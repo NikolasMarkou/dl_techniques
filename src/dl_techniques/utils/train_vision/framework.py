@@ -1,0 +1,945 @@
+"""
+Model-agnostic training framework for vision tasks with integrated
+visualization and analysis capabilities.
+
+This framework provides a complete solution for training, monitoring,
+and analyzing computer vision models with minimal boilerplate code.
+"""
+
+import gc
+import json
+import keras
+import argparse
+import tensorflow as tf
+from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass, field, asdict
+from abc import ABC, abstractmethod
+from typing import (
+    Tuple, List, Optional, Dict, Any, Callable, Union
+)
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.visualization import (
+    VisualizationManager,
+    TrainingHistory,
+    PlotConfig,
+    PlotStyle,
+    ColorScheme,
+    TrainingCurvesVisualization,
+    LearningRateScheduleVisualization,
+    ModelComparisonBarChart,
+    PerformanceRadarChart,
+    NetworkArchitectureVisualization,
+)
+from dl_techniques.analyzer import (
+    ModelAnalyzer,
+    AnalysisConfig,
+    DataInput,
+)
+
+
+# =============================================================================
+# 1. CONFIGURATION DATACLASS
+# =============================================================================
+
+@dataclass
+class TrainingConfig:
+    """
+    Centralized configuration for training vision models.
+
+    This dataclass encapsulates all training parameters, making experiments
+    reproducible and easy to configure. It can be populated from command-line
+    arguments, JSON files, or direct instantiation.
+
+    Attributes:
+        input_shape: Input image shape (H, W, C).
+        num_classes: Number of output classes.
+        epochs: Maximum number of training epochs.
+        batch_size: Training batch size.
+        optimizer_type: Optimizer name ('adam', 'adamw', 'sgd', 'lion').
+        learning_rate: Initial learning rate.
+        weight_decay: L2 regularization coefficient (for AdamW).
+        lr_schedule_type: Type of LR schedule ('cosine', 'exponential',
+                         'reduce_on_plateau', 'constant').
+        gradient_clipping: Gradient clipping by norm. None disables clipping.
+        from_logits: Whether model outputs logits (True) or probabilities (False).
+        steps_per_epoch: Override automatic calculation of steps per epoch.
+        validation_steps: Override automatic calculation of validation steps.
+        early_stopping_patience: Patience for early stopping callback.
+        monitor_metric: Metric to monitor for callbacks ('val_accuracy', 'val_loss').
+        monitor_mode: Mode for monitoring ('max' for accuracy, 'min' for loss).
+        output_dir: Base directory for experiment outputs.
+        experiment_name: Name of the experiment. Auto-generated if None.
+        enable_visualization: Enable automatic visualization during training.
+        enable_analysis: Enable model analysis after training.
+        visualization_frequency: Create visualizations every N epochs.
+        model_args: Additional model-specific arguments.
+    """
+    # --- Data & Model Configuration ---
+    input_shape: Tuple[int, int, int] = (224, 224, 3)
+    num_classes: int = 1000
+
+    # --- Training Hyperparameters ---
+    epochs: int = 100
+    batch_size: int = 64
+
+    # --- Optimization Configuration ---
+    optimizer_type: str = 'adamw'
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    lr_schedule_type: str = 'cosine'
+    gradient_clipping: Optional[float] = 1.0
+
+    # --- Loss Configuration ---
+    from_logits: bool = False
+
+    # --- Training Control ---
+    steps_per_epoch: Optional[int] = None
+    validation_steps: Optional[int] = None
+    early_stopping_patience: int = 25
+    monitor_metric: str = 'val_accuracy'
+    monitor_mode: str = 'max'
+
+    # --- Output & Logging ---
+    output_dir: str = 'results'
+    experiment_name: Optional[str] = None
+
+    # --- Visualization & Analysis ---
+    enable_visualization: bool = True
+    enable_analysis: bool = True
+    visualization_frequency: int = 10
+
+    # --- Model-Specific Arguments ---
+    model_args: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Generate experiment name if not provided."""
+        if self.experiment_name is None:
+            model_name = self.model_args.get('variant', 'model')
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.experiment_name = f"{model_name}_{timestamp}"
+
+    def save(self, file_path: Path) -> None:
+        """
+        Save configuration to JSON file.
+
+        Args:
+            file_path: Path where to save the configuration.
+        """
+        logger.info(f"Saving configuration to {file_path}")
+        with open(file_path, 'w') as f:
+            json.dump(asdict(self), f, indent=4)
+
+    @classmethod
+    def load(cls, file_path: Path) -> 'TrainingConfig':
+        """
+        Load configuration from JSON file.
+
+        Args:
+            file_path: Path to the configuration file.
+
+        Returns:
+            Loaded TrainingConfig instance.
+        """
+        logger.info(f"Loading configuration from {file_path}")
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return cls(**data)
+
+
+# =============================================================================
+# 2. ABSTRACT DATASET BUILDER
+# =============================================================================
+
+class DatasetBuilder(ABC):
+    """
+    Abstract base class for creating training and validation datasets.
+
+    This class defines the interface for data handling. By creating concrete
+    subclasses, you can easily switch between different data sources without
+    changing the main training loop.
+
+    Attributes:
+        config: The TrainingConfig object for this experiment.
+    """
+
+    def __init__(self, config: TrainingConfig):
+        """
+        Initialize the dataset builder.
+
+        Args:
+            config: Training configuration object.
+        """
+        self.config = config
+
+    @abstractmethod
+    def build(self) -> Tuple[
+        tf.data.Dataset,
+        tf.data.Dataset,
+        Optional[int],
+        Optional[int]
+    ]:
+        """
+        Construct training and validation datasets.
+
+        Returns:
+            Tuple containing:
+                - train_dataset: Configured training dataset.
+                - val_dataset: Configured validation dataset.
+                - steps_per_epoch: Calculated steps for one epoch.
+                - validation_steps: Calculated steps for validation.
+        """
+        pass
+
+    def get_test_data(self) -> Optional[DataInput]:
+        """
+        Get test data for model analysis.
+
+        Returns:
+            DataInput object containing test data, or None if not available.
+        """
+        return None
+
+
+# =============================================================================
+# 3. VISUALIZATION CALLBACK
+# =============================================================================
+
+class VisualizationCallback(keras.callbacks.Callback):
+    """
+    Custom callback for creating visualizations during training.
+
+    This callback integrates with the VisualizationManager to create
+    real-time visualizations of training progress, learning rate schedules,
+    and other metrics.
+
+    Attributes:
+        viz_manager: VisualizationManager instance.
+        frequency: Create visualizations every N epochs.
+        lr_schedule: Learning rate schedule for visualization.
+    """
+
+    def __init__(
+            self,
+            viz_manager: VisualizationManager,
+            frequency: int = 10,
+            lr_schedule: Optional[Any] = None
+    ):
+        """
+        Initialize the visualization callback.
+
+        Args:
+            viz_manager: VisualizationManager instance.
+            frequency: Visualization frequency in epochs.
+            lr_schedule: Learning rate schedule object for plotting.
+        """
+        super().__init__()
+        self.viz_manager = viz_manager
+        self.frequency = frequency
+        self.lr_schedule = lr_schedule
+        self.history_data = {
+            'epochs': [],
+            'train_loss': [],
+            'val_loss': [],
+            'train_metrics': {},
+            'val_metrics': {},
+            'learning_rates': []
+        }
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None):
+        """
+        Called at the end of each epoch to update and visualize metrics.
+
+        Args:
+            epoch: Current epoch number.
+            logs: Dictionary of metrics from this epoch.
+        """
+        if logs is None:
+            return
+
+        # Collect history data
+        self.history_data['epochs'].append(epoch)
+        self.history_data['train_loss'].append(logs.get('loss', 0.0))
+        self.history_data['val_loss'].append(logs.get('val_loss', 0.0))
+
+        # Collect metrics
+        for key, value in logs.items():
+            if key.startswith('val_') and key != 'val_loss':
+                metric_name = key.replace('val_', '')
+                if metric_name not in self.history_data['val_metrics']:
+                    self.history_data['val_metrics'][metric_name] = []
+                    self.history_data['train_metrics'][metric_name] = []
+                self.history_data['val_metrics'][metric_name].append(value)
+                self.history_data['train_metrics'][metric_name].append(
+                    logs.get(metric_name, 0.0)
+                )
+
+        # Collect learning rate
+        try:
+            lr = float(keras.ops.convert_to_numpy(
+                self.model.optimizer.learning_rate
+            ))
+            self.history_data['learning_rates'].append(lr)
+        except Exception:
+            pass
+
+        # Create visualizations at specified frequency
+        if (epoch + 1) % self.frequency == 0:
+            self._create_visualizations()
+
+    def _create_visualizations(self):
+        """Create and save current visualizations."""
+        try:
+            # Create training history visualization
+            history = TrainingHistory(
+                epochs=self.history_data['epochs'],
+                train_loss=self.history_data['train_loss'],
+                val_loss=self.history_data['val_loss'],
+                train_metrics=self.history_data['train_metrics'],
+                val_metrics=self.history_data['val_metrics']
+            )
+
+            self.viz_manager.visualize(
+                data=history,
+                plugin_name='training_curves',
+                smooth_factor=0.1,
+                show=False
+            )
+
+            # Create LR schedule visualization if available
+            if self.history_data['learning_rates']:
+                self.viz_manager.visualize(
+                    data={'learning_rate': self.history_data['learning_rates']},
+                    plugin_name='lr_schedule',
+                    show=False
+                )
+
+            logger.info("Training visualizations updated")
+
+        except Exception as e:
+            logger.warning(f"Failed to create visualizations: {e}")
+
+    def on_train_end(self, logs: Optional[Dict[str, float]] = None):
+        """Create final visualizations when training ends."""
+        self._create_visualizations()
+
+
+# =============================================================================
+# 4. MODEL BUILDER TYPE
+# =============================================================================
+
+ModelBuilder = Callable[[TrainingConfig], keras.Model]
+
+
+# =============================================================================
+# 5. CORE TRAINING PIPELINE
+# =============================================================================
+
+class TrainingPipeline:
+    """
+    Orchestrates end-to-end model training with visualization and analysis.
+
+    This class takes a configuration, model builder, and dataset builder
+    to run a complete training experiment with automatic visualization,
+    monitoring, and post-training analysis.
+
+    Attributes:
+        config: Training configuration object.
+        experiment_dir: Directory for saving experiment outputs.
+        viz_manager: VisualizationManager for creating plots.
+        training_history: Storage for training metrics.
+    """
+
+    def __init__(self, config: TrainingConfig):
+        """
+        Initialize the training pipeline.
+
+        Args:
+            config: TrainingConfig object for the experiment.
+        """
+        self.config = config
+        self.experiment_dir = Path(self.config.output_dir) / self.config.experiment_name
+        self.viz_manager: Optional[VisualizationManager] = None
+        self.training_history: Optional[keras.callbacks.History] = None
+
+    def _setup_environment(self):
+        """
+        Set up the training environment.
+
+        Creates output directories, saves configuration, and configures
+        GPU settings for optimal performance.
+        """
+        logger.info(f"Setting up experiment: {self.config.experiment_name}")
+        self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        self.config.save(self.experiment_dir / 'config.json')
+
+        # Configure GPU settings
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
+            except RuntimeError as e:
+                logger.error(f"GPU setup error: {e}")
+        else:
+            logger.info("No GPUs found, using CPU")
+
+    def _setup_visualization(self):
+        """
+        Initialize the visualization manager.
+
+        Sets up the visualization system with appropriate configuration
+        and registers all required visualization templates.
+        """
+        if not self.config.enable_visualization:
+            return
+
+        logger.info("Setting up visualization manager")
+
+        # Create plot configuration
+        plot_config = PlotConfig(
+            style=PlotStyle.PUBLICATION,
+            color_scheme=ColorScheme(
+                primary="#2E86AB",
+                secondary="#A23B72"
+            ),
+            title_fontsize=14,
+            save_format='png',
+            dpi=300
+        )
+
+        # Initialize visualization manager
+        self.viz_manager = VisualizationManager(
+            experiment_name=self.config.experiment_name,
+            output_dir=str(self.experiment_dir / 'visualizations'),
+            config=plot_config
+        )
+
+        # Register visualization templates
+        self.viz_manager.register_template(
+            'training_curves',
+            TrainingCurvesVisualization
+        )
+        self.viz_manager.register_template(
+            'lr_schedule',
+            LearningRateScheduleVisualization
+        )
+        self.viz_manager.register_template(
+            'model_comparison_bars',
+            ModelComparisonBarChart
+        )
+        self.viz_manager.register_template(
+            'performance_radar',
+            PerformanceRadarChart
+        )
+        self.viz_manager.register_template(
+            'network_architecture',
+            NetworkArchitectureVisualization
+        )
+
+        logger.info("Visualization manager ready")
+
+    def _create_lr_schedule(
+            self,
+            total_steps: int
+    ) -> Union[float, keras.optimizers.schedules.LearningRateSchedule]:
+        """
+        Create learning rate schedule based on configuration.
+
+        Args:
+            total_steps: Total number of training steps.
+
+        Returns:
+            Learning rate schedule object or constant float.
+        """
+        schedule_type = self.config.lr_schedule_type.lower()
+
+        if schedule_type == 'cosine':
+            return keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=self.config.learning_rate,
+                decay_steps=total_steps
+            )
+        elif schedule_type == 'exponential':
+            return keras.optimizers.schedules.ExponentialDecay(
+                initial_learning_rate=self.config.learning_rate,
+                decay_steps=total_steps // 10,
+                decay_rate=0.9
+            )
+        elif schedule_type == 'constant':
+            return self.config.learning_rate
+        elif schedule_type == 'reduce_on_plateau':
+            # Handled by callback
+            return self.config.learning_rate
+        else:
+            logger.warning(
+                f"Unknown schedule type '{schedule_type}', using constant LR"
+            )
+            return self.config.learning_rate
+
+    def _create_optimizer(
+            self,
+            lr_schedule: Union[float, keras.optimizers.schedules.LearningRateSchedule]
+    ) -> keras.optimizers.Optimizer:
+        """
+        Create optimizer based on configuration.
+
+        Args:
+            lr_schedule: Learning rate or schedule object.
+
+        Returns:
+            Configured optimizer instance.
+        """
+        opt_type = self.config.optimizer_type.lower()
+
+        common_args = {
+            'learning_rate': lr_schedule,
+            'clipnorm': self.config.gradient_clipping
+        }
+
+        if opt_type == 'adamw':
+            return keras.optimizers.AdamW(
+                weight_decay=self.config.weight_decay,
+                **common_args
+            )
+        elif opt_type == 'adam':
+            return keras.optimizers.Adam(**common_args)
+        elif opt_type == 'sgd':
+            return keras.optimizers.SGD(
+                momentum=0.9,
+                nesterov=True,
+                **common_args
+            )
+        elif opt_type == 'lion':
+            try:
+                return keras.optimizers.Lion(
+                    weight_decay=self.config.weight_decay,
+                    **common_args
+                )
+            except AttributeError:
+                logger.warning("Lion optimizer not available, using AdamW")
+                return keras.optimizers.AdamW(
+                    weight_decay=self.config.weight_decay,
+                    **common_args
+                )
+        else:
+            raise ValueError(f"Unsupported optimizer: {opt_type}")
+
+    def _compile_model(
+            self,
+            model: keras.Model,
+            total_steps: int
+    ) -> None:
+        """
+        Compile the model with configured optimizer, loss, and metrics.
+
+        Args:
+            model: Keras model to compile.
+            total_steps: Total number of training steps for LR schedule.
+        """
+        logger.info("Compiling model")
+        logger.info(f"Loss configured with from_logits={self.config.from_logits}")
+
+        # Create learning rate schedule
+        lr_schedule = self._create_lr_schedule(total_steps)
+
+        # Create optimizer
+        optimizer = self._create_optimizer(lr_schedule)
+
+        # Define loss (using configured from_logits)
+        loss = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=self.config.from_logits
+        )
+
+        # Define metrics (assuming classification)
+        metrics = [
+            keras.metrics.SparseCategoricalAccuracy(name='accuracy'),
+            keras.metrics.SparseTopKCategoricalAccuracy(
+                k=5,
+                name='top5_accuracy'
+            )
+        ]
+
+        model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics
+        )
+
+        logger.info("Model compilation complete")
+
+    def _create_callbacks(
+            self,
+            lr_schedule: Optional[Any] = None,
+            custom_callbacks: Optional[List[keras.callbacks.Callback]] = None
+    ) -> List[keras.callbacks.Callback]:
+        """
+        Create standard and custom callbacks for training.
+
+        Args:
+            lr_schedule: Learning rate schedule for visualization.
+            custom_callbacks: Additional user-provided callbacks.
+
+        Returns:
+            List of configured callbacks.
+        """
+        logger.info("Creating training callbacks")
+
+        callbacks: List[keras.callbacks.Callback] = [
+            keras.callbacks.ModelCheckpoint(
+                filepath=str(self.experiment_dir / 'best_model.keras'),
+                monitor=self.config.monitor_metric,
+                save_best_only=True,
+                mode=self.config.monitor_mode,
+                verbose=1
+            ),
+            keras.callbacks.EarlyStopping(
+                monitor=self.config.monitor_metric,
+                patience=self.config.early_stopping_patience,
+                restore_best_weights=True,
+                mode=self.config.monitor_mode,
+                verbose=1
+            ),
+            keras.callbacks.CSVLogger(
+                filename=str(self.experiment_dir / 'training_log.csv')
+            ),
+            keras.callbacks.TensorBoard(
+                log_dir=str(self.experiment_dir / 'tensorboard_logs'),
+                histogram_freq=1,
+                write_graph=True,
+                update_freq='epoch'
+            )
+        ]
+
+        # Add ReduceLROnPlateau if specified
+        if self.config.lr_schedule_type == 'reduce_on_plateau':
+            callbacks.append(
+                keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.2,
+                    patience=5,
+                    min_lr=1e-7,
+                    verbose=1
+                )
+            )
+
+        # Add visualization callback
+        if self.config.enable_visualization and self.viz_manager is not None:
+            callbacks.append(
+                VisualizationCallback(
+                    viz_manager=self.viz_manager,
+                    frequency=self.config.visualization_frequency,
+                    lr_schedule=lr_schedule
+                )
+            )
+
+        # Add custom callbacks
+        if custom_callbacks:
+            callbacks.extend(custom_callbacks)
+
+        logger.info(f"Created {len(callbacks)} callbacks")
+        return callbacks
+
+    def _run_model_analysis(
+            self,
+            model: keras.Model,
+            test_data: Optional[DataInput] = None
+    ):
+        """
+        Run comprehensive model analysis after training.
+
+        Args:
+            model: Trained model to analyze.
+            test_data: Test data for evaluation.
+        """
+        if not self.config.enable_analysis:
+            return
+
+        logger.info("Starting model analysis")
+
+        try:
+            # Configure analysis
+            analysis_config = AnalysisConfig(
+                analyze_weights=True,
+                analyze_calibration=True,
+                analyze_information_flow=True,
+                analyze_training_dynamics=True,
+                compute_weight_pca=True,
+                save_plots=True,
+                save_format='png',
+                dpi=300,
+                plot_style='publication'
+            )
+
+            # Prepare training history for analyzer
+            training_history = None
+            if self.training_history is not None:
+                training_history = {
+                    self.config.experiment_name: self.training_history.history
+                }
+
+            # Initialize analyzer
+            analyzer = ModelAnalyzer(
+                models={self.config.experiment_name: model},
+                training_history=training_history,
+                config=analysis_config,
+                output_dir=str(self.experiment_dir / 'analysis')
+            )
+
+            # Run analysis
+            results = analyzer.analyze(data=test_data)
+
+            # Log summary statistics
+            summary = analyzer.get_summary_statistics()
+            logger.info("Model analysis complete")
+            logger.info(f"Analysis results saved to {self.experiment_dir / 'analysis'}")
+
+            # Log key metrics
+            if 'calibration_summary' in summary:
+                cal_metrics = summary['calibration_summary'].get(
+                    self.config.experiment_name,
+                    {}
+                )
+                if 'ece' in cal_metrics:
+                    logger.info(f"Expected Calibration Error: {cal_metrics['ece']:.4f}")
+
+        except Exception as e:
+            logger.error(f"Model analysis failed: {e}", exc_info=True)
+
+    def run(
+            self,
+            model_builder: ModelBuilder,
+            dataset_builder: DatasetBuilder,
+            custom_callbacks: Optional[List[keras.callbacks.Callback]] = None
+    ) -> Tuple[keras.Model, keras.callbacks.History]:
+        """
+        Execute the complete training pipeline.
+
+        This method orchestrates the entire training process including:
+        - Environment setup
+        - Dataset preparation
+        - Model creation and compilation
+        - Training with callbacks
+        - Visualization and analysis
+
+        Args:
+            model_builder: Function that creates and returns a Keras model.
+            dataset_builder: Instance of DatasetBuilder for data loading.
+            custom_callbacks: Optional additional callbacks for training.
+
+        Returns:
+            Tuple of (trained_model, training_history).
+        """
+        # Setup
+        self._setup_environment()
+        self._setup_visualization()
+
+        # Build datasets
+        logger.info("Building datasets")
+        train_ds, val_ds, steps_per_epoch, val_steps = dataset_builder.build()
+
+        # Use config overrides if provided
+        steps_per_epoch = self.config.steps_per_epoch or steps_per_epoch
+        val_steps = self.config.validation_steps or val_steps
+
+        if steps_per_epoch is None:
+            raise ValueError(
+                "steps_per_epoch must be defined in config or by DatasetBuilder"
+            )
+
+        # Build model
+        logger.info("Building model")
+        model = model_builder(self.config)
+
+        # Log model architecture
+        logger.info("Model architecture:")
+        model.summary(print_fn=logger.info, expand_nested=True)
+
+        # Visualize model architecture
+        if self.config.enable_visualization and self.viz_manager is not None:
+            try:
+                self.viz_manager.visualize(
+                    model,
+                    plugin_name='network_architecture',
+                    show=False
+                )
+            except Exception as e:
+                logger.warning(f"Could not visualize architecture: {e}")
+
+        # Compile model
+        total_steps = steps_per_epoch * self.config.epochs
+        self._compile_model(model, total_steps)
+
+        # Create callbacks
+        lr_schedule = self._create_lr_schedule(total_steps)
+        callbacks = self._create_callbacks(lr_schedule, custom_callbacks)
+
+        # Train model
+        logger.info("Starting model training")
+        logger.info(
+            f"Epochs: {self.config.epochs}, "
+            f"Steps per epoch: {steps_per_epoch}"
+        )
+
+        self.training_history = model.fit(
+            train_ds,
+            epochs=self.config.epochs,
+            steps_per_epoch=steps_per_epoch,
+            validation_data=val_ds,
+            validation_steps=val_steps,
+            callbacks=callbacks,
+            verbose=1
+        )
+
+        logger.info("Training finished")
+
+        # Save final model
+        final_model_path = self.experiment_dir / 'final_model.keras'
+        model.save(final_model_path)
+        logger.info(f"Final model saved to {final_model_path}")
+
+        # Run model analysis
+        test_data = dataset_builder.get_test_data()
+        self._run_model_analysis(model, test_data)
+
+        # Clean up memory
+        gc.collect()
+        keras.backend.clear_session()
+
+        return model, self.training_history
+
+
+# =============================================================================
+# 6. UTILITY FUNCTIONS
+# =============================================================================
+
+def create_argument_parser() -> argparse.ArgumentParser:
+    """
+    Create argument parser for command-line configuration.
+
+    Returns:
+        Configured ArgumentParser instance.
+    """
+    parser = argparse.ArgumentParser(
+        description='Train vision models with automatic visualization and analysis'
+    )
+
+    # Data arguments
+    parser.add_argument(
+        '--input-shape',
+        type=int,
+        nargs=3,
+        default=[224, 224, 3],
+        help='Input image shape (H W C)'
+    )
+    parser.add_argument(
+        '--num-classes',
+        type=int,
+        default=1000,
+        help='Number of output classes'
+    )
+
+    # Training arguments
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=100,
+        help='Number of training epochs'
+    )
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=64,
+        help='Training batch size'
+    )
+
+    # Optimizer arguments
+    parser.add_argument(
+        '--optimizer',
+        type=str,
+        default='adamw',
+        choices=['adam', 'adamw', 'sgd', 'lion'],
+        help='Optimizer type'
+    )
+    parser.add_argument(
+        '--learning-rate',
+        type=float,
+        default=1e-3,
+        help='Initial learning rate'
+    )
+    parser.add_argument(
+        '--weight-decay',
+        type=float,
+        default=1e-4,
+        help='Weight decay for regularization'
+    )
+    parser.add_argument(
+        '--lr-schedule',
+        type=str,
+        default='cosine',
+        choices=['cosine', 'exponential', 'reduce_on_plateau', 'constant'],
+        help='Learning rate schedule type'
+    )
+
+    # Loss arguments
+    parser.add_argument(
+        '--from-logits',
+        action='store_true',
+        help='Model outputs logits instead of probabilities'
+    )
+
+    # Output arguments
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='results',
+        help='Base output directory'
+    )
+    parser.add_argument(
+        '--experiment-name',
+        type=str,
+        default=None,
+        help='Experiment name (auto-generated if not provided)'
+    )
+
+    # Feature flags
+    parser.add_argument(
+        '--no-visualization',
+        action='store_true',
+        help='Disable automatic visualization'
+    )
+    parser.add_argument(
+        '--no-analysis',
+        action='store_true',
+        help='Disable model analysis'
+    )
+
+    return parser
+
+
+def config_from_args(args: argparse.Namespace) -> TrainingConfig:
+    """
+    Create TrainingConfig from command-line arguments.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        TrainingConfig instance.
+    """
+    return TrainingConfig(
+        input_shape=tuple(args.input_shape),
+        num_classes=args.num_classes,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        optimizer_type=args.optimizer,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        lr_schedule_type=args.lr_schedule,
+        from_logits=args.from_logits,
+        output_dir=args.output_dir,
+        experiment_name=args.experiment_name,
+        enable_visualization=not args.no_visualization,
+        enable_analysis=not args.no_analysis
+    )

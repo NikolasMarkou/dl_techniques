@@ -500,7 +500,9 @@ class TransformerLayer(keras.layers.Layer):
         config = {
             'type': self.ffn_type,
             'name': name,
-            'dropout_rate': self.dropout_rate
+            'dropout_rate': self.dropout_rate,
+            'kernel_initializer': self.kernel_initializer,
+            'bias_initializer': self.bias_initializer
         }
 
         # Map TransformerLayer's generic parameters to FFN-specific ones

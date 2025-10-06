@@ -302,10 +302,6 @@ class MLPBlock(keras.layers.Layer):
         # Second dense layer (projection)
         x = self.fc2(x)
 
-        # Final dropout if enabled
-        if self.dropout is not None:
-            x = self.dropout(x, training=training)
-
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

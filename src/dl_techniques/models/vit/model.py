@@ -24,7 +24,7 @@ from dl_techniques.layers.embedding import create_embedding_layer
 # ---------------------------------------------------------------------
 
 PoolingMode = Literal['cls', 'mean', 'max']
-VitScale = Literal['tiny', 'small', 'base', 'large', 'huge']
+VitScale = Literal['pico', 'tiny', 'small', 'base', 'large', 'huge']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
 
@@ -206,6 +206,7 @@ class ViT(keras.Model):
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
     SCALE_CONFIGS: Dict[str, Tuple[int, int, int, float]] = {
+        "pico": (192, 3, 6, 4.0),  # ViT-Pico
         "tiny": (192, 3, 12, 4.0),  # ViT-Tiny
         "small": (384, 6, 12, 4.0),  # ViT-Small
         "base": (768, 12, 12, 4.0),  # ViT-Base
@@ -463,45 +464,65 @@ class ViT(keras.Model):
         Returns:
             Model output tensor. Shape depends on include_top and pooling settings.
         """
-        # Convert image to patches
+        # 1. Convert image to a sequence of patch embeddings
         x = self.patch_embed(inputs, training=training)  # (batch_size, num_patches, embed_dim)
 
-        # Add CLS token to sequence
+        # 2. Prepend the CLS token to the sequence of patches
+        # The CLS token acts as a global representation of the image. It will be used
+        # by the classification head to make the final prediction. We broadcast a single
+        # learned token to the entire batch size.
         batch_size = ops.shape(x)[0]
         cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
         x = ops.concatenate([cls_tokens, x], axis=1)  # (batch_size, seq_len, embed_dim)
 
-        # Add positional embeddings (includes dropout)
+        # 3. Add learned positional embeddings to provide positional context
         x = self.pos_embed(x, training=training)
 
-        # Apply transformer layers
+        # 4. Process the full sequence through the Transformer layers
         for layer in self.transformer_layers:
             x = layer(x, training=training)
 
-        # Apply final normalization
-        x = self.norm(x, training=training)
-
-        # Handle different output modes
+        # 5. Handle the output based on the model's configuration
         if self.include_top:
-            # Extract CLS token for classification
-            cls_token = x[:, 0, :]  # (batch_size, embed_dim)
+            # --- CRITICAL: Classification Head Logic ---
+            # For classification, we only need the final representation of the CLS token.
+            # The standard and correct procedure is to:
+            #   1. Extract the CLS token from the sequence.
+            #   2. Apply the final normalization *only to the CLS token*.
+            #
+            # The previous implementation made a critical error by normalizing the entire
+            # sequence *before* extracting the token. This "pollutes" the CLS token's
+            # statistics with those of all other patch tokens, preventing the model from
+            # learning effectively.
+
+            # 5a. Extract the CLS token (the first token in the sequence)
+            cls_token = x[:, 0, :]  # Shape: (batch_size, embed_dim)
+
+            # 5b. Apply the final normalization to the isolated CLS token
+            cls_token = self.norm(cls_token, training=training)
+
+            # 5c. Pass the normalized CLS token through the final classification head
             if self.head_dropout is not None:
                 cls_token = self.head_dropout(cls_token, training=training)
-            x = self.head(cls_token)  # (batch_size, num_classes)
+            x = self.head(cls_token)  # Shape: (batch_size, num_classes)
             return x
         else:
-            # Feature extraction mode
+            # --- Feature Extraction Logic ---
+            # In feature extraction mode, it is common to normalize the entire output
+            # sequence to provide a clean, scaled set of features for downstream tasks.
+            x = self.norm(x, training=training)
+
             if self.pooling == "cls":
-                # Return CLS token representation
+                # Return the final, normalized CLS token representation
                 return x[:, 0, :]  # (batch_size, embed_dim)
             elif self.pooling == "mean":
-                # Global average pooling over sequence
+                # Global average pooling over the entire normalized sequence
                 return self.global_pool(x)  # (batch_size, embed_dim)
             elif self.pooling == "max":
-                # Global max pooling over sequence
+                # Global max pooling over the entire normalized sequence
                 return self.global_pool(x)  # (batch_size, embed_dim)
             else:
-                # Return full transformer output
+                # Return the full, normalized transformer output sequence
                 return x  # (batch_size, seq_len, embed_dim)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
