@@ -4,9 +4,6 @@ Time Series Forecasting with Mixture Density Networks
 This experiment demonstrates how MDNs can be used for time series forecasting
 with uncertainty quantification, with improved numerical stability for the loss function.
 
-Python 3.11
-Keras 3.8.0
-TensorFlow 2.18.0 as backend
 """
 
 import os
@@ -18,10 +15,9 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from keras.api import layers, regularizers
-from typing import Dict, List, Optional, Tuple, Union, Callable, Any, cast
+from typing import Dict, List, Optional, Tuple, Callable, Any
 
-# Assume MDN Layer implementation is imported, but we'll create a custom loss function
-from dl_techniques.layers.mdn_layer import (
+from dl_techniques.layers.statistics.mdn_layer import (
     MDNLayer,
     get_uncertainty,
     get_point_estimate,
