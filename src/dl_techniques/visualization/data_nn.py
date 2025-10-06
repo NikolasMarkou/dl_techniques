@@ -15,6 +15,9 @@ from scipy.stats import gaussian_kde
 from matplotlib.patches import FancyBboxPatch
 from typing import Dict, List, Optional, Tuple, Any, Union
 
+from scipy.ndimage import zoom
+import warnings
+
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
@@ -76,6 +79,309 @@ class GradientData:
     layer_names: List[str]
     gradients: Dict[str, np.ndarray]  # layer_name -> gradients
     model_name: Optional[str] = None
+
+
+# --- START OF MODIFICATION ---
+
+@dataclass
+class GradientTopologyData:
+    """Container for gradient topology data."""
+    model: keras.Model
+    gradients: List[Any]
+    model_name: Optional[str] = None
+
+
+# ---------------------------------------------------------------------
+# Gradient Topology Visualizer (Integrated Code)
+# ---------------------------------------------------------------------
+
+class GradientTopologyVisualizer:
+    """
+    Visualizes model topology and gradient flow as a heatmap.
+
+    This class creates a topological connectivity matrix where each cell
+    represents the gradient magnitude between connected layers, then
+    interpolates to a fixed NxN size for visualization.
+
+    Parameters
+    ----------
+    model : keras.Model
+        The Keras model to visualize.
+    target_size : int, optional
+        Target size for the NxN heatmap matrix. Default is 64.
+    aggregation : str, optional
+        Method to aggregate gradients ('norm', 'mean', 'max'). Default is 'norm'.
+    """
+
+    def __init__(
+        self,
+        model: keras.Model,
+        target_size: int = 64,
+        aggregation: str = 'norm'
+    ) -> None:
+        self.model = model
+        self.target_size = target_size
+        self.aggregation = aggregation
+        self._layer_map: Dict[str, int] = {}
+        self._build_layer_map()
+
+    def _build_layer_map(self) -> None:
+        """
+        Build a mapping from layer names to indices.
+        """
+        for idx, layer in enumerate(self.model.layers):
+            self._layer_map[layer.name] = idx
+
+    def _aggregate_gradient(self, gradient: Any) -> float:
+        """
+        Aggregate gradient tensor to a single scalar value.
+
+        Parameters
+        ----------
+        gradient : array-like
+            Gradient tensor.
+
+        Returns
+        -------
+        float
+            Aggregated gradient value.
+        """
+        if gradient is None:
+            return 0.0
+
+        grad_array = keras.ops.convert_to_numpy(gradient)
+
+        if self.aggregation == 'norm':
+            return float(np.linalg.norm(grad_array))
+        elif self.aggregation == 'mean':
+            return float(np.abs(grad_array).mean())
+        elif self.aggregation == 'max':
+            return float(np.abs(grad_array).max())
+        else:
+            raise ValueError(f"Unknown aggregation method: {self.aggregation}")
+
+    def _compute_layer_gradients(
+        self,
+        gradients: List[Any]
+    ) -> Dict[str, float]:
+        """
+        Map gradients to layers and compute aggregate values.
+
+        Parameters
+        ----------
+        gradients : List[Any]
+            List of gradient tensors from GradientTape.
+
+        Returns
+        -------
+        Dict[str, float]
+            Dictionary mapping layer names to aggregated gradient values.
+        """
+        trainable_vars = self.model.trainable_variables
+
+        if len(gradients) != len(trainable_vars):
+            warnings.warn(
+                f"Number of gradients ({len(gradients)}) does not match "
+                f"trainable variables ({len(trainable_vars)})"
+            )
+
+        layer_gradients: Dict[str, List[float]] = {}
+
+        # Map gradients to layers
+        for grad, var in zip(gradients, trainable_vars):
+            # Extract layer name from variable name
+            var_name = var.name
+            layer_name = var_name.split('/')[0]
+
+            if layer_name not in layer_gradients:
+                layer_gradients[layer_name] = []
+
+            layer_gradients[layer_name].append(self._aggregate_gradient(grad))
+
+        # Aggregate per layer
+        aggregated = {}
+        for layer_name, grad_values in layer_gradients.items():
+            if grad_values:
+                aggregated[layer_name] = np.mean(grad_values)
+            else:
+                aggregated[layer_name] = 0.0
+
+        return aggregated
+
+    def _build_topology_matrix(
+        self,
+        layer_gradients: Dict[str, float]
+    ) -> np.ndarray:
+        """
+        Build a topology connectivity matrix with gradient information.
+
+        Parameters
+        ----------
+        layer_gradients : Dict[str, float]
+            Dictionary mapping layer names to gradient magnitudes.
+
+        Returns
+        -------
+        np.ndarray
+            Topology matrix of shape (num_layers, num_layers).
+        """
+        num_layers = len(self.model.layers)
+        topology_matrix = np.zeros((num_layers, num_layers), dtype=np.float32)
+
+        # Build connectivity based on inbound nodes
+        for layer_idx, layer in enumerate(self.model.layers):
+            layer_grad = layer_gradients.get(layer.name, 0.0)
+
+            # Self-connection representing layer's own gradient
+            topology_matrix[layer_idx, layer_idx] = layer_grad
+
+            # Check inbound connections
+            if hasattr(layer, '_inbound_nodes') and layer._inbound_nodes:
+                for node in layer._inbound_nodes:
+                    if hasattr(node, 'inbound_layers'):
+                        for inbound_layer in node.inbound_layers:
+                            if inbound_layer.name in self._layer_map:
+                                inbound_idx = self._layer_map[inbound_layer.name]
+                                # Connection weighted by gradient magnitude
+                                connection_weight = (
+                                    layer_grad +
+                                    layer_gradients.get(inbound_layer.name, 0.0)
+                                ) / 2.0
+                                topology_matrix[inbound_idx, layer_idx] = connection_weight
+                                topology_matrix[layer_idx, inbound_idx] = connection_weight
+
+        return topology_matrix
+
+    def _resize_matrix(self, matrix: np.ndarray) -> np.ndarray:
+        """
+        Resize matrix to target size using interpolation.
+
+        Parameters
+        ----------
+        matrix : np.ndarray
+            Input matrix to resize.
+
+        Returns
+        -------
+        np.ndarray
+            Resized matrix of shape (target_size, target_size).
+        """
+        if matrix.shape[0] == self.target_size:
+            return matrix
+
+        # Calculate zoom factors
+        zoom_factor = self.target_size / matrix.shape[0]
+
+        # Use zoom for interpolation (order=1 for bilinear)
+        resized = zoom(matrix, zoom_factor, order=1, mode='nearest')
+
+        return resized
+
+    def create_gradient_heatmap(
+        self,
+        gradients: List[Any],
+        title: str = "Gradient Topology Heatmap",
+        cmap: str = "viridis",
+        figsize: Tuple[int, int] = (10, 8),
+        show_colorbar: bool = True,
+        log_scale: bool = False,
+        save_path: Optional[str] = None
+    ) -> Tuple[plt.Figure, plt.Axes, np.ndarray]:
+        """
+        Create a heatmap visualization of gradient topology.
+
+        Parameters
+        ----------
+        gradients : List[Any]
+            List of gradient tensors from tf.GradientTape.
+        title : str, optional
+            Title for the heatmap. Default is "Gradient Topology Heatmap".
+        cmap : str, optional
+            Colormap for the heatmap. Default is "viridis".
+        figsize : Tuple[int, int], optional
+            Figure size. Default is (10, 8).
+        show_colorbar : bool, optional
+            Whether to show colorbar. Default is True.
+        log_scale : bool, optional
+            Whether to use log scale for gradients. Default is False.
+        save_path : Optional[str], optional
+            Path to save the figure. If None, figure is not saved.
+
+        Returns
+        -------
+        Tuple[plt.Figure, plt.Axes, np.ndarray]
+            The matplotlib figure, axes, and the gradient matrix.
+        """
+        # Compute layer gradients
+        layer_gradients = self._compute_layer_gradients(gradients)
+
+        # Build topology matrix
+        topology_matrix = self._build_topology_matrix(layer_gradients)
+
+        # Resize to target size
+        resized_matrix = self._resize_matrix(topology_matrix)
+
+        # Apply log scale if requested
+        if log_scale:
+            resized_matrix = np.log1p(resized_matrix)
+
+        # Create visualization
+        fig, ax = plt.subplots(figsize=figsize)
+
+        im = ax.imshow(resized_matrix, cmap=cmap, aspect='auto', interpolation='nearest')
+
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xlabel(f"Layer Space (interpolated to {self.target_size}x{self.target_size})", fontsize=11)
+        ax.set_ylabel(f"Layer Space (interpolated to {self.target_size}x{self.target_size})", fontsize=11)
+
+        if show_colorbar:
+            cbar = plt.colorbar(im, ax=ax)
+            scale_label = "Log(Gradient Magnitude + 1)" if log_scale else "Gradient Magnitude"
+            cbar.set_label(scale_label, fontsize=11)
+
+        # Add grid for better readability
+        ax.grid(False)
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+        return fig, ax, resized_matrix
+
+    def get_statistics(self, gradients: List[Any]) -> Dict[str, Any]:
+        """
+        Compute statistics about the gradient topology.
+
+        Parameters
+        ----------
+        gradients : List[Any]
+            List of gradient tensors from tf.GradientTape.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing various statistics.
+        """
+        layer_gradients = self._compute_layer_gradients(gradients)
+        topology_matrix = self._build_topology_matrix(layer_gradients)
+
+        stats = {
+            'num_layers': len(self.model.layers),
+            'num_trainable_layers': len(layer_gradients),
+            'total_gradient_magnitude': sum(layer_gradients.values()),
+            'mean_gradient_magnitude': np.mean(list(layer_gradients.values())),
+            'max_gradient_magnitude': max(layer_gradients.values()) if layer_gradients else 0.0,
+            'min_gradient_magnitude': min(layer_gradients.values()) if layer_gradients else 0.0,
+            'matrix_sparsity': np.sum(topology_matrix == 0) / topology_matrix.size,
+            'layer_gradients': layer_gradients,
+            'original_matrix_shape': topology_matrix.shape,
+            'resized_matrix_shape': (self.target_size, self.target_size)
+        }
+
+        return stats
+
+# --- END OF MODIFICATION ---
 
 
 # ---------------------------------------------------------------------
@@ -1048,5 +1354,78 @@ class GradientVisualization(VisualizationPlugin):
 
         plt.suptitle('Gradient Analysis', fontsize=14, fontweight='bold')
         plt.tight_layout()
+
+        return fig
+
+
+# --- START OF MODIFICATION ---
+
+# ---------------------------------------------------------------------
+# Gradient Topology Visualization
+# ---------------------------------------------------------------------
+
+class GradientTopologyVisualization(VisualizationPlugin):
+    """
+    Visualize gradient flow through the model's topology as a heatmap.
+    """
+
+    @property
+    def name(self) -> str:
+        return "gradient_topology"
+
+    @property
+    def description(self) -> str:
+        return "Creates a heatmap of gradient flow across the model's layer connections."
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, GradientTopologyData)
+
+    def create_visualization(
+        self,
+        data: GradientTopologyData,
+        ax: Optional[plt.Axes] = None,
+        **kwargs
+    ) -> plt.Figure:
+        """
+        Create a gradient topology heatmap.
+
+        Args:
+            data: A GradientTopologyData object containing the model and gradients.
+            ax: Optional matplotlib axes. Note: This is ignored as this visualization
+                creates its own complex figure.
+            **kwargs: Additional arguments for the heatmap, such as:
+                target_size (int): Target size for the NxN heatmap.
+                aggregation (str): 'norm', 'mean', or 'max'.
+                log_scale (bool): Use log scale for gradients.
+                title (str): Plot title.
+                cmap (str): Colormap.
+        """
+        if ax is not None:
+            warnings.warn(
+                f"{self.name} creates its own figure and will ignore the provided 'ax' argument."
+            )
+
+        # Extract relevant kwargs for the visualizer
+        visualizer_kwargs = {
+            'target_size': kwargs.get('target_size', 64),
+            'aggregation': kwargs.get('aggregation', 'norm')
+        }
+        heatmap_kwargs = {
+            'title': kwargs.get('title', f"Gradient Topology - {data.model_name or 'Model'}"),
+            'cmap': kwargs.get('cmap', 'viridis'),
+            'log_scale': kwargs.get('log_scale', False)
+        }
+
+        # Initialize the visualizer
+        visualizer = GradientTopologyVisualizer(
+            model=data.model,
+            **visualizer_kwargs
+        )
+
+        # The visualizer's method returns fig, ax, matrix. We just need the fig.
+        fig, _, _ = visualizer.create_gradient_heatmap(
+            gradients=data.gradients,
+            **heatmap_kwargs
+        )
 
         return fig

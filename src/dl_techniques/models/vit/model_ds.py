@@ -1,14 +1,24 @@
 """
-Vision Transformer (ViT) Model Implementation
+Vision Transformer (ViT) Model Implementation with Deep Supervision
 
 The implementation supports different scales and configurations similar to the original
 "An Image is Worth 16x16 Words" paper and its variants, with enhanced flexibility
 through factory-based component creation.
+
+Deep supervision provides multiple outputs during training:
+- Output 0: Final inference output (highest resolution, primary output)
+- Output 1-N: Intermediate supervision outputs at progressively earlier transformer layers
+
+This allows for:
+- Better gradient flow to earlier layers
+- Multi-scale feature learning and supervision
+- More stable training for very deep networks
+- Curriculum learning capabilities through weight scheduling
 """
 
 import keras
 from keras import ops, layers, initializers, regularizers
-from typing import Optional, Tuple, Dict, Any, Union, Literal
+from typing import Optional, Tuple, Dict, Any, Union, Literal, List
 
 # ---------------------------------------------------------------------
 # Local imports
@@ -28,18 +38,23 @@ VitScale = Literal['pico', 'tiny', 'small', 'base', 'large', 'huge']
 FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
 NormalizationType = Literal['layer_norm', 'rms_norm', 'batch_norm', 'band_rms', 'adaptive_band_rms', 'dynamic_tanh']
 
+
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class ViT(keras.Model):
     """
-    Vision Transformer model with factory-based component creation and modern Keras 3 patterns.
+    Vision Transformer model with factory-based component creation and optional deep supervision.
 
     This model implements the complete Vision Transformer architecture using the dl_techniques
     framework's factory system for consistent component creation. It supports different scales
-    and configurations for various vision_heads tasks including classification, feature extraction,
+    and configurations for various vision tasks including classification, feature extraction,
     and transfer learning.
+
+    **Deep Supervision**: When enabled, the model produces multiple outputs during training:
+    - Output 0: Final inference output (primary classification head)
+    - Output 1-N: Intermediate supervision outputs from earlier transformer layers
 
     **Intent**: Provide a production-ready Vision Transformer implementation that leverages
     the dl_techniques framework's modular components while following modern Keras 3 best
@@ -55,7 +70,7 @@ class ViT(keras.Model):
            ↓
     PositionalEmbedding + Dropout
            ↓
-    TransformerLayer × num_layers
+    TransformerLayer × num_layers [with optional intermediate outputs]
            ↓
     Final Normalization
            ↓
@@ -65,6 +80,7 @@ class ViT(keras.Model):
     ```
 
     **Scale Configurations**:
+    - **Pico**: 192d, 3h, 6L - Ultra-lightweight for quick experiments
     - **Tiny**: 192d, 3h, 12L - Efficient for small datasets/mobile deployment
     - **Small**: 384d, 6h, 12L - Balanced performance and efficiency
     - **Base**: 768d, 12h, 12L - Standard configuration (original paper)
@@ -78,7 +94,7 @@ class ViT(keras.Model):
         num_classes: Integer, number of output classes for classification.
             Must be positive. Only used when include_top=True.
         scale: VitScale, model scale configuration determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'. Defaults to 'base'.
+            Available: 'pico', 'tiny', 'small', 'base', 'large', 'huge'. Defaults to 'base'.
         patch_size: Union[int, Tuple[int, int]], size of patches to extract from images.
             If int, uses square patches. Image dimensions must be divisible by patch size.
             Defaults to 16.
@@ -124,6 +140,12 @@ class ViT(keras.Model):
             Defaults to 'mlp'.
         activation: Union[str, Callable], activation function for FFN.
             Defaults to 'gelu'.
+        enable_deep_supervision: Boolean, whether to add deep supervision outputs.
+            When True, model outputs multiple scales during training.
+            Defaults to False.
+        supervision_layer_indices: Optional[List[int]], indices of transformer layers
+            to add supervision outputs after. If None, automatically selects evenly
+            spaced layers. Defaults to None.
         name: Optional[str], model name. Auto-generated if None.
         **kwargs: Additional arguments for Model base class.
 
@@ -139,8 +161,10 @@ class ViT(keras.Model):
         Depends on configuration:
 
         **Classification mode** (include_top=True):
-        - Shape: `(batch_size, num_classes)`
-        - Values: Logits for each class (no softmax applied)
+        - Without deep supervision: `(batch_size, num_classes)` - Logits for each class
+        - With deep supervision: List of `[(batch_size, num_classes), ...]` where:
+          - Output 0: Final output (primary)
+          - Output 1-N: Intermediate supervision outputs
 
         **Feature extraction mode** (include_top=False):
         - pooling='cls': `(batch_size, embed_dim)` - CLS token features
@@ -159,6 +183,7 @@ class ViT(keras.Model):
         transformer_layers: List of TransformerLayer instances.
         norm: Final normalization layer.
         head: Optional Dense layer for classification.
+        supervision_heads: List of intermediate supervision heads (if deep supervision enabled).
 
     Example:
         ```python
@@ -167,6 +192,14 @@ class ViT(keras.Model):
             input_shape=(224, 224, 3),
             num_classes=1000,
             scale='base'
+        )
+
+        # ViT with deep supervision for better training
+        model = ViT(
+            input_shape=(224, 224, 3),
+            num_classes=1000,
+            scale='base',
+            enable_deep_supervision=True
         )
 
         # Feature extractor with CLS token
@@ -187,7 +220,8 @@ class ViT(keras.Model):
             normalization_position='pre',
             ffn_type='swiglu',
             dropout_rate=0.1,
-            attention_dropout_rate=0.1
+            attention_dropout_rate=0.1,
+            enable_deep_supervision=True
         )
 
         # Compile for training
@@ -233,13 +267,16 @@ class ViT(keras.Model):
             normalization_position: Literal['pre', 'post'] = "post",
             ffn_type: FFNType = "mlp",
             activation: Union[str, callable] = "gelu",
+            enable_deep_supervision: bool = False,
+            supervision_layer_indices: Optional[List[int]] = None,
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize Vision Transformer model."""
+        """Initialize Vision Transformer model with optional deep supervision."""
         # Auto-generate name if not provided
         if name is None:
-            name = f"vision_transformer_{scale}"
+            ds_suffix = '_ds' if enable_deep_supervision else ''
+            name = f"vision_transformer_{scale}{ds_suffix}"
 
         super().__init__(name=name, **kwargs)
 
@@ -306,6 +343,8 @@ class ViT(keras.Model):
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
         self.activation = activation
+        self.enable_deep_supervision = bool(enable_deep_supervision)
+        self.supervision_layer_indices = supervision_layer_indices
 
         # Get model configuration from scale
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
@@ -318,6 +357,31 @@ class ViT(keras.Model):
         # Validate derived parameters
         if self.num_patches <= 0:
             raise ValueError(f"Number of patches must be positive, got {self.num_patches}")
+
+        # Determine supervision layer indices if not provided
+        if self.enable_deep_supervision and self.supervision_layer_indices is None:
+            # Automatically select evenly spaced layers (excluding the last one)
+            # For example, with 12 layers, select layers at indices: [3, 7, 11] for 3 supervision outputs
+            # This provides supervision at early, middle, and late stages
+            if self.num_layers <= 3:
+                # For very shallow models, supervise all intermediate layers
+                self.supervision_layer_indices = list(range(self.num_layers - 1))
+            else:
+                # For deeper models, select 3-4 evenly spaced intermediate layers
+                num_supervision = min(4, self.num_layers - 1)
+                step = max(1, (self.num_layers - 1) // num_supervision)
+                self.supervision_layer_indices = list(range(step - 1, self.num_layers - 1, step))
+        elif not self.enable_deep_supervision:
+            self.supervision_layer_indices = []
+
+        # Validate supervision indices
+        if self.supervision_layer_indices:
+            for idx in self.supervision_layer_indices:
+                if not (0 <= idx < self.num_layers - 1):
+                    raise ValueError(
+                        f"Supervision layer index {idx} out of range. "
+                        f"Must be in [0, {self.num_layers - 1})"
+                    )
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         # Using factories for consistent component creation
@@ -381,8 +445,32 @@ class ViT(keras.Model):
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
-                name="head"
+                name="final_output"  # Named for multi-output metric tracking
             )
+
+        # Deep supervision components
+        self.supervision_dropouts = []
+        self.supervision_heads = []
+
+        if self.enable_deep_supervision and self.include_top:
+            for i, layer_idx in enumerate(self.supervision_layer_indices):
+                # Dropout for supervision output
+                if self.dropout_rate > 0.0:
+                    dropout = layers.Dropout(self.dropout_rate, name=f"supervision_dropout_{layer_idx}")
+                    self.supervision_dropouts.append(dropout)
+                else:
+                    self.supervision_dropouts.append(None)
+
+                # Classification head for supervision
+                head = layers.Dense(
+                    self.num_classes,
+                    kernel_initializer=self.kernel_initializer,
+                    bias_initializer=self.bias_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
+                    name=f"supervision_output_{layer_idx}"
+                )
+                self.supervision_heads.append(head)
 
         # Global pooling layers (if needed for feature extraction)
         self.global_pool = None
@@ -397,6 +485,10 @@ class ViT(keras.Model):
         logger.info(f"Created VisionTransformer-{scale} with {self.embed_dim}d, {self.num_heads}h, {self.num_layers}L")
         logger.info(
             f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
+
+        if self.enable_deep_supervision:
+            logger.info(f"Deep supervision enabled with {len(self.supervision_layer_indices)} intermediate outputs")
+            logger.info(f"Supervision at transformer layers: {self.supervision_layer_indices}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -442,6 +534,13 @@ class ViT(keras.Model):
                 self.head_dropout.build(head_input_shape)
             self.head.build(head_input_shape)
 
+        # Deep supervision components
+        if self.enable_deep_supervision and self.include_top:
+            for i in range(len(self.supervision_layer_indices)):
+                if self.supervision_dropouts[i] is not None:
+                    self.supervision_dropouts[i].build(head_input_shape)
+                self.supervision_heads[i].build(head_input_shape)
+
         # Global pooling
         if self.global_pool is not None:
             self.global_pool.build(pos_input_shape)
@@ -453,7 +552,7 @@ class ViT(keras.Model):
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
-    ) -> keras.KerasTensor:
+    ) -> Union[keras.KerasTensor, List[keras.KerasTensor]]:
         """
         Forward pass through the Vision Transformer.
 
@@ -462,53 +561,85 @@ class ViT(keras.Model):
             training: Whether in training mode.
 
         Returns:
-            Model output tensor. Shape depends on include_top and pooling settings.
+            Model output tensor or list of tensors (if deep supervision enabled).
+            - Single output: Shape depends on include_top and pooling settings.
+            - Multi-output (deep supervision): List of [final_output, supervision_outputs...]
         """
         # 1. Convert image to a sequence of patch embeddings
-        x = self.patch_embed(inputs, training=training)
+        x = self.patch_embed(inputs, training=training)  # (batch_size, num_patches, embed_dim)
 
-        # 2. Prepend the CLS token
+        # 2. Prepend the CLS token to the sequence of patches
         batch_size = ops.shape(x)[0]
         cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)
+        x = ops.concatenate([cls_tokens, x], axis=1)  # (batch_size, seq_len, embed_dim)
 
         # 3. Add learned positional embeddings
         x = self.pos_embed(x, training=training)
 
-        # 4. Process through the Transformer layers
-        for layer in self.transformer_layers:
+        # 4. Process through transformer layers with optional intermediate supervision
+        supervision_outputs = []
+
+        for i, layer in enumerate(self.transformer_layers):
             x = layer(x, training=training)
 
-        # 5. Apply final normalization to the entire sequence for architectural consistency
-        x_norm = self.norm(x, training=training)
+            # Collect intermediate supervision outputs during training
+            if self.enable_deep_supervision and self.include_top and i in self.supervision_layer_indices:
+                # Find the index in supervision_layer_indices
+                sup_idx = self.supervision_layer_indices.index(i)
 
-        # 6. Handle the output based on the model's configuration
+                # The output 'x' is already normalized from the TransformerLayer (post-norm).
+                # Extract the CLS token directly.
+                cls_token_sup = x[:, 0, :]
+
+                # Apply dropout
+                if self.supervision_dropouts[sup_idx] is not None:
+                    cls_token_sup = self.supervision_dropouts[sup_idx](cls_token_sup, training=training)
+
+                # Generate supervision output
+                sup_output = self.supervision_heads[sup_idx](cls_token_sup)
+                supervision_outputs.append(sup_output)
+
+        # 5. Handle the output based on the model's configuration
         if self.include_top:
             # --- Classification Head Logic ---
-            # Extract the CLS token from the *normalized* sequence.
+            # Apply final normalization to the entire sequence first
+            x_norm = self.norm(x, training=training)
+
+            # Now, extract the CLS token from the normalized sequence
             cls_token = x_norm[:, 0, :]
 
-            # Pass through the final classification head
+            # Apply dropout
             if self.head_dropout is not None:
                 cls_token = self.head_dropout(cls_token, training=training)
 
-            return self.head(cls_token)
+            # Final classification
+            final_output = self.head(cls_token)  # (batch_size, num_classes)
+
+            # Return outputs based on deep supervision setting
+            if self.enable_deep_supervision and supervision_outputs:
+                # Multi-output: [final_output, supervision_outputs...]
+                # Order is from shallowest intermediate layer to deepest
+                all_outputs = [final_output] + supervision_outputs
+                return all_outputs
+            else:
+                return final_output
+
         else:
             # --- Feature Extraction Logic ---
-            if self.pooling == "cls":
-                # Return the normalized CLS token
-                return x_norm[:, 0, :]
-            elif self.pooling == "mean":
-                # Pool over patch tokens only, excluding the CLS token
-                return self.global_pool(x_norm[:, 1:, :])
-            elif self.pooling == "max":
-                # Pool over patch tokens only, excluding the CLS token
-                return self.global_pool(x_norm[:, 1:, :])
-            else:
-                # Return the full, normalized sequence
-                return x_norm
+            x = self.norm(x, training=training)
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+            if self.pooling == "cls":
+                return x[:, 0, :]  # (batch_size, embed_dim)
+            elif self.pooling == "mean":
+                # For mean/max pooling, we should exclude the CLS token
+                return self.global_pool(x[:, 1:, :])  # (batch_size, embed_dim)
+            elif self.pooling == "max":
+                return self.global_pool(x[:, 1:, :])  # (batch_size, embed_dim)
+            else:
+                return x  # (batch_size, seq_len, embed_dim)
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Union[
+        Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
         """
         Compute output shape.
 
@@ -516,7 +647,7 @@ class ViT(keras.Model):
             input_shape: Input tensor shape.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple or list of tuples (if deep supervision enabled).
         """
         if len(input_shape) < 4:
             raise ValueError(f"Expected 4D input shape (batch, height, width, channels), got {input_shape}")
@@ -524,7 +655,14 @@ class ViT(keras.Model):
         batch_size = input_shape[0]
 
         if self.include_top:
-            return (batch_size, self.num_classes)
+            output_shape = (batch_size, self.num_classes)
+
+            if self.enable_deep_supervision and self.supervision_layer_indices:
+                # Return list of output shapes
+                num_outputs = 1 + len(self.supervision_layer_indices)
+                return [output_shape] * num_outputs
+            else:
+                return output_shape
         else:
             if self.pooling in ["cls", "mean", "max"]:
                 return (batch_size, self.embed_dim)
@@ -556,6 +694,8 @@ class ViT(keras.Model):
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
             "activation": self.activation,
+            "enable_deep_supervision": self.enable_deep_supervision,
+            "supervision_layer_indices": self.supervision_layer_indices,
         })
         return config
 
@@ -587,6 +727,7 @@ class ViT(keras.Model):
             normalization_position=self.normalization_position,
             ffn_type=self.ffn_type,
             activation=self.activation,
+            enable_deep_supervision=False,  # Feature extractors don't use deep supervision
             name=f"{self.name}_feature_extractor"
         )
 
@@ -613,6 +754,9 @@ class ViT(keras.Model):
         logger.info(f"Include Top: {self.include_top}")
         logger.info(f"Pooling: {self.pooling}")
         logger.info(f"Number of Classes: {self.num_classes}")
+        logger.info(f"Deep Supervision: {self.enable_deep_supervision}")
+        if self.enable_deep_supervision:
+            logger.info(f"Supervision Layers: {self.supervision_layer_indices}")
         if self.built:
             logger.info(f"Total Parameters: {self.count_params():,}")
 
@@ -645,6 +789,8 @@ def create_vision_transformer(
         normalization_position: Literal['pre', 'post'] = "post",
         ffn_type: FFNType = "mlp",
         activation: Union[str, callable] = "gelu",
+        enable_deep_supervision: bool = False,
+        supervision_layer_indices: Optional[List[int]] = None,
         **kwargs: Any
 ) -> ViT:
     """
@@ -655,16 +801,11 @@ def create_vision_transformer(
 
     Args:
         input_shape: Input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
         num_classes: Number of output classes for classification.
-            Must be positive. Only used when include_top=True.
         scale: Model scale determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'.
         patch_size: Size of patches to extract from input images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
         include_top: Whether to include the classification head.
         pooling: Pooling mode for feature extraction when include_top=False.
-            Available: 'cls', 'mean', 'max', None.
         dropout_rate: Dropout rate for general regularization.
         attention_dropout_rate: Dropout rate for attention weights.
         pos_dropout_rate: Dropout rate for positional embeddings.
@@ -676,6 +817,8 @@ def create_vision_transformer(
         normalization_position: Position of normalization in transformer layers.
         ffn_type: Type of feed-forward network for transformer layers.
         activation: Activation function for feed-forward networks.
+        enable_deep_supervision: Whether to add deep supervision outputs.
+        supervision_layer_indices: Optional indices for supervision layers.
         **kwargs: Additional arguments for ViT constructor.
 
     Returns:
@@ -693,7 +836,15 @@ def create_vision_transformer(
             scale='base'
         )
 
-        # Create feature extractor with modern components
+        # Create ViT with deep supervision
+        model = create_vision_transformer(
+            input_shape=(224, 224, 3),
+            num_classes=1000,
+            scale='base',
+            enable_deep_supervision=True
+        )
+
+        # Feature extractor with modern components
         feature_model = create_vision_transformer(
             input_shape=(384, 384, 3),
             scale='small',
@@ -758,11 +909,13 @@ def create_vision_transformer(
         normalization_position=normalization_position,
         ffn_type=ffn_type,
         activation=activation,
+        enable_deep_supervision=enable_deep_supervision,
+        supervision_layer_indices=supervision_layer_indices,
         **kwargs
     )
 
     logger.info(f"VisionTransformer-{scale} created successfully")
     logger.info(f"Configuration: {num_patches} patches ({img_h // patch_h}x{img_w // patch_w}), {num_classes} classes")
+    if enable_deep_supervision:
+        logger.info("Deep supervision enabled")
     return model
-
-# ---------------------------------------------------------------------

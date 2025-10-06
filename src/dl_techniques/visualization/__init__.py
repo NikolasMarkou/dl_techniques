@@ -35,6 +35,9 @@ from .data_nn import (
     ActivationData,
     WeightData,
     GradientData,
+    # --- START OF MODIFICATION ---
+    GradientTopologyData,
+    # --- END OF MODIFICATION ---
 )
 
 # ---------------------------------------------------------------------
@@ -71,6 +74,9 @@ from .data_nn import (
     WeightVisualization,
     FeatureMapVisualization,
     GradientVisualization,
+    # --- START OF MODIFICATION ---
+    GradientTopologyVisualization,
+    # --- END OF MODIFICATION ---
 )
 
 # ---------------------------------------------------------------------
@@ -97,6 +103,9 @@ __all__ = [
     "ActivationData",
     "WeightData",
     "GradientData",
+    # --- START OF MODIFICATION ---
+    "GradientTopologyData",
+    # --- END OF MODIFICATION ---
 
     # Training & Performance Plugins
     "TrainingCurvesVisualization",
@@ -122,4 +131,7 @@ __all__ = [
     "WeightVisualization",
     "FeatureMapVisualization",
     "GradientVisualization",
+    # --- START OF MODIFICATION ---
+    "GradientTopologyVisualization",
+    # --- END OF MODIFICATION ---
 ]
