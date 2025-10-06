@@ -499,8 +499,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             train_loss=history_dict.get('loss', []),
             val_loss=history_dict.get('val_loss', []),
             train_metrics=train_metrics,
-            val_metrics=val_metrics,
-            model_name=model_name
+            val_metrics=val_metrics
         )
 
     if training_histories_data:
