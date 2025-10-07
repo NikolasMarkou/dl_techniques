@@ -209,7 +209,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 5
+    epochs: int = 1
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -228,7 +228,7 @@ class ExperimentConfig:
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
         analyze_weights=True,
         analyze_calibration=True,
-        analyze_information_flow=False,  # Can be disabled to speed up
+        analyze_information_flow=True,
         calibration_bins=15,
         save_plots=True,
         plot_style='publication',
@@ -494,37 +494,100 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Failed to create training history visualization: {e}")
 
+        # Generate confusion matrices for model comparison
+    raw_predictions = {
+        name: model.predict(cifar10_data.x_test, verbose=0)
+        for name, model in trained_models.items()
+    }
+    class_predictions = {
+        name: np.argmax(preds, axis=1)
+        for name, preds in raw_predictions.items()
+    }
+
+    # Convert y_test to class indices for confusion matrix
     y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
-    for model_name, model in trained_models.items():
+
+    # Create classification results for each model
+    for model_name, y_pred in class_predictions.items():
         try:
-            y_prob = model.predict(cifar10_data.x_test, verbose=0)
-            y_pred = np.argmax(y_prob, axis=1)
             classification_data = ClassificationResults(
-                y_true=y_true_indices, y_pred=y_pred, y_prob=y_prob,
-                class_names=cifar10_data.class_names, model_name=model_name
+                y_true=y_true_indices,
+                y_pred=y_pred,
+                y_prob=raw_predictions[model_name],
+                class_names=cifar10_data.class_names,
+                model_name=model_name
             )
+
             vis_manager.visualize(
                 data=classification_data,
                 plugin_name="confusion_matrix",
-                normalize='true', show=False
+                normalize='true',
+                show=False
             )
         except Exception as e:
             logger.error(f"Failed to create confusion matrix for {model_name}: {e}")
 
+    # ===== FINAL PERFORMANCE EVALUATION =====
     logger.info("Evaluating final model performance on test set...")
+    logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
+    logger.info(f"Test labels sample: {cifar10_data.y_test[:5]}")
+
     performance_results = {}
+
     for name, model in trained_models.items():
+        logger.info(f"Evaluating model {name}...")
+        logger.info(f"Model {name} metrics: {model.metrics_names}")
+
+        # Get model evaluation metrics
         eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
-        performance_results[name] = dict(zip(model.metrics_names, eval_results))
+        metrics_dict = dict(zip(model.metrics_names, eval_results))
+
+        # Debug logging for metric inspection
+        logger.info(f"Raw evaluation metrics for {name}: {metrics_dict}")
+
+        # Calculate manual accuracy verification
+        predictions = model.predict(cifar10_data.x_test, verbose=0)
+        y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
+
+        # Manual top-1 accuracy verification
+        manual_top1_acc = np.mean(np.argmax(predictions, axis=1) == y_true_indices)
+        logger.info(f"Manual top-1 accuracy for {name}: {manual_top1_acc:.4f}")
+
+        # Manual top-5 accuracy calculation
+        top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
+        manual_top5_acc = np.mean([
+            y_true in top5_pred
+            for y_true, top5_pred in zip(y_true_indices, top_5_predictions)
+        ])
+        logger.info(f"Manual top-5 accuracy for {name}: {manual_top5_acc:.4f}")
+
+        # Store standardized metrics
+        performance_results[name] = {
+            'accuracy': metrics_dict.get('accuracy', manual_top1_acc),
+            'top_5_accuracy': metrics_dict.get('top_5_accuracy', manual_top5_acc),
+            'loss': metrics_dict.get('loss', 0.0)
+        }
+
+        # Warn about potentially problematic accuracy values
+        final_accuracy = performance_results[name]['accuracy']
+        if final_accuracy < 0.2:
+            logger.warning(f"Low accuracy detected for {name}: {final_accuracy:.4f}")
+            logger.warning("This may indicate training issues or model problems")
+
+        # Log final metrics for this model
         logger.info(f"Model {name} final metrics: {performance_results[name]}")
 
+    # ===== RESULTS COMPILATION =====
     results_payload = {
         'performance_analysis': performance_results,
         'model_analysis': model_analysis_results,
         'histories': all_histories,
         'trained_models': trained_models
     }
+
+    # Print comprehensive summary
     print_experiment_summary(results_payload)
+
     return results_payload
 
 
@@ -533,44 +596,76 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 # ==============================================================================
 
 def print_experiment_summary(results: Dict[str, Any]) -> None:
-    """Prints a comprehensive summary of experimental results."""
+    """
+    Print a comprehensive summary of experimental results.
+
+    This function generates a detailed report of all experimental outcomes,
+    including performance metrics, calibration analysis, and training progress.
+    The summary is formatted for clear readability and easy interpretation.
+
+    Args:
+        results: Dictionary containing all experimental results and analysis
+    """
     logger.info("=" * 80)
     logger.info("EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
+    # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
         logger.info("PERFORMANCE METRICS (on Full Test Set):")
-        logger.info(f"{'Model':<25} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
-        logger.info("-" * 65)
-        for name, metrics in results['performance_analysis'].items():
-            logger.info(
-                f"{name:<25} {metrics.get('accuracy', 0.0):<12.4f} "
-                f"{metrics.get('top_5_accuracy', 0.0):<12.4f} "
-                f"{metrics.get('loss', 0.0):<12.4f}"
-            )
+        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
+        logger.info("-" * 60)
 
+        for model_name, metrics in results['performance_analysis'].items():
+            accuracy = metrics.get('accuracy', 0.0)
+            top5_acc = metrics.get('top_5_accuracy', 0.0)
+            loss = metrics.get('loss', 0.0)
+            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
+
+    # ===== CALIBRATION METRICS SECTION =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("\nCALIBRATION METRICS (from Model Analyzer):")
-        logger.info(f"{'Model':<25} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
-        logger.info("-" * 70)
-        for name, cal_metrics in model_analysis.calibration_metrics.items():
-            conf_metrics = model_analysis.confidence_metrics.get(name, {})
+        logger.info("CALIBRATION METRICS (from Model Analyzer):")
+        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
+        logger.info("-" * 65)
+
+        for model_name, cal_metrics in model_analysis.calibration_metrics.items():
+            # Get the corresponding confidence metrics for the same model
+            conf_metrics = model_analysis.confidence_metrics.get(model_name, {})
+
             logger.info(
-                f"{name:<25} {cal_metrics.get('ece', 0.0):<12.4f} "
+                f"{model_name:<20} {cal_metrics.get('ece', 0.0):<12.4f} "
                 f"{cal_metrics.get('brier_score', 0.0):<15.4f} "
                 f"{conf_metrics.get('mean_entropy', 0.0):<12.4f}"
             )
 
+    # ===== TRAINING METRICS SECTION =====
     if 'histories' in results and results['histories']:
-        logger.info("\nFINAL TRAINING METRICS (on Validation Set):")
-        logger.info(f"{'Model':<25} {'Val Accuracy':<15} {'Val Loss':<12}")
-        logger.info("-" * 55)
-        for name, history in results['histories'].items():
-            if history.get('val_accuracy'):
-                final_val_acc = history['val_accuracy'][-1]
-                final_val_loss = history['val_loss'][-1]
-                logger.info(f"{name:<25} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
+        # Check if any model actually has training history data
+        has_training_data = False
+        for model_name, history_dict in results['histories'].items():
+            if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
+                history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                has_training_data = True
+                break
+
+        if has_training_data:
+            logger.info("FINAL TRAINING METRICS (on Validation Set):")
+            logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
+            logger.info("-" * 50)
+
+            for model_name, history_dict in results['histories'].items():
+                # Check if this specific model has actual training data
+                if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
+                    history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                    final_val_acc = history_dict['val_accuracy'][-1]
+                    final_val_loss = history_dict['val_loss'][-1]
+                    logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
+                else:
+                    logger.info(f"{model_name:<20} {'Not trained':<15} {'Not trained':<12}")
+        else:
+            logger.info("TRAINING STATUS:")
+            logger.info("Models were not trained (epochs=0) - no training metrics available")
 
     logger.info("=" * 80)
 
