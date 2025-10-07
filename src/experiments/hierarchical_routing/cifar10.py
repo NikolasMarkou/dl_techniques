@@ -196,7 +196,7 @@ class ExperimentConfig:
 
     # --- Dataset Configuration ---
     dataset_name: str = "cifar10"
-    num_classes: int = 10
+    num_classes: int = 100
     input_shape: Tuple[int, ...] = (32, 32, 3)
 
     # --- Model Architecture Parameters ---
