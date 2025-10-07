@@ -113,6 +113,16 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
         # Shape: (batch_size, num_decisions)
         decision_probs = self.decision_dense(inputs, training=training)
 
+        # ------------------- STABILITY FIX -------------------
+        # Clip decision probabilities to prevent them from becoming exactly 0 or 1.
+        # This avoids multiplying by zero during tree traversal, which could lead
+        # to zero probabilities in the final output. A zero probability for the
+        # true class causes a NaN loss from log(0) in cross-entropy.
+        decision_probs = ops.clip(
+            decision_probs, self.epsilon, 1.0 - self.epsilon
+        )
+        # -----------------------------------------------------
+
         # Get the batch size dynamically for backend-agnostic compatibility.
         batch_size = ops.shape(inputs)[0]
 
