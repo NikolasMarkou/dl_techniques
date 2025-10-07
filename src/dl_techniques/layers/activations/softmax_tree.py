@@ -1,7 +1,7 @@
 import keras
 import numpy as np
 from keras import ops, initializers
-from typing import Optional, Union, Tuple, List, Dict, Any
+from typing import Union, Tuple, List, Dict, Any
 
 
 @keras.saving.register_keras_serializable()
