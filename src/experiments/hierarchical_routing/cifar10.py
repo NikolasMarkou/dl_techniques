@@ -196,7 +196,7 @@ class ExperimentConfig:
 
     # --- Dataset Configuration ---
     dataset_name: str = "cifar10"
-    num_classes: int = 100
+    num_classes: int = 10
     input_shape: Tuple[int, ...] = (32, 32, 3)
 
     # --- Model Architecture Parameters ---
@@ -211,7 +211,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 10
+    epochs: int = 100
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -375,7 +375,6 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
         predictions = HierarchicalRoutingLayer(
             output_dim=config.num_classes,
             name='predictions',
-            use_bias=False,
             kernel_initializer=OrthogonalHypersphereInitializer(),
             kernel_regularizer=SoftOrthonormalConstraintRegularizer()
         )(x)
