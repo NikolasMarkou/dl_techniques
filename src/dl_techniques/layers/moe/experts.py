@@ -257,3 +257,4 @@ def create_expert(expert_type: str, **kwargs) -> BaseExpert:
             f"Unsupported expert type: {expert_type}. "
             f"Only 'ffn' experts are supported in the simplified MoE implementation."
         )
+

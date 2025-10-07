@@ -218,6 +218,7 @@ class SledLogitsProcessor:
         )
         return evolved_logits
 
+# ---------------------------------------------------------------------
 
 def sled_builder(
     config: Dict[str, Union[str, Dict[str, Union[float, str, bool, int]]]]
@@ -277,3 +278,5 @@ def sled_builder(
             f"Unknown SLED type: [{sled_type}]. "
             f"Supported types: {[t.value for t in SledEvolutionType]}"
         )
+
+# ---------------------------------------------------------------------

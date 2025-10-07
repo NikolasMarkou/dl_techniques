@@ -13,8 +13,13 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Union, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class BaseTokenizer(ABC):
     """Abstract base class for tokenizers."""
@@ -43,6 +48,7 @@ class BaseTokenizer(ABC):
         """
         pass
 
+# ---------------------------------------------------------------------
 
 class SimpleCharTokenizer(BaseTokenizer):
     """Simple character-level tokenizer for demonstration purposes.
@@ -85,6 +91,7 @@ class SimpleCharTokenizer(BaseTokenizer):
         chars = [chr(min(token_id, 127)) for token_id in token_ids]  # ASCII range
         return ''.join(chars)
 
+# ---------------------------------------------------------------------
 
 class VQADataProcessor:
     """Data processor for Vision Question Answering datasets.
@@ -352,6 +359,7 @@ class VQADataProcessor:
         # Ensure exact length
         return input_ids[:self.max_text_length]
 
+# ---------------------------------------------------------------------
 
 class VQADataSequence(keras.utils.Sequence):
     """Keras Sequence for VQA data loading and batching.
@@ -479,6 +487,7 @@ class VQADataSequence(keras.utils.Sequence):
             np.random.shuffle(self.indices)
             logger.debug("Shuffled data indices for new epoch")
 
+# ---------------------------------------------------------------------
 
 def create_vqa_dataset(
         data_samples: List[Dict[str, Any]],
@@ -510,6 +519,7 @@ def create_vqa_dataset(
         conversation_format=conversation_format
     )
 
+# ---------------------------------------------------------------------
 
 def load_cauldron_sample() -> List[Dict[str, Any]]:
     """Load sample data in Cauldron format for testing.
@@ -547,6 +557,7 @@ def load_cauldron_sample() -> List[Dict[str, Any]]:
     logger.info(f"Loaded {len(sample_data)} sample data points")
     return sample_data
 
+# ---------------------------------------------------------------------
 
 def load_cauldron_from_json(json_path: Union[str, Path]) -> List[Dict[str, Any]]:
     """Load Cauldron dataset from JSON file.
@@ -589,3 +600,5 @@ def load_cauldron_from_json(json_path: Union[str, Path]) -> List[Dict[str, Any]]
     except Exception as e:
         logger.error(f"Failed to load JSON file {json_path}: {e}")
         raise
+
+# ---------------------------------------------------------------------

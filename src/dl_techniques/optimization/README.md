@@ -798,10 +798,4 @@ def create_sweep_configs():
                 sweep_configs.append(config)
     
     return sweep_configs
-
-# Use with your preferred hyperparameter tuning library
 ```
-
----
-
-This guide provides comprehensive coverage of the optimization module. For additional questions or advanced use cases, refer to the source code documentation or create an issue in the project repository.

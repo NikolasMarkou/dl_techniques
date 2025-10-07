@@ -3,6 +3,13 @@ import numpy as np
 from keras import ops, initializers
 from typing import Union, Tuple, List, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class DifferentiableSoftmaxTree(keras.layers.Layer):

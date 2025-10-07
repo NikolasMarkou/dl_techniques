@@ -38,9 +38,9 @@ from keras.api.optimizers.schedules import LearningRateSchedule
 # local imports
 # ---------------------------------------------------------------------
 
-from .constants import *
-from .warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
+from .warmup_schedule import WarmupSchedule
+from .constants import *
 
 # ---------------------------------------------------------------------
 # enums

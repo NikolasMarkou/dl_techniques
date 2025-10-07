@@ -3,9 +3,6 @@ import numpy as np
 import warnings
 from typing import Optional, Tuple, Dict, Any
 
-
-# ---------------------------------------------------------------------
-# Custom Initializer
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -234,3 +231,5 @@ class OrthogonalHypersphereInitializer(keras.initializers.Initializer):
             f"{self.__class__.__name__}("
             f"radius={self.radius}, seed={self.seed})"
         )
+
+# ---------------------------------------------------------------------

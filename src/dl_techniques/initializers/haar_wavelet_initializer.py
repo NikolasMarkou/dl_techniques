@@ -240,6 +240,9 @@ class HaarWaveletInitializer(keras.initializers.Initializer):
         """
         return cls(**config)
 
+# ---------------------------------------------------------------------
+# builder utility
+# ---------------------------------------------------------------------
 
 def create_haar_depthwise_conv2d(
     input_shape: Tuple[int, int, int],

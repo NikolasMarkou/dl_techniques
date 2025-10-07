@@ -53,6 +53,7 @@ class PatchInfo:
     def center_y(self) -> float:
         return (self.y1 + self.y2) / 2
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class DetectionResult:
@@ -68,6 +69,7 @@ class DetectionResult:
             'class_id': self.class_id
         }
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class PatchPrediction:
@@ -586,8 +588,10 @@ class ResultAggregator:
             }
         }
 
-
+# ---------------------------------------------------------------------
 # Utility functions for easy usage
+# ---------------------------------------------------------------------
+
 def create_patch_grid(
         image_width: int,
         image_height: int,
@@ -598,6 +602,7 @@ def create_patch_grid(
     generator = PatchGridGenerator(patch_size=patch_size, overlap=overlap)
     return generator.generate_patches(image_width, image_height)
 
+# ---------------------------------------------------------------------
 
 def aggregate_patch_results(
         patch_predictions: List[PatchPrediction],
@@ -608,3 +613,5 @@ def aggregate_patch_results(
     """Convenience function to aggregate patch results."""
     aggregator = ResultAggregator(**kwargs)
     return aggregator.aggregate_predictions(patch_predictions, image_width, image_height)
+
+# ---------------------------------------------------------------------

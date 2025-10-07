@@ -210,6 +210,7 @@ def learning_rate_schedule_builder(config: Dict[str, Any]) -> LearningRateSchedu
 
     return schedule
 
+# ---------------------------------------------------------------------
 
 def optimizer_builder(
         config: Dict[str, Any],

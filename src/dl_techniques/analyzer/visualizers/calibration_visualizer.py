@@ -13,8 +13,8 @@ from typing import List
 # local imports
 # ---------------------------------------------------------------------
 
-from .base import BaseVisualizer
 from dl_techniques.utils.logger import logger
+from .base import BaseVisualizer
 
 # Figure Layout Constants
 FIGURE_SIZE = (14, 10)

@@ -2,8 +2,13 @@ import numpy as np
 from typing import List, Optional, Tuple, Union, Literal
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class TabularDataProcessor:
     """Preprocessor for tabular data compatible with TabM models.
@@ -201,3 +206,4 @@ class TabularDataProcessor:
         logger.info(
             f"Auto-detected {len(self.numerical_columns)} numerical and {len(self.categorical_columns)} categorical features")
 
+# ---------------------------------------------------------------------
