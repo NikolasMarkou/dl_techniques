@@ -97,6 +97,8 @@ from typing import Dict, Any, List, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.layers.hierarchical_routing import HierarchicalRoutingLayer
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 from dl_techniques.visualization import (
     VisualizationManager,
@@ -217,7 +219,7 @@ class ExperimentConfig:
     loss_function: Callable = field(default_factory=lambda: keras.losses.CategoricalCrossentropy(from_logits=False))
 
     # --- Models to Evaluate ---
-    model_types: List[str] = field(default_factory=lambda: ['Softmax', 'HierarchicalRouting'])
+    model_types: List[str] = field(default_factory=lambda: ['Softmax', 'HierarchicalRouting', 'HierarchicalRoutingOrthonormal'])
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")
@@ -368,6 +370,14 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
         predictions = HierarchicalRoutingLayer(
             output_dim=config.num_classes,
             name='predictions'
+        )(x)
+    elif model_type == 'HierarchicalRoutingOrthonormal':
+        predictions = HierarchicalRoutingLayer(
+            output_dim=config.num_classes,
+            name='predictions',
+            use_bias=False,
+            kernel_initializer=OrthogonalHypersphereInitializer(),
+            kernel_regularizer=SoftOrthonormalConstraintRegularizer()
         )(x)
     else:
         raise ValueError(f"Unknown model_type: {model_type}. "
