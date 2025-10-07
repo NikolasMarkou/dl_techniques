@@ -10,10 +10,12 @@ This document provides a comprehensive guide to using the `visualization` framew
     -   [Training and Performance](#training-and-performance)
     -   [Classification Analysis](#classification-analysis)
     -   [Data and Neural Network Inspection](#data-and-neural-network-inspection)
+    -   [Time Series Analysis](#time-series-analysis)
 4.  [Visualization Cookbook](#visualization-cookbook)
     -   [Visualizing Training and Performance](#visualizing-training-and-performance-1)
     -   [Comparing Multiple Models](#comparing-multiple-models)
     -   [Analyzing Classification Results](#analyzing-classification-results)
+    -   [Analyzing Time Series Forecasts](#analyzing-time-series-forecasts)
     -   [Inspecting Neural Networks](#inspecting-neural-networks)
 5.  [Advanced Usage](#advanced-usage)
     -   [Customizing Plot Appearance](#customizing-plot-appearance)
@@ -123,6 +125,14 @@ This section provides a detailed reference for all built-in visualization plugin
 | **`GradientTopologyVisualization`**<br/>`"gradient_topology"` | Visualizes the entire model's gradient flow as a topological heatmap, showing how gradients propagate between connected layers. | `GradientTopologyData` | `target_size: int` (default: 64)<br/>`aggregation: str` (`'norm'`, `'mean'`, `'max'`)<br/>`log_scale: bool` (default: `False`)<br/>`cmap: str` (default: `'viridis'`) |
 | **`GenericMatrixVisualization`**<br/>`"generic_matrix"` | Renders any 2D NumPy array as a heatmap, useful for correlation matrices or custom data. | `MatrixData` or `np.ndarray` | `title: str`<br/>`annot: bool` (default: `True`)<br/>`fmt: str` (default: `'.2f'`)<br/>`xticklabels: List[str]` |
 | **`ImageComparisonVisualization`**<br/>`"image_comparison"` | Displays a list of images side-by-side, ideal for comparing original vs. reconstructed images or data augmentations. | `ImageData` or `List[np.ndarray]` | `titles: List[str]`<br/>`super_title: str`<br/>`cmap: str` (default: `'gray'`) |
+
+### Time Series Analysis
+
+*Visualizations from `time_series.py` for evaluating the performance of forecasting models.*
+
+| Plugin (`plugin_name`) | Description | Required Data | Key Options |
+| :--- | :--- | :--- | :--- |
+| **`ForecastVisualization`**<br/>`"forecast_visualization"` | Plots sample forecasts against true values, with optional support for visualizing uncertainty via prediction quantiles. | `TimeSeriesEvaluationResults` | `num_samples: int` (default: 6)<br/>`plot_type: str` (`'auto'`, `'point'`, `'quantile'`) |
 
 ---
 
@@ -254,6 +264,76 @@ viz_manager.visualize(
     data=eval_data,
     plugin_name="roc_pr_curves",
     plot_type='both',  # Generate both ROC and Precision-Recall curves.
+    show=True
+)
+```
+
+### Analyzing Time Series Forecasts
+
+This example demonstrates how to visualize both a simple point forecast and a more complex probabilistic (quantile) forecast.
+
+```python
+import numpy as np
+from dl_techniques.visualization import (
+    TimeSeriesEvaluationResults,
+    ForecastVisualization,
+    VisualizationManager
+)
+
+# --- 1. Generate Sample Data ---
+# Let's create dummy data for 100 samples
+# Input length = 50, Forecast length = 12
+num_samples = 100
+input_len = 50
+forecast_len = 12
+quantile_levels = [0.1, 0.25, 0.5, 0.75, 0.9]
+
+all_inputs = np.random.randn(num_samples, input_len)
+all_true_forecasts = np.random.randn(num_samples, forecast_len)
+
+# Point forecasts (e.g., from a model like N-BEATS)
+all_point_forecasts = all_true_forecasts + np.random.randn(num_samples, forecast_len) * 0.5
+
+# Quantile forecasts (e.g., from a model like TiRex)
+# Shape: (num_samples, num_quantiles, forecast_len)
+all_quantile_forecasts = np.random.randn(num_samples, len(quantile_levels), forecast_len)
+all_quantile_forecasts.sort(axis=1) # Ensure quantiles are ordered
+
+# --- 2. Create Data Containers ---
+# a) For a point forecasting model
+point_forecast_data = TimeSeriesEvaluationResults(
+    all_inputs=all_inputs,
+    all_true_forecasts=all_true_forecasts,
+    all_predicted_forecasts=all_point_forecasts,
+    model_name="N-BEATS_Example"
+)
+
+# b) For a probabilistic forecasting model
+quantile_forecast_data = TimeSeriesEvaluationResults(
+    all_inputs=all_inputs,
+    all_true_forecasts=all_true_forecasts,
+    all_predicted_quantiles=all_quantile_forecasts,
+    quantile_levels=quantile_levels,
+    model_name="TiRex_Example"
+)
+
+# --- 3. Visualize ---
+viz_manager = VisualizationManager(experiment_name="time_series_cookbook")
+viz_manager.register_template("forecast_visualization", ForecastVisualization)
+
+# a) Visualize the point forecast
+print("Visualizing point forecast...")
+viz_manager.visualize(
+    data=point_forecast_data,
+    plugin_name="forecast_visualization",
+    show=True
+)
+
+# b) Visualize the quantile forecast
+print("Visualizing quantile forecast...")
+viz_manager.visualize(
+    data=quantile_forecast_data,
+    plugin_name="forecast_visualization",
     show=True
 )
 ```

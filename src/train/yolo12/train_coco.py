@@ -57,7 +57,7 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.vision_task_types import TaskType
-from dl_techniques.utils.datasets.coco import COCODatasetBuilder
+from dl_techniques.datasets import COCODatasetBuilder
 from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
 

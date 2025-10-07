@@ -1072,7 +1072,7 @@ import keras
 from keras import ops
 from dl_techniques.models.nano_vlm import create_nanovlm_222m
 from dl_techniques.losses.nanovlm_loss import NanoVLMLoss
-from dl_techniques.utils.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample
+from dl_techniques.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 from dl_techniques.utils.logger import logger
 

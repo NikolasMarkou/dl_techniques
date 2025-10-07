@@ -8,7 +8,7 @@ pattern generation, parameter validation, and edge cases.
 import pytest
 import numpy as np
 
-from dl_techniques.utils.datasets.time_series_generator import (
+from dl_techniques.datasets.time_series.time_series_generator import (
     TimeSeriesGenerator,
     TimeSeriesConfig
 )

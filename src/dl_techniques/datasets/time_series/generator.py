@@ -66,7 +66,7 @@ TimeSeriesGenerator
 Usage Examples
 --------------
 Basic Usage:
-    >>> from dl_techniques.utils.datasets.time_series_generator import (
+    >>> from dl_techniques.datasets.time_series import (
     ...     TimeSeriesGenerator, TimeSeriesConfig
     ... )
     >>> config = TimeSeriesConfig(n_samples=1000, random_seed=42)
@@ -125,7 +125,7 @@ Multi-Task Dataset Creation:
 
 Integration with Deep Learning:
     >>> import keras
-    >>> from dl_techniques.models.nbeats import create_nbeats_model
+    >>> from dl_techniques.models.nbeats.model import create_nbeats_model
     >>>
     >>> # Generate training data
     >>> config = TimeSeriesConfig(n_samples=1000)

@@ -518,11 +518,11 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         for name, metrics in sorted_models:
             logger.info(f"{name:<25} {metrics['mean_accuracy']:.4f} {metrics['std_accuracy']:.4f}")
         best_model = sorted_models[0]
-        logger.info(f"\nBest Performing Model: {best_model[0]} (Mean Accuracy: {best_model[1]['mean_accuracy']:.4f})")
+        logger.info(f"Best Performing Model: {best_model[0]} (Mean Accuracy: {best_model[1]['mean_accuracy']:.4f})")
 
     if 'statistical_analysis' in results and results['statistical_analysis']:
         stats = results['statistical_analysis']
-        logger.info("\nSTATISTICAL SIGNIFICANCE ANALYSIS:")
+        logger.info("STATISTICAL SIGNIFICANCE ANALYSIS:")
         if 'anova' in stats:
             logger.info(f"Overall ANOVA: p={stats['anova']['p_value']:.4f}, Significant: {stats['anova']['significant']}")
         if 'pairwise_comparisons' in stats:
@@ -534,7 +534,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     analysis = results.get('model_analysis')
     if analysis and hasattr(analysis, 'calibration_metrics') and analysis.calibration_metrics:
-        logger.info("\nCALIBRATION ANALYSIS (from final fold):")
+        logger.info("CALIBRATION ANALYSIS (from final fold):")
         logger.info(f"{'Model':<25} {'ECE':<10} {'Brier Score':<15}")
         logger.info("-" * 50)
         for name, metrics in analysis.calibration_metrics.items():
@@ -553,7 +553,7 @@ def main() -> None:
     config = ExperimentConfig()
     logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"  Architectures: {list(config.model_builders.keys())}")
-    logger.info(f"  Cross-validation: {config.cv_folds} folds\n")
+    logger.info(f"  Cross-validation: {config.cv_folds} folds")
     try:
         run_experiment(config)
         logger.info("Experiment completed successfully.")

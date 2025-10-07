@@ -6,13 +6,12 @@ including The Cauldron dataset format, with robust preprocessing pipelines
 for both images and text.
 """
 
-from typing import Dict, List, Optional, Tuple, Callable, Union, Any
+import json
 import keras
-from keras import ops
 import numpy as np
 from pathlib import Path
-import json
 from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 from dl_techniques.utils.logger import logger
 

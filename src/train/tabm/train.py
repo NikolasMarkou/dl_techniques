@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error
 from sklearn.datasets import make_classification, make_regression, load_breast_cancer
-from typing import List, Optional, Tuple, Union, Literal, Any, Dict
+from typing import List, Optional, Tuple, Union, Any, Dict
 
 from dl_techniques.losses.tabm_loss import TabMLoss
 from dl_techniques.models.tabm import (
     create_tabm_model, create_tabm_ensemble, TabMModel
 )
-from dl_techniques.utils.datasets.tabular import TabularDataProcessor
+from dl_techniques.datasets import TabularDataProcessor
 from dl_techniques.utils.logger import logger
 
 

@@ -40,6 +40,10 @@ from .data_nn import (
     ImageData,
 )
 
+from .time_series import (
+    TimeSeriesEvaluationResults, ForecastVisualization
+)
+
 # ---------------------------------------------------------------------
 # Visualization Plugin Templates
 # ---------------------------------------------------------------------
@@ -75,10 +79,8 @@ from .data_nn import (
     FeatureMapVisualization,
     GradientVisualization,
     GradientTopologyVisualization,
-    # --- START OF MODIFICATION ---
     GenericMatrixVisualization,
     ImageComparisonVisualization,
-    # --- END OF MODIFICATION ---
 )
 
 # ---------------------------------------------------------------------
@@ -106,10 +108,10 @@ __all__ = [
     "WeightData",
     "GradientData",
     "GradientTopologyData",
-    # --- START OF MODIFICATION ---
+
     "MatrixData",
     "ImageData",
-    # --- END OF MODIFICATION ---
+    "TimeSeriesEvaluationResults",
 
     # Training & Performance Plugins
     "TrainingCurvesVisualization",
@@ -136,8 +138,9 @@ __all__ = [
     "FeatureMapVisualization",
     "GradientVisualization",
     "GradientTopologyVisualization",
-    # --- START OF MODIFICATION ---
+
     "GenericMatrixVisualization",
     "ImageComparisonVisualization",
-    # --- END OF MODIFICATION ---
+
+    "ForecastVisualization",
 ]

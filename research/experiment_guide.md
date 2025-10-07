@@ -65,13 +65,22 @@ import numpy as np
 # DL-Techniques imports (organized by category)
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.datasets import load_and_preprocess_[dataset]
+from dl_techniques.datasets import load_and_preprocess_
+
+[dataset]
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 # Experiment-specific imports
-from dl_techniques.layers.[category].[specific_layer] import SpecificLayer
-from dl_techniques.losses.[loss_name] import SpecificLoss
+from dl_techniques.layers.
+
+[category].[specific_layer]
+import SpecificLayer
+from dl_techniques.losses.
+
+[loss_name]
+import SpecificLoss
+
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
@@ -82,6 +91,7 @@ class ExperimentConfig:
     """Configuration for the [Experiment Name] experiment."""
     # Configuration details...
 
+
 # ==============================================================================
 # MODEL ARCHITECTURE BUILDING UTILITIES
 # ==============================================================================
@@ -90,9 +100,11 @@ def build_component(args) -> keras.layers.Layer:
     """Build reusable architectural components."""
     pass
 
+
 def build_model(config, variant_params, name) -> keras.Model:
     """Build complete model with specified configuration."""
     pass
+
 
 # ==============================================================================
 # MAIN EXPERIMENT RUNNER
@@ -102,6 +114,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """Run the complete experiment pipeline."""
     pass
 
+
 # ==============================================================================
 # RESULTS REPORTING
 # ==============================================================================
@@ -110,6 +123,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     """Print comprehensive experiment summary."""
     pass
 
+
 # ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
@@ -117,6 +131,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 def main() -> None:
     """Main execution function."""
     pass
+
 
 # ==============================================================================
 # SCRIPT ENTRY POINT
@@ -828,10 +843,12 @@ from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.datasets import load_and_preprocess_mnist
+from dl_techniques.datasets import load_and_preprocess_mnist
 from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+
+
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
 # ==============================================================================
@@ -873,6 +890,7 @@ class ExperimentConfig:
         save_plots=True,
     ))
 
+
 # ==============================================================================
 # MODEL ARCHITECTURE
 # ==============================================================================
@@ -909,6 +927,7 @@ def build_model(config: ExperimentConfig, activation: str, name: str) -> keras.M
     )
 
     return model
+
 
 # ==============================================================================
 # MAIN EXPERIMENT RUNNER
@@ -977,6 +996,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     print_experiment_summary(results)
     return results
 
+
 # ==============================================================================
 # RESULTS REPORTING
 # ==============================================================================
@@ -993,6 +1013,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     logger.info("=" * 50)
 
+
 # ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
@@ -1001,6 +1022,7 @@ def main() -> None:
     """Main execution function."""
     config = ExperimentConfig()
     run_experiment(config)
+
 
 if __name__ == "__main__":
     main()

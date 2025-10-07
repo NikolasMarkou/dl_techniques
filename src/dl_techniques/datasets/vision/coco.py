@@ -41,8 +41,6 @@ Usage:
 
     train_ds, val_ds = builder.create_datasets()
     ```
-
-File: src/dl_techniques/utils/datasets/coco.py
 """
 
 import os

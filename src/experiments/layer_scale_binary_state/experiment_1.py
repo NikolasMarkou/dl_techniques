@@ -3,42 +3,368 @@ Complete LayerScale and LearnableMultiplier Feature Selection Experiment
 =======================================================================
 
 This experiment demonstrates how the LearnableMultiplier layer with BinaryPreferenceRegularizer
- can act as effective feature selectors on a synthetic dataset
-with many irrelevant features. The experiment includes visualization of decision boundaries.
+can act as effective feature selectors on a synthetic dataset with many irrelevant features.
 
-The experiment:
-1. Creates a synthetic dataset with 2 important features and many noise features
-2. Builds models with LearnableMultiplier and LearnableMultiplier (without binary preference) layers
-3. Trains the models and visualizes which features were selected
-4. Visualizes decision boundaries in different feature spaces
+The experiment uses the dl_techniques visualization framework for all plots.
 
 Note: This code assumes you have already imported the following custom layers:
 - LearnableMultiplier
 - BinaryPreferenceRegularizer
 """
 
+import keras
 import numpy as np
 import tensorflow as tf
-import keras
 import matplotlib.pyplot as plt
+from dataclasses import dataclass
 from sklearn.model_selection import train_test_split
 from typing import Tuple, List, Dict, Any, Optional
 
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.layer_scale import LearnableMultiplier
+from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+
+from dl_techniques.visualization import (
+    VisualizationManager,
+    VisualizationPlugin,
+    TrainingHistory,
+    ModelComparison,
+    PlotConfig,
+    PlotStyle,
+    ColorScheme,
+    TrainingCurvesVisualization,
+    ModelComparisonBarChart,
+    PerformanceRadarChart,
+)
 
 # Set random seeds for reproducibility
 np.random.seed(42)
 tf.random.set_seed(42)
 
-from dl_techniques.layers.layer_scale import LearnableMultiplier
-from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-from dl_techniques.regularizers.binary_preference import BinaryPreferenceRegularizer
 
+# ============================================================================
+# Custom Data Structures for Feature Selection Visualization
+# ============================================================================
+
+@dataclass
+class FeatureWeightsData:
+    """
+    Data structure for feature weights visualization.
+
+    Attributes:
+        weights: Array of feature weights
+        feature_names: Names/labels for each feature
+        important_features: Indices of ground truth important features
+        model_name: Name of the model
+    """
+    weights: np.ndarray
+    feature_names: List[str]
+    important_features: List[int]
+    model_name: str
+
+
+@dataclass
+class DecisionBoundaryData:
+    """
+    Data structure for decision boundary visualization.
+
+    Attributes:
+        X: Feature matrix
+        y: Class labels
+        feature_indices: Tuple of (feature1_idx, feature2_idx) to visualize
+        model: Trained keras model for boundary prediction
+        centers: Optional class centers in the feature space
+        title: Plot title
+    """
+    X: np.ndarray
+    y: np.ndarray
+    feature_indices: Tuple[int, int]
+    model: Optional[keras.Model]
+    centers: Optional[np.ndarray]
+    title: str
+
+
+# ============================================================================
+# Custom Visualization Plugins
+# ============================================================================
+
+class FeatureWeightsVisualization(VisualizationPlugin):
+    """Visualization plugin for feature weights with importance highlighting."""
+
+    @property
+    def name(self) -> str:
+        return "feature_weights"
+
+    @property
+    def description(self) -> str:
+        return "Visualizes learned feature weights with importance highlighting"
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, (FeatureWeightsData, Dict))
+
+    def create_visualization(
+        self,
+        data: Any,
+        ax: Optional[plt.Axes] = None,
+        **kwargs
+    ) -> plt.Figure:
+        """Create feature weights bar chart."""
+        if isinstance(data, dict):
+            # Handle multiple models
+            fig, axes = plt.subplots(
+                len(data), 1,
+                figsize=(self.config.fig_size[0], self.config.fig_size[1] * len(data)),
+                dpi=self.config.dpi
+            )
+            if len(data) == 1:
+                axes = [axes]
+
+            for idx, (model_name, weights_data) in enumerate(data.items()):
+                self._plot_single_weights(weights_data, axes[idx])
+
+            plt.tight_layout()
+            return fig
+        else:
+            # Handle single model
+            if ax is None:
+                fig, ax = plt.subplots(figsize=self.config.fig_size, dpi=self.config.dpi)
+            else:
+                fig = ax.get_figure()
+
+            self._plot_single_weights(data, ax)
+            return fig
+
+    def _plot_single_weights(
+        self,
+        data: FeatureWeightsData,
+        ax: plt.Axes
+    ) -> None:
+        """Plot weights for a single model."""
+        weights = data.weights
+        feature_names = data.feature_names
+        important_features = data.important_features
+
+        # Color bars based on importance
+        colors = [
+            self.config.color_scheme.primary if i in important_features
+            else self.config.color_scheme.secondary
+            for i in range(len(weights))
+        ]
+
+        bars = ax.bar(feature_names, weights, color=colors, alpha=0.7, edgecolor='black')
+        ax.set_title(
+            f'{data.model_name} Feature Weights',
+            fontsize=self.config.title_fontsize
+        )
+        ax.set_ylabel('Weight Value', fontsize=self.config.label_fontsize)
+        ax.tick_params(axis='x', rotation=90)
+        ax.axhline(y=0.5, linestyle='--', color='gray', alpha=0.7, linewidth=1)
+        ax.grid(alpha=0.3, axis='y')
+
+        # Add value annotations
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2., height + 0.02,
+                f'{height:.2f}',
+                ha='center', va='bottom',
+                fontsize=8
+            )
+
+
+class FeatureWeightDistributionVisualization(VisualizationPlugin):
+    """Visualization plugin for feature weight distributions."""
+
+    @property
+    def name(self) -> str:
+        return "feature_weight_distribution"
+
+    @property
+    def description(self) -> str:
+        return "Visualizes the distribution of feature weights"
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, (FeatureWeightsData, Dict))
+
+    def create_visualization(
+        self,
+        data: Any,
+        ax: Optional[plt.Axes] = None,
+        **kwargs
+    ) -> plt.Figure:
+        """Create weight distribution histogram."""
+        if isinstance(data, dict):
+            # Handle multiple models
+            fig, axes = plt.subplots(
+                1, len(data),
+                figsize=(self.config.fig_size[0] * len(data) / 2, self.config.fig_size[1]),
+                dpi=self.config.dpi
+            )
+            if len(data) == 1:
+                axes = [axes]
+
+            for idx, (model_name, weights_data) in enumerate(data.items()):
+                self._plot_single_distribution(weights_data, axes[idx])
+
+            plt.tight_layout()
+            return fig
+        else:
+            # Handle single model
+            if ax is None:
+                fig, ax = plt.subplots(figsize=self.config.fig_size, dpi=self.config.dpi)
+            else:
+                fig = ax.get_figure()
+
+            self._plot_single_distribution(data, ax)
+            return fig
+
+    def _plot_single_distribution(
+        self,
+        data: FeatureWeightsData,
+        ax: plt.Axes
+    ) -> None:
+        """Plot weight distribution for a single model."""
+        weights = data.weights
+
+        ax.hist(
+            weights, bins=20,
+            color=self.config.color_scheme.primary,
+            alpha=0.7, edgecolor='black'
+        )
+        ax.set_title(
+            f'{data.model_name} Weight Distribution',
+            fontsize=self.config.title_fontsize
+        )
+        ax.set_xlabel('Weight Value', fontsize=self.config.label_fontsize)
+        ax.set_ylabel('Count', fontsize=self.config.label_fontsize)
+        ax.axvline(x=0.5, linestyle='--', color='red', linewidth=2, label='Binary threshold')
+        ax.grid(alpha=0.3)
+        ax.legend()
+
+
+class DecisionBoundaryVisualization(VisualizationPlugin):
+    """Visualization plugin for decision boundaries in feature space."""
+
+    @property
+    def name(self) -> str:
+        return "decision_boundary"
+
+    @property
+    def description(self) -> str:
+        return "Visualizes decision boundaries in 2D feature space"
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, (DecisionBoundaryData, List))
+
+    def create_visualization(
+        self,
+        data: Any,
+        ax: Optional[plt.Axes] = None,
+        **kwargs
+    ) -> plt.Figure:
+        """Create decision boundary visualization."""
+        if isinstance(data, list):
+            # Handle multiple boundaries
+            n_plots = len(data)
+            fig, axes = plt.subplots(
+                1, n_plots,
+                figsize=(self.config.fig_size[0] * n_plots / 2, self.config.fig_size[1]),
+                dpi=self.config.dpi
+            )
+            if n_plots == 1:
+                axes = [axes]
+
+            for idx, boundary_data in enumerate(data):
+                self._plot_single_boundary(boundary_data, axes[idx])
+
+            plt.tight_layout()
+            return fig
+        else:
+            # Handle single boundary
+            if ax is None:
+                fig, ax = plt.subplots(figsize=self.config.fig_size, dpi=self.config.dpi)
+            else:
+                fig = ax.get_figure()
+
+            self._plot_single_boundary(data, ax)
+            return fig
+
+    def _plot_single_boundary(
+        self,
+        data: DecisionBoundaryData,
+        ax: plt.Axes
+    ) -> None:
+        """Plot a single decision boundary."""
+        X = data.X
+        y = data.y
+        feature_indices = data.feature_indices
+        model = data.model
+        centers = data.centers
+
+        # Extract the two features to visualize
+        X_reduced = X[:, feature_indices]
+
+        # Create meshgrid for decision boundary
+        h = 0.1
+        x_min, x_max = X_reduced[:, 0].min() - 1, X_reduced[:, 0].max() + 1
+        y_min, y_max = X_reduced[:, 1].min() - 1, X_reduced[:, 1].max() + 1
+        xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
+
+        # Plot decision boundaries if model is provided
+        if model is not None:
+            grid = np.c_[xx.ravel(), yy.ravel()]
+
+            # Pad with zeros for other features
+            if X.shape[1] > 2:
+                grid_full = np.zeros((grid.shape[0], X.shape[1]))
+                grid_full[:, feature_indices[0]] = grid[:, 0]
+                grid_full[:, feature_indices[1]] = grid[:, 1]
+            else:
+                grid_full = grid
+
+            # Get predictions
+            Z = model.predict(grid_full, verbose=0)
+            Z = np.argmax(Z, axis=1)
+            Z = Z.reshape(xx.shape)
+
+            # Plot decision boundaries
+            ax.contourf(xx, yy, Z, alpha=0.3, cmap='viridis')
+
+        # Plot class centers if provided
+        if centers is not None and feature_indices[0] < 2 and feature_indices[1] < 2:
+            ax.scatter(
+                centers[:, 0], centers[:, 1],
+                marker='X', s=200, c='red',
+                edgecolors='white', linewidths=2,
+                label='Class Centers', zorder=5
+            )
+
+        # Plot data points
+        scatter = ax.scatter(
+            X_reduced[:, 0], X_reduced[:, 1],
+            c=y, cmap='viridis', s=30, alpha=0.8,
+            edgecolors='k', linewidths=0.5
+        )
+
+        ax.set_title(data.title, fontsize=self.config.title_fontsize)
+        ax.set_xlabel(f'Feature {feature_indices[0]+1}', fontsize=self.config.label_fontsize)
+        ax.set_ylabel(f'Feature {feature_indices[1]+1}', fontsize=self.config.label_fontsize)
+        ax.grid(alpha=0.3)
+
+        # Add colorbar for classes
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label('Class', fontsize=self.config.label_fontsize)
+
+
+# ============================================================================
+# Data Generation
+# ============================================================================
 
 def generate_synthetic_data(
-        n_samples: int = 1000,
-        n_noise_features: int = 20,
-        noise_level: float = 1.0
+    n_samples: int = 1000,
+    n_noise_features: int = 20,
+    noise_level: float = 1.0
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Generate a synthetic classification dataset with important and noise features.
@@ -84,9 +410,13 @@ def generate_synthetic_data(
     return X, y, centers
 
 
+# ============================================================================
+# Model Creation
+# ============================================================================
+
 def create_model_with_learnable_multiplier(
-        input_dim: int,
-        num_classes: int
+    input_dim: int,
+    num_classes: int
 ) -> keras.Model:
     """
     Create a model with LearnableMultiplier layer to identify important features.
@@ -112,7 +442,11 @@ def create_model_with_learnable_multiplier(
     x = keras.layers.Dense(256, activation='relu', use_bias=False)(x)
     x = keras.layers.Dropout(0.5)(x)
     x = keras.layers.Dense(64, activation='relu', use_bias=False)(x)
-    x = keras.layers.Dense(num_classes, activation='softmax', kernel_regularizer=SoftOrthonormalConstraintRegularizer(), use_bias=False)(x)
+    x = keras.layers.Dense(
+        num_classes, activation='softmax',
+        kernel_regularizer=SoftOrthonormalConstraintRegularizer(),
+        use_bias=False
+    )(x)
 
     model = keras.Model(inputs=inputs, outputs=x)
 
@@ -126,8 +460,8 @@ def create_model_with_learnable_multiplier(
 
 
 def create_model_with_layer_scale(
-        input_dim: int,
-        num_classes: int
+    input_dim: int,
+    num_classes: int
 ) -> keras.Model:
     """
     Create a model with LearnableMultiplier (without binary preference) layer for comparison.
@@ -153,7 +487,11 @@ def create_model_with_layer_scale(
     x = keras.layers.Dense(256, activation='relu', use_bias=False)(x)
     x = keras.layers.Dropout(0.5)(x)
     x = keras.layers.Dense(64, activation='relu', use_bias=False)(x)
-    x = keras.layers.Dense(num_classes, activation='softmax', kernel_regularizer=SoftOrthonormalConstraintRegularizer(), use_bias=False)(x)
+    x = keras.layers.Dense(
+        num_classes, activation='softmax',
+        kernel_regularizer=SoftOrthonormalConstraintRegularizer(),
+        use_bias=False
+    )(x)
 
     model = keras.Model(inputs=inputs, outputs=x)
 
@@ -166,259 +504,9 @@ def create_model_with_layer_scale(
     return model
 
 
-def visualize_training_history(
-        history_lm: Dict,
-        history_ls: Dict
-) -> None:
-    """
-    Visualize the training history of both models.
-
-    Args:
-        history_lm: Training history for LearnableMultiplier model
-        history_ls: Training history for LayerScale model
-    """
-    plt.figure(figsize=(15, 5))
-
-    # Plot accuracy
-    plt.subplot(1, 2, 1)
-    plt.plot(history_lm['accuracy'], label='LM Train')
-    plt.plot(history_lm['val_accuracy'], label='LM Validation')
-    plt.plot(history_ls['accuracy'], label='LS Train', linestyle='--')
-    plt.plot(history_ls['val_accuracy'], label='LS Validation', linestyle='--')
-    plt.title('Model Accuracy')
-    plt.ylabel('Accuracy')
-    plt.xlabel('Epoch')
-    plt.legend()
-    plt.grid(alpha=0.3)
-
-    # Plot loss
-    plt.subplot(1, 2, 2)
-    plt.plot(history_lm['loss'], label='LM Train')
-    plt.plot(history_lm['val_loss'], label='LM Validation')
-    plt.plot(history_ls['loss'], label='LS Train', linestyle='--')
-    plt.plot(history_ls['val_loss'], label='LS Validation', linestyle='--')
-    plt.title('Model Loss')
-    plt.ylabel('Loss')
-    plt.xlabel('Epoch')
-    plt.legend()
-    plt.grid(alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig('training_history.png', dpi=300)
-    plt.show()
-
-
-def visualize_feature_weights(
-        lm_weights: np.ndarray,
-        ls_weights: np.ndarray
-) -> None:
-    """
-    Visualize the learned feature weights.
-
-    Args:
-        lm_weights: Weights from LearnableMultiplier
-        ls_weights: Weights from LayerScale
-    """
-    feature_names = [f'Important {i + 1}' if i < 2 else f'Noise {i - 1}' for i in range(len(lm_weights))]
-
-    # Plotting
-    plt.figure(figsize=(15, 10))
-
-    # Plot LearnableMultiplier weights
-    plt.subplot(2, 1, 1)
-    bars = plt.bar(feature_names, lm_weights, color=['green' if i < 2 else 'red' for i in range(len(lm_weights))])
-    plt.title('LearnableMultiplier Feature Weights', fontsize=14)
-    plt.ylabel('Weight Value')
-    plt.xticks(rotation=90)
-    plt.axhline(y=0.5, linestyle='--', color='black')
-    plt.ylim(-0.1, 1.1)
-
-    # Add value annotations
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width() / 2., height + 0.05,
-                 f'{height:.2f}', ha='center', va='bottom', rotation=0)
-
-    # Plot LayerScale weights
-    plt.subplot(2, 1, 2)
-    bars = plt.bar(feature_names, ls_weights, color=['green' if i < 2 else 'red' for i in range(len(ls_weights))])
-    plt.title('LayerScale Feature Weights', fontsize=14)
-    plt.ylabel('Weight Value')
-    plt.xticks(rotation=90)
-
-    # Add value annotations
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width() / 2., height + 0.05,
-                 f'{height:.2f}', ha='center', va='bottom', rotation=0)
-
-    plt.tight_layout()
-    plt.savefig('feature_weights_comparison.png', dpi=300)
-    plt.show()
-
-    # Plot weight distribution
-    plt.figure(figsize=(12, 5))
-
-    plt.subplot(1, 2, 1)
-    plt.hist(lm_weights, bins=20, range=(0, 1))
-    plt.title('LearnableMultiplier Weight Distribution')
-    plt.xlabel('Weight Value')
-    plt.ylabel('Count')
-    plt.axvline(x=0.5, linestyle='--', color='red')
-    plt.grid(alpha=0.3)
-
-    plt.subplot(1, 2, 2)
-    plt.hist(ls_weights, bins=20)
-    plt.title('LayerScale Weight Distribution')
-    plt.xlabel('Weight Value')
-    plt.ylabel('Count')
-    plt.grid(alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig('weight_distributions.png', dpi=300)
-    plt.show()
-
-    # Print feature importance statistics
-    important_features = list(range(2))  # First 2 features are important
-    lm_important_avg = np.mean(lm_weights[important_features])
-    lm_noise_avg = np.mean(lm_weights[2:])
-    ls_important_avg = np.mean(ls_weights[important_features])
-    ls_noise_avg = np.mean(ls_weights[2:])
-
-    print("\nFeature Importance Analysis:")
-    print(f"LearnableMultiplier - Important features avg weight: {lm_important_avg:.4f}")
-    print(f"LearnableMultiplier - Noise features avg weight: {lm_noise_avg:.4f}")
-    print(f"LearnableMultiplier - Important/Noise ratio: {lm_important_avg / lm_noise_avg:.4f}")
-    print(f"LayerScale - Important features avg weight: {ls_important_avg:.4f}")
-    print(f"LayerScale - Noise features avg weight: {ls_noise_avg:.4f}")
-    print(f"LayerScale - Important/Noise ratio: {ls_important_avg / ls_noise_avg:.4f}")
-
-
-def visualize_single_boundary(
-        X: np.ndarray,
-        y: np.ndarray,
-        feature_indices: Tuple[int, int],
-        title: str,
-        ax: plt.Axes,
-        model: Optional[keras.Model] = None,
-        centers: Optional[np.ndarray] = None
-) -> None:
-    """
-    Visualize decision boundary for a single pair of features.
-
-    Args:
-        X: Feature matrix
-        y: Class labels
-        feature_indices: Tuple of (feature1_idx, feature2_idx)
-        title: Plot title
-        ax: Matplotlib axes to plot on
-        model: Optional model to generate decision boundaries
-        centers: Optional class centers to plot
-    """
-    # Extract the two features we want to visualize
-    X_reduced = X[:, feature_indices]
-
-    # Create a meshgrid for the feature space
-    h = 0.1  # Step size
-    x_min, x_max = X_reduced[:, 0].min() - 1, X_reduced[:, 0].max() + 1
-    y_min, y_max = X_reduced[:, 1].min() - 1, X_reduced[:, 1].max() + 1
-    xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
-
-    # Plot decision boundaries if model is provided
-    if model is not None:
-        # Create a grid of points
-        grid = np.c_[xx.ravel(), yy.ravel()]
-
-        # Pad with zeros for other features
-        if X.shape[1] > 2:
-            grid_full = np.zeros((grid.shape[0], X.shape[1]))
-            grid_full[:, feature_indices[0]] = grid[:, 0]
-            grid_full[:, feature_indices[1]] = grid[:, 1]
-        else:
-            grid_full = grid
-
-        # Get predictions
-        Z = model.predict(grid_full, verbose=0)
-        Z = np.argmax(Z, axis=1)
-
-        # Reshape to match grid
-        Z = Z.reshape(xx.shape)
-
-        # Plot decision boundaries
-        ax.contourf(xx, yy, Z, alpha=0.3, cmap='viridis')
-
-    # Plot class centers if provided
-    if centers is not None and feature_indices[0] < 2 and feature_indices[1] < 2:
-        ax.scatter(centers[:, 0], centers[:, 1],
-                   marker='X', s=200, c='red',
-                   edgecolors='white', linewidths=2,
-                   label='Class Centers')
-
-    # Plot the data points
-    scatter = ax.scatter(X_reduced[:, 0], X_reduced[:, 1],
-                         c=y, cmap='viridis', s=30, alpha=0.8,
-                         edgecolors='k')
-
-    # Add legend and labels
-    ax.set_title(title, fontsize=14)
-    ax.set_xlabel(f'Feature {feature_indices[0]+1}')
-    ax.set_ylabel(f'Feature {feature_indices[1]+1}')
-    ax.legend(*scatter.legend_elements(), title='Classes')
-
-    # Add grid for readability
-    ax.grid(alpha=0.3)
-
-
-def visualize_decision_boundaries(
-        X: np.ndarray,
-        y: np.ndarray,
-        model_lm: keras.Model,
-        model_ls: keras.Model,
-        lm_weights: np.ndarray,
-        ls_weights: np.ndarray,
-        centers: np.ndarray
-) -> None:
-    """
-    Visualize decision boundaries in the feature space.
-
-    Args:
-        X: Feature matrix
-        y: Class labels
-        model_lm: Trained model with LearnableMultiplier
-        model_ls: Trained model with LearnableMultiplier (no binary preference)
-        lm_weights: Weights from LearnableMultiplier
-        ls_weights: Weights from LearnableMultiplier (no binary preference)
-        centers: Class centers in the original 2D space
-    """
-    # Create figure with 3 subplots
-    plt.figure(figsize=(18, 6))
-
-    # 1. True feature space (first 2 features)
-    ax1 = plt.subplot(1, 3, 1)
-    visualize_single_boundary(X, y, (0, 1), "True Feature Space (Features 1 & 2)", ax1, centers=centers)
-
-    # 2. LearnableMultiplier top features
-    lm_top_features = np.argsort(lm_weights)[-2:]
-    ax2 = plt.subplot(1, 3, 2)
-    visualize_single_boundary(
-        X, y, lm_top_features,
-        f"LearnableMultiplier Selected Features\n({lm_top_features[0]+1} & {lm_top_features[1]+1})",
-        ax2, model=model_lm
-    )
-
-    # 3. LayerScale top features
-    ls_top_features = np.argsort(ls_weights)[-2:]
-    ax3 = plt.subplot(1, 3, 3)
-    visualize_single_boundary(
-        X, y, ls_top_features,
-        f"LearnableMultiplier (no binary preference) Selected Features\n({ls_top_features[0]+1} & {ls_top_features[1]+1})",
-        ax3, model=model_ls
-    )
-
-    plt.tight_layout()
-    plt.savefig('decision_boundaries.png', dpi=300)
-    plt.show()
-
+# ============================================================================
+# Main Experiment
+# ============================================================================
 
 def run_experiment() -> Dict[str, Any]:
     """
@@ -427,22 +515,48 @@ def run_experiment() -> Dict[str, Any]:
     Returns:
         Dictionary with experiment results
     """
+    # Initialize visualization manager
+    viz_config = PlotConfig(
+        style=PlotStyle.SCIENTIFIC,
+        color_scheme=ColorScheme(
+            primary='#2E86AB',
+            secondary='#A23B72',
+            accent='#F18F01'
+        ),
+        title_fontsize=14,
+        save_format='png'
+    )
+
+    viz_manager = VisualizationManager(
+        experiment_name="feature_selection_experiment",
+        output_dir="visualizations_output",
+        config=viz_config
+    )
+
+    # Register visualization plugins
+    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
+    viz_manager.register_template("model_comparison_bars", ModelComparisonBarChart)
+    viz_manager.register_template("performance_radar", PerformanceRadarChart)
+    viz_manager.register_template("feature_weights", FeatureWeightsVisualization)
+    viz_manager.register_template("feature_weight_distribution", FeatureWeightDistributionVisualization)
+    viz_manager.register_template("decision_boundary", DecisionBoundaryVisualization)
+
     # Generate dataset with 2 important features and 20 noise features
-    print("Generating synthetic dataset...")
+    logger.info("Generating synthetic dataset...")
     X, y, centers = generate_synthetic_data(n_samples=10000, n_noise_features=20)
     n_features = X.shape[1]
     n_classes = len(np.unique(y))
 
-    print(f"Dataset: {X.shape[0]} samples, {n_features} features ({n_features - 20} important, 20 noise)")
-    print(f"Classes: {n_classes}")
+    logger.info(f"Dataset: {X.shape[0]} samples, {n_features} features ({n_features - 20} important, 20 noise)")
+    logger.info(f"Classes: {n_classes}")
 
     # Split into train and test sets
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    # Create and train model with LearnableMultiplier
-    print("\nTraining model with LearnableMultiplier...")
+    # Train model with LearnableMultiplier
+    logger.info("\nTraining model with LearnableMultiplier...")
     model_lm = create_model_with_learnable_multiplier(n_features, n_classes)
 
     history_lm = model_lm.fit(
@@ -453,8 +567,8 @@ def run_experiment() -> Dict[str, Any]:
         verbose=1
     )
 
-    # Create and train model with LearnableMultiplier
-    print("\nTraining model with LearnableMultiplier (no binary preference)...")
+    # Train model with LayerScale
+    logger.info("\nTraining model with LearnableMultiplier (no binary preference)...")
     model_ls = create_model_with_layer_scale(n_features, n_classes)
 
     history_ls = model_ls.fit(
@@ -466,37 +580,154 @@ def run_experiment() -> Dict[str, Any]:
     )
 
     # Evaluate both models
-    print("\nEvaluating models...")
+    logger.info("\nEvaluating models...")
     lm_eval = model_lm.evaluate(X_test, y_test, verbose=0)
     ls_eval = model_ls.evaluate(X_test, y_test, verbose=0)
 
-    print(f"LearnableMultiplier Test Accuracy: {lm_eval[1]:.4f}")
-    print(f"LearnableMultiplier (no binary preference) Test Accuracy: {ls_eval[1]:.4f}")
+    logger.info(f"LearnableMultiplier Test Accuracy: {lm_eval[1]:.4f}")
+    logger.info(f"LearnableMultiplier (no binary preference) Test Accuracy: {ls_eval[1]:.4f}")
 
-    # Extract feature weights from LearnableMultiplier
+    # Extract feature weights
     lm_layer = model_lm.layers[1]
     lm_weights = lm_layer.get_weights()[0].flatten()
 
-    # Extract feature weights from LearnableMultiplier
     ls_layer = model_ls.layers[1]
     ls_weights = ls_layer.get_weights()[0].flatten()
 
-    # Visualize training history
-    visualize_training_history(history_lm.history, history_ls.history)
+    # Create data structures for visualization
+    feature_names = [f'Important {i + 1}' if i < 2 else f'Noise {i - 1}' for i in range(n_features)]
 
-    # Visualize the feature weights
-    visualize_feature_weights(lm_weights, ls_weights)
+    # Training history
+    history_data = {
+        "LearnableMultiplier": TrainingHistory(
+            epochs=list(range(len(history_lm.history['loss']))),
+            train_loss=history_lm.history['loss'],
+            val_loss=history_lm.history['val_loss'],
+            train_metrics={'accuracy': history_lm.history['accuracy']},
+            val_metrics={'accuracy': history_lm.history['val_accuracy']}
+        ),
+        "LearnableMultiplier (no binary pref)": TrainingHistory(
+            epochs=list(range(len(history_ls.history['loss']))),
+            train_loss=history_ls.history['loss'],
+            val_loss=history_ls.history['val_loss'],
+            train_metrics={'accuracy': history_ls.history['accuracy']},
+            val_metrics={'accuracy': history_ls.history['val_accuracy']}
+        )
+    }
 
-    # Generate smaller dataset for visualization
+    # Model comparison
+    comparison_data = ModelComparison(
+        model_names=["LearnableMultiplier", "LearnableMultiplier (no binary pref)"],
+        metrics={
+            "LearnableMultiplier": {"accuracy": lm_eval[1]},
+            "LearnableMultiplier (no binary pref)": {"accuracy": ls_eval[1]}
+        }
+    )
+
+    # Feature weights
+    lm_weights_data = FeatureWeightsData(
+        weights=lm_weights,
+        feature_names=feature_names,
+        important_features=[0, 1],
+        model_name="LearnableMultiplier"
+    )
+
+    ls_weights_data = FeatureWeightsData(
+        weights=ls_weights,
+        feature_names=feature_names,
+        important_features=[0, 1],
+        model_name="LearnableMultiplier (no binary pref)"
+    )
+
+    # Generate visualizations
+    logger.info("\nGenerating visualizations...")
+
+    # 1. Training curves
+    viz_manager.visualize(
+        data=history_data,
+        plugin_name="training_curves",
+        show=False
+    )
+
+    # 2. Model comparison
+    viz_manager.visualize(
+        data=comparison_data,
+        plugin_name="model_comparison_bars",
+        show=False
+    )
+
+    # 3. Feature weights comparison
+    viz_manager.visualize(
+        data={
+            "LearnableMultiplier": lm_weights_data,
+            "LearnableMultiplier (no binary pref)": ls_weights_data
+        },
+        plugin_name="feature_weights",
+        show=False
+    )
+
+    # 4. Weight distributions
+    viz_manager.visualize(
+        data={
+            "LearnableMultiplier": lm_weights_data,
+            "LearnableMultiplier (no binary pref)": ls_weights_data
+        },
+        plugin_name="feature_weight_distribution",
+        show=False
+    )
+
+    # 5. Decision boundaries
     X_viz, y_viz, centers_viz = generate_synthetic_data(n_samples=500, n_noise_features=20)
 
-    # Visualize decision boundaries
-    visualize_decision_boundaries(
-        X_viz, y_viz,
-        model_lm, model_ls,
-        lm_weights, ls_weights,
-        centers_viz
+    lm_top_features = tuple(np.argsort(lm_weights)[-2:])
+    ls_top_features = tuple(np.argsort(ls_weights)[-2:])
+
+    boundary_data = [
+        DecisionBoundaryData(
+            X=X_viz, y=y_viz, feature_indices=(0, 1),
+            model=None, centers=centers_viz,
+            title="True Feature Space (Features 1 & 2)"
+        ),
+        DecisionBoundaryData(
+            X=X_viz, y=y_viz, feature_indices=lm_top_features,
+            model=model_lm, centers=None,
+            title=f"LearnableMultiplier Selected\n(Features {lm_top_features[0]+1} & {lm_top_features[1]+1})"
+        ),
+        DecisionBoundaryData(
+            X=X_viz, y=y_viz, feature_indices=ls_top_features,
+            model=model_ls, centers=None,
+            title=f"LearnableMultiplier (no binary pref) Selected\n(Features {ls_top_features[0]+1} & {ls_top_features[1]+1})"
+        )
+    ]
+
+    viz_manager.visualize(
+        data=boundary_data,
+        plugin_name="decision_boundary",
+        show=False
     )
+
+    # Print feature importance statistics
+    important_features = list(range(2))
+    lm_important_avg = np.mean(lm_weights[important_features])
+    lm_noise_avg = np.mean(lm_weights[2:])
+    ls_important_avg = np.mean(ls_weights[important_features])
+    ls_noise_avg = np.mean(ls_weights[2:])
+
+    logger.info("\nFeature Importance Analysis:")
+    logger.info(f"LearnableMultiplier - Important features avg weight: {lm_important_avg:.4f}")
+    logger.info(f"LearnableMultiplier - Noise features avg weight: {lm_noise_avg:.4f}")
+    logger.info(f"LearnableMultiplier - Important/Noise ratio: {lm_important_avg / (lm_noise_avg + 1e-10):.4f}")
+    logger.info(f"LearnableMultiplier (no binary pref) - Important features avg weight: {ls_important_avg:.4f}")
+    logger.info(f"LearnableMultiplier (no binary pref) - Noise features avg weight: {ls_noise_avg:.4f}")
+    logger.info(f"LearnableMultiplier (no binary pref) - Important/Noise ratio: {ls_important_avg / (ls_noise_avg + 1e-10):.4f}")
+
+    # Feature selection success analysis
+    lm_success = set(lm_top_features) == {0, 1}
+    ls_success = set(ls_top_features) == {0, 1}
+
+    logger.info("\nFeature Selection Success:")
+    logger.info(f"LearnableMultiplier: {'✓' if lm_success else '✗'} (Selected features: {lm_top_features})")
+    logger.info(f"LearnableMultiplier (no binary pref): {'✓' if ls_success else '✗'} (Selected features: {ls_top_features})")
 
     return {
         "models": {
@@ -515,39 +746,25 @@ def run_experiment() -> Dict[str, Any]:
             "lm": history_lm.history,
             "ls": history_ls.history
         },
+        "viz_manager": viz_manager
     }
 
 
 def main():
     """Execute the experiment."""
-    print("Starting LearnableMultiplier Feature Selection Experiment...")
-    print("=" * 80)
+    logger.info("Starting LearnableMultiplier Feature Selection Experiment...")
+    logger.info("=" * 80)
 
     # Run the experiment
     results = run_experiment()
 
-    print("=" * 80)
-    print("Experiment completed. Results saved as PNG files.")
+    logger.info("=" * 80)
+    logger.info("Experiment completed. Results saved in 'visualizations_output' directory.")
 
-    # Print final accuracy comparison
-    print("\nFinal Performance Comparison:")
-    print(f"LearnableMultiplier Accuracy: {results['accuracy']['lm']:.4f}")
-    print(f"LearnableMultiplier (no binary preference) Accuracy: {results['accuracy']['ls']:.4f}")
-
-    # Print feature selection success analysis
-    lm_weights = results['weights']['lm']
-    ls_weights = results['weights']['ls']
-
-    # Find if the top 2 features match the true informative features (0 and 1)
-    lm_top_features = np.argsort(lm_weights)[-2:]
-    ls_top_features = np.argsort(ls_weights)[-2:]
-
-    lm_success = set(lm_top_features) == {0, 1}
-    ls_success = set(ls_top_features) == {0, 1}
-
-    print("\nFeature Selection Success:")
-    print(f"LearnableMultiplier: {'✓' if lm_success else '✗'} (Selected features: {lm_top_features})")
-    print(f"LearnableMultiplier (no binary preference: {'✓' if ls_success else '✗'} (Selected features: {ls_top_features})")
+    # Print final summary
+    logger.info("\nFinal Performance Summary:")
+    logger.info(f"LearnableMultiplier Accuracy: {results['accuracy']['lm']:.4f}")
+    logger.info(f"LearnableMultiplier (no binary pref) Accuracy: {results['accuracy']['ls']:.4f}")
 
 
 if __name__ == "__main__":

@@ -313,7 +313,7 @@ plt.title("Score Field Magnitude (Semantic Landscape)")
 ### Dataset Preparation
 
 ```python
-from dl_techniques.utils.datasets.vqa_dataset import VQADataProcessor
+from dl_techniques.datasets.vqa_dataset import VQADataProcessor
 
 processor = VQADataProcessor(
     image_size=224,

@@ -56,8 +56,7 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.nbeats.model import create_nbeats_model, NBeatsNet
-from dl_techniques.utils.datasets.time_series_normalizer import TimeSeriesNormalizer
-from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
+from dl_techniques.datasets.time_series import TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
 
 
 plt.style.use('default')

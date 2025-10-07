@@ -33,7 +33,7 @@ from sklearn.datasets import make_blobs, make_moons, make_circles
 # local imports
 #------------------------------------------------------------------------------
 
-from ..logger import logger
+from dl_techniques.utils.logger import logger
 
 #------------------------------------------------------------------------------
 

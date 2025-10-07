@@ -18,9 +18,13 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class PatchInfo:
@@ -604,28 +608,3 @@ def aggregate_patch_results(
     """Convenience function to aggregate patch results."""
     aggregator = ResultAggregator(**kwargs)
     return aggregator.aggregate_predictions(patch_predictions, image_width, image_height)
-
-
-# Testing and example usage
-if __name__ == "__main__":
-    # Test coordinate transformation
-    patch_info = PatchInfo(x1=100, y1=200, x2=356, y2=456, patch_size=256)
-    patch_bbox = [50, 60, 150, 160]  # bbox in patch coordinates
-
-    # Transform to full image coordinates
-    full_bbox = CoordinateTransformer.patch_to_full_image_bbox(patch_bbox, patch_info)
-    print(f"Patch bbox {patch_bbox} -> Full image bbox {full_bbox}")
-
-    # Test patch grid generation
-    patches = create_patch_grid(3024, 4032, patch_size=256, overlap=64)
-    print(f"Generated {len(patches)} patches for 3024x4032 image")
-
-    # Test NMS
-    detections = [
-        DetectionResult([100, 100, 200, 200], 0.9),
-        DetectionResult([110, 110, 210, 210], 0.8),  # High overlap
-        DetectionResult([300, 300, 400, 400], 0.7),  # No overlap
-    ]
-
-    nms_results = NonMaximumSuppression.apply_nms(detections, iou_threshold=0.5)
-    print(f"NMS: {len(detections)} -> {len(nms_results)} detections")

@@ -49,15 +49,14 @@ import seaborn as sns
 import tensorflow as tf
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional, Union
+from typing import Dict, List, Tuple, Any, Optional
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.tirex.model import create_tirex_model, create_tirex_by_variant, TiRexCore, DEFAULT_QUANTILES
-from dl_techniques.utils.datasets.time_series_normalizer import TimeSeriesNormalizer
-from dl_techniques.utils.datasets.time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
+from dl_techniques.datasets.time_series import TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
 
 plt.style.use('default')
 sns.set_palette("husl")

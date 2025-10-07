@@ -30,7 +30,10 @@ A comprehensive time series generator for creating diverse synthetic time series
 Place the `time_series_generator.py` file in your `dl_techniques/utils/datasets` directory:
 
 ```python
-from dl_techniques.utils.datasets,time_series_generator import (
+from dl_techniques.datasets, time_series_generator
+import
+
+(
     TimeSeriesGenerator,
     TimeSeriesConfig
 )
@@ -39,7 +42,8 @@ from dl_techniques.utils.datasets,time_series_generator import (
 ## Quick Start
 
 ```python
-from dl_techniques.utils.datasets,time_series_generator import TimeSeriesGenerator, TimeSeriesConfig
+from dl_techniques.datasets, time_series_generator
+import TimeSeriesGenerator, TimeSeriesConfig
 
 # Create configuration
 config = TimeSeriesConfig(n_samples=1000, random_seed=42)

@@ -19,7 +19,7 @@ Experimental Design
 **Dataset**: CIFAR-10 (10 classes, 32×32 RGB images)
 - 50,000 training images
 - 10,000 test images
-- Standard preprocessing with normalization
+- Standard preprocessing with normalization and augmentation
 
 **Model Architecture**: ResNet-inspired CNN with the following components:
 - Initial convolutional layer (32 filters)
@@ -29,31 +29,13 @@ Experimental Design
 - Global average pooling
 - Dense classification layer with L2 regularization
 - Softmax output layer for probability predictions
-- Configurable architecture parameters for systematic studies
 
 **Activation Functions Evaluated**:
-
 1. **ReLU**: The baseline rectified linear unit - simple and efficient
 2. **Tanh**: Hyperbolic tangent - smooth, bounded activation
 3. **GELU**: Gaussian Error Linear Unit - smooth approximation of ReLU
 4. **Mish**: Self-regularized non-monotonic activation function
-
-Expected Outcomes and Insights
-------------------------------
-
-This experiment is designed to reveal:
-
-1. **Activation Function Trade-offs**: How different activations balance
-   expressiveness with training stability and computational efficiency
-
-2. **Training Dynamics**: Which activation functions lead to faster convergence,
-   better gradient flow, and more stable training
-
-3. **Weight Distribution Effects**: How activation choice influences weight
-   distributions, sparsity, and effective network capacity
-
-4. **Feature Quality**: The impact of activation functions on learned feature
-   representations and their discriminative power
+5. **SaturatedMish**: Mish variants with saturation
 """
 
 # ==============================================================================
@@ -67,34 +49,249 @@ import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Callable
+from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.datasets import load_and_preprocess_cifar10
 from dl_techniques.layers.activations.mish import mish, saturated_mish
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
 
+from dl_techniques.datasets.vision.common import (
+    create_dataset_builder
+)
+
+from dl_techniques.visualization import (
+    VisualizationManager,
+    VisualizationPlugin,
+    TrainingHistory,
+    ModelComparison,
+    ClassificationResults,
+    PlotConfig,
+    PlotStyle,
+    ColorScheme,
+    TrainingCurvesVisualization,
+    ModelComparisonBarChart,
+    PerformanceRadarChart,
+    ConfusionMatrixVisualization,
+)
 
 from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
-    DataInput
 )
 
 # ==============================================================================
-# SETUP SATURATED MISH
+# SETUP SATURATED MISH VARIANTS
 # ==============================================================================
 
 def saturated_mish_1(x):
+    """Saturated Mish with alpha=1.0."""
     return saturated_mish(x, alpha=1.0)
 
+
 def saturated_mish_2(x):
+    """Saturated Mish with alpha=2.0."""
     return saturated_mish(x, alpha=2.0)
+
+
+# ==============================================================================
+# CUSTOM DATA STRUCTURES
+# ==============================================================================
+
+@dataclass
+class ActivationComparisonData:
+    """
+    Data structure for activation function comparison visualization.
+
+    Attributes:
+        activation_names: Names of activation functions compared
+        metrics: Dictionary mapping activation names to their metrics
+        histories: Dictionary mapping activation names to training histories
+    """
+    activation_names: List[str]
+    metrics: Dict[str, Dict[str, float]]
+    histories: Dict[str, Dict[str, List[float]]]
+
+
+# ==============================================================================
+# CUSTOM VISUALIZATION PLUGINS
+# ==============================================================================
+
+class ActivationComparisonDashboard(VisualizationPlugin):
+    """Comprehensive dashboard for activation function comparison."""
+
+    @property
+    def name(self) -> str:
+        return "activation_comparison_dashboard"
+
+    @property
+    def description(self) -> str:
+        return "Comprehensive dashboard comparing activation functions"
+
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, ActivationComparisonData)
+
+    def create_visualization(
+        self,
+        data: ActivationComparisonData,
+        ax: Optional[Any] = None,
+        **kwargs
+    ) -> Any:
+        """Create comprehensive comparison dashboard."""
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure(figsize=(20, 12), dpi=self.config.dpi)
+        gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+
+        # 1. Training accuracy comparison
+        ax1 = fig.add_subplot(gs[0, :2])
+        self._plot_training_curves(data, ax1, 'accuracy', 'Training Accuracy')
+
+        # 2. Validation accuracy comparison
+        ax2 = fig.add_subplot(gs[1, :2])
+        self._plot_training_curves(data, ax2, 'val_accuracy', 'Validation Accuracy')
+
+        # 3. Loss comparison
+        ax3 = fig.add_subplot(gs[2, :2])
+        self._plot_training_curves(data, ax3, 'loss', 'Training Loss')
+
+        # 4. Final metrics comparison
+        ax4 = fig.add_subplot(gs[0, 2])
+        self._plot_final_metrics(data, ax4, 'accuracy', 'Final Accuracy')
+
+        # 5. Top-5 accuracy comparison
+        ax5 = fig.add_subplot(gs[1, 2])
+        self._plot_final_metrics(data, ax5, 'top_5_accuracy', 'Top-5 Accuracy')
+
+        # 6. Summary table
+        ax6 = fig.add_subplot(gs[2, 2])
+        self._plot_summary_table(data, ax6)
+
+        plt.suptitle(
+            'Activation Function Comparison Dashboard',
+            fontsize=self.config.title_fontsize + 2,
+            fontweight='bold'
+        )
+
+        return fig
+
+    def _plot_training_curves(
+        self,
+        data: ActivationComparisonData,
+        ax: Any,
+        metric: str,
+        title: str
+    ) -> None:
+        """Plot training curves for a specific metric."""
+        colors = plt.cm.tab10(np.linspace(0, 1, len(data.activation_names)))
+
+        for idx, name in enumerate(data.activation_names):
+            if name in data.histories and metric in data.histories[name]:
+                epochs = range(len(data.histories[name][metric]))
+                ax.plot(
+                    epochs,
+                    data.histories[name][metric],
+                    label=name,
+                    color=colors[idx],
+                    linewidth=2,
+                    alpha=0.8
+                )
+
+        ax.set_xlabel('Epoch', fontsize=self.config.label_fontsize)
+        ax.set_ylabel(metric.replace('_', ' ').title(), fontsize=self.config.label_fontsize)
+        ax.set_title(title, fontsize=self.config.title_fontsize)
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(alpha=0.3)
+
+    def _plot_final_metrics(
+        self,
+        data: ActivationComparisonData,
+        ax: Any,
+        metric: str,
+        title: str
+    ) -> None:
+        """Plot bar chart of final metrics."""
+        values = [
+            data.metrics[name].get(metric, 0.0)
+            for name in data.activation_names
+        ]
+
+        colors = plt.cm.tab10(np.linspace(0, 1, len(data.activation_names)))
+        bars = ax.bar(range(len(data.activation_names)), values, color=colors, alpha=0.7)
+
+        ax.set_xticks(range(len(data.activation_names)))
+        ax.set_xticklabels(data.activation_names, rotation=45, ha='right')
+        ax.set_ylabel(metric.replace('_', ' ').title(), fontsize=self.config.label_fontsize)
+        ax.set_title(title, fontsize=self.config.title_fontsize)
+        ax.grid(alpha=0.3, axis='y')
+
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2., height,
+                f'{height:.3f}',
+                ha='center', va='bottom',
+                fontsize=9
+            )
+
+    def _plot_summary_table(
+        self,
+        data: ActivationComparisonData,
+        ax: Any
+    ) -> None:
+        """Plot summary table of all metrics."""
+        ax.axis('off')
+
+        # Prepare table data
+        table_data = []
+        for name in data.activation_names:
+            row = [
+                name,
+                f"{data.metrics[name].get('accuracy', 0.0):.4f}",
+                f"{data.metrics[name].get('top_5_accuracy', 0.0):.4f}",
+                f"{data.metrics[name].get('loss', 0.0):.4f}"
+            ]
+            table_data.append(row)
+
+        table = ax.table(
+            cellText=table_data,
+            colLabels=['Activation', 'Accuracy', 'Top-5 Acc', 'Loss'],
+            cellLoc='center',
+            loc='center',
+            bbox=[0, 0, 1, 1]
+        )
+
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 2)
+
+        # Style header
+        for i in range(4):
+            table[(0, i)].set_facecolor('#4CAF50')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+
+        ax.set_title('Performance Summary', fontsize=self.config.title_fontsize, pad=20)
+
 
 # ==============================================================================
 # EXPERIMENT CONFIGURATION
 # ==============================================================================
+
+@dataclass
+class TrainingConfig:
+    """
+    Minimal training configuration for dataset builder compatibility.
+
+    Attributes:
+        input_shape: Input image shape (height, width, channels)
+        num_classes: Number of output classes
+        batch_size: Training batch size
+        epochs: Number of training epochs
+    """
+    input_shape: Tuple[int, int, int] = (32, 32, 3)
+    num_classes: int = 10
+    batch_size: int = 64
+    epochs: int = 100
+
 
 @dataclass
 class ExperimentConfig:
@@ -112,22 +309,22 @@ class ExperimentConfig:
     input_shape: Tuple[int, ...] = (32, 32, 3)
 
     # --- Model Architecture Parameters ---
-    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256])  # Filter counts for each conv block
-    dense_units: List[int] = field(default_factory=lambda: [64])  # Hidden units in dense layers
-    dropout_rates: List[float] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.4, 0.5])  # Dropout per layer
-    kernel_size: Tuple[int, int] = (3, 3)  # Convolution kernel size
-    pool_size: Tuple[int, int] = (2, 2)  # Max pooling window size
-    weight_decay: float = 1e-4  # L2 regularization strength
-    kernel_initializer: str = 'he_normal'  # Weight initialization scheme
-    use_batch_norm: bool = True  # Enable batch normalization
-    use_residual: bool = True  # Enable residual connections
+    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256])
+    dense_units: List[int] = field(default_factory=lambda: [64])
+    dropout_rates: List[float] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.4, 0.5])
+    kernel_size: Tuple[int, int] = (3, 3)
+    pool_size: Tuple[int, int] = (2, 2)
+    weight_decay: float = 1e-4
+    kernel_initializer: str = 'he_normal'
+    use_batch_norm: bool = True
+    use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 100  # Number of training epochs
-    batch_size: int = 64  # Training batch size
-    learning_rate: float = 0.001  # Adam optimizer learning rate
-    early_stopping_patience: int = 50  # Patience for early stopping
-    monitor_metric: str = 'val_accuracy'  # Metric to monitor for early stopping
+    epochs: int = 100
+    batch_size: int = 64
+    learning_rate: float = 0.001
+    early_stopping_patience: int = 50
+    monitor_metric: str = 'val_accuracy'
 
     # --- Activation Functions to Evaluate ---
     activations: Dict[str, Callable] = field(default_factory=lambda: {
@@ -140,18 +337,18 @@ class ExperimentConfig:
     })
 
     # --- Experiment Configuration ---
-    output_dir: Path = Path("results")  # Output directory for results
-    experiment_name: str = "cifar10_activation_comparison"  # Experiment name
-    random_seed: int = 42  # Random seed for reproducibility
+    output_dir: Path = Path("results")
+    experiment_name: str = "cifar10_activation_comparison"
+    random_seed: int = 42
 
     # --- Analysis Configuration ---
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
-        analyze_weights=True,  # Analyze weight distributions
-        analyze_calibration=True,  # Analyze model calibration
-        analyze_information_flow=True,  # Analyze information flow / activation patterns
-        calibration_bins=15,  # Number of bins for calibration analysis
-        save_plots=True,  # Save analysis plots
-        plot_style='publication',  # Publication-ready plot style
+        analyze_weights=True,
+        analyze_calibration=True,
+        analyze_information_flow=True,
+        calibration_bins=15,
+        save_plots=True,
+        plot_style='publication',
     ))
 
 
@@ -169,11 +366,6 @@ def build_residual_block(
     """
     Build a residual block with skip connections.
 
-    This function creates a residual block consisting of two convolutional layers
-    with batch normalization and the specified activation function, plus a skip
-    connection that bypasses the block. If the input and output dimensions don't
-    match, a 1x1 convolution is used to adjust the skip connection.
-
     Args:
         inputs: Input tensor to the residual block
         filters: Number of filters in the convolutional layers
@@ -184,7 +376,6 @@ def build_residual_block(
     Returns:
         Output tensor after applying the residual block
     """
-    # Store the original input for the skip connection
     shortcut = inputs
 
     # First convolutional layer
@@ -240,10 +431,6 @@ def build_conv_block(
     """
     Build a convolutional block with optional residual connections.
 
-    This function creates either a standard convolutional block or a residual
-    block based on the configuration. It includes optional max pooling and
-    dropout regularization.
-
     Args:
         inputs: Input tensor to the convolutional block
         filters: Number of filters in the convolutional layers
@@ -286,16 +473,12 @@ def build_conv_block(
 
 
 def build_model(
-        config: ExperimentConfig,
-        activation_fn: Callable,
-        name: str) -> keras.Model:
+    config: ExperimentConfig,
+    activation_fn: Callable,
+    name: str
+) -> keras.Model:
     """
     Build a complete CNN model for CIFAR-10 classification with specified activation.
-
-    This function constructs a ResNet-inspired CNN with configurable architecture
-    parameters. The model includes convolutional blocks, global average pooling,
-    dense classification layers, and a final softmax layer for probability output.
-    The specified activation function is used throughout the network.
 
     Args:
         config: Experiment configuration containing model architecture parameters
@@ -312,7 +495,7 @@ def build_model(
     # Initial convolutional layer
     x = keras.layers.Conv2D(
         filters=config.conv_filters[0],
-        kernel_size=(5, 5),  # Larger kernel for initial feature extraction
+        kernel_size=(5, 5),
         strides=(1, 1),
         padding='same',
         kernel_initializer=config.kernel_initializer,
@@ -369,14 +552,81 @@ def build_model(
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
     model.compile(
         optimizer=optimizer,
-        loss='categorical_crossentropy',
+        loss='sparse_categorical_crossentropy',  # Use sparse for integer labels
         metrics=[
-            keras.metrics.CategoricalAccuracy(name='accuracy'),
-            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
+            keras.metrics.SparseCategoricalAccuracy(name='accuracy'),
+            keras.metrics.SparseTopKCategoricalAccuracy(k=5, name='top_5_accuracy')
         ]
     )
 
     return model
+
+
+# ==============================================================================
+# TRAINING UTILITIES
+# ==============================================================================
+
+def train_single_model(
+    model: keras.Model,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    config: ExperimentConfig,
+    steps_per_epoch: int,
+    val_steps: int,
+    activation_name: str,
+    output_dir: Path
+) -> Dict[str, List[float]]:
+    """
+    Train a single model and return its history.
+
+    Args:
+        model: Keras model to train
+        train_ds: Training dataset
+        val_ds: Validation dataset
+        config: Experiment configuration
+        steps_per_epoch: Number of steps per epoch
+        val_steps: Number of validation steps
+        activation_name: Name of activation function
+        output_dir: Directory to save checkpoints
+
+    Returns:
+        Training history dictionary
+    """
+    # Create callbacks
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor=config.monitor_metric,
+            patience=config.early_stopping_patience,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=10,
+            min_lr=1e-7,
+            verbose=1
+        ),
+        keras.callbacks.ModelCheckpoint(
+            filepath=str(output_dir / f'{activation_name}_best.keras'),
+            monitor=config.monitor_metric,
+            save_best_only=True,
+            verbose=0
+        )
+    ]
+
+    # Train the model
+    history = model.fit(
+        train_ds,
+        epochs=config.epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_data=val_ds,
+        validation_steps=val_steps,
+        callbacks=callbacks,
+        verbose=1
+    )
+
+    return history.history
 
 
 # ==============================================================================
@@ -388,10 +638,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     Run the complete CIFAR-10 activation function comparison experiment.
 
     This function orchestrates the entire experimental pipeline, including:
-    1. Dataset loading and preprocessing
+    1. Dataset loading and preprocessing using standardized builder
     2. Model training for each activation function
     3. Model analysis and evaluation
-    4. Visualization generation
+    4. Visualization generation using framework
     5. Results compilation and reporting
 
     Args:
@@ -409,11 +659,29 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize visualization manager
-    vis_manager = VisualizationManager(
-        output_dir=experiment_dir / "visualizations",
-        config=VisualizationConfig(),
-        timestamp_dirs=False
+    viz_config = PlotConfig(
+        style=PlotStyle.SCIENTIFIC,
+        color_scheme=ColorScheme(
+            primary='#2E86AB',
+            secondary='#A23B72',
+            accent='#F18F01'
+        ),
+        title_fontsize=14,
+        save_format='png'
     )
+
+    viz_manager = VisualizationManager(
+        experiment_name=config.experiment_name,
+        output_dir=experiment_dir / "visualizations",
+        config=viz_config
+    )
+
+    # Register visualization plugins
+    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
+    viz_manager.register_template("model_comparison_bars", ModelComparisonBarChart)
+    viz_manager.register_template("performance_radar", PerformanceRadarChart)
+    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+    viz_manager.register_template("activation_dashboard", ActivationComparisonDashboard)
 
     # Log experiment start
     logger.info("🚀 Starting CIFAR-10 Activation Function Comparison Experiment")
@@ -421,23 +689,36 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading CIFAR-10 dataset...")
-    cifar10_data = load_and_preprocess_cifar10()
+    logger.info("📊 Loading CIFAR-10 dataset using standardized builder...")
+
+    # Create training config for dataset builder
+    train_config = TrainingConfig(
+        input_shape=config.input_shape,
+        num_classes=config.num_classes,
+        batch_size=config.batch_size,
+        epochs=config.epochs
+    )
+
+    # Create dataset builder
+    dataset_builder = create_dataset_builder('cifar10', train_config)
+
+    # Build datasets
+    train_ds, val_ds, steps_per_epoch, val_steps = dataset_builder.build()
+
+    # Get test data for evaluation
+    test_data = dataset_builder.get_test_data()
+    class_names = dataset_builder.get_class_names()
+
     logger.info("✅ Dataset loaded successfully")
+    logger.info(f"Steps per epoch: {steps_per_epoch}, Validation steps: {val_steps}")
+    logger.info(f"Test data shape: {test_data.x_data.shape}")
+    logger.info(f"Class names: {class_names}")
 
     # ===== MODEL TRAINING PHASE =====
     logger.info("🏋️ Starting model training phase...")
 
-    # Log data format for debugging
-    logger.info(f"Training data shape: {cifar10_data.x_train.shape}, {cifar10_data.y_train.shape}")
-    logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
-    if len(cifar10_data.y_train.shape) > 1:
-        logger.info(f"Labels are one-hot encoded with {cifar10_data.y_train.shape[1]} classes")
-    else:
-        logger.info("Labels are integer encoded")
-
-    trained_models = {}  # Store trained models
-    all_histories = {}  # Store training histories
+    trained_models = {}
+    all_histories = {}
 
     for activation_name, activation_fn_factory in config.activations.items():
         logger.info(f"--- Training model with {activation_name} activation ---")
@@ -448,168 +729,169 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Log model architecture
         model.summary(print_fn=logger.info)
         logger.info(f"Model {activation_name} parameters: {model.count_params():,}")
-        logger.info(f"Model {activation_name} metrics: {model.metrics_names}")
-
-        # Configure training parameters
-        training_config = TrainingConfig(
-            epochs=config.epochs,
-            batch_size=config.batch_size,
-            early_stopping_patience=config.early_stopping_patience,
-            monitor_metric=config.monitor_metric,
-            model_name=activation_name,
-            output_dir=experiment_dir / "training_plots" / activation_name
-        )
 
         # Train the model
-        history = train_model(
-            model, cifar10_data.x_train, cifar10_data.y_train,
-            cifar10_data.x_test, cifar10_data.y_test, training_config
+        history = train_single_model(
+            model=model,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            config=config,
+            steps_per_epoch=steps_per_epoch,
+            val_steps=val_steps,
+            activation_name=activation_name,
+            output_dir=experiment_dir / "checkpoints"
         )
 
         # Store results
         trained_models[activation_name] = model
-        all_histories[activation_name] = history.history
+        all_histories[activation_name] = history
         logger.info(f"✅ {activation_name} training completed!")
 
     # ===== MEMORY MANAGEMENT =====
     logger.info("🗑️ Triggering garbage collection...")
     gc.collect()
 
+    # ===== FINAL PERFORMANCE EVALUATION =====
+    logger.info("📈 Evaluating final model performance on test set...")
+
+    performance_results = {}
+    all_predictions = {}
+
+    for name, model in trained_models.items():
+        logger.info(f"Evaluating model {name}...")
+
+        # Get predictions
+        predictions = model.predict(test_data.x_data, verbose=0)
+        y_pred_classes = np.argmax(predictions, axis=1)
+
+        # Calculate metrics manually for consistency
+        y_true = test_data.y_data.astype(int)
+        accuracy = np.mean(y_pred_classes == y_true)
+
+        # Calculate top-5 accuracy
+        top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
+        top5_acc = np.mean([
+            y_true_val in top5_pred
+            for y_true_val, top5_pred in zip(y_true, top_5_predictions)
+        ])
+
+        # Calculate loss
+        loss = -np.mean(
+            np.log(predictions[np.arange(len(y_true)), y_true] + 1e-7)
+        )
+
+        performance_results[name] = {
+            'accuracy': accuracy,
+            'top_5_accuracy': top5_acc,
+            'loss': loss
+        }
+
+        all_predictions[name] = y_pred_classes
+
+        logger.info(f"Model {name} - Accuracy: {accuracy:.4f}, Top-5: {top5_acc:.4f}, Loss: {loss:.4f}")
+
+    # ===== VISUALIZATION GENERATION =====
+    logger.info("🖼️ Generating visualizations using framework...")
+
+    # 1. Training curves comparison
+    training_histories = {
+        name: TrainingHistory(
+            epochs=list(range(len(hist['loss']))),
+            train_loss=hist['loss'],
+            val_loss=hist['val_loss'],
+            train_metrics={'accuracy': hist['accuracy']},
+            val_metrics={'accuracy': hist['val_accuracy']}
+        )
+        for name, hist in all_histories.items()
+    }
+
+    viz_manager.visualize(
+        data=training_histories,
+        plugin_name="training_curves",
+        show=False
+    )
+
+    # 2. Model comparison
+    comparison_data = ModelComparison(
+        model_names=list(performance_results.keys()),
+        metrics={
+            name: {
+                'accuracy': metrics['accuracy'],
+                'top_5_accuracy': metrics['top_5_accuracy']
+            }
+            for name, metrics in performance_results.items()
+        }
+    )
+
+    viz_manager.visualize(
+        data=comparison_data,
+        plugin_name="model_comparison_bars",
+        sort_by='accuracy',
+        show=False
+    )
+
+    viz_manager.visualize(
+        data=comparison_data,
+        plugin_name="performance_radar",
+        normalize=True,
+        show=False
+    )
+
+    # 3. Confusion matrices for each model
+    for name, y_pred in all_predictions.items():
+        classification_results = ClassificationResults(
+            y_true=test_data.y_data.astype(int),
+            y_pred=y_pred,
+            class_names=class_names,
+            model_name=name
+        )
+
+        viz_manager.visualize(
+            data=classification_results,
+            plugin_name="confusion_matrix",
+            normalize='true',
+            show=False
+        )
+
+    # 4. Comprehensive activation comparison dashboard
+    activation_comparison = ActivationComparisonData(
+        activation_names=list(config.activations.keys()),
+        metrics=performance_results,
+        histories=all_histories
+    )
+
+    viz_manager.visualize(
+        data=activation_comparison,
+        plugin_name="activation_dashboard",
+        show=False
+    )
+
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
     logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
-        # Initialize the model analyzer with trained models
         analyzer = ModelAnalyzer(
             models=trained_models,
             config=config.analyzer_config,
             output_dir=experiment_dir / "model_analysis"
         )
 
-        # Run comprehensive analysis
-        model_analysis_results = analyzer.analyze(data=DataInput.from_object(cifar10_data))
+        model_analysis_results = analyzer.analyze(data=test_data)
         logger.info("✅ Model analysis completed successfully!")
 
     except Exception as e:
         logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
-
-    # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼️ Generating training history and confusion matrix plots...")
-
-    # Plot training history comparison
-    vis_manager.plot_history(
-        histories=all_histories,
-        metrics=['accuracy', 'loss'],
-        name='training_comparison',
-        subdir='training_plots',
-        title='Activation Functions Training & Validation Comparison'
-    )
-
-    # Generate confusion matrices for model comparison
-    raw_predictions = {
-        name: model.predict(cifar10_data.x_test, verbose=0)
-        for name, model in trained_models.items()
-    }
-    class_predictions = {
-        name: np.argmax(preds, axis=1)
-        for name, preds in raw_predictions.items()
-    }
-
-    # Handle y_true format - convert to class indices if one-hot encoded
-    if len(cifar10_data.y_test.shape) > 1 and cifar10_data.y_test.shape[1] > 1:
-        y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
-    else:
-        y_true_classes = cifar10_data.y_test
-
-    vis_manager.plot_confusion_matrices_comparison(
-        y_true=y_true_classes,
-        model_predictions=class_predictions,
-        name='activation_function_confusion_matrices',
-        subdir='model_comparison',
-        normalize=True,
-        class_names=[str(i) for i in range(10)]
-    )
-
-    # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("📈 Evaluating final model performance on test set...")
-
-    performance_results = {}
-
-    for name, model in trained_models.items():
-        logger.info(f"Evaluating model {name}...")
-
-        # Get predictions for debugging
-        predictions = model.predict(cifar10_data.x_test, verbose=0)
-
-        # Check label format and evaluate accordingly
-        try:
-            # First try evaluation with original labels
-            eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
-            metrics_dict = dict(zip(model.metrics_names, eval_results))
-
-            # If accuracy seems incorrect, calculate manually
-            if metrics_dict.get('accuracy', 0.0) < 0.5:  # Suspiciously low
-                logger.warning(f"Low accuracy detected for {name}, calculating manually...")
-
-                # Get predicted classes
-                y_pred_classes = np.argmax(predictions, axis=1)
-
-                # Get true classes (handle both one-hot and integer labels)
-                if len(cifar10_data.y_test.shape) > 1 and cifar10_data.y_test.shape[1] > 1:
-                    y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
-                else:
-                    y_true_classes = cifar10_data.y_test.astype(int)
-
-                # Calculate accuracy
-                manual_accuracy = np.mean(y_pred_classes == y_true_classes)
-
-                # Calculate top-5 accuracy
-                top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
-                manual_top5_acc = np.mean([
-                    y_true in top5_pred
-                    for y_true, top5_pred in zip(y_true_classes, top_5_predictions)
-                ])
-
-                logger.info(f"Manual accuracy for {name}: {manual_accuracy:.4f}")
-                logger.info(f"Manual top-5 accuracy for {name}: {manual_top5_acc:.4f}")
-
-                # Update metrics
-                metrics_dict['accuracy'] = manual_accuracy
-                metrics_dict['top_5_accuracy'] = manual_top5_acc
-
-        except Exception as e:
-            logger.error(f"Error evaluating {name}: {e}")
-            # Fallback to manual calculation
-            y_pred_classes = np.argmax(predictions, axis=1)
-            if len(cifar10_data.y_test.shape) > 1:
-                y_true_classes = np.argmax(cifar10_data.y_test, axis=1)
-            else:
-                y_true_classes = cifar10_data.y_test.astype(int)
-
-            manual_accuracy = np.mean(y_pred_classes == y_true_classes)
-            metrics_dict = {
-                'accuracy': manual_accuracy,
-                'top_5_accuracy': manual_accuracy,  # CIFAR-10 typically has very high accuracy
-                'loss': 0.0
-            }
-
-        # Store standardized metrics
-        performance_results[name] = {
-            'accuracy': metrics_dict.get('accuracy', 0.0),
-            'top_5_accuracy': metrics_dict.get('top_5_accuracy', metrics_dict.get('accuracy', 0.0)),
-            'loss': metrics_dict.get('loss', 0.0)
-        }
-
-        # Log final metrics for this model
-        logger.info(f"Model {name} final metrics: {performance_results[name]}")
 
     # ===== RESULTS COMPILATION =====
     results_payload = {
         'performance_analysis': performance_results,
         'model_analysis': model_analysis_results,
         'histories': all_histories,
-        'trained_models': trained_models  # Include trained models in results
+        'trained_models': trained_models,
+        'predictions': all_predictions,
+        'test_data': test_data,
+        'class_names': class_names
     }
 
     # Print comprehensive summary
@@ -626,10 +908,6 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     """
     Print a comprehensive summary of experimental results.
 
-    This function generates a detailed report of all experimental outcomes,
-    including performance metrics, calibration analysis, and training progress.
-    The summary is formatted for clear readability and easy interpretation.
-
     Args:
         results: Dictionary containing all experimental results and analysis
     """
@@ -639,11 +917,18 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("🎯 PERFORMANCE METRICS (on Full Test Set):")
+        logger.info("🎯 PERFORMANCE METRICS (on Test Set):")
         logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
         logger.info("-" * 60)
 
-        for model_name, metrics in results['performance_analysis'].items():
+        # Sort by accuracy for better readability
+        sorted_results = sorted(
+            results['performance_analysis'].items(),
+            key=lambda x: x[1]['accuracy'],
+            reverse=True
+        )
+
+        for model_name, metrics in sorted_results:
             accuracy = metrics.get('accuracy', 0.0)
             top5_acc = metrics.get('top_5_accuracy', 0.0)
             loss = metrics.get('loss', 0.0)
@@ -652,7 +937,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION METRICS SECTION =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info("\n🎯 CALIBRATION METRICS:")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
 
@@ -662,33 +947,13 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
                 f"{cal_metrics['brier_score']:<15.4f} {cal_metrics['mean_entropy']:<12.4f}"
             )
 
-    # ===== TRAINING METRICS SECTION =====
-    if 'histories' in results and results['histories']:
-        # Check if any model actually has training history data
-        has_training_data = False
-        for model_name, history_dict in results['histories'].items():
-            if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
-                history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
-                has_training_data = True
-                break
-
-        if has_training_data:
-            logger.info("🏁 FINAL TRAINING METRICS (on Validation Set):")
-            logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
-            logger.info("-" * 50)
-
-            for model_name, history_dict in results['histories'].items():
-                # Check if this specific model has actual training data
-                if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
-                    history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
-                    final_val_acc = history_dict['val_accuracy'][-1]
-                    final_val_loss = history_dict['val_loss'][-1]
-                    logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
-                else:
-                    logger.info(f"{model_name:<20} {'Not trained':<15} {'Not trained':<12}")
-        else:
-            logger.info("🏁 TRAINING STATUS:")
-            logger.info("⚠️  Models were not trained (epochs=0) - no training metrics available")
+    # ===== BEST MODEL IDENTIFICATION =====
+    if 'performance_analysis' in results:
+        best_model = max(
+            results['performance_analysis'].items(),
+            key=lambda x: x[1]['accuracy']
+        )
+        logger.info(f"\n🏆 BEST MODEL: {best_model[0]} (Accuracy: {best_model[1]['accuracy']:.4f})")
 
     logger.info("=" * 80)
 
@@ -700,21 +965,17 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 def main() -> None:
     """
     Main execution function for running the CIFAR-10 activation comparison experiment.
-
-    This function serves as the entry point for the experiment, handling
-    configuration setup, experiment execution, and error handling.
     """
     logger.info("🚀 CIFAR-10 Activation Function Comparison Experiment")
     logger.info("=" * 80)
 
+    # Configure GPU
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
-            # Currently, memory growth needs to be the same across GPUs
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
         except RuntimeError as e:
-            # Memory growth must be set before GPUs have been initialized
             logger.info(e)
 
     # Initialize experiment configuration
@@ -727,7 +988,6 @@ def main() -> None:
     logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
                 f"{len(config.dense_units)} dense layers")
     logger.info(f"   Residual Connections: {config.use_residual}")
-    logger.info(f"   Output: Softmax probabilities")
     logger.info("")
 
     try:

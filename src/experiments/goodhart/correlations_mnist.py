@@ -81,38 +81,6 @@ This experiment is designed to reveal:
 3. **Information-Theoretic Benefits**: Whether the Goodhart-Aware Loss provides
    measurable advantages in preventing overfitting to spurious signals
 
-Usage Example
--------------
-
-Basic usage with default configuration:
-
-    ```python
-    config = ExperimentConfig()
-    results = run_experiment(config)
-
-    # Access results
-    robustness = results['robustness_analysis']
-    performance = results['performance_analysis']
-    ```
-
-Advanced usage with custom configuration:
-
-    ```python
-    config = ExperimentConfig(
-        train_correlation_strength=0.9,
-        epochs=50,
-        loss_functions={
-            'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(from_logits=False),
-            'CustomGoodhart': lambda: GoodhartAwareLoss(
-                entropy_weight=0.2,
-                mi_weight=0.05,
-                from_logits=False
-            )
-        }
-    )
-    results = run_experiment(config)
-    ```
-
 Theoretical Foundation
 ----------------------
 
@@ -139,7 +107,14 @@ from typing import Dict, Any, List, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+
+from dl_techniques.visualization import (
+    VisualizationManager,
+    TrainingHistory,
+    ClassificationResults,
+    TrainingCurvesVisualization,
+    ConfusionMatrixVisualization
+)
 
 from dl_techniques.analyzer import (
     ModelAnalyzer,
@@ -191,7 +166,7 @@ class ExperimentConfig:
     early_stopping_patience: int = 10
     monitor_metric: str = 'val_accuracy'
 
-    # --- Loss Functions to Evaluate (Updated for softmax outputs) ---
+    # --- Loss Functions to Evaluate ---
     loss_functions: Dict[str, Callable] = field(default_factory=lambda: {
         'CrossEntropy': lambda: keras.losses.CategoricalCrossentropy(
             from_logits=False),
@@ -309,7 +284,7 @@ def create_colored_mnist_dataset(config: ExperimentConfig) -> ColoredMNISTData:
     Returns:
         ColoredMNISTData object containing all dataset splits
     """
-    logger.info("🎨 Generating Colored MNIST dataset...")
+    logger.info("Generating Colored MNIST dataset...")
 
     # Set random seed for reproducibility
     np.random.seed(config.random_seed)
@@ -345,7 +320,7 @@ def create_colored_mnist_dataset(config: ExperimentConfig) -> ColoredMNISTData:
     y_val = keras.utils.to_categorical(y_val_split, config.num_classes)
     y_test = keras.utils.to_categorical(y_test_orig, config.num_classes)
 
-    logger.info("✅ Dataset generated successfully:")
+    logger.info("Dataset generated successfully:")
     logger.info(f"   Train: {len(x_train)} samples, {config.train_correlation_strength:.0%} correlation")
     logger.info(f"   Val:   {len(x_val)} samples, {config.validation_correlation_strength:.0%} correlation")
     logger.info(f"   Test:  {len(x_test)} samples, {config.test_correlation_strength:.0%} correlation")
@@ -629,7 +604,7 @@ def analyze_robustness(
     Returns:
         Dictionary of robustness metrics for each model
     """
-    logger.info("🛡️ Computing spurious correlation robustness metrics...")
+    logger.info("Computing spurious correlation robustness metrics...")
 
     robustness_results = {}
 
@@ -684,7 +659,7 @@ def analyze_robustness(
         logger.info(f"     Gen. gap:       {robustness_results[name]['generalization_gap']:.4f}")
         logger.info(f"     Color dep.:     {robustness_results[name]['color_dependency']:.4f}")
 
-    logger.info("✅ Robustness analysis completed.")
+    logger.info("Robustness analysis completed.")
 
     return robustness_results
 
@@ -719,22 +694,25 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize visualization manager
+    # Initialize visualization manager (new framework)
     vis_manager = VisualizationManager(
-        output_dir=experiment_dir / "visualizations",
-        config=VisualizationConfig(),
-        timestamp_dirs=False
+        experiment_name=config.experiment_name,
+        output_dir=experiment_dir / "visualizations"
     )
 
+    # Register visualization templates
+    vis_manager.register_template("training_curves", TrainingCurvesVisualization)
+    vis_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+
     # Log experiment start
-    logger.info("🚀 Starting Colored MNIST Spurious Correlation Experiment")
-    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("Starting Colored MNIST Spurious Correlation Experiment")
+    logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET GENERATION =====
-    logger.info("📊 Generating Colored MNIST dataset...")
+    logger.info("Generating Colored MNIST dataset...")
     dataset = create_colored_mnist_dataset(config)
-    logger.info("✅ Dataset generation completed")
+    logger.info("Dataset generation completed")
 
     # Debug information about data format
     logger.info(f"Dataset shapes - Train: {dataset.x_train.shape}, {dataset.y_train.shape}")
@@ -743,14 +721,14 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     logger.info(f"Data range - Min: {dataset.x_train.min():.3f}, Max: {dataset.x_train.max():.3f}")
 
     # ===== MODEL TRAINING PHASE =====
-    logger.info("🏋️ Starting model training phase...")
-    trained_models = {}  # Store trained models (already with softmax output)
+    logger.info("Starting model training phase...")
+    trained_models = {}  # Store trained models
     all_histories = {}  # Store training histories
 
     for loss_name, loss_fn_factory in config.loss_functions.items():
         logger.info(f"--- Training model with {loss_name} loss ---")
 
-        # Build model for this loss function (with softmax output)
+        # Build model for this loss function
         model = build_model(config, loss_fn_factory(), loss_name)
 
         # Log model architecture info
@@ -783,18 +761,18 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Store results
         trained_models[loss_name] = model
         all_histories[loss_name] = history.history
-        logger.info(f"✅ {loss_name} training completed!")
+        logger.info(f"{loss_name} training completed!")
 
     # ===== MEMORY MANAGEMENT =====
-    logger.info("🗑️ Triggering garbage collection...")
+    logger.info("Triggering garbage collection...")
     gc.collect()
 
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
-    logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
-        # Initialize the model analyzer with trained models (already have softmax outputs)
+        # Initialize the model analyzer with trained models
         analyzer = ModelAnalyzer(
             models=trained_models,
             config=config.analyzer_config,
@@ -803,25 +781,45 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
         # Run comprehensive analysis
         model_analysis_results = analyzer.analyze(data=DataInput.from_object(dataset))
-        logger.info("✅ Model analysis completed successfully!")
+        logger.info("Model analysis completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
+        logger.error(f"Model analysis failed: {e}", exc_info=True)
 
     # ===== SPURIOUS CORRELATION ANALYSIS =====
     robustness_results = analyze_robustness(trained_models, dataset, config)
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼️ Generating training history and confusion matrix plots...")
+    logger.info("Generating training history and confusion matrix plots...")
+
+    # Convert training histories to TrainingHistory objects
+    training_histories = {}
+    for name, hist_dict in all_histories.items():
+        if len(hist_dict.get('loss', [])) > 0:
+            training_histories[name] = TrainingHistory(
+                epochs=list(range(len(hist_dict['loss']))),
+                train_loss=hist_dict['loss'],
+                val_loss=hist_dict.get('val_loss', []),
+                train_metrics={
+                    'accuracy': hist_dict.get('accuracy', [])
+                },
+                val_metrics={
+                    'accuracy': hist_dict.get('val_accuracy', [])
+                }
+            )
 
     # Plot training history comparison
-    vis_manager.plot_history(
-        histories=all_histories,
-        metrics=['accuracy', 'loss'],
-        name='training_comparison',
-        subdir='training_plots',
-        title='Loss Functions Training & Validation Comparison'
-    )
+    if training_histories:
+        try:
+            vis_manager.visualize(
+                data=training_histories,
+                plugin_name="training_curves",
+                metrics_to_plot=['accuracy', 'loss'],
+                show=False
+            )
+            logger.info("Training history visualization created")
+        except Exception as e:
+            logger.error(f"Failed to create training history visualization: {e}")
 
     # Generate confusion matrices for model comparison
     raw_predictions = {
@@ -833,17 +831,31 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         for name, preds in raw_predictions.items()
     }
 
-    vis_manager.plot_confusion_matrices_comparison(
-        y_true=np.argmax(dataset.y_test, axis=1),
-        model_predictions=class_predictions,
-        name='loss_function_confusion_matrices',
-        subdir='model_comparison',
-        normalize=True,
-        class_names=[str(i) for i in range(config.num_classes)]
-    )
+    # Convert y_test to class indices for confusion matrix
+    y_true_indices = np.argmax(dataset.y_test, axis=1)
+
+    # Create classification results for each model
+    for model_name, y_pred in class_predictions.items():
+        try:
+            classification_data = ClassificationResults(
+                y_true=y_true_indices,
+                y_pred=y_pred,
+                y_prob=raw_predictions[model_name],
+                class_names=[str(i) for i in range(config.num_classes)],
+                model_name=model_name
+            )
+
+            vis_manager.visualize(
+                data=classification_data,
+                plugin_name="confusion_matrix",
+                normalize='true',
+                show=False
+            )
+        except Exception as e:
+            logger.error(f"Failed to create confusion matrix for {model_name}: {e}")
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("📈 Evaluating final model performance on test set...")
+    logger.info("Evaluating final model performance on test set...")
 
     performance_results = {}
 
@@ -881,7 +893,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'model_analysis': model_analysis_results,
         'robustness_analysis': robustness_results,
         'histories': all_histories,
-        'trained_models': trained_models  # Include trained models in results
+        'trained_models': trained_models
     }
 
     # Print comprehensive summary
@@ -907,20 +919,20 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         results: Dictionary containing all experimental results and analysis
     """
     logger.info("=" * 80)
-    logger.info("📋 SPURIOUS CORRELATION EXPERIMENT SUMMARY")
+    logger.info("SPURIOUS CORRELATION EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # ===== EXPERIMENT CONFIGURATION =====
     config = results.get('config')
     if config:
-        logger.info("⚙️ EXPERIMENT SETUP:")
+        logger.info("EXPERIMENT SETUP:")
         logger.info(f"   Train/Val/Test Correlation: {config.train_correlation_strength:.0%} / "
                    f"{config.validation_correlation_strength:.0%} / {config.test_correlation_strength:.0%}")
         logger.info("")
 
     # ===== PERFORMANCE METRICS =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("🎯 PERFORMANCE METRICS (on Test Set with 0% Color Correlation):")
+        logger.info("PERFORMANCE METRICS (on Test Set with 0% Color Correlation):")
         logger.info(f"{'Model':<20} {'Accuracy':<12} {'Loss':<12}")
         logger.info("-" * 45)
 
@@ -931,7 +943,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== ROBUSTNESS METRICS =====
     if 'robustness_analysis' in results and results['robustness_analysis']:
-        logger.info("🛡️ ROBUSTNESS METRICS:")
+        logger.info("ROBUSTNESS METRICS:")
         logger.info(f"{'Model':<20} {'Train Acc':<12} {'Test Acc':<12} {'Gen Gap':<12} {'Color Dep':<12}")
         logger.info("-" * 70)
 
@@ -949,20 +961,24 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION METRICS =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("🎯 CALIBRATION METRICS (from Model Analyzer):")
+        logger.info("CALIBRATION METRICS (from Model Analyzer):")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
 
         for model_name, cal_metrics in model_analysis.calibration_metrics.items():
+            # Get the corresponding confidence metrics for the same model
+            conf_metrics = model_analysis.confidence_metrics.get(model_name, {})
+
             logger.info(
-                f"{model_name:<20} {cal_metrics['ece']:<12.4f} "
-                f"{cal_metrics['brier_score']:<15.4f} {cal_metrics['mean_entropy']:<12.4f}"
+                f"{model_name:<20} {cal_metrics.get('ece', 0.0):<12.4f} "
+                f"{cal_metrics.get('brier_score', 0.0):<15.4f} "
+                f"{conf_metrics.get('mean_entropy', 0.0):<12.4f}"
             )
 
     # ===== EXPERIMENTAL VERDICT =====
     if 'robustness_analysis' in results and results['robustness_analysis']:
         logger.info("=" * 80)
-        logger.info("🔍 EXPERIMENTAL VERDICT:")
+        logger.info("EXPERIMENTAL VERDICT:")
 
         rob_res = results['robustness_analysis']
 
@@ -971,9 +987,9 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         most_robust = min(rob_res, key=lambda k: rob_res[k]['color_dependency'])
         smallest_gap = min(rob_res, key=lambda k: rob_res[k]['generalization_gap'])
 
-        logger.info(f"🏆 Highest Test Accuracy:      {best_test_acc} ({rob_res[best_test_acc]['test_accuracy']:.4f})")
-        logger.info(f"🛡️  Lowest Color Dependency:    {most_robust} ({rob_res[most_robust]['color_dependency']:.4f})")
-        logger.info(f"📊 Smallest Generalization Gap: {smallest_gap} ({rob_res[smallest_gap]['generalization_gap']:.4f})")
+        logger.info(f"Highest Test Accuracy:      {best_test_acc} ({rob_res[best_test_acc]['test_accuracy']:.4f})")
+        logger.info(f"Lowest Color Dependency:    {most_robust} ({rob_res[most_robust]['color_dependency']:.4f})")
+        logger.info(f"Smallest Generalization Gap: {smallest_gap} ({rob_res[smallest_gap]['generalization_gap']:.4f})")
 
         # Compare GoodhartAware loss to baseline
         if 'GoodhartAware' in rob_res and 'CrossEntropy' in rob_res:
@@ -984,7 +1000,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             color_diff = ce_metrics['color_dependency'] - gal_metrics['color_dependency']
             gap_diff = ce_metrics['generalization_gap'] - gal_metrics['generalization_gap']
 
-            logger.info("📊 GoodhartAware vs. CrossEntropy:")
+            logger.info("GoodhartAware vs. CrossEntropy:")
             logger.info(f"   Test Accuracy Improvement:      {acc_diff:+.4f}")
             logger.info(f"   Color Dependency Reduction:     {color_diff:+.4f}")
             logger.info(f"   Generalization Gap Reduction:   {gap_diff:+.4f}")
@@ -993,17 +1009,17 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             positive_indicators = sum([acc_diff > 0.01, color_diff > 0.05, gap_diff > 0.05])
 
             if positive_indicators >= 3:
-                logger.info("   VERDICT: 🎉 Strong support for Goodhart-Aware loss effectiveness!")
-                logger.info("             The model successfully resists spurious correlations.")
+                logger.info("   VERDICT: Strong support for Goodhart-Aware loss effectiveness!")
+                logger.info("            The model successfully resists spurious correlations.")
             elif positive_indicators >= 2:
-                logger.info("   VERDICT: ✅ Positive evidence for Goodhart-Aware loss benefits.")
-                logger.info("             Some improvement in robustness to spurious features.")
+                logger.info("   VERDICT: Positive evidence for Goodhart-Aware loss benefits.")
+                logger.info("            Some improvement in robustness to spurious features.")
             elif positive_indicators >= 1:
-                logger.info("   VERDICT: 🔶 Mixed results - some benefits observed.")
-                logger.info("             Consider tuning hyperparameters for this task.")
+                logger.info("   VERDICT: Mixed results - some benefits observed.")
+                logger.info("            Consider tuning hyperparameters for this task.")
             else:
-                logger.info("   VERDICT: ➖ Limited benefit observed in this configuration.")
-                logger.info("             May need different hyperparameters or architecture.")
+                logger.info("   VERDICT: Limited benefit observed in this configuration.")
+                logger.info("            May need different hyperparameters or architecture.")
 
     logger.info("=" * 80)
 
@@ -1019,14 +1035,14 @@ def main() -> None:
     This function serves as the entry point for the experiment, handling
     configuration setup, experiment execution, and error handling.
     """
-    logger.info("🚀 Colored MNIST Spurious Correlation Experiment")
+    logger.info("Colored MNIST Spurious Correlation Experiment")
     logger.info("=" * 80)
 
     # Initialize experiment configuration
     config = ExperimentConfig()
 
     # Log key configuration parameters
-    logger.info("⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"   Loss Functions: {list(config.loss_functions.keys())}")
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
     logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
@@ -1039,10 +1055,10 @@ def main() -> None:
     try:
         # Run the complete experiment
         _ = run_experiment(config)
-        logger.info("✅ Experiment completed successfully!")
+        logger.info("Experiment completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Experiment failed with error: {e}", exc_info=True)
+        logger.error(f"Experiment failed with error: {e}", exc_info=True)
         raise
 
 
