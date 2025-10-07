@@ -98,7 +98,6 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.layers.hierarchical_routing import HierarchicalRoutingLayer
 
-# Visualization imports
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
@@ -107,7 +106,6 @@ from dl_techniques.visualization import (
     ConfusionMatrixVisualization
 )
 
-# Analysis imports
 from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
@@ -211,7 +209,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 5
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -467,18 +465,34 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.error(f"Model analysis failed: {e}", exc_info=True)
 
     logger.info("Generating training history and confusion matrix plots...")
-    training_histories = {
-        name: TrainingHistory.from_keras_history(hist)
-        for name, hist in all_histories.items()
-    }
+    # Convert training histories to TrainingHistory objects
+    training_histories = {}
+    for name, hist_dict in all_histories.items():
+        if len(hist_dict.get('loss', [])) > 0:
+            training_histories[name] = TrainingHistory(
+                epochs=list(range(len(hist_dict['loss']))),
+                train_loss=hist_dict['loss'],
+                val_loss=hist_dict.get('val_loss', []),
+                train_metrics={
+                    'accuracy': hist_dict.get('accuracy', [])
+                },
+                val_metrics={
+                    'accuracy': hist_dict.get('val_accuracy', [])
+                }
+            )
 
+    # Plot training history comparison
     if training_histories:
-        vis_manager.visualize(
-            data=training_histories,
-            plugin_name="training_curves",
-            metrics_to_plot=['accuracy', 'loss'],
-            show=False
-        )
+        try:
+            vis_manager.visualize(
+                data=training_histories,
+                plugin_name="training_curves",
+                metrics_to_plot=['accuracy', 'loss'],
+                show=False
+            )
+            logger.info("Training history visualization created")
+        except Exception as e:
+            logger.error(f"Failed to create training history visualization: {e}")
 
     y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
     for model_name, model in trained_models.items():
