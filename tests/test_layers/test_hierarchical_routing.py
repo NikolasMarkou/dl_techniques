@@ -5,101 +5,11 @@ import keras
 import os
 import tempfile
 
-
-import math
-from keras import ops
-from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.layers.hierarchical_routing import HierarchicalRoutingLayer
 
-
-@keras.saving.register_keras_serializable()
-class HierarchicalRoutingLayer(keras.layers.Layer):
-    def __init__(
-            self,
-            output_dim: int,
-            epsilon: float = 1e-7,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            use_bias: bool = False,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-        if not isinstance(output_dim, int) or output_dim <= 1:
-            raise ValueError(
-                f"The 'output_dim' must be an integer greater than 1, "
-                f"but received: {output_dim}"
-            )
-        self.output_dim = output_dim
-        self.epsilon = epsilon
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.use_bias = use_bias
-        self.padded_output_dim = 1 << (output_dim - 1).bit_length()
-        self.num_decisions = int(math.log2(self.padded_output_dim))
-
-        self.decision_dense = keras.layers.Dense(
-            units=self.num_decisions,
-            use_bias=self.use_bias,
-            activation='sigmoid',
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='decision_dense'
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        self.decision_dense.build(input_shape)
-        super().build(input_shape)
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        decision_probs = self.decision_dense(inputs, training=training)
-        batch_size = ops.shape(inputs)[0]
-        padded_probs = ops.ones((batch_size, 1), dtype=self.compute_dtype)
-        for i in range(self.num_decisions):
-            p_go_right = decision_probs[:, i:i + 1]
-            p_go_left = 1.0 - p_go_right
-            probs_for_left_branches = padded_probs * p_go_left
-            probs_for_right_branches = padded_probs * p_go_right
-            combined = ops.stack(
-                [probs_for_left_branches, probs_for_right_branches], axis=2
-            )
-            padded_probs = ops.reshape(combined, (batch_size, 2 ** (i + 1)))
-        if self.output_dim == self.padded_output_dim:
-            return padded_probs
-        else:
-            unnormalized_probs = padded_probs[:, :self.output_dim]
-            prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
-            final_probs = unnormalized_probs / (prob_sum + self.epsilon)
-            return final_probs
-
-    def compute_output_shape(
-            self,
-            input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        output_shape = list(input_shape)
-        output_shape[-1] = self.output_dim
-        return tuple(output_shape)
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            'output_dim': self.output_dim,
-            'epsilon': self.epsilon,
-            'use_bias': self.use_bias,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
-
-# --- End of Layer Definition ---
+# ==============================================================================
+# Test Suite
+# ==============================================================================
 
 
 class TestHierarchicalRoutingLayer:
@@ -182,41 +92,67 @@ class TestHierarchicalRoutingLayer:
         """Test the core probability routing logic with deterministic weights."""
         input_dim = 2
         output_dim = 6  # Non-power-of-2, padded to 8 (3 decisions)
+        epsilon = 1e-7
 
-        layer = HierarchicalRoutingLayer(output_dim=output_dim, use_bias=True)
-        inputs = tf.ones((1, input_dim))  # Simple input
+        layer = HierarchicalRoutingLayer(output_dim=output_dim, use_bias=True, epsilon=epsilon)
+        inputs = tf.ones((1, input_dim))
 
-        # Build layer to create weights
-        layer(inputs)
+        layer(inputs)  # Build layer
 
         # Manually set weights for predictable sigmoid outputs
-        # We want sigmoid outputs of [1.0, 0.0, 0.5]
-        # To get sigmoid(x) -> 1, x must be large positive (e.g., 20)
-        # To get sigmoid(x) -> 0, x must be large negative (e.g., -20)
-        # To get sigmoid(x) -> 0.5, x must be 0
+        # We want sigmoid outputs of [~1.0, ~0.0, 0.5] which will be clipped
         kernel = np.zeros((input_dim, layer.num_decisions), dtype=np.float32)
-        bias = np.array([20.0, -20.0, 0.0], dtype=np.float32)
+        bias = np.array([100.0, -100.0, 0.0], dtype=np.float32)  # Extreme values
         layer.decision_dense.set_weights([kernel, bias])
 
-        # Expected decision probabilities: d1=1.0, d2=0.0, d3=0.5
-        # Expected padded probabilities (for 8 leaves):
-        # Leaf 0 (000): (1-d1)(1-d2)(1-d3) = 0 * 1 * 0.5 = 0
-        # Leaf 1 (001): (1-d1)(1-d2)(d3)   = 0 * 1 * 0.5 = 0
-        # Leaf 2 (010): (1-d1)(d2)(1-d3)   = 0 * 0 * 0.5 = 0
-        # Leaf 3 (011): (1-d1)(d2)(d3)     = 0 * 0 * 0.5 = 0
-        # Leaf 4 (100): (d1)(1-d2)(1-d3)   = 1 * 1 * 0.5 = 0.5
-        # Leaf 5 (101): (d1)(1-d2)(d3)     = 1 * 1 * 0.5 = 0.5
-        # Leaf 6 (110): (d1)(d2)(1-d3)     = 1 * 0 * 0.5 = 0
-        # Leaf 7 (111): (d1)(d2)(d3)       = 1 * 0 * 0.5 = 0
-        expected_padded = np.array([0, 0, 0, 0, 0.5, 0.5, 0, 0])
+        # Expected decision probabilities after clipping:
+        d1 = 1.0 - epsilon
+        d2 = epsilon
+        d3 = 0.5
 
-        # The layer slices this to output_dim=6
-        unnormalized = expected_padded[:6]  # [0, 0, 0, 0, 0.5, 0.5]
-        # The sum is 1.0, so renormalization doesn't change it.
-        expected_final = unnormalized
+        # Expected padded probabilities (for 8 leaves):
+        # Leaf 0 (000): (1-d1)(1-d2)(1-d3) = eps * (1-eps) * 0.5
+        # Leaf 1 (001): (1-d1)(1-d2)(d3)   = eps * (1-eps) * 0.5
+        # Leaf 2 (010): (1-d1)(d2)(1-d3)   = eps * eps * 0.5
+        # Leaf 3 (011): (1-d1)(d2)(d3)     = eps * eps * 0.5
+        # Leaf 4 (100): (d1)(1-d2)(1-d3)   = (1-eps) * (1-eps) * 0.5
+        # Leaf 5 (101): (d1)(1-d2)(d3)     = (1-eps) * (1-eps) * 0.5
+        # Leaf 6 (110): (d1)(d2)(1-d3)     = (1-eps) * eps * 0.5
+        # Leaf 7 (111): (d1)(d2)(d3)       = (1-eps) * eps * 0.5
+        expected_padded = np.array([
+            (epsilon) * (1 - epsilon) * 0.5,
+            (epsilon) * (1 - epsilon) * 0.5,
+            (epsilon) * (epsilon) * 0.5,
+            (epsilon) * (epsilon) * 0.5,
+            (1 - epsilon) * (1 - epsilon) * 0.5,
+            (1 - epsilon) * (1 - epsilon) * 0.5,
+            (1 - epsilon) * (epsilon) * 0.5,
+            (1 - epsilon) * (epsilon) * 0.5,
+        ])
+
+        unnormalized = expected_padded[:output_dim]
+        prob_sum = np.sum(unnormalized)
+        expected_final = unnormalized / prob_sum
 
         output = layer(inputs).numpy().flatten()
         assert np.allclose(output, expected_final, atol=1e-6)
+
+    def test_stability_with_extreme_inputs(self):
+        """Test that the layer does not produce exact zeros, preventing NaN loss."""
+        layer = HierarchicalRoutingLayer(output_dim=10, use_bias=True)
+        inputs = tf.ones((1, 2))
+        layer(inputs)  # Build
+
+        # Set weights to produce extreme logits for the sigmoid
+        kernel = np.zeros((2, layer.num_decisions), dtype=np.float32)
+        bias = np.array([-100.0, 100.0, -100.0, 100.0], dtype=np.float32)
+        layer.decision_dense.set_weights([kernel, bias])
+
+        output_probs = layer(inputs).numpy().flatten()
+
+        # The key check: no probability should be exactly zero
+        assert np.all(output_probs > 0), "Output contains zero probabilities"
+        assert not np.any(np.isnan(output_probs)), "Output contains NaN values"
 
     def test_serialization(self):
         """Test serialization and deserialization of the layer."""
@@ -232,7 +168,7 @@ class TestHierarchicalRoutingLayer:
         assert recreated_layer.name == original_layer.name
         assert recreated_layer.output_dim == original_layer.output_dim
         assert recreated_layer.epsilon == original_layer.epsilon
-        assert recreated_layer.padded_output_dim == 2 ** 4
+        assert recreated_layer.padded_output_dim == 16
 
     def test_model_save_load(self, input_tensor, output_dim):
         """Test saving and loading a model with the HierarchicalRoutingLayer."""
@@ -247,10 +183,7 @@ class TestHierarchicalRoutingLayer:
             model_path = os.path.join(tmpdirname, "model.keras")
             model.save(model_path)
 
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={"HierarchicalRoutingLayer": HierarchicalRoutingLayer}
-            )
+            loaded_model = keras.models.load_model(model_path)
 
             loaded_prediction = loaded_model.predict(input_tensor)
 
@@ -264,7 +197,6 @@ class TestHierarchicalRoutingLayer:
         with tf.GradientTape() as tape:
             tape.watch(input_tensor)
             outputs = layer(input_tensor)
-            # Use a simple loss that depends on all outputs
             loss = tf.reduce_mean(tf.square(outputs))
 
         grads = tape.gradient(loss, layer.trainable_weights)
@@ -272,7 +204,8 @@ class TestHierarchicalRoutingLayer:
         assert len(grads) > 0, "No gradients were computed."
         for grad in grads:
             assert grad is not None, "A gradient is None."
-            assert np.any(grad.numpy() != 0), "Gradients are all zero."
+            # The gradient might be very small, but shouldn't be exactly zero everywhere
+            assert not np.all(grad.numpy() == 0), "Gradients are all zero."
 
     def test_training_loop(self):
         """Test that the layer can be used in a training loop."""
@@ -284,27 +217,19 @@ class TestHierarchicalRoutingLayer:
             HierarchicalRoutingLayer(output_dim=output_dim)
         ])
 
-        # Since the layer outputs probabilities, CategoricalCrossentropy is a suitable loss
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=0.01),
             loss=keras.losses.CategoricalCrossentropy(),
             metrics=['accuracy']
         )
 
-        # Create mock data
         x_train = tf.random.normal([batch_size, input_dim])
-        # Labels must be one-hot encoded for CategoricalCrossentropy
         y_train_indices = tf.random.uniform([batch_size], 0, output_dim, dtype=tf.int32)
         y_train = tf.one_hot(y_train_indices, depth=output_dim)
 
-        # Get initial loss
         initial_loss = model.evaluate(x_train, y_train, verbose=0)[0]
-
-        # Train for a few steps
         model.fit(x_train, y_train, epochs=3, batch_size=4, verbose=0)
-
-        # Get final loss
         final_loss = model.evaluate(x_train, y_train, verbose=0)[0]
 
-        # Loss should decrease as the model learns
         assert final_loss < initial_loss
+        assert not np.isnan(final_loss), "Loss became NaN during training"
