@@ -1,20 +1,3 @@
-# test_model.py
-
-"""
-Comprehensive Tests for the Tiny Recursive Model (TRM).
-
-This module provides comprehensive tests for the TRM, including:
-- Basic functionality tests for the core recursive step.
-- State management and multi-step loop simulation.
-- Configuration variants for reasoning cycles and halting logic.
-- Serialization/deserialization of the entire composite model.
-- Integration tests simulating an end-to-end training step.
-- Verification of key architectural behaviors like state reset.
-
-All tests use small model configurations to keep memory usage low and
-ensure fast execution in CI/CD environments.
-"""
-
 import pytest
 import numpy as np
 import tempfile
