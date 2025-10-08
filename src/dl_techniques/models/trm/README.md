@@ -76,7 +76,7 @@ Here is a conceptual example of how to use the model in a custom training loop:
 ```python
 import tensorflow as tf
 import keras
-from model import TinyRecursiveReasoningModel
+from dl_techniques.models.trm.model import TinyRecursiveReasoningModel
 
 # 1. Define model configuration
 config = {
