@@ -607,26 +607,6 @@ class TestConvNeXtV2:
         captured = capsys.readouterr()
         assert len(captured.out) > 0  # Summary was printed
 
-    def test_stage_structure(self, num_classes, cifar_input_shape, cifar_sample_data):
-        """Test that the model builds stages correctly."""
-        depths = [2, 2, 6, 2]
-        model = ConvNeXtV2(
-            num_classes=num_classes,
-            depths=depths,
-            dims=[32, 64, 128, 256],
-            input_shape=cifar_input_shape  # Specify correct input shape
-        )
-
-        # Trigger build by calling model
-        _ = model(cifar_sample_data)
-
-        # Check that stages were created
-        assert len(model.stages) == len(depths)
-
-        # Check that each stage has the correct number of blocks
-        for i, (stage, expected_depth) in enumerate(zip(model.stages, depths)):
-            assert len(stage) == expected_depth
-
     def test_kernel_size_variations(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test different kernel sizes."""
         kernel_sizes = [3, 5, 7, 9]

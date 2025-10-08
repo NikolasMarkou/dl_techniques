@@ -344,6 +344,20 @@ class ConvNeXtV2(keras.Model):
         else:
             self.classifier = None
 
+    def build(self, input_shape):
+        """Builds the model and its layers."""
+
+        super().build(input_shape)
+        # The summary() method might call build with a 3D shape (without batch dim).
+        # We add a dummy batch dimension if that's the case to ensure layers build correctly.
+        if len(input_shape) == 3:
+            build_shape = (None,) + tuple(input_shape)
+        else:
+            build_shape = input_shape
+        # A dummy forward pass with a KerasTensor will correctly build all sub-layers.
+        dummy_input = keras.KerasTensor(build_shape)
+        _ = self.call(dummy_input)
+
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Defines the forward pass of the model.
 

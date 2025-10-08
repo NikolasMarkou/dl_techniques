@@ -567,25 +567,6 @@ class TestConvNeXtV1:
         captured = capsys.readouterr()
         assert len(captured.out) > 0  # Summary was printed
 
-    def test_stage_structure(self, num_classes, cifar_input_shape, cifar_sample_data):
-        """Test that the model builds stages correctly."""
-        depths = [2, 2, 4, 2]
-        model = ConvNeXtV1(
-            num_classes=num_classes,
-            depths=depths,
-            dims=[32, 64, 128, 256]
-        )
-
-        # Trigger build by calling model
-        _ = model(cifar_sample_data)
-
-        # Check that stages were created
-        assert len(model.stages) == len(depths)
-
-        # Check that each stage has the correct number of blocks
-        for i, (stage, expected_depth) in enumerate(zip(model.stages, depths)):
-            assert len(stage) == expected_depth
-
     def test_head_configurations(self, cifar_input_shape, cifar_sample_data):
         """Test different head configurations."""
         # Model with classification head

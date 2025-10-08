@@ -153,7 +153,7 @@ class ConvNeXtV1(keras.Model):
             spatial_dropout_rate: float = 0.0,
             strides: int = 4,
             use_gamma: bool = True,
-            use_softorthonormal_regularizer: bool = True,
+            use_softorthonormal_regularizer: bool = False,
             include_top: bool = True,
             input_shape: Tuple[int, ...] = (None, None, 3),
             **kwargs
@@ -325,6 +325,21 @@ class ConvNeXtV1(keras.Model):
             )
         else:
             self.classifier = None
+
+
+    def build(self, input_shape):
+        """Builds the model and its layers."""
+
+        super().build(input_shape)
+        # The summary() method might call build with a 3D shape (without batch dim).
+        # We add a dummy batch dimension if that's the case to ensure layers build correctly.
+        if len(input_shape) == 3:
+            build_shape = (None,) + tuple(input_shape)
+        else:
+            build_shape = input_shape
+        # A dummy forward pass with a KerasTensor will correctly build all sub-layers.
+        dummy_input = keras.KerasTensor(build_shape)
+        _ = self.call(dummy_input)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Defines the forward pass of the model.
