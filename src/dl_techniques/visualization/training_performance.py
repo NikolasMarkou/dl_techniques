@@ -430,21 +430,39 @@ class ConvergenceAnalysis(CompositeVisualization):
         self.add_subplot("Validation Gap", self._plot_validation_gap)
         self.add_subplot("Convergence Rate", self._plot_convergence_rate)
 
+    def _normalize_histories(self, data: Any) -> Dict[str, Dict]:
+        """
+        Standardize input data into a dictionary of history dictionaries.
+        This handles TrainingHistory objects, single history dicts from the callback,
+        and multi-model dicts.
+        """
+        if isinstance(data, TrainingHistory):
+            # Convert a single TrainingHistory object to the standard format
+            return {"Model": data.__dict__}
+        if isinstance(data, dict) and 'epochs' in data:
+            # This is the primary case from the callback: a single history dict
+            return {"Model": data}
+
+        # Handle dict of TrainingHistory objects
+        normalized_data = {}
+        for name, hist_obj in data.items():
+            if isinstance(hist_obj, TrainingHistory):
+                normalized_data[name] = hist_obj.__dict__
+            else:
+                normalized_data[name] = hist_obj  # Assume it's already a dict
+        return normalized_data
+
     def _plot_loss_convergence(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot loss convergence patterns."""
-        if isinstance(data, TrainingHistory):
-            histories = {"Model": data}
-        else:
-            histories = data
+        histories = self._normalize_histories(data)
 
         for idx, (name, hist) in enumerate(histories.items()):
             color = self.config.color_scheme.get_model_color(name, idx)
 
-            # Plot with log scale
-            ax.semilogy(hist.epochs[:len(hist.train_loss)], hist.train_loss,
+            ax.semilogy(hist['epochs'], hist['train_loss'],
                         label=f"{name} (train)", color=color, alpha=0.7)
-            if hist.val_loss:
-                ax.semilogy(hist.epochs[:len(hist.val_loss)], hist.val_loss,
+            if hist.get('val_loss'):
+                ax.semilogy(hist['epochs'][:len(hist['val_loss'])], hist['val_loss'],
                             label=f"{name} (val)", color=color, linestyle='--')
 
         ax.set_xlabel('Epoch')
@@ -454,25 +472,19 @@ class ConvergenceAnalysis(CompositeVisualization):
 
     def _plot_gradient_flow(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot gradient flow magnitude over time."""
-        if isinstance(data, TrainingHistory):
-            histories = {"Model": data}
-        else:
-            histories = data
-
+        histories = self._normalize_histories(data)
         plotted_anything = False
-        # The key we expect in the grad_norms dictionary.
-        # This could be made a parameter in the future for more flexibility.
-        grad_metric_name = "global_grad_norm"
 
         for idx, (name, hist) in enumerate(histories.items()):
-            # Check if gradient data is available for this history
-            if hist.grad_norms and grad_metric_name in hist.grad_norms:
-                grad_data = hist.grad_norms[grad_metric_name]
-                if grad_data:  # Ensure the list is not empty
-                    color = self.config.color_scheme.get_model_color(name, idx)
-                    ax.plot(hist.epochs[:len(grad_data)], grad_data,
-                            label=name, color=color, linewidth=2)
-                    plotted_anything = True
+            if hist.get('grad_norms') and hist['grad_norms']:
+                grad_data = hist['grad_norms']
+                # Align epochs with potentially fewer grad_norm data points
+                epochs_for_grads = hist['epochs'][-len(grad_data):]
+
+                color = self.config.color_scheme.get_model_color(name, idx)
+                ax.plot(epochs_for_grads, grad_data,
+                        label=name, color=color, linewidth=2)
+                plotted_anything = True
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Global Gradient Norm (L2)')
@@ -482,27 +494,27 @@ class ConvergenceAnalysis(CompositeVisualization):
         if plotted_anything:
             ax.legend(fontsize=8)
         else:
-            # Provide an informative message if no data was found
             ax.text(0.5, 0.5,
-                    f'Gradient Flow\n(Requires "{grad_metric_name}" in TrainingHistory.grad_norms)',
+                    'Gradient Flow\n(No gradient data found)',
                     ha='center', va='center', transform=ax.transAxes,
                     fontsize=9, color='gray')
 
     def _plot_validation_gap(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot gap between training and validation loss."""
-        if isinstance(data, TrainingHistory):
-            histories = {"Model": data}
-        else:
-            histories = data
+        histories = self._normalize_histories(data)
 
         for idx, (name, hist) in enumerate(histories.items()):
-            if hist.val_loss:
+            if hist.get('val_loss'):
                 color = self.config.color_scheme.get_model_color(name, idx)
-                gap = np.array(hist.val_loss) - np.array(hist.train_loss[:len(hist.val_loss)])
-                ax.plot(hist.epochs[:len(gap)], gap, label=name, color=color, linewidth=2)
-                ax.fill_between(hist.epochs[:len(gap)], 0, gap,
-                                where=(gap > 0), alpha=0.3, color=color,
-                                label='Overfitting' if idx == 0 else '')
+
+                # Ensure arrays are same length before subtraction
+                val_len = len(hist['val_loss'])
+                gap = np.array(hist['val_loss']) - np.array(hist['train_loss'][:val_len])
+                epochs = hist['epochs'][:val_len]
+
+                ax.plot(epochs, gap, label=name, color=color, linewidth=2)
+                ax.fill_between(epochs, 0, gap,
+                                where=(gap > 0), alpha=0.3, color=color)
 
         ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
         ax.set_xlabel('Epoch')
@@ -512,26 +524,21 @@ class ConvergenceAnalysis(CompositeVisualization):
 
     def _plot_convergence_rate(self, ax: plt.Axes, data: Any, **kwargs):
         """Plot convergence rate (loss reduction per epoch)."""
-        if isinstance(data, TrainingHistory):
-            histories = {"Model": data}
-        else:
-            histories = data
+        histories = self._normalize_histories(data)
 
         for idx, (name, hist) in enumerate(histories.items()):
             color = self.config.color_scheme.get_model_color(name, idx)
 
-            # Calculate rate of change
-            loss_diff = np.diff(hist.train_loss)
-            rate = -loss_diff  # Negative because loss should decrease
-
-            ax.plot(hist.epochs[1:len(rate) + 1], rate,
-                    label=name, color=color, alpha=0.7)
+            if len(hist['train_loss']) > 1:
+                loss_diff = np.diff(hist['train_loss'])
+                rate = -loss_diff  # Negative because loss should decrease
+                epochs = hist['epochs'][1:len(rate) + 1]
+                ax.plot(epochs, rate, label=name, color=color, alpha=0.7)
 
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss Reduction Rate')
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-
 
 # ---------------------------------------------------------------------
 # Overfitting Detection Template

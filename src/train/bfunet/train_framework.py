@@ -3,8 +3,8 @@ import keras
 import argparse
 import numpy as np
 import tensorflow as tf
-import matplotlib.pyplot as plt
 from pathlib import Path
+import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
@@ -12,10 +12,15 @@ from dl_techniques.optimization.train_vision import (
     TrainingConfig,
     DatasetBuilder,
     TrainingPipeline,
-    ModelBuilder,
+    ModelBuilder
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.optimization import deep_supervision_schedule_builder
+from dl_techniques.optimization import (
+    deep_supervision_schedule_builder,
+    learning_rate_schedule_builder,
+    optimizer_builder
+)
+
 from dl_techniques.models.bias_free_denoisers.bfunet import (
     create_bfunet_denoiser,
     BFUNET_CONFIGS,
@@ -118,6 +123,12 @@ class BFUNetConfig(TrainingConfig):
     # Monitoring
     monitor_every_n_epochs: int = 2
     save_training_images: bool = True
+    monitor_metric: str = 'val_final_output_primary_psnr'
+    monitor_mode: str = 'max'
+
+    visualization_frequency: int = 1
+    enable_gradient_tracking: bool = True
+    enable_gradient_topology_viz: bool = True
 
     def __post_init__(self):
         """Initialize and validate configuration."""
@@ -799,10 +810,12 @@ class BFUNetTrainingPipeline(TrainingPipeline):
     def _create_callbacks(
             self,
             lr_schedule: Optional[Any] = None,
-            custom_callbacks: Optional[List[keras.callbacks.Callback]] = None
+            custom_callbacks: Optional[List[keras.callbacks.Callback]] = None,
+            train_ds: Optional[tf.data.Dataset] = None
     ) -> List[keras.callbacks.Callback]:
         """Create callbacks with deep supervision support."""
-        callbacks = super()._create_callbacks(lr_schedule, custom_callbacks)
+        callbacks = super()._create_callbacks(
+            lr_schedule, custom_callbacks, train_ds)
 
         # Add deep supervision scheduler
         if self.config.enable_deep_supervision and self.num_outputs > 1:
@@ -831,6 +844,54 @@ class BFUNetTrainingPipeline(TrainingPipeline):
                 logger.warning(f"Could not add denoising visualization: {e}")
 
         return callbacks
+
+    def _create_lr_schedule(self, total_steps: int) -> Any:
+        """Creates the learning rate schedule from the configuration."""
+        decay_steps = self.config.decay_steps
+
+        if decay_steps is None:
+            decay_steps = total_steps - self.config.warmup_steps
+
+
+        if decay_steps <= 0:
+            logger.warning(
+                f"Calculated decay_steps is non-positive ({decay_steps}) because warmup_steps "
+                f"({self.config.warmup_steps}) >= total_steps ({total_steps}). Setting decay_steps to 1."
+            )
+            decay_steps = 1
+
+        # Collect all possible schedule parameters from the config
+        schedule_config = {
+            'type': self.config.lr_schedule_type,
+            'learning_rate': self.config.learning_rate,
+            'warmup_steps': self.config.warmup_steps,
+            'warmup_start_lr': self.config.warmup_start_lr,
+            'decay_steps': decay_steps,
+            'alpha': self.config.alpha,
+            'decay_rate': getattr(self.config, 'decay_rate', None),
+            't_mul': getattr(self.config, 't_mul', None),
+            'm_mul': getattr(self.config, 'm_mul', None),
+        }
+
+        return learning_rate_schedule_builder(schedule_config)
+
+
+    def _create_optimizer(self, lr_schedule: Any) -> keras.optimizers.Optimizer:
+        """Creates the optimizer from the configuration."""
+
+        # Collect all possible optimizer parameters from the config
+        optimizer_config = {
+            'type': self.config.optimizer_type,
+            'weight_decay': self.config.weight_decay,
+            'beta_1': self.config.beta_1,
+            'beta_2': self.config.beta_2,
+            'epsilon': getattr(self.config, 'epsilon', 1e-7),
+            'gradient_clipping_by_norm': self.config.gradient_clipping_norm_global,
+            'gradient_clipping_by_local_norm': getattr(self.config, 'gradient_clipping_norm_local', None),
+            'gradient_clipping_by_value': getattr(self.config, 'gradient_clipping_value', None),
+        }
+
+        return optimizer_builder(optimizer_config, lr_schedule=lr_schedule)
 
     def run(
             self,
@@ -946,7 +1007,13 @@ def create_bfunet_argument_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--model-variant', type=str, default='tiny')
+    parser.add_argument(
+        '--model-variant',
+        choices=['tiny', 'small', 'base', 'large', 'xlarge', 'custom'],
+        default='tiny',
+        help='Model architecture variant'
+    )
+
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--patch-size', type=int, default=128)
@@ -977,15 +1044,15 @@ def main():
     config = BFUNetConfig(
         # Data paths - MODIFY FOR YOUR SETUP
         train_image_dirs=[
-            '/media/arxwn/data0_4tb/datasets/Megadepth',
+            #'/media/arxwn/data0_4tb/datasets/Megadepth',
             '/media/arxwn/data0_4tb/datasets/div2k/train',
-            '/media/arxwn/data0_4tb/datasets/WFLW/images',
-            '/media/arxwn/data0_4tb/datasets/bdd_data/train',
-            '/media/arxwn/data0_4tb/datasets/COCO/train2017'
+            #'/media/arxwn/data0_4tb/datasets/WFLW/images',
+            #'/media/arxwn/data0_4tb/datasets/bdd_data/train',
+            #'/media/arxwn/data0_4tb/datasets/COCO/train2017'
         ],
         val_image_dirs=[
             '/media/arxwn/data0_4tb/datasets/div2k/validation',
-            '/media/arxwn/data0_4tb/datasets/COCO/val2017',
+            #'/media/arxwn/data0_4tb/datasets/COCO/val2017',
         ],
 
         # Model
@@ -1010,7 +1077,7 @@ def main():
         # Optimization
         learning_rate=1e-3,
         optimizer_type='adamw',
-        lr_schedule_type='cosine',
+        lr_schedule_type='cosine_decay',
         weight_decay=1e-5,
 
         # Output
@@ -1018,6 +1085,8 @@ def main():
         experiment_name=args.experiment_name,
         enable_visualization=True,
         enable_analysis=False,
+
+        enable_gradient_tracking=True
     )
 
     logger.info("=== BFU-Net Training Configuration ===")

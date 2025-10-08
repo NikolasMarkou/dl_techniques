@@ -8,8 +8,8 @@ including point forecasts, prediction intervals, and model performance.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
-from typing import List, Optional, Any, Union
+from dataclasses import dataclass
+from typing import List, Optional, Any
 
 # ---------------------------------------------------------------------
 # local imports

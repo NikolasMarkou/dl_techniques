@@ -54,6 +54,7 @@ from dl_techniques.visualization import (
     FeatureMapVisualization,
     GradientVisualization,
     GradientTopologyVisualization,
+    GradientTopologyData
 )
 from dl_techniques.analyzer import (
     ModelAnalyzer,
@@ -198,6 +199,7 @@ class TrainingConfig:
     enable_convergence_analysis: bool = True
     enable_overfitting_analysis: bool = True
     enable_gradient_tracking: bool = False
+    enable_gradient_topology_viz: bool = False
     enable_classification_viz: bool = True
     create_final_dashboard: bool = True
 
@@ -413,7 +415,6 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
             frequency: int = 10,
             lr_schedule: Optional[Any] = None,
             track_gradients: bool = False,
-            # CHANGED: Added sample_batch to init for gradient computation.
             sample_batch: Optional[Tuple[tf.Tensor, tf.Tensor]] = None
     ):
         """
@@ -444,6 +445,7 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
             'learning_rates': [],
             'grad_norms': []
         }
+        self.last_raw_gradients: Optional[List[tf.Tensor]] = None
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None):
         """
@@ -485,50 +487,48 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
         # Collect gradient norms if enabled
         if self.track_gradients:
             try:
-                grad_norm = self._compute_gradient_norm()
+                grad_norm, raw_gradients = self._compute_gradients()
                 if grad_norm is not None:
                     self.history_data['grad_norms'].append(grad_norm)
+                # Store the raw gradients for use in _create_visualizations
+                self.last_raw_gradients = raw_gradients
             except Exception as e:
-                logger.warning(f"Failed to compute gradient norm: {e}")
+                logger.warning(f"Failed to compute gradients: {e}")
 
         # Create visualizations at specified frequency
         if (epoch + 1) % self.frequency == 0:
             self._create_visualizations()
 
-    # IMPLEMENTED: Replaced placeholder with a full implementation.
-    def _compute_gradient_norm(self) -> Optional[float]:
+    def _compute_gradients(self) -> Tuple[Optional[float], Optional[List[tf.Tensor]]]:
         """
-        Compute the global gradient norm for the current model state.
-
-        Uses a pre-fetched sample batch to calculate the gradients of the
-        model's loss with respect to its trainable variables.
-
-        Returns:
-            Global gradient norm as a float, or None if computation fails.
+        Compute the global gradient norm and return the raw gradients.
         """
         if not self.track_gradients or self.sample_batch is None:
-            return None
+            return None, None
 
         try:
             x, y_true = self.sample_batch
 
             with tf.GradientTape() as tape:
-                # Forward pass
                 y_pred = self.model(x, training=False)
-                # Compute loss. Assumes the model has a compiled loss function.
-                loss = self.model.compiled_loss(y_true, y_pred)
+                loss = self.model.compute_loss(x=x, y=y_true, y_pred=y_pred)
 
-            # Compute gradients
+            # Compute gradients of the total loss w.r.t. the variables
             gradients = tape.gradient(loss, self.model.trainable_variables)
 
-            # Compute global L2 norm
-            global_norm = tf.linalg.global_norm(gradients)
+            # Filter out potential None gradients for unconnected layers
+            valid_gradients = [g for g in gradients if g is not None]
+            if not valid_gradients:
+                logger.warning("All computed gradients were None. Check model connectivity and loss function.")
+                return None, None
 
-            return float(global_norm.numpy())
+            global_norm = tf.linalg.global_norm(valid_gradients)
+
+            return float(global_norm.numpy()), gradients
 
         except Exception as e:
-            logger.warning(f"Could not compute gradient norm: {e}")
-            return None
+            logger.warning(f"Could not compute gradients: {e}", exc_info=True)
+            return None, None
 
     def _create_visualizations(self):
         """Create and save current visualizations."""
@@ -558,7 +558,7 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
                 )
 
             # Create convergence analysis if enabled
-            if self.config.enable_convergence_analysis and len(self.history_data['epochs']) > 10:
+            if self.config.enable_convergence_analysis:
                 try:
                     # Add grad_norms to history if available
                     history_dict = {
@@ -579,8 +579,24 @@ class EnhancedVisualizationCallback(keras.callbacks.Callback):
                 except Exception as e:
                     logger.warning(f"Failed to create convergence analysis: {e}")
 
+            if self.config.enable_gradient_topology_viz and self.last_raw_gradients:
+                logger.info("Creating gradient topology visualization...")
+                try:
+                    topo_data = GradientTopologyData(
+                        model=self.model,
+                        gradients=self.last_raw_gradients,
+                        model_name=self.config.experiment_name
+                    )
+                    self.viz_manager.visualize(
+                        data=topo_data,
+                        plugin_name='gradient_topology',
+                        show=False
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create gradient topology visualization: {e}")
+
             # Create overfitting analysis if enabled
-            if self.config.enable_overfitting_analysis and len(self.history_data['epochs']) > 10:
+            if self.config.enable_overfitting_analysis:
                 try:
                     self.viz_manager.visualize(
                         data=history,

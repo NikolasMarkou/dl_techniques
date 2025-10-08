@@ -5,7 +5,7 @@ from .framework import (
     ModelBuilder,
     DataInput,
     create_argument_parser,
-    config_from_args
+    config_from_args,
 )
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     DatasetBuilder,
     ModelBuilder,
     create_argument_parser,
-    config_from_args
+    config_from_args,
 ]
