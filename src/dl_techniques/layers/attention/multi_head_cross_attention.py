@@ -1,5 +1,5 @@
 """
-Implements a unified multi-head attention with adaptive temperature.
+A unified multi-head attention with adaptive temperature.
 
 This layer provides a versatile implementation of multi-head attention that
 can operate in both self-attention and cross-attention modes. It extends
