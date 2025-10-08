@@ -1,4 +1,5 @@
-"""Implement a Transformer encoder layer for joint patch-query processing.
+"""
+A Transformer encoder layer for joint patch-query processing.
 
 This layer forms the core computational block of the Encoder-only Mask
 Transformer (EoMT). It adapts the standard Vision Transformer (ViT) encoder

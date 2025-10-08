@@ -1,4 +1,5 @@
-"""Generate instance segmentation predictions from transformer query tokens.
+"""
+Generate instance segmentation predictions from transformer query tokens.
 
 This layer implements the prediction heads for a query-based segmentation
 architecture, translating learned object queries into class labels and spatial
