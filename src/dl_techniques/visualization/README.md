@@ -91,11 +91,11 @@ This section provides a detailed reference for all built-in visualization plugin
 | :--- | :--- | :--- | :--- |
 | **`TrainingCurvesVisualization`**<br/>`"training_curves"` | Plots training and validation loss/metrics over epochs to monitor model learning. | `TrainingHistory` or `Dict[str, TrainingHistory]` | `metrics_to_plot: List[str]` (default: all)<br/>`smooth_factor: float` (0-1, default: 0)<br/>`show_best_epoch: bool` (default: `True`) |
 | **`LearningRateScheduleVisualization`**<br/>`"lr_schedule"` | Shows how the learning rate changes over epochs, helping to debug schedulers. | `List[float]` or `Dict[str, List[float]]` | `show_phases: bool` (default: `True`)<br/>`phase_boundaries: List[int]` |
-| **`ModelComparisonBarChart`**<br/>`"model_comparison_bars"` | Creates grouped bar charts to compare final performance metrics across multiple models. | `ModelComparison` | `metrics_to_show: List[str]` (default: all)<br/>`sort_by: str` (sorts by a metric)<br/>`show_values: bool` (default: `True`) |
-| **`PerformanceRadarChart`**<br/>`"performance_radar"` | Generates a radar (or spider) chart to visualize trade-offs in multiple performance metrics between models. | `ModelComparison` | `metrics_to_show: List[str]` (default: all)<br/>`normalize: bool` (scales axes to best model, default: `True`) |
+| **`ModelComparisonBarChart`**<br/>`"model_comparison_bars"` | Creates grouped bar charts to compare final performance metrics across multiple models. | `ModelComparison` or `Dict[str, Dict[str, float]]` | `metrics_to_show: List[str]` (default: all)<br/>`sort_by: str` (sorts by a metric)<br/>`show_values: bool` (default: `True`) |
+| **`PerformanceRadarChart`**<br/>`"performance_radar"` | Generates a radar (or spider) chart to visualize trade-offs in multiple performance metrics between models. | `ModelComparison` or `Dict[str, Dict[str, float]]` | `metrics_to_show: List[str]` (default: all)<br/>`normalize: bool` (scales axes to best model, default: `True`) |
 | **`ConvergenceAnalysis`**<br/>`"convergence_analysis"` | A dashboard analyzing loss convergence, gradient flow, and validation gap to diagnose training stability. | `TrainingHistory` or `Dict[str, TrainingHistory]` | A composite dashboard with subplots for:<br/>- Loss Convergence<br/>- Gradient Flow<br/>- Validation Gap<br/>- Convergence Rate<br/>*Note: Gradient Flow requires `grad_norms` in the data.* |
 | **`OverfittingAnalysis`**<br/>`"overfitting_analysis"` | A dashboard that identifies when and how a model starts overfitting by analyzing the generalization gap. | `TrainingHistory` or `Dict[str, TrainingHistory]` | `patience: int` (epochs to wait before marking overfit point, default: 10) |
-| **`PerformanceDashboard`**<br/>`"performance_dashboard"` | A comprehensive dashboard summarizing model performance with curves, heatmaps, and rankings. | `ModelComparison` | A comprehensive dashboard with subplots for:<br/>- Training Curves<br/>- Metric Comparison<br/>- Performance Heatmap<br/>- Ranking Table<br/>`metric_to_display: str` (selects a metric for the bar chart) |
+| **`PerformanceDashboard`**<br/>`"performance_dashboard"` | A comprehensive dashboard summarizing model performance with curves, heatmaps, and rankings. | `ModelComparison` | A comprehensive dashboard with subplots for:<br/>- Training Curves<br/>- Metric Comparison<br/>- Performance Heatmap<br/>- Ranking Table<br/>- Statistical Comparison<br/>`metric_to_display: str` (selects a metric for the bar chart) |
 
 ### Classification Analysis
 
@@ -122,7 +122,7 @@ This section provides a detailed reference for all built-in visualization plugin
 | **`WeightVisualization`**<br/>`"weights"` | Shows the distribution, matrix, or filters of a model's weights to inspect what the model has learned. | `WeightData` or `keras.Model` | `layers_to_show: List[str]` (default: first 6)<br/>`plot_type: str` (`'distribution'`, `'matrix'`, `'filters'`) |
 | **`FeatureMapVisualization`**<br/>`"feature_maps"` | Displays the output feature maps from convolutional layers to see what features the network detects in an input sample. | `ActivationData` | `sample_idx: int` (default: 0)<br/>`layers_to_show: List[str]` (default: first 4 conv layers)<br/>`max_features: int` (default: 16) |
 | **`GradientVisualization`**<br/>`"gradients"` | Plots gradient norms or distributions across layers to diagnose vanishing or exploding gradient problems. | `GradientData` | `plot_type: str` (`'flow'`, `'distribution'`, `'vanishing'`) |
-| **`GradientTopologyVisualization`**<br/>`"gradient_topology"` | Visualizes the entire model's gradient flow as a topological heatmap, showing how gradients propagate between connected layers. | `GradientTopologyData` | `target_size: int` (default: 64)<br/>`aggregation: str` (`'norm'`, `'mean'`, `'max'`)<br/>`log_scale: bool` (default: `False`)<br/>`cmap: str` (default: `'viridis'`) |
+| **`GradientTopologyVisualization`**<br/>`"gradient_topology"` | Visualizes the entire model's gradient flow as a topological heatmap, showing how gradients propagate between connected layers. | `GradientTopologyData` | `target_size: int` (default: 64)<br/>`aggregation: str` (`'norm'`, `'mean'`, `'max'`)<br/>`log_scale: bool` (default: `True`)<br/>`cmap: str` (default: `'viridis'`) |
 | **`GenericMatrixVisualization`**<br/>`"generic_matrix"` | Renders any 2D NumPy array as a heatmap, useful for correlation matrices or custom data. | `MatrixData` or `np.ndarray` | `title: str`<br/>`annot: bool` (default: `True`)<br/>`fmt: str` (default: `'.2f'`)<br/>`xticklabels: List[str]` |
 | **`ImageComparisonVisualization`**<br/>`"image_comparison"` | Displays a list of images side-by-side, ideal for comparing original vs. reconstructed images or data augmentations. | `ImageData` or `List[np.ndarray]` | `titles: List[str]`<br/>`super_title: str`<br/>`cmap: str` (default: `'gray'`) |
 
@@ -225,6 +225,7 @@ viz_manager.visualize(
 The following examples use a `ClassificationResults` object, demonstrated below with sample data.
 
 ```python
+import numpy as np
 from dl_techniques.visualization import ClassificationResults
 
 # Create sample prediction data.
@@ -389,7 +390,7 @@ custom_viz_manager = VisualizationManager(
 
 ### Creating Multi-Plot Dashboards
 
-Combine multiple visualizations into a single figure using the `create_dashboard` method. The manager automatically handles the subplot layout.
+Combine multiple visualizations into a single figure using the `create_dashboard` method. You can let the manager handle the layout automatically or specify a custom grid layout.
 
 ```python
 from dl_techniques.visualization import ClassificationReportVisualization
@@ -405,7 +406,18 @@ dashboard_data = {
     "classification_report": eval_data,
 }
 
+# Example 1: Automatic Layout
 viz_manager.create_dashboard(data=dashboard_data, show=True)
+
+# Example 2: Custom Layout
+# Define a layout with (row, column) coordinates for each plot.
+custom_layout = {
+    "training_curves": (0, 0),
+    "confusion_matrix": (0, 1),
+    "classification_report": (1, 0), # Place this on the next row
+}
+
+viz_manager.create_dashboard(data=dashboard_data, layout=custom_layout, show=True)
 ```
 
 ---
@@ -415,6 +427,7 @@ viz_manager.create_dashboard(data=dashboard_data, show=True)
 New visualizations can be added by creating a custom plugin. This involves inheriting from `VisualizationPlugin` and implementing three required properties/methods.
 
 ```python
+import numpy as np
 import matplotlib.pyplot as plt
 from typing import Any, Optional
 from dl_techniques.visualization import VisualizationPlugin, VisualizationManager
