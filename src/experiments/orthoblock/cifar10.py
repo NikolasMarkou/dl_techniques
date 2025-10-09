@@ -850,7 +850,6 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
         color_scheme=ColorScheme(
             primary='#FF8C00',  # Orange for OrthoBlock
             secondary='#4169E1',  # Blue for Dense
-            accent='#32CD32'
         ),
         title_fontsize=14,
         save_format='png'
