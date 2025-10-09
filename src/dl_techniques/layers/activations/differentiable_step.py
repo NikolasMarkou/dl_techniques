@@ -57,8 +57,8 @@ from typing import Optional, Union, Any, Tuple, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.regularizers.l2_custom import L2_custom
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
-
 
 # ---------------------------------------------------------------------
 
@@ -151,8 +151,8 @@ class DifferentiableStep(keras.layers.Layer):
             axis: Optional[int] = -1,
             slope_initializer: Union[str, keras.initializers.Initializer] = 'ones',
             shift_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            shift_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            shift_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
+            shift_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = keras.regularizers.L2(1e-3), # incentivize center -> 0
+            shift_constraint: Optional[Union[str, keras.constraints.Constraint]] = ValueRangeConstraint(min_value=-1, max_value=+1), # clip it to be sure
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -206,8 +206,10 @@ class DifferentiableStep(keras.layers.Layer):
             name='slope',
             shape=param_shape,
             initializer=self.slope_initializer,
+            # reasonable range 1: normal tanh, 10: heavy side
             constraint=ValueRangeConstraint(min_value=+1.0, max_value=+10.0),
-            regularizer=None,
+            # incentivizes the slope to increase -> become heavy side
+            regularizer=L2_custom(-1e-3),
             trainable=True,
         )
 

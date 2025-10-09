@@ -55,6 +55,7 @@ from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.orthoblock import OrthoBlock
+from dl_techniques.layers.orthoblock_v2 import OrthoBlockV2
 
 from dl_techniques.datasets.vision.common import (
     create_dataset_builder,
@@ -386,6 +387,22 @@ class OrthoBlockExperimentConfig:
 
     # --- Dense Layer Variants ---
     dense_variants: Dict[str, Callable] = field(default_factory=lambda: {
+        'OrthoBlock_V2_Strong': lambda config: ('orthoblock_v2', {
+            'ortho_reg_factor': 1.0,
+        }),
+        'OrthoBlock_V2_Medium': lambda config: ('orthoblock_v2', {
+            'ortho_reg_factor': 0.1,
+        }),
+        'OrthoBlock_V2_Weak': lambda config: ('orthoblock_v2', {
+            'ortho_reg_factor': 0.01,
+        }),
+        'OrthoBlock_V2_HighScale': lambda config: ('orthoblock_v2', {
+            'ortho_reg_factor': 0.1,
+            'scale_initial_value': 0.8
+        }),
+        'OrthoBlock_V2_LowScale': lambda config: ('orthoblock_v2', {
+            'ortho_reg_factor': 0.1,
+        }),
         'OrthoBlock_Strong': lambda config: ('orthoblock', {
             'ortho_reg_factor': 1.0,
             'scale_initial_value': 0.5
@@ -416,7 +433,7 @@ class OrthoBlockExperimentConfig:
     output_dir: Path = Path("results")
     experiment_name: str = "orthoblock_effectiveness_study"
     random_seed: int = 42
-    n_runs: int = 3  # Multiple runs for statistical significance
+    n_runs: int = 1  # Multiple runs for statistical significance
 
     # --- Analysis Configuration ---
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
@@ -459,6 +476,15 @@ def create_dense_layer(
             activation=activation,
             ortho_reg_factor=layer_params.get('ortho_reg_factor', 0.1),
             scale_initial_value=layer_params.get('scale_initial_value', 0.5),
+            use_bias=layer_params.get('use_bias', True),
+            kernel_initializer=layer_params.get('kernel_initializer', 'glorot_uniform'),
+            name=name
+        )
+    elif layer_type == 'orthoblock_v2':
+        return OrthoBlockV2(
+            units=units,
+            activation=activation,
+            ortho_reg_factor=layer_params.get('ortho_reg_factor', 0.1),
             use_bias=layer_params.get('use_bias', True),
             kernel_initializer=layer_params.get('kernel_initializer', 'glorot_uniform'),
             name=name
