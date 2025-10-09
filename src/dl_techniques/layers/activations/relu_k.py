@@ -1,16 +1,61 @@
-"""ReLU-k activation layer implementing f(x) = max(0, x)^k.
+"""
+A powered ReLU activation function, `f(x) = max(0, x)^k`.
 
-This layer applies a powered ReLU activation function, providing more
-expressiveness than standard ReLU while maintaining computational
-efficiency and preserving non-linearity.
+This layer generalizes the standard Rectified Linear Unit (ReLU) by
+introducing a power exponent `k`, creating a higher-order non-linearity.
+The primary architectural purpose is to allow a network to model more
+complex polynomial relationships within a single activation, potentially
+increasing the model's expressive power compared to the purely linear
+positive region of a standard ReLU.
 
-The ReLU-k activation is defined as:
-    `f(x) = max(0, x)^k`
+Architectural Overview:
+    While standard ReLU (`k=1`) introduces a piecewise linear activation,
+    ReLUK with `k > 1` introduces a piecewise polynomial activation. This
+    changes the activation landscape significantly. For positive inputs,
+    the function is no longer a simple linear pass-through but a convex
+    polynomial curve. This allows a single neuron to learn a more complex,
+    non-linear response to its inputs. The exponent `k` serves as a
+    hyperparameter that controls the "aggressiveness" of this non-linearity;
+    higher values of `k` create a function that is very flat near zero
+    but grows extremely rapidly for larger inputs.
 
-Where `k` is a positive integer power parameter. When `k=1`, this layer is
-equivalent to the standard `keras.layers.ReLU`. Higher values of `k` create
-more aggressive non-linearities that can help with gradient flow in
-certain network architectures.
+Mathematical Foundation:
+    The function is defined as:
+        f(x) = max(0, x)^k
+
+    The most critical difference from standard ReLU lies in its derivative,
+    which directly impacts gradient flow during backpropagation. The
+    derivative for positive inputs is:
+        f'(x) = k * x^(k-1) for x > 0
+
+    Unlike standard ReLU, which has a constant gradient of 1 for all
+    positive inputs, the gradient of ReLUK is dependent on the magnitude of
+    the pre-activation `x`. This has two major implications:
+    1.  **Suppression of Small Signals**: For `0 < x < 1`, the gradient
+        `k * x^(k-1)` is less than `k` and can be smaller than 1 (for `k>1`),
+        effectively dampening the gradient for small positive activations.
+    2.  **Amplification of Large Signals**: For `x > 1`, the gradient grows
+        polynomially, strongly amplifying the gradient for large positive
+        activations. This can accelerate learning for strong features but
+        also carries a risk of exploding gradients.
+
+    This input-dependent gradient scaling introduces a dynamic that can
+    help the network focus on stronger signals, but requires careful
+    initialization and potentially gradient clipping to ensure stability.
+
+References:
+    This function is a member of the broader class of polynomial-like
+    activations explored as alternatives to linear rectifiers. Its
+    conceptual roots lie in works that investigate the representation
+    power of networks with higher-order activation functions.
+    -   Ramachandran, P., Zoph, B., & Le, Q. V. (2017). "Searching for
+        Activation Functions." (Exemplifies the search for non-linear
+        activations beyond ReLU).
+    -   Gouk, H., et al. (2021). "Regularisation of Neural Networks by
+        Enforcing Lipschitz Continuity." (Discusses the role of activation
+        functions in controlling network properties like Lipschitz
+        constants).
+
 """
 
 import keras

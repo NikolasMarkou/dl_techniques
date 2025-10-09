@@ -1,29 +1,60 @@
 """
-Adaptive Temperature Softmax Implementation
+An adaptive softmax with entropy-based temperature scaling.
 
-This implementation provides an enhanced version of the softmax function that dynamically
-adjusts its temperature parameter based on the entropy of the input distribution. The
-goal is to maintain sharpness in the output probabilities even as the input size grows,
-addressing a fundamental limitation of standard softmax.
+This layer addresses a key limitation of the standard softmax function: the
+"dispersion effect." As the number of output classes increases, the
+probability mass of a standard softmax tends to spread out, approaching a
+uniform distribution. This makes it difficult for a model to express high
+confidence, particularly when faced with a larger-than-training number of
+classes (an out-of-distribution scenario). This layer counteracts this
+effect by dynamically sharpening the output distribution based on its
+uncertainty.
 
-Standard Softmax Limitations:
-- Dispersion Effect: As input size grows, probabilities tend towards 1/n
-- Out-of-Distribution Behavior: Performance degrades on larger inputs than training
-- Fixed Temperature: No adaptation to different input distributions
+Architectural Overview:
+    The core principle is to adjust the softmax temperature `T` only when
+    necessary. A low temperature (`T < 1.0`) sharpens a distribution,
+    concentrating probability on the highest-scoring logits, while `T=1.0`
+    recovers the standard softmax.
 
-Key Features:
-- Entropy-based temperature adaptation using polynomial mapping
-- Selective application when entropy exceeds threshold
-- Maintains computational efficiency for already-sharp distributions
-- Backend-agnostic implementation using keras.ops
+    This layer uses Shannon entropy as a quantitative measure of the
+    output distribution's uncertainty. A high entropy value indicates a
+    flat, uncertain distribution that needs sharpening. The operational
+    flow is as follows:
+    1.  An initial probability distribution `p` is calculated using a
+        standard softmax (`T=1.0`).
+    2.  The Shannon entropy `H(p)` of this initial distribution is computed.
+    3.  If `H(p)` exceeds a specified `entropy_threshold`, the distribution
+        is considered too diffuse. An adaptive temperature `T < 1.0` is
+        then calculated.
+    4.  If `H(p)` is below the threshold, the distribution is already
+        sharp, and the temperature is set to `T=1.0` to preserve it.
+    5.  The final, potentially sharpened, distribution is computed using
+        the selected temperature: `softmax(logits / T)`.
 
-Performance improvements on max retrieval tasks:
-- 512 items: 70.1% → 72.5% (+2.4%)
-- 1024 items: 53.8% → 57.7% (+3.9%)
-- 2048 items: 35.7% → 39.4% (+3.7%)
+Mathematical Foundation:
+    The standard softmax function is defined as:
+        p_i = exp(z_i) / Σ_j exp(z_j)
+
+    This is a special case of the temperatured softmax where T=1:
+        p_i(T) = exp(z_i / T) / Σ_j exp(z_j / T)
+
+    The uncertainty of a distribution `p` is measured by its Shannon
+    entropy:
+        H(p) = -Σ_i p_i * log(p_i)
+
+    This layer implements an adaptive temperature function `T = f(H)` which
+    maps the entropy `H` to an appropriate temperature `T`. The function is
+    designed such that higher entropy (more uncertainty) maps to a lower
+    temperature (more sharpening). This implementation uses a polynomial
+    to approximate this mapping, `T = polynomial(H)`, which is then clipped
+    and scaled to lie within a pre-defined `[min_temp, max_temp]` range.
+    This provides a continuous and differentiable mechanism for adapting
+    the model's confidence to the characteristics of each input.
 
 References:
-- Original Paper: "Softmax is not enough (for sharp out-of-distribution), 2024"
+    - I. Drozdov et al., "Softmax is not enough (for sharp
+      out-of-distribution)," 2024.
+
 """
 
 import keras

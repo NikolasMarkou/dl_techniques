@@ -1,3 +1,65 @@
+"""
+A learnable hierarchical classifier for large-scale output layers.
+
+This layer provides a computationally efficient alternative to the standard
+softmax function for classification tasks with a very large number of
+output classes (e.g., tens of thousands to millions). The standard softmax
+operation has a computational complexity of O(N), where N is the number of
+classes, making it a bottleneck in extreme classification scenarios. This
+layer replaces that O(N) complexity with an O(log N) complexity by
+structuring the classification problem as a series of hierarchical
+decisions.
+
+Architectural Overview:
+    The core of this layer is a balanced binary tree where each of the
+    `num_classes` is a unique leaf node. The `num_classes - 1` internal
+    nodes of the tree act as learnable binary classifiers or "routers."
+    Given an input feature vector `h`, the model starts at the root of the
+    tree. At each internal node `n`, a decision is made to traverse to
+    either the left or right child. This decision is parameterized by a
+    dedicated weight vector `W_n`, which is learned during training. The
+    process continues until a leaf node (a class) is reached.
+
+    Unlike methods that rely on pre-defined class hierarchies (e.g., from
+    WordNet), this tree's routing logic is learned end-to-end based on the
+    training objective. The structure effectively decomposes a single,
+    massive N-way classification problem into a sequence of `log(N)` simple
+    binary classification problems.
+
+Mathematical Foundation:
+    The probability of a specific class `c` is defined as the product of
+    the probabilities of taking the correct turns at each internal node
+    along the unique path from the root to the leaf `c`.
+
+    At any internal node `n`, the probability of choosing a direction `d`
+    (where `d` is Left or Right) given the feature vector `h` is modeled
+    by a simple binary softmax:
+        P(d | n, h) = softmax(h^T * W_n)_d
+
+    The total probability for class `c` is then:
+        P(c | h) = Π_[ (n, d) in Path(c) ] P(d | n, h)
+
+    For numerical stability and computational efficiency during training,
+    the optimization is performed in the log-domain. The layer directly
+    computes the negative log-likelihood (NLL) loss for a target class.
+    Taking the logarithm transforms the product of probabilities into a sum
+    of log-probabilities:
+        log P(c | h) = Σ_[ (n, d) in Path(c) ] log P(d | n, h)
+
+    The loss for a single example is simply `-log P(c | h)`. This formulation
+    avoids the large normalization term of a standard softmax and only requires
+    evaluating the nodes along a single path for each training sample.
+
+References:
+    - Morin, F., & Bengio, Y. (2005). "Hierarchical Probabilistic Neural
+      Network Language Model."
+    - Mnih, A., & Hinton, G. E. (2009). "A Scalable Hierarchical
+      Distributed Language Model."
+    - Mikolov, T., et al. (2013). "Distributed Representations of Words
+      and Phrases and their Compositionality." (Used in word2vec).
+
+"""
+
 import keras
 import numpy as np
 from keras import ops, initializers

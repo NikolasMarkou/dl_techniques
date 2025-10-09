@@ -1,9 +1,74 @@
-"""ThreshMax activation layer with differentiable step function.
+"""
+A sparse softmax variant using differentiable confidence thresholding.
 
-This module implements a sparse softmax variant that creates sparsity through
-confidence thresholding while maintaining smooth gradients via a differentiable
-step function. The layer helps create more confident and sparse probability
-distributions compared to standard softmax.
+This layer provides a modification of the standard softmax function designed
+to produce sparse probability distributions. Standard softmax often assigns
+non-zero probabilities to all classes, even those that are highly
+unlikely. ThreshMax encourages sparsity by effectively zeroing out the
+probabilities of classes whose scores fall below a confidence-based
+threshold, leading to more interpretable and potentially more efficient
+downstream processing, especially in attention mechanisms.
+
+Architectural Overview:
+    The core principle is to transform the output of a standard softmax
+    based on each class's "confidence" relative to a uniform distribution.
+    The process involves four main steps:
+    1.  A standard softmax is applied to the input logits to obtain an
+        initial dense probability distribution `p`.
+    2.  A confidence threshold is established as the probability of a
+        uniform distribution, `τ = 1/N`, where `N` is the number of classes.
+    3.  The confidence difference, `d_i = p_i - τ`, is computed for each
+        class. Only classes with a probability greater than uniform are
+        considered "confident."
+    4.  A smooth, differentiable step function is applied to these
+        differences. This function acts as a soft gate, smoothly mapping
+        negative differences (low confidence) to near-zero and positive
+        differences (high confidence) to near-one. This avoids the hard
+        clipping of a `ReLU`-like function, which would kill gradients for
+        low-confidence classes.
+    5.  The resulting values are renormalized to sum to one, producing the
+        final sparse probability distribution.
+
+    A crucial feature is the graceful handling of the degenerate case: when
+    the input logits are nearly uniform (maximum entropy), the layer
+    reverts to the standard softmax output to maintain numerical stability.
+
+Mathematical Foundation:
+    The operation begins with the standard softmax function:
+        p_i = exp(x_i) / Σ_j exp(x_j)
+
+    The key innovation is the replacement of a hard threshold (e.g.,
+    `max(0, p_i - 1/N)`) with a differentiable step function `S(z)`, which
+    is a scaled and shifted hyperbolic tangent:
+        S(z) = 0.5 * (tanh(slope * z) + 1)
+
+    This function `S(z)` provides a smooth approximation of the Heaviside
+    step function, transitioning from 0 to 1 around `z=0`. The `slope`
+    parameter controls the steepness of this transition. Applying this
+    to the confidence difference `d_i = p_i - 1/N` yields a soft mask:
+        m_i = S(d_i)
+
+    The final sparse probability distribution `p_sparse` is obtained by
+    renormalizing this mask:
+        p_sparse_i = m_i / Σ_j m_j
+
+    This formulation ensures that gradients can flow to all input logits,
+    even those corresponding to classes that are ultimately suppressed. The
+    `tanh` function provides a smooth, non-zero derivative everywhere,
+    allowing the model to learn to push low-confidence logits further down
+    or pull them up across the threshold.
+
+References:
+    The concept draws from several areas:
+    -   **Sparse Softmax Variants:** Similar in goal to functions like
+        Sparsemax, which project onto the probability simplex.
+    -   **Confidence Thresholding:** Techniques used in attention mechanisms
+        to prune connections and improve efficiency.
+    -   **Differentiable Relaxations:** The use of smooth functions like
+        `tanh` or `sigmoid` to approximate non-differentiable operations
+        (e.g., step functions, argmax) is a common technique in deep
+        learning for enabling end-to-end training.
+
 """
 
 import keras

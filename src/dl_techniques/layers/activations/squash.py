@@ -1,10 +1,48 @@
-"""Squash activation layer for Capsule Networks.
+"""
+Vector squashing non-linearity for Capsule Networks.
 
-This layer applies the squashing non-linearity commonly used in Capsule Networks
-to ensure that vector outputs have meaningful magnitudes while preserving their
-directional information. The squashing function ensures that short vectors get
-shrunk to almost zero length and long vectors get shrunk to a length slightly
-below 1, while maintaining vector orientation.
+This layer applies a specific non-linear function designed to operate on
+vectors (capsules) rather than scalars. Its primary architectural purpose
+in a Capsule Network is to normalize the length of a capsule's output
+vector to lie within the range [0, 1), making the length interpretable as
+the probability that the entity represented by the capsule exists. Crucially,
+this is achieved while preserving the vector's orientation, which encodes
+the instantiation parameters (e.g., pose, texture) of the detected entity.
+
+The "squashing" operation serves as the activation function for a capsule
+layer. It ensures that the outputs from different capsules are on a
+comparable scale before they are used in routing algorithms, such as
+"dynamic routing." This decouples the "what" (existence probability, encoded
+in the length) from the "how" (properties, encoded in the direction). Short
+input vectors, representing low certainty, are shrunk almost to zero, while
+long vectors, representing high certainty, are shrunk to a length just
+below one.
+
+Mathematical Foundation:
+    The squashing function is defined as:
+        v_squashed = (||v||² / (1 + ||v||²)) * (v / ||v||)
+
+    This formula can be understood as the product of two components:
+    1.  **Directional Unit Vector (`v / ||v||`):** This term isolates the
+        orientation of the input vector `v`, ensuring that the direction of
+        the output is identical to the input. This preserves the learned
+        instantiation parameters.
+    2.  **Scalar Scaling Factor (`||v||² / (1 + ||v||²)`):** This term
+        non-linearly scales the magnitude. It is a monotonic function of
+        the squared norm `||v||²`.
+        -   As the input vector's norm approaches zero (`||v|| -> 0`), the
+            scaling factor also approaches zero, effectively nullifying
+            low-confidence capsules.
+        -   As the input vector's norm becomes very large (`||v|| -> ∞`),
+            the scaling factor asymptotically approaches one, ensuring the
+            output length is always bounded.
+
+References:
+    - Sabour, S., Frosst, N., & Hinton, G. E. (2017). "Dynamic routing
+      between capsules."
+    - Hinton, G. E., Krizhevsky, A., & Wang, S. D. (2011). "Transforming
+      auto-encoders." (Introduced the concept of capsules).
+
 """
 
 import keras

@@ -1,3 +1,50 @@
+"""
+A computationally efficient, piecewise linear sigmoid approximation.
+
+This layer provides a hardware-friendly approximation of the standard
+logistic sigmoid function. Its primary purpose is to replace the
+computationally expensive exponential operation in the standard sigmoid
+with simple arithmetic, making it ideal for deployment on resource-
+constrained environments like mobile or edge devices, and for quantized
+models. It is a core component in modern efficient architectures such as
+MobileNetV3.
+
+Architectural Design:
+    The HardSigmoid is constructed as a piecewise linear function composed
+    of three segments: a zero region, a linear ramp, and a saturation
+    region at one. This structure mimics the S-shape of the true sigmoid
+    while being implementable with basic, fast operations. The function is
+    built by applying a linear transformation (`x + 3`), clamping the
+    result to a fixed range `[0, 6]` (the ReLU6 operation), and finally
+    scaling the output to `[0, 1]`. This avoids any transcendental
+    function calls, significantly reducing latency.
+
+Mathematical Foundation:
+    The standard logistic sigmoid is defined as:
+        σ(x) = 1 / (1 + exp(-x))
+
+    The HardSigmoid approximates this with the piecewise linear function:
+        h(x) = ReLU6(x + 3) / 6 = max(0, min(6, x + 3)) / 6
+
+    This can be expressed in three parts:
+        h(x) = 0          if x <= -3
+        h(x) = (x / 6) + 0.5  if -3 < x < 3
+        h(x) = 1          if x >= 3
+
+    The linear segment `(x/6) + 0.5` serves as a first-order Taylor
+    approximation of the sigmoid function around x=0, but shifted and
+    scaled. The key insight is that this simple linear ramp is a
+    "good enough" approximation for the gating and activation purposes
+    served by the sigmoid in many neural network components.
+
+References:
+    - Howard, A., et al. (2019). "Searching for MobileNetV3."
+    - Courbariaux, M., et al. (2015). "BinaryConnect: Training Deep
+      Neural Networks with binary weights during propagations." (Introduced
+      an early version of the hard sigmoid).
+
+"""
+
 import keras
 from typing import Optional, Tuple, Dict, Any
 

@@ -1,8 +1,58 @@
-"""Mish activation functions for neural networks.
+"""
+Mish self-regularized, non-monotonic activation function.
 
-This module provides implementations of the Mish activation function and its
-saturated variant, offering smooth, non-monotonic activation functions that
-can improve neural network training dynamics and final performance.
+This layer implements the Mish activation function, designed to improve the
+performance and training stability of deep neural networks. It serves as a
+smooth, continuously differentiable alternative to functions like ReLU and
+Swish, combining their benefits while mitigating some of their drawbacks,
+such as the dying ReLU problem and the less smooth gradient landscape.
+
+Architectural Overview:
+    Mish is architecturally a self-gated activation function, similar in
+    principle to Swish (`x * sigmoid(x)`). The core idea is that the
+    activation's output is a product of the input itself and a non-linear
+    gating function derived from the input. In Mish, this gate is more
+    complex than in Swish, aiming for a more favorable functional landscape.
+
+    The function can be deconstructed into two main parts:
+    1.  **Identity Path (`x`):** The input is passed through directly,
+        preserving an unobstructed path for gradient flow, especially for
+        large positive values.
+    2.  **Gating Mechanism (`tanh(softplus(x))`):**
+        -   `softplus(x)` acts as a smooth approximation of the ReLU
+            function, mapping all inputs to positive values without the
+            abrupt change at zero.
+        -   `tanh(y)` takes this positive output and maps it to the range
+            (0, 1), creating a smooth, saturating gate.
+
+    The multiplication of these two components results in a function that
+    is unbounded above (like ReLU) but smooth and non-monotonic (unlike
+    ReLU), allowing it to capture more complex dependencies in the data.
+
+Mathematical Foundation:
+    The Mish activation function is formally defined as:
+        f(x) = x * tanh(softplus(x))
+    where `softplus(x) = log(1 + exp(x))`.
+
+    This formulation gives rise to several key mathematical properties that
+    contribute to its empirical success:
+    -   **Unbounded Above**: As `x -> ∞`, `softplus(x) -> x` and
+        `tanh(softplus(x)) -> 1`, so `f(x) ≈ x`. This prevents gradient
+        saturation for positive inputs, similar to ReLU.
+    -   **Bounded Below**: As `x -> -∞`, the function has a finite lower
+        bound, which can contribute to regularization.
+    -   **C-infinity Smoothness**: The function is infinitely
+        differentiable, providing a very smooth gradient landscape that can
+        stabilize and accelerate gradient-based optimization.
+    -   **Non-Monotonicity**: Mish has a slight negative dip for small
+        negative inputs before asymptotically approaching its lower bound.
+        This property is believed to increase the expressiveness of the
+        network.
+
+References:
+    - Misra, D. (2019). "Mish: A Self Regularized Non-Monotonic Neural
+      Activation Function."
+
 """
 
 import keras

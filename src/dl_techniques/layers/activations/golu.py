@@ -1,5 +1,5 @@
 """
-Implement the Gompertz Linear Unit (GoLU) activation function.
+A Gompertz Linear Unit (GoLU) activation function.
 
 This layer provides a self-gated activation function based on the Gompertz
 function. Unlike traditional monolithic activations (e.g., ReLU) or other

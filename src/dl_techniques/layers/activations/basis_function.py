@@ -1,3 +1,47 @@
+"""
+Swish activation function, used as a non-linear basis.
+
+This layer implements the Swish activation function, `f(x) = x * sigmoid(x)`,
+which serves as a smooth, non-monotonic "basis function" to enhance the
+expressive power of a neural network. Its primary architectural advantage
+is its self-gating mechanism, where the function uses a transformation of
+the input itself to modulate its own output. This property often leads to
+improved performance and better gradient flow compared to activations like
+ReLU.
+
+The "self-gating" property is central to its design. The sigmoid of the
+input acts as a soft, continuous gate. For strongly positive inputs (`x ->
+inf`), the gate `sigmoid(x)` approaches 1, making the function behave like
+the identity (`f(x) ≈ x`). For strongly negative inputs (`x -> -inf`),
+the gate approaches 0, suppressing the output (`f(x) ≈ 0`). This provides a
+smooth interpolation between a linear and a zeroing function, avoiding the
+abrupt switch and "dying neuron" problem associated with ReLU's hard gate.
+
+Mathematical Foundation:
+    The function is formally defined as:
+        f(x) = x * σ(x) = x / (1 + exp(-x))
+
+    where `σ` is the standard logistic sigmoid function. The function
+    exhibits several key properties that contribute to its effectiveness:
+    -   **Smoothness**: The function is infinitely differentiable, which
+        benefits gradient-based optimization by providing a more stable and
+        consistent gradient landscape compared to the non-differentiable
+        point of ReLU at x=0.
+    -   **Non-Monotonicity**: Unlike most common activations, Swish is not
+        monotonic. It exhibits a slight dip for negative values before
+        asymptotically approaching zero. This characteristic may increase
+        the expressive capacity of the model by allowing it to capture more
+        complex data patterns.
+    -   **Unbounded Above, Bounded Below**: The function is unbounded for
+        positive inputs, preventing gradient saturation that can occur in
+        saturating functions like sigmoid or tanh. It is bounded below,
+        which can contribute to network regularization.
+
+References:
+    - Ramachandran, P., Zoph, B., & Le, Q. V. (2017). "Searching for
+      Activation Functions."
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
