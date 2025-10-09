@@ -1,56 +1,48 @@
 """
-Multi-Head Attention Layer with Mask Support.
+Pairwise relationships between elements in a sequence.
 
-This module implements a Multi-Head Self-Attention mechanism optimized for vision_heads
-and sequence modeling tasks. The implementation follows Keras 3.x best practices 
-with backend-agnostic operations and comprehensive serialization support.
+This layer implements the multi-head self-attention mechanism, a cornerstone
+of the Transformer architecture. Its fundamental purpose is to dynamically
+weigh the importance of all other elements in a sequence when producing a new
+representation for a given element. This allows the model to capture complex,
+long-range dependencies and contextual relationships within the input data,
+regardless of the distance between elements.
 
-Key Features:
-    - Backend-agnostic implementation using keras.ops
-    - Flexible attention masking support (sequence-level, full, per-head)
-    - Proper serialization with modern Keras 3 patterns
-    - Configurable initializers and regularizers
-    - Dropout support for attention weights
-    - Type-safe implementation with comprehensive documentation
+Architecturally, the process is built upon the scaled dot-product attention
+mechanism. For each element in the input sequence, three vectors are derived
+through learned linear projections: a Query (Q), a Key (K), and a Value (V).
+-   The **Query** vector represents the current element's request for
+    information.
+-   The **Key** vector represents what information each element in the
+    sequence has to offer.
+-   The **Value** vector represents the content of each element that will be
+    aggregated.
 
-Attention Mask Support:
-    The layer supports three different attention mask formats:
+The core mathematical operation computes a compatibility score between the
+Query of one element and the Key of every other element in the sequence via a
+dot product. These scores are then scaled and passed through a softmax
+function to create a set of attention weights—a probability distribution
+indicating how much attention the current element should pay to every other
+element. The final output for the current element is a weighted sum of all
+Value vectors in the sequence, using the computed attention weights.
 
-    1. Sequence-level mask (batch_size, seq_len):
-       - Masks entire positions in the sequence (e.g., padding tokens)
-       - Applied to key positions across all attention heads
+The formula is: `Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V`
 
-    2. Full attention mask (batch_size, seq_len, seq_len):
-       - Controls which query positions can attend to which key positions
-       - Useful for causal attention, bidirectional constraints, etc.
+The "multi-head" aspect enhances this mechanism's power. Instead of a single
+set of Q, K, V projections, the input is projected into multiple (`h`) lower-
+dimensional subspaces. Scaled dot-product attention is then performed in
+parallel within each of these "heads." This allows the model to jointly attend
+to information from different representation subspaces at different positions.
+For example, one head might learn to focus on syntactic relationships, while
+another focuses on semantic similarity. The outputs from all heads are then
+concatenated and passed through a final linear projection to produce the final
+result. This parallel structure enables the model to capture a richer and more
+diverse set of relationships within the data.
 
-    3. Per-head mask (batch_size, num_heads, seq_len, seq_len):
-       - Different mask for each attention head
-       - Maximum flexibility for complex attention patterns
+References:
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 
-Example Usage:
-    ```python
-    # Basic multi-head attention
-    attn = MultiHeadAttention(embed_dim=512, num_heads=8, dropout_rate=0.1)
-    output = attn(input_tensor)
-
-    # With sequence-level masking (padding)
-    padding_mask = keras.ops.ones((batch_size, seq_len))
-    padding_mask = keras.ops.slice_update(padding_mask, [0, 100],
-                                          keras.ops.zeros((batch_size, seq_len - 100)))
-    output = attn(input_tensor, attention_mask=padding_mask)
-
-    # With causal masking
-    seq_len = input_tensor.shape[1]
-    causal_mask = keras.ops.tri(seq_len)
-    causal_mask = keras.ops.expand_dims(causal_mask, 0)  # Add batch dimension
-    output = attn(input_tensor, attention_mask=causal_mask)
-
-    # In a model context
-    inputs = keras.Input(shape=(seq_len, embed_dim))
-    x = MultiHeadAttention(embed_dim=256, num_heads=4)(inputs)
-    model = keras.Model(inputs=inputs, outputs=x)
-    ```
 """
 
 import keras

@@ -1,5 +1,5 @@
 """
-Implements a hierarchical, memory-efficient anchor-based attention.
+A hierarchical, memory-efficient anchor-based attention.
 
 This layer provides a scalable alternative to standard self-attention by
 creating an information bottleneck through a small, fixed set of "anchor"

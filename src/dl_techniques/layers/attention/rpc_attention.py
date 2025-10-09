@@ -1,5 +1,5 @@
 """
-Implements a robust attention mechanism via Principal Component Pursuit.
+A robust attention mechanism via Principal Component Pursuit.
 
 This layer enhances the standard scaled dot-product attention by integrating
 Principal Component Pursuit (PCP), a matrix decomposition technique. The

@@ -1,6 +1,6 @@
 """
-This module implements the Non-local Attention layer, a self-attention mechanism
-for computer vision_heads tasks, based on the influential paper "Non-local Neural Networks".
+A self-attention mechanism for computer vision_heads tasks,
+based on the influential paper "Non-local Neural Networks".
 
 Standard convolutional layers operate on a small, local neighborhood of pixels,
 limiting their receptive field. In contrast, this Non-local Attention layer captures

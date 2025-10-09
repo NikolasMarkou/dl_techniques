@@ -1,5 +1,5 @@
 """
-Implements the asymmetric cross-attention from the Perceiver architecture.
+Asymmetric cross-attention from the Perceiver architecture.
 
 This layer is a specialized form of cross-attention that serves as the
 core building block of the Perceiver and Perceiver IO models. Its primary

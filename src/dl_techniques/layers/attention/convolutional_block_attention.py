@@ -1,40 +1,52 @@
 """
-Keras Implementation of the Convolutional Block Attention Module (CBAM).
+Refine feature maps by sequentially applying channel and spatial attention.
 
-This file provides a Keras-native implementation of the CBAM attention mechanism,
-as detailed in the paper: 'CBAM: Convolutional Block Attention Module' by
-Woo et al. (2018). Link: https://arxiv.org/abs/1807.06521v2
+This module implements the Convolutional Block Attention Module (CBAM), a
+lightweight and effective attention mechanism for CNNs. CBAM operates on the
+principle of inferring attention maps along two separate dimensions, channel
+and spatial, and then sequentially applying them to the input feature map for
+adaptive feature refinement. The key architectural choice is this sequential
+arrangement: channel attention is applied first, followed by spatial attention.
+This allows the spatial attention mechanism to operate on features that have
+already been recalibrated for channel-wise importance.
 
-The primary export of this file is the `CBAM` layer, which serves as a
-composite layer that sequentially applies channel and spatial attention to refine
-input feature maps.
+The foundational mathematics of CBAM is divided into its two sub-modules:
 
-Implementation Details:
------------------------
+1.  **Channel Attention (`Mc`):** This module aims to answer "what" is
+    meaningful in the input feature map. It aggregates spatial information by
+    applying both average-pooling and max-pooling operations across the
+    spatial dimensions (H x W), producing two distinct context descriptors.
+    These descriptors capture both the average and the most salient features
+    across the spatial grid for each channel. Both descriptors are then
+    processed by a shared Multi-Layer Perceptron (MLP) with a bottleneck
+    structure to efficiently compute the channel attention weights. The outputs
+    are merged via element-wise summation and passed through a sigmoid
+    function to generate the final channel attention map, which encodes the
+    inter-channel relationship of features.
 
-1.  **Modular and Composite Structure:**
-    The implementation is highly modular. The `CBAM` class acts as a container
-    and orchestrator for two specialized, independent sub-modules:
-    - `ChannelAttention`: Handles the channel-wise attention mechanism.
-    - `SpatialAttention`: Handles the spatial-wise attention mechanism.
-    These sub-modules are imported from `.channel_attention` and
-    `.spatial_attention` respectively, promoting code organization and reusability.
+2.  **Spatial Attention (`Ms`):** Following channel refinement, this module
+    aims to answer "where" is the most informative region. It first aggregates
+    the channel information at each spatial location by applying average-
+    pooling and max-pooling along the channel axis. This generates two 2D maps
+    that effectively summarize the features across all channels for each
+    pixel, highlighting regions with high average and high peak activations.
+    These two maps are concatenated and then passed through a standard
+    convolutional layer to produce a single 2D spatial attention map. After a
+    final sigmoid activation, this map highlights the most salient spatial
+-   regions to focus on.
 
-2.  **Sequential Attention Flow:**
-    The core logic resides in the `call` method, which strictly follows the
-    sequential attention process described in the paper:
-    - **Step 1 (Channel Attention):** The input tensor is first passed to the
-      `ChannelAttention` sub-module to generate a 1D channel attention map
-      (shape: `(batch, 1, 1, channels)`).
-    - **Step 2 (Channel Refinement):** This attention map is broadcasted across the
-      spatial dimensions and multiplied element-wise with the original input tensor
-      to produce a channel-refined feature map.
-    - **Step 3 (Spatial Attention):** The channel-refined feature map is then passed
-      to the `SpatialAttention` sub-module. This module generates a 2D spatial
-      attention map (shape: `(batch, height, width, 1)`).
-    - **Step 4 (Final Refinement):** The spatial attention map is broadcasted across
-      the channel dimension and multiplied element-wise with the channel-refined
-      feature map to produce the final output.
+The complete CBAM operation is a sequential multiplication: the input feature
+map `F` is first multiplied by the channel attention map `Mc(F)`, and the
+result is then multiplied by the spatial attention map `Ms(F')`. This
+factorization of attention into two sequential, decoupled modules makes CBAM
+lightweight and easily integrable into existing CNN architectures, enhancing
+their representational power by allowing the network to learn to selectively
+focus on informative features and suppress irrelevant ones.
+
+References:
+    - Woo et al., 2018. CBAM: Convolutional Block Attention Module.
+      (https://arxiv.org/abs/1807.06521)
+
 """
 
 import keras

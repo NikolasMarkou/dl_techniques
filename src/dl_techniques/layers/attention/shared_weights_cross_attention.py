@@ -1,5 +1,5 @@
 """
-Implements a parameter-efficient, bidirectional cross-attention mechanism.
+A parameter-efficient, bidirectional cross-attention mechanism.
 
 This layer facilitates information exchange between two distinct sets of
 tokens (modalities) through a cross-attention pattern where the projection

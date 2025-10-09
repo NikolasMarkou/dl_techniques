@@ -1,5 +1,5 @@
 """
-Generates a spatial attention map for convolutional feature maps.
+A spatial attention map for convolutional feature maps.
 
 This module implements the spatial attention mechanism from the Convolutional
 Block Attention Module (CBAM). It is designed to identify the most

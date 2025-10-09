@@ -1,57 +1,46 @@
 """
-This module provides a `MobileMQA` layer, an implementation of Multi-Query Attention
-that is highly optimized for efficiency on mobile and edge devices.
+An efficient multi-query attention mechanism for mobile devices.
 
-Standard Multi-Head Attention (MHA) can be memory-bandwidth intensive because it
-requires separate, large Key (K) and Value (V) tensors to be projected and loaded for
-each attention head. This layer mitigates that bottleneck by using the Multi-Query
-Attention (MQA) strategy.
+This layer implements Multi-Query Attention (MQA), a memory-efficient variant
+of the standard Multi-Head Attention (MHA) mechanism. The primary motivation
+behind MQA is to reduce the significant memory bandwidth overhead associated
+with loading the Key (K) and Value (V) tensors in MHA, which is often a
+bottleneck on mobile and edge hardware.
 
-Core Concepts and Optimizations:
+Architecturally, the key difference lies in how the K and V projections are
+handled. In standard MHA, each attention head has its own independent linear
+projections for Query (Q), Key, and Value. This means that for `h` heads,
+`h` separate K and V tensors must be computed and stored. In MQA, this is
+radically simplified:
+-   **Multiple Queries:** Each head still has its own unique Q projection,
+    allowing different heads to focus on different aspects of the input.
+-   **Shared Key and Value:** A single, shared linear projection is used to
+    create one K and one V tensor that are subsequently used by *all*
+    attention heads.
 
-1.  **Shared Key and Value (The MQA Strategy):**
-    -   In MQA, while each attention head gets its own unique Query (Q) projection,
-        all heads *share a single Key and Value projection*.
-    -   This is the defining feature of MQA. It dramatically reduces the memory
-        footprint and I/O required for the K and V tensors, which is a major
-        performance bottleneck on memory-constrained mobile accelerators. The layer
-        implements this by having a single `kv_proj` that is shared across all
-        `num_heads` query heads.
+The mathematical formulation remains largely the same as scaled dot-product
+attention, but the K and V tensors are effectively broadcasted across the
+head dimension during the attention score calculation. This design
+dramatically reduces the size of the K and V tensors from `(batch, h, seq_len,
+d_head)` to `(batch, 1, seq_len, d_head)`, leading to a significant reduction
+in memory footprint and the I/O required to read them from memory during
+computation.
 
-2.  **Optional Spatial Downsampling of Context:**
-    -   The layer includes an optional `use_downsampling` mechanism that further
-        reduces computational load.
-    -   When enabled, it applies an efficient, strided `DepthwiseConv2D` to the
-        Key and Value feature maps *before* the attention calculation.
-    -   This reduces the spatial resolution of the context (K and V) that the
-        queries attend to. The full-resolution queries can still attend to this
-        coarser-grained context, effectively summarizing the key information from a
-        larger receptive field at a lower cost.
+Furthermore, this implementation introduces an optional spatial downsampling
+step for the shared K and V tensors. When enabled, a strided depthwise
+convolution is applied to the K and V feature maps before attention. This
+further reduces the sequence length of the context that the queries attend
+to, decreasing the `O(N^2)` complexity of the dot-product to `O(N*M)`, where `M`
+is the downsampled sequence length. This allows the model to efficiently
+aggregate information from a summarized, lower-resolution context, trading
+some spatial granularity for a large gain in computational efficiency.
 
-3.  **Designed for 4D Image Tensors:**
-    -   This implementation is tailored for computer vision_heads tasks, operating directly
-        on 4D feature maps of shape `(batch, height, width, channels)`. It internally
-        flattens the spatial dimensions to perform attention and then reshapes the
-        output back to the original 4D format.
+References:
+    - Shazeer, 2019. Fast Transformer Decoding: One Write-Head is All You Need.
+      (Introduced Multi-Query Attention)
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. (Used cross-attention with downsampled context)
 
-Architectural Flow:
-
-1.  An input feature map is passed through two parallel projections:
-    a. `q_proj`: To create the multi-headed Query tensor.
-    b. `kv_proj`: To create the *single*, shared Key and Value tensors.
-
-2.  If `use_downsampling` is active, the combined KV tensor is spatially downsampled.
-
-3.  The KV tensor is split into a single Key and a single Value.
-
-4.  The Query tensor is reshaped to have `num_heads`. The Key and Value tensors are
-    reshaped to have a head dimension of 1, ready for broadcasting.
-
-5.  Standard scaled dot-product attention is performed. Due to broadcasting, all query
-    heads attend to the same Key/Value pair.
-
-6.  The output is reshaped back to its 4D spatial format and passed through a final
-    output projection (`o_proj`) to produce the layer's result.
 """
 
 import keras

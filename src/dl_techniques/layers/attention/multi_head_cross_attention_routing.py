@@ -1,3 +1,53 @@
+"""
+A scalable attention mechanism using hierarchical routing.
+
+This layer provides a computationally efficient alternative to the standard
+dot-product attention mechanism, particularly for tasks involving very long
+sequences. It replaces the computationally expensive `softmax(QK^T)` operation,
+which has a quadratic complexity of `O(N^2)` with respect to sequence length
+`N`, with a `HierarchicalRoutingLayer` that approximates the attention
+distribution with `O(log N)` complexity.
+
+Architecturally, this layer deviates from the conventional attention paradigm.
+Instead of computing attention scores through content-based comparison (i.e.,
+the dot product between every query and key), it employs a learned routing
+mechanism. Each query vector is fed into a `HierarchicalRoutingLayer`, which
+functions as a "soft" binary decision tree. This routing layer directly
+outputs a valid probability distribution over the key/value items without ever
+explicitly computing the full `N x N` attention matrix.
+
+The foundational mathematical concept is an adaptation of hierarchical softmax,
+a technique originally used to handle large output vocabularies in language
+models. The core idea is to structure the `N` possible items (keys/values) as
+leaves in a binary tree. To compute the probability of attending to a specific
+item, the query vector traverses a path from the root of this tree to the
+corresponding leaf. At each of the `log(N)` internal nodes along the path, a
+small learned function (e.g., a single neuron with a sigmoid activation) uses
+the query vector to decide the probability of taking the left or right branch:
+
+`P(branch | q) = σ(W_node * q + b_node)`
+
+The final probability of attending to a specific value item is the product of
+the probabilities of the decisions made along the unique path to its leaf.
+This transforms the problem of selecting one item from `N` into a sequence of
+`log(N)` binary decisions. The `HierarchicalRoutingLayer` encapsulates this
+entire process, taking a query as input and producing a correctly-normalized
+`N`-dimensional probability vector as output. This vector is then used to
+compute a weighted sum of the value vectors, analogous to the final step in
+standard attention.
+
+This approach offers a significant scalability advantage, making it feasible
+to apply attention-like mechanisms to sequences that would be computationally
+intractable with standard dot-product attention.
+
+References:
+    - Morin & Bengio, 2005. Hierarchical Probabilistic Neural Network
+      Language Model. (For the foundational hierarchical softmax concept)
+    - Kitaev, Kaiser, & Sutskever, 2020. Reformer: The Efficient Transformer.
+      (For general concepts on improving attention efficiency)
+
+"""
+
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, List

@@ -1,5 +1,5 @@
 """
-Implement a gated multi-head attention with rotary position embeddings.
+A gated multi-head attention with rotary position embeddings.
 
 This layer provides a sophisticated and high-performance implementation of
 multi-head attention, integrating several modern architectural enhancements

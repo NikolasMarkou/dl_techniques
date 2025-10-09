@@ -1,5 +1,5 @@
 """
-Computes exact attention for long sequences via blockwise processing.
+Exact attention for long sequences via blockwise processing.
 
 This layer implements Ring Attention, a memory-efficient algorithm that
 makes it possible to apply transformer attention to sequences of nearly
