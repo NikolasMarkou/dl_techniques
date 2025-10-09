@@ -1,13 +1,76 @@
-"""NanoVLM Loss Function for Vision-Language Model Training.
+"""
+Autoregressive cross-entropy loss for language modeling.
 
-This module implements the autoregressive language modeling loss function
-specifically designed for nanoVLM training with proper masking and label smoothing.
+This loss function implements the core training objective for the language
+generation component of a Vision-Language Model (VLM). It is designed to
+train a model to predict the next token in a sequence, conditioned on the
+preceding tokens and, implicitly, the visual input that has been processed
+by the model's encoder.
+
+Conceptual Overview:
+    The fundamental principle is autoregressive sequence generation, where the
+    model learns a probability distribution over a vocabulary for the next
+    token at each position in a sequence. By maximizing the likelihood of the
+    ground-truth next token at every step, the model learns the statistical
+    patterns of language, enabling it to generate coherent text. This is the
+    standard objective used to train large-scale generative language models
+    like GPT.
+
+Architectural Design:
+    To implement the "next-token prediction" objective, this loss function
+    relies on a crucial alignment shift between the model's predictions and
+    the ground-truth labels.
+    -   The predictions for sequence positions `[0, 1, ..., N-1]` are used.
+    -   The ground-truth labels for sequence positions `[1, 2, ..., N]` are
+        used as targets.
+    This effectively aligns the model's output at time step `t` with the
+    target token at `t+1`, forcing the model to predict one step into the
+    future.
+
+    A key architectural component is the handling of padding. Since sequences
+    in a batch are padded to a uniform length, an `ignore_index` is used to
+    create a mask. This mask ensures that the loss is only computed for
+    actual tokens in the sequence, and the gradients are not influenced by
+    the arbitrary padding tokens.
+
+Mathematical Formulation:
+    The loss is based on the standard cross-entropy between the model's
+    predicted probability distribution and the one-hot encoded ground-truth
+    token. For a given sequence position, the loss is the negative
+    log-probability of the correct target token:
+
+        L_token = -log(p_target)
+
+    where `p_target` is the probability assigned by the model to the correct
+    next token. In practice, this is computed using the model's raw output
+    logits `z` and the target token's index `y`:
+
+        L_token = -z_y + log( Σ_j exp(z_j) )
+
+    The final loss is the average of `L_token` over all non-masked (i.e.,
+    non-padding) tokens across all sequences in the batch. This formulation
+    may also incorporate label smoothing, a regularization technique that
+    replaces the hard one-hot target with a soft distribution, preventing
+    the model from becoming overconfident.
+
+References:
+    -   Radford, A., et al. (2018). "Improving Language Understanding by
+        Generative Pre-Training." Foundational for large-scale autoregressive
+        language model pre-training.
+    -   Vaswani, A., et al. (2017). "Attention Is All You Need." Introduced the
+        Transformer architecture where this loss is predominantly used.
 """
 
 import keras
 from keras import ops
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -208,3 +271,5 @@ class NanoVLMLoss(keras.losses.Loss):
             New NanoVLMLoss instance.
         """
         return cls(**config)
+
+# ---------------------------------------------------------------------

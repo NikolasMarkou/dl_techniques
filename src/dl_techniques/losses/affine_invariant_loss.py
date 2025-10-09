@@ -1,3 +1,56 @@
+"""
+A loss function invariant to scale and shift transformations.
+
+This loss is designed for tasks where the absolute scale and shift of the
+output are ambiguous or irrelevant, most notably in self-supervised or
+multi-dataset monocular depth estimation. When training on diverse datasets
+with different units (e.g., meters, feet) or unknown scaling factors, a
+standard regression loss like L1 or L2 would incorrectly penalize a
+prediction that is structurally correct but globally scaled or shifted.
+
+Conceptual Overview:
+    The core principle is to normalize both the predicted and ground truth
+    depth maps to a canonical representation before computing their
+    difference. This normalization removes any global affine transformation
+    (scale and shift), making the loss focus solely on the relative,
+    structural correctness of the prediction. For example, a predicted depth
+    map that is twice the scale of the ground truth but otherwise perfectly
+    proportional will incur zero loss.
+
+Architectural Design:
+    To achieve invariance, the loss function performs a per-sample
+    normalization. For each depth map in a batch (both prediction and
+    target), it calculates two robust statistical measures:
+    1.  A shift parameter `t`, estimated using the median of all depth values.
+    2.  A scale parameter `s`, estimated using the mean absolute deviation
+        (MAD) from the median.
+
+    The median and MAD are chosen over the mean and standard deviation for
+    their robustness to outliers, which are common in depth data (e.g.,
+    invalid "sky" pixels or sensor noise). After normalization, a standard
+    L1 (Mean Absolute Error) loss is computed on the transformed maps.
+
+Mathematical Formulation:
+    For a given depth map `d` (either predicted `d_pred` or ground truth
+    `d_true`), the normalization is performed as follows:
+
+    1.  Compute the shift: `t = median(d)`
+    2.  Compute the scale: `s = mean(|d - t|)`
+    3.  Normalize the depth map: `d_norm = (d - t) / (s + ε)`
+
+    where `ε` is a small constant for numerical stability. The final loss
+    is the L1 distance between the normalized prediction and ground truth:
+
+    Loss = || d_pred_norm - d_true_norm ||₁
+
+References:
+    The concept of a scale-invariant loss was popularized in early deep
+    learning approaches to monocular depth estimation.
+    -   Eigen, D., Puhrsch, C., & Fergus, R. (2014). "Depth Map Prediction
+        from a Single Image using a Multi-Scale Deep Network."
+        https://arxiv.org/abs/1406.2283
+"""
+
 import keras
 from keras import ops
 from typing import Any
@@ -24,16 +77,6 @@ class AffineInvariantLoss(keras.losses.Loss):
             computing scale normalization. Defaults to 1e-6.
         name: String, name of the loss function. Defaults to 'affine_invariant_loss'.
         **kwargs: Additional keyword arguments passed to the parent Loss class.
-
-    Example:
-        >>> import keras
-        >>> import tensorflow as tf
-        >>> loss_fn = AffineInvariantLoss()
-        >>> y_true = tf.random.uniform([8, 64, 64, 1], 0, 10)
-        >>> y_pred = tf.random.uniform([8, 64, 64, 1], 0, 10)
-        >>> loss = loss_fn(y_true, y_pred)
-        >>> print(loss.shape)
-        ()
     """
 
     def __init__(

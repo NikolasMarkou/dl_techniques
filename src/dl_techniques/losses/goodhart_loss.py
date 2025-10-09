@@ -1,88 +1,62 @@
 """
-GoodhartAwareLoss: Information-Theoretic Loss for Robust Classification
-=======================================================================
+An information-theoretic loss to promote robust generalization.
 
-This module implements a loss function that addresses Goodhart's Law
-("When a measure becomes a target, it ceases to be a good measure") in machine
-learning classification tasks through information-theoretic principles.
+This loss function is designed to address the ML equivalent of Goodhart's Law,
+where a model, in optimizing a simple metric like cross-entropy, learns to
+exploit statistical shortcuts or "spurious correlations" in the training
+data rather than learning the underlying causal features. The objective is to
+create a more holistic training signal that encourages robustness and better
+generalization by combining the standard task loss with information-theoretic
+regularizers.
 
-The ``GoodhartAwareLoss`` is a composite loss function that combines a standard
-cross-entropy term with two regularizers. The goal is to create a more
-holistic training objective that encourages models to learn robust and
-generalizable features rather than exploiting statistical shortcuts in the
-training data.
+Conceptual Overview:
+    The core idea is that a robust model should not only be accurate but also
+    well-calibrated (not overconfident) and information-efficient (it should
+    compress the input, retaining only the information essential for the task).
+    By explicitly penalizing overconfidence and information redundancy, this
+    loss function guides the model away from brittle, shortcut-based solutions
+    towards more generalizable representations.
 
-.. caution::
-    This is an advanced loss function whose effectiveness is **highly sensitive
-    to its hyperparameters and the specific task**. It is not a guaranteed
-    drop-in replacement for Cross-Entropy. Experimental results show that while
-    it can improve generalization on some complex benchmarks (e.g., CIFAR-10),
-    it may not be the optimal choice for combating simple, strong spurious
-    correlations (e.g., Colored MNIST) without careful tuning.
+Architectural Design:
+    The total loss is a weighted composite of three distinct components:
+    1.  Categorical Cross-Entropy: The standard supervised loss that drives
+        the model to make accurate predictions. This is the primary "task"
+        component.
+    2.  Entropy Regularization: This term penalizes overconfident predictions
+        by maximizing the Shannon entropy of the model's output distribution for
+        each sample. A higher entropy corresponds to a less confident, more
+        uniform prediction. This discourages the model from collapsing its
+        predictions based on flimsy evidence from a single spurious feature.
+    3.  Mutual Information Regularization: Based on the Information Bottleneck
+        principle, this term penalizes the mutual information between the raw
+        input `X` and the model's prediction `Ŷ`. It encourages the model to
+        learn a compressed internal representation, forcing it to "forget"
+        information from the input that is not strictly necessary for the
+        prediction task. This compression is hypothesized to discard noisy or
+        spurious features, retaining only the robust, generalizable ones.
 
-Components
-----------
-1. **Cross-Entropy (CE)**: The primary task loss that drives the model to be
-   accurate. This implementation can optionally include label smoothing.
+Mathematical Formulation:
+    The total loss is a linear combination of the three components:
 
-2. **Entropy Regularization**: Aims to improve calibration and prevent
-   overconfidence by maximizing the Shannon entropy :math:`H(p) = -\\sum p_i \\log p_i`
-   of the model's predictive distribution for each sample. This discourages the
-   model from collapsing to brittle, overconfident solutions (Pereyra et al., 2017).
-   - **Mechanism**: Acts as a "pressure valve" against over-optimization on
-     the CE term. It is controlled by the ``entropy_weight`` (:math:`\\lambda`).
+    L = L_CE - λ * H(p(Ŷ|X)) + β * I(X; Ŷ)
 
-3. **Mutual Information (MI) Regularization**: Based on the Information
-   Bottleneck principle (Tishby et al., 2000), this term penalizes the mutual
-   information :math:`I(X;\\hat{Y})` between the inputs (X) and the predictions (Ŷ).
-   This encourages the model to learn a compressed representation of the input,
-   retaining only the most essential information for the task.
-   - **Mechanism**: Creates a "compression bottleneck" that aims to discard
-     irrelevant information and spurious correlations, with the goal of improving
-     generalization. It is controlled by the ``mi_weight`` (:math:`\\beta`).
+    Where:
+    -   `L_CE` is the standard categorical cross-entropy loss.
+    -   `H(p(Ŷ|X))` is the conditional entropy of the prediction `Ŷ` given the
+        input `X`, averaged over the batch. The loss *maximizes* this entropy
+        (by minimizing its negative) to penalize confidence. `λ` is its weight.
+    -   `I(X; Ŷ)` is the mutual information between the input and the prediction.
+        The loss *minimizes* this term to encourage compression. `β` is its
+        weight. The mutual information is practically approximated over a
+        batch using the identity `I(X; Ŷ) = H(Ŷ) - H(Ŷ|X)`, where `H(Ŷ)` is the
+        entropy of the marginal prediction distribution (the average prediction
+        across the batch).
 
-Mathematical Foundation
------------------------
-The total loss is a weighted combination of the three components:
-
-.. math::
-    L_{total} = L_{CE} - \\lambda H(p(\\hat{Y}|X)) + \\beta I(X; \\hat{Y})
-
-Where:
-- :math:`L_{CE}` is the categorical cross-entropy.
-- :math:`- H(p(\\hat{Y}|X))` is the term that maximizes the conditional entropy of predictions.
-- :math:`I(X; \\hat{Y})` is the mutual information, approximated as :math:`H(\\hat{Y}) - H(\\hat{Y}|X)`.
-- :math:`\\lambda` and :math:`\\beta` are the regularization weights.
-
-Practical Considerations & Tuning Guide
----------------------------------------
-- **Hyperparameter Sensitivity**: The performance of this loss is critically
-  dependent on the ``entropy_weight`` (:math:`\\lambda`) and ``mi_weight``
-  (:math:`\\beta`). The default values are a starting point, but they are not
-  universally optimal.
-
-- **Task-Dependency**: The ideal weights vary significantly with the dataset and
-  task. For instance, a configuration that improves accuracy on a general
-  benchmark may not be the best for a task focused on removing specific
-  spurious correlations.
-
-- **Tuning Strategy**:
-  1. **Start Small**: Begin with small regularization weights (e.g., 1e-3 to 1e-2)
-     and observe their effect on the total loss and individual components.
-  2. **Isolate Components**: To understand their effects, try tuning one
-     regularizer at a time by setting the other's weight to zero.
-  3. **Grid Search**: For best results, perform a 2D grid search over a range
-     of :math:`\\lambda` and :math:`\\beta` values (e.g., `[0.0, 0.001, 0.01, 0.1]`).
-  4. **Monitor Calibration**: Be aware of trade-offs. Improving accuracy with this
-     loss might sometimes come at the cost of poorer calibration (higher ECE).
-     Monitor both accuracy and calibration metrics.
-
-References
-----------
-- Goodhart's Law: https://en.wikipedia.org/wiki/Goodhart's_law
-- Information Bottleneck: Tishby, N., Pereira, F. C., & Bialek, W. (2000).
-- Regularizing by Penalizing Confident Outputs: Pereyra, G., et al. (2017).
-
+References:
+    -   Pereyra, G., et al. (2017). "Regularizing Neural Networks by Penalizing
+        Confident Output Distributions." (For the entropy regularization term).
+    -   Tishby, N., Pereira, F. C., & Bialek, W. (2000). "The Information
+        Bottleneck Method." (For the mutual information term).
 """
 
 import keras

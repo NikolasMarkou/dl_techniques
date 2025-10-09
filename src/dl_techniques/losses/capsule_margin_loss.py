@@ -1,41 +1,55 @@
 """
-CapsuleMarginLoss: Margin Loss for Capsule Networks
-===================================================
+Margin loss for training Capsule Networks.
 
-This module implements the margin loss function specifically designed for
-Capsule Networks, as described in "Dynamic Routing Between Capsules" by
-Sabour et al. (2017).
+This loss function is the objective proposed in the paper "Dynamic Routing
+Between Capsules" for training Capsule Networks (CapsNets). Unlike
+traditional cross-entropy loss which operates on probabilities, this loss is
+designed to work directly with the lengths (L2 norm) of the output capsule
+vectors, where a longer vector signifies a higher probability of an entity's
+presence.
 
-The margin loss is a specialized loss function that differs from traditional
-cross-entropy by using separate margins for positive and negative classes.
-This design is particularly suited for capsule networks where the output
-represents the length of capsule vectors, and the goal is to have long
-vectors for present entities and short vectors for absent entities.
+Conceptual Overview:
+    The core idea is to enforce a margin-based separation between the capsule
+    representing the correct class and the capsules for incorrect classes.
+    For a given input, the model is trained to produce a long output vector
+    (length > `m^+`) for the true class and short vectors (length < `m^-`)
+    for all other classes. This encourages the network to be decisive and
+    produces a more robust representation of classification confidence.
 
-Mathematical Foundation
------------------------
-The margin loss for each class k is defined as:
+Architectural Design:
+    The loss is computed as a sum over two distinct components for each
+    class `k`:
+    1.  A "positive loss" that penalizes the model only if the correct
+        class's capsule vector length is smaller than a high margin `m^+`.
+        This term is zero if the length is already greater than `m^+`.
+    2.  A "negative loss" that penalizes the model only if an incorrect
+        class's capsule vector length is larger than a low margin `m^-`.
+        This term is zero if the length is already smaller than `m^-`.
 
-.. math::
-    L_k = T_k \\max(0, m^+ - \\|v_k\\|)^2 + \\lambda (1 - T_k) \\max(0, \\|v_k\\| - m^-)^2
+    The negative loss component is typically down-weighted by a factor `λ`
+    to prevent the numerous negative classes from overpowering the gradient
+    signal from the single positive class, which helps to stabilize training.
 
-Where:
-- :math:`T_k` is 1 if class k is present (true label), 0 otherwise
-- :math:`\\|v_k\\|` is the length of the capsule vector for class k
-- :math:`m^+` is the margin for positive classes (default 0.9)
-- :math:`m^-` is the margin for negative classes (default 0.1)
-- :math:`\\lambda` is the downweighting factor for negative classes (default 0.5)
+Mathematical Formulation:
+    For each output capsule `k`, with a vector `v_k`, the loss `L_k` is:
 
-The total loss is the sum of individual class losses:
+    L_k = T_k * max(0, m⁺ - ||v_k||)² + λ * (1 - T_k) * max(0, ||v_k|| - m⁻)²
 
-.. math::
-    L = \\sum_k L_k
+    Where:
+    -   `T_k` is the ground truth label (1 if class `k` is present, 0 otherwise).
+    -   `||v_k||` is the L2 norm (length) of the capsule vector for class `k`.
+    -   `m⁺` is the positive margin (e.g., 0.9), the desired lower bound for
+        the correct capsule's length.
+    -   `m⁻` is the negative margin (e.g., 0.1), the desired upper bound for
+        incorrect capsules' lengths.
+    -   `λ` is a down-weighting scalar (e.g., 0.5) for the negative loss.
 
-References
-----------
-- Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between capsules.
-  In Advances in neural information processing systems (pp. 3856-3866).
+    The total loss for a sample is the sum of `L_k` over all classes `k`.
 
+References:
+    - Sabour, S., Frosst, N., & Hinton, G. E. (2017). "Dynamic Routing
+      Between Capsules." Advances in Neural Information Processing Systems 30.
+      https://papers.nips.cc/paper/2017/file/2cad8fa43b24f4120ef25e47fa44b34c-Paper.pdf
 """
 
 import keras

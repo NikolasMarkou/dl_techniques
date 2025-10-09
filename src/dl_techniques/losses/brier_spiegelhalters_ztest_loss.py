@@ -1,28 +1,61 @@
 """
-Calibration Loss Functions: Brier Score and Spiegelhalter's Z-test
+A loss function based on Spiegelhalter's Z-test.
 
-This module implements differentiable loss functions based on model calibration metrics:
-- Brier Score: Measures the mean squared difference between predicted probabilities
-  and actual outcomes
-- Spiegelhalter's Z-test: Statistical test for calibration that measures systematic
-  bias in probability predictions
+This loss function provides a differentiable objective for directly optimizing
+a model's calibration during training. Calibration refers to the statistical
+consistency between a model's predicted probabilities and the actual
+long-run frequencies of outcomes. A well-calibrated model that predicts a
+40% probability for an event should be correct 40% of the time over many
+such predictions. This loss specifically targets and minimizes systematic
+bias (i.e., consistent over- or under-prediction).
 
-These loss functions allow direct optimization of model calibration during training,
-complementing the AnyLoss framework for comprehensive model evaluation.
+Conceptual Overview:
+    The core idea is to reframe a statistical test for calibration as a
+    differentiable loss function. Spiegelhalter's Z-test is a statistical
+    tool that measures the standardized difference between observed outcomes
+    and predicted probabilities. A Z-statistic close to zero indicates good
+    calibration, while large positive or negative values suggest systematic
+    under-prediction or over-prediction, respectively. By minimizing the
+    magnitude (or square) of this Z-statistic, the model is explicitly
+    trained to reduce this bias.
 
-Key Benefits:
-    - Direct optimization of probability calibration
-    - No approximation functions needed (works directly with probabilities)
-    - Addresses both accuracy and reliability of probability predictions
-    - Can be combined with other loss functions for multi-objective optimization
+Architectural Design:
+    The loss function computes the Spiegelhalter Z-statistic over a batch of
+    predictions and their corresponding true outcomes. The objective is to
+    drive this statistic towards zero. The loss is therefore formulated as
+    the square of the Z-statistic (`Z²`), which creates a smooth, convex
+    objective with a global minimum at `Z=0`. This approach turns the
+    problem of improving calibration into a standard gradient-based
+    optimization problem.
 
-Example:
-    >>> model = keras.Sequential([...])
-    >>> model.compile(
-    ...     optimizer=keras.optimizers.Adam(learning_rate=0.001),
-    ...     loss=BrierScoreLoss(),  # Or SpiegelhalterZLoss() or CombinedCalibrationLoss()
-    ...     metrics=['accuracy']
-    ... )
+Mathematical Formulation:
+    Spiegelhalter's Z-statistic is defined as the sum of residuals
+    (observed - predicted) divided by the standard deviation of that sum,
+    under the null hypothesis that the model is well-calibrated.
+
+    For a batch of `N` samples, let `oᵢ` be the observed outcome (0 or 1) and
+    `pᵢ` be the predicted probability for the i-th sample.
+
+    The Z-statistic is calculated as:
+
+        Z = Σᵢ (oᵢ - pᵢ) / sqrt( Σᵢ pᵢ(1 - pᵢ) )
+
+    -   Numerator `Σᵢ (oᵢ - pᵢ)`: This is the sum of the residuals. It
+        represents the net difference between the number of observed positive
+        outcomes and the number of expected positive outcomes. For a
+        well-calibrated model, this sum should be close to zero.
+    -   Denominator `sqrt( Σᵢ pᵢ(1 - pᵢ) )`: This is the standard deviation
+        of the sum of residuals. It is derived from the property that each
+        prediction `pᵢ` can be seen as a parameter of an independent
+        Bernoulli trial, whose variance is `pᵢ(1 - pᵢ)`.
+
+    The loss function is then the square of this statistic:
+
+        Loss = Z²
+
+References:
+    - Spiegelhalter, D. J. (1986). "Probabilistic prediction in patient
+      management and clinical trials." Statistics in Medicine, 5(5), 421-433.
 """
 
 import keras

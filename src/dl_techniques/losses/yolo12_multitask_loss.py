@@ -35,8 +35,11 @@ from typing import Dict, Any, List, Union, Tuple, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.bounding_box import bbox_iou
-from dl_techniques.utils.vision_task_types import (
-    TaskType, TaskConfiguration, parse_task_list
+
+from dl_techniques.layers.vision_heads.task_types import (
+    TaskType,
+    TaskConfiguration,
+    parse_task_list
 )
 
 

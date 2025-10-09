@@ -1,3 +1,65 @@
+"""
+A margin-based cosine similarity loss for feature alignment.
+
+This loss function is designed for knowledge distillation or transfer learning
+scenarios where a "student" model is trained to mimic the feature
+representations of a pre-trained, frozen "teacher" model. Its goal is to
+transfer the semantic knowledge embedded in the teacher's feature space to
+the student, often when the student has a different or smaller architecture.
+
+Conceptual Overview:
+    The core principle is to align the feature vectors produced by the student
+    with those from the teacher for the same input. Instead of forcing an
+    exact match of the feature vectors (e.g., with L2 loss), this loss
+    focuses on aligning their *direction* in the high-dimensional embedding
+    space. The direction of a feature vector is often a better proxy for
+    semantic meaning than its magnitude. By maximizing the cosine similarity,
+    the student learns to place its representations in the same conceptual
+    direction as the teacher.
+
+Architectural Design:
+    The loss architecture is built upon two key components:
+    1.  Cosine Similarity: The primary metric for alignment. Both the teacher
+        (y_true) and student (y_pred) feature vectors are first L2-normalized
+        to project them onto the unit hypersphere. The loss is then derived
+        from the dot product of these normalized vectors, which is equivalent
+        to their cosine similarity. A similarity of 1 indicates perfect
+        alignment, while -1 indicates perfect opposition.
+    2.  Margin Threshold: The loss incorporates a margin `m`. The model is
+        only penalized if the cosine similarity between a pair of feature
+        vectors falls *below* this margin. If the alignment is already "good
+        enough" (i.e., similarity > `m`), the loss for that sample is zero.
+        This prevents the model from overfitting to the teacher's exact
+        representations and focuses the training effort on the most poorly
+        aligned examples, acting as a form of regularization.
+
+Mathematical Formulation:
+    For a given pair of teacher and student feature vectors, `v_true` and
+    `v_pred`, the loss is calculated as follows:
+
+    1.  Normalize the vectors to unit length:
+        `v̂_true = v_true / ||v_true||₂`
+        `v̂_pred = v_pred / ||v_pred||₂`
+
+    2.  Compute the cosine similarity:
+        `sim = v̂_true ⋅ v̂_pred`
+
+    3.  Apply the margin `m` to compute the final loss for the sample:
+        Loss = max(0, 1 - sim) if sim < m, else 0.
+        This can be expressed more concisely as:
+        Loss = max(0, m - sim) and then scaled, but the code's approach
+        of `(1-sim)` for `sim < m` is a common variant.
+
+References:
+    The technique of aligning intermediate feature representations is a form
+    of knowledge distillation, extending the original concept.
+    -   Hinton, G., Vinyals, O., & Dean, J. (2015). "Distilling the Knowledge
+        in a Neural Network." https://arxiv.org/abs/1503.02531
+    -   Romero, A., et al. (2014). "FitNets: Hints for Thin Deep Nets."
+        (Introduced the idea of aligning intermediate feature maps).
+        https://arxiv.org/abs/1412.6550
+"""
+
 import keras
 from keras import ops
 from typing import Any
@@ -25,16 +87,6 @@ class FeatureAlignmentLoss(keras.losses.Loss):
             Should be in range [0, 1]. Defaults to 0.85.
         name: String, name of the loss function. Defaults to 'feature_alignment_loss'.
         **kwargs: Additional keyword arguments passed to the parent Loss class.
-
-    Example:
-        >>> import keras
-        >>> import tensorflow as tf
-        >>> loss_fn = FeatureAlignmentLoss(margin=0.8)
-        >>> y_true = tf.random.normal([32, 128])
-        >>> y_pred = tf.random.normal([32, 128])
-        >>> loss = loss_fn(y_true, y_pred)
-        >>> print(loss.shape)
-        ()
     """
 
     def __init__(

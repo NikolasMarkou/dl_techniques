@@ -12,15 +12,17 @@ with the dl_techniques framework, including:
 6. Integration with diffusion models
 """
 
-import keras
-from keras import ops
-import tensorflow as tf
-import numpy as np
-from typing import Dict, List, Tuple, Optional
-import os
 import json
+import keras
+import numpy as np
+import tensorflow as tf
+from typing import List, Tuple, Optional
 
-from dl_techniques.models.clip_modern import (
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.models.clip.model import (
     ModernCLIP,
     CLIPConfig,
     create_modern_clip,
@@ -28,8 +30,6 @@ from dl_techniques.models.clip_modern import (
 )
 from dl_techniques.losses.siglip_contrastive_loss import (
     create_siglip_loss,
-    create_adaptive_siglip_loss,
-    create_hybrid_loss
 )
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -38,6 +38,7 @@ from dl_techniques.optimization import (
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.tokenizers.bpe import BPETokenizer
 
+# ---------------------------------------------------------------------
 
 class CLIPDataLoader:
     """Data loader for CLIP training with image-text pairs."""

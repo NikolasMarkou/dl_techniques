@@ -1,19 +1,81 @@
+"""
+A dual-objective loss function for deep clustering.
+
+This loss is designed for deep learning models that perform unsupervised
+clustering by learning an embedding space. It guides the model to produce
+both compact and well-balanced clusters by combining two distinct objectives:
+a primary clustering assignment loss and a regularization term for cluster
+distribution.
+
+Conceptual Overview:
+    The fundamental goal is to simultaneously optimize the quality of the
+    learned feature representations and the quality of the cluster
+    assignments. This is achieved by penalizing two undesirable outcomes:
+    1.  Poor cluster assignments, where the model's predicted cluster
+        probabilities for a sample diverge from a target distribution. This
+        target is often derived in a self-supervised manner from a more
+        confident version of the model's own predictions.
+    2.  Trivial or degenerate solutions, such as the model assigning all data
+        points to a single cluster ("cluster collapse").
+
+Architectural Design:
+    The total loss is a weighted sum of two components:
+    1.  Intra-cluster Distance Loss: This term measures the discrepancy
+        between the model's predicted soft cluster assignments and a target
+        assignment distribution. In many deep clustering frameworks (like DEC),
+        this target is a "sharpened" version of the predictions, which helps
+        to improve cluster purity and separation over time. The implementation
+        here uses Mean Squared Error (MSE) as the distance metric.
+    2.  Cluster Distribution Penalty: This term acts as a regularizer. It
+        calculates the mean frequency of assignment for each cluster across an
+        entire batch and penalizes any deviation from a uniform distribution.
+        This encourages the model to utilize all available clusters equally,
+        preventing it from ignoring some clusters entirely.
+
+Mathematical Formulation:
+    Let `P` be the `(N, K)` matrix of predicted soft assignments for a batch
+    of `N` samples and `K` clusters, and let `Q` be the target distribution.
+
+    1.  The distance loss (`L_dist`) is the mean squared error between the
+        predicted and target distributions:
+
+        L_dist = MSE(P, Q) = 1/N * Σᵢ ||pᵢ - qᵢ||²
+
+    2.  The distribution penalty (`L_distrib`) is the MSE between the actual
+        cluster assignment frequencies and a uniform distribution. Let `f_j`
+        be the frequency of cluster `j`, computed as `f_j = 1/N * Σᵢ pᵢⱼ`.
+
+        L_distrib = MSE(f, u) = 1/K * Σⱼ (fⱼ - 1/K)²
+
+    The final loss is a weighted combination of these two terms:
+
+        L_total = w_dist * L_dist + w_distrib * L_distrib
+
+References:
+    The architectural pattern of combining a primary clustering objective with
+    a distribution-balancing regularizer is a common technique in deep
+    unsupervised clustering. It draws inspiration from foundational works
+    such as:
+    -   Xie, J., Girshick, R., & Farhadi, A. (2016). "Unsupervised Deep
+        Embedding for Clustering Analysis." ICML.
+    -   Guo, X., et al. (2017). "Improved Deep Embedded Clustering with Local
+        Structure Preservation." IJCAI.
+"""
+
 import os
 import keras
 import numpy as np
 from keras import ops
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
-from typing import Optional, Union, List, Any, Tuple, Dict
+from typing import Optional, Union, List, Any, Dict
 
 # ---------------------------------------------------------------------
 # Local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.kmeans import KMeansLayer
 
 # ---------------------------------------------------------------------
 
@@ -43,6 +105,7 @@ class ClusteringMetrics:
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class ClusteringLoss(keras.losses.Loss):
     """Custom loss function for clustering quality.
 
@@ -391,256 +454,5 @@ def compute_clustering_metrics(
         cluster_distribution=cluster_distribution,
         mean_distance=float(mean_distance)
     )
-
-
-# ---------------------------------------------------------------------
-
-def generate_test_data(
-        n_samples: int,
-        n_features: int,
-        n_clusters: int,
-        noise_std: float = 0.1,
-        random_seed: Optional[int] = None
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Generate synthetic clustering data.
-
-    Creates synthetic data with well-separated clusters for testing clustering
-    algorithms. Each cluster is generated as a Gaussian distribution around
-    a randomly placed center.
-
-    Args:
-        n_samples (int): Number of samples to generate. Must be positive.
-        n_features (int): Number of features per sample. Must be positive.
-        n_clusters (int): Number of true clusters. Must be positive.
-        noise_std (float): Standard deviation of Gaussian noise. Must be non-negative.
-        random_seed (Optional[int]): Random seed for reproducibility.
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: Tuple of (data, true_labels) where:
-            - data has shape (n_samples, n_features)
-            - true_labels has shape (n_samples,)
-
-    Raises:
-        ValueError: If input parameters are invalid.
-
-    Example:
-        >>> data, labels = generate_test_data(100, 10, 3, noise_std=0.2)
-        >>> print(f"Generated data shape: {data.shape}")
-        >>> print(f"Number of unique labels: {len(np.unique(labels))}")
-    """
-    # Validate inputs
-    if n_samples <= 0:
-        raise ValueError(f"n_samples must be positive, got {n_samples}")
-    if n_features <= 0:
-        raise ValueError(f"n_features must be positive, got {n_features}")
-    if n_clusters <= 0:
-        raise ValueError(f"n_clusters must be positive, got {n_clusters}")
-    if noise_std < 0:
-        raise ValueError(f"noise_std must be non-negative, got {noise_std}")
-
-    if random_seed is not None:
-        np.random.seed(random_seed)
-        logger.info(f"Set random seed to {random_seed}")
-
-    # Generate cluster centers
-    centers = np.random.randn(n_clusters, n_features) * 2.0  # Scale centers for better separation
-
-    # Generate samples around centers
-    samples_per_cluster = n_samples // n_clusters
-    remaining_samples = n_samples % n_clusters
-
-    data = []
-    labels = []
-
-    for i, center in enumerate(centers):
-        # Add extra samples to first clusters if n_samples not divisible by n_clusters
-        n_cluster_samples = samples_per_cluster + (1 if i < remaining_samples else 0)
-
-        cluster_samples = center + np.random.randn(n_cluster_samples, n_features) * noise_std
-        data.append(cluster_samples)
-        labels.append(np.full(n_cluster_samples, i))
-
-    final_data = np.vstack(data).astype(np.float32)
-    final_labels = np.hstack(labels).astype(np.int32)
-
-    logger.info(f"Generated {len(final_data)} samples with {n_features} features "
-                f"and {n_clusters} clusters")
-
-    return final_data, final_labels
-
-
-# ---------------------------------------------------------------------
-
-def visualize_clusters_2d(
-        data: TensorLike,
-        assignments: TensorLike,
-        title: str = 'Cluster Visualization',
-        save_path: Optional[str] = None
-) -> None:
-    """Visualize clustering results in 2D using t-SNE.
-
-    Creates a 2D scatter plot of clustering results. If the data has more than
-    2 dimensions, t-SNE is used for dimensionality reduction.
-
-    Args:
-        data (TensorLike): Input data points of shape (n_samples, n_features).
-        assignments (TensorLike): Cluster assignments of shape (n_samples, n_clusters).
-        title (str): Plot title.
-        save_path (Optional[str]): Optional path to save the plot.
-
-    Raises:
-        ValueError: If data or assignments have invalid shapes.
-
-    Example:
-        >>> data = np.random.randn(100, 10)
-        >>> assignments = np.random.rand(100, 3)
-        >>> visualize_clusters_2d(data, assignments, save_path='clusters.png')
-    """
-    # Convert to numpy if needed
-    if hasattr(data, 'numpy'):
-        data = data.numpy()
-    if hasattr(assignments, 'numpy'):
-        assignments = assignments.numpy()
-
-    # Validate inputs
-    if data.ndim != 2:
-        raise ValueError(f"Data must be 2D, got shape {data.shape}")
-    if assignments.ndim != 2:
-        raise ValueError(f"Assignments must be 2D, got shape {assignments.shape}")
-    if data.shape[0] != assignments.shape[0]:
-        raise ValueError(f"Data and assignments must have same number of samples")
-
-    # Get hard assignments
-    labels = np.argmax(assignments, axis=1)
-
-    try:
-        # Reduce dimensionality for visualization
-        if data.shape[1] > 2:
-            logger.info("Reducing dimensionality with t-SNE for visualization")
-            tsne = TSNE(n_components=2, random_state=42, verbose=0)
-            data_2d = tsne.fit_transform(data)
-        else:
-            data_2d = data
-
-        # Create scatter plot
-        plt.figure(figsize=(10, 8))
-        scatter = plt.scatter(
-            data_2d[:, 0],
-            data_2d[:, 1],
-            c=labels,
-            cmap='tab10',
-            alpha=0.6,
-            s=30,
-            edgecolors='black',
-            linewidth=0.5
-        )
-        plt.colorbar(scatter, label='Cluster')
-        plt.title(title)
-        plt.xlabel('Component 1')
-        plt.ylabel('Component 2')
-        plt.grid(True, alpha=0.3)
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            logger.info(f"Saved cluster visualization to {save_path}")
-        else:
-            plt.show()
-
-    except Exception as e:
-        logger.error(f"Error creating cluster visualization: {str(e)}")
-        raise
-
-
-# ---------------------------------------------------------------------
-
-def create_clustering_pipeline(
-        input_shape: Tuple[int, ...],
-        n_clusters: int,
-        temperature: float = 0.1,
-        learning_rate: float = 0.001,
-        distance_weight: float = 1.0,
-        distribution_weight: float = 0.5
-) -> keras.Model:
-    """Create a complete clustering pipeline.
-
-    Builds a complete clustering model with preprocessing layers and a KMeans
-    clustering layer. The model is compiled and ready for training.
-
-    Args:
-        input_shape (Tuple[int, ...]): Shape of input data (without batch dimension).
-        n_clusters (int): Number of clusters. Must be positive.
-        temperature (float): Softmax temperature for soft assignments. Must be positive.
-        learning_rate (float): Learning rate for optimizer. Must be positive.
-        distance_weight (float): Weight for distance term in loss. Must be positive.
-        distribution_weight (float): Weight for distribution term in loss. Must be positive.
-
-    Returns:
-        keras.Model: Compiled Keras model ready for training.
-
-    Raises:
-        ValueError: If input parameters are invalid.
-        RuntimeError: If model creation fails.
-
-    Example:
-        >>> model = create_clustering_pipeline(
-        ...     input_shape=(784,),
-        ...     n_clusters=10,
-        ...     temperature=0.1
-        ... )
-        >>> model.summary()
-    """
-    try:
-        # Input validation
-        if not all(dim > 0 for dim in input_shape):
-            raise ValueError(f"Invalid input shape: {input_shape}")
-        if n_clusters < 1:
-            raise ValueError(f"Invalid number of clusters: {n_clusters}")
-        if temperature <= 0:
-            raise ValueError(f"Invalid temperature: {temperature}")
-        if learning_rate <= 0:
-            raise ValueError(f"Invalid learning rate: {learning_rate}")
-        if distance_weight <= 0:
-            raise ValueError(f"Invalid distance weight: {distance_weight}")
-        if distribution_weight <= 0:
-            raise ValueError(f"Invalid distribution weight: {distribution_weight}")
-
-        logger.info(f"Creating clustering pipeline with {n_clusters} clusters")
-        logger.info(f"Input shape: {input_shape}, Temperature: {temperature}")
-
-        # Create model
-        inputs = keras.Input(shape=input_shape, name='input')
-
-        # Preprocessing layers
-        x = keras.layers.LayerNormalization(name='layer_norm')(inputs)
-        x = keras.layers.GaussianNoise(0.01, name='gaussian_noise')(x)
-
-        # Clustering layer
-        kmeans = KMeansLayer(
-            n_clusters=n_clusters,
-            temperature=temperature,
-            name='kmeans_clustering'
-        )
-        outputs = kmeans(x)
-
-        # Create model
-        model = keras.Model(inputs, outputs, name='clustering_pipeline')
-
-        # Compile model
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
-            loss=ClusteringLoss(
-                distance_weight=distance_weight,
-                distribution_weight=distribution_weight
-            ),
-            metrics=['accuracy']
-        )
-
-        logger.info(f"Successfully created clustering pipeline with {model.count_params()} parameters")
-        return model
-
-    except Exception as e:
-        logger.error(f"Error creating clustering pipeline: {str(e)}")
-        raise RuntimeError(f"Error creating clustering pipeline: {str(e)}") from e
 
 # ---------------------------------------------------------------------

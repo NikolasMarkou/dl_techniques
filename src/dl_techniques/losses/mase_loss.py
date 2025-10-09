@@ -1,5 +1,56 @@
+"""
+Mean Absolute Scaled Error (MASE), a scale-free loss metric.
+
+This loss function evaluates forecast accuracy by comparing the model's
+performance against a simple, naive baseline forecast (e.g., predicting
+the previous value). This relative comparison makes the metric scale-
+independent, allowing for meaningful performance evaluation across different
+time series, regardless of their native units or magnitudes.
+
+Architecturally, MASE provides a more informative training objective than
+standard error metrics like MAE or MSE for many forecasting tasks. A MASE
+value is directly interpretable: a value less than 1.0 indicates that the
+model is outperforming the naive benchmark, while a value greater than 1.0
+indicates it is performing worse. This provides a clear, standardized
+measure of forecasting skill. This specific implementation calculates the
+naive forecast error on a per-batch basis, making it a self-contained and
+practical loss function for mini-batch training, although this is an
+approximation of the canonical MASE which uses a global scaling factor
+derived from the entire training set.
+
+Foundational Mathematics
+------------------------
+MASE is defined as the ratio of the Mean Absolute Error (MAE) of the
+forecast to the MAE of a naive, in-sample benchmark forecast.
+
+    MASE = MAE_forecast / MAE_naive
+
+1.  **Forecast Error (Numerator)**: This is the standard MAE of the
+    model's predictions over the forecast horizon.
+    `MAE_forecast = mean(|y_true - y_pred|)`
+
+2.  **Naive Scaling Factor (Denominator)**: This is the MAE of a simple,
+    non-seasonal (`m=1`) or seasonal (`m > 1`) naive forecast, where the
+    forecast for time `t` is the value from time `t-m`. For a time
+    series `y` of length `T`, it is calculated over the training data as:
+    `MAE_naive = (1 / (T - m)) * Σ |y_t - y_{t-m}|` for `t` from `m+1`
+    to `T`.
+
+This denominator acts as a robust scaling factor, normalizing the forecast
+error by a measure of the inherent variability and one-step
+predictability of the time series itself.
+
+References
+----------
+The MASE metric was proposed by:
+-   Hyndman, R. J., & Koehler, A. B. (2006). "Another look at measures
+    of forecast accuracy". *International Journal of Forecasting*.
+"""
+
 import keras
 from keras import ops
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MASELoss(keras.losses.Loss):
@@ -35,7 +86,9 @@ class MASELoss(keras.losses.Loss):
         self.seasonal_periods = seasonal_periods
         self.epsilon = epsilon
 
-    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+    def call(self,
+             y_true: keras.KerasTensor,
+             y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """Compute MASE loss.
 
         Args:
@@ -121,3 +174,5 @@ def mase_metric(seasonal_periods: int = 1):
 
     metric.__name__ = f'mase_metric_sp{seasonal_periods}'
     return metric
+
+# ---------------------------------------------------------------------

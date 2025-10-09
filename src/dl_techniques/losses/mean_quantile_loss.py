@@ -1,5 +1,58 @@
+"""
+Quantile loss, also known as the pinball loss.
+
+This loss function facilitates quantile regression, a technique that
+shifts the modeling objective from predicting a single point estimate (like
+the conditional mean in MSE-based regression) to predicting a specific
+conditional quantile of the target distribution. This is the cornerstone
+of probabilistic forecasting, as it allows a model to quantify uncertainty.
+By training a model on multiple quantiles (e.g., 0.1, 0.5, 0.9), one can
+construct prediction intervals that provide a range of likely outcomes.
+
+Architecturally, quantile loss enables a standard neural network to
+output a distribution's characteristics rather than just its central
+tendency. It achieves this by introducing an asymmetric penalty that is
+minimized, in expectation, when the model's output corresponds to the
+desired quantile of the true conditional distribution.
+
+Foundational Mathematics
+------------------------
+The quantile loss is an asymmetric function that penalizes over- and
+under-predictions differently, with the asymmetry controlled by the target
+quantile `q`. For a given prediction error `e = y_true - y_pred`, the loss
+`L_q(e)` is defined as:
+
+         | q * e                if e >= 0  (underprediction)
+L_q(e) = |
+         | (1 - q) * (-e)       if e < 0   (overprediction)
+
+The intuition behind this "pinball loss" is as follows:
+-   If the target quantile `q` is 0.9, the loss for underpredicting (`e > 0`)
+    is weighted by `0.9`, while the loss for overpredicting (`e < 0`) is
+    weighted by `1 - 0.9 = 0.1`. The model is therefore penalized much more
+    heavily for being too low than for being too high. To minimize its
+    expected loss, the network learns to output a value that is greater
+    than the true value 90% of the time, which is the definition of the
+    90th percentile.
+-   If `q = 0.5`, the weights for under- and over-prediction are both 0.5,
+    making the loss symmetric: `L_0.5(e) = 0.5 * |e|`. Minimizing this is
+    equivalent to minimizing the Mean Absolute Error (MAE), which is known
+    to yield the conditional median.
+
+This mechanism provides a robust and elegant way to train a deterministic
+model to produce probabilistic forecasts.
+
+References
+----------
+The foundational work on quantile regression was introduced by:
+-   Koenker, R., & Bassett, G. (1978). "Regression Quantiles".
+    *Econometrica*.
+"""
+
 import keras
 from keras import ops
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MQLoss(keras.losses.Loss):
@@ -52,3 +105,5 @@ class MQLoss(keras.losses.Loss):
             'quantile': self.quantile,
         })
         return config
+
+# ---------------------------------------------------------------------

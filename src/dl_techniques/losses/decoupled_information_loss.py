@@ -89,9 +89,10 @@ Example:
 
 import keras
 from keras import ops
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Any
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable(package="dl_techniques.losses")
 class DecoupledInformationLoss(keras.losses.Loss):
@@ -295,6 +296,7 @@ class DecoupledInformationLoss(keras.losses.Loss):
         )
         return config
 
+# ---------------------------------------------------------------------
 
 def analyze_decoupled_information_loss(
         loss_fn: DecoupledInformationLoss,
@@ -403,3 +405,5 @@ def analyze_decoupled_information_loss(
     logger.debug(f"Loss analysis: {results}")
 
     return results
+
+# ---------------------------------------------------------------------

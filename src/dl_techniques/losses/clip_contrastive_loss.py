@@ -1,76 +1,64 @@
 """
-CLIP Contrastive Loss Implementation
+Symmetric contrastive loss for multimodal training.
 
-This module implements the contrastive loss function used in CLIP (Contrastive Language-Image
-Pre-training) for learning joint representations of images and text. The loss encourages
-matching image-text pairs to have high similarity while pushing non-matching pairs apart.
+This loss function is the core training objective introduced in the CLIP
+(Contrastive Language-Image Pre-training) paper. Its purpose is to learn a
+joint multimodal embedding space where semantically similar image and text
+vectors are located close to each other.
+
+Conceptual Overview:
+    The fundamental idea is to perform contrastive learning on batches of
+    (image, text) pairs. For a batch of N pairs, the model's goal is to
+    correctly predict which of the N texts corresponds to each of the N
+    images, and vice-versa. This creates N correct pairings (positive
+    samples) and N * (N - 1) incorrect pairings (negative samples) for the
+    model to contrast against. By maximizing the similarity of positive
+    pairs while minimizing the similarity of negative pairs, the model
+    learns robust representations of visual and textual concepts.
+
+Architectural Design:
+    The loss operates on a matrix of similarity scores, typically computed as
+    the cosine similarity between every image embedding and every text
+    embedding in a batch. This results in an N x N similarity matrix where
+    the diagonal entries correspond to the positive pairs.
+
+    The loss is symmetric, meaning it is computed in two directions:
+    1.  Image-to-Text: For each image, the model treats its corresponding
+        text as the target and all other texts in the batch as distractors.
+        A cross-entropy loss is computed over these N possibilities.
+    2.  Text-to-Image: Similarly, for each text, the model treats its
+        corresponding image as the target and all other images as
+        distractors, again calculating a cross-entropy loss.
+
+    The final loss is the average of these two directional losses, ensuring
+    that the learned embedding space is well-aligned from both modalities.
 
 Mathematical Formulation:
-    CLIP uses a symmetric contrastive loss that operates on similarity matrices:
+    Given a batch of N normalized image embeddings `I` and N normalized text
+    embeddings `T`, the similarity matrix `S` is computed as their dot product:
+    `S = I @ T.T`. These raw similarity scores (logits) are then scaled by a
+    learnable temperature parameter `τ`:
 
-    For a batch of N image-text pairs:
-    1. Compute similarity matrix S[i,j] = (image_i · text_j) / τ
-    2. Create diagonal target matrix where correct pairs are on the diagonal
-    3. Apply cross-entropy loss in both directions:
-       - L_i2t = CrossEntropy(S_image_to_text, diagonal_labels)
-       - L_t2i = CrossEntropy(S_text_to_image, diagonal_labels)
-    4. Final loss = (L_i2t + L_t2i) / 2
+        logits = S / τ
 
-    Where τ (tau) is a learnable temperature parameter that controls the sharpness
-    of the softmax distribution.
+    The temperature `τ` controls the sharpness of the softmax distribution
+    over the similarity scores. A lower temperature makes the distribution
+    more peaked, effectively increasing the penalty for misclassifying
+    hard negatives.
 
-Architecture Details:
-    - Operates on pre-computed logit matrices (similarity scores)
-    - Temperature scaling is typically applied during similarity computation
-    - Symmetric loss ensures both image→text and text→image alignments
-    - Label smoothing can be applied for regularization
-    - Supports both fixed and learnable temperature parameters
+    The loss is then the average of the standard cross-entropy loss
+    calculated for image-to-text (`L_i2t`) and text-to-image (`L_t2i`)
+    predictions, where the ground-truth labels are simply the indices of the
+    diagonal (0, 1, ..., N-1).
 
-Key Benefits:
-    - Learns rich multimodal representations without explicit supervision
-    - Scalable to large datasets through batch-wise contrastive learning
-    - Enables zero-shot transfer to downstream tasks
-    - Robust to noisy web-scale data through contrastive objective
-
-Implementation Details:
-    - Handles temperature scaling if not pre-applied to logits
-    - Supports label smoothing for improved generalization
-    - Numerically stable computation with proper logit handling
-    - Configurable reduction and loss weighting options
+        L_i2t = CrossEntropy(logits, labels)
+        L_t2i = CrossEntropy(logits.T, labels)
+        L_total = (L_i2t + L_t2i) / 2
 
 References:
-    - Radford, A., et al. (2021). "Learning Transferable Visual Representations
-      from Natural Language Supervision." https://arxiv.org/abs/2103.00020
-
-    - Jia, C., et al. (2021). "Scaling Up Visual and Vision-Language Representation
-      Learning With Noisy Text Supervision." https://arxiv.org/abs/2102.05918
-
-    - Li, J., et al. (2022). "BLIP: Bootstrapping Language-Image Pre-training for
-      Unified Vision-Language Understanding and Generation."
-      https://arxiv.org/abs/2201.12086
-
-Usage Examples:
-    Basic usage with pre-computed logits:
-    >>> loss_fn = CLIPContrastiveLoss(temperature=0.07)
-    >>> y_pred = {
-    ...     'logits_per_image': image_text_similarities,
-    ...     'logits_per_text': text_image_similarities
-    ... }
-    >>> loss = loss_fn(None, y_pred)  # y_true not needed
-
-    With label smoothing:
-    >>> loss_fn = CLIPContrastiveLoss(
-    ...     temperature=0.07,
-    ...     label_smoothing=0.1,
-    ...     apply_temperature=True
-    ... )
-
-    In training loop:
-    >>> model.compile(
-    ...     optimizer='adam',
-    ...     loss=CLIPContrastiveLoss(temperature=0.07),
-    ...     metrics=['accuracy']
-    ... )
+    - Radford, A., et al. (2021). "Learning Transferable Visual
+      Representations from Natural Language Supervision."
+      https://arxiv.org/abs/2103.00020
 """
 
 import keras

@@ -30,20 +30,16 @@ import matplotlib.patches as patches
 import seaborn as sns
 import pandas as pd
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-# Add project root to path
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
 # ---------------------------------------------------------------------
-# Local imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets import OptimizedSUTDataset
-from dl_techniques.models.yolo12_multitask import create_yolov12_multitask
-from dl_techniques.utils.vision_task_types import (
+from dl_techniques.datasets.sut import OptimizedSUTDataset
+from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
+from dl_techniques.layers.vision_heads.task_types import (
     TaskType,
     TaskConfiguration,
     parse_task_list

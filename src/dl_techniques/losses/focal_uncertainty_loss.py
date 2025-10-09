@@ -75,9 +75,15 @@ Example:
 
 import keras
 from keras import ops
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable(package="dl_techniques.losses")
 class FocalUncertaintyLoss(keras.losses.Loss):
@@ -354,6 +360,7 @@ class FocalUncertaintyLoss(keras.losses.Loss):
         logger.debug(f"Deserializing FocalUncertaintyLoss from config: {config}")
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 def analyze_focal_uncertainty_loss(
     loss_fn: FocalUncertaintyLoss,
@@ -450,3 +457,5 @@ def analyze_focal_uncertainty_loss(
     logger.debug(f"Focal uncertainty loss analysis: {results}")
 
     return results
+
+# ---------------------------------------------------------------------

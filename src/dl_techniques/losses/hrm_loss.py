@@ -35,8 +35,6 @@ task and the task of learning when to halt.
 import keras
 
 # ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class StableMaxCrossEntropy(keras.losses.Loss):

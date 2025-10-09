@@ -1,35 +1,62 @@
 """
-Modern Keras 3 implementation of DINOv2 losses (DINO, iBOT, KoLeo).
+A self-supervised loss from the DINO framework.
 
-This module provides production-ready implementations of the core loss functions
-from the DINOv2 self-supervised learning framework, following modern Keras 3
-best practices for custom losses with proper serialization and type safety.
+This loss function is the core objective of the DINO (self-DIstillation
+with NO labels) framework. It enables a model to learn rich visual
+representations from images alone, without any human-provided labels.
+The method is based on a student-teacher knowledge distillation paradigm,
+where the student network is trained to match the output of a momentum
+teacher network when shown different augmented views of the same image.
 
-Classes:
-    DINOLoss: Implements the DINO consistency loss for CLS tokens.
-    iBOTPatchLoss: Implements the iBOT masked image modeling loss for patch tokens.
-    KoLeoLoss: Implements the Kozachenko-Leonenko entropic regularizer.
+Conceptual Overview:
+    The fundamental idea is to enforce consistency in the representations of
+    different distorted versions ("views") of an image. The student network
+    processes a set of views (including small local crops and large global
+    crops), while the teacher network only processes the global crops. The
+    training objective is to make the student's output distribution for any
+    view match the teacher's output distribution for the global views. This
+    forces the student to learn features that are invariant to these
+    augmentations, capturing high-level semantic content.
 
-Example:
-    ```python
-    # Initialize losses
-    dino_loss = DINOLoss(out_dim=65536, student_temp=0.1, teacher_temp=0.04)
-    ibot_loss = iBOTPatchLoss(out_dim=65536, student_temp=0.1, teacher_temp=0.04)
-    koleo_loss = KoLeoLoss(epsilon=1e-8)
+Architectural Design & Collapse Prevention:
+    A naive implementation would be prone to "collapse," where both networks
+    learn a trivial solution, such as outputting a constant vector for all
+    inputs. DINO employs two key mechanisms to prevent this:
+    1.  Momentum Teacher: The teacher's weights are not updated by back-
+        propagation. Instead, they are an exponential moving average (EMA) of
+        the student's weights. This provides more stable and slowly evolving
+        targets for the student to learn from.
+    2.  Centering: The teacher's outputs are centered by subtracting a
+        running average of all batch outputs. This normalization prevents any
+        single dimension from dominating the output and encourages the model
+        to produce features that are uniformly distributed, effectively
+        avoiding collapse.
 
-    # Use in training
-    with tf.GradientTape() as tape:
-        teacher_cls, teacher_patches = teacher_model(global_crops, training=False)
-        student_cls, student_patches = student_model(all_crops, masks=masks, training=True)
+Mathematical Formulation:
+    The loss is a cross-entropy calculated between the probability
+    distributions produced by the student and teacher networks. Let `z_s` and
+    `z_t` be the output logits from the student and teacher, respectively.
 
-        loss_dino = dino_loss(teacher_cls, student_cls)
-        loss_ibot = ibot_loss(teacher_patches, student_patches, masks)
-        loss_koleo = koleo_loss(None, student_cls)
+    First, the logits are converted to probabilities using a softmax function
+    with different temperature parameters (`τ_s` for student, `τ_t` for
+    teacher). The teacher's output is also centered using a momentum-updated
+    center vector `C`.
 
-        # Update centers after loss computation
-        dino_loss.update_center(teacher_cls)
-        ibot_loss.update_center(teacher_patches)
-    ```
+        p_s = softmax(z_s / τ_s)
+        p_t = softmax((z_t - C) / τ_t)
+
+    A low teacher temperature `τ_t` sharpens its output distribution, creating
+    confident targets for the student to match. The loss is then the
+    cross-entropy between these two distributions:
+
+        Loss = - Σ p_t * log(p_s)
+
+    The center `C` is updated via an EMA of the teacher's outputs over many
+    batches.
+
+References:
+    -   Caron, M., et al. (2021). "Emerging Properties in Self-Supervised
+        Vision Transformers." https://arxiv.org/abs/2104.14294
 """
 
 import keras

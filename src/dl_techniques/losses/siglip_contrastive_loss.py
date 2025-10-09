@@ -1,19 +1,70 @@
 """
-SigLIP Contrastive Loss Implementation
+Sigmoid Loss for Language Image Pre-training (SigLIP).
 
-Modern sigmoid-based contrastive loss that treats each image-text pair
-as an independent binary classification problem, eliminating the need
-for global normalization and reducing memory requirements.
+This loss function presents a paradigm shift from the conventional softmax-
+based contrastive learning used in models like CLIP. Instead of framing
+the task as a multi-class classification problem over a batch of samples,
+SigLIP treats each image-text pair as an independent binary
+classification problem. This architectural change eliminates the need for
+a global normalization term (i.e., the denominator in the softmax),
+which is computationally expensive and memory-intensive.
 
-Based on "Sigmoid Loss for Language Image Pre-Training" (Zhai et al., 2023)
+The primary advantage of this design is scalability. By removing the
+inter-sample dependency required for normalization, the computational
+complexity with respect to negative samples is significantly reduced. This
+allows for training with much larger batch sizes, which is crucial for
+effective representation learning. Furthermore, this approach inherently
+avoids the "false negative" problem where semantically similar pairs are
+incorrectly pushed apart, as it does not rely on a global view of
+negatives.
+
+Foundational Mathematics
+------------------------
+Contrastive losses like InfoNCE (used in CLIP) are based on a softmax
+cross-entropy formulation. For an image embedding `x_i` and text
+embedding `y_j`, the probability of `y_j` being the correct caption for
+`x_i` among `N` candidates is modeled as:
+
+    p_ij = exp(s_ij / t) / Σ_k exp(s_ik / t)
+
+where `s_ij` is the cosine similarity and `t` is a temperature parameter.
+
+SigLIP replaces this with a simpler, pairwise sigmoid cross-entropy. For
+any given pair `(x_i, y_j)`, the goal is to predict a binary label `z_ij`,
+where `z_ij = 1` if `i=j` (a positive pair) and `z_ij = -1` otherwise (a
+negative pair). The loss for a single pair is the negative log-likelihood:
+
+    L_ij = -log(sigmoid(z_ij * s_ij * t))
+
+Using the identity `log(sigmoid(a)) = -log(1 + exp(-a))`, this can be
+rewritten in the numerically stable form used in the implementation:
+
+    L_ij = log(1 + exp(-z_ij * s_ij * t))
+
+The total loss is the sum (or mean) of these pairwise losses across all
+possible pairs in the batch, computed symmetrically for both image-to-text
+and text-to-image directions. This formulation effectively trains a
+classifier to distinguish between correct and incorrect pairings on a
+case-by-case basis.
+
+References
+----------
+-   Zhai, X., et al. (2023). "Sigmoid Loss for Language Image
+    Pre-Training". *International Conference on Computer Vision (ICCV)*.
 """
 
 import keras
 from keras import ops
-import tensorflow as tf
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class SigLIPContrastiveLoss(keras.losses.Loss):
     """
     SigLIP Contrastive Loss Function.
@@ -118,7 +169,7 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
         })
         return config
 
-
+@keras.saving.register_keras_serializable()
 class AdaptiveSigLIPLoss(keras.losses.Loss):
     """
     Adaptive SigLIP Loss with dynamic temperature scaling.
@@ -158,8 +209,9 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         self.adaptation_rate = adaptation_rate
         self.target_entropy = target_entropy
 
+
         # Adaptive temperature (will be updated during training)
-        self.adaptive_temperature = tf.Variable(
+        self.adaptive_temperature = keras.Variable(
             initial_temperature,
             trainable=False,
             name='adaptive_temperature'
@@ -227,7 +279,7 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         })
         return config
 
-
+@keras.saving.register_keras_serializable()
 class HybridContrastiveLoss(keras.losses.Loss):
     """
     Hybrid loss combining SigLIP with score-based objectives.
@@ -290,8 +342,8 @@ class HybridContrastiveLoss(keras.losses.Loss):
             text_emb = y_pred['text_embeddings']
 
             # Add noise for score matching (Miyasawa theorem application)
-            noise_image = ops.random.normal(ops.shape(image_emb), stddev=self.noise_level)
-            noise_text = ops.random.normal(ops.shape(text_emb), stddev=self.noise_level)
+            noise_image = keras.random.normal(ops.shape(image_emb), stddev=self.noise_level)
+            noise_text = keras.random.normal(ops.shape(text_emb), stddev=self.noise_level)
 
             noisy_image_emb = image_emb + noise_image
             noisy_text_emb = text_emb + noise_text
@@ -320,7 +372,8 @@ class HybridContrastiveLoss(keras.losses.Loss):
         return config
 
 
-# Convenience functions for creating loss functions
+# ---------------------------------------------------------------------
+
 def create_siglip_loss(
         temperature: float = 1.0,
         use_learnable_temperature: bool = True,
@@ -358,3 +411,5 @@ def create_hybrid_loss(
         score_weight=score_weight,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

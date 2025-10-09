@@ -2,7 +2,14 @@ import keras
 from keras import ops
 from typing import Union
 
+# ---------------------------------------------------------------------
+# lolca imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+
 
 class TabMLoss(keras.losses.Loss):
     """Custom loss for TabM ensemble training.
@@ -57,3 +64,5 @@ class TabMLoss(keras.losses.Loss):
             'share_training_batches': self.share_training_batches,
         })
         return config
+
+# ---------------------------------------------------------------------
