@@ -1,23 +1,44 @@
 """
-Sampling Layer for Variational Autoencoders (VAEs).
+Sample from a latent Normal distribution using the reparameterization trick.
 
-This module defines the `Sampling` layer, a custom Keras layer that implements
-the reparameterization trick. This technique is a cornerstone of Variational
-Autoencoders, enabling the model to be trained via backpropagation despite
-involving a random sampling step.
+This layer is the central component that enables the training of Variational
+Autoencoders (VAEs) through gradient-based optimization. In a VAE, the
+encoder network learns to map an input `x` to the parameters of a posterior
+distribution `q_φ(z|x)`, typically a diagonal Gaussian. This layer's role is
+to draw a sample `z` from this learned distribution, which is then passed to
+the decoder.
 
-The layer takes the mean (mu) and the log-variance (log_var) of a latent
-Gaussian distribution (as predicted by a VAE's encoder) and generates a
-sample `z` from this distribution. The reparameterization trick expresses
-the sample `z` as a deterministic function of `mu`, `log_var`, and an
-auxiliary random noise variable `epsilon` (sampled from a standard normal
-distribution), according to the formula:
+The primary challenge in this architecture is that the sampling operation is
+stochastic and thus non-differentiable. Standard backpropagation cannot flow
+through a random node, which would prevent the training of the encoder. This
+layer resolves this issue by implementing the "reparameterization trick."
 
-    z = mu + exp(0.5 * log_var) * epsilon
+The core mathematical insight is to re-express the random variable `z` as a
+deterministic function of the distribution's parameters (mean `μ` and
+standard deviation `σ`) and an auxiliary, parameter-independent random
+variable `ε`. For a Gaussian distribution, this is formulated as:
 
-By reformulating the sampling process this way, the gradients can flow
-backwards from the decoder's loss, through the sample `z`, and to the
-encoder's parameters (`mu` and `log_var`), allowing for end-to-end training.
+`z = μ + σ * ε`,  where `ε ~ N(0, I)`
+
+Here, `μ` and `log_var` (from which `σ` is derived as `exp(0.5 * log_var)`)
+are the outputs of the encoder network. The randomness is sourced entirely
+from `ε`, which is sampled from a fixed standard normal distribution. The
+transformation that produces `z` is now a simple, deterministic computation.
+
+This reformulation makes the entire model differentiable with respect to the
+encoder's parameters `φ`. The gradient of the loss function can flow from the
+decoder, through the sampled `z`, back to `μ` and `σ`, and finally to the
+weights of the encoder. This allows the VAE to be trained end-to-end using
+standard stochastic gradient descent, jointly optimizing the encoder and
+decoder.
+
+References:
+    - Kingma & Welling, 2013. Auto-Encoding Variational Bayes.
+      (https://arxiv.org/abs/1312.6114)
+    - Rezende, Mohamed, & Wierstra, 2014. Stochastic Backpropagation and
+      Approximate Inference in Deep Generative Models.
+      (https://arxiv.org/abs/1401.4082)
+
 """
 
 import keras

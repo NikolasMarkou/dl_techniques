@@ -1,122 +1,61 @@
 """
-Hierarchical Aggregation of Neighborhood Context (HANC) Block - Core Building Block of ACC-UNet.
+Model long-range dependencies using hierarchical context aggregation.
 
-This module implements the revolutionary HANC block, which represents the fundamental
-architectural innovation of ACC-UNet. By combining transformer-inspired design principles
-with convolutional efficiency, HANC blocks provide long-range contextual dependencies
-while maintaining the computational advantages and inductive biases of convolutional
-neural networks. This design enables ACC-UNet to achieve transformer-level performance
-with significantly fewer parameters and computational overhead.
+This block is the core component of the ACC-UNet architecture, designed to
+bridge the gap between the efficiency of Convolutional Neural Networks (CNNs)
+and the global context modeling capabilities of Transformers. It addresses the
+inherent limitation of standard convolutions—their restricted receptive
+field—by introducing a novel mechanism to efficiently aggregate multi-scale
+contextual information.
 
-Core Innovation Philosophy:
-    The HANC block addresses a fundamental limitation of standard convolutional blocks:
-    their restricted receptive field and inability to model long-range dependencies
-    efficiently. While transformers excel at capturing global context through self-attention,
-    they lack the spatial inductive biases and efficiency of convolutions. HANC blocks
-    bridge this gap by implementing a convolutional approximation of self-attention
-    through hierarchical neighborhood context aggregation.
+Architecturally, the HANC block synthesizes several successful design
+principles from modern deep learning into a coherent structure. It adopts the
+inverted bottleneck from MobileNetV2, expanding the channel dimension with a
+1x1 convolution to create a richer feature space for processing. Spatial
+feature extraction is then performed efficiently using a depthwise separable
+convolution. The block's central innovation, however, is the Hierarchical
+Aggregation of Neighborhood Context (HANC) layer, which is subsequently
+followed by a projection 1x1 convolution, a Squeeze-and-Excitation (SE)
+module for channel recalibration, and a residual connection for stable
+gradient flow.
 
-    Key insight: Instead of computing expensive attention matrices, HANC blocks approximate
-    self-attention by comparing each pixel with statistical summaries (mean and max) of
-    its neighborhoods at multiple scales, providing transformer-like global modeling
-    with convolutional efficiency.
+The foundational mathematical concept is a convolutional approximation of the
+self-attention mechanism found in Transformers. Standard self-attention
+computes a pixel's relationship to every other pixel, incurring a quadratic
+computational cost `O(N^2)` with respect to the number of pixels `N`. The
+HANC mechanism circumvents this by reformulating the problem: instead of
+all-to-all comparisons, each pixel's feature representation is enriched by
+comparing it to statistical summaries of its surrounding neighborhoods at
+multiple scales. The process is as follows:
 
-Architectural Design Principles:
-    The HANC block integrates five complementary design elements inspired by modern
-    deep learning architectures:
+1.  **Hierarchical Pooling:** For `k` different scales (e.g., corresponding
+    to 2x2, 4x4, 8x8 receptive fields), the feature map is downsampled using
+    both average and max pooling to create a set of low-resolution context
+    maps. These maps summarize the feature statistics at different levels of
+    granularity.
 
-    1. **Inverted Bottleneck Expansion**: Inspired by MobileNetV2 and transformers' MLP layers
-       - Expands channels by inv_factor (typically 3-4x) for increased expressivity
-       - Provides wider intermediate representation for richer feature learning
+2.  **Context Concatenation:** These multi-scale context maps are concatenated
+    with the original, full-resolution feature map along the channel axis. This
+    creates an augmented representation where each pixel is now explicitly
+    aware of not just its own features, but also the average and maximum
+    feature values in its local, medium, and large-scale neighborhoods.
 
-    2. **Efficient Convolution**: Uses depthwise separable convolutions for parameter efficiency
-       - 3×3 depthwise convolution reduces computational complexity
-       - Maintains spatial feature extraction with minimal parameter overhead
+3.  **Learned Aggregation:** A final 1x1 convolution processes this augmented
+    tensor. This step acts as a learned, weighted aggregator, allowing the
+    model to determine the optimal way to combine local information with the
+    multi-scale contextual signals.
 
-    3. **Hierarchical Context Aggregation**: Novel HANC layer for long-range dependencies
-       - Multi-scale neighborhood analysis through hierarchical pooling
-       - Convolutional approximation of transformer self-attention mechanism
+This approach provides a powerful proxy for global context with computational
+complexity that is linear with respect to the number of scales `k`, making it
+far more efficient than true self-attention for high-resolution inputs.
 
-    4. **Residual Learning**: Skip connections for stable gradient flow and feature preservation
-       - Enables training of very deep networks without degradation
-       - Preserves low-level spatial information throughout processing
+References:
+    - Yan et al., 2023. ACC-UNet: An adaptive context and contrast-aware UNet
+      for seismic facies identification. (Inspired this architecture)
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear
+      Bottlenecks. (Inverted bottleneck concept)
+    - Hu et al., 2018. Squeeze-and-Excitation Networks. (Channel attention)
 
-    5. **Adaptive Channel Recalibration**: Squeeze-Excitation for feature refinement
-       - Learns channel-wise importance weights adaptively
-       - Enhances feature discriminability and suppresses irrelevant channels
-
-Detailed Processing Pipeline:
-    The HANC block implements a sophisticated seven-stage processing pipeline:
-
-    ```
-    Input Features (H×W×C_in)
-           ↓
-    [1] Channel Expansion: 1×1 Conv (C_in → C_in×inv_factor)
-           ↓
-    [2] Spatial Processing: 3×3 Depthwise Conv (preserve channels)
-           ↓
-    [3] Hierarchical Context: HANC Layer (C_in×inv_factor → C_in)
-           ↓
-    [4] Residual Integration: Addition + Batch Norm (if channels match)
-           ↓
-    [5] Output Projection: 1×1 Conv (C_in → filters)
-           ↓
-    [6] Channel Recalibration: Squeeze-Excitation attention
-           ↓
-    Output Features (H×W×filters)
-    ```
-
-Mathematical Formulation:
-    For input X ∈ ℝ^(H×W×C_in), the HANC block transformation is:
-
-    ```python
-    # Stage 1: Channel expansion with inverted bottleneck
-    X_exp = ReLU(BN(Conv1x1(X, C_in → C_in×inv_factor)))
-
-    # Stage 2: Efficient spatial feature extraction
-    X_spatial = ReLU(BN(DepthwiseConv3x3(X_exp)))
-
-    # Stage 3: Hierarchical context aggregation (core innovation)
-    X_context = HANC(X_spatial, k_levels)  # Multi-scale pooling and aggregation
-
-    # Stage 4: Residual connection (conditional on channel compatibility)
-    if C_in == filters:
-        X_residual = BN(X_context + X)  # Identity shortcut
-    else:
-        X_residual = X_context  # No residual when dimensions differ
-
-    # Stage 5: Output projection and feature transformation
-    X_proj = ReLU(BN(Conv1x1(X_residual, C_in → filters)))
-
-    # Stage 6: Adaptive channel recalibration
-    X_out = SE(X_proj)  # Squeeze-Excitation attention
-    ```
-
-Hierarchical Context Aggregation (HANC) Mechanism:
-    The core innovation lies in the HANC layer's ability to capture multi-scale context:
-
-    - **Scale Hierarchy**: Analyzes neighborhoods at k different scales: [2¹, 2², ..., 2^(k-1)]
-    - **Statistical Aggregation**: Computes mean and max pooling at each scale
-    - **Context Compilation**: Concatenates multi-scale statistics with original features
-    - **Dimensional Reduction**: Uses 1×1 convolution to compress enriched representation
-
-    This provides O(k) complexity for multi-scale context vs. O(n²) for full self-attention,
-    where k≪n for typical feature map sizes.
-
-Adaptive Configuration Strategy:
-    HANC blocks use context-aware parameter selection based on network depth and scale:
-
-    - **Shallow Levels (k=3)**: Maximum context aggregation for fine-grained features
-      * Processes scales: [2×2, 4×4, 8×8] patches
-      * Balances local details with broader spatial context
-
-    - **Intermediate Levels (k=2)**: Moderate context for mid-level representations
-      * Processes scales: [2×2, 4×4] patches
-      * Focuses on structural patterns and object parts
-
-    - **Deep Levels (k=1)**: Minimal context for high-level semantic features
-      * Original features only (no additional pooling)
-      * Preserves semantic abstraction without excessive context mixing
 """
 
 import keras

@@ -72,7 +72,7 @@ from .attention.perceiver_attention import PerceiverAttention
 
 
 @keras.saving.register_keras_serializable()
-class PerceiverTransformerBlock(keras.layers.Layer):
+class PerceiverTransformerLayer(keras.layers.Layer):
     """Complete Perceiver transformer block with cross-attention.
 
     This block implements a complete Perceiver transformer layer that combines:

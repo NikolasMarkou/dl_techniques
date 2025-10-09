@@ -1,15 +1,62 @@
-"""Bit-quantized linear layer for efficient language models.
+"""
+A bit-quantized linear layer for efficient inference.
 
-This layer provides a Keras implementation of the linear layer proposed in the
-BitNet architecture, designed to enable 1-bit Large Language Models (LLMs). It
-replaces standard floating-point matrix multiplication with low-bit integer
-operations, drastically reducing memory footprint and computational cost.
+This layer simulates low-bit quantization during training, a technique known
+as Quantization-Aware Training (QAT). The goal of QAT is to train a model
+that is robust to the precision loss incurred when weights and activations
+are converted to low-bit integer formats for deployment. This process
+significantly reduces the model's memory footprint and enables the use of
+highly efficient integer-based arithmetic on specialized hardware, leading
+to faster inference and lower power consumption.
+
+Architecturally, this layer replaces the standard floating-point matrix
+multiplication `y = matmul(x, W)` with a quantized equivalent. The core
+idea is to dynamically scale, quantize, and then de-quantize both the
+input activations (`x`) and the weights (`W`) during each forward pass.
+
+The mathematical formulation for a given tensor `T` (either `x` or `W`)
+involves three main steps:
+1.  **Scaling:** The full-precision tensor `T` is first scaled into the
+    target integer range `[Q_min, Q_max]`. This is achieved by multiplying
+    it with a scaling factor `alpha`.
+    `T_scaled = T * alpha`
+    The scaling factor `alpha` is calculated as `Q_max / gamma`, where
+    `gamma` is a representative value of the tensor's magnitude (e.g., the
+    absolute maximum or absolute mean value). This ensures that the bulk
+    of the tensor's values are mapped into the limited integer range. The
+    BitNet paper specifically advocates for using the mean of the absolute
+    values for `gamma` for its robustness.
+
+2.  **Quantization:** The scaled tensor is then quantized by rounding to the
+    nearest integer and clipping values that fall outside the target range.
+    `T_quant = clip(round(T_scaled), Q_min, Q_max)`
+    For "1.58-bit" quantization, this corresponds to a ternary range
+    `{-1, 0, 1}`, effectively mapping the scaled weights to one of three
+    possible values.
+
+3.  **Matrix Multiplication:** The quantized activations and weights are used
+    in the matrix multiplication. The result is then rescaled to approximate
+    the original full-precision output.
+    `y = matmul(x_quant, W_quant) / (alpha_x * alpha_W)`
+
+A critical challenge in training such a network is that the `round`
+function has zero gradients almost everywhere, which stalls learning via
+backpropagation. This layer overcomes this by using a Straight-Through
+Estimator (STE). During the backward pass, the gradient is allowed to flow
+through the quantization function as if it were an identity function.
+Essentially, the non-differentiable `round` operation is replaced with a
+simple identity mapping (`dy/dx = 1`) for the gradient calculation. This
+trick allows the underlying full-precision weights to be updated by the
+optimizer, while the forward pass continues to use the quantized values,
+thus making the model "aware" of the effects of quantization.
 
 References:
-    - Wang et al. "The Era of 1-bit LLMs: All Large Language Models are in
-      1.58 Bits". https://arxiv.org/abs/2402.17764
-    - Bengio et al. "Estimating or Propagating Gradients Through Stochastic
-      Neurons for Conditional Computation". https://arxiv.org/abs/1308.3432
+    - Wang et al., 2024. The Era of 1-bit LLMs: All Large Language Models
+      are in 1.58 Bits. (https://arxiv.org/abs/2402.17764)
+    - Bengio et al., 2013. Estimating or Propagating Gradients Through
+      Stochastic Neurons for Conditional Computation.
+      (https://arxiv.org/abs/1308.3432)
+
 """
 
 import keras

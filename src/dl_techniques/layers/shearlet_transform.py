@@ -1,192 +1,51 @@
 """
-Shearlet Transform Layer for Deep Learning Applications
+Decompose an image into multi-scale, multi-directional components.
 
-This module implements a differentiable shearlet transform as a Keras layer, enabling
-multi-scale, multi-directional analysis of images within neural network architectures.
-The shearlet transform provides optimal sparse representation for images containing
-edges, textures, and directional patterns.
+This layer implements a differentiable shearlet transform, a powerful tool
+from multiscale geometric analysis that provides a sparse representation of
+images rich in directional features like edges and textures. Unlike learned
+convolutional filters, this layer acts as a fixed, mathematically-defined
+feature extractor that injects strong geometric priors into a neural
+network.
 
-## Mathematical Foundation
+Architecturally, the layer operates as a non-trainable filter bank in the
+frequency domain. The transformation process involves:
+1.  Computing the 2D Fast Fourier Transform (FFT) of the input image.
+2.  Multiplying the result element-wise with a pre-computed bank of
+    shearlet filters, each corresponding to a specific scale and orientation.
+3.  Applying the inverse FFT to each filtered output to obtain the shearlet
+    coefficients in the spatial domain.
 
-The shearlet transform is a multiscale geometric analysis tool that extends traditional
-wavelet transforms by incorporating directional selectivity through anisotropic scaling
-and shearing operations. Unlike wavelets which use isotropic dilations, shearlets employ
-anisotropic scaling matrices that better capture directional information in images.
+The foundational mathematical principle of the shearlet transform is its
+ability to overcome the limitations of traditional wavelets. While wavelets
+use isotropic (directionally uniform) scaling, they are inefficient at
+representing anisotropic features like curves. Shearlets, in contrast, are
+constructed using a combination of anisotropic scaling and shearing matrices.
+This construction leads to basis functions that are elongated and directionally
+oriented, making them highly effective at capturing directional information.
 
-### Core Mathematical Concepts
+A key theoretical property is the use of "parabolic scaling," where the
+support of the shearlet filters in the frequency domain scales differently
+along different axes (e.g., size `~2^j` along one axis and `~2^(j/2)` along
+the other). This specific scaling relationship is mathematically proven to be
+optimal for providing sparse representations of "cartoon-like" images—a class
+of functions that are piecewise smooth with discontinuities along curves.
+This optimal sparsity means that complex edge information can be captured
+with very few non-zero coefficients, making it a highly efficient
+representation.
 
-**Shearlet System**: A shearlet system is a collection of functions {ψ_{j,k,m}} indexed by:
-- j ∈ Z: scale parameter (controls frequency resolution)
-- k ∈ Z: shear parameter (controls orientation)
-- m ∈ Z²: translation parameter (spatial localization)
+The constructed filter bank forms a "tight frame," a mathematical property
+that ensures the transformation is energy-preserving and allows for perfect
+reconstruction of the original signal from its coefficients. This stability
+is crucial for its integration into deep learning models, as it guarantees
+a well-behaved and invertible feature transformation.
 
-**Frequency Domain Definition**: Each shearlet is defined in the frequency domain as:
-```
-ψ̂_{j,k}(ξ) = ψ̂(ξ₁/2^j, ξ₂/2^{j/2} - k ξ₁/2^{j/2})
-```
+References:
+    - Guo, K., Kutyniok, G., & Labate, D., 2006. Sparse multidimensional
+      representations using shearlets.
+    - Kutyniok, G., & Labate, D., 2012. Shearlets: Multiscale Analysis
+      for Multivariate Data.
 
-Where the anisotropic scaling matrix A = [[2^j, 0], [0, 2^{j/2}]] and shearing matrix
-S = [[1, k], [0, 1]] provide the geometric flexibility that makes shearlets particularly
-effective for analyzing directional features.
-
-**Parabolic Scaling**: The key insight is the parabolic relationship between scales:
-- Horizontal scale: 2^j
-- Vertical scale: 2^{j/2}
-- This ensures optimal approximation rates for cartoon-like images
-
-### Advantages Over Traditional Transforms
-
-**Compared to Wavelets**:
-- **Directional Selectivity**: Wavelets are isotropic and cannot efficiently capture
-  directional information. Shearlets provide built-in directional analysis.
-- **Edge Representation**: Shearlets achieve optimal sparse representation O(M^{1/2} log M)
-  for cartoon-like images, while wavelets only achieve O(M).
-- **Anisotropic Features**: Better suited for images with curves, edges, and textures.
-
-**Compared to Curvelets**:
-- **Implementation Simplicity**: Shearlets avoid the complex geometric constructions
-  required for curvelets while maintaining similar theoretical properties.
-- **Translation Invariance**: Better translation invariance properties.
-- **Computational Efficiency**: More straightforward FFT-based implementation.
-
-## Technical Implementation Details
-
-### Filter Bank Construction
-
-The implementation creates a tight frame of shearlet filters with the following properties:
-
-1. **Cone-Adapted Design**: Uses separate cone regions to avoid singularities at frequency origin
-2. **Meyer Windows**: Employs smooth Meyer window functions for frequency localization
-3. **Frame Bounds**: Ensures tight frame property: A ≤ ∑|⟨f, ψ_{j,k,m}⟩|² ≤ B with A ≈ B ≈ 1
-4. **Normalization**: Careful energy normalization to maintain reconstruction fidelity
-
-### Computational Complexity
-
-**Time Complexity**: O(N M log M) where N is the number of filters and M is image size
-- Forward transform: N × FFT operations
-- Each scale adds (directions + 1) filters
-- Total filters: 1 + scales × (directions + 1)
-
-**Space Complexity**: O(N M) for storing filter bank and intermediate results
-- Filter bank: Each filter requires M complex coefficients
-- Intermediate FFTs: Additional M complex coefficients per image
-
-**Memory Usage**:
-- Input image: H × W × C × 4 bytes (float32)
-- Filter bank: (1 + scales × directions) × H × W × 8 bytes (complex64)
-- Output coefficients: H × W × N_filters × 4 bytes (float32)
-
-### Performance Characteristics
-
-**Computational Bottlenecks**:
-1. **FFT Operations**: Dominate runtime, O(M log M) per filter
-2. **Filter Bank Size**: Memory usage grows linearly with scales × directions
-3. **Batch Processing**: Well-suited for GPU parallelization across batch dimension
-
-**Optimization Strategies**:
-- **Filter Precomputation**: Filters computed once during build() phase
-- **Real-valued Output**: Only real part retained to reduce memory footprint
-- **Numerical Stability**: Minimum response thresholds prevent division by zero
-- **Energy Normalization**: Maintains consistent coefficient magnitudes
-
-## Applications and Use Cases
-
-### Primary Applications
-
-**Image Processing**:
-- **Denoising**: Sparse representation enables effective noise removal
-- **Edge Detection**: Superior to traditional edge detectors for curved edges
-- **Texture Analysis**: Multi-directional analysis captures texture orientation
-- **Image Inpainting**: Sparse coefficients guide reconstruction of missing regions
-
-**Computer Vision**:
-- **Feature Extraction**: Rich geometric features for object recognition
-- **Medical Imaging**: Analysis of anatomical structures with directional content
-- **Remote Sensing**: Geological feature analysis, road detection
-- **Quality Assessment**: Perceptual quality metrics based on directional distortions
-
-### Deep Learning Integration
-
-**Neural Network Layers**:
-- **Feature Extraction**: First layer for geometry-aware feature learning
-- **Attention Mechanisms**: Multi-scale directional attention weights
-- **Loss Functions**: Perceptual losses based on shearlet domain differences
-
-**Training Considerations**:
-- **Differentiability**: Fully differentiable through FFT operations
-- **Gradient Flow**: Stable gradients through frequency domain operations
-- **Initialization**: Filter bank fixed during training (non-trainable parameters)
-- **Memory Management**: Significant memory requirements for large images/many filters
-
-## Theoretical Properties
-
-### Approximation Theory
-
-**Optimal Approximation Rates**: For functions in cartoon-like image class:
-- **Wavelets**: O(M^{-1/2}) approximation rate
-- **Shearlets**: O(M^{-1} (log M)^3) approximation rate
-- **Practical Impact**: 2-4x fewer coefficients needed for same reconstruction quality
-
-### Frame Properties
-
-**Tight Frame**: The filter bank forms a tight frame with bounds A ≈ B ≈ 1:
-```
-∑_{j,k,m} |⟨f, ψ_{j,k,m}⟩|² = ||f||²
-```
-
-**Perfect Reconstruction**: When implemented as tight frame:
-```
-f = ∑_{j,k,m} ⟨f, ψ_{j,k,m}⟩ ψ_{j,k,m}
-```
-
-### Numerical Stability
-
-**Condition Number**: Well-conditioned linear operators with condition numbers ≈ 1
-**Aliasing Control**: Proper frequency domain windowing minimizes aliasing artifacts
-**Boundary Handling**: Periodic boundary conditions assumed (standard for FFT-based methods)
-
-## Performance Benchmarks and Guidelines
-
-### Computational Requirements
-
-**Scaling Guidelines**:
-- **Small Images** (≤256×256): Up to 6 scales, 16 directions feasible
-- **Medium Images** (512×512): 4-5 scales, 8-12 directions recommended
-- **Large Images** (≥1024×1024): 3-4 scales, 6-8 directions to avoid memory limits
-
-### Quality vs. Performance Trade-offs
-
-**Parameter Selection**:
-- **Scales**: Each additional scale doubles frequency resolution but increases computation
-- **Directions**: More directions improve angular resolution but increase memory linearly
-- **Alpha Parameter**: α = 0.5 optimal for most natural images
-
-**Typical Configurations**:
-- **Fast**: 3 scales, 4 directions → 13 filters, ~50ms per 256×256 image
-- **Balanced**: 4 scales, 8 directions → 33 filters, ~120ms per 256×256 image
-- **High Quality**: 5 scales, 16 directions → 81 filters, ~300ms per 256×256 image
-
-## Implementation Notes
-
-### Numerical Considerations
-
-**Precision**: Uses float32 for spatial domain, complex64 for frequency domain
-**Stability**: Minimum response thresholds (1e-3) prevent numerical issues
-**Normalization**: Energy-based normalization maintains coefficient dynamic range
-
-### Limitations
-
-**Boundary Effects**: Periodic boundary conditions may introduce artifacts at image borders
-**Memory Scaling**: Memory requirements grow O(scales × directions × image_size)
-**Fixed Filters**: Non-trainable filter bank limits adaptability compared to learned features
-**Complex Gradients**: Gradient computation through FFT can be memory-intensive
-
-## References
-
-1. Kutyniok, G., & Labate, D. (2012). Shearlets: Multiscale Analysis for Multivariate Data
-2. Guo, K., Kutyniok, G., & Labate, D. (2006). Sparse multidimensional representations using shearlets
-3. Easley, G., Labate, D., & Lim, W. Q. (2008). Sparse directional image representations using the discrete shearlet transform
-4. Kittipoom, P., Kutyniok, G., & Lim, W. Q. (2012). Construction of compactly supported shearlets
 """
 
 import keras

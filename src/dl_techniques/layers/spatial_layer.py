@@ -1,39 +1,48 @@
 """
-This module provides a `SpatialLayer`, a custom Keras layer that dynamically
-generates spatial coordinate grids and injects them into a model.
+Inject explicit spatial coordinate information into feature maps.
 
-In many computer vision_heads tasks, particularly those involving complex spatial reasoning
-or generative models, it is beneficial for the network to have explicit knowledge of
-pixel locations. Standard convolutional networks build this understanding implicitly
-through their local receptive fields, but providing coordinate information directly
-can enhance performance. This layer serves as a "coordinate encoder," generating a
-normalized `(x, y)` coordinate for every pixel position.
+This layer addresses a fundamental property of standard convolutional neural
+networks: translation equivariance. While this property is a powerful
+inductive bias for many tasks, it makes CNNs agnostic to the absolute
+spatial location of features. This layer provides a simple, non-trainable
+mechanism to explicitly encode coordinate information, making the network
+"aware" of where features are located within the input grid. This technique
+is a core component of architectures like CoordConv.
 
-The layer is non-trainable; it does not learn any parameters from data. Instead, it
-functions as a pre-defined feature generator that operates in two main stages:
+Architecturally, the layer functions as a deterministic coordinate generator.
+It does not learn any parameters. Instead, its operation is two-fold:
+1.  **Build Phase:** A low-resolution "prototype" coordinate grid is created
+    and stored internally. This grid represents the normalized `x` and `y`
+    coordinates for a small feature map.
+2.  **Call Phase:** During the forward pass, this prototype grid is
+    dynamically resized to match the spatial dimensions of the input
+    feature map using interpolation. The resized grid is then tiled to match
+    the batch size.
 
-1.  **Grid Creation (`build` phase):**
-    -   A low-resolution coordinate grid is created once when the layer is built.
-    -   This grid represents normalized `x` and `y` coordinates, typically ranging
-        from -0.5 to 0.5.
-    -   Crucially, these coordinates are then standardized (normalized to have zero
-        mean and unit standard deviation). This ensures that the coordinate features
-        are on a similar scale to the activations of other layers, promoting stable
-        training.
+The final output is a tensor of shape `(batch, height, width, 2)` that can
+be concatenated with the input feature map, effectively adding two new
+channels that explicitly state the `(x, y)` position of each feature vector.
 
-2.  **Dynamic Resizing (`call` phase):**
-    -   During the forward pass, the layer takes an input tensor (e.g., a feature map
-        from a preceding layer).
-    -   It dynamically resizes its internal, low-resolution coordinate grid to match
-        the spatial dimensions (height and width) of the input tensor. This is done
-        using a specified interpolation method (`'nearest'` or `'bilinear'`).
-    -   The resized grid is then tiled to match the batch size of the input, producing
-        a final output tensor of shape `(batch_size, height, width, 2)`.
+The mathematical process involves two key steps. First, a base grid is
+formed by creating two matrices for the normalized `x` and `y` coordinates,
+typically spanning the interval `[-0.5, 0.5]`. The second, and more critical,
+step is the standardization of these coordinate grids. Each grid is
+independently normalized to have a mean of zero and a standard deviation of
+one:
 
-This output tensor can then be concatenated with the original feature map, providing
-every subsequent layer with explicit information about the absolute position of each
-feature vector in the grid. This is a common technique in architectures like
-CoordConv and is also used in various generative models and attention mechanisms.
+`z = (x - μ) / σ`
+
+This standardization is crucial for training stability. It ensures that the
+coordinate features have a similar statistical distribution to typical
+learned feature activations. Without it, the large, unshuffled values of the
+coordinates could dominate the initial learning process when concatenated
+with activations that are often centered around zero.
+
+References:
+    - Liu et al., 2018. An intriguing failing of convolutional neural
+      networks and the CoordConv solution.
+      (https://arxiv.org/abs/1807.03247)
+
 """
 
 import keras

@@ -1,4 +1,5 @@
-"""A Radial Basis Function (RBF) layer with center repulsion.
+"""
+A Radial Basis Function (RBF) layer with center repulsion.
 
 This layer implements a layer of Radial Basis Function units, which are
 powerful for function approximation and pattern recognition tasks. Unlike

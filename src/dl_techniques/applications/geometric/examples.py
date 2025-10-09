@@ -12,7 +12,7 @@ from keras import ops
 from dl_techniques.layers.attention.anchor_attention import AnchorAttention
 from dl_techniques.layers.geometric.supernode_pooling import SupernodePooling
 from dl_techniques.layers.embedding.continuous_rope_embedding import ContinuousRoPE
-from dl_techniques.layers.perceiver_transformer_block import PerceiverTransformerBlock
+from dl_techniques.layers.perceiver_transformer_block import PerceiverTransformerLayer
 from dl_techniques.layers.embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
 from dl_techniques.layers.attention.cross_attention_perceiver_attention import PerceiverAttention
 from dl_techniques.layers.attention.shared_weights_cross_attention import SharedWeightsCrossAttention
@@ -69,7 +69,7 @@ def build_point_cloud_segmentation(num_points: int = 2048, num_classes: int = 13
     anchors = AnchorAttention(dim=256, num_heads=8)(embedded, num_anchor_tokens=512)
 
     # Cross-attention back to all points
-    perceiver = PerceiverTransformerBlock(dim=256, num_heads=8)(
+    perceiver = PerceiverTransformerLayer(dim=256, num_heads=8)(
         query_input=embedded,  # All points as queries
         kv_input=anchors  # Anchors as keys/values
     )

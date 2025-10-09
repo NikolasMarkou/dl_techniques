@@ -1,16 +1,43 @@
 """
-Downsamples feature maps by merging adjacent patches.
+Downsample feature maps by merging patches to create a hierarchical representation.
 
-This layer implements the patch merging technique from the Swin Transformer
-paper, which reduces spatial dimensions while increasing the channel dimension
-to create hierarchical feature representations.
+This layer implements the patch merging strategy introduced in the Swin
+Transformer, a key component for building hierarchical Vision Transformers.
+While standard Vision Transformers maintain a fixed sequence length of
+patches throughout the network, this layer provides a mechanism analogous to
+pooling in Convolutional Neural Networks (CNNs), enabling the model to
+create multi-scale feature maps. This hierarchical structure allows the
+network to learn features at various granularities, from fine-grained details
+to global context, which is crucial for complex vision tasks.
 
-The layer reshapes an input tensor of shape `(B, H, W, C)` into a tensor
-of shape `(B, H/2, W/2, 2*C)`. It does this by first concatenating the
-features from non-overlapping 2x2 patches, which results in a shape of
-`(B, H/2, W/2, 4*C)`. A `LayerNormalization` is applied, followed by a
-`Dense` layer that projects the features from `4*C` to `2*C`. This layer
-can automatically handle odd input resolutions by padding.
+Architecturally, the layer performs a learned spatial downsampling. It takes an
+input feature map of shape `(H, W, C)` and produces an output of shape
+`(H/2, W/2, 2*C)`. This is accomplished through a two-step process:
+
+1.  **Patch Concatenation:** The input feature map is first partitioned into
+    non-overlapping 2x2 patches. The features from these four adjacent
+    spatial locations are then concatenated along the channel dimension. For
+    an input patch at `(2i, 2j)`, this combines information from its
+    neighbors at `(2i+1, 2j)`, `(2i, 2j+1)`, and `(2i+1, 2j+1)`. This step
+    halves the spatial dimensions while quadrupling the channel depth to `4*C`,
+    critically preserving all the information from the input, unlike lossy
+    pooling operations.
+
+2.  **Linear Projection:** A trainable linear layer (a Dense layer) then
+    projects the resulting `4*C`-dimensional feature vectors down to `2*C`
+    dimensions. This projection allows the model to learn the most effective
+    way to combine and summarize the features from the local 2x2 neighborhood.
+    A Layer Normalization is applied before this projection to stabilize the
+    training dynamics.
+
+The overall operation is a powerful, data-driven alternative to fixed
+downsampling functions like max or average pooling, forming the backbone of
+the feature pyramid structure in the Swin Transformer architecture.
+
+References:
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
+      using Shifted Windows. (https://arxiv.org/abs/2103.14030)
+
 """
 
 import keras

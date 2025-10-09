@@ -1,14 +1,58 @@
 """
-OrthoBlock: A Structured Layer for Learning Decorrelated Features.
+Learn decorrelated and gated features through a structured pipeline.
 
-This module implements a composite Keras layer designed to learn feature
-representations that are decorrelated, well-scaled, and interpretable. It
-achieves this by enforcing a specific, mathematically-motivated computational
-flow, making it a powerful alternative to a standard Dense layer in many
-deep learning models.
+This layer provides a mathematically-motivated alternative to a standard Dense
+layer by enforcing a structured computational flow. The core philosophy is to
+decouple the feature transformation into three distinct, interpretable steps:
+a rotation to create decorrelated features, a normalization step to stabilize
+activations, and a learned gating mechanism for feature selection. This
+structured approach is designed to improve gradient flow, enhance model
+stability, and provide insights into feature importance.
 
-The layer is built on the principle that structured feature extraction can lead
-to better generalization, stability, and model insight.
+Architecturally, the layer implements a four-stage pipeline:
+1.  **Orthogonal Projection:** An initial linear transformation is applied,
+    but its weight matrix `W` is heavily regularized to be orthogonal. This
+    encourages the columns of `W` to form an orthonormal basis.
+2.  **Magnitude Stabilization:** The resulting activations are normalized using
+    Root Mean Square Normalization (RMSNorm). This step controls the
+    magnitude of the feature vectors without the centering operation of
+    Layer Normalization, preserving the directional information from the
+    orthogonal projection.
+3.  **Non-Linearity:** A standard activation function is applied.
+4.  **Feature Gating:** A learnable scaling vector `s`, with its values
+    constrained to the range `[0, 1]`, is applied element-wise.
+
+The foundational mathematical principle is the enforcement of orthogonality on
+the projection matrix `W`. An orthogonal transformation is a rotation (or
+roto-reflection) that preserves the geometric structure of the input data,
+such as distances and angles. This property is enforced via a soft
+regularization term that penalizes the matrix `W` based on its deviation from
+orthonormality:
+
+`Loss_ortho = λ * ||W^T W - I||²_F`
+
+where `I` is the identity matrix and `||.||²_F` is the squared Frobenius
+norm. By minimizing this loss, the columns of `W` are encouraged to be
+mutually orthogonal and have a norm of one. This has two critical benefits:
+it ensures that the learned features are decorrelated, capturing unique and
+non-redundant information, and it promotes stable gradient flow by preventing
+the transformation from exploding or vanishing gradient magnitudes.
+
+The final scaling step, `s`, acts as a set of learnable gates. Because each
+`s_i` is constrained to `[0, 1]`, the model can learn to selectively "turn
+off" features by driving their corresponding `s_i` towards zero, or "pass
+them through" by driving `s_i` towards one. This provides a form of automatic,
+differentiable feature selection and offers a degree of interpretability, as
+the final values of `s` can be inspected to understand the relative
+importance of the learned features.
+
+References:
+    - Saxe et al., 2013. Exact solutions to the nonlinear dynamics of
+      learning in deep linear neural networks (for orthogonal initialization).
+    - Cisse et al., 2017. Parseval Networks: Improving Robustness to
+      Adversarial Examples (for orthogonal regularization).
+    - Zhang & Sennrich, 2019. Root Mean Square Layer Normalization.
+
 """
 
 import keras

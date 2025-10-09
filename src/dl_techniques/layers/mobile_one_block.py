@@ -1,23 +1,53 @@
-"""Implements the MobileOne block using structural reparameterization.
+"""
+MobileOne block using structural reparameterization.
 
-The MobileOne block is a convolutional building block designed for high
-performance on mobile devices. It uses a multi-branch architecture during
-training that can be fused into a single, efficient convolutional
-layer at inference time. This technique, known as structural
-reparameterization, provides enhanced representational power during
-training without sacrificing inference speed.
+This layer embodies the principle of structural reparameterization, a design
+paradigm that decouples the training-time architecture from the
+inference-time architecture. The core idea is to use a more complex,
+over-parameterized, multi-branch structure during training to enhance model
+representation and ease optimization, and then mathematically fuse these
+branches into a single, computationally efficient layer for fast inference.
 
-The training-time architecture comprises several parallel branches: one
-or more main convolutional branches, a 1x1 'scale' branch, and an
-optional skip connection. The outputs of these branches are summed. For
-inference, the parameters of all branches are mathematically fused into
-a single convolutional kernel and bias, which significantly reduces
-computational cost.
+Architecturally, during training, this block consists of multiple parallel
+branches whose outputs are summed. These typically include:
+1.  One or more main branches, each a `k x k` convolution followed by a
+    Batch Normalization layer.
+2.  A 1x1 convolution branch, also followed by Batch Normalization, acting
+    as a "scale" branch.
+3.  An optional identity skip-connection, also passed through Batch
+    Normalization if the input and output dimensions match.
 
-This layer supports an optional Squeeze-and-Excitation (SE) module for
-channel-wise feature recalibration. It is designed for building
-MobileOne-based models in Keras and includes methods to switch between
-training and inference configurations.
+This over-parameterization creates a richer gradient landscape, which can
+lead to better model convergence and final accuracy.
+
+For inference, these parallel affine operations are fused into a single
+`Conv2D` operation. This fusion is possible due to the linear properties of
+convolution and batch normalization. The fusion process relies on two key
+mathematical principles:
+
+First, a `Conv2D` layer followed by a `BatchNormalization` layer can be
+converted into a single `Conv2D` layer with a new kernel and bias. Given a
+convolution kernel `W` and a batch norm with mean `μ`, variance `σ²`, scale
+`γ`, and shift `β`, the fused kernel `W'` and bias `b'` are:
+
+`W' = (γ / sqrt(σ² + ε)) * W`
+`b' = β - (γ * μ / sqrt(σ² + ε))`
+
+Second, the sum of outputs from parallel convolutions (with identical stride
+and padding) is equivalent to a single convolution whose kernel and bias are
+the sum of the individual fused kernels and biases. The 1x1 and identity
+branches are first converted to equivalent `k x k` convolutions (by centering
+their kernels in a padded `k x k` tensor) before this summation. The result
+is a standard, hardware-friendly `Conv2D` layer that is mathematically
+equivalent to the complex training-time block, but with significantly lower
+latency and memory access costs.
+
+References:
+    - Vasu et al., 2022. MobileOne: An Improved One millisecond Mobile
+      Backbone. (https://arxiv.org/abs/2206.04040)
+    - Ding et al., 2021. RepVGG: Making VGG-style ConvNets Great Again.
+      (https://arxiv.org/abs/2101.03697)
+
 """
 
 import keras

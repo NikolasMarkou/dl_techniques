@@ -1,4 +1,5 @@
-"""Implement a Gated Delta Network, a linear-time transformer variant.
+"""
+A Gated Delta Network, a linear-time transformer variant.
 
 This layer provides a sophisticated, recurrent mechanism for sequence modeling,
 designed to overcome the limitations of both standard quadratic attention and

@@ -1,4 +1,5 @@
-"""Selectively mask gradients during backpropagation without altering the forward pass.
+"""
+Selectively mask gradients during backpropagation without altering the forward pass.
 
 This layer provides a mechanism to decouple the forward computation from the
 gradient computation, a powerful technique for implementing advanced machine
