@@ -391,14 +391,7 @@ class OrthoBlockExperimentConfig:
             'ortho_reg_factor': 1.0,
         }),
         'OrthoBlock_V2_Medium': lambda config: ('orthoblock_v2', {
-            'ortho_reg_factor': 0.1,
-        }),
-        'OrthoBlock_V2_Weak': lambda config: ('orthoblock_v2', {
-            'ortho_reg_factor': 0.01,
-        }),
-        'OrthoBlock_V2_HighScale': lambda config: ('orthoblock_v2', {
-            'ortho_reg_factor': 0.1,
-            'scale_initial_value': 0.8
+            'ortho_reg_factor': 0.5,
         }),
         'OrthoBlock_V2_LowScale': lambda config: ('orthoblock_v2', {
             'ortho_reg_factor': 0.1,
