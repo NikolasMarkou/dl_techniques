@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Union, Any, Callable
 
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets import (
+from dl_techniques.datasets.patch_transforms import (
     PatchGridGenerator, PatchInfo, PatchPrediction, DetectionResult,
     ResultAggregator
 )
