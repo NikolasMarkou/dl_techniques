@@ -55,6 +55,7 @@ Usage Example:
     >>> print(evolved_logits.shape)
     (2, 50257)
 """
+
 import keras
 from enum import Enum
 from keras import KerasTensor

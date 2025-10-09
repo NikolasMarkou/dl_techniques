@@ -35,10 +35,13 @@ from typing import Dict, Union, Any
 from keras.api.optimizers import Optimizer
 from keras.api.optimizers.schedules import LearningRateSchedule
 
-from dl_techniques.utils.logger import logger
-from .constants import *
-from .warmup_schedule import WarmupSchedule
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from .warmup_schedule import WarmupSchedule
+from .constants import *
 
 # ---------------------------------------------------------------------
 # Enums
