@@ -1,5 +1,5 @@
 """
-Constructs the composite input embeddings for BERT-style models.
+Construct the composite input embeddings for BERT-style models.
 
 This layer builds the initial vector representation for each token in an
 input sequence by combining three distinct sources of information. This
@@ -87,8 +87,7 @@ class BertEmbeddings(keras.layers.Layer):
     - Token type embeddings: Distinguish between different sentence segments
 
     The embeddings are summed together, normalized, and passed through dropout
-    for regularization. Supports configurable normalization types from the
-    dl-techniques framework.
+    for regularization.
 
     Args:
         vocab_size: Size of the vocabulary. Must be positive.

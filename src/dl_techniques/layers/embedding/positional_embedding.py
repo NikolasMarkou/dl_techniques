@@ -1,34 +1,62 @@
 """
-This module provides a `PositionalEmbedding` layer, a fundamental component for
-sequence-processing models like Transformers, implemented in Keras.
+Inject positional information into a sequence using learnable embeddings.
 
-In many sequence models, especially Transformers, the core mechanisms (like self-attention)
-are inherently order-agnostic; they treat the input as a "bag of tokens" without any
-innate sense of position. This layer addresses this by adding a unique, trainable
-vector to each position in an input sequence. This allows the model to learn the
-significance of word order and relative positioning directly from the data.
+This layer addresses the permutation-invariant nature of the Transformer
+architecture. Core mechanisms like self-attention do not have a built-in
+understanding of token order, treating input as an unordered set. This
+layer explicitly encodes the position of each token by adding a unique,
+trainable vector to its embedding.
 
-Key Features and Mechanisms:
+Architecture:
+    The fundamental design is an embedding lookup table where each row
+    corresponds to an absolute position in the sequence. Unlike the fixed
+    sinusoidal functions proposed in the original Transformer paper, this
+    implementation uses *learnable* positional embeddings. This allows the
+    model to learn the optimal representation of position for its specific
+    downstream task, rather than being constrained to a predefined
+    mathematical form.
 
-1.  **Learnable Embeddings:**
-    Unlike fixed sinusoidal embeddings, the positional vectors in this layer are
-    trainable weights. This gives the model the flexibility to discover optimal
-    positional representations for a specific task and dataset, rather than relying
-    on a predefined mathematical function.
+    The process is as follows:
+    1.  A weight matrix, representing the positional embedding table, is
+        initialized with shape `(max_sequence_length, embedding_dimension)`.
+    2.  For an incoming sequence of length `L`, the first `L` embedding
+        vectors are sliced from this table.
+    3.  These `L` positional vectors are added element-wise to the `L` token
+        embedding vectors of the input sequence.
 
-2.  **Handling Variable Sequence Lengths:**
-    The layer is designed to handle input sequences of variable lengths up to the
-    configured `max_seq_len`. During the forward pass, it dynamically slices its
-    internal embedding table to match the length of the incoming sequence before
-    adding the positional vectors. This makes it efficient and flexible for use
-    with batched data where sequences may have different lengths.
+    This simple additive approach effectively merges semantic and positional
+    information into a single, unified representation that can be processed
+    by subsequent Transformer layers.
 
-The operational flow of the layer is as follows:
--   An internal embedding table of shape `(max_seq_len, dim)` is created and learned.
--   For a given input tensor of shape `(batch_size, seq_len, dim)`, the layer takes
-    the first `seq_len` vectors from its internal table.
--   These positional vectors are broadcasted and added to the input tensor.
--   Dropout is applied to the resulting tensor.
+Foundational Mathematics:
+    Let `X ∈ R^(L x D)` be the input tensor of token embeddings for a
+    sequence of length `L` with dimension `D`. Let `P ∈ R^(M x D)` be the
+    learnable positional embedding table, where `M` is the maximum possible
+    sequence length.
+
+    The output `Y ∈ R^(L x D)` is computed by adding the corresponding
+    positional embedding to each token embedding:
+
+        Y_i = X_i + P_i   for i = 0, 1, ..., L-1
+
+    By projecting both token identity and position into the same vector
+    space, the self-attention mechanism can learn to compute attention
+    scores that are a function of both what a token is and where it is. For
+    example, the dot product attention between two tokens `i` and `j` will
+    depend on terms involving `X_i`, `X_j`, `P_i`, and `P_j`, allowing the
+    model to learn relative positional relationships.
+
+References:
+    - The concept of adding positional encodings was introduced in the
+      original Transformer paper, although it used a fixed sinusoidal
+      function:
+      Vaswani, A., et al. (2017). "Attention Is All You Need".
+
+    - The use of *learnable* absolute positional embeddings, as implemented
+      here, is a common variant used in highly influential models like BERT
+      and GPT:
+      Devlin, J., et al. (2018). "BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding".
 """
 
 import keras

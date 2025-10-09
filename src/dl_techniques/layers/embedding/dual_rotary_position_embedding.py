@@ -1,5 +1,5 @@
 """
-Implements a dual-configuration Rotary Position Embedding (RoPE).
+A dual-configuration Rotary Position Embedding (RoPE).
 
 This layer provides two distinct, pre-computed Rotary Position Embedding
 (RoPE) configurations within a single module. It is specifically designed

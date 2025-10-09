@@ -1,39 +1,59 @@
-"""
-This module provides Keras layers for converting spatial or sequential data into
-a sequence of "patches," a foundational step for applying Transformer architectures
-to domains beyond natural language, such as images and time series.
+"""Convert a 2D image into a sequence of flattened patch embeddings.
 
-The core idea is to break down a high-resolution input (like an image or a long
-time series) into a sequence of smaller, manageable chunks or "patches." Each patch
-is then linearly projected into a vector embedding. This process transforms the
-input into a format that a standard Transformer encoder can process: a sequence
-of embedding vectors.
+This layer implements the input "tokenization" strategy for Vision
+Transformers (ViT), bridging the gap between the grid-like structure of
+images and the sequence-based architecture of Transformers. It transforms an
+image into a sequence of vectors, where each vector represents a small
+rectangular region, or "patch," of the original image.
 
-This module offers two specialized layers for this purpose:
+Architecture:
+    The core idea is to treat an image as an ordered sequence of smaller
+    sub-images. This transformation is achieved elegantly and efficiently
+    using a single `keras.layers.Conv2D` operation. The key insight lies in
+    the specific configuration of this convolution:
 
-1.  **`PatchEmbedding2D` for Images (Vision Transformers):**
-    -   **Function:** Takes a 2D image and divides it into a grid of non-overlapping
-        rectangular patches.
-    -   **Mechanism:** This is elegantly implemented using a single `Conv2D` layer.
-        By setting the kernel size and stride equal to the `patch_size`, the
-        convolution operation effectively extracts each patch and performs the linear
-        embedding in one efficient step.
-    -   **Output:** Transforms a `(batch, height, width, channels)` image tensor into a
-        `(batch, num_patches, embed_dim)` sequence tensor, ready for a Vision
-        Transformer (ViT).
+    1.  **Kernel Size:** The `kernel_size` of the convolution is set to be
+        identical to the desired `patch_size`. This ensures that the filter
+        views exactly one patch at a time.
 
-2.  **`PatchEmbedding1D` for Time Series:**
-    -   **Function:** Takes a 1D sequence (e.g., a time series with multiple features)
-        and converts it into a sequence of overlapping or non-overlapping patches.
-    -   **Mechanism:** Similar to the 2D case, this uses a `Conv1D` layer. The `stride`
-        parameter allows for control over the degree of overlap between consecutive
-        patches, which can be crucial for preserving temporal continuity in time
-        series analysis.
-    -   **Output:** Transforms a `(batch, seq_len, features)` time series tensor into a
-        `(batch, num_patches, embed_dim)` sequence tensor.
+    2.  **Strides:** The `strides` of the convolution are also set equal to
+        the `patch_size`. This makes the kernel slide across the image in
+        non-overlapping steps, moving from one patch to the next adjacent one.
 
-Both layers are essential "tokenizer" front-ends that bridge the gap between
-continuous, high-dimensional data and the sequence-based processing of Transformers.
+    3.  **Filters:** The number of convolution filters is set to the target
+        `embed_dim`. This means that as the kernel processes each patch, it
+        simultaneously performs a linear projection, transforming the patch
+        into a vector of the desired embedding dimension.
+
+    The output of this convolution is a 4D tensor of shape
+    `(batch, num_patches_h, num_patches_w, embed_dim)`. A final reshape
+    operation flattens the two spatial dimensions into a single sequence
+    dimension, producing the required `(batch, num_patches, embed_dim)`
+    output for the subsequent Transformer encoder.
+
+Foundational Mathematics:
+    Conceptually, the operation consists of two stages: patching and linear
+    projection. For an input image `X ∈ R^(H x W x C)`, it is first divided
+    into `N` flattened patches `x_p ∈ R^(P*P*C)`, where `P` is the patch size
+    and `N = (H*W)/P^2` is the total number of patches.
+
+    Each patch `x_p^(i)` is then linearly projected by a learnable weight
+    matrix `E ∈ R^((P^2*C) x D)`, where `D` is the embedding dimension:
+
+        z_i = x_p^(i) * E
+
+    The `Conv2D` layer provides a computationally efficient implementation of
+    this exact process. The convolutional kernel weights are equivalent to
+    the projection matrix `E`, and the sliding window mechanism with a stride
+    equal to the patch size performs both the patching and projection in a
+    single, highly optimized operation.
+
+References:
+    - This patch embedding strategy is the cornerstone of the Vision
+      Transformer (ViT) model, introduced in:
+      Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn, D., Zhai, X.,
+      Unterthiner, T., ... & Houlsby, N. (2020). "An Image is Worth 16x16
+      Words: Transformers for Image Recognition at Scale".
 """
 
 import keras
