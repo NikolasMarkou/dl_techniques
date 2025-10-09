@@ -11,10 +11,9 @@ import warnings
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
 from scipy.stats import gaussian_kde
+from dataclasses import dataclass, field
 from matplotlib.patches import FancyBboxPatch
 from typing import Dict, List, Optional, Tuple, Any, Union
 
@@ -110,24 +109,13 @@ class ImageData:
 # Gradient Topology Visualizer
 # ---------------------------------------------------------------------
 
-# In data_nn.py
-
 class GradientTopologyVisualizer:
     """
     Visualizes model topology and gradient flow as a heatmap.
 
     This class creates a topological connectivity matrix where each cell
     represents the gradient magnitude between connected layers, then
-    interpolates to a fixed NxN size for visualization.
-
-    Parameters
-    ----------
-    model : keras.Model
-        The Keras model to visualize.
-    target_size : int, optional
-        Target size for the NxN heatmap matrix. Default is 64.
-    aggregation : str, optional
-        Method to aggregate gradients ('norm', 'mean', 'max'). Default is 'norm'.
+    maps it to a fixed NxN size for visualization.
     """
 
     def __init__(
@@ -140,24 +128,25 @@ class GradientTopologyVisualizer:
         self.target_size = target_size
         self.aggregation = aggregation
         self._layer_map: Dict[str, int] = {}
-        # This new map will reliably link each variable back to its parent layer.
-        self.var_to_layer_map: Dict[Any, str] = {}
+        # This map will link a variable's memory ID to its parent layer's name.
+        self._var_id_to_layer_name: Dict[int, str] = {}
         self._build_maps()
 
     def _build_maps(self) -> None:
         """
-        Build robust mappings from layer names to indices and from
-        trainable variables to their parent layer's name.
+        Build robust mappings from layer names to indices and from the memory ID
+        of each weight to its parent layer's name.
         """
         for idx, layer in enumerate(self.model.layers):
             self._layer_map[layer.name] = idx
-            # For each variable in the layer, create a definitive mapping
-            for var in layer.trainable_variables:
-                self.var_to_layer_map[var.name] = layer.name
+            # Create a complete map of every weight's memory ID to its owner.
+            # This is the most reliable way to link variables back to layers.
+            for weight in layer.weights:
+                self._var_id_to_layer_name[id(weight)] = layer.name
 
     def _aggregate_gradient(self, gradient: Any) -> float:
         """
-        Aggregate gradient tensor to a single scalar value.
+        Aggregate a gradient tensor to a single scalar value.
         """
         if gradient is None:
             return 0.0
@@ -178,7 +167,7 @@ class GradientTopologyVisualizer:
             gradients: List[Any]
     ) -> Dict[str, float]:
         """
-        Map gradients to layers using the robust map and compute aggregate values.
+        Map gradients to layers using the robust ID-based map and compute aggregates.
         """
         trainable_vars = self.model.trainable_variables
 
@@ -190,14 +179,15 @@ class GradientTopologyVisualizer:
 
         layer_gradients: Dict[str, List[float]] = {}
 
-        # Iterate through gradients and their corresponding variables.
         for grad, var in zip(gradients, trainable_vars):
-            # Use the reliable map to find the owner layer's name.
-            # This replaces the brittle `var.name.split('/')[0]` logic.
-            layer_name = self.var_to_layer_map.get(var.name)
+            # Use the variable's memory ID to perform a reliable lookup.
+            layer_name = self._var_id_to_layer_name.get(id(var))
 
             if layer_name is None:
-                warnings.warn(f"Could not map variable {var.name} to a layer. Skipping.")
+                warnings.warn(
+                    f"Could not map variable '{var.name}' to any layer via its ID. "
+                    "This is unexpected. Skipping."
+                )
                 continue
 
             if layer_name not in layer_gradients:
@@ -209,7 +199,6 @@ class GradientTopologyVisualizer:
         aggregated = {}
         for layer_name, grad_values in layer_gradients.items():
             if grad_values:
-                # The mean of norms is a good approximation for visualization.
                 aggregated[layer_name] = np.mean(grad_values)
             else:
                 aggregated[layer_name] = 0.0
@@ -236,23 +225,45 @@ class GradientTopologyVisualizer:
                         for inbound_layer in node.inbound_layers:
                             if inbound_layer.name in self._layer_map:
                                 inbound_idx = self._layer_map[inbound_layer.name]
-                                connection_weight = (
-                                        layer_grad +
-                                        layer_gradients.get(inbound_layer.name, 0.0)
-                                ) / 2.0
+                                inbound_grad = layer_gradients.get(
+                                    inbound_layer.name, 0.0
+                                )
+                                connection_weight = (layer_grad + inbound_grad) / 2.0
                                 topology_matrix[inbound_idx, layer_idx] = connection_weight
                                 topology_matrix[layer_idx, inbound_idx] = connection_weight
         return topology_matrix
 
     def _resize_matrix(self, matrix: np.ndarray) -> np.ndarray:
         """
-        Resize matrix to target size using interpolation.
+        Resize matrix to target size by mapping, not interpolating.
         """
         if matrix.shape[0] == self.target_size:
             return matrix
-        zoom_factor = self.target_size / matrix.shape[0]
-        resized = zoom(matrix, zoom_factor, order=1, mode='nearest')
-        return resized
+
+        if matrix.shape[0] == 0:
+            return np.zeros((self.target_size, self.target_size))
+
+        resized_matrix = np.zeros(
+            (self.target_size, self.target_size), dtype=matrix.dtype
+        )
+        scale = self.target_size / matrix.shape[0]
+
+        for r in range(matrix.shape[0]):
+            for c in range(matrix.shape[1]):
+                if matrix[r, c] != 0:
+                    r_start = int(r * scale)
+                    c_start = int(c * scale)
+                    r_end = int((r + 1) * scale)
+                    c_end = int((c + 1) * scale)
+
+                    if r_end == r_start:
+                        r_end += 1
+                    if c_end == c_start:
+                        c_end += 1
+
+                    resized_matrix[r_start:r_end, c_start:c_end] = matrix[r, c]
+
+        return resized_matrix
 
     def create_gradient_heatmap(
             self,
@@ -270,7 +281,7 @@ class GradientTopologyVisualizer:
         layer_gradients = self._compute_layer_gradients(gradients)
 
         if not layer_gradients:
-            warnings.warn("No layer gradients were computed. The topology matrix will be empty.")
+            warnings.warn("No layer gradients were computed. The matrix will be empty.")
             fig, ax = plt.subplots(figsize=figsize)
             ax.text(0.5, 0.5, 'No gradient data to display.', ha='center', va='center')
             return fig, ax, np.zeros((self.target_size, self.target_size))
@@ -279,14 +290,21 @@ class GradientTopologyVisualizer:
         resized_matrix = self._resize_matrix(topology_matrix)
 
         if log_scale:
-            # Use a small epsilon to avoid log(0)
             resized_matrix = np.log1p(resized_matrix)
 
         fig, ax = plt.subplots(figsize=figsize)
-        im = ax.imshow(resized_matrix, cmap=cmap, aspect='auto', interpolation='nearest')
+        im = ax.imshow(
+            resized_matrix, cmap=cmap, aspect='auto', interpolation='nearest'
+        )
         ax.set_title(title, fontsize=14, fontweight='bold')
-        ax.set_xlabel(f"Layer Space (interpolated to {self.target_size}x{self.target_size})", fontsize=11)
-        ax.set_ylabel(f"Layer Space (interpolated to {self.target_size}x{self.target_size})", fontsize=11)
+        ax.set_xlabel(
+            f"Layer Space (mapped to {self.target_size}x{self.target_size})",
+            fontsize=11
+        )
+        ax.set_ylabel(
+            f"Layer Space (mapped to {self.target_size}x{self.target_size})",
+            fontsize=11
+        )
 
         if show_colorbar:
             cbar = plt.colorbar(im, ax=ax)
@@ -308,14 +326,25 @@ class GradientTopologyVisualizer:
         layer_gradients = self._compute_layer_gradients(gradients)
         topology_matrix = self._build_topology_matrix(layer_gradients)
 
+        sparsity = (
+            np.sum(topology_matrix == 0) / topology_matrix.size
+            if topology_matrix.size > 0 else 1.0
+        )
+
         stats = {
             'num_layers': len(self.model.layers),
             'num_trainable_layers': len(layer_gradients),
             'total_gradient_magnitude': sum(layer_gradients.values()),
-            'mean_gradient_magnitude': np.mean(list(layer_gradients.values())) if layer_gradients else 0.0,
-            'max_gradient_magnitude': max(layer_gradients.values()) if layer_gradients else 0.0,
-            'min_gradient_magnitude': min(layer_gradients.values()) if layer_gradients else 0.0,
-            'matrix_sparsity': np.sum(topology_matrix == 0) / topology_matrix.size if topology_matrix.size > 0 else 1.0,
+            'mean_gradient_magnitude': (
+                np.mean(list(layer_gradients.values())) if layer_gradients else 0.0
+            ),
+            'max_gradient_magnitude': (
+                max(layer_gradients.values()) if layer_gradients else 0.0
+            ),
+            'min_gradient_magnitude': (
+                min(layer_gradients.values()) if layer_gradients else 0.0
+            ),
+            'matrix_sparsity': sparsity,
             'layer_gradients': layer_gradients,
             'original_matrix_shape': topology_matrix.shape,
             'resized_matrix_shape': (self.target_size, self.target_size)
