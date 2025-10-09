@@ -1,39 +1,58 @@
 """
-Binary Preference Regularizer
-============================
+Encourage network weights to adopt binary values (0 or 1).
 
-This regularizer implements an unconventional cost function that encourages neural
-network weights to adopt binary (0 or 1) values through the following equation:
+This regularizer introduces a penalty to the network's loss function,
+designed to guide weights towards either 0 or 1. Unlike traditional L1
+or L2 regularization that penalizes the magnitude of weights (based on
+vector norms), this regularizer modifies the optimization landscape to
+create two stable "valleys" or fixed points at 0 and 1. Any weight
+value falling between these two points incurs a penalty, effectively
+creating a "binarizing pressure" during training.
 
-    y = (1 - ((x-0.5)^2)/0.25)^2
+Architecturally, this component acts as a non-standard potential
+function. It imposes a cost based on a weight's value, not its
+magnitude relative to the origin. This is particularly useful for
+building intrinsically interpretable or compressed models where weights
+represent binary-like states, such as feature selection or network
+pruning, without resorting to non-differentiable operations.
 
-Key Properties:
--------------
-* Creates two stable points at x=0 and x=1 where the cost is zero
-* Maximum penalty occurs at x=0.5 with cost=1.0
-* Symmetric parabolic-like curve around x=0.5
-* Smooth and differentiable across its domain
+Foundational Mathematics
+------------------------
+The core of the regularizer is a custom-designed, differentiable
+cost function that exhibits a "double-well potential" shape. For a
+given weight `x`, the penalty `L(x)` is calculated as:
 
-Unlike traditional L1/L2 regularizers that push weights toward zero, this regularizer
-creates a "binarizing pressure" on the weights. This can be particularly useful for:
+    L(x) = (1 - 4 * (x - 0.5)^2)^2
 
-1. Training networks with interpretable, nearly-binary weights
-2. Creating sparse representations with clear on/off patterns
-3. Reducing effective model complexity by simplifying weight distributions
-4. Problems where binary-like decisions are inherently beneficial
+The intuition behind this equation's structure is as follows:
+1.  `(x - 0.5)^2`: This term creates a standard parabola with a
+    minimum at `x = 0.5`, the midpoint between the desired binary
+    values.
+2.  `4 * (...)`: The term is normalized such that its value is 1 at the
+    endpoints `x = 0` and `x = 1`. This step is equivalent to dividing
+    by the maximum value of the parabola in the [0, 1] range, which is
+    0.25.
+3.  `1 - (...)`: The normalized parabola is inverted. This creates a
+    function with a maximum value of 1 at the midpoint (`x = 0.5`) and
+    minimums of 0 at the endpoints (`x = 0` and `x = 1`).
+4.  `(...)**2`: Squaring the entire expression is a critical final step.
+    It ensures that the function is not only zero at `x = 0` and
+    `x = 1`, but also that its first derivative is zero at these points.
+    This creates truly stable fixed points in the optimization
+    landscape, meaning the regularizer exerts no force on weights that
+    have already converged to a binary value.
 
-The regularizer can be scaled through a 'multiplier' parameter to control the strength
-of the binarizing effect during training, and a 'scale' parameter to adjust the
-effective binary target range.
+This function provides a smooth, continuous, and differentiable penalty
+that is easily integrated into gradient-based optimization frameworks.
 
-Example Usage:
-------------
-    >>> regularizer = get_binary_preference_regularizer(multiplier=1.0)
-    >>> model.add(keras.layers.Dense(64, kernel_regularizer=regularizer))
-
-Note: The convergence behavior and final weight distributions may be significantly
-      different from traditional regularizers. Consider starting with a small
-      multiplier value and gradually increasing it if needed.
+References
+----------
+This regularizer is not based on a specific academic paper but is derived
+from first principles to create a desired penalty shape. The concept is
+conceptually related to ideas in energy-based models and the design of
+potential functions in physics, where a system is encouraged to settle
+into low-energy states. It stands in contrast to standard regularization
+methods which are typically based on Lp-norms.
 """
 
 import keras
@@ -226,7 +245,7 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
 
 # ---------------------------------------------------------------------
 
-def get_binary_preference_regularizer(
+def create_binary_preference_regularizer(
     multiplier: float = DEFAULT_BINARY_MULTIPLIER,
     scale: float = DEFAULT_BINARY_SCALE,
     **kwargs: Any
@@ -258,10 +277,10 @@ def get_binary_preference_regularizer(
     Examples
     --------
     >>> # Create a standard binary preference regularizer
-    >>> reg = get_binary_preference_regularizer(multiplier=1.0)
+    >>> reg = create_binary_preference_regularizer(multiplier=1.0)
 
     >>> # Create with stronger binarization pressure
-    >>> reg = get_binary_preference_regularizer(multiplier=2.0, scale=1.5)
+    >>> reg = create_binary_preference_regularizer(multiplier=2.0, scale=1.5)
 
     Notes
     -----

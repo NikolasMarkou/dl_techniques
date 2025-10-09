@@ -1,48 +1,52 @@
 """
-This module provides a Keras implementation of the Spectral Restricted Isometry
-Property (SRIP) regularizer, a powerful technique for improving the training of
-deep neural networks, particularly Convolutional Neural Networks (CNNs).
+Enforce near-orthonormality in weight matrices via spectral norm penalty.
 
-The core idea behind this regularizer, as proposed by Bansal et al. in "Can We Gain
-More from Orthogonality Regularizations in Training Deep CNNs?", is that encouraging
-the weight matrices of a network to be "approximately orthogonal" can lead to
-significant benefits. An orthogonal matrix preserves the norm of vectors, which helps
-to mitigate the exploding and vanishing gradient problems during training. This leads
-to more stable training, faster convergence, and often better generalization.
+This regularizer promotes stable training dynamics in deep neural networks
+by encouraging weight matrices to behave as isometries, i.e.,
+transformations that preserve the Euclidean norm of vectors. Such a
+property is highly beneficial for mitigating the exploding and vanishing
+gradient problems, as it ensures that the magnitude of signals and
+gradients does not grow or shrink exponentially as they propagate through
+the network layers.
 
-How it Works:
+Architecturally, this component introduces a soft constraint to the
+network's loss function. It evaluates the degree to which a layer's
+linear transformation deviates from being a perfect isometry and adds a
+corresponding penalty. This is applicable to both dense (2D) and
+convolutional (4D) weight tensors, with the latter being reshaped into
+an equivalent matrix representation for analysis.
 
-1.  **The Orthogonality Condition:** A matrix `W` is orthogonal if its transpose is
-    also its inverse, which means `W^T * W = I` (where `I` is the identity matrix).
-    This regularizer aims to enforce this condition.
+Foundational Mathematics
+------------------------
+The core principle is to enforce the Spectral Restricted Isometry Property
+(SRIP). A matrix `W` is a perfect isometry (orthonormal) if its Gram
+matrix `W^T * W` is the identity matrix `I`. The regularizer penalizes
+deviations from this condition using the following loss function:
 
-2.  **The SRIP Loss Function:** Instead of a strict enforcement, SRIP encourages
-    *near-orthogonality* by penalizing the deviation of `W^T * W` from the identity
-    matrix `I`. The loss is calculated as:
-    `Loss = lambda * ||W^T * W - I||_2`
-    where `||...||_2` is the spectral norm (the largest singular value of the matrix).
-    Minimizing this loss pushes the Gram matrix `W^T * W` to be close to `I`.
+    Loss = λ * ||W^T * W - I||_2
 
-3.  **Spectral Norm Estimation:** Calculating the exact spectral norm is computationally
-    expensive. This implementation uses the **power iteration method**, an efficient
-    iterative algorithm, to approximate the largest singular value. The number of
-    `power_iterations` controls the trade-off between accuracy and computational cost.
+The norm used, `||.||_2`, is the spectral norm, which is defined as the
+largest singular value (`σ_max`) of the matrix. The spectral norm of
+`W^T * W - I` quantifies the maximum possible change in a vector's norm
+caused by the deviation from a perfect isometry. Minimizing this value
+drives all singular values of `W^T * W` towards 1, thus making `W`
+approximately orthonormal.
 
-4.  **Support for Convolutional and Dense Layers:** The regularizer is designed to
-    work with both `Dense` and `Conv2D` layers. For convolutional kernels, which are
-    4D tensors, it automatically reshapes them into 2D matrices so that the `W^T * W`
-    operation can be performed.
+Calculating the exact spectral norm requires a Singular Value
+Decomposition (SVD), which is computationally expensive. This
+implementation therefore uses the **power iteration method**, an efficient
+iterative algorithm that approximates the largest singular value (and its
+corresponding singular vector) without performing a full matrix
+decomposition. This provides a computationally tractable way to apply the
+spectral norm penalty during training.
 
-5.  **Lambda Scheduling:** The strength of the regularization is controlled by a
-    parameter, `lambda`. This implementation includes a dynamic scheduling mechanism.
-    The `update_lambda` method allows the regularization strength to be decayed over
-    the course of training (e.g., via a Keras callback). This is often beneficial, as
-    strong regularization is most needed in the early stages of training, and can be
-    relaxed later to allow for fine-tuning.
-
-By adding this regularizer to the kernel of `Dense` or `Conv2D` layers, one can
-improve the conditioning of the network's weight matrices, leading to a more robust
-and effective training process.
+References
+----------
+The formulation and motivation for this regularizer are primarily derived
+from:
+-   Bansal, N., Chen, X., & Wang, Z. (2018). "Can We Gain More from
+    Orthogonality Regularizations in Training Deep CNNs?". *Advances
+    in Neural Information Processing Systems (NeurIPS)*.
 """
 
 import keras
@@ -375,7 +379,7 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
         )
 
 
-def get_srip_regularizer(
+def create_srip_regularizer(
     lambda_init: Optional[float] = 0.1,
     power_iterations: Optional[int] = 2,
     epsilon: Optional[float] = 1e-7,
@@ -404,16 +408,16 @@ def get_srip_regularizer(
 
     Example:
         >>> # Create SRIP regularizer with default parameters
-        >>> regularizer = get_srip_regularizer()
+        >>> regularizer = create_srip_regularizer()
         >>> conv_layer = keras.layers.Conv2D(64, 3, kernel_regularizer=regularizer)
         >>>
         >>> # Create SRIP regularizer with stronger initial orthogonality constraint
-        >>> strong_regularizer = get_srip_regularizer(lambda_init=0.5)
+        >>> strong_regularizer = create_srip_regularizer(lambda_init=0.5)
         >>> dense_layer = keras.layers.Dense(128, kernel_regularizer=strong_regularizer)
         >>>
         >>> # Create SRIP regularizer with custom decay schedule
         >>> custom_schedule = {10: 0.05, 30: 0.01, 50: 0.001}
-        >>> scheduled_regularizer = get_srip_regularizer(
+        >>> scheduled_regularizer = create_srip_regularizer(
         ...     lambda_init=0.1, lambda_schedule=custom_schedule
         ... )
         >>>
@@ -426,9 +430,5 @@ def get_srip_regularizer(
         epsilon=epsilon,
         lambda_schedule=lambda_schedule
     )
-
-
-# Alias for backward compatibility
-srip_regularizer = get_srip_regularizer
 
 # ---------------------------------------------------------------------

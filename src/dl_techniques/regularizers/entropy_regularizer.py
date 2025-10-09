@@ -1,52 +1,65 @@
 """
-Entropy-Based Neural Network Regularization
+Encourage a target entropy level in network weight distributions.
 
-Overview
---------
-This module implements a custom regularization technique based on entropy principles from
-information theory. The entropy regularizer shapes how information is distributed in neural
-network weight matrices, which can influence the network's generalization capabilities and
-representational efficiency.
+This regularizer applies principles from information theory to shape the
+representational structure of a neural network's weights. Instead of
+penalizing the magnitude of weights like traditional L1/L2 norms, it
+penalizes the deviation of a weight vector's Shannon entropy from a
+predefined target. This provides a mechanism to control whether a layer
+develops sparse, specialized features (low entropy) or dense,
+distributed representations (high entropy).
 
-Theoretical Background
----------------------
-Entropy regularization draws from information theory principles and statistical mechanics.
-Shannon entropy measures the uncertainty or randomness in a probability distribution. In the
-context of neural networks, weight matrices with different entropy profiles exhibit different
-computational and representational properties:
+Architecturally, this component acts as a constraint on the information
+distribution within a layer's weight tensor. By setting a target
+entropy, one can guide the learning process to favor certain types of
+solutions. For example, a low target entropy encourages a few weights to
+become dominant, effectively performing a soft form of feature
+selection. Conversely, a high target entropy promotes a more uniform
+distribution of weight importance, which can lead to more robust,
+fault-tolerant representations.
 
-- **Low entropy weights**: Concentrate information in a few dominant connections, similar to
-  sparse coding or feature selection
-- **High entropy weights**: Distribute information across many connections, similar to
-  distributed representations
+Foundational Mathematics
+------------------------
+The regularizer's penalty is derived from Shannon's definition of
+entropy. For a discrete probability distribution `P = {p_1, p_2, ...,
+p_n}`, the entropy `H(P)` is:
 
-Mathematical Foundation
-----------------------
-The entropy of weight matrices is calculated using Shannon's entropy formula:
-    H(W) = -∑(p_i * log(p_i))
-where p_i are the normalized weight values (using softmax). The entropy is then
-normalized by dividing by the maximum possible entropy log(n) to get a value between 0 and 1.
+    H(P) = - Σ p_i * log(p_i)
 
-Different parts of the network are encouraged to have specific entropy targets by
-penalizing the squared difference between the actual and target entropy.
-
-Practical Applications
----------------------
-Entropy regularization can be useful in:
-1. Preventing over-concentration of information in a few weights
-2. Creating more robust distributed representations
-3. Controlling information flow between layers
-4. Improving generalization by enforcing specific information distribution patterns
+To apply this to a vector of network weights `w`, which are not
+inherently a probability distribution, the following steps are taken:
+1.  **Probabilistic Transformation**: The absolute values of the weights
+    are transformed into a probability-like distribution `p` using the
+    softmax function: `p = softmax(|w|)`. This ensures that all `p_i`
+    are positive and sum to 1.
+2.  **Entropy Calculation**: The Shannon entropy `H(p)` is calculated for
+    this derived distribution.
+3.  **Normalization**: The raw entropy is normalized by the maximum
+    possible entropy for a distribution of size `n`, which is `log(n)`.
+    This maps the calculated entropy to a consistent `[0, 1]` range,
+    making the target hyperparameter independent of layer size.
+    `H_norm = H(p) / log(n)`.
+4.  **Penalty Formulation**: The final regularization loss is the
+    squared difference between the normalized entropy and the desired
+    target entropy, `H_target`.
+    `Loss = (H_norm - H_target)^2`.
+    This quadratic penalty creates a smooth optimization landscape that
+    drives the weight distribution towards the specified entropy level.
 
 References
 ----------
-- Shannon, C. E. (1948). "A Mathematical Theory of Communication". Bell System Technical Journal.
-- Tishby, N., & Zaslavsky, N. (2015). "Deep learning and the information bottleneck principle".
-  IEEE Information Theory Workshop (ITW).
-- Yang, G., & Schoenholz, S. (2017). "Mean Field Residual Networks: On the Edge of Chaos".
-  Advances in Neural Information Processing Systems (NeurIPS).
-- Lin, H. W., Tegmark, M., & Rolnick, D. (2017). "Why does deep and cheap learning work so well?".
-  Journal of Statistical Physics.
+The conceptual basis for using information-theoretic measures like
+entropy in deep learning is well-established and explored in several key
+works:
+
+-   Shannon, C. E. (1948). "A Mathematical Theory of Communication".
+    *Bell System Technical Journal*.
+-   Tishby, N., & Zaslavsky, N. (2015). "Deep learning and the
+    information bottleneck principle". *IEEE Information Theory Workshop
+    (ITW)*.
+-   Yang, G., & Schoenholz, S. (2017). "Mean Field Residual Networks:
+    On the Edge of Chaos". *Advances in Neural Information Processing
+    Systems (NeurIPS)*.
 """
 
 import keras
@@ -271,7 +284,7 @@ class EntropyRegularizer(keras.regularizers.Regularizer):
 
 # ---------------------------------------------------------------------
 
-def get_entropy_regularizer(
+def create_entropy_regularizer(
     strength: float = DEFAULT_ENTROPY_STRENGTH,
     target_entropy: Optional[float] = None,
     mode: Optional[str] = None,
@@ -311,13 +324,13 @@ def get_entropy_regularizer(
     Examples
     --------
     >>> # Create a low-entropy regularizer for concentrated weights
-    >>> reg = get_entropy_regularizer(strength=0.01, mode='low')
+    >>> reg = create_entropy_regularizer(strength=0.01, mode='low')
 
     >>> # Create a high-entropy regularizer for distributed weights
-    >>> reg = get_entropy_regularizer(strength=0.02, mode='high')
+    >>> reg = create_entropy_regularizer(strength=0.02, mode='high')
 
     >>> # Create with specific target entropy
-    >>> reg = get_entropy_regularizer(strength=0.01, target_entropy=0.6)
+    >>> reg = create_entropy_regularizer(strength=0.01, target_entropy=0.6)
     """
     # Validate strength parameter
     if strength < 0.0:

@@ -1,32 +1,57 @@
 """
-Tri-State Preference Regularizer
-==============================
+Encourage network weights to adopt ternary values (-1, 0, or 1).
 
-A sophisticated regularizer that encourages neural network weights to converge
-towards three preferred states: -1, 0, or 1. This is achieved through a carefully
-designed 6th order polynomial:
+This regularizer modifies the optimization landscape to guide network
+weights towards one of three preferred states: -1, 0, or 1. It serves
+as an alternative to standard L1/L2 regularization, which solely
+penalizes weight magnitude. By creating three distinct low-cost "valleys"
+in the loss surface, this regularizer is particularly useful for
+training networks that are intrinsically sparse and quantized, which can
+lead to significant model compression and hardware efficiency.
 
-    f(x) = (32/4.5)x²(x+1)²(x-1)²
+Architecturally, the regularizer implements a "triple-well potential"
+function. This design creates three stable equilibrium points where the
+regularization cost and its gradient are both zero. Weights that fall
+into these wells are no longer pushed by the regularizer, allowing the
+optimizer to focus on the main task loss. Conversely, weights lying
+between these stable points incur a penalty, creating a continuous
+pressure to move them towards the nearest preferred state.
 
-Key Properties:
--------------
-* Three stable points at x = -1, 0, and 1 where the cost is zero
-* Local maxima of exactly 1.0 at x = -0.5 and x = 0.5
-* Strictly positive cost between stable points
-* Rapidly increasing cost for |x| > 1
-* Perfectly symmetric around x = 0
+Foundational Mathematics
+------------------------
+The core of the regularizer is a custom-designed, 6th-order polynomial
+that is smooth and differentiable, making it suitable for gradient-based
+optimization. For a given weight `x`, the penalty `L(x)` is:
 
-Applications:
------------
-1. Training networks with quantized-like weights (-1, 0, 1)
-2. Creating sparse, interpretable representations with clear ternary patterns
-3. Reducing model complexity by pushing weights to three distinct values
-4. Problems where ternary decisions are naturally beneficial
-5. Hardware-efficient neural networks that prefer simple weight values
+    L(x) = (32/4.5) * x² * (x - 1)² * (x + 1)²
 
-The regularizer provides a smooth, differentiable cost function that guides weights
-towards these three preferred states while maintaining trainability through
-gradient descent.
+The structure of this polynomial is deliberate and provides key
+properties:
+1.  **Root Factors**: The terms `x`, `(x - 1)`, and `(x + 1)` ensure that
+    the function has roots precisely at the target values of 0, 1, and
+    -1.
+2.  **Squared Terms**: Squaring each factor, i.e., `x²`, `(x - 1)²`, and
+    `(x + 1)²`, is critical. This ensures that not only is the function
+    value zero at the roots, but its first derivative is also zero. This
+    mathematical property creates the stable, "flat-bottomed" wells in
+    the loss landscape, preventing the regularizer from applying any
+    force once a weight has reached a target state.
+3.  **Normalization Constant**: The leading coefficient, `(32/4.5)`, is a
+    normalization factor. It is specifically chosen to scale the penalty
+    function such that the local maxima between the wells (at `x ≈ ±0.5`)
+    have a value of exactly 1.0. This makes the `multiplier`
+    hyperparameter more interpretable as a direct scaling of this
+    normalized penalty.
+
+References
+----------
+This regularizer is not based on a specific academic paper but is
+derived from first principles to construct a potential function with the
+desired properties. The concept is conceptually related to ideas in:
+-   Network quantization and binarization, such as Ternary Connect
+    networks, which explore training with discrete weights.
+-   Energy-based models, where the goal is to shape an energy function
+    (analogous to the loss landscape) to have minima at desired states.
 """
 
 import keras
