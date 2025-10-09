@@ -59,7 +59,6 @@ from dl_techniques.optimization import (
     deep_supervision_schedule_builder
 )
 from dl_techniques.models.resnet.model import (
-    ResNet,
     create_resnet,
     get_model_output_info,
     create_inference_model_from_training_model
@@ -77,8 +76,6 @@ from dl_techniques.visualization import (
     ModelComparisonBarChart,
     ROCPRCurves
 )
-from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
-
 
 # =============================================================================
 # CONFIGURATION DATACLASS

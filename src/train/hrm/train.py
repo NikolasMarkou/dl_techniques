@@ -14,7 +14,7 @@ from keras import optimizers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.models.hrm import (
+from dl_techniques.models.hierarchical_reasoning_model.model import (
     create_hierarchical_reasoning_model,
     HierarchicalReasoningModel
 )
