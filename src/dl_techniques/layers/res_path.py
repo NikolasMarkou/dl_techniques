@@ -1,4 +1,5 @@
-"""Implement a residual path to bridge the semantic gap in U-Net skip connections.
+"""
+A residual path to bridge the semantic gap in U-Net skip connections.
 
 This layer provides a sophisticated feature refinement mechanism for the skip
 connections in U-Net-like architectures. It addresses a common challenge in
