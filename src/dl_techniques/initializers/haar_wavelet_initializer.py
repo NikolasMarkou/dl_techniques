@@ -1,87 +1,52 @@
-"""
-HaarWaveletInitializer: A Keras initializer for generating Haar wavelet decomposition filters.
+"""Fixed 2D Haar wavelet decomposition filters.
 
-This module implements a custom Keras initializer that creates 2D Haar wavelet filters
-for use in convolutional neural networks. Haar wavelets are the simplest form of wavelets
-and provide an efficient mechanism for multi-resolution analysis and frequency decomposition
-of signals and images.
+This initializer is deterministic and does not perform random sampling.
+Instead, it builds a fixed set of 2x2 convolution kernels that correspond
+to the basis functions of the 2D discrete Haar wavelet transform. Its
+purpose is to equip a convolutional layer with the ability to perform a
+single level of multi-resolution analysis, decomposing an input signal (such
+as an image) into distinct frequency sub-bands.
 
-The implementation offers:
+Architecture and Mathematical Foundations:
+The Haar wavelet transform is the simplest form of wavelet analysis and is
+based on a single prototype wavelet. In two dimensions, this decomposition is
+achieved by applying the 1D transform separably along the rows and columns,
+resulting in four distinct filters that capture different components of the
+signal:
 
-1. Generation of standard 2D Haar wavelet decomposition filters:
-   - LL: Low-Low pass filter (approximation coefficients)
-   - LH: Low-High pass filter (horizontal detail coefficients)
-   - HL: High-Low pass filter (vertical detail coefficients)
-   - HH: High-High pass filter (diagonal detail coefficients)
+1.  **LL (Low-pass/Approximation)**: `[[0.5, 0.5], [0.5, 0.5]]`
+    This filter acts as a 2x2 averager. When applied with a stride of 2, it
+    produces a downsampled, lower-resolution version of the input, capturing
+    its low-frequency content or "approximation" coefficients.
 
-2. A utility function to create a Keras DepthwiseConv2D layer pre-configured
-   with Haar wavelet filters for wavelet decomposition.
+2.  **LH (Horizontal Detail)**: `[[0.5, -0.5], [0.5, -0.5]]`
+    This filter averages vertically (low-pass) and takes the difference
+    horizontally (high-pass). It therefore acts as a detector for vertical
+    edges and captures horizontal detail coefficients.
 
-Wavelet transforms are particularly useful in:
-- Image processing and computer vision_heads for multi-scale feature extraction
-- Signal denoising and compression
-- Edge and texture detection
-- Multi-resolution analysis
-- Neural network architectures like wavelet scattering networks and wavelet CNNs
+3.  **HL (Vertical Detail)**: `[[0.5, 0.5], [-0.5, -0.5]]`
+    Conversely, this filter takes the difference vertically (high-pass) and
+    averages horizontally (low-pass), making it a detector for horizontal
+    edges and capturing vertical detail coefficients.
 
-Mathematical background:
-The discrete Haar wavelet transform decomposes a signal into a set of coefficients
-representing different frequency bands. For 2D signals like images, the decomposition
-is applied along both dimensions, resulting in four subbands:
+4.  **HH (Diagonal Detail)**: `[[0.5, -0.5], [-0.5, 0.5]]`
+    This filter takes the difference in both directions, making it sensitive
+    to diagonal details and capturing diagonal detail coefficients.
 
-1. Approximation coefficients (LL): Represent low-frequency content in both directions
-2. Horizontal detail coefficients (LH): Capture horizontal edges (vertical changes)
-3. Vertical detail coefficients (HL): Capture vertical edges (horizontal changes)
-4. Diagonal detail coefficients (HH): Capture diagonal details
-
-These filters form an orthonormal basis, meaning they preserve energy and enable
-perfect reconstruction. The implementation normalizes the filters to maintain
-variance across forward passes.
+Together, these four filters form an orthonormal basis. This mathematical
+property ensures that the transformation is energy-preserving and allows for
+perfect reconstruction of the original signal from its coefficients. In a
+neural network context, this initializer provides a fixed, non-learned layer
+that acts as an engineered feature extractor, effectively embedding the
+principles of wavelet analysis directly into the model's architecture.
 
 References:
-    [1] Mallat, S. (1989). A theory for multiresolution signal decomposition:
-        The wavelet representation. IEEE Transactions on Pattern Analysis and
-        Machine Intelligence, 11(7), 674-693.
+    - Mallat, S. (1989). *A theory for multiresolution signal
+      decomposition: The wavelet representation*. IEEE Transactions on
+      Pattern Analysis and Machine Intelligence.
+    - Daubechies, I. (1992). *Ten lectures on wavelets*. Society for
+      Industrial and Applied Mathematics.
 
-    [2] Daubechies, I. (1992). Ten lectures on wavelets. Society for Industrial and
-        Applied Mathematics. https://doi.org/10.1137/1.9781611970104
-
-    [3] Oyallon, E., & Mallat, S. (2015). Deep roto-translation scattering for object
-        classification. In Proceedings of the IEEE Conference on Computer Vision and
-        Pattern Recognition (pp. 2865-2873).
-
-    [4] Fujieda, S., Takayama, K., & Hachisuka, T. (2018). Wavelet convolutional
-        neural networks. arXiv preprint arXiv:1805.08620.
-
-Example usage:
-    ```python
-    # Example 1: Manual initialization of convolution kernels
-    initializer = HaarWaveletInitializer(scale=1.0)
-    kernel = initializer((2, 2, 3, 4))  # 2x2 kernel, 3 input channels, 4 filters per channel
-
-    # Example 2: Using the convenience function to create a wavelet decomposition layer
-    input_shape = (256, 256, 3)  # Input image dimensions (H, W, C)
-    wavelet_layer = create_haar_depthwise_conv2d(
-        input_shape=input_shape,
-        channel_multiplier=4,  # Standard decomposition uses 4 filters
-        trainable=False  # Fixed wavelet filters
-    )
-
-    # Example 3: Creating a wavelet scattering network
-    model = keras.Sequential([
-        keras.layers.Input(shape=(256, 256, 3)),
-        create_haar_depthwise_conv2d(input_shape=(256, 256, 3), name='wavelet_level1'),
-        keras.layers.Activation('relu'),
-        create_haar_depthwise_conv2d(input_shape=(128, 128, 12), name='wavelet_level2'),
-        keras.layers.GlobalAveragePooling2D(),
-        keras.layers.Dense(10, activation='softmax')
-    ])
-    ```
-
-Note:
-    The implementation requires 2x2 kernels and is designed for DepthwiseConv2D layers
-    with stride=2 to properly implement the standard Haar wavelet decomposition with
-    dyadic downsampling. For full wavelet decomposition, channel_multiplier should be 4.
 """
 
 import keras

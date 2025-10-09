@@ -1,3 +1,58 @@
+"""Initialize weights as orthogonal vectors on a hypersphere.
+
+This initializer populates a weight tensor with vectors that are mutually
+orthogonal and lie on the surface of a hypersphere of a specified radius.
+Its primary purpose is to establish maximal geometric separation between
+initial weight vectors, which can improve training dynamics in certain
+architectures by encouraging feature diversity from the start.
+
+Architecture and Mathematical Foundations:
+The initializer's design is dictated by a fundamental constraint from linear
+algebra: the maximum number of mutually orthogonal vectors in an n-dimensional
+space is n. The implementation strictly adheres to this principle, resulting
+in two distinct operational modes.
+
+1.  **Orthogonal Regime (Feasible Case)**: When the number of vectors to be
+    initialized (`num_vectors`) is less than or equal to the dimensionality
+    of the space (`latent_dim`), the initializer can generate a truly
+    orthogonal set. This is achieved using QR decomposition on a random
+    matrix. A random matrix `A` of shape (`latent_dim`, `num_vectors`) is
+    factorized into `A = QR`, where `Q` is an orthogonal matrix whose
+    columns form an orthonormal basis. The first `num_vectors` columns of
+    `Q` are selected and scaled by the desired `radius`. The resulting
+    vectors `v_i` satisfy `v_i · v_j = 0` for `i ≠ j` and `||v_i|| = radius`.
+
+2.  **Uniform Hypersphere Regime (Infeasible Case)**: When `num_vectors`
+    exceeds `latent_dim`, perfect orthogonality is mathematically
+    impossible. The initializer then falls back to a method that ensures
+    the next-best property: a uniform distribution on the hypersphere's
+    surface. This maximizes the *average* angular separation between vectors.
+    This is achieved by sampling vectors from an isotropic multivariate
+    Gaussian distribution (`N(0, I)`) and subsequently normalizing each
+    vector to unit length. The spherical symmetry of the Gaussian
+    distribution guarantees that the resulting unit vectors are uniformly
+    distributed on the n-sphere. These vectors are then scaled by the
+    `radius`.
+
+This dual-mode architecture ensures that the initializer always produces
+geometrically well-distributed weights while respecting mathematical laws,
+providing a robust tool for scenarios where initial weight diversity is
+paramount, such as in mixture-of-experts models, embedding layers, or
+attention mechanisms.
+
+References:
+    - For orthogonal initialization benefits in deep learning:
+      Saxe, A. M., McClelland, J. L., & Ganguli, S. (2013). *Exact
+      solutions to the nonlinear dynamics of learning in deep linear
+      neural networks*.
+    - For the method of generating uniform points on a sphere:
+      Marsaglia, G. (1972). *Choosing a Point from the Surface of a
+      Sphere*. The Annals of Mathematical Statistics.
+    - For QR decomposition:
+      Strang, G. (2016). *Introduction to Linear Algebra*.
+
+"""
+
 import keras
 import numpy as np
 import warnings

@@ -1,68 +1,48 @@
-"""
-OrthonormalInitializer: A Keras initializer for generating orthonormal vectors.
+"""Initialize weights as a set of orthonormal vectors.
 
-This module implements a custom Keras initializer that creates sets of orthonormal vectors
-using QR decomposition. Orthonormal vectors are particularly useful in machine learning
-applications such as:
+This initializer constructs a weight matrix whose rows form an orthonormal set,
+meaning each row vector has a unit norm and is orthogonal to every other row
+vector. Such a geometric configuration is highly desirable in deep neural
+networks as it helps preserve the norm of signals during forward and backward
+propagation, a property known as isometry. This can significantly stabilize
+training by mitigating the vanishing and exploding gradients problem.
 
-1. Clustering algorithms (e.g., k-means) where orthogonal centroids can improve convergence
-2. Self-organizing maps where orthogonal weight initialization can lead to better space coverage
-3. Representation learning where orthogonal bases can improve feature disentanglement
-4. Deep neural networks where orthogonal weight matrices help mitigate vanishing/exploding gradients
+Architecture and Mathematical Foundations:
+The generation of the orthonormal matrix relies on QR decomposition, a
+standard procedure in linear algebra. The conceptual process is as follows:
 
-The implementation follows these key steps:
-1. Generate a random matrix using NumPy's random number generator
-2. Apply QR decomposition to obtain orthogonal vectors (Q matrix)
-3. Ensure numerical stability by fixing the signs based on the diagonal of R
-4. Extract the first n_clusters rows to get the desired number of orthogonal vectors
+1.  A random square matrix `A` is sampled from a Gaussian distribution. The
+    dimensionality of this matrix corresponds to the feature dimension of the
+    weights (`feature_dims x feature_dims`).
 
-This approach guarantees that the resulting vectors are orthonormal (orthogonal and unit length)
-and provides better numerical stability compared to simpler approaches like Gram-Schmidt
-orthogonalization.
+2.  This random matrix `A` undergoes QR decomposition, factorizing it into
+    `A = QR`, where `Q` is an orthogonal matrix and `R` is an upper
+    triangular matrix. An orthogonal matrix `Q` has the defining property
+    that its columns (and rows) form an orthonormal basis. That is, for
+_   any two column vectors `q_i` and `q_j` from `Q`, their dot product is
+    `q_i · q_j = δ_ij`, where `δ_ij` is the Kronecker delta.
 
-Mathematical Background
------------------------
-A set of vectors {v₁, v₂, ..., vₙ} is orthonormal if:
+3.  The final weight matrix is constructed by taking a subset of the rows
+    from the resulting orthogonal matrix `Q`.
 
-- ⟨vᵢ, vⱼ⟩ = 0 for all i ≠ j (orthogonality)
-- ‖vᵢ‖ = 1 for all i (unit length)
+A key mathematical constraint is that the number of vectors being initialized
+(e.g., `n_clusters` or `units`) cannot exceed the dimensionality of the
+vector space (`feature_dims`). It is mathematically impossible to construct
+more than `d` mutually orthogonal vectors in a `d`-dimensional space. This
+initializer enforces this constraint. To ensure reproducibility for a given
+seed, a sign-flipping convention is applied to `Q`, as QR decomposition is
+only unique up to the signs of its columns.
 
-Where ⟨·,·⟩ denotes the inner product and ‖·‖ the Euclidean norm.
+References:
+    - Saxe, A. M., McClelland, J. L., & Ganguli, S. (2013). *Exact
+      solutions to the nonlinear dynamics of learning in deep linear
+      neural networks*. This paper provides a foundational theoretical
+      analysis showing how orthogonal initialization prevents gradient
+      issues in deep linear networks.
+    - Mishkin, D., & Matas, J. (2015). *All you need is a good init*. This
+      work demonstrates the practical benefits of orthogonal initialization
+      for deep convolutional networks.
 
-References
-----------
-.. [1] Saxe, A. M., McClelland, J. L., & Ganguli, S. (2013). Exact solutions to the
-       nonlinear dynamics of learning in deep linear neural networks.
-       arXiv preprint arXiv:1312.6120.
-
-.. [2] Hu, T., Pehlevan, C., & Chklovskii, D. B. (2014). A Hebbian/anti-Hebbian network
-       for online sparse dictionary learning derived from symmetric matrix factorization.
-       In 2014 48th Asilomar Conference on Signals, Systems and Computers (pp. 613-619). IEEE.
-
-.. [3] Mishkin, D., & Matas, J. (2015). All you need is a good init.
-       arXiv preprint arXiv:1511.06422.
-
-.. [4] Bansal, N., Chen, X., & Wang, Z. (2018). Can we gain more from orthogonality
-       regularizations in training deep networks?
-       Advances in Neural Information Processing Systems, 31.
-
-Note
-----
-The implementation enforces that the number of clusters (n_clusters) must be less than
-or equal to the feature dimensions. This is a mathematical constraint as you cannot
-have more than n orthogonal vectors in an n-dimensional space.
-
-Examples
---------
->>> # Initialize a Dense layer with orthonormal weights
->>> dense = keras.layers.Dense(
-...     units=64,
-...     kernel_initializer=OrthonormalInitializer(seed=42)
-... )
->>>
->>> # Initialize clustering centroids orthogonally
->>> initializer = OrthonormalInitializer(seed=123)
->>> centroids = initializer((10, 128))
 """
 
 import keras
