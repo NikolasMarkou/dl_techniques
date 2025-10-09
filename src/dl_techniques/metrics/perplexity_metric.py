@@ -154,16 +154,6 @@ def custom_loss_and_metrics(y_true, y_pred):
     ppl = perplexity(y_true, y_pred, from_logits=True, ignore_class=0)
     return loss, ppl
 ```
-
-## Technical Notes
-
-- **Threading:** Metric state is not thread-safe; use separate instances for concurrent evaluation
-- **Memory:** Peak memory usage occurs during softmax computation; consider gradient checkpointing for large models
-- **Precision:** Supports both float32 and mixed precision training; automatic dtype promotion ensures numerical stability
-- **Backwards Compatibility:** Compatible with TensorFlow 2.x and Keras 3.x APIs
-
-This implementation follows modern deep learning best practices while maintaining compatibility
-with established language modeling evaluation protocols and benchmarks.
 """
 
 import keras

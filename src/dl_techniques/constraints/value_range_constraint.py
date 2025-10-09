@@ -1,3 +1,46 @@
+"""
+Constrain weights to a specified value range after each update.
+
+This constraint implements a hard, element-wise projection of a weight
+tensor onto a predefined feasible interval. It serves as a potent form of
+regularization by directly restricting the hypothesis space of the model's
+parameters. After each gradient update step performed by the optimizer, this
+constraint is applied to ensure that the weights remain within the specified
+bounds `[min_value, max_value]`.
+
+Architecturally, this operates as a post-hoc projection. If `W` represents
+the weight tensor after an optimizer update, the constraint computes a new
+tensor `W'` where each element `w'` is given by the clipping operation:
+
+`w' = max(min_value, min(w, max_value))`
+
+This operation is equivalent to a projection onto the convex set defined by
+the hyperrectangle `[min_value, max_value]^d`, where `d` is the number of
+weights. This can be viewed as one half of a Projected Gradient Descent
+step, where the projection ensures the updated parameters satisfy the
+required constraints.
+
+The primary motivation for this technique is to enforce stability and
+incorporate prior knowledge. By preventing weights from growing
+indefinitely, it can mitigate the risk of exploding gradients and improve
+numerical stability, especially in deep or recurrent architectures.
+Furthermore, it allows for the direct enforcement of physical or logical
+constraints, such as non-negativity (`min_value=0`), which is crucial in
+models that represent physical quantities or perform tasks analogous to
+Non-negative Matrix Factorization (NMF).
+
+A prominent application of this technique is in the training of Wasserstein
+Generative Adversarial Networks (WGANs), where weight clipping is used to
+enforce a Lipschitz constraint on the critic model, which is a necessary
+condition for the validity of the Wasserstein distance approximation.
+
+References:
+    - Arjovsky et al., 2017. Wasserstein GAN
+      (https://arxiv.org/abs/1701.07875)
+    - Bertsekas, 1999. Nonlinear Programming (for Projected Gradient Methods).
+
+"""
+
 import keras
 from keras import ops
 from typing import Dict, Union, Optional, Any
