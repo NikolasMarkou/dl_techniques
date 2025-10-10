@@ -1,9 +1,13 @@
 """
-# WindowAttention Layer - Refined for Modern Keras 3
+WindowAttention Layer
 
 A Keras layer implementing windowed multi-head self-attention as described in the Swin Transformer
 paper. This layer partitions input tokens into non-overlapping windows and computes self-attention
 within each window, reducing computational complexity while maintaining effective modeling capacity.
+
+This version is enhanced to support input sequences shorter than the window's capacity
+(window_size * window_size) by automatically padding the sequence for computation and
+removing the padding from the output.
 
 ## Conceptual Overview
 
@@ -16,43 +20,46 @@ WindowAttention addresses this by:
 1. **Spatial Partitioning**: Dividing the input feature map into non-overlapping windows
 2. **Local Attention**: Computing self-attention only within each window
 3. **Relative Position Encoding**: Using learnable relative position biases to capture spatial relationships
+4. **Flexible Input Handling**: Automatically pads sequences shorter than the window area to enable
+   computation on non-square or incomplete windows, then un-pads the output.
 
 This reduces complexity from O(N²) to O(W² × N) where W is the window size, making it linear
 with respect to image size while quadratic only within small, fixed-size windows.
 
 ### Mathematical Description:
 
-For an input tensor of shape (B, H×W, C) representing B images with H×W patches of C channels:
+For an input tensor of shape (B, N_actual, C) where N_actual <= window_size²:
 
-1. **Window Partitioning**: Reshape input into (B×num_windows, window_size², C)
-2. **Standard Multi-Head Attention** within each window:
+1. **Padding (if N_actual < window_size²)**: Pad input and create a mask.
+2. **Window Partitioning**: Reshape input into (B×num_windows, window_size², C)
+3. **Standard Multi-Head Attention** within each window:
    * Query, Key, Value projections: `Q = XW_q`, `K = XW_k`, `V = XW_v`
    * Attention scores: `A = (QK^T) / √d_head`
    * **Relative Position Bias**: `A = A + B_rel`
-   * Attention weights: `P = softmax(A)`
+   * Attention weights: `P = softmax(A + Mask)`
    * Output: `O = PV`
-
-3. **Relative Position Bias Computation**:
-   * For each window position pair (i,j), compute relative coordinates: `(Δi, Δj)`
-   * Map to bias table index: `idx = (Δi + W-1) × (2W-1) + (Δj + W-1)`
-   * Retrieve bias: `B_rel[i,j] = bias_table[idx]`
+4. **Un-padding**: Slice output back to original sequence length N_actual.
 
 ### Key Benefits:
 
 1. **Linear Complexity**: O(W² × N) complexity scales linearly with image size
 2. **Local Modeling**: Effectively captures local spatial relationships within windows
 3. **Relative Position Awareness**: Learnable biases encode spatial structure without absolute positions
-4. **Hardware Efficient**: Regular window structure enables efficient GPU/TPU computation
-5. **Hierarchical Compatibility**: Works with shifted window schemes for cross-window connections
+4. **Flexible**: Handles incomplete windows (e.g., at image edges) via padding.
+5. **Hardware Efficient**: Regular window structure enables efficient GPU/TPU computation
 
 ### Usage Example:
 ```python
 # For a 7×7 window with 96 channels and 3 attention heads
 window_attn = WindowAttention(dim=96, window_size=7, num_heads=3)
 
-# Input: (batch_size, 49, 96) where 49 = 7×7 window
-x = keras.random.normal((4, 49, 96))
-output = window_attn(x)  # Shape: (4, 49, 96)
+# Input for a full window: (batch_size, 49, 96)
+x_full = keras.random.normal((4, 49, 96))
+output_full = window_attn(x_full)  # Shape: (4, 49, 96)
+
+# Input for a partial window (e.g., 20 tokens): (batch_size, 20, 96)
+x_partial = keras.random.normal((4, 20, 96))
+output_partial = window_attn(x_partial) # Shape: (4, 20, 96)
 ```
 """
 
@@ -71,21 +78,26 @@ class WindowAttention(keras.layers.Layer):
 
     **Intent**: Provide efficient windowed self-attention that scales linearly with
     image size while maintaining local spatial modeling capacity through relative
-    position encoding within fixed-size windows.
+    position encoding. This implementation robustly handles input sequences that are
+    shorter than the window's capacity (`window_size**2`) by padding during computation.
 
     **Architecture**:
     ```
-    Input(B, N, C) where N = window_size²
+    Input(B, N_actual, C) where N_actual <= window_size²
+           ↓
+    Pad to (B, N_target, C) if needed, where N_target = window_size²
            ↓
     QKV Projection: Linear(C → 3C)
            ↓
-    Reshape: (B, N, 3, num_heads, head_dim)
+    Reshape: (B, N_target, 3, num_heads, head_dim)
            ↓
-    Multi-Head Attention with Relative Position Bias
+    Multi-Head Attention with Relative Position Bias and Padding Mask
            ↓
     Output Projection: Linear(C → C)
            ↓
-    Output(B, N, C)
+    Un-pad to (B, N_actual, C)
+           ↓
+    Output(B, N_actual, C)
     ```
 
     Args:
@@ -109,13 +121,14 @@ class WindowAttention(keras.layers.Layer):
         ValueError: If window_size is not positive.
         ValueError: If num_heads is not positive.
         ValueError: If dropout rates are not between 0.0 and 1.0.
+        ValueError: In `call`, if input sequence length exceeds `window_size**2`.
 
     Input shape:
-        A 3D tensor with shape: `(batch_size, num_tokens_in_window, dim)`
-        where num_tokens_in_window = window_size * window_size
+        A 3D tensor with shape: `(batch_size, num_tokens, dim)`
+        where `num_tokens` must be less than or equal to `window_size * window_size`.
 
     Output shape:
-        A 3D tensor with shape: `(batch_size, num_tokens_in_window, dim)`
+        A 3D tensor with the same shape as the input: `(batch_size, num_tokens, dim)`.
 
     Attributes:
         qkv: Dense layer for query, key, value projections.
@@ -127,23 +140,14 @@ class WindowAttention(keras.layers.Layer):
 
     Example:
         ```python
-        # Basic usage
+        # Basic usage with a full window
         window_attn = WindowAttention(dim=96, window_size=7, num_heads=3)
+        x_full = keras.random.normal((4, 49, 96))
+        output_full = window_attn(x_full)  # Shape: (4, 49, 96)
 
-        # Advanced configuration with regularization
-        window_attn = WindowAttention(
-            dim=384,
-            window_size=7,
-            num_heads=12,
-            qkv_bias=True,
-            attn_dropout_rate=0.1,
-            proj_dropout_rate=0.1,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Input with batch_size=4, window_size=7x7=49, dim=96
-        x = keras.random.normal((4, 49, 96))
-        output = window_attn(x)  # Shape: (4, 49, 96)
+        # Usage with a partial window (e.g., 30 tokens)
+        x_partial = keras.random.normal((4, 30, 96))
+        output_partial = window_attn(x_partial) # Shape: (4, 30, 96)
         ```
 
     References:
@@ -270,21 +274,22 @@ class WindowAttention(keras.layers.Layer):
 
         # --- Explicitly BUILD all sub-layers in computational order ---
         # This is CRITICAL for robust serialization in Keras 3
+        # We build with the *padded* shape to ensure layers can handle full window size
+        padded_shape = list(input_shape)
+        padded_shape[1] = self.window_size * self.window_size
 
         # 1. Build QKV projection
-        self.qkv.build(input_shape)
+        self.qkv.build(padded_shape)
 
-        # 2. Build output projection (same shape as input)
-        self.proj.build(input_shape)
+        # 2. Build output projection
+        self.proj.build(padded_shape)
 
         # 3. Build dropout layers if they exist
-        # Note: Dropout layers don't change shape, so we can use input_shape
         if self.attn_dropout is not None:
-            # Attention dropout operates on (B, num_heads, N, N) but Keras handles this automatically
             self.attn_dropout.build(None)  # Dropout doesn't need specific input shape
 
         if self.proj_dropout is not None:
-            self.proj_dropout.build(input_shape)  # Same shape as input
+            self.proj_dropout.build(padded_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -298,17 +303,60 @@ class WindowAttention(keras.layers.Layer):
         """Forward pass of the WindowAttention layer.
 
         Args:
-            inputs: Input tensor of shape (B, N, C) where N = window_size²
-            attention_mask: Optional attention mask of shape (B, N) where 1=attend, 0=mask
+            inputs: Input tensor of shape (B, N_actual, C) where N_actual <= window_size²
+            attention_mask: Optional attention mask of shape (B, N_actual) where 1=attend, 0=mask.
+                This mask is merged with the internal padding mask if padding is required.
             training: Whether in training mode (for dropout)
 
         Returns:
-            Output tensor of shape (B, N, C)
+            Output tensor of shape (B, N_actual, C)
         """
-        B, N, C = keras.ops.shape(inputs)
+        B_actual, N_actual, C_actual = keras.ops.shape(inputs)
+        N_target = self.window_size * self.window_size
+
+        if N_actual > N_target:
+            raise ValueError(
+                f"Input sequence length ({N_actual}) cannot be greater than the "
+                f"window area ({N_target})."
+            )
+
+        # --- START PADDING LOGIC ---
+        padded_inputs = inputs
+        padding_mask = None
+        if N_actual < N_target:
+            padding_amount = N_target - N_actual
+            # Pad inputs with zeros to match the window size
+            padding_tensor = keras.ops.zeros((B_actual, padding_amount, C_actual), dtype=inputs.dtype)
+            padded_inputs = keras.ops.concatenate([inputs, padding_tensor], axis=1)
+
+            # Create an internal mask to ignore padded tokens
+            padding_mask = keras.ops.concatenate([
+                keras.ops.ones((B_actual, N_actual), dtype="int32"),
+                keras.ops.zeros((B_actual, padding_amount), dtype="int32")
+            ], axis=1)
+
+        # Merge the internal padding mask with any user-provided mask
+        if attention_mask is not None:
+            # Pad user mask to target size if necessary
+            if keras.ops.shape(attention_mask)[1] < N_target:
+                 padding_amount_mask = N_target - keras.ops.shape(attention_mask)[1]
+                 mask_padding = keras.ops.zeros((B_actual, padding_amount_mask), dtype=attention_mask.dtype)
+                 attention_mask = keras.ops.concatenate([attention_mask, mask_padding], axis=1)
+
+            if padding_mask is not None:
+                # Combine masks using multiplication (logical AND)
+                attention_mask = keras.ops.cast(attention_mask, dtype="int32") * padding_mask
+            # If no padding_mask, user mask is used directly
+        elif padding_mask is not None:
+            attention_mask = padding_mask
+        # If both are None, attention_mask remains None
+
+        # --- END PADDING LOGIC ---
+
+        B, N, C = keras.ops.shape(padded_inputs) # Now B, N_target, C
 
         # QKV projection and reshape
-        qkv = self.qkv(inputs, training=training)  # (B, N, 3*C)
+        qkv = self.qkv(padded_inputs, training=training)  # (B, N, 3*C)
         qkv = keras.ops.reshape(qkv, (B, N, 3, self.num_heads, self.head_dim))  # (B, N, 3, num_heads, head_dim)
         qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))  # (3, B, num_heads, N, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]  # Each: (B, num_heads, N, head_dim)
@@ -337,7 +385,7 @@ class WindowAttention(keras.layers.Layer):
         if attention_mask is not None:
             # Reshape mask for broadcasting: (B, 1, 1, N)
             broadcast_mask = keras.ops.reshape(attention_mask, (B, 1, 1, N))
-            # Convert mask to additive form: 0 -> 0, 1 -> -inf
+            # Convert mask to additive form: 1 -> 0, 0 -> -inf
             inf_value = keras.ops.convert_to_tensor(-1e9, dtype=attn.dtype)
             additive_mask = (1.0 - keras.ops.cast(broadcast_mask, dtype=attn.dtype)) * inf_value
             attn = attn + additive_mask
@@ -360,6 +408,12 @@ class WindowAttention(keras.layers.Layer):
         # Apply projection dropout
         if self.proj_dropout is not None:
             x = self.proj_dropout(x, training=training)
+
+        # --- START UN-PADDING LOGIC ---
+        # Remove padding from the output if it was added
+        if N_actual < N_target:
+            x = x[:, :N_actual, :]
+        # --- END UN-PADDING LOGIC ---
 
         return x
 
@@ -388,5 +442,3 @@ class WindowAttention(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
