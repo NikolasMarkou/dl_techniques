@@ -4,8 +4,6 @@ import keras
 import os
 import tempfile
 
-# To make the test runnable, assuming the file is in the specified path
-# You might need to adjust this based on your project structure
 from dl_techniques.layers.attention.window_attention import WindowAttention
 
 
