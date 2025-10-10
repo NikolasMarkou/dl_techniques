@@ -190,6 +190,72 @@ class TestTransformerLayer:
     # ===============================================
     # 3. Serialization Test (The Gold Standard)
     # ===============================================
+
+    # The following comprehensive test replaces previous, more focused tests for
+    # attention forward pass and serialization. It covers a wider range of
+    # component combinations in a single, efficient test case.
+    @pytest.mark.parametrize(
+        "attention_config",
+        [
+            {'attention_type': 'multi_head', 'attention_args': {}},
+            {'attention_type': 'window', 'attention_args': {'window_size': 4}},
+            {'attention_type': 'group_query', 'attention_args': {'n_kv_head': 2}},
+            # hidden_size (64) / num_heads (4) = 16
+            {'attention_type': 'differential', 'attention_args': {'head_dim': 16}},
+        ]
+    )
+    @pytest.mark.parametrize("ffn_type", ['mlp', 'swiglu', 'glu', 'geglu'])
+    @pytest.mark.parametrize("normalization_type", ['layer_norm', 'rms_norm', 'zero_centered_rms_norm', 'dynamic_tanh'])
+    @pytest.mark.parametrize("normalization_position", ['pre', 'post'])
+    def test_component_combinations_forward_pass_and_serialization(
+        self,
+        layer_config,
+        sample_input,
+        attention_config,
+        ffn_type,
+        normalization_type,
+        normalization_position
+    ):
+        """
+        Tests forward pass and serialization for various combinations of core components.
+        This is a comprehensive 'gold standard' test that covers multiple configurations
+        of attention, FFN, and normalization to ensure robust interoperability.
+        """
+        # --- 1. Setup Layer Configuration ---
+        full_config = {
+            **layer_config,
+            **attention_config,
+            'ffn_type': ffn_type,
+            'normalization_type': normalization_type,
+            'normalization_position': normalization_position,
+            'dropout_rate': 0.0,
+            'attention_dropout_rate': 0.0,
+        }
+
+        # --- 2. Model Creation and Forward Pass ---
+        inputs = layers.Input(shape=sample_input.shape[1:])
+        outputs = TransformerLayer(**full_config)(inputs)
+        model = models.Model(inputs, outputs)
+
+        original_prediction = model(sample_input, training=False)
+        assert original_prediction.shape == sample_input.shape
+        assert not np.any(np.isnan(ops.convert_to_numpy(original_prediction)))
+
+        # --- 3. Serialization and Deserialization ---
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "test_combo_model.keras")
+            model.save(filepath)
+            loaded_model = models.load_model(filepath)
+
+            # --- 4. Verification ---
+            loaded_prediction = loaded_model(sample_input, training=False)
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_prediction),
+                ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6,
+                err_msg=f"Mismatch for combo: {full_config}"
+            )
+
     def test_full_serialization_cycle_with_moe(self, moe_config, sample_input):
         """Tests full serialization cycle with MoE configuration."""
         layer_config = {
