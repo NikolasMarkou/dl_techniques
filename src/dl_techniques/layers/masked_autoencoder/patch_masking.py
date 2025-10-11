@@ -307,3 +307,5 @@ class PatchMasking(keras.layers.Layer):
             "mask_value": self.mask_value,
         })
         return config
+
+# ---------------------------------------------------------------------

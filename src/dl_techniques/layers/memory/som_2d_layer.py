@@ -1,5 +1,5 @@
 """
-Self-Organizing Map (SOM) 2D layer implementation for Keras.
+Self-Organizing Map (SOM) 2D layer implementation.
 
 This file should be saved as: dl_techniques/layers/som_2d_layer.py
 
