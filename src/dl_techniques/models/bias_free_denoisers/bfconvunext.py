@@ -679,6 +679,8 @@ def get_model_output_info(model: keras.Model) -> Dict[str, Any]:
         'primary_output_index': 0  # Primary output is always at index 0
     }
 
+# ---------------------------------------------------------------------
+
 def create_inference_model_from_training_model(training_model: keras.Model) -> keras.Model:
     """
     Create a single-output inference model from a multi-output training model.
@@ -721,3 +723,5 @@ def create_inference_model_from_training_model(training_model: keras.Model) -> k
     logger.info(f"Created inference model with single output shape: {primary_output.shape}")
 
     return inference_model
+
+# ---------------------------------------------------------------------

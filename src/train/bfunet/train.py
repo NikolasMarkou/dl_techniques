@@ -149,7 +149,7 @@ class TrainingConfig:
     train_image_dirs: List[str] = field(default_factory=list)
     val_image_dirs: List[str] = field(default_factory=list)
     patch_size: int = 64
-    channels: int = 1
+    channels: int = 3
     image_extensions: List[str] = field(
         default_factory=lambda: ['.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.webp']
     )

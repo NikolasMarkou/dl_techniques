@@ -575,3 +575,5 @@ def create_inference_model_from_training_model(training_model: keras.Model) -> k
     logger.info(f"Created inference model with single output shape: {primary_output.shape}")
 
     return inference_model
+
+# ---------------------------------------------------------------------
