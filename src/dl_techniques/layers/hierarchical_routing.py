@@ -173,25 +173,22 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
         # Step 3: Slice and re-normalize if the target dimension is not a power of 2.
         if self.output_dim == self.padded_output_dim:
             # If output_dim is a power of 2, the distribution is already correct.
-            logger.debug(f"[{self.name}] Using direct output path (power of 2).")
             return padded_probs
-        else:
-            # If not, we discard the "padded" probabilities and re-normalize.
-            logger.debug(f"[{self.name}] Slicing to {self.output_dim} and renormalizing.")
 
-            # 3a. Slice to get the probabilities for only the true classes.
-            unnormalized_probs = padded_probs[:, :self.output_dim]
+        # If not, we discard the "padded" probabilities and re-normalize.
+        # 3a. Slice to get the probabilities for only the true classes.
+        unnormalized_probs = padded_probs[:, :self.output_dim]
 
-            # 3b. Compute the sum of these probabilities. The sum will be < 1.0
-            # because we discarded the probability mass routed to padded classes.
-            # `keepdims=True` is crucial for correct broadcasting during division.
-            prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
+        # 3b. Compute the sum of these probabilities. The sum will be < 1.0
+        # because we discarded the probability mass routed to padded classes.
+        # `keepdims=True` is crucial for correct broadcasting during division.
+        prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
 
-            # 3c. Renormalize to ensure the final output is a valid probability
-            # distribution that sums to 1. Epsilon prevents division by zero.
-            final_probs = unnormalized_probs / (prob_sum + self.epsilon)
+        # 3c. Renormalize to ensure the final output is a valid probability
+        # distribution that sums to 1. Epsilon prevents division by zero.
+        final_probs = unnormalized_probs / (prob_sum + self.epsilon)
 
-            return final_probs
+        return final_probs
 
 
     def compute_output_shape(
