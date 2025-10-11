@@ -60,15 +60,20 @@ class AnalysisResults:
     # Activation analysis (now part of information flow)
     activation_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
-    # Weight analysis - FIXED: Properly declared all weight-related attributes
+    # Weight analysis
     weight_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     weight_pca: Optional[Dict[str, Any]] = None
     weight_stats_layer_order: Dict[str, List[str]] = field(default_factory=dict)  # FIXED: Properly declared
 
-    # Calibration analysis - FIXED: Consolidated structure
+    # Calibration analysis
     calibration_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    """Metrics related to the model's calibration (e.g., ECE, Brier Score)."""
+
     reliability_data: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
+    """Data for plotting reliability diagrams (bin accuracies, confidences, etc.)."""
+
     confidence_metrics: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
+    """Metrics related to the distribution of prediction confidences (e.g., entropy, max probability)."""
 
     # Information flow
     information_flow: Dict[str, Any] = field(default_factory=dict)

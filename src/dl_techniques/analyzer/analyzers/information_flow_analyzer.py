@@ -37,7 +37,7 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
         # Get sample data and store batch size for proper tensor handling
         x_sample = data.x_data[:min(200, len(data.x_data))]
-        self._batch_size = len(x_sample)  # FIXED: Store actual batch size
+        self._batch_size = len(x_sample)
 
         for model_name, extraction_data in self.layer_extraction_models.items():
             if extraction_data is None:
@@ -282,16 +282,21 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         if dense_indices:
             # ==============================================================================
             # COMMENT: The original code arbitrarily chose the second-to-last dense
-            # layer (`dense_indices[-2]`), which is not a meaningful heuristic for many
-            # modern or complex architectures.
+            # layer (`dense_indices[-2]`), which is not a meaningful heuristic. The
+            # current fix uses the middle dense layer, which is better.
             #
-            # The fix is to use a more stable and generally useful heuristic: selecting
-            # the *middle* dense layer. This is less likely to be a simple projection
-            # layer and more likely to contain rich feature representations, making it
-            # a better point of interest for analysis across a wider variety of models.
+            # A further improvement is to avoid the final dense layer (which is often
+            # a simple linear projection for classification) and pick a layer
+            # from the "body" of the dense block.
             # ==============================================================================
-            middle_dense_layer_index = dense_indices[len(dense_indices) // 2]
-            key_indices.append(middle_dense_layer_index)
+
+            # Exclude the last dense layer if there are multiple
+            candidate_dense_layers = dense_indices[:-1] if len(dense_indices) > 1 else dense_indices
+
+            if candidate_dense_layers:
+                # Select the middle layer from the candidates
+                middle_dense_layer_index = candidate_dense_layers[len(candidate_dense_layers) // 2]
+                key_indices.append(middle_dense_layer_index)
 
         results.activation_stats[model_name] = {}
 

@@ -166,14 +166,18 @@ class CalibrationVisualizer(BaseVisualizer):
         """Plot confidence distributions as a vertical violin plot."""
         confidence_data = []
 
-        # Access confidence metrics from the correct location with consistent ordering
-        for model_name in self._sort_models_consistently(list(self.results.confidence_metrics.keys())):
-            metrics = self.results.confidence_metrics[model_name]
-            # Safety check for required keys
-            if 'max_probability' not in metrics:
-                logger.warning(f"Missing 'max_probability' key for model {model_name}")
+        model_order_source = self._sort_models_consistently(
+            list(self.results.calibration_metrics.keys())
+        )
+
+        for model_name in model_order_source:
+            # Safely access confidence metrics and check for required keys
+            if (model_name not in self.results.confidence_metrics or
+                'max_probability' not in self.results.confidence_metrics[model_name]):
+                logger.warning(f"Missing 'max_probability' data for model {model_name}, skipping confidence plot.")
                 continue
 
+            metrics = self.results.confidence_metrics[model_name]
             for conf in metrics['max_probability']:
                 confidence_data.append({
                     'Model': model_name,
@@ -235,8 +239,6 @@ class CalibrationVisualizer(BaseVisualizer):
                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
                              alpha=ALPHA_ANNOTATION_BOX))
 
-        # Removed model mapping annotation
-
     def _plot_per_class_ece(self, ax) -> None:
         """Plot per-class Expected Calibration Error."""
         ece_data = []
@@ -279,22 +281,22 @@ class CalibrationVisualizer(BaseVisualizer):
 
     def _plot_uncertainty_landscape(self, ax) -> None:
         """Plot uncertainty landscape with density contours for each model."""
-        # Sort models for consistent ordering
-        model_order = self._sort_models_consistently(list(self.results.confidence_metrics.keys()))
+        # Iterate over models with calibration metrics as the source of truth
+        model_order = self._sort_models_consistently(list(self.results.calibration_metrics.keys()))
 
         # Track successful contour plots for legend
         successful_models = []
 
         # Plot contours for each model
         for model_name in model_order:
-            # UPDATED: Access metrics from confidence_metrics
-            metrics = self.results.confidence_metrics[model_name]
-
-            # Safety checks for required keys
-            if 'max_probability' not in metrics or 'entropy' not in metrics:
-                logger.warning(f"Missing confidence metrics keys for model {model_name}")
+            # access confidence metrics and required keys
+            if (model_name not in self.results.confidence_metrics or
+                'max_probability' not in self.results.confidence_metrics[model_name] or
+                'entropy' not in self.results.confidence_metrics[model_name]):
+                logger.warning(f"Missing confidence/entropy data for model {model_name}, skipping uncertainty plot.")
                 continue
 
+            metrics = self.results.confidence_metrics[model_name]
             confidence = metrics['max_probability']
             entropy = metrics['entropy']
             color = self._get_model_color(model_name)

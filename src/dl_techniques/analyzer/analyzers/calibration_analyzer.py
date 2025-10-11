@@ -135,11 +135,12 @@ class CalibrationAnalyzer(BaseAnalyzer):
 
         # Handle single-class case for margin and gini
         if probabilities.shape[1] > 1:
+            # Sort probabilities to find the top two for margin calculation
             sorted_probs = np.sort(probabilities, axis=1)
             margin = sorted_probs[:, -1] - sorted_probs[:, -2]
             gini = 1 - np.sum(sorted_probs**2, axis=1)
         else:
-            # Margin and Gini are not well-defined for single class
+            # Margin and Gini are not well-defined for a single class output
             margin = np.full(probabilities.shape[0], np.nan)
             gini = np.zeros(probabilities.shape[0])
 

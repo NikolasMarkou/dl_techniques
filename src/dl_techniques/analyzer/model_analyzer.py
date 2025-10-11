@@ -627,9 +627,6 @@ class ModelAnalyzer:
             Dictionary containing summary statistics organized by analysis type,
             including model performance, calibration metrics, confidence metrics,
             weight statistics, and training dynamics summaries.
-
-        Note:
-            Fixed to access entropy from confidence_metrics instead of calibration_metrics.
         """
         summary = {
             'n_models': len(self.models),
@@ -670,7 +667,7 @@ class ModelAnalyzer:
                 'brier_score': metrics.get('brier_score', DEFAULT_METRIC_VALUE),
             }
 
-        # Compile confidence summaries (fixed to use correct source)
+        # Compile confidence summaries
         for model_name, metrics in self.results.confidence_metrics.items():
             max_prob_values = metrics.get('max_probability', [DEFAULT_METRIC_VALUE])
             summary['confidence_summary'][model_name] = {
