@@ -145,15 +145,14 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         use_adaptive_softmax: Boolean, if True, uses AdaptiveTemperatureSoftmax
             instead of standard softmax for attention normalization.
             Defaults to False.
-        min_temp: Float, minimum temperature for AdaptiveTemperatureSoftmax.
-            Only used when use_adaptive_softmax=True. Defaults to 0.1.
-        max_temp: Float, maximum temperature for AdaptiveTemperatureSoftmax.
-            Only used when use_adaptive_softmax=True. Defaults to 1.0.
-        entropy_threshold: Float, entropy threshold for AdaptiveTemperatureSoftmax.
-            Only used when use_adaptive_softmax=True. Defaults to 0.5.
-        polynomial_coeffs: Optional list of coefficients for polynomial temperature
-            function in AdaptiveTemperatureSoftmax. Only used when
-            use_adaptive_softmax=True. Defaults to None.
+        adaptive_softmax_config: Optional dictionary of arguments for
+            AdaptiveTemperatureSoftmax. Used only when `use_adaptive_softmax=True`.
+            Defaults to None, which implies default values will be used.
+            Expected keys are:
+                - `min_temp` (float, default: 0.1): Minimum temperature.
+                - `max_temp` (float, default: 1.0): Maximum temperature.
+                - `entropy_threshold` (float, default: 0.5): Entropy threshold.
+                - `polynomial_coeffs` (list[float], optional): Polynomial coefficients.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Call arguments:
@@ -194,8 +193,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             dim=256,
             num_heads=8,
             use_adaptive_softmax=True,
-            min_temp=0.1,
-            max_temp=2.0
+            adaptive_softmax_config={"min_temp": 0.1, "max_temp": 2.0}
         )
         adaptive_output = adaptive_attn(text_queries, visual_features)
 
@@ -221,10 +219,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             use_adaptive_softmax: bool = False,
-            min_temp: float = 0.1,
-            max_temp: float = 1.0,
-            entropy_threshold: float = 0.5,
-            polynomial_coeffs: Optional[List[float]] = None,
+            adaptive_softmax_config: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -238,12 +233,6 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
-        if use_adaptive_softmax and min_temp <= 0:
-            raise ValueError(f"min_temp must be positive, got {min_temp}")
-        if use_adaptive_softmax and max_temp <= min_temp:
-            raise ValueError(f"max_temp ({max_temp}) must be greater than min_temp ({min_temp})")
-        if use_adaptive_softmax and not (0.0 <= entropy_threshold <= 1.0):
-            raise ValueError(f"entropy_threshold must be between 0 and 1, got {entropy_threshold}")
 
         # Store ALL configuration parameters
         self.dim = dim
@@ -256,13 +245,33 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-
-        # Adaptive temperature softmax parameters
         self.use_adaptive_softmax = use_adaptive_softmax
-        self.min_temp = min_temp
-        self.max_temp = max_temp
-        self.entropy_threshold = entropy_threshold
-        self.polynomial_coeffs = polynomial_coeffs
+        self.adaptive_softmax_config = adaptive_softmax_config
+
+        # Adaptive temperature softmax configuration and validation
+        if self.use_adaptive_softmax:
+            if self.adaptive_softmax_config is None:
+                self.adaptive_softmax_config = {}
+
+            # Extract parameters with defaults for validation
+            min_temp = self.adaptive_softmax_config.get("min_temp", 0.1)
+            max_temp = self.adaptive_softmax_config.get("max_temp", 1.0)
+            entropy_threshold = self.adaptive_softmax_config.get("entropy_threshold", 0.5)
+
+            # Store resolved defaults back into the config for serialization
+            self.adaptive_softmax_config["min_temp"] = min_temp
+            self.adaptive_softmax_config["max_temp"] = max_temp
+            self.adaptive_softmax_config["entropy_threshold"] = entropy_threshold
+
+            # Validate the parameters
+            if min_temp <= 0:
+                raise ValueError(f"min_temp must be positive, got {min_temp}")
+            if max_temp <= min_temp:
+                raise ValueError(f"max_temp ({max_temp}) must be greater than min_temp ({min_temp})")
+            if not (0.0 <= entropy_threshold <= 1.0):
+                raise ValueError(f"entropy_threshold must be between 0 and 1, got {entropy_threshold}")
+        else:
+            self.adaptive_softmax_config = None
 
         # Scale factor for attention scores
         self.scale = 1.0 / ops.sqrt(float(self.head_dim))
@@ -293,16 +302,9 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # CREATE adaptive temperature softmax layer if enabled
         if self.use_adaptive_softmax:
-            adaptive_kwargs = {}
-            if self.polynomial_coeffs is not None:
-                adaptive_kwargs["polynomial_coeffs"] = self.polynomial_coeffs
-
             self.adaptive_softmax = AdaptiveTemperatureSoftmax(
-                min_temp=self.min_temp,
-                max_temp=self.max_temp,
-                entropy_threshold=self.entropy_threshold,
                 name="adaptive_softmax",
-                **adaptive_kwargs
+                **self.adaptive_softmax_config
             )
         else:
             self.adaptive_softmax = None
@@ -320,9 +322,9 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # Robustly determine if input_shape is a list of shapes (cross-attention)
         # or a single shape (self-attention). This works across backends.
         is_list_of_shapes = (
-            isinstance(input_shape, (list, tuple))
-            and len(input_shape) > 0
-            and isinstance(input_shape[0], (list, tuple))
+            isinstance(input_shape, list) and
+            len(input_shape) > 0 and
+            not isinstance(input_shape[0], (int, type(None)))
         )
 
         if is_list_of_shapes:
@@ -335,7 +337,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # Validate input shapes
         if len(query_shape) != 3:
             raise ValueError(f"Query input must be 3D, got shape {query_shape}")
-        if query_shape[-1] != self.dim:
+        if query_shape[-1] is not None and query_shape[-1] != self.dim:
             raise ValueError(f"Query last dimension ({query_shape[-1]}) must match dim ({self.dim})")
 
         # Build projection layers explicitly for serialization
@@ -458,13 +460,14 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     def compute_output_shape(
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
-    ) -> Tuple[Optional[int], ...]:
+    ) -> Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
         """Compute output shape - returns query input shape."""
         is_list_of_shapes = (
-            isinstance(input_shape, (list, tuple))
-            and len(input_shape) > 0
-            and isinstance(input_shape[0], (list, tuple))
+            isinstance(input_shape, list) and
+            len(input_shape) > 0 and
+            not isinstance(input_shape[0], (int, type(None)))
         )
+
         if is_list_of_shapes:
             return input_shape[0]
         return input_shape
@@ -482,12 +485,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-            # Adaptive temperature softmax parameters
             "use_adaptive_softmax": self.use_adaptive_softmax,
-            "min_temp": self.min_temp,
-            "max_temp": self.max_temp,
-            "entropy_threshold": self.entropy_threshold,
-            "polynomial_coeffs": self.polynomial_coeffs,
+            "adaptive_softmax_config": self.adaptive_softmax_config,
         })
         return config
 
