@@ -49,65 +49,25 @@ Task-Specific Outputs
 3.  **Decoupled Heads:** Task-specific heads are separate and can be attached via
     the integration function `create_fftnet_with_head`.
 4.  **Simplified Interface:** Clean, composable design pattern for multi-task learning.
-
-This refactoring enables:
-- **Easy Multi-Tasking:** A single shared FFTNet encoder feeds multiple task heads.
-- **Clean Fine-Tuning:** Foundation weights can be frozen separately from task heads.
-- **Model Reusability:** Same pre-trained FFTNet for classification, detection, segmentation.
-
-Usage Examples:
---------------
-```python
-# 1. Create the foundational FFTNet model
-fftnet_encoder = FFTNet.from_variant("base", image_size=224, patch_size=16)
-
-# 2. Use as a feature extractor
-inputs = keras.random.normal((4, 224, 224, 3))
-outputs = fftnet_encoder(inputs)
-features = outputs['last_hidden_state']  # (4, 197, 768)
-cls_token = outputs['cls_token']          # (4, 768)
-
-# 3. Combine with a task head (see create_fftnet_with_head)
-from dl_techniques.vision.heads import create_vision_head, VisionTaskConfig
-
-task_config = VisionTaskConfig(
-    name="imagenet_classification",
-    task_type="image_classification",
-    num_classes=1000
-)
-classification_model = create_fftnet_with_head(
-    fftnet_variant="base",
-    task_config=task_config
-)
-```
 """
 
-import os
-
-os.environ["KERAS_BACKEND"] = "tensorflow"
-
 import keras
+import tensorflow as tf
 from keras import ops, layers, initializers
-from typing import Optional, Dict, Any, Tuple, Literal, Union
-import math
+from typing import Optional, Dict, Any, Tuple, Literal
 
-try:
-    import tensorflow as tf
+# ---------------------------------------------------------------------
+# Local Imports
+# ---------------------------------------------------------------------
 
-    _HAVE_TF = True
-except ImportError:
-    _HAVE_TF = False
-    raise ImportError("FFTNet requires TensorFlow backend for FFT operations.")
-
-# Import factories from dl_techniques
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D, PatchEmbedding1D
 
-
-# ==============================================================================
+# ---------------------------------------------------------------------
 # Core FFT Mixing Layer (As Described in Paper)
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FFTMixer(layers.Layer):
@@ -271,9 +231,9 @@ class FFTMixer(layers.Layer):
         return config
 
 
-# ==============================================================================
+# ---------------------------------------------------------------------
 # FFTNet Transformer Block
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FFTNetBlock(layers.Layer):
@@ -374,78 +334,9 @@ class FFTNetBlock(layers.Layer):
         return config
 
 
-# ==============================================================================
-# Patch Embedding for Vision Transformer
-# ==============================================================================
-
-@keras.saving.register_keras_serializable()
-class PatchEmbedding(layers.Layer):
-    """
-    Convert image into sequence of patch embeddings.
-
-    Splits an image into non-overlapping patches and projects them to
-    embedding dimension using a convolutional layer.
-
-    Args:
-        patch_size: Size of each square patch. Default: 16.
-        embed_dim: Embedding dimension. Default: 768.
-        **kwargs: Additional keyword arguments for the Layer base class.
-    """
-
-    def __init__(
-            self,
-            patch_size: int = 16,
-            embed_dim: int = 768,
-            **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        self.patch_size = patch_size
-        self.embed_dim = embed_dim
-
-        # Patch projection using convolution
-        self.projection = layers.Conv2D(
-            filters=embed_dim,
-            kernel_size=patch_size,
-            strides=patch_size,
-            padding='valid',
-            name='projection'
-        )
-
-    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Convert image to patch embeddings."""
-        x = self.projection(inputs)
-
-        # Reshape to sequence
-        batch_size = ops.shape(x)[0]
-        h, w = ops.shape(x)[1], ops.shape(x)[2]
-        num_patches = h * w
-
-        x = ops.reshape(x, (batch_size, num_patches, self.embed_dim))
-
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
-        batch_size, height, width, _ = input_shape
-        num_patches_h = height // self.patch_size if height else None
-        num_patches_w = width // self.patch_size if width else None
-        num_patches = num_patches_h * num_patches_w if (num_patches_h and num_patches_w) else None
-        return (batch_size, num_patches, self.embed_dim)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'patch_size': self.patch_size,
-            'embed_dim': self.embed_dim,
-        })
-        return config
-
-
-# ==============================================================================
+# ---------------------------------------------------------------------
 # FFTNet Foundation Model
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FFTNet(keras.Model):
@@ -630,7 +521,7 @@ class FFTNet(keras.Model):
     def _build_architecture(self) -> None:
         """Build all model components."""
         # Patch embedding
-        self.patch_embed = PatchEmbedding(
+        self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
             name='patch_embed'
@@ -795,9 +686,9 @@ class FFTNet(keras.Model):
         logger.info(f"  - Dropout: {self.dropout_p}")
 
 
-# ==============================================================================
+# ---------------------------------------------------------------------
 # Integration with Vision Task Heads
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 def create_fftnet_with_head(
         fftnet_variant: str,
@@ -916,9 +807,9 @@ def create_fftnet_with_head(
     return model
 
 
-# ==============================================================================
+# ---------------------------------------------------------------------
 # Convenience Functions for Backward Compatibility
-# ==============================================================================
+# ---------------------------------------------------------------------
 
 def create_fftnet(
         variant: Literal["base", "large", "huge", "small", "tiny"] = "base",
