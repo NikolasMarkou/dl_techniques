@@ -56,6 +56,8 @@ from typing import Optional, Tuple, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class FireModule(keras.layers.Layer):
     """
@@ -591,6 +593,7 @@ class SqueezeNetV1(keras.Model):
         )
         logger.info(f"  - Estimated parameter reduction: ~50x vs AlexNet")
 
+# ---------------------------------------------------------------------
 
 def create_squeezenet_v1(
         variant: str = "1.0",
@@ -635,3 +638,5 @@ def create_squeezenet_v1(
     )
 
     return model
+
+# ---------------------------------------------------------------------

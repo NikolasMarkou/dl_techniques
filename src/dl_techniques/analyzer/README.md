@@ -1,6 +1,6 @@
 # Model Analyzer: Complete Usage Guide
 
-A comprehensive, modular analysis toolkit for deep learning models built on Keras and TensorFlow. This module provides multi-dimensional model analysis including weight distributions, calibration metrics, information flow patterns, and training dynamics with publication-ready visualizations.
+A comprehensive, modular analysis toolkit for deep learning models built on Keras and TensorFlow. This module provides multi-dimensional model analysis including weight distributions, calibration metrics, information flow patterns, training dynamics, and advanced spectral analysis with publication-ready visualizations.
 
 ## 1. Overview
 
@@ -8,7 +8,8 @@ The Model Analyzer is designed to provide deep insights into your neural network
 
 ### Key Features
 
--   **Comprehensive Analysis**: Four specialized analysis modules covering weights, calibration, information flow, and training dynamics.
+-   **Comprehensive Analysis**: Five specialized analysis modules covering weights, calibration, information flow, training dynamics, and spectral properties.
+-   **Advanced Spectral Analysis (WeightWatcher)**: Assess training quality, complexity, and generalization potential using power-law and concentration analysis, often without needing test data.
 -   **Rich Visualizations**: Publication-ready plots and summary dashboards with consistent styling and color schemes.
 -   **Modular & Extensible**: Each analysis is independent. The architecture is designed for adding custom analyzers and visualizers.
 -   **Training & Hyperparameter Insights**: Deep analysis of training history, convergence patterns, and a powerful Pareto-front analysis for optimal model selection.
@@ -23,21 +24,25 @@ The toolkit is organized into distinct components for analysis, visualization, a
 analyzer/
 ├── analyzers/                          # Core analysis logic components
 │   ├── base.py                         # Abstract base analyzer interface
-│   ├── weight_analyzer.py              # Weight distribution and health analysis
+│   ├── weight_analyzer.py              # Weight distribution and basic health analysis
 │   ├── calibration_analyzer.py         # Model confidence and calibration metrics
 │   ├── information_flow_analyzer.py    # Activation patterns and information flow
-│   └── training_dynamics_analyzer.py   # Training history and convergence analysis
+│   ├── training_dynamics_analyzer.py   # Training history and convergence analysis
+│   └── spectral_analyzer.py            # Spectral analysis of weights (WeightWatcher)
 ├── visualizers/                        # Visualization generation components
 │   ├── base.py                         # Abstract base visualizer interface
 │   ├── weight_visualizer.py            # Weight analysis visualizations
 │   ├── calibration_visualizer.py       # Calibration and confidence plots
 │   ├── information_flow_visualizer.py  # Information flow visualizations
 │   ├── training_dynamics_visualizer.py # Training dynamics plots
+│   ├── spectral_visualizer.py          # Spectral analysis visualizations
 │   └── summary_visualizer.py           # Unified summary dashboard
 ├── config.py                           # Configuration classes and plotting setup
 ├── data_types.py                       # Structured data types (DataInput, AnalysisResults)
 ├── constants.py                        # Analysis constants and thresholds
-├── utils.py                            # Utility functions and helpers
+├── spectral_metrics.py                 # Core spectral metric calculations
+├── spectral_utils.py                   # Utilities for spectral analysis
+├── utils.py                            # General utility functions and helpers
 ├── model_analyzer.py                   # Main coordinator class
 └── README.md                           # This file
 ```
@@ -73,7 +78,10 @@ test_data = DataInput(x_data=x_test, y_data=y_test)
 # training_histories = {'ResNet_v1': history1, 'ConvNext_v2': history2} # Optional
 
 # 3. Configure and run the analysis
-config = AnalysisConfig(analyze_training_dynamics=True) # Enable training analysis
+config = AnalysisConfig(
+    analyze_training_dynamics=True, # Enable training analysis
+    analyze_spectral=True           # Enable spectral analysis
+)
 analyzer = ModelAnalyzer(
     models=models,
     # training_history=training_histories, # Uncomment if you have histories
@@ -87,7 +95,7 @@ print("Analysis complete! Check the 'analysis_results' folder for plots and data
 
 ## 3. Analysis Capabilities
 
-The analyzer computes a wide range of metrics across four key areas of model behavior.
+The analyzer computes a wide range of metrics across five key areas of model behavior.
 
 ### Weight Analysis Metrics
 
@@ -96,9 +104,20 @@ This analysis inspects the internal parameters of the model to diagnose its stru
 | Metric                | Description                                                                                             | Interpretation                                                                                                                              |
 | --------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | **L1/L2/Spectral Norms** | Mathematical norms that measure the aggregate magnitude of weights in a layer.                          | Higher values indicate larger, more complex weights which can lead to instability or overfitting. Consistently low norms might suggest underfitting. |
-| **Weight Distribution** | Statistical properties like mean, standard deviation, skewness, and kurtosis of the weight values.    | A distribution centered near zero with moderate variance is often ideal. High skew or kurtosis can signal issues like dying ReLUs or unstable gradients. |
+| **Weight Distribution** | Statistical properties like mean, standard deviation, skewness, and kurtosis of the weight values.    | A distribution centered near zero with moderate variance is often ideal. High skew or kurtosis can signal issues like dying ReLUS or unstable gradients. |
 | **Sparsity**          | The fraction of weights in a layer that are very close to zero.                                         | High sparsity can indicate that many neurons are not contributing to the model's predictions (i.e., they are "dead" or under-utilized).            |
 | **Health Score**      | A composite score (0-1) derived from norm, sparsity, and distribution health.                           | A single-glance metric for layer health. Higher scores (closer to 1) indicate a healthier, more balanced weight distribution.                 |
+
+### Spectral Analysis Metrics (WeightWatcher)
+
+This analysis examines the eigenvalue spectrum of weight matrices to assess training quality and complexity without requiring test data.
+
+| Metric                     | Description                                                                                                       | Interpretation                                                                                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Power-Law Exponent (α)** | The exponent of the power-law fit to the eigenvalue distribution of weight matrices.                              | `α < 2.0` may indicate over-training or memorization. `2.0 < α < 6.0` suggests a well-trained model. `α > 6.0` may indicate under-training.             |
+| **Concentration Score**    | A composite metric (Gini, dominance ratio) measuring the inequality of the eigenvalue distribution.               | High values suggest information is concentrated in a few dominant patterns, which can indicate model brittleness or highlight critical layers.         |
+| **Matrix Entropy**         | A measure of the information distribution across eigenvalues, normalized by the effective rank of the matrix.     | Higher entropy indicates a more uniform distribution of information across weight components, which is often a sign of better generalization.        |
+| **Stable Rank**            | The effective rank of a weight matrix, indicating the dimensionality of the space spanned by its singular vectors. | A higher stable rank suggests the layer is utilizing its full capacity. A low stable rank can indicate over-parameterization or redundant features. |
 
 ### Calibration & Confidence Metrics
 
@@ -183,7 +202,7 @@ results = analyzer.analyze(test_data)
 # Next steps:
 # 1. Start with `summary_dashboard.png`. The performance table gives a quick overview.
 # 2. Check the "Calibration Landscape" plot. Models in the bottom-left (low ECE, low Brier) are best.
-# 3. Use the "Model Similarity" plot to see which models learned similar representations.
+# 3. Check `spectral_summary.png` to compare training quality (alpha values) and complexity.
 ```
 
 ### Pattern 3: Hyperparameter Sweep Analysis
@@ -212,8 +231,43 @@ results = analyzer.analyze(validation_data)
 pareto_fig = analyzer.create_pareto_analysis()
 
 # Next steps:
-# 1. Open `pareto_analysis.png`. The scatter plot shows models on the Pareto front (optimal trade-offs between accuracy and overfitting).
+# 1. Open `pareto_analysis.png`. Models on the Pareto front offer optimal trade-offs.
 # 2. Use the heatmap to compare normalized performance across all models and metrics.
+```
+
+### Pattern 4: Data-Free Training Quality Check
+
+Use spectral analysis to quickly assess if a model is over-trained or under-trained without a test set.
+
+```python
+# Scenario: Quickly validate a newly trained model's quality.
+model = keras.models.load_model('path/to/new_model.keras')
+
+config = AnalysisConfig(analyze_spectral=True) # Only run spectral analysis
+analyzer = ModelAnalyzer(models={'NewModel': model}, config=config)
+results = analyzer.analyze() # No data needed for this analysis
+
+# Next steps:
+# 1. Open `spectral_summary.png`. Check if the Mean Alpha (α) is in the 2.0-6.0 range.
+# 2. Read the recommendations in `analysis_results.json` under `spectral_recommendations`.
+```
+
+### Pattern 5: Improving Generalization with SVD Smoothing
+
+Create a smoothed version of a model to potentially improve its generalization performance.
+
+```python
+# Scenario: A model shows signs of being slightly over-trained.
+analyzer = ModelAnalyzer(models={'OverTrainedModel': model})
+analyzer.analyze() # Run analysis to get spectral data
+
+# Create a smoothed version of the model
+smoothed_model = analyzer.create_smoothed_model(
+    model_name='OverTrainedModel',
+    method='detX' # 'svd', 'detX', or 'lambda_min'
+)
+
+# You can now save and evaluate the smoothed_model
 ```
 
 ## 5. Advanced Configuration
@@ -227,32 +281,38 @@ config = AnalysisConfig(
     analyze_calibration=True,
     analyze_information_flow=True,
     analyze_training_dynamics=True,
+    analyze_spectral=True,
 
     # === Data Sampling ===
-    n_samples=1000,  # Max samples to use for data-dependent analyses (e.g., calibration)
+    n_samples=1000,  # Max samples for data-dependent analyses
 
     # === Weight Analysis ===
-    weight_layer_types=['Dense', 'Conv2D'],  # Only analyze weights from these layer types
-    analyze_biases=False,                  # Exclude bias vectors from analysis
-    compute_weight_pca=True,               # Enable model similarity analysis
+    weight_layer_types=['Dense', 'Conv2D'],
+    analyze_biases=False,
+    compute_weight_pca=True,
+
+    # === Spectral Analysis (WeightWatcher) ===
+    spectral_min_evals=10,                # Min eigenvalues for a layer to be analyzed
+    spectral_concentration_analysis=True, # Enable concentration metrics
+    spectral_randomize=False,             # Compare with randomized weights
 
     # === Calibration Analysis ===
-    calibration_bins=15,                   # Number of bins for ECE calculation
+    calibration_bins=15,
 
     # === Training Dynamics ===
-    smooth_training_curves=True,           # Apply a moving average filter to training curves
-    smoothing_window=5,                    # The window size for the smoothing filter
+    smooth_training_curves=True,
+    smoothing_window=5,
 
     # === Visualization & Output ===
-    plot_style='publication',              # 'publication', 'presentation', or 'draft'
+    plot_style='publication',
     save_plots=True,
-    save_format='png',                     # 'png', 'pdf', 'svg'
+    save_format='png',
     dpi=300,
 
     # === Performance & Limits ===
-    max_layers_heatmap=12,                 # Max layers in the weight health heatmap
-    max_layers_info_flow=8,                # Max layers in information flow plots
-    verbose=True,                          # Enable detailed logging
+    max_layers_heatmap=12,
+    max_layers_info_flow=8,
+    verbose=True,
 )
 ```
 
@@ -263,11 +323,14 @@ After running, the analyzer saves plots and a JSON data file to the output direc
 ```
 analysis_results/
 ├── summary_dashboard.png              # START HERE: High-level overview of all models.
+├── spectral_summary.png               # Compares models on spectral metrics (training quality).
 ├── training_dynamics.png              # Training curves, overfitting, and convergence analysis.
 ├── weight_learning_journey.png        # Weight magnitude evolution and health heatmap.
 ├── confidence_calibration_analysis.png  # Deep dive into model confidence and calibration.
 ├── information_flow_analysis.png      # Layer-wise analysis of activations and information.
 ├── pareto_analysis.png               # (Optional) Hyperparameter optimization insights.
+├── spectral_plots/                   # Directory with detailed per-layer power-law plots.
+│   └── ModelA_layer_5_dense_powerlaw.png
 └── analysis_results.json             # Raw data for all computed metrics.
 ```
 
@@ -277,51 +340,59 @@ analysis_results/
 
 A 2x2 grid providing a holistic view of all models.
 
--   **Performance Table**: A comprehensive summary of key performance indicators. If training history is provided, it includes metrics like "Best Accuracy," "Convergence Speed," and "Overfitting Index," offering a deeper look into training efficiency. Without it, the table focuses on final evaluation metrics.
--   **Model Similarity**: A 2D PCA plot of weight statistics. Models that are close together have learned similar weight distributions, suggesting architectural or training similarities. Models far from the origin may be outliers.
--   **Confidence Profiles**: Violin plots showing the distribution of prediction confidence (max probability) for each model. This reveals if a model is generally overconfident, underconfident, or well-balanced.
--   **Calibration Landscape**: A scatter plot of ECE vs. Brier Score. The goal is to be in the bottom-left quadrant, which represents models that are both well-calibrated (low ECE) and produce accurate probabilities (low Brier Score).
+-   **Performance Table**: A comprehensive summary of key performance indicators, including training efficiency metrics if history is provided.
+-   **Model Similarity**: A 2D PCA plot of weight statistics. Models that are close together have learned similar weight distributions.
+-   **Confidence Profiles**: Violin plots showing the distribution of prediction confidence for each model.
+-   **Calibration Landscape**: A scatter plot of ECE vs. Brier Score. The goal is to be in the bottom-left quadrant (low error, good calibration).
 
-#### 2. Training Dynamics (`training_dynamics.png`)
+#### 2. Spectral Analysis Summary (`spectral_summary.png`)
+
+A dashboard for comparing models based on their weight matrix spectral properties.
+
+-   **Mean Power-Law Exponent (α)**: A bar chart comparing the average α value for each model. Green indicates the ideal range (2.0-6.0), while red indicates potential over- or under-training. This is a key indicator of training quality.
+-   **Mean Concentration Score**: A bar chart comparing the average information concentration. Higher scores suggest some layers are more "brittle" or specialized.
+-   **Recommendations**: The `analysis_results.json` file contains specific recommendations based on the spectral analysis for each model.
+
+#### 3. Training Dynamics (`training_dynamics.png`)
 
 A deep dive into the learning process.
 
--   **Loss/Accuracy Curves**: Smoothed training and validation curves for loss and accuracy, providing a clear view of the learning trajectory and generalization performance over time.
--   **Overfitting Analysis**: Plots the gap (validation loss - training loss) over epochs. A positive and growing gap is a clear sign of overfitting, while a negative gap indicates underfitting.
--   **Best Epoch Performance**: A scatter plot showing each model's peak validation accuracy versus the epoch it was achieved. This helps identify models that learn faster and more effectively, distinguishing high performance from quick convergence.
--   **Summary Table**: A detailed table of quantitative training metrics like convergence speed, stability score, and final overfitting gap, allowing for precise, data-driven comparisons of training efficiency.
+-   **Loss/Accuracy Curves**: Smoothed training and validation curves for a clear view of the learning trajectory.
+-   **Overfitting Analysis**: Plots the gap (validation loss - training loss) over epochs to diagnose overfitting.
+-   **Best Epoch Performance**: A scatter plot showing each model's peak validation accuracy versus the epoch it was achieved.
+-   **Summary Table**: A detailed table of quantitative training metrics like convergence speed and stability.
 
-#### 3. Weight Learning Journey (`weight_learning_journey.png`)
+#### 4. Weight Learning Journey (`weight_learning_journey.png`)
 
 Assesses the health and evolution of model weights.
 
--   **Weight Evolution**: Shows how the L2 norm of weights changes across the layers of the network. This visualization helps detect exploding gradients (sharp upward spikes) or vanishing gradients (weights collapsing to zero). A healthy model often shows a smooth progression.
--   **Health Heatmap**: A layer-by-layer health score for each model, where green indicates healthy weights and red indicates potential issues like high sparsity or unstable distributions. This allows for quick identification of problematic layers within a specific model.
+-   **Weight Evolution**: Shows how the L2 norm of weights changes across layers, helping detect exploding or vanishing gradients.
+-   **Health Heatmap**: A layer-by-layer health score for each model, allowing quick identification of problematic layers.
 
-#### 4. Confidence & Calibration Analysis (`confidence_calibration_analysis.png`)
+#### 5. Confidence & Calibration Analysis (`confidence_calibration_analysis.png`)
 
 Evaluates the reliability of model predictions.
 
--   **Reliability Diagram**: Compares the model's predicted probability (confidence) to the actual observed frequency of correct predictions. A perfectly calibrated model's line will be on the y=x diagonal.
--   **Confidence Distributions**: Violin plots showing the shape of each model's confidence distribution. This helps to visualize if a model is timid (concentrated low confidence) or bold (concentrated high confidence).
--   **Per-Class ECE**: A bar chart showing the calibration error for each individual class. This is crucial for identifying classes where the model's confidence is particularly unreliable.
--   **Uncertainty Landscape**: A 2D density plot of prediction confidence vs. entropy. This shows the model's uncertainty profile and reveals how confidence and uncertainty are related in its predictions.
+-   **Reliability Diagram**: Compares predicted probability to actual accuracy. A perfect model lies on the y=x diagonal.
+-   **Confidence Distributions**: Violin plots showing the shape of each model's confidence distribution.
+-   **Per-Class ECE**: A bar chart showing calibration error for each class, identifying unreliable classes.
+-   **Uncertainty Landscape**: A 2D density plot of confidence vs. entropy, showing the model's uncertainty profile.
 
-#### 5. Information Flow Analysis (`information_flow_analysis.png`)
+#### 6. Information Flow Analysis (`information_flow_analysis.png`)
 
 Diagnoses how information propagates through the network.
 
--   **Activation Flow Overview**: Tracks the mean and standard deviation of activations through the layers. This is a primary tool for spotting vanishing or exploding activation signals during forward propagation.
--   **Effective Rank Evolution**: Plots the dimensionality of the information being processed at each layer. A healthy network should maintain or transform this dimensionality effectively; a sudden collapse may indicate an information bottleneck.
--   **Activation Health Dashboard**: A heatmap showing potential issues like dead neurons (high sparsity) or saturated activations (where neurons stop learning). It provides an actionable diagnostic for layer-specific problems.
--   **Layer Specialization Analysis**: Plots a "specialization score" for each layer, which measures how well it's learning diverse and useful features. This can help identify layers that are underperforming or redundant.
+-   **Activation Flow Overview**: Tracks activation mean and standard deviation to spot vanishing/exploding signals.
+-   **Effective Rank Evolution**: Plots the dimensionality of information at each layer to find bottlenecks.
+-   **Activation Health Dashboard**: A heatmap showing issues like dead or saturated neurons.
+-   **Layer Specialization Analysis**: Plots a score measuring how well each layer learns diverse features.
 
-#### 6. Pareto Analysis (`pareto_analysis.png`)
+#### 7. Pareto Analysis (`pareto_analysis.png`)
 
 (Generated with `create_pareto_analysis()`) A powerful tool for hyperparameter tuning.
 
--   **Pareto Front Plot**: A scatter plot of Peak Accuracy vs. Overfitting Index. Models on the red-dashed "Pareto Front" represent the best possible trade-offs; any model not on the front is suboptimal because another model is better on at least one metric without being worse on the other.
--   **Normalized Performance Heatmap**: A heatmap that normalizes and compares all models across key metrics (accuracy, low overfitting, fast convergence). This makes it easy to see which configuration excels in which area and to make a balanced decision based on priorities.
+-   **Pareto Front Plot**: A scatter plot of Peak Accuracy vs. Overfitting Index. Models on the "Pareto Front" represent the best possible trade-offs.
+-   **Normalized Performance Heatmap**: Compares all models across key metrics, making it easy to identify the best configuration based on priorities.
 
 ## 7. Troubleshooting
 
@@ -336,6 +407,7 @@ Diagnoses how information propagates through the network.
     )
     ```
 -   **Plots look wrong/empty**: Enable verbose logging (`config = AnalysisConfig(verbose=True)`) and check the console output. You can also inspect the `analysis_results.json` file to see what data was successfully computed.
+-   **Spectral Analysis Fails**: Spectral analysis requires layers to have a minimum number of weights (e.g., a 10x10 matrix). Very small layers will be skipped automatically. Check the console log for warnings about skipped layers.
 
 ## 8. Extensions
 

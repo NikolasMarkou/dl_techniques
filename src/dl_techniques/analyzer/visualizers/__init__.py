@@ -8,6 +8,7 @@ from .calibration_visualizer import CalibrationVisualizer
 from .information_flow_visualizer import InformationFlowVisualizer
 from .training_dynamics_visualizer import TrainingDynamicsVisualizer
 from .summary_visualizer import SummaryVisualizer
+from .spectral_visualizer import SpectralVisualizer
 
 __all__ = [
     'BaseVisualizer',
@@ -15,5 +16,6 @@ __all__ = [
     'CalibrationVisualizer',
     'InformationFlowVisualizer',
     'TrainingDynamicsVisualizer',
-    'SummaryVisualizer'
+    'SummaryVisualizer',
+    'SpectralVisualizer'
 ]

@@ -20,6 +20,7 @@ class AnalysisConfig:
     analyze_calibration: bool = True
     analyze_information_flow: bool = True
     analyze_training_dynamics: bool = True
+    analyze_spectral: bool = True
 
     # Sampling parameters
     n_samples: int = 1000
@@ -41,6 +42,13 @@ class AnalysisConfig:
     # Training analysis options
     smooth_training_curves: bool = True
     smoothing_window: int = 5
+
+    # Spectral Analysis (WeightWatcher) options
+    spectral_min_evals: int = 10
+    spectral_max_evals: int = 15000
+    spectral_glorot_fix: bool = False
+    spectral_randomize: bool = False
+    spectral_concentration_analysis: bool = True
 
     # Visualization settings
     plot_style: str = 'publication'

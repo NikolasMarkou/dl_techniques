@@ -3,6 +3,7 @@ Data Type Definitions for Model Analyzer
 """
 
 import numpy as np
+import pandas as pd
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple, NamedTuple, Set
@@ -63,17 +64,12 @@ class AnalysisResults:
     # Weight analysis
     weight_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     weight_pca: Optional[Dict[str, Any]] = None
-    weight_stats_layer_order: Dict[str, List[str]] = field(default_factory=dict)  # FIXED: Properly declared
+    weight_stats_layer_order: Dict[str, List[str]] = field(default_factory=dict)
 
     # Calibration analysis
     calibration_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    """Metrics related to the model's calibration (e.g., ECE, Brier Score)."""
-
     reliability_data: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
-    """Data for plotting reliability diagrams (bin accuracies, confidences, etc.)."""
-
     confidence_metrics: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
-    """Metrics related to the distribution of prediction confidences (e.g., entropy, max probability)."""
 
     # Information flow
     information_flow: Dict[str, Any] = field(default_factory=dict)
@@ -82,11 +78,16 @@ class AnalysisResults:
     training_history: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
     training_metrics: Optional[TrainingMetrics] = None
 
+    # Spectral analysis (WeightWatcher)
+    spectral_analysis: Optional[pd.DataFrame] = None
+    spectral_summary: Dict[str, Any] = field(default_factory=dict)
+    spectral_recommendations: Dict[str, List[str]] = field(default_factory=dict)
+    spectral_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
+
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional['AnalysisConfig'] = None  # Forward reference
 
-    # FIXED: Explicitly declare fields for serialization control
     _non_serializable_fields: Set[str] = field(
         default_factory=lambda: {'_non_serializable_fields'},
         init=False,
@@ -95,7 +96,6 @@ class AnalysisResults:
 
     def __post_init__(self):
         """Post-initialization to set up any derived fields."""
-        # Ensure all dict fields are properly initialized
         if not isinstance(self.weight_stats_layer_order, dict):
             self.weight_stats_layer_order = {}
         if not isinstance(self.activation_stats, dict):

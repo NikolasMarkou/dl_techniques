@@ -1,10 +1,11 @@
 """
-CIFAR-10 Loss Function Comparison: Evaluating Goodhart-Aware Training
-=====================================================================
+CIFAR-10 Loss Function Comparison: Evaluating Goodhart-Aware Training with Calibration Losses
+================================================================================================
 
 This experiment conducts a comprehensive comparison of different loss functions
 for image classification on CIFAR-10, with particular emphasis on evaluating
-the effectiveness of the GoodhartAwareLoss against traditional approaches.
+the effectiveness of the GoodhartAwareLoss and calibration-focused losses
+(Brier Score and combined approaches) against traditional approaches.
 
 The study addresses a fundamental question in deep learning: how do different
 loss formulations affect model robustness, calibration, and generalization?
@@ -35,10 +36,18 @@ Experimental Design
 1. **Standard Cross-Entropy**: The baseline approach for multi-class classification
 2. **Label Smoothing**: Cross-entropy with soft targets (α=0.1) to reduce overconfidence
 3. **Focal Loss**: Addresses class imbalance by down-weighting easy examples (γ=2.0)
-4. **Goodhart-Aware Loss**: Information-theoretic approach combining:
+4. **Brier Score Loss**: Direct optimization of calibration via mean squared error
+   between predicted probabilities and one-hot labels
+5. **Combined Calibration Loss**: Weighted combination of Cross-Entropy and Brier Score
+   for joint accuracy and calibration optimization
+6. **Goodhart-Aware Loss**: Information-theoretic approach combining:
    - Cross-entropy for task accuracy
    - Entropy regularization to maintain prediction uncertainty
    - Mutual information regularization to compress irrelevant features
+
+Note: SpiegelhalterZLoss is designed for binary classification and is not included
+in this multi-class experiment. For multi-class calibration, Brier Score provides
+a natural and effective alternative.
 
 Comprehensive Analysis Pipeline
 ------------------------------
@@ -119,7 +128,10 @@ This experiment is designed to reveal:
 3. **Information-Theoretic Benefits**: Whether the Goodhart-Aware Loss's
    information bottleneck principle provides measurable advantages
 
-4. **Training Dynamics**: How different loss formulations affect convergence
+4. **Calibration Effectiveness**: How direct calibration optimization (Brier Score)
+   compares with indirect approaches (label smoothing, entropy regularization)
+
+5. **Training Dynamics**: How different loss formulations affect convergence
    speed, stability, and final performance
 
 Theoretical Foundation
@@ -139,7 +151,8 @@ generalization bounds.
 
 **Calibration Theory**: The analysis framework evaluates how well predicted
 probabilities reflect true confidence, crucial for reliable decision-making
-in real-world applications.
+in real-world applications. The Brier Score provides a proper scoring rule
+for probabilistic predictions.
 """
 
 # ==============================================================================
@@ -156,13 +169,18 @@ from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.goodhart_loss import GoodhartAwareLoss
+from dl_techniques.losses.brier_spiegelhalters_ztest_loss import (
+    BrierScoreLoss,
+    CombinedCalibrationLoss,
+    BrierScoreMetric
+)
 from dl_techniques.utils.train import TrainingConfig, train_model
 
-# Visualization imports (new framework)
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
     ClassificationResults,
+    MultiModelClassification,
     TrainingCurvesVisualization,
     ConfusionMatrixVisualization
 )
@@ -241,6 +259,105 @@ def load_and_preprocess_cifar10() -> CIFAR10Data:
 
 
 # ==============================================================================
+# CUSTOM COMBINED LOSS FOR MULTI-CLASS
+# ==============================================================================
+
+@keras.saving.register_keras_serializable()
+class CombinedCrossEntropyBrierLoss(keras.losses.Loss):
+    """
+    Combined loss using Cross-Entropy and Brier Score for multi-class classification.
+
+    This loss function combines standard categorical cross-entropy (for optimizing
+    classification accuracy) with the Brier Score (for optimizing calibration).
+    The combination provides a balance between discriminative power and
+    probabilistic calibration.
+
+    Loss = α * CrossEntropy + (1-α) * BrierScore
+
+    Args:
+        alpha: Weight for the cross-entropy component. The Brier Score component
+            has a weight of (1-alpha). Default is 0.5.
+        from_logits: Whether the predictions are logits (not passed through
+            softmax). Default is False.
+        reduction: Type of reduction to apply to the loss.
+        name: Optional name for the loss function.
+        **kwargs: Additional keyword arguments passed to the parent class.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.5,
+        from_logits: bool = False,
+        reduction: str = 'sum_over_batch_size',
+        name: str = None,
+        **kwargs: Any
+    ) -> None:
+        """
+        Initialize the CombinedCrossEntropyBrierLoss.
+
+        Args:
+            alpha: Weight for the cross-entropy component (0 to 1).
+            from_logits: Whether model outputs raw logits without softmax.
+            reduction: Type of reduction to apply to the loss.
+            name: Optional name for the loss.
+            **kwargs: Additional keyword arguments passed to the parent class.
+
+        Raises:
+            ValueError: If alpha is not in the range [0, 1].
+        """
+        if alpha < 0 or alpha > 1:
+            raise ValueError(f"alpha must be in the range [0, 1], got {alpha}")
+
+        super().__init__(
+            reduction=reduction,
+            name=name or "combined_ce_brier_loss",
+            **kwargs
+        )
+        self.alpha = alpha
+        self.from_logits = from_logits
+
+        # Initialize component losses
+        self.ce_loss = keras.losses.CategoricalCrossentropy(
+            from_logits=from_logits,
+            reduction='none'
+        )
+        self.brier_loss = BrierScoreLoss(
+            from_logits=from_logits,
+            reduction='none'
+        )
+
+    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Compute the combined calibration loss.
+
+        Args:
+            y_true: Ground truth labels (one-hot encoded for multi-class).
+            y_pred: Predicted probabilities or logits.
+
+        Returns:
+            Combined loss value.
+        """
+        ce_component = self.ce_loss(y_true, y_pred)
+        brier_component = self.brier_loss(y_true, y_pred)
+
+        return self.alpha * ce_component + (1 - self.alpha) * brier_component
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get loss configuration for serialization.
+
+        Returns:
+            Dictionary containing the loss configuration.
+        """
+        config = super().get_config()
+        config.update({
+            "alpha": self.alpha,
+            "from_logits": self.from_logits
+        })
+        return config
+
+
+# ==============================================================================
 # EXPERIMENT CONFIGURATION
 # ==============================================================================
 
@@ -271,7 +388,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 2
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -286,6 +403,18 @@ class ExperimentConfig:
         ),
         'FocalLoss': lambda: keras.losses.CategoricalFocalCrossentropy(
             gamma=2.0, from_logits=False
+        ),
+        'BrierScore': lambda: BrierScoreLoss(
+            from_logits=False
+        ),
+        'Combined_CE_Brier_05': lambda: CombinedCrossEntropyBrierLoss(
+            alpha=0.5, from_logits=False
+        ),
+        'Combined_CE_Brier_07': lambda: CombinedCrossEntropyBrierLoss(
+            alpha=0.7, from_logits=False
+        ),
+        'Combined_CE_Brier_03': lambda: CombinedCrossEntropyBrierLoss(
+            alpha=0.3, from_logits=False
         ),
         'GAL_0': lambda: GoodhartAwareLoss(
             entropy_weight=0.0, mi_weight=0.01, from_logits=False
@@ -303,7 +432,7 @@ class ExperimentConfig:
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")
-    experiment_name: str = "cifar10_loss_comparison_softmax"
+    experiment_name: str = "cifar10_loss_comparison_with_calibration"
     random_seed: int = 42
 
     # --- Analysis Configuration ---
@@ -519,14 +648,15 @@ def build_model(config: ExperimentConfig, loss_fn: Callable, name: str) -> keras
     # Create and compile the model
     model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
 
-    # Compile with comprehensive metrics
+    # Compile with comprehensive metrics including Brier Score
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
     model.compile(
         optimizer=optimizer,
         loss=loss_fn,
         metrics=[
             keras.metrics.CategoricalAccuracy(name='accuracy'),
-            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
+            keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy'),
+            BrierScoreMetric(from_logits=False, name='brier_score')
         ]
     )
 
@@ -573,7 +703,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     vis_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
 
     # Log experiment start
-    logger.info("Starting CIFAR-10 Loss Comparison Experiment (Softmax Output)")
+    logger.info("Starting CIFAR-10 Loss Comparison Experiment with Calibration Losses")
     logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
@@ -653,10 +783,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 train_loss=hist_dict['loss'],
                 val_loss=hist_dict.get('val_loss', []),
                 train_metrics={
-                    'accuracy': hist_dict.get('accuracy', [])
+                    'accuracy': hist_dict.get('accuracy', []),
+                    'brier_score': hist_dict.get('brier_score', [])
                 },
                 val_metrics={
-                    'accuracy': hist_dict.get('val_accuracy', [])
+                    'accuracy': hist_dict.get('val_accuracy', []),
+                    'brier_score': hist_dict.get('val_brier_score', [])
                 }
             )
 
@@ -666,7 +798,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             vis_manager.visualize(
                 data=training_histories,
                 plugin_name="training_curves",
-                metrics_to_plot=['accuracy', 'loss'],
+                metrics_to_plot=['accuracy', 'loss', 'brier_score'],
                 show=False
             )
             logger.info("Training history visualization created")
@@ -686,9 +818,13 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     # Convert y_test to class indices for confusion matrix
     y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
 
-    # Create classification results for each model
+    # 1. Create a dictionary to hold the results for all models
+    all_classification_results = {}
+
+    # 2. Loop to populate the dictionary
     for model_name, y_pred in class_predictions.items():
         try:
+            # Create the data container for each model
             classification_data = ClassificationResults(
                 y_true=y_true_indices,
                 y_pred=y_pred,
@@ -696,20 +832,33 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 class_names=cifar10_data.class_names,
                 model_name=model_name
             )
+            # Add it to our dictionary
+            all_classification_results[model_name] = classification_data
+        except Exception as e:
+            logger.error(f"Failed to prepare classification results for {model_name}: {e}")
 
+    # 3. Create the multi-model data container
+    if all_classification_results:
+        try:
+            multi_model_data = MultiModelClassification(
+                results=all_classification_results,
+                dataset_name="CIFAR-10"
+            )
+
+            # 4. Make a SINGLE call to the visualizer with the aggregated data
             vis_manager.visualize(
-                data=classification_data,
+                data=multi_model_data,
                 plugin_name="confusion_matrix",
                 normalize='true',
                 show=False
             )
+            logger.info("Multi-model confusion matrix visualization created.")
         except Exception as e:
-            logger.error(f"Failed to create confusion matrix for {model_name}: {e}")
+            logger.error(f"Failed to create multi-model confusion matrix: {e}")
 
     # ===== FINAL PERFORMANCE EVALUATION =====
     logger.info("Evaluating final model performance on test set...")
     logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
-    logger.info(f"Test labels sample: {cifar10_data.y_test[:5]}")
 
     performance_results = {}
 
@@ -744,7 +893,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         performance_results[name] = {
             'accuracy': metrics_dict.get('accuracy', manual_top1_acc),
             'top_5_accuracy': metrics_dict.get('top_5_accuracy', manual_top5_acc),
-            'loss': metrics_dict.get('loss', 0.0)
+            'loss': metrics_dict.get('loss', 0.0),
+            'brier_score': metrics_dict.get('brier_score', 0.0)
         }
 
         # Warn about potentially problematic accuracy values
@@ -792,28 +942,32 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
         logger.info("PERFORMANCE METRICS (on Full Test Set):")
-        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
-        logger.info("-" * 60)
+        logger.info(f"{'Model':<30} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12} {'Brier':<12}")
+        logger.info("-" * 80)
 
         for model_name, metrics in results['performance_analysis'].items():
             accuracy = metrics.get('accuracy', 0.0)
             top5_acc = metrics.get('top_5_accuracy', 0.0)
             loss = metrics.get('loss', 0.0)
-            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
+            brier = metrics.get('brier_score', 0.0)
+            logger.info(
+                f"{model_name:<30} {accuracy:<12.4f} {top5_acc:<12.4f} "
+                f"{loss:<12.4f} {brier:<12.4f}"
+            )
 
     # ===== CALIBRATION METRICS SECTION =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("CALIBRATION METRICS (from Model Analyzer):")
-        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
-        logger.info("-" * 65)
+        logger.info("\nCALIBRATION METRICS (from Model Analyzer):")
+        logger.info(f"{'Model':<30} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
+        logger.info("-" * 75)
 
         for model_name, cal_metrics in model_analysis.calibration_metrics.items():
             # Get the corresponding confidence metrics for the same model
             conf_metrics = model_analysis.confidence_metrics.get(model_name, {})
 
             logger.info(
-                f"{model_name:<20} {cal_metrics.get('ece', 0.0):<12.4f} "
+                f"{model_name:<30} {cal_metrics.get('ece', 0.0):<12.4f} "
                 f"{cal_metrics.get('brier_score', 0.0):<15.4f} "
                 f"{conf_metrics.get('mean_entropy', 0.0):<12.4f}"
             )
@@ -829,9 +983,9 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
                 break
 
         if has_training_data:
-            logger.info("FINAL TRAINING METRICS (on Validation Set):")
-            logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
-            logger.info("-" * 50)
+            logger.info("\nFINAL TRAINING METRICS (on Validation Set):")
+            logger.info(f"{'Model':<30} {'Val Accuracy':<15} {'Val Loss':<12} {'Val Brier':<12}")
+            logger.info("-" * 75)
 
             for model_name, history_dict in results['histories'].items():
                 # Check if this specific model has actual training data
@@ -839,11 +993,15 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
                     history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
                     final_val_acc = history_dict['val_accuracy'][-1]
                     final_val_loss = history_dict['val_loss'][-1]
-                    logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
+                    final_val_brier = history_dict.get('val_brier_score', [0.0])[-1]
+                    logger.info(
+                        f"{model_name:<30} {final_val_acc:<15.4f} "
+                        f"{final_val_loss:<12.4f} {final_val_brier:<12.4f}"
+                    )
                 else:
-                    logger.info(f"{model_name:<20} {'Not trained':<15} {'Not trained':<12}")
+                    logger.info(f"{model_name:<30} {'Not trained':<15} {'Not trained':<12} {'N/A':<12}")
         else:
-            logger.info("TRAINING STATUS:")
+            logger.info("\nTRAINING STATUS:")
             logger.info("Models were not trained (epochs=0) - no training metrics available")
 
     logger.info("=" * 80)
@@ -860,7 +1018,7 @@ def main() -> None:
     This function serves as the entry point for the experiment, handling
     configuration setup, experiment execution, and error handling.
     """
-    logger.info("CIFAR-10 Loss Function Comparison (Softmax Output)")
+    logger.info("CIFAR-10 Loss Function Comparison with Calibration Losses")
     logger.info("=" * 80)
 
     # Initialize experiment configuration
@@ -873,6 +1031,7 @@ def main() -> None:
     logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
                 f"{len(config.dense_units)} dense layers")
     logger.info(f"   Output: Softmax probabilities (from_logits=False)")
+    logger.info(f"   Additional Metrics: Brier Score tracked during training")
     logger.info("")
 
     try:

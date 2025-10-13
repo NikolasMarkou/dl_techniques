@@ -28,17 +28,21 @@ import matplotlib.pyplot as plt
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults
 from .utils import find_pareto_front, normalize_metric
+from . import spectral_metrics, spectral_utils
+from .constants import SmoothingMethod
 
 from .analyzers.weight_analyzer import WeightAnalyzer
 from .analyzers.calibration_analyzer import CalibrationAnalyzer
 from .analyzers.information_flow_analyzer import InformationFlowAnalyzer
 from .analyzers.training_dynamics_analyzer import TrainingDynamicsAnalyzer
+from .analyzers.spectral_analyzer import SpectralAnalyzer
 
 from .visualizers.weight_visualizer import WeightVisualizer
 from .visualizers.summary_visualizer import SummaryVisualizer
 from .visualizers.calibration_visualizer import CalibrationVisualizer
 from .visualizers.information_flow_visualizer import InformationFlowVisualizer
 from .visualizers.training_dynamics_visualizer import TrainingDynamicsVisualizer
+from .visualizers.spectral_visualizer import SpectralVisualizer
 
 from dl_techniques.utils.logger import logger
 
@@ -78,6 +82,7 @@ ANALYSIS_TYPE_WEIGHTS: str = 'weights'
 ANALYSIS_TYPE_CALIBRATION: str = 'calibration'
 ANALYSIS_TYPE_INFORMATION_FLOW: str = 'information_flow'
 ANALYSIS_TYPE_TRAINING_DYNAMICS: str = 'training_dynamics'
+ANALYSIS_TYPE_SPECTRAL: str = 'spectral'
 
 # Analysis types that require input data to function
 DATA_REQUIRED_ANALYSES: Set[str] = {ANALYSIS_TYPE_CALIBRATION, ANALYSIS_TYPE_INFORMATION_FLOW}
@@ -133,7 +138,7 @@ class ModelAnalyzer:
     This is the main coordinator class that orchestrates all analysis and
     visualization components. It supports multiple types of analysis including
     weight distribution analysis, model calibration assessment, information
-    flow analysis, and training dynamics evaluation.
+    flow analysis, training dynamics evaluation, and spectral analysis.
 
     The analyzer is designed to handle both single-input and multi-input models,
     with special handling and warnings for multi-input architectures that may
@@ -262,7 +267,8 @@ class ModelAnalyzer:
             ANALYSIS_TYPE_WEIGHTS: WeightAnalyzer(self.models, self.config),
             ANALYSIS_TYPE_CALIBRATION: CalibrationAnalyzer(self.models, self.config),
             ANALYSIS_TYPE_INFORMATION_FLOW: InformationFlowAnalyzer(self.models, self.config),
-            ANALYSIS_TYPE_TRAINING_DYNAMICS: TrainingDynamicsAnalyzer(self.models, self.config)
+            ANALYSIS_TYPE_TRAINING_DYNAMICS: TrainingDynamicsAnalyzer(self.models, self.config),
+            ANALYSIS_TYPE_SPECTRAL: SpectralAnalyzer(self.models, self.config)
         }
 
     def analyze(
@@ -283,7 +289,7 @@ class ModelAnalyzer:
                  Required for calibration and information flow analyses.
             analysis_types: Set of analysis types to run. If None, runs analyses
                           based on configuration flags. Valid types: 'weights',
-                          'calibration', 'information_flow', 'training_dynamics'.
+                          'calibration', 'information_flow', 'training_dynamics', 'spectral'.
 
         Returns:
             AnalysisResults object containing all computed metrics, statistics,
@@ -299,6 +305,7 @@ class ModelAnalyzer:
                 ANALYSIS_TYPE_CALIBRATION if self.config.analyze_calibration else None,
                 ANALYSIS_TYPE_INFORMATION_FLOW if self.config.analyze_information_flow else None,
                 ANALYSIS_TYPE_TRAINING_DYNAMICS if self.config.analyze_training_dynamics else None,
+                ANALYSIS_TYPE_SPECTRAL if self.config.analyze_spectral else None,
             }
             # Remove None values from the set
             analysis_types.discard(None)
@@ -500,7 +507,8 @@ class ModelAnalyzer:
             ANALYSIS_TYPE_WEIGHTS: WeightVisualizer,
             ANALYSIS_TYPE_CALIBRATION: CalibrationVisualizer,
             ANALYSIS_TYPE_INFORMATION_FLOW: InformationFlowVisualizer,
-            ANALYSIS_TYPE_TRAINING_DYNAMICS: TrainingDynamicsVisualizer
+            ANALYSIS_TYPE_TRAINING_DYNAMICS: TrainingDynamicsVisualizer,
+            ANALYSIS_TYPE_SPECTRAL: SpectralVisualizer
         }
 
         # Create visualizations for each completed analysis
@@ -554,8 +562,14 @@ class ModelAnalyzer:
             'activation_stats': self.results.activation_stats,
             'training_metrics': (self._serialize_training_metrics()
                                if self.results.training_metrics else None),
+            'spectral_summary': self.results.spectral_summary,
+            'spectral_recommendations': self.results.spectral_recommendations,
             'multi_input_models': list(self._multi_input_models),
         }
+
+        # Add spectral analysis DataFrame if it exists
+        if self.results.spectral_analysis is not None:
+            results_dict['spectral_analysis'] = self.results.spectral_analysis.to_dict(orient='records')
 
         def convert_numpy(obj: Any) -> Any:
             """
@@ -637,7 +651,8 @@ class ModelAnalyzer:
             'calibration_summary': {},
             'confidence_summary': {},  # Separate confidence summary for clarity
             'weight_summary': {},
-            'training_summary': {}
+            'training_summary': {},
+            'spectral_summary': self.results.spectral_summary
         }
 
         # Determine which analyses were actually performed based on results
@@ -651,6 +666,9 @@ class ModelAnalyzer:
             summary['analyses_performed'].append('information_flow_analysis')
         if self.results.training_metrics:
             summary['analyses_performed'].append('training_dynamics_analysis')
+        if self.results.spectral_analysis is not None:
+            summary['analyses_performed'].append('spectral_analysis')
+
 
         # Compile model performance summaries
         for model_name, metrics in self.results.model_metrics.items():
@@ -831,5 +849,72 @@ class ModelAnalyzer:
             summary_visualizer._save_figure(fig, 'pareto_analysis')
 
         return fig
+
+    def create_smoothed_model(
+        self,
+        model_name: str,
+        method: str = 'detX',
+        percent: float = 0.8,
+        save_path: Optional[str] = None
+    ) -> keras.Model:
+        """
+        Create a smoothed version of a model using SVD truncation.
+
+        Requires spectral analysis to have been run first.
+
+        Args:
+            model_name: Name of the model to smooth (must be in self.models).
+            method: Smoothing method ('svd', 'detX', or 'lambda_min').
+            percent: Percentage of singular values to keep for 'svd' method.
+            save_path: Optional path to save the smoothed model.
+
+        Returns:
+            A new Keras model with smoothed weights.
+        """
+        if model_name not in self.models:
+            raise ValueError(f"Model '{model_name}' not found in analyzer.")
+        if (self.results.spectral_analysis is None or
+            model_name not in self.results.spectral_esds):
+            raise RuntimeError("Run spectral analysis first via analyzer.analyze() with analyze_spectral=True.")
+
+        original_model = self.models[model_name]
+        model_details = self.results.spectral_analysis[
+            self.results.spectral_analysis['model_name'] == model_name
+        ]
+        model_esds = self.results.spectral_esds[model_name]
+
+        smoothed_model = keras.models.clone_model(original_model)
+        smoothed_model.set_weights(original_model.get_weights())
+
+        for _, row in model_details.iterrows():
+            layer_id = int(row['layer_id'])
+            layer = smoothed_model.layers[layer_id]
+            layer_type = spectral_utils.infer_layer_type(layer)
+
+            has_weights, old_weights, has_bias, old_bias = spectral_utils.get_layer_weights_and_bias(layer)
+            if not has_weights: continue
+
+            if method == SmoothingMethod.DETX:
+                evals = model_esds.get(layer_id, np.array([]))
+                num_smooth = spectral_metrics.compute_detX_constraint(evals)
+            elif method == SmoothingMethod.LAMBDA_MIN:
+                num_smooth = int(row.get('num_pl_spikes', 0.5 * row.get('num_evals', 0)))
+            else:
+                num_smooth = int(percent * row.get('num_evals', 0))
+
+            logger.info(f"Layer {layer_id} ({layer.name}): keeping {num_smooth} components")
+            Wmats, _, _, _ = spectral_utils.get_weight_matrices(old_weights, layer_type)
+            if not Wmats: continue
+
+            W_smoothed = spectral_metrics.smooth_matrix(Wmats[0], num_smooth)
+            new_weights = W_smoothed.reshape(old_weights.shape)
+
+            layer.set_weights([new_weights, old_bias] if has_bias else [new_weights])
+
+        if save_path:
+            smoothed_model.save(save_path)
+            logger.info(f"Saved smoothed model to {save_path}")
+
+        return smoothed_model
 
 # ---------------------------------------------------------------------

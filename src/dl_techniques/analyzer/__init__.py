@@ -9,6 +9,7 @@ Key Features:
 - Weight distribution and health analysis
 - Confidence and calibration metrics
 - Information flow through network layers
+- Spectral weight analysis (WeightWatcher integration)
 - Quantitative training metrics
 - Summary dashboard with training insights
 
@@ -22,6 +23,7 @@ Example Usage:
         analyze_calibration=True,
         analyze_information_flow=True,
         analyze_training_dynamics=True,
+        analyze_spectral=True, # Enable spectral analysis
         plot_style='publication'
     )
 
@@ -52,13 +54,18 @@ Multi-Input Model Support:
 from .model_analyzer import ModelAnalyzer
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults, TrainingMetrics
+from .constants import LayerType, SmoothingMethod, StatusCode, MetricNames
 
 __all__ = [
     'ModelAnalyzer',
     'AnalysisConfig',
     'DataInput',
     'AnalysisResults',
-    'TrainingMetrics'
+    'TrainingMetrics',
+    'LayerType',
+    'SmoothingMethod',
+    'StatusCode',
+    'MetricNames'
 ]
 
-__version__ = '1.0.0'
+__version__ = '1.1.0' # Updated version
