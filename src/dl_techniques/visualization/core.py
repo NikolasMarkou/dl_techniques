@@ -337,8 +337,6 @@ class CompositeVisualization(VisualizationPlugin):
             rows = (n_plots + cols - 1) // cols
             layout = (rows, cols)
 
-        # --- START OF FIX ---
-
         if ax is not None:
             # We are drawing inside a subplot provided by a dashboard.
             # Use GridSpecFromSubplotSpec to create a nested layout.
@@ -373,8 +371,6 @@ class CompositeVisualization(VisualizationPlugin):
             # Hide unused subplots
             for idx in range(n_plots, len(axes_list)):
                 axes_list[idx].set_visible(False)
-
-        # --- END OF FIX ---
 
         return fig
 

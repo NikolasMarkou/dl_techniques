@@ -52,14 +52,19 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 continue
 
             model_cache = cache[model_name]
-            y_pred_logits = model_cache.get('predictions')
+            # --- FIX STARTS HERE ---
+            # This variable now correctly holds probabilities, not logits.
+            y_pred_proba = model_cache.get('predictions')
 
-            if y_pred_logits is None:
+            if y_pred_proba is None:
                 logger.warning(f"Skipping calibration analysis for {model_name}: No predictions available.")
                 continue
 
-            # Convert model outputs (logits) to probabilities, as calibration metrics require them.
-            y_pred_proba = keras.ops.softmax(y_pred_logits, axis=1)
+            # REMOVED: The incorrect second application of softmax.
+            # The model's output is already probabilities because the loss function
+            # was compiled with from_logits=False.
+            # y_pred_proba = keras.ops.softmax(y_pred_logits, axis=1)
+            # --- FIX ENDS HERE ---
 
             y_true = model_cache['y_data']
 

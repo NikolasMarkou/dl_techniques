@@ -97,15 +97,15 @@ from typing import Dict, Any, List, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.layers.hierarchical_routing import HierarchicalRoutingLayer
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from dl_techniques.layers.routing_probabilities import RoutingProbabilitiesLayer
 
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
     ClassificationResults,
     TrainingCurvesVisualization,
-    ConfusionMatrixVisualization
+    ConfusionMatrixVisualization,
+    MultiModelClassification
 )
 
 from dl_techniques.analyzer import (
@@ -211,7 +211,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 100
+    epochs: int = 10
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 15
@@ -219,11 +219,11 @@ class ExperimentConfig:
     loss_function: Callable = field(default_factory=lambda: keras.losses.CategoricalCrossentropy(from_logits=False))
 
     # --- Models to Evaluate ---
-    model_types: List[str] = field(default_factory=lambda: ['Softmax', 'HierarchicalRouting', 'HierarchicalRoutingOrthonormal'])
+    model_types: List[str] = field(default_factory=lambda: ['Softmax', 'HierarchicalRouting', 'RoutingProbabilities'])
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")
-    experiment_name: str = "cifar10_hierarchical_routing_comparison"
+    experiment_name: str = "cifar10_routing_comparison"
     random_seed: int = 42
 
     # --- Analysis Configuration ---
@@ -371,13 +371,14 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
             output_dim=config.num_classes,
             name='predictions'
         )(x)
-    elif model_type == 'HierarchicalRoutingOrthonormal':
-        predictions = HierarchicalRoutingLayer(
-            output_dim=config.num_classes,
-            name='predictions',
-            kernel_initializer=OrthogonalHypersphereInitializer(),
-            kernel_regularizer=SoftOrthonormalConstraintRegularizer()
+    elif model_type == 'RoutingProbabilities':
+        logits = keras.layers.Dense(
+            units=config.num_classes,
+            kernel_initializer=config.kernel_initializer,
+            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
+            name='logits'
         )(x)
+        predictions = RoutingProbabilitiesLayer()(logits)
     else:
         raise ValueError(f"Unknown model_type: {model_type}. "
                          f"Choose from {config.model_types}")
@@ -513,12 +514,14 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         for name, preds in raw_predictions.items()
     }
 
-    # Convert y_test to class indices for confusion matrix
     y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
+    # 1. Create a dictionary to hold the results for all models
+    all_classification_results = {}
 
-    # Create classification results for each model
+    # 2. Loop to populate the dictionary
     for model_name, y_pred in class_predictions.items():
         try:
+            # Create the data container for each model
             classification_data = ClassificationResults(
                 y_true=y_true_indices,
                 y_pred=y_pred,
@@ -526,15 +529,29 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 class_names=cifar10_data.class_names,
                 model_name=model_name
             )
+            # Add it to our dictionary
+            all_classification_results[model_name] = classification_data
+        except Exception as e:
+            logger.error(f"Failed to prepare classification results for {model_name}: {e}")
 
+    # 3. Create the multi-model data container
+    if all_classification_results:
+        try:
+            multi_model_data = MultiModelClassification(
+                results=all_classification_results,
+                dataset_name="CIFAR-10"
+            )
+
+            # 4. Make a SINGLE call to the visualizer with the aggregated data
             vis_manager.visualize(
-                data=classification_data,
+                data=multi_model_data,
                 plugin_name="confusion_matrix",
                 normalize='true',
                 show=False
             )
+            logger.info("Multi-model confusion matrix visualization created.")
         except Exception as e:
-            logger.error(f"Failed to create confusion matrix for {model_name}: {e}")
+            logger.error(f"Failed to create multi-model confusion matrix: {e}")
 
     # ===== FINAL PERFORMANCE EVALUATION =====
     logger.info("Evaluating final model performance on test set...")
