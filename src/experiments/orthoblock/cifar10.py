@@ -55,7 +55,6 @@ from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.orthoblock import OrthoBlock
-from dl_techniques.layers.orthoblock_v2 import OrthoBlockV2
 
 from dl_techniques.datasets.vision.common import (
     create_dataset_builder,
@@ -387,15 +386,6 @@ class OrthoBlockExperimentConfig:
 
     # --- Dense Layer Variants ---
     dense_variants: Dict[str, Callable] = field(default_factory=lambda: {
-        'OrthoBlock_V2_Strong': lambda config: ('orthoblock_v2', {
-            'ortho_reg_factor': 1.0,
-        }),
-        'OrthoBlock_V2_Medium': lambda config: ('orthoblock_v2', {
-            'ortho_reg_factor': 0.5,
-        }),
-        'OrthoBlock_V2_LowScale': lambda config: ('orthoblock_v2', {
-            'ortho_reg_factor': 0.1,
-        }),
         'OrthoBlock_Strong': lambda config: ('orthoblock', {
             'ortho_reg_factor': 1.0,
             'scale_initial_value': 0.5
@@ -469,15 +459,6 @@ def create_dense_layer(
             activation=activation,
             ortho_reg_factor=layer_params.get('ortho_reg_factor', 0.1),
             scale_initial_value=layer_params.get('scale_initial_value', 0.5),
-            use_bias=layer_params.get('use_bias', True),
-            kernel_initializer=layer_params.get('kernel_initializer', 'glorot_uniform'),
-            name=name
-        )
-    elif layer_type == 'orthoblock_v2':
-        return OrthoBlockV2(
-            units=units,
-            activation=activation,
-            ortho_reg_factor=layer_params.get('ortho_reg_factor', 0.1),
             use_bias=layer_params.get('use_bias', True),
             kernel_initializer=layer_params.get('kernel_initializer', 'glorot_uniform'),
             name=name
@@ -600,7 +581,8 @@ def build_model(
         x = build_conv_block(x, filters, config, i)
 
     # Global average pooling
-    x = keras.layers.GlobalMaxPooling2D()(x)
+    x = keras.layers.GlobalAveragePooling2D()(x)
+    x = keras.layers.LayerNormalization()(x)
 
     # Create the specified dense layer
     x = create_dense_layer(
@@ -610,12 +592,6 @@ def build_model(
         activation=config.activation,
         name=f'{name}_dense'
     )(x)
-
-    # Additional dropout for non-OrthoBlock layers
-    if layer_type != 'orthoblock':
-        dropout_rate = layer_params.get('dropout_rate', config.final_dropout)
-        if dropout_rate > 0:
-            x = keras.layers.Dropout(dropout_rate)(x)
 
     # Output layer
     outputs = keras.layers.Dense(
@@ -862,12 +838,12 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     viz_manager.register_template("orthogonality_analysis", OrthogonalityAnalysisVisualization)
     viz_manager.register_template("statistical_comparison", StatisticalComparisonVisualization)
 
-    logger.info("🚀 Starting OrthoBlock Effectiveness Experiment")
-    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("Starting OrthoBlock Effectiveness Experiment")
+    logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading CIFAR-10 dataset using standardized builder...")
+    logger.info("Loading CIFAR-10 dataset using standardized builder...")
 
     # Create training config for dataset builder
     train_config = TrainingConfig(
@@ -891,7 +867,7 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     logger.info(f"Steps per epoch: {steps_per_epoch}, Validation steps: {val_steps}")
 
     # ===== MULTI-RUN TRAINING =====
-    logger.info(f"🏋️ Running {config.n_runs} repetitions for statistical significance...")
+    logger.info(f"Running {config.n_runs} repetitions for statistical significance...")
 
     all_trained_models = {}
     all_histories = {}
@@ -969,11 +945,11 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
         gc.collect()
 
     # ===== STATISTICAL ANALYSIS =====
-    logger.info("📊 Calculating statistics across runs...")
+    logger.info("Calculating statistics across runs...")
     run_statistics = calculate_run_statistics(results_per_run)
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼️ Generating visualizations using framework...")
+    logger.info("🖼Generating visualizations using framework...")
 
     # 1. Statistical comparison
     stat_comparison_data = StatisticalComparisonData(
@@ -1090,7 +1066,7 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
         logger.warning(f"Could not generate confusion matrices: {e}")
 
     # ===== MODEL ANALYSIS =====
-    logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
@@ -1204,12 +1180,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         results: Experiment results dictionary
     """
     logger.info("=" * 80)
-    logger.info("📋 ORTHOBLOCK EFFECTIVENESS EXPERIMENT SUMMARY")
+    logger.info("ORTHOBLOCK EFFECTIVENESS EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # Statistical results
     if 'run_statistics' in results and results['run_statistics']:
-        logger.info("\n🎯 STATISTICAL RESULTS (Mean ± Std across runs):")
+        logger.info("\nSTATISTICAL RESULTS (Mean ± Std across runs):")
         logger.info(f"{'Model':<24} {'Accuracy':<20} {'Loss':<20} {'Runs':<8}")
         logger.info("-" * 75)
 
@@ -1234,7 +1210,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # Calibration analysis
     analysis = results.get('model_analysis')
     if analysis and analysis.calibration_metrics:
-        logger.info("\n🎯 CALIBRATION ANALYSIS (from last run):")
+        logger.info("\nCALIBRATION ANALYSIS (from last run):")
         logger.info(f"{'Model':<24} {'ECE':<12} {'Brier':<12} {'Mean Entropy':<15}")
         logger.info("-" * 67)
         for name, cal_metrics in analysis.calibration_metrics.items():
@@ -1245,23 +1221,23 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             )
 
     # Key insights
-    logger.info("\n💡 KEY INSIGHTS:")
+    logger.info("\nKEY INSIGHTS:")
     if 'run_statistics' in results:
         stats = results['run_statistics']
         best_acc_model = max(stats, key=lambda m: stats[m]['accuracy']['mean'])
         logger.info(
-            f"   🏆 Best Accuracy: {best_acc_model} "
+            f"   Best Accuracy: {best_acc_model} "
             f"({stats[best_acc_model]['accuracy']['mean']:.4f})"
         )
 
         most_stable_model = min(stats, key=lambda m: stats[m]['accuracy']['std'])
         logger.info(
-            f"   📊 Most Stable: {most_stable_model} "
+            f"   Most Stable: {most_stable_model} "
             f"(Acc Std: {stats[most_stable_model]['accuracy']['std']:.4f})"
         )
 
         if results.get('orthogonality_trackers'):
-            logger.info("\n   📐 Orthogonality Dynamics (Initial → Final ||W^T W - I||_F):")
+            logger.info("\n   Orthogonality Dynamics (Initial → Final ||W^T W - I||_F):")
             for name, tracker in results['orthogonality_trackers'].items():
                 if tracker.orthogonality_history:
                     initial = tracker.orthogonality_history[0].get('layer_0', 0)
@@ -1277,7 +1253,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
 def main() -> None:
     """Main execution function for the OrthoBlock effectiveness experiment."""
-    logger.info("🚀 OrthoBlock Effectiveness Experiment")
+    logger.info("OrthoBlock Effectiveness Experiment")
     logger.info("=" * 80)
 
     # Configure GPU
@@ -1292,7 +1268,7 @@ def main() -> None:
     # Initialize configuration
     config = OrthoBlockExperimentConfig()
 
-    logger.info("⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"   Dense layer variants: {list(config.dense_variants.keys())}")
     logger.info(f"   Epochs: {config.epochs}, Batch size: {config.batch_size}")
     logger.info(f"   Number of runs: {config.n_runs}")
@@ -1301,10 +1277,10 @@ def main() -> None:
 
     try:
         results = run_experiment(config)
-        logger.info("✅ OrthoBlock effectiveness experiment completed successfully!")
+        logger.info("OrthoBlock effectiveness experiment completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Experiment failed with an unhandled exception: {e}", exc_info=True)
+        logger.error(f"Experiment failed with an unhandled exception: {e}", exc_info=True)
         raise
 
 

@@ -200,9 +200,9 @@ class ExperimentConfig:
     input_shape: Tuple[int, ...] = (32, 32, 3)
 
     # --- Model Architecture Parameters ---
-    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256])
+    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256, 256, 256])
     dense_units: List[int] = field(default_factory=lambda: [128])
-    dropout_rates: List[float] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25, 0.25])
+    dropout_rates: List[float] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25])
     kernel_size: Tuple[int, int] = (3, 3)
     pool_size: Tuple[int, int] = (2, 2)
     weight_decay: float = 1e-4
@@ -240,9 +240,6 @@ class ExperimentConfig:
 # ==============================================================================
 # MODEL ARCHITECTURE BUILDING UTILITIES
 # ==============================================================================
-
-# Note: build_residual_block and build_conv_block are reused from the example
-# as they define the common base architecture for this experiment.
 
 def build_residual_block(
     inputs: keras.layers.Layer,
@@ -301,8 +298,6 @@ def build_conv_block(
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization()(x)
         x = keras.layers.Activation('relu')(x)
-    if block_index < len(config.conv_filters) - 1:
-        x = keras.layers.MaxPooling2D(config.pool_size)(x)
     dropout_rate = (config.dropout_rates[block_index]
                    if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
@@ -342,20 +337,7 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
     for i, filters in enumerate(config.conv_filters):
         x = build_conv_block(x, filters, config, i)
     x = keras.layers.GlobalAveragePooling2D()(x)
-    for j, units in enumerate(config.dense_units):
-        x = keras.layers.Dense(
-            units=units, kernel_initializer=config.kernel_initializer,
-            kernel_regularizer=keras.regularizers.L2(config.weight_decay),
-            name=f'dense_{j}'
-        )(x)
-        if config.use_batch_norm:
-            x = keras.layers.BatchNormalization()(x)
-        x = keras.layers.Activation('relu')(x)
-        dense_dropout_idx = len(config.conv_filters) + j
-        if dense_dropout_idx < len(config.dropout_rates):
-            dropout_rate = config.dropout_rates[dense_dropout_idx]
-            if dropout_rate > 0:
-                x = keras.layers.Dropout(dropout_rate)(x)
+    x = keras.layers.LayerNormalization()(x)
 
     # --- Interchangeable Output Layer ---
     if model_type == 'Softmax':
