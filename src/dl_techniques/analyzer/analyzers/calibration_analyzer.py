@@ -14,14 +14,14 @@ from typing import Dict, Any, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.calibration_metrics import (
+from .base import BaseAnalyzer
+from ..data_types import AnalysisResults, DataInput
+from ..calibration_metrics import (
     compute_ece,
     compute_brier_score,
     compute_reliability_data,
     compute_prediction_entropy_stats
 )
-from .base import BaseAnalyzer
-from ..data_types import AnalysisResults, DataInput
 
 # ---------------------------------------------------------------------
 
@@ -155,3 +155,5 @@ class CalibrationAnalyzer(BaseAnalyzer):
             'margin': margin,
             'gini_coefficient': gini
         }
+
+# ---------------------------------------------------------------------
