@@ -1,4 +1,5 @@
-"""Implements the depthwise separable convolution block, a core of MobileNet.
+"""
+Depthwise separable convolution block, a core of MobileNet.
 
 Architecture and Core Concepts:
 
@@ -66,8 +67,8 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.activations import create_activation_layer
+from .norms import create_normalization_layer
+from .activations import create_activation_layer
 
 # ---------------------------------------------------------------------
 
