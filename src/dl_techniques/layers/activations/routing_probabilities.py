@@ -56,7 +56,7 @@ Foundational Mathematics:
         choices made along its unique path from the root. If a path is
         defined by a sequence of choices `(b_0, b_1, ..., b_{d-1})`, where
         `b_k ∈ {left, right}`, the leaf probability is:
-        `P(leaf) = Π_{k=0}^{d-1} P(b_k)`
+        `P(leaf) = ∏_{k=0}^{d-1} P(b_k)`
         The branch probabilities at level `k` are determined by the sigmoid
         of the corresponding logit: `P(right_k) = σ(z_k)` and
         `P(left_k) = 1 - σ(z_k)`.
@@ -106,7 +106,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
     **Architecture**:
     1. **Output Dimension Inference**: If `output_dim` is None, it is inferred
-       from the input shape during build().
+       from the input shape along the specified axis during build().
     2. **Padding**: Given `output_dim = N`, calculate `padded_dim`, the smallest
        power of two such that `padded_dim >= N`.
     3. **Deterministic Decision Making**: For each of `k = log₂(padded_dim)`
@@ -121,28 +121,46 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
     Args:
         output_dim: Optional integer, the dimensionality of the output space.
-            If None, will be inferred from the last dimension of the input
-            shape during build(). Must be an integer greater than 1.
+            If None, will be inferred from the dimension at the specified axis
+            of the input shape during build(). Must be an integer greater than 1.
+        axis: Integer, the axis along which the routing is applied. Defaults to -1
+            (the last axis), following the same convention as softmax. Can be
+            negative to index from the end.
         epsilon: A small float added to prevent numerical issues during
             probability clipping and renormalization. Defaults to 1e-7.
         **kwargs: Additional arguments for the `Layer` base class (e.g., `name`).
 
     Example:
-        >>> # As a drop-in replacement for softmax
+        >>> # As a drop-in replacement for softmax on the last axis
         >>> inputs = keras.layers.Input(shape=(128,))
         >>> logits = keras.layers.Dense(10)(inputs)
-        >>> # Option 1: Explicit output_dim
         >>> probs = RoutingProbabilitiesLayer(output_dim=10)(logits)
-        >>> # Option 2: Infer output_dim from input
+        >>>
+        >>> # With axis parameter for arbitrary shapes
+        >>> inputs = keras.layers.Input(shape=(32, 64, 10))
+        >>> # Apply routing along axis 1
+        >>> probs = RoutingProbabilitiesLayer(axis=1)(inputs)  # shape: (32, 64, 10)
+        >>>
+        >>> # Infer output_dim from input
         >>> probs = RoutingProbabilitiesLayer()(logits)
     """
 
     def __init__(
             self,
             output_dim: Optional[int] = None,
+            axis: int = -1,
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
+        """
+        Initialize the RoutingProbabilitiesLayer.
+
+        Args:
+            output_dim: Optional integer for output dimensionality.
+            axis: Integer specifying the axis along which to apply routing.
+            epsilon: Small float for numerical stability.
+            **kwargs: Additional layer arguments.
+        """
         super().__init__(**kwargs)
 
         if output_dim is not None:
@@ -152,11 +170,18 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                     f"but received: {output_dim}"
                 )
 
+        if not isinstance(axis, int):
+            raise ValueError(
+                f"The 'axis' must be an integer, but received: {axis}"
+            )
+
         self.output_dim = output_dim
+        self.axis = axis
         self.epsilon = epsilon
         self.padded_output_dim = None
         self.num_decisions = None
         self.decision_weights = None
+        self._normalized_axis = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -165,17 +190,30 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        # Infer output_dim from input shape if not provided
+        # Normalize axis to handle negative indices
+        input_rank = len(input_shape)
+        if self.axis < 0:
+            self._normalized_axis = input_rank + self.axis
+        else:
+            self._normalized_axis = self.axis
+
+        # Validate normalized axis
+        if self._normalized_axis < 0 or self._normalized_axis >= input_rank:
+            raise ValueError(
+                f"axis {self.axis} is out of bounds for input shape {input_shape}"
+            )
+
+        # Infer output_dim from input shape at the specified axis if not provided
         if self.output_dim is None:
-            if input_shape[-1] is None:
+            if input_shape[self._normalized_axis] is None:
                 raise ValueError(
-                    "Cannot infer output_dim when the last dimension of "
-                    "input_shape is None. Please provide output_dim explicitly."
+                    f"Cannot infer output_dim when the dimension at axis {self.axis} "
+                    f"of input_shape is None. Please provide output_dim explicitly."
                 )
-            self.output_dim = int(input_shape[-1])
+            self.output_dim = int(input_shape[self._normalized_axis])
             logger.info(
                 f"[{self.name}] Inferred output_dim={self.output_dim} "
-                f"from input shape: {input_shape}"
+                f"from input shape: {input_shape} at axis {self.axis}"
             )
 
         # Validate output_dim
@@ -189,14 +227,14 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         self.num_decisions = int(math.log2(self.padded_output_dim))
 
         logger.info(
-            f"[{self.name}] Built for {self.output_dim} classes. "
+            f"[{self.name}] Built for {self.output_dim} classes along axis {self.axis}. "
             f"Padded to {self.padded_output_dim} for tree construction, "
             f"requiring {self.num_decisions} routing decisions."
         )
 
         # Precompute deterministic weight patterns for each decision
         # Uses Fourier-like cosine basis to create diverse, orthogonal patterns
-        input_dim = input_shape[-1]
+        input_dim = input_shape[self._normalized_axis]
         decision_weights_list = []
 
         for decision_idx in range(self.num_decisions):
@@ -234,21 +272,45 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         Defines the forward pass logic of the layer.
 
         Args:
-            inputs: Input tensor of shape (batch_size, input_dim).
-                Typically these are logits from a previous layer.
+            inputs: Input tensor of arbitrary rank. The routing is applied along
+                the specified axis. All other dimensions are treated as batch dimensions.
             training: Boolean or None, whether the layer is in training mode.
 
         Returns:
-            Output tensor of shape (batch_size, output_dim) containing
-            probabilities that sum to 1.0 across the last dimension.
+            Output tensor of the same shape as inputs, except the dimension at
+            the specified axis may be different if output_dim != input_dim.
+            Probabilities sum to 1.0 across the specified axis.
         """
+        # Step 0: Handle axis manipulation for arbitrary rank tensors
+        # Move the target axis to the last position for easier computation
+        input_shape = ops.shape(inputs)
+        input_rank = len(inputs.shape)
+
+        # Create permutation to move target axis to last position
+        perm = list(range(input_rank))
+        perm[self._normalized_axis] = input_rank - 1
+        perm[input_rank - 1] = self._normalized_axis
+
+        # Transpose if axis is not already last
+        if self._normalized_axis != input_rank - 1:
+            inputs_transposed = ops.transpose(inputs, perm)
+        else:
+            inputs_transposed = inputs
+
+        # Reshape to 2D: (batch_size, input_dim)
+        # where batch_size is the product of all dimensions except the last
+        transposed_shape = ops.shape(inputs_transposed)
+        batch_size = ops.prod(transposed_shape[:-1])
+        input_dim = transposed_shape[-1]
+
+        inputs_2d = ops.reshape(inputs_transposed, (batch_size, input_dim))
+
         # Step 1: Compute deterministic routing decisions from inputs
         # For each decision, compute weighted sum of inputs using precomputed patterns
-        # Shape: inputs = (batch_size, input_dim)
+        # Shape: inputs_2d = (batch_size, input_dim)
         # Shape: decision_weights = (num_decisions, input_dim)
         # Result shape: (batch_size, num_decisions)
-
-        decision_logits = ops.matmul(inputs, ops.transpose(self.decision_weights))
+        decision_logits = ops.matmul(inputs_2d, ops.transpose(self.decision_weights))
 
         # Apply sigmoid to convert logits to probabilities (0 to 1)
         # Each value represents the probability of taking the "right" branch
@@ -260,9 +322,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         decision_probs = ops.clip(
             decision_probs, self.epsilon, 1.0 - self.epsilon
         )
-
-        # Get batch size dynamically for backend compatibility
-        batch_size = ops.shape(inputs)[0]
 
         # Step 2: Initialize root probability
         # Start with probability mass of 1.0 for each batch item
@@ -300,19 +359,39 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # Step 4: Handle non-power-of-2 output dimensions
         if self.output_dim == self.padded_output_dim:
             # Output dimension is already a power of 2, no adjustment needed
-            return padded_probs
+            final_probs = padded_probs
+        else:
+            # Slice to get only the true class probabilities
+            unnormalized_probs = padded_probs[:, :self.output_dim]
 
-        # Slice to get only the true class probabilities
-        unnormalized_probs = padded_probs[:, :self.output_dim]
+            # Compute sum of sliced probabilities (will be < 1.0)
+            prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
 
-        # Compute sum of sliced probabilities (will be < 1.0)
-        prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
+            # Renormalize to ensure output sums to 1.0
+            final_probs = unnormalized_probs / prob_sum
 
-        # Renormalize to ensure output sums to 1.0. The epsilon is not needed
-        # here, as prob_sum is guaranteed to be > 0 due to prior clipping.
-        final_probs = unnormalized_probs / prob_sum
+        # Step 5: Reshape back to original shape (with axis still at last position)
+        output_shape_transposed = list(transposed_shape)
+        output_shape_transposed[-1] = self.output_dim
 
-        return final_probs
+        # Convert to concrete values where possible for reshape
+        output_shape_concrete = []
+        for i, dim in enumerate(output_shape_transposed[:-1]):
+            if i < len(inputs_transposed.shape) - 1 and inputs_transposed.shape[i] is not None:
+                output_shape_concrete.append(inputs_transposed.shape[i])
+            else:
+                output_shape_concrete.append(dim)
+        output_shape_concrete.append(self.output_dim)
+
+        outputs_transposed = ops.reshape(final_probs, output_shape_concrete)
+
+        # Step 6: Transpose back to original axis order if needed
+        if self._normalized_axis != input_rank - 1:
+            outputs = ops.transpose(outputs_transposed, perm)
+        else:
+            outputs = outputs_transposed
+
+        return outputs
 
     def compute_output_shape(
             self,
@@ -325,13 +404,24 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             input_shape: Shape tuple of the input.
 
         Returns:
-            Output shape tuple.
+            Output shape tuple. Same as input shape except at the specified axis,
+            which will be output_dim if specified.
         """
         output_shape = list(input_shape)
+
+        # Determine which axis to modify
+        if self._normalized_axis is not None:
+            axis_to_modify = self._normalized_axis
+        else:
+            # During shape inference before build, normalize the axis
+            input_rank = len(input_shape)
+            axis_to_modify = input_rank + self.axis if self.axis < 0 else self.axis
+
         if self.output_dim is not None:
-            output_shape[-1] = self.output_dim
+            output_shape[axis_to_modify] = self.output_dim
         # If output_dim is None, it will be inferred in build()
         # and the output shape will match the input shape
+
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
@@ -344,6 +434,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'output_dim': self.output_dim,
+            'axis': self.axis,
             'epsilon': self.epsilon,
         })
         return config

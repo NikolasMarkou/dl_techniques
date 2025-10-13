@@ -97,7 +97,7 @@ from typing import Dict, Any, List, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.layers.hierarchical_routing import HierarchicalRoutingLayer
-from dl_techniques.layers.routing_probabilities import RoutingProbabilitiesLayer
+from dl_techniques.layers.activations.routing_probabilities import RoutingProbabilitiesLayer
 
 from dl_techniques.visualization import (
     VisualizationManager,

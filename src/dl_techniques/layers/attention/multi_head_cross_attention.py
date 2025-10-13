@@ -70,6 +70,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # ---------------------------------------------------------------------
 
 from ..activations.adaptive_softmax import AdaptiveTemperatureSoftmax
+from ..activations.routing_probabilities import RoutingProbabilitiesLayer
 
 # ---------------------------------------------------------------------
 
@@ -142,6 +143,9 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             Defaults to "zeros".
         kernel_regularizer: Optional regularizer for kernel weights.
         bias_regularizer: Optional regularizer for bias weights.
+        use_hierarchical_routing: Boolean, if True, uses hierarchical routing probability
+            instead of standard softmax for attention normalization.
+            Defaults to False.
         use_adaptive_softmax: Boolean, if True, uses AdaptiveTemperatureSoftmax
             instead of standard softmax for attention normalization.
             Defaults to False.
@@ -218,6 +222,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            use_hierarchical_routing: bool = False,
             use_adaptive_softmax: bool = False,
             adaptive_softmax_config: Optional[Dict[str, Any]] = None,
             **kwargs: Any
@@ -245,6 +250,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.use_hierarchical_routing = use_hierarchical_routing
         self.use_adaptive_softmax = use_adaptive_softmax
         self.adaptive_softmax_config = adaptive_softmax_config
 
@@ -299,6 +305,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.dropout_layer = keras.layers.Dropout(
             self.dropout_rate, name="dropout"
         ) if self.dropout_rate > 0.0 else None
+
+        if self.use_hierarchical_routing:
+            self.hierarchical_routing = RoutingProbabilitiesLayer()
+        else:
+            self.hierarchical_routing = None
 
         # CREATE adaptive temperature softmax layer if enabled
         if self.use_adaptive_softmax:
@@ -356,6 +367,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             # Dropout doesn't change shape, use attention weight shape for building
             attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
+
+        # Build hierarchical routing layer if exists
+        if self.hierarchical_routing is not None:
+            # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
+            attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
+            self.hierarchical_routing.build(attn_shape)
 
         # Build adaptive softmax layer if exists
         if self.adaptive_softmax is not None:
@@ -443,6 +460,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # Compute attention weights using adaptive or standard softmax
         if self.use_adaptive_softmax and self.adaptive_softmax is not None:
             attn_weights = self.adaptive_softmax(scores)
+        elif self.use_hierarchical_routing and self.hierarchical_routing is not None:
+            attn_weights = self.hierarchical_routing(scores)
         else:
             attn_weights = ops.softmax(scores, axis=-1)
 
@@ -487,6 +506,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "use_adaptive_softmax": self.use_adaptive_softmax,
             "adaptive_softmax_config": self.adaptive_softmax_config,
+            "use_hierarchical_routing": self.use_hierarchical_routing,
         })
         return config
 
