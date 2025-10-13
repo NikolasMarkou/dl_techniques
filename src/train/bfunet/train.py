@@ -571,29 +571,6 @@ class ScaledMseLoss(keras.losses.Loss):
 # METRICS FOR EVALUATION
 # =============================================================================
 
-@keras.saving.register_keras_serializable()
-def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-    """
-    Compute Peak Signal-to-Noise Ratio (PSNR) for image quality evaluation.
-
-    PSNR is a standard metric for image restoration tasks, measuring the ratio
-    between the maximum possible power of a signal and the power of corrupting
-    noise that affects the fidelity of its representation.
-
-    Args:
-        y_true: Ground truth images in [0, 1] range
-        y_pred: Predicted/denoised images in [0, 1] range
-
-    Returns:
-        Mean PSNR value across the batch in decibels (dB)
-
-    Note:
-        Higher PSNR values indicate better image quality. The max_val parameter
-        is set to 1.0 to match the [0, 1] normalization range.
-    """
-    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=1.0))
-
-
 class PrimaryOutputPSNR(keras.metrics.Metric):
     """
     PSNR metric that evaluates only the primary output for multi-output models.
@@ -949,9 +926,6 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
 
         # Update available metrics set
         self.available_metrics.update(logs.keys())
-
-        # Store all metrics that match our expected patterns
-        all_expected_metrics = list(self.train_metrics.keys()) + list(self.val_metrics.keys())
 
         for metric_name, metric_value in logs.items():
             try:
