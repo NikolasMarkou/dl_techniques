@@ -52,19 +52,20 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 continue
 
             model_cache = cache[model_name]
-            # --- FIX STARTS HERE ---
             # This variable now correctly holds probabilities, not logits.
-            y_pred_proba = model_cache.get('predictions')
+            y_pred_proba = model_cache.get('predictions', None)
 
             if y_pred_proba is None:
-                logger.warning(f"Skipping calibration analysis for {model_name}: No predictions available.")
-                continue
+                logger.warning(f"Could not find predictions for {model_name}: attempting to get logits")
+                y_pred_logits = model_cache.get('logits', None)
+                if y_pred_logits is None:
+                    y_pred_proba = keras.ops.softmax(y_pred_logits, axis=-1)
+                else:
+                    logger.warning(f"Could not find logits for {model_name}")
 
-            # REMOVED: The incorrect second application of softmax.
-            # The model's output is already probabilities because the loss function
-            # was compiled with from_logits=False.
-            # y_pred_proba = keras.ops.softmax(y_pred_logits, axis=1)
-            # --- FIX ENDS HERE ---
+            if y_pred_proba is None:
+                logger.warning(f"Skipping calibration analysis for {model_name}: No predictions / logits available.")
+                continue
 
             y_true = model_cache['y_data']
 
@@ -72,7 +73,7 @@ class CalibrationAnalyzer(BaseAnalyzer):
             y_true = np.asarray(y_true)
             try:
                 if len(y_true.shape) > 1 and y_true.shape[1] > 1:
-                    y_true_idx = np.argmax(y_true, axis=1)
+                    y_true_idx = np.argmax(y_true, axis=-1)
                 else:
                     y_true_idx = y_true.flatten().astype(int)
             except (ValueError, TypeError) as e:

@@ -605,11 +605,9 @@ class SummaryVisualizer(BaseVisualizer):
                 parts[partname].set_color('black')
                 parts[partname].set_alpha(VIOLIN_EDGE_ALPHA)
 
-        # Configure axis labels and annotations
-        ax.set_xticks(range(len(model_order)))
-        # Use full model names directly instead of M1, M2 abbreviations
-        ax.set_xticklabels([name[:8] + '...' if len(name) > 8 else name for name in model_order],
-                           fontsize=TABLE_FONT_SIZE, rotation=45, ha='right')
+        # Remove the x-axis labels and ticks. The dashboard uses a shared legend.
+        ax.set_xticks([])
+        ax.set_xlabel('') # Clear the x-axis label
 
         # Add mean confidence annotations for quick reference
         for i, model in enumerate(model_order):

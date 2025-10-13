@@ -216,16 +216,11 @@ class CalibrationVisualizer(BaseVisualizer):
                 parts[partname].set_linewidth(LINE_WIDTH_MEDIUM)
                 parts[partname].set_alpha(ALPHA_VIOLIN_INTERNAL)
 
-        # Configure axis labels and annotations
-        ax.set_xticks(range(len(model_order)))
-        # Use truncated model names directly instead of M1, M2 abbreviations
-        truncated_names = [
-            name[:MODEL_NAME_TRUNCATE_LENGTH] + MODEL_NAME_ELLIPSIS
-            if len(name) > MODEL_NAME_TRUNCATE_LENGTH else name
-            for name in model_order
-        ]
-        ax.set_xticklabels(truncated_names, rotation=45, ha='right')
-        ax.set_xlabel('Models')
+        # Remove the x-axis labels and ticks entirely.
+        # The main figure legend will identify the models.
+        ax.set_xticks([])
+        ax.set_xlabel('') # Clear the x-axis label
+
         ax.set_ylabel('Confidence (Max Probability)')
         ax.set_title('Confidence Score Distributions')
         ax.grid(True, alpha=ALPHA_GRID_STANDARD, axis='y')

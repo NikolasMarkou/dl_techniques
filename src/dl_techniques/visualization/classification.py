@@ -173,7 +173,6 @@ class ConfusionMatrixVisualization(VisualizationPlugin):
         """Create multiple confusion matrices for comparison with a better layout."""
         n_models = len(data.results)
 
-        # --- FIX: MORE GRACEFUL LAYOUT LOGIC ---
         # Use a max of 2 columns to give each plot more space
         cols = 2 if n_models > 1 else 1
         rows = (n_models + cols - 1) // cols
