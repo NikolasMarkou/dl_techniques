@@ -8,12 +8,12 @@ The Model Analyzer is designed to provide deep insights into your neural network
 
 ### Key Features
 
--   🔍 **Comprehensive Analysis**: Four specialized analysis modules covering weights, calibration, information flow, and training dynamics.
--   📊 **Rich Visualizations**: Publication-ready plots and summary dashboards with consistent styling and color schemes.
--   🧩 **Modular & Extensible**: Each analysis is independent. The architecture is designed for adding custom analyzers and visualizers.
--   🚀 **Training & Hyperparameter Insights**: Deep analysis of training history, convergence patterns, and a powerful Pareto-front analysis for optimal model selection.
--   💾 **Serializable Results**: Export all raw metrics to a single JSON file for reproducible analysis, reporting, or further programmatic use.
--   💪 **Robust & Efficient**: Handles large datasets through smart sampling, caches intermediate results to avoid re-computation, and includes robust error handling.
+-   **Comprehensive Analysis**: Four specialized analysis modules covering weights, calibration, information flow, and training dynamics.
+-   **Rich Visualizations**: Publication-ready plots and summary dashboards with consistent styling and color schemes.
+-   **Modular & Extensible**: Each analysis is independent. The architecture is designed for adding custom analyzers and visualizers.
+-   **Training & Hyperparameter Insights**: Deep analysis of training history, convergence patterns, and a powerful Pareto-front analysis for optimal model selection.
+-   **Serializable Results**: Export all raw metrics to a single JSON file for reproducible analysis, reporting, or further programmatic use.
+-   **Robust & Efficient**: Handles large datasets through smart sampling, caches intermediate results to avoid re-computation, and includes robust error handling.
 
 ### Module Structure
 
@@ -91,40 +91,48 @@ The analyzer computes a wide range of metrics across four key areas of model beh
 
 ### Weight Analysis Metrics
 
-| Metric                | Description                                         | Interpretation                                            |
-| --------------------- | --------------------------------------------------- | --------------------------------------------------------- |
-| **L1/L2/Spectral Norms** | Measures of weight magnitude and complexity.        | Higher values indicate larger weights; controls stability. |
-| **Weight Distribution** | Statistical properties (mean, std, skew, kurtosis). | Indicates weight health and potential for vanishing/exploding gradients. |
-| **Sparsity**          | Fraction of near-zero weights in a layer.           | High sparsity can indicate under-utilized or dead neurons. |
-| **Health Score**      | A combined metric (0-1) summarizing weight health.  | Higher score = healthier weight distribution.             |
+This analysis inspects the internal parameters of the model to diagnose its structural health and complexity.
+
+| Metric                | Description                                                                                             | Interpretation                                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| **L1/L2/Spectral Norms** | Mathematical norms that measure the aggregate magnitude of weights in a layer.                          | Higher values indicate larger, more complex weights which can lead to instability or overfitting. Consistently low norms might suggest underfitting. |
+| **Weight Distribution** | Statistical properties like mean, standard deviation, skewness, and kurtosis of the weight values.    | A distribution centered near zero with moderate variance is often ideal. High skew or kurtosis can signal issues like dying ReLUs or unstable gradients. |
+| **Sparsity**          | The fraction of weights in a layer that are very close to zero.                                         | High sparsity can indicate that many neurons are not contributing to the model's predictions (i.e., they are "dead" or under-utilized).            |
+| **Health Score**      | A composite score (0-1) derived from norm, sparsity, and distribution health.                           | A single-glance metric for layer health. Higher scores (closer to 1) indicate a healthier, more balanced weight distribution.                 |
 
 ### Calibration & Confidence Metrics
 
-| Metric             | Description                                          | Ideal Value     |
-| ------------------ | ---------------------------------------------------- | --------------- |
-| **ECE**            | Expected Calibration Error. Measures gap between confidence and accuracy. | 0 (perfect calibration) |
-| **Brier Score**    | Mean squared error for probabilistic predictions.    | 0 (perfect predictions) |
-| **Mean Confidence**| Average of the max probability for each prediction.  | Context-dependent |
-| **Mean Entropy**   | Average uncertainty across all predictions.          | Context-dependent |
+This analysis evaluates how well the model's predicted probabilities reflect the true likelihood of outcomes.
+
+| Metric             | Description                                                                                             | Ideal Value     |
+| ------------------ | ------------------------------------------------------------------------------------------------------- | --------------- |
+| **ECE**            | Expected Calibration Error. Measures the average gap between a model's prediction confidence and its actual accuracy. | 0 (perfect calibration) |
+| **Brier Score**    | The mean squared error between predicted probabilities and the one-hot encoded true labels. A measure of both calibration and resolution. | 0 (perfect predictions) |
+| **Mean Confidence**| The average of the highest probability assigned by the model for each prediction in the dataset.      | Context-dependent; very high values might indicate overconfidence. |
+| **Mean Entropy**   | The average Shannon entropy across all prediction distributions, quantifying the model's overall uncertainty. | Context-dependent; lower values indicate more confident (peaked) predictions. |
 
 ### Information Flow Metrics
 
-| Metric                  | Description                                            | Interpretation                                                              |
-| ----------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
-| **Activation Statistics** | Mean, std, and sparsity of layer activations.          | Indicates layer health, utilization, and potential for dead neurons.        |
-| **Effective Rank**      | Dimensionality of the information represented by a layer. | Higher rank suggests more diverse and expressive feature representations.  |
-| **Positive Ratio**      | Fraction of positive activations (e.g., after ReLU).   | Indicates activation patterns; values near 0 or 1 suggest saturation.       |
-| **Specialization Score**| A combined metric measuring a layer's feature learning quality. | Higher score suggests a good balance of activation, diversity, and utilization. |
+This analysis tracks how information (activations) propagates through the network, helping to identify bottlenecks and pathologies.
+
+| Metric                  | Description                                                                                                   | Interpretation                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Activation Statistics** | The mean, standard deviation, and sparsity of activations for each layer's output.                            | Helps diagnose vanishing gradients (mean/std near zero), exploding gradients (large values), or dead neurons (high sparsity after ReLU).       |
+| **Effective Rank**      | A measure of the dimensionality of the feature space represented by a layer's activations.                    | A higher rank suggests that the layer is learning a diverse and rich set of features. A sudden drop in rank can indicate an information bottleneck. |
+| **Positive Ratio**      | The fraction of activations that are positive (typically after a ReLU activation).                            | Values near 0 or 1 indicate that the layer is saturated (either always off or always on), which hinders learning. A balanced ratio is healthier. |
+| **Specialization Score**| A composite score (0-1) that combines activation health, balance, and effective rank to measure feature learning quality. | Higher scores suggest a layer is effectively transforming information without losing diversity or becoming saturated.                           |
 
 ### Training Dynamics Metrics
 
-| Metric                  | Description                                                     | Interpretation                                            |
-| ----------------------- | --------------------------------------------------------------- | --------------------------------------------------------- |
-| **Epochs to Convergence** | Epochs to reach 95% of peak validation performance.             | Lower is faster and more efficient learning.              |
-| **Overfitting Index**   | Average (Val Loss - Train Loss) in the final third of training. | Positive values indicate overfitting.                     |
-| **Training Stability**  | Standard deviation of recent validation losses.                 | Lower values indicate more stable training convergence.   |
-| **Peak Performance**    | Best validation accuracy/loss achieved and at which epoch.      | The model's best potential performance during training.   |
-| **Final Gap**           | Difference between validation and training loss at the last epoch. | Indicates the final overfitting or underfitting state.    |
+This analysis examines the model's learning history to understand its training efficiency, stability, and tendency to overfit.
+
+| Metric                  | Description                                                                                             | Interpretation                                                                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Epochs to Convergence** | The number of epochs required for the model to reach 95% of its peak validation performance.              | A measure of training speed. Lower is faster and indicates more efficient learning.                                                       |
+| **Overfitting Index**   | The average difference between validation loss and training loss during the final third of training.    | A positive value indicates overfitting (model performs better on training data). A negative value indicates underfitting.                  |
+| **Training Stability**  | The standard deviation of validation loss over the last several epochs.                                 | A lower value indicates a smooth and stable convergence. High values suggest an unstable training process (e.g., learning rate is too high). |
+| **Peak Performance**    | The best validation accuracy or loss achieved during the entire training process, and the epoch it occurred. | Represents the model's maximum potential performance. If it occurs early, it may be a sign of early overfitting.                          |
+| **Final Gap**           | The difference between validation and training loss at the very last epoch of training.                 | A snapshot of the model's generalization state at the end of training.                                                                    |
 
 ## 4. Usage Patterns & Use Cases
 
@@ -269,51 +277,51 @@ analysis_results/
 
 A 2x2 grid providing a holistic view of all models.
 
--   **Performance Table**: Key metrics for each model, including training insights if history is provided.
--   **Model Similarity**: A 2D PCA plot of weight statistics. Models that are close together have learned similar weight distributions.
--   **Confidence Profiles**: Violin plots showing the distribution of prediction confidence (max probability) for each model.
--   **Calibration Landscape**: A scatter plot of ECE vs. Brier Score. Models in the bottom-left quadrant are well-calibrated and have high probabilistic accuracy.
+-   **Performance Table**: A comprehensive summary of key performance indicators. If training history is provided, it includes metrics like "Best Accuracy," "Convergence Speed," and "Overfitting Index," offering a deeper look into training efficiency. Without it, the table focuses on final evaluation metrics.
+-   **Model Similarity**: A 2D PCA plot of weight statistics. Models that are close together have learned similar weight distributions, suggesting architectural or training similarities. Models far from the origin may be outliers.
+-   **Confidence Profiles**: Violin plots showing the distribution of prediction confidence (max probability) for each model. This reveals if a model is generally overconfident, underconfident, or well-balanced.
+-   **Calibration Landscape**: A scatter plot of ECE vs. Brier Score. The goal is to be in the bottom-left quadrant, which represents models that are both well-calibrated (low ECE) and produce accurate probabilities (low Brier Score).
 
 #### 2. Training Dynamics (`training_dynamics.png`)
 
 A deep dive into the learning process.
 
--   **Loss/Accuracy Curves**: Smoothed training and validation curves.
--   **Overfitting Analysis**: Plots the gap (validation loss - training loss) over epochs. A positive gap indicates overfitting.
--   **Best Epoch Performance**: A scatter plot showing each model's peak validation accuracy versus the epoch it was achieved. Helps identify models that learn faster.
--   **Summary Table**: Quantitative training metrics like convergence speed and stability.
+-   **Loss/Accuracy Curves**: Smoothed training and validation curves for loss and accuracy, providing a clear view of the learning trajectory and generalization performance over time.
+-   **Overfitting Analysis**: Plots the gap (validation loss - training loss) over epochs. A positive and growing gap is a clear sign of overfitting, while a negative gap indicates underfitting.
+-   **Best Epoch Performance**: A scatter plot showing each model's peak validation accuracy versus the epoch it was achieved. This helps identify models that learn faster and more effectively, distinguishing high performance from quick convergence.
+-   **Summary Table**: A detailed table of quantitative training metrics like convergence speed, stability score, and final overfitting gap, allowing for precise, data-driven comparisons of training efficiency.
 
 #### 3. Weight Learning Journey (`weight_learning_journey.png`)
 
 Assesses the health and evolution of model weights.
 
--   **Weight Evolution**: Shows how the L2 norm of weights changes across the layers of the network. Look for smooth progressions, not sudden explosions or collapses.
--   **Health Heatmap**: A layer-by-layer health score for each model. Green indicates healthy weights; red indicates potential issues like high sparsity or unstable distributions.
+-   **Weight Evolution**: Shows how the L2 norm of weights changes across the layers of the network. This visualization helps detect exploding gradients (sharp upward spikes) or vanishing gradients (weights collapsing to zero). A healthy model often shows a smooth progression.
+-   **Health Heatmap**: A layer-by-layer health score for each model, where green indicates healthy weights and red indicates potential issues like high sparsity or unstable distributions. This allows for quick identification of problematic layers within a specific model.
 
 #### 4. Confidence & Calibration Analysis (`confidence_calibration_analysis.png`)
 
 Evaluates the reliability of model predictions.
 
--   **Reliability Diagram**: Compares predicted probability to the actual fraction of positives. A perfectly calibrated model follows the diagonal.
--   **Confidence Distributions**: Violin plots showing how confident each model is.
--   **Per-Class ECE**: Bar chart showing calibration error for each class, helping to identify problematic classes.
--   **Uncertainty Landscape**: A 2D density plot of prediction confidence vs. entropy. Shows the model's uncertainty profile.
+-   **Reliability Diagram**: Compares the model's predicted probability (confidence) to the actual observed frequency of correct predictions. A perfectly calibrated model's line will be on the y=x diagonal.
+-   **Confidence Distributions**: Violin plots showing the shape of each model's confidence distribution. This helps to visualize if a model is timid (concentrated low confidence) or bold (concentrated high confidence).
+-   **Per-Class ECE**: A bar chart showing the calibration error for each individual class. This is crucial for identifying classes where the model's confidence is particularly unreliable.
+-   **Uncertainty Landscape**: A 2D density plot of prediction confidence vs. entropy. This shows the model's uncertainty profile and reveals how confidence and uncertainty are related in its predictions.
 
 #### 5. Information Flow Analysis (`information_flow_analysis.png`)
 
 Diagnoses how information propagates through the network.
 
--   **Activation Flow Overview**: Tracks the mean and standard deviation of activations through the layers. Helps spot vanishing or exploding activations.
--   **Effective Rank Evolution**: Plots the dimensionality of information at each layer. A collapsing rank may indicate a bottleneck.
--   **Activation Health Dashboard**: A heatmap showing potential issues like dead neurons (high sparsity) or saturated activations.
--   **Layer Specialization Analysis**: Plots a "specialization score" for each layer, indicating how well it's learning diverse features.
+-   **Activation Flow Overview**: Tracks the mean and standard deviation of activations through the layers. This is a primary tool for spotting vanishing or exploding activation signals during forward propagation.
+-   **Effective Rank Evolution**: Plots the dimensionality of the information being processed at each layer. A healthy network should maintain or transform this dimensionality effectively; a sudden collapse may indicate an information bottleneck.
+-   **Activation Health Dashboard**: A heatmap showing potential issues like dead neurons (high sparsity) or saturated activations (where neurons stop learning). It provides an actionable diagnostic for layer-specific problems.
+-   **Layer Specialization Analysis**: Plots a "specialization score" for each layer, which measures how well it's learning diverse and useful features. This can help identify layers that are underperforming or redundant.
 
 #### 6. Pareto Analysis (`pareto_analysis.png`)
 
 (Generated with `create_pareto_analysis()`) A powerful tool for hyperparameter tuning.
 
--   **Pareto Front Plot**: A scatter plot of Peak Accuracy vs. Overfitting Index. Models on the red-dashed "Pareto Front" represent the best possible trade-offs.
--   **Normalized Performance Heatmap**: A heatmap comparing all models across normalized metrics (accuracy, low overfitting, fast convergence), making it easy to see which configuration excels in which area.
+-   **Pareto Front Plot**: A scatter plot of Peak Accuracy vs. Overfitting Index. Models on the red-dashed "Pareto Front" represent the best possible trade-offs; any model not on the front is suboptimal because another model is better on at least one metric without being worse on the other.
+-   **Normalized Performance Heatmap**: A heatmap that normalizes and compares all models across key metrics (accuracy, low overfitting, fast convergence). This makes it easy to see which configuration excels in which area and to make a balanced decision based on priorities.
 
 ## 7. Troubleshooting
 

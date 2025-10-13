@@ -128,9 +128,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         """
         Safely flatten activation tensors using known batch size instead of guessing.
 
-        FIXED: Removed brittle magic number heuristics for batch dimension detection.
-        Uses the actual batch size from the prediction to make informed decisions.
-
         Args:
             output: Activation tensor from model prediction
 
@@ -153,7 +150,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
         # Case 3: Higher dimensional tensors (conv layers, etc.)
         elif len(original_shape) >= 3:
-            # FIXED: Use actual batch size instead of magic number guessing
             expected_batch_size = getattr(self, '_batch_size', None)
 
             if expected_batch_size is not None and original_shape[0] == expected_batch_size:
@@ -171,7 +167,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     flattened = output.reshape(original_shape[0], -1)
                     spatial_output = output
             else:
-                # FIXED: Handle case where batch dimension isn't first or is missing
                 if expected_batch_size is None:
                     logger.debug("No batch size available for tensor shape inference")
 
@@ -213,8 +208,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
     def _analyze_layer_information(self, output: np.ndarray, layer_info: Dict) -> Dict[str, Any]:
         """
         Analysis of layer information content with improved effective rank calculation.
-
-        FIXED: Removed restrictive condition for effective rank calculation.
         """
 
         # Use safe flattening
@@ -242,9 +235,7 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 channel_means = np.mean(spatial_output, axis=(0, 1, 2))
                 analysis['channel_variance'] = float(np.var(channel_means))
 
-        # FIXED: Compute effective rank with relaxed conditions
         if (output_flat.ndim == 2 and min(output_flat.shape) > 1):
-            # FIXED: Removed restrictive condition output_flat.shape[0] <= output_flat.shape[1]
             # SVD is well-defined regardless of whether samples > features
             try:
                 # Ensure matrix is centered for SVD

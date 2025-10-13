@@ -37,10 +37,6 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         """
         Analyze model confidence and calibration with consolidated metric storage.
-
-        FIXED: Eliminates redundancy by storing all confidence-related metrics
-        (including entropy) in results.confidence_metrics, while keeping only
-        calibration-specific metrics in results.calibration_metrics.
         """
         logger.info("Analyzing confidence and calibration...")
 
