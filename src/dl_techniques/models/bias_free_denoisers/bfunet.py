@@ -22,6 +22,7 @@ Denoising via Bias-Free Convolutional Neural Networks" (Mohan et al., ICLR 2020)
 applied to the U-Net architecture with deep supervision.
 """
 
+import os
 import keras
 from typing import Optional, Union, Tuple, List, Dict, Any
 
@@ -67,6 +68,33 @@ BFUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
         'initial_filters': 64,
         'blocks_per_level': 5,
         'description': 'Extra-Large BF-UNet (depth=5) for maximum performance.'
+    }
+}
+
+# ---------------------------------------------------------------------
+# Pretrained Weights Configuration
+# ---------------------------------------------------------------------
+
+BFUNET_PRETRAINED_WEIGHTS: Dict[str, Dict[str, str]] = {
+    'tiny': {
+        'imagenet_denoising': 'https://example.com/bfunet_tiny_imagenet_denoising.keras',
+        'general_denoising': 'https://example.com/bfunet_tiny_general_denoising.keras',
+    },
+    'small': {
+        'imagenet_denoising': 'https://example.com/bfunet_small_imagenet_denoising.keras',
+        'general_denoising': 'https://example.com/bfunet_small_general_denoising.keras',
+    },
+    'base': {
+        'imagenet_denoising': 'https://example.com/bfunet_base_imagenet_denoising.keras',
+        'general_denoising': 'https://example.com/bfunet_base_general_denoising.keras',
+    },
+    'large': {
+        'imagenet_denoising': 'https://example.com/bfunet_large_imagenet_denoising.keras',
+        'general_denoising': 'https://example.com/bfunet_large_general_denoising.keras',
+    },
+    'xlarge': {
+        'imagenet_denoising': 'https://example.com/bfunet_xlarge_imagenet_denoising.keras',
+        'general_denoising': 'https://example.com/bfunet_xlarge_general_denoising.keras',
     }
 }
 
@@ -428,6 +456,127 @@ def create_bfunet_denoiser(
     return model
 
 # ---------------------------------------------------------------------
+# Pretrained Weights Functions
+# ---------------------------------------------------------------------
+
+def _download_bfunet_weights(
+        variant: str,
+        dataset: str = "imagenet_denoising",
+        cache_dir: Optional[str] = None
+) -> str:
+    """
+    Download pretrained BFUNet weights from URL.
+
+    Args:
+        variant: String, model variant name (e.g., 'tiny', 'small', 'base').
+        dataset: String, dataset the weights were trained on.
+            Options: "imagenet_denoising", "general_denoising".
+        cache_dir: Optional string, directory to cache downloaded weights.
+            If None, uses default Keras cache directory.
+
+    Returns:
+        String, path to the downloaded weights file.
+
+    Raises:
+        ValueError: If variant or dataset is not available.
+
+    Example:
+        >>> weights_path = _download_bfunet_weights('base', 'imagenet_denoising')
+    """
+    if variant not in BFUNET_PRETRAINED_WEIGHTS:
+        raise ValueError(
+            f"No pretrained weights available for variant '{variant}'. "
+            f"Available variants: {list(BFUNET_PRETRAINED_WEIGHTS.keys())}"
+        )
+
+    if dataset not in BFUNET_PRETRAINED_WEIGHTS[variant]:
+        raise ValueError(
+            f"No pretrained weights available for dataset '{dataset}'. "
+            f"Available datasets for {variant}: "
+            f"{list(BFUNET_PRETRAINED_WEIGHTS[variant].keys())}"
+        )
+
+    url = BFUNET_PRETRAINED_WEIGHTS[variant][dataset]
+
+    logger.info(f"Downloading BFUNet-{variant} weights from {dataset}...")
+
+    # Download weights using Keras utility
+    weights_path = keras.utils.get_file(
+        fname=f"bfunet_{variant}_{dataset}.keras",
+        origin=url,
+        cache_dir=cache_dir,
+        cache_subdir="models/bfunet"
+    )
+
+    logger.info(f"Weights downloaded to: {weights_path}")
+    return weights_path
+
+
+def load_pretrained_weights_into_model(
+        model: keras.Model,
+        weights_path: str,
+        skip_mismatch: bool = True,
+        by_name: bool = True
+) -> None:
+    """
+    Load pretrained weights into a BFUNet model.
+
+    This function handles loading weights with smart mismatch handling,
+    particularly useful when the input shape, output channels, or deep
+    supervision settings differ between the pretrained and target models.
+
+    Args:
+        model: Keras Model, the BFUNet model to load weights into.
+        weights_path: String, path to the weights file (.keras format).
+        skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
+            Useful when loading weights with different input/output shapes
+            or deep supervision settings.
+        by_name: Boolean, whether to load weights by layer name.
+
+    Raises:
+        FileNotFoundError: If weights_path doesn't exist.
+        ValueError: If weights cannot be loaded.
+
+    Example:
+        >>> model = create_bfunet_variant('base', (256, 256, 3))
+        >>> load_pretrained_weights_into_model(model, 'bfunet_base.keras')
+        >>>
+        >>> # Load with different output channels (e.g., 1 channel grayscale)
+        >>> model = create_bfunet_variant('base', (256, 256, 1))
+        >>> load_pretrained_weights_into_model(
+        ...     model, 'bfunet_base_rgb.keras', skip_mismatch=True
+        ... )
+    """
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Weights file not found: {weights_path}")
+
+    try:
+        # Build model if not already built
+        if not model.built:
+            dummy_input = keras.random.normal((1,) + tuple(model.input.shape[1:]))
+            model(dummy_input, training=False)
+
+        logger.info(f"Loading pretrained weights from {weights_path}")
+
+        # Load weights with appropriate settings
+        model.load_weights(
+            weights_path,
+            skip_mismatch=skip_mismatch,
+            by_name=by_name
+        )
+
+        if skip_mismatch:
+            logger.info(
+                "Weights loaded with skip_mismatch=True. "
+                "Layers with shape mismatches were skipped."
+            )
+        else:
+            logger.info("All weights loaded successfully.")
+
+    except Exception as e:
+        raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+
+# ---------------------------------------------------------------------
 # Variant Creation Functions
 # ---------------------------------------------------------------------
 
@@ -435,6 +584,10 @@ def create_bfunet_variant(
         variant: str,
         input_shape: Tuple[int, int, int],
         enable_deep_supervision: bool = False,
+        pretrained: Union[bool, str] = False,
+        weights_dataset: str = "imagenet_denoising",
+        weights_input_shape: Optional[Tuple[int, int, int]] = None,
+        cache_dir: Optional[str] = None,
         **kwargs
 ) -> keras.Model:
     """
@@ -444,6 +597,15 @@ def create_bfunet_variant(
         variant: String, one of 'tiny', 'small', 'base', 'large', 'xlarge'.
         input_shape: Tuple of integers, shape of input images (height, width, channels).
         enable_deep_supervision: Boolean, whether to enable deep supervision outputs.
+        pretrained: Boolean or string. If True, loads pretrained weights from
+            default URL. If string, treats it as a path to local weights file.
+        weights_dataset: String, dataset for pretrained weights.
+            Options: "imagenet_denoising", "general_denoising".
+            Only used if pretrained=True.
+        weights_input_shape: Tuple, input shape used during weight pretraining.
+            Only needed if loading pretrained weights with different input_shape.
+            Defaults to (256, 256, 3) for standard denoising weights.
+        cache_dir: Optional string, directory to cache downloaded weights.
         **kwargs: Additional keyword arguments to override default parameters.
 
     Returns:
@@ -465,6 +627,25 @@ def create_bfunet_variant(
         ...                                     enable_deep_supervision=True,
         ...                                     activation='gelu',
         ...                                     use_residual_blocks=False)
+        >>>
+        >>> # Load pretrained weights
+        >>> model = create_bfunet_variant(
+        ...     'base',
+        ...     (256, 256, 3),
+        ...     pretrained=True,
+        ...     weights_dataset='imagenet_denoising'
+        ... )
+        >>>
+        >>> # Fine-tune with different input channels (e.g., grayscale)
+        >>> model = create_bfunet_variant(
+        ...     'base',
+        ...     (256, 256, 1),
+        ...     pretrained=True,
+        ...     weights_input_shape=(256, 256, 3)  # Pretrained on RGB
+        ... )
+        >>>
+        >>> # Load from local weights file
+        >>> model = create_bfunet_variant('large', (256, 256, 3), pretrained='path/to/weights.keras')
     """
     if variant not in BFUNET_CONFIGS:
         available_variants = list(BFUNET_CONFIGS.keys())
@@ -487,10 +668,73 @@ def create_bfunet_variant(
     logger.info(f"Creating bias-free U-Net variant '{variant}': {description}")
     logger.info(f"Deep supervision: {'enabled' if enable_deep_supervision else 'disabled'}")
 
-    return create_bfunet_denoiser(
+    # Handle pretrained weights
+    load_weights_path = None
+    skip_mismatch = False
+
+    if pretrained:
+        if isinstance(pretrained, str):
+            # Load from local file path
+            load_weights_path = pretrained
+            logger.info(f"Will load weights from local file: {load_weights_path}")
+        else:
+            # Download from URL
+            try:
+                load_weights_path = _download_bfunet_weights(
+                    variant=variant,
+                    dataset=weights_dataset,
+                    cache_dir=cache_dir
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to download pretrained weights: {str(e)}. "
+                    f"Continuing with random initialization."
+                )
+                load_weights_path = None
+
+        # Determine if we need to skip mismatches
+        if load_weights_path:
+            # Check if input shape matches
+            if weights_input_shape and input_shape != weights_input_shape:
+                logger.info(
+                    f"Loading weights pretrained on {weights_input_shape} "
+                    f"for model with input shape {input_shape}. "
+                    f"Will skip layers with shape mismatches."
+                )
+                skip_mismatch = True
+
+            # Check if output channels match
+            if input_shape[-1] != (weights_input_shape[-1] if weights_input_shape else 3):
+                logger.info(
+                    f"Output channels differ from pretrained weights. "
+                    f"Will skip final output layers."
+                )
+                skip_mismatch = True
+
+            # Check if deep supervision settings match
+            # If we can't determine this from weights, we'll let skip_mismatch handle it
+            skip_mismatch = True  # Always skip mismatches for safety with pretrained weights
+
+    # Create model
+    model = create_bfunet_denoiser(
         input_shape=input_shape,
         **config
     )
+
+    # Load pretrained weights if available
+    if load_weights_path:
+        try:
+            load_pretrained_weights_into_model(
+                model=model,
+                weights_path=load_weights_path,
+                skip_mismatch=skip_mismatch,
+                by_name=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to load pretrained weights: {str(e)}")
+            raise
+
+    return model
 
 # ---------------------------------------------------------------------
 # Utility Functions for Deep Supervision
