@@ -24,6 +24,7 @@ from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
 from .mish import Mish, SaturatedMish
 from .relu_k import ReLUK
+from .routing_probabilities import RoutingProbabilitiesLayer
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
 
@@ -46,6 +47,7 @@ ActivationType = Literal[
     'saturated_mish',
     'relu',
     'relu_k',
+    'routing_probabilities',
     'squash',
     'thresh_max'
 ]
@@ -201,6 +203,21 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'optional_params': {'k': 3},
         'use_case': 'Creates more aggressive non-linearities than standard ReLU.'
     },
+    'routing_probabilities': {
+        'class': RoutingProbabilitiesLayer,
+        'description': 'A non-trainable hierarchical routing layer for probabilistic classification.',
+        'required_params': [],
+        'optional_params': {
+            'output_dim': None,
+            'axis': -1,
+            'epsilon': 1e-7
+        },
+        'use_case': (
+            'Parameter-free alternative to softmax for multi-class '
+            'classification, introducing a structured, hierarchical bias '
+            'without trainable weights.'
+        )
+    },
     'squash': {
         'class': SquashLayer,
         'description': 'Squashing non-linearity for Capsule Networks.',
@@ -339,6 +356,25 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
             )
         if k <= 0:
             raise ValueError(f"k must be a positive integer, got {k}")
+
+    if activation_type == 'routing_probabilities':
+        output_dim = kwargs.get('output_dim', None)
+        axis = kwargs.get('axis', -1)
+        epsilon = kwargs.get('epsilon', 1e-7)
+        if output_dim is not None:
+            if not isinstance(output_dim, int) or output_dim <= 1:
+                raise ValueError(
+                    "output_dim must be an integer greater than 1, "
+                    f"but received: {output_dim}"
+                )
+        if not isinstance(axis, int):
+            raise ValueError(
+                f"axis must be an integer, but received: {axis}"
+            )
+        if not isinstance(epsilon, (float, int)) or epsilon <= 0:
+            raise ValueError(
+                f"epsilon must be a positive number, but received: {epsilon}"
+            )
 
     if activation_type == 'thresh_max':
         slope = kwargs.get('slope', 10.0)

@@ -4,7 +4,7 @@ The `dl_techniques.layers.activations` module provides a comprehensive collectio
 
 ## Overview
 
-This module includes sixteen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
+This module includes seventeen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
 
 ## Available Activation Types
 
@@ -26,6 +26,7 @@ The following layers are supported by the factory system with automated paramete
 | `mish` | `Mish` | A self-regularized, non-monotonic activation function. | Smooth activation that can outperform ReLU in deep models. |
 | `saturated_mish` | `SaturatedMish` | Mish variant that smoothly saturates for large inputs. | Preventing activation explosion in very deep networks. |
 | `relu_k` | `ReLUK` | Powered ReLU activation: `max(0, x)^k`. | Creating more aggressive non-linearities than standard ReLU. |
+| `routing_probabilities` | `RoutingProbabilitiesLayer` | A non-trainable hierarchical routing layer for probabilistic classification, an alternative to softmax. | Parameter-free alternative to softmax, introducing hierarchical bias without trainable weights. |
 | `squash` | `SquashLayer` | Squashing non-linearity for Capsule Networks. | Normalizing vector outputs in Capsule Networks. |
 | `thresh_max` | `ThreshMax` | Sparse softmax variant using a differentiable step function. | Creating sparse, confident probability distributions. |
 
@@ -146,6 +147,13 @@ sat_mish = create_activation_layer(
 
 ```python
 relu_squared = create_activation_layer('relu_k', k=2)
+```
+
+### RoutingProbabilitiesLayer
+**Optional:** `output_dim` (int, default: None), `axis` (int, default: -1), `epsilon` (float, default: 1e-7)
+
+```python
+routing_probs = create_activation_layer('routing_probabilities', output_dim=10) # `output_dim` can also be inferred
 ```
 
 ### SquashLayer
@@ -313,4 +321,4 @@ Get comprehensive information about all available activation types.
 ### Types
 
 #### `ActivationType`
-A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'xsilu'`, etc.
+A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'routing_probabilities'`, `'xsilu'`, etc.
