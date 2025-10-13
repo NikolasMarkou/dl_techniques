@@ -116,17 +116,6 @@ class CalibrationAnalyzer(BaseAnalyzer):
             confidence_metrics = self._compute_confidence_metrics(y_pred_proba)
             entropy_stats = compute_prediction_entropy_stats(y_pred_proba)
 
-            # Manually calculate per-sample entropy if it's missing, ensuring visualizers work.
-            if 'entropy' not in entropy_stats:
-                # Add a small epsilon to prevent log(0) for probabilities of 0.
-                epsilon = 1e-9
-                per_sample_entropy = -np.sum(y_pred_proba * np.log2(y_pred_proba + epsilon), axis=1)
-                entropy_stats['entropy'] = per_sample_entropy
-
-            # Ensure mean_entropy is present for summary tables.
-            if 'entropy' in entropy_stats and 'mean_entropy' not in entropy_stats:
-                entropy_stats['mean_entropy'] = float(np.mean(entropy_stats['entropy']))
-
             # Combine all confidence-related metrics into one place
             all_confidence_metrics = {**confidence_metrics, **entropy_stats}
             results.confidence_metrics[model_name] = all_confidence_metrics

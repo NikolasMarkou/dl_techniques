@@ -621,7 +621,6 @@ class SummaryVisualizer(BaseVisualizer):
 
         # Configure plot styling and labels
         ax.set_ylabel('Confidence (Max Probability)')
-        ax.set_xlabel('Models')
         ax.set_title('Confidence Distribution Profiles')
         ax.grid(True, alpha=ALPHA_LOW, axis='y')
 

@@ -373,6 +373,7 @@ def compute_prediction_entropy_stats(y_prob: np.ndarray) -> Dict[str, float]:
     entropies = -np.sum(y_prob_clipped * np.log(y_prob_clipped), axis=1)
 
     return {
+        'entropy': entropies,
         'mean_entropy': np.mean(entropies),
         'std_entropy': np.std(entropies),
         'median_entropy': np.median(entropies),
