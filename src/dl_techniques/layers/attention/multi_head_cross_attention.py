@@ -368,11 +368,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
 
-        # Build hierarchical routing layer if exists
-        if self.hierarchical_routing is not None:
-            # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
-            attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
-            self.hierarchical_routing.build(attn_shape)
+        # # Build hierarchical routing layer if exists
+        # if self.hierarchical_routing is not None:
+        #     # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
+        #     attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
+        #     self.hierarchical_routing.build(attn_shape)
 
         # Build adaptive softmax layer if exists
         if self.adaptive_softmax is not None:
