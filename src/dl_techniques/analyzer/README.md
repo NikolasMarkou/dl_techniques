@@ -110,14 +110,16 @@ This analysis inspects the internal parameters of the model to diagnose its stru
 
 ### Spectral Analysis Metrics (WeightWatcher)
 
-This analysis examines the eigenvalue spectrum of weight matrices to assess training quality and complexity without requiring test data.
+This analysis examines the eigenvalue spectrum of weight matrices to assess training quality and complexity without requiring test data. It is based on the theory of **Heavy-Tailed Self-Regularization (HTSR)**, which posits that SGD implicitly regularizes deep neural networks, causing the distribution of eigenvalues of their weight matrices—the Empirical Spectral Density (ESD)—to develop a characteristic heavy-tailed shape. This shape, quantifiable with a power-law, correlates strongly with the model's ability to generalize.
 
 | Metric                     | Description                                                                                                       | Interpretation                                                                                                                                         |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Power-Law Exponent (α)** | The exponent of the power-law fit to the eigenvalue distribution of weight matrices.                              | `α < 2.0` may indicate over-training or memorization. `2.0 < α < 6.0` suggests a well-trained model. `α > 6.0` may indicate under-training.             |
-| **Concentration Score**    | A composite metric (Gini, dominance ratio) measuring the inequality of the eigenvalue distribution.               | High values suggest information is concentrated in a few dominant patterns, which can indicate model brittleness or highlight critical layers.         |
-| **Matrix Entropy**         | A measure of the information distribution across eigenvalues, normalized by the effective rank of the matrix.     | Higher entropy indicates a more uniform distribution of information across weight components, which is often a sign of better generalization.        |
-| **Stable Rank**            | The effective rank of a weight matrix, indicating the dimensionality of the space spanned by its singular vectors. | A higher stable rank suggests the layer is utilizing its full capacity. A low stable rank can indicate over-parameterization or redundant features. |
+| **Power-Law Exponent (α)** | The exponent of the power-law fit `P(λ) ~ λ^(-α)` to the tail of the eigenvalue distribution (ESD) of weight matrices.                              | This is the key indicator of training quality. `α < 2.0` suggests an extremely heavy-tailed spectrum, which can indicate over-training or memorization. `2.0 < α < 6.0` typically corresponds to a well-trained model that generalizes well. `α > 6.0` may indicate under-training. The value `α ≈ 2.0` represents a critical phase boundary for "Ideal Learning."             |
+| **Concentration Score**    | A composite metric measuring the inequality of the eigenvalue distribution. It combines the Gini Coefficient, Dominance Ratio, and Participation Ratio.               | High values suggest information is concentrated in a few dominant patterns, which can indicate model brittleness, highlight critical layers, or suggest that pruning/quantization may be risky.         |
+| **Matrix Entropy**         | A measure of the information distribution across eigenvalues, calculated from the Shannon entropy of the normalized singular values.     | Higher entropy indicates a more uniform spread of information across all learned features (eigenvectors), which is often a sign of better generalization and robustness.        |
+| **Stable Rank**            | The effective rank of a weight matrix, `||W||_F^2 / ||W||_2^2`, which simplifies to `(Σ λ_i) / max(λ_i)`. It indicates the dimensionality of the space spanned by its singular vectors. | A higher stable rank suggests the layer is utilizing its full capacity to learn diverse features. A low stable rank can indicate over-parameterization, redundant features, or an information bottleneck. |
+| **Gini Coefficient** | A statistical measure of inequality in the eigenvalue distribution, ranging from 0 (perfect equality) to 1 (perfect inequality). | A sub-metric of the Concentration Score. High Gini values mean a few eigenvalues are much larger than the rest, indicating information concentration. |
+| **Dominance Ratio** | The ratio of the largest eigenvalue to the sum of all other eigenvalues. | A sub-metric of the Concentration Score. This directly quantifies how much a single feature or pattern dominates the layer's learned representation. |
 
 ### Calibration & Confidence Metrics
 
@@ -349,9 +351,9 @@ A 2x2 grid providing a holistic view of all models.
 
 A dashboard for comparing models based on their weight matrix spectral properties.
 
--   **Mean Power-Law Exponent (α)**: A bar chart comparing the average α value for each model. Green indicates the ideal range (2.0-6.0), while red indicates potential over- or under-training. This is a key indicator of training quality.
--   **Mean Concentration Score**: A bar chart comparing the average information concentration. Higher scores suggest some layers are more "brittle" or specialized.
--   **Recommendations**: The `analysis_results.json` file contains specific recommendations based on the spectral analysis for each model.
+-   **Mean Power-Law Exponent (α)**: A bar chart comparing the average α value for each model. This is the single most important plot for data-free generalization estimates. A green bar indicates the ideal range (2.0-6.0), red indicates potential over- or under-training, and yellow is borderline.
+-   **Mean Concentration Score**: A bar chart comparing the average information concentration. Higher scores suggest some layers are more "brittle" or specialized. Use this to gauge model robustness, especially if you plan to prune or quantize the model.
+-   **Recommendations**: The `analysis_results.json` file contains specific, actionable recommendations based on the spectral analysis for each model (e.g., "Model may be over-trained. Consider early stopping...").
 
 #### 3. Training Dynamics (`training_dynamics.png`)
 
@@ -393,6 +395,17 @@ Diagnoses how information propagates through the network.
 
 -   **Pareto Front Plot**: A scatter plot of Peak Accuracy vs. Overfitting Index. Models on the "Pareto Front" represent the best possible trade-offs.
 -   **Normalized Performance Heatmap**: Compares all models across key metrics, making it easy to identify the best configuration based on priorities.
+
+#### 8. Detailed Spectral Plots (`spectral_plots/*.png`)
+
+These plots provide a layer-by-layer deep dive into the power-law fit that is summarized in the main spectral dashboard. Each plot visualizes the Empirical Spectral Density (ESD) of a single layer's weight matrix.
+
+-   **What it shows**: A log-log plot of the eigenvalue (λ) distribution. A straight line in the tail of this plot is the signature of a power-law.
+-   **How to read it**:
+    -   The **blue dots** represent the actual binned histogram of the layer's eigenvalues.
+    -   The **red line** is the best-fit power-law model, `P(λ) ~ λ^(-α)`. The steepness of this line's slope is the exponent `α`.
+    -   The **vertical dashed line (`xmin`)** marks the beginning of the power-law tail, where the fit is applied.
+    -   **Interpretation**: A well-trained layer will show the blue dots in the tail (right side of the plot) aligning closely with the red line. A poor fit may indicate that the layer has not developed a clear heavy-tailed structure, which could be a sign of training issues.
 
 ## 7. Troubleshooting
 
