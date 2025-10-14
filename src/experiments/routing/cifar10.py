@@ -253,15 +253,20 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 3
+    epochs: int = 100
     batch_size: int = 128
     learning_rate: float = 0.001
-    early_stopping_patience: int = 50
+    early_stopping_patience: int = 30
     monitor_metric: str = 'val_accuracy'
     loss_function: Callable = field(default_factory=lambda: keras.losses.CategoricalCrossentropy(from_logits=False))
 
     # --- Models to Evaluate ---
-    model_types: List[str] = field(default_factory=lambda: ['Softmax', 'HierarchicalRouting', 'RoutingProbabilities'])
+    model_types: List[str] = field(default_factory=lambda: [
+        'PlainRoutingProbabilities', # Routing
+        'RoutingProbabilities',      # Dense -> Routing
+        'HierarchicalRouting',       # HierarchicalRouting
+        'Softmax',                   # Dense -> Softmax
+    ])
 
     # --- Experiment Configuration ---
     output_dir: Path = Path("results")
@@ -482,6 +487,13 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
             name='logits'
         )(x)
         predictions = RoutingProbabilitiesLayer(name='predictions')(logits)
+
+    elif model_type == 'PlainRoutingProbabilities':
+        predictions = (
+            RoutingProbabilitiesLayer(
+                output_dim=config.num_classes,
+                name='predictions')(x)
+        )
 
     else:
         raise ValueError(f"Unknown model_type: {model_type}. "
@@ -975,26 +987,6 @@ def print_experiment_summary(
     logger.info("ANALYSIS COMPLETE")
     logger.info("=" * 80)
     logger.info("")
-    logger.info("Key Insights:")
-    logger.info("  - Compare accuracy vs. computational complexity (O(N) vs O(log N))")
-    logger.info("  - Examine calibration differences between output layer types")
-    logger.info("  - Analyze training dynamics and convergence patterns")
-    logger.info("  - Check spectral metrics for training quality assessment")
-    logger.info("")
-    logger.info("Key Outputs:")
-    logger.info("  1. summary_dashboard.png - High-level comparison of all models")
-    logger.info("  2. spectral_summary.png - Training quality (α values)")
-    logger.info("  3. training_dynamics.png - Learning curves and stability")
-    logger.info("  4. confidence_calibration_analysis.png - Reliability analysis")
-    logger.info("  5. analysis_results.json - Raw metrics for further analysis")
-    logger.info("")
-    logger.info("Interpretation Tips:")
-    logger.info("  - Lower ECE & Brier Score = Better calibration")
-    logger.info("  - Power-law α in [2.0, 6.0] = Well-trained model")
-    logger.info("  - Lower Overfitting Index = Better generalization")
-    logger.info("  - Compare routing approaches to identify best trade-offs")
-    logger.info("")
-
 
 # ==============================================================================
 # MAIN EXECUTION
