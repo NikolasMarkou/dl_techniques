@@ -1,8 +1,72 @@
 """
-Enhanced Metrics module for WeightWatcher integration
+The mathematical core of spectral analysis for neural networks.
 
-This module contains autonomous functions for calculating various spectral and statistical metrics
-on neural network weight matrices, including advanced concentration and localization measures.
+This module provides a suite of functions for analyzing the spectral
+properties of deep learning model weights, based on principles from Random
+Matrix Theory and statistical physics. The central idea is that the
+distribution of eigenvalues of a layer's weight matrix contains a wealth of
+information about the quality of training and the model's potential for
+generalization.
+
+Architecture and Methodology
+---------------------------
+The analysis pipeline implemented here follows these primary steps:
+1.  **Eigenvalue Computation**: For a given weight matrix `W`, the eigenvalues
+    {λ_i} of its correlation matrix `WW^T` are computed. This is achieved
+    efficiently via Singular Value Decomposition (SVD), leveraging the
+    relationship λ_i = σ_i^2, where {σ_i} are the singular values of `W`.
+    For large matrices, truncated SVD (`svds`) is used for performance.
+2.  **Power-Law Fitting**: The core hypothesis is that the tail of the
+    Empirical Spectral Density (ESD) of these eigenvalues follows a truncated
+    power-law distribution, P(λ) ~ λ^(-α). The function `fit_powerlaw`
+    estimates the exponent `α` using a robust Maximum Likelihood Estimation
+    (MLE) technique. This exponent `α` serves as the primary metric for
+    assessing training quality.
+3.  **Statistical Characterization**: Beyond the power-law fit, a variety
+    of metrics are computed to characterize the shape and properties of the
+    entire spectrum, including:
+    -   **Information Content**: Stable Rank and Matrix Entropy measure the
+        effective dimensionality and the uniformity of information spread
+        across eigenvalues.
+    -   **Concentration**: The Gini Coefficient and Dominance Ratio quantify
+        the inequality in the spectrum, indicating whether information is
+        concentrated in a few dominant modes.
+    -   **Localization**: The Participation Ratio of the top eigenvectors
+        is used to determine if the principal components of the learned
+        features are localized to specific neurons or distributed.
+
+Foundational Mathematics
+------------------------
+-   **Power-Law Exponent (α)**: This is the key metric. The MLE for a
+    continuous power-law distribution is given by:
+    α = 1 + n * [ Σ_{i=1 to n} log(x_i / x_min) ]^(-1)
+    Empirical studies have shown a strong correlation between the value of `α`
+    and a model's generalization gap. An `α` in the range (2.0, 6.0) is
+    often indicative of a well-trained model, with values below 2.0
+    suggesting overfitting and values above 6.0 suggesting under-training.
+
+-   **Stable Rank**: Defined as ||W||_F^2 / ||W||_2^2, which simplifies to
+    (Σ λ_i) / max(λ_i). It provides a more robust measure of the "effective"
+    rank of a matrix than the discrete matrix rank, indicating the
+    dimensionality of the space spanned by the weights.
+
+-   **Participation Ratio (PR)**: Derived from Anderson localization theory in
+    physics, the PR of an eigenvector `v` is calculated as:
+    PR(v) = (Σ v_i^2)^2 / (Σ v_i^4)
+    It measures how many basis elements an eigenvector is spread across. A
+    low PR indicates that a principal feature is "localized" to a small
+    subset of neurons.
+
+References
+----------
+1.  Martin, C., & Mahoney, M. W. (2021). "Heavy-Tailed Universals in
+    Deep Neural Networks." arXiv preprint arXiv:2106.07590.
+2.  Clauset, A., Shalizi, C. R., & Newman, M. E. J. (2009). "Power-law
+    distributions in empirical data." SIAM review, 51(4), 661-703.
+3.  Sagun, L., Evci, U., Guney, V. U., Dauphin, Y., & Bottou, L. (2017).
+    "Empirical analysis of the hessian of loss functions for deep neural
+    networks." arXiv preprint arXiv:1706.04454.
+
 """
 
 import numpy as np

@@ -7,8 +7,14 @@ Common utility functions used throughout the analyzer module.
 import numpy as np
 import matplotlib.colors as mcolors
 from typing import List, Optional, Dict, Tuple, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 def safe_set_xticklabels(ax, labels, rotation=0, max_labels=10):
     """Safely set x-tick labels with proper handling."""
@@ -389,3 +395,6 @@ def truncate_model_name(name: str, max_len: int = 12, filler: str = "...") -> st
     end_len = chars_to_keep // 2
 
     return f"{name[:start_len]}{filler}{name[-end_len:]}"
+
+# ---------------------------------------------------------------------
+

@@ -8,9 +8,15 @@ import numpy as np
 from typing import List
 import matplotlib.pyplot as plt
 
-from .base import BaseVisualizer
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+from .base import BaseVisualizer
 from ..constants import WEIGHT_HEALTH_L2_NORMALIZER, WEIGHT_HEALTH_SPARSITY_THRESHOLD
+
+# ---------------------------------------------------------------------
 
 # Figure Layout Constants
 FIGURE_SIZE = (14, 10)
@@ -65,6 +71,7 @@ BBOX_COLOR_GRAY = 'lightgray'
 TEXT_COLOR_WHITE = 'white'
 TEXT_COLOR_BLACK = 'black'
 
+# ---------------------------------------------------------------------
 
 class WeightVisualizer(BaseVisualizer):
     """Creates weight analysis visualizations with centralized legend."""
@@ -297,3 +304,5 @@ class WeightVisualizer(BaseVisualizer):
                    ha='center', va='center', transform=ax.transAxes)
             ax.set_title('Weight Health Heatmap')
             ax.axis('off')
+
+# ---------------------------------------------------------------------

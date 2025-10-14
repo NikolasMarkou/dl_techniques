@@ -1,18 +1,84 @@
 """
-Information Flow Analysis Module
+Analyze the flow of information and feature dimensionality through layers.
 
-Analyzes how information flows through the network layers.
+This analyzer diagnoses the health of a neural network by examining the
+activations of its intermediate layers. It is designed to detect common
+pathologies such as vanishing or exploding gradients, dead neurons, and
+information bottlenecks, which can impede a model's ability to learn.
+
+Architecture
+------------
+The analysis is performed by constructing a temporary Keras "feature
+extractor" model. This new model shares the same input as the original model
+but is reconfigured to output a list of activation tensors from each
+intermediate layer. By performing a single forward pass on a batch of data,
+this architecture efficiently captures a snapshot of the entire network's
+internal state. The analyzer then processes this sequence of activation
+tensors to quantify how information is transformed at each stage of the
+network.
+
+Foundational Mathematics
+------------------------
+The analysis relies on two primary sets of metrics computed from the
+activation matrix `A` of each layer, where rows correspond to samples in a
+batch and columns correspond to features (neurons):
+
+1.  **Activation Statistics**: Basic statistical moments are used to diagnose
+    the health of the signal propagation.
+    -   The `mean` and `standard deviation` of activations are tracked across
+        layers. Values consistently close to zero suggest a vanishing signal
+        (gradient), while very large values suggest an exploding signal.
+    -   `Sparsity`, the fraction of near-zero activations, is particularly
+        useful for diagnosing "dead neurons," a common issue with ReLU-based
+        activations where a neuron ceases to output non-zero values.
+
+2.  **Effective Rank**: This metric quantifies the dimensionality of the
+    feature space learned by a layer, providing a more robust measure than
+    the classical matrix rank. It is designed to identify "information
+    bottlenecks," where a layer compresses the feature representation too
+    aggressively, potentially discarding useful information. The calculation
+    proceeds as follows:
+    -   First, Singular Value Decomposition (SVD) is performed on the
+        centered activation matrix `A` to obtain its singular values `{σ_i}`.
+    -   These singular values are normalized to form a probability
+        distribution, `p_i = σ_i / Σσ_j`. Each `p_i` represents the
+        proportion of variance captured by the i-th principal component.
+    -   The Shannon entropy of this distribution is calculated:
+        `H = -Σ p_i * log(p_i)`.
+    -   The effective rank is `exp(H)`.
+
+    Intuitively, `exp(H)` measures the number of "significant" dimensions in
+    the activation space. If all singular values are equal (maximum entropy),
+    the effective rank equals the true rank. If a few singular values
+    dominate (low entropy), the effective rank is low. A sharp drop in
+    effective rank between layers is a strong indicator of an information
+    bottleneck.
+
+References
+----------
+1.  Tishby, N., & Zaslavsky, N. (2015). "Deep learning and the information
+    bottleneck principle." ITW.
+2.  Aghajanian, S., et al. (2020). "Characterizing signal propagation to
+    close the performance gap between Caffe and PyTorch." SysML.
+3.  Roy, O., & Vetterli, M. (2007). "The effective rank: A measure of
+    effective dimensionality." LATS.
+
 """
 
 import keras
 import numpy as np
 from typing import Dict, Any, Optional, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
 from ..config import AnalysisConfig
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class InformationFlowAnalyzer(BaseAnalyzer):
     """Analyzes information flow through network layers."""
@@ -322,3 +388,5 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                                          if spatial_acts is not None and len(spatial_acts.shape) >= 4
                                          else None)
                 }
+
+# ---------------------------------------------------------------------

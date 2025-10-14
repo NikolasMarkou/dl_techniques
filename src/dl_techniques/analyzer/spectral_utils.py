@@ -1,11 +1,52 @@
 """
-Utility functions for Keras weight matrix spectral analysis.
+Provide utilities to adapt Keras layer weights for spectral analysis.
 
-This module provides utility functions for analyzing weight matrices in Keras models,
-including layer type inference, weight extraction, and visualization helpers.
+This module serves as a crucial bridge between the high-level Keras API and
+the low-level mathematical requirements of spectral analysis. The core
+challenge in analyzing neural network weights is that different layer types
+(Dense, Conv2D, Embedding, etc.) store their learnable parameters in
+tensors of varying shapes and semantics. Spectral methods, however,
+fundamentally operate on 2D matrices.
+
+Architecture and Purpose
+-----------------------
+The primary architectural function of this module is to act as an adapter. It
+abstracts away the heterogeneity of Keras layers, providing a standardized
+interface for the `spectral_metrics` module. It inspects a given Keras
+layer, identifies its type, and intelligently extracts and reshapes its
+weight tensor into a 2D matrix representation upon which eigenvalue
+decomposition can be performed. This allows the core analysis logic to remain
+agnostic to the specifics of layer architecture.
+
+Foundational Mathematics: Tensor Matricization
+----------------------------------------------
+The most critical transformation occurs in `get_weight_matrices` for
+convolutional layers. A standard Conv2D layer's weights are stored in a 4D
+tensor of shape `(kernel_height, kernel_width, in_channels, out_channels)`.
+To analyze its spectral properties, this tensor must be "unfolded" or
+"matricized" into a 2D matrix.
+
+This module implements a standard matricization where the tensor is reshaped
+into a matrix `W_matrix` of shape
+`(kernel_height * kernel_width * in_channels, out_channels)`. This reshaping
+is not arbitrary; the resulting matrix represents the linear transformation
+applied by the convolutional filters. The spectrum of this matrix (i.e., its
+singular values) captures the properties of this transformation, such as its
+effective rank and the distribution of its principal components. The product
+of the kernel dimensions (`kernel_height * kernel_width`) is also extracted
+as the receptive field size (`rf`), which can be used for normalization in
+more advanced spectral analyses.
+
+References
+----------
+1.  Rahaman, N., et al. (2019). "On the Spectral Bias of Neural Networks."
+    ICML. (Discusses the Fourier analysis of neural network layers, which
+    relates to the matricization of convolutional kernels).
+2.  Martin, C., & Mahoney, M. W. (2021). "Heavy-Tailed Universals in
+    Deep Neural Networks." arXiv preprint arXiv:2106.07590.
+
 """
 
-import os
 import keras
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,9 +56,7 @@ from typing import Dict, List, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.analyzer.constants import (
-    LayerType, SPECTRAL_DEFAULT_BINS, SPECTRAL_DEFAULT_FIG_SIZE, SPECTRAL_DEFAULT_DPI
-)
+from dl_techniques.analyzer.constants import LayerType
 
 from dl_techniques.utils.logger import logger
 

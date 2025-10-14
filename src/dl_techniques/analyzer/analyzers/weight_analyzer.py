@@ -1,19 +1,89 @@
 """
-Weight Analysis Module
+Analyze the statistical properties and structural similarity of model weights.
 
-Analyzes weight distributions, statistics, and health metrics.
+This analyzer provides a quantitative, data-independent assessment of a neural
+network's internal state by examining its weight tensors. The core philosophy
+is that the statistical distributions of weights within and across layers
+can reveal insights into training health, model complexity, and architectural
+similarity.
+
+Architecture and Methodology
+---------------------------
+The analysis is performed in two main stages:
+
+1.  **Per-Layer Statistical Profiling**: The analyzer iterates through each
+    layer of a given model. For each weight tensor, it computes a feature
+    vector comprising fundamental statistical descriptors. This captures the
+    "micro-level" properties of the model's learned parameters.
+
+2.  **Model-Level Comparison via PCA**: To compare different models, the
+    per-layer feature vectors of each model are concatenated into a single,
+    high-dimensional vector. This vector serves as a holistic statistical
+    fingerprint for the entire model. Principal Component Analysis (PCA) is
+    then applied to the collection of these model fingerprints. By projecting
+    these high-dimensional vectors onto the first two principal components,
+    we can visualize the models in a 2D "model space." Models that cluster
+    together in this space have learned statistically similar weight
+    distributions, suggesting they have converged to similar solutions or
+    possess similar architectural properties.
+
+Foundational Mathematics
+------------------------
+The analysis is grounded in fundamental statistical and linear algebra
+concepts applied to the weight tensors of a neural network:
+
+-   **Statistical Moments**: The analysis calculates the first four central
+    moments of each layer's weight distribution: mean, standard deviation
+    (variance), skewness, and kurtosis. These metrics diagnose the "health"
+    of the learned weights. A near-zero mean and moderate standard deviation
+    are often desirable. High skewness can indicate neuron saturation or
+    dying ReLU issues, while high kurtosis points to the presence of extreme
+    outlier weights, which can affect model stability.
+
+-   **Matrix and Vector Norms**: L1, L2, and spectral norms are computed to
+    quantify the overall magnitude of the weight tensors. These norms serve
+    as proxies for model complexity. The spectral norm (the largest singular
+    value of the weight matrix) is particularly significant as it bounds the
+    Lipschitz constant of the layer, which relates directly to the model's
+    robustness to adversarial perturbations and its generalization
+    capabilities.
+
+-   **Principal Component Analysis (PCA)**: This linear dimensionality
+    reduction technique is used to find the principal axes of variation
+    within the "model space." Each model's statistical fingerprint is treated
+    as a point in a high-dimensional space. PCA identifies the directions
+    (principal components) that capture the most variance among these points.
+    Visualizing models along the top two components provides an intuitive map
+    of their structural similarities.
+
+References
+----------
+1.  Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*.
+    MIT Press. (Provides background on weight initialization and norms).
+2.  Neyshabur, B., Tomioka, R., & Srebro, N. (2015). "Norm-Based Capacity
+    Control in Neural Networks." COLT.
+3.  Li, H., Xu, Z., Taylor, G., & Goldstein, T. (2018). "Visualizing the
+    Loss Landscape of Neural Nets." NeurIPS. (While focused on loss, it
+    popularized the idea of using PCA to understand high-dimensional
+    spaces in deep learning).
+
 """
 
 import numpy as np
 import scipy.stats
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 from typing import Dict, Any, Optional
+from sklearn.preprocessing import StandardScaler
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
-from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 class WeightAnalyzer(BaseAnalyzer):
     """Analyzes weight distributions and statistics."""

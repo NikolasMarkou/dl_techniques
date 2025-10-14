@@ -1,7 +1,70 @@
 """
-Calibration Analysis Module
+Assess the reliability and uncertainty of model predictions.
 
-Analyzes model calibration and confidence metrics.
+This analyzer evaluates how well a model's predicted probabilities align with
+the true likelihood of outcomes. Modern neural networks, particularly when
+trained with techniques that encourage low-entropy outputs (e.g., cross-
+entropy loss), often become overconfident. This means the model might assign
+a high probability (e.g., 99%) to a prediction that is incorrect. For
+high-stakes applications, understanding and quantifying this discrepancy
+between confidence and accuracy is critical. This module provides the tools
+to measure this gap.
+
+Architecture
+------------
+The analyzer operates as a post-processing component. It does not run the
+model but consumes pre-computed predictions (probabilities) and true labels.
+Its primary role is to delegate these data to a suite of specialized metric
+functions, each designed to probe a different aspect of probabilistic
+prediction quality. The results are then structured into two distinct
+categories:
+-   **Calibration Metrics**: Focus on the reliability of the probabilities. It
+    answers the question: "When the model says it's P% confident, is it
+    correct P% of the time?" Key metrics include ECE and Brier score.
+-   **Confidence Metrics**: Characterize the model's internal sense of
+    certainty, irrespective of correctness. It answers: "How certain is the
+    model in its predictions?" Key metrics include prediction entropy and
+    the distribution of maximum probabilities.
+
+Foundational Mathematics
+------------------------
+The core of the analysis rests on established metrics from statistics and
+information theory to quantify the quality of probabilistic forecasts.
+
+-   **Expected Calibration Error (ECE)**: This is the primary metric for
+    miscalibration. It measures the average gap between a model's prediction
+    confidence and its actual accuracy. The calculation involves partitioning
+    predictions into `M` bins based on their confidence scores. For each bin
+    `B_m`, the average confidence `conf(B_m)` and accuracy `acc(B_m)` are
+    computed. The ECE is the weighted average of their absolute difference:
+    ECE = Σ_{m=1 to M} (|B_m|/n) * |acc(B_m) - conf(B_m)|
+    A perfectly calibrated model has an ECE of 0.
+
+-   **Brier Score**: This is a "proper scoring rule" that measures both
+    calibration and resolution (the model's ability to distinguish outcomes).
+    It is the mean squared error between the predicted probability vector `p`
+    and the one-hot encoded true label vector `o`:
+    BS = (1/N) * Σ_{i=1 to N} Σ_{j=1 to K} (p_ij - o_ij)²
+    A lower Brier score is better, indicating predictions that are both
+    accurate and well-calibrated.
+
+-   **Shannon Entropy**: This metric is used to quantify the uncertainty of an
+    individual prediction. For a probability distribution `p` over `K`
+    classes, the entropy is:
+    H(p) = -Σ_{i=1 to K} p_i * log(p_i)
+    A low entropy value corresponds to a "peaked," high-confidence
+    prediction, while a high entropy value indicates an uncertain prediction
+    with probabilities spread across multiple classes.
+
+References
+----------
+1.  Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). "On calibration
+    of modern neural networks." ICML.
+2.  Niculescu-Mizil, A., & Caruana, R. (2005). "Predicting good
+    probabilities with supervised learning." ICML.
+3.  Brier, G. W. (1950). "Verification of forecasts expressed in terms of
+    probability." Monthly Weather Review.
+
 """
 
 import keras

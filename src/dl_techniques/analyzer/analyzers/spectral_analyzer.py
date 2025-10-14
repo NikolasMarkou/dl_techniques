@@ -1,3 +1,80 @@
+"""
+Analyze model generalization and training quality via spectral properties.
+
+This class implements the "WeightWatcher" methodology, a data-independent
+approach for assessing the quality of trained deep neural networks. It
+operates by examining the spectral properties of layer weight matrices,
+providing insights into phenomena like overfitting, under-training, and model
+complexity without requiring access to test or training data.
+
+Architecture and Methodology
+---------------------------
+The analyzer functions as an orchestrator, systematically applying spectral
+analysis to each qualifying layer of a given model. Its workflow is as
+follows:
+
+1.  **Layer Identification**: It first traverses the model architecture to
+    identify layers with analyzable weight tensors (e.g., Dense, Conv2D).
+2.  **Weight Matrix Extraction**: For each identified layer, it uses utility
+    functions to extract the weight tensor and reshape (matricize) it into a
+    standard 2D matrix, `W`. This critical step adapts the heterogeneous
+    tensor formats of different layer types for uniform analysis.
+3.  **Spectral Computation**: It computes the eigenvalues {λ_i} of the layer's
+    correlation matrix, `WW^T`. This is efficiently done by calculating the
+    squared singular values of `W` via Singular Value Decomposition (SVD). The
+    resulting set of eigenvalues forms the Empirical Spectral Density (ESD).
+4.  **Power-Law Fitting**: The core of the analysis involves fitting the tail
+    of the ESD to a truncated power-law distribution. This step tests the
+    hypothesis that well-trained models exhibit heavy-tailed spectral
+    distributions.
+5.  **Metric Aggregation**: Results from each layer, including the power-law
+    exponent (α), stable rank, and concentration metrics, are compiled into
+    a comprehensive pandas DataFrame. This allows for both layer-level
+    diagnostics and model-level summary statistics.
+6.  **Recommendation Generation**: Based on the aggregated metrics, particularly
+    the mean α, the analyzer generates actionable recommendations regarding
+    the model's training state.
+
+Foundational Mathematics: Heavy-Tailed Self-Regularization
+---------------------------------------------------------
+The analysis is grounded in the theory of Heavy-Tailed Self-Regularization,
+which posits that Stochastic Gradient Descent (SGD) implicitly regularizes
+the layers of a deep neural network, causing their weight matrix spectra to
+develop characteristic heavy-tailed structures.
+
+-   **Power-Law Exponent (α)**: The primary metric is the exponent `α` of the
+    power-law fit to the ESD tail, P(λ) ~ λ^(-α). This exponent is estimated
+    using a robust Maximum Likelihood Estimator. The value of `α` has been
+    shown to correlate strongly with a model's generalization capabilities:
+    -   `α < 2.0`: Suggests an extremely heavy-tailed spectrum, which can
+        indicate overfitting or memorization of the training set.
+    -   `2.0 < α < 6.0`: Typically corresponds to a well-trained model that
+        has learned meaningful features and is expected to generalize well.
+    -   `α > 6.0`: Indicates a less heavy-tailed spectrum, which may be a
+        sign of under-training or a model that has failed to learn complex,
+        hierarchical features.
+
+-   **Concentration and Information Metrics**: In addition to `α`, other
+    metrics are used to characterize the spectrum's shape:
+    -   **Stable Rank**: Defined as (Σ λ_i) / max(λ_i), it measures the
+        effective dimensionality of the weight matrix, providing a more robust
+        metric than the discrete matrix rank.
+    -   **Gini Coefficient / Dominance Ratio**: These metrics quantify the
+        inequality of the eigenvalue distribution. High values indicate that
+        information is concentrated in a few dominant modes, which can make
+        the model brittle or sensitive to small perturbations.
+
+References
+----------
+1.  Martin, C., & Mahoney, M. W. (2021). "Heavy-Tailed Universals in
+    Deep Neural Networks." arXiv preprint arXiv:2106.07590.
+2.  Martin, C., & Mahoney, M. W. (2019). "Predicting the Generalization
+    Gap in Deep Networks with Margin Distributions." ICLR.
+3.  Clauset, A., Shalizi, C. R., & Newman, M. E. J. (2009). "Power-law
+    distributions in empirical data." SIAM review, 51(4), 661-703.
+
+"""
+
 import keras
 import warnings
 import numpy as np

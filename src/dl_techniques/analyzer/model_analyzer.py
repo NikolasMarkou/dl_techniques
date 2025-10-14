@@ -1,11 +1,83 @@
-"""
-Model Analyzer Main Module
+"""Orchestrate a multi-faceted analysis of deep learning models.
 
-A comprehensive model analysis toolkit that orchestrates multiple analysis types including
-weight analysis, calibration analysis, information flow analysis, and training dynamics
-analysis. Provides automated visualization generation and result serialization.
+This class serves as the central coordinator for a comprehensive model
+analysis toolkit. It is designed not as a monolithic analyzer, but as a
+facade that delegates tasks to a suite of specialized, modular components.
+This architecture provides a unified interface for executing complex,
+multi-dimensional evaluations of Keras models, moving beyond simple
+performance metrics to reveal deeper insights into model behavior, training
+quality, and generalization potential.
 
-Main coordinator class that orchestrates all analysis and visualization components.
+The analysis pipeline is initiated by the `analyze` method, which follows a
+structured lifecycle:
+1.  **Data Preparation**: Caches model predictions on a sampled subset of
+    data to prevent redundant computations across data-dependent analyses.
+2.  **Delegation to Analyzers**: Iteratively invokes specialized analyzer
+    classes (e.g., `SpectralAnalyzer`, `CalibrationAnalyzer`), each
+    responsible for computing a distinct set of metrics.
+3.  **Result Aggregation**: Consolidates all computed metrics into a
+    structured `AnalysisResults` object.
+4.  **Visualization**: Passes the aggregated results to corresponding
+    visualizer classes to generate publication-quality plots.
+5.  **Serialization**: Exports all raw metrics to a JSON file for
+    reproducibility and external use.
+
+Foundational Mathematics & Concepts
+----------------------------------
+The `ModelAnalyzer` orchestrates several analyses, each grounded in
+specific mathematical principles to diagnose different aspects of a model:
+
+-   **Spectral Analysis (WeightWatcher)**: This analysis is based on the
+    principle that the weight matrices of well-trained deep neural networks
+    exhibit statistical properties predicted by Random Matrix Theory and
+    heavy-tailed self-regularization. It examines the Empirical Spectral
+    Density (ESD) of layer weight matrices (W), specifically the eigenvalues
+    of the correlation matrix WW^T. The core insight is that the tail of
+    the ESD can be accurately modeled by a truncated power-law distribution,
+    P(λ) ~ λ^(-α). The power-law exponent, α, serves as a powerful proxy for
+    generalization quality, often without requiring test data. An α between
+    2.0 and 6.0 typically indicates a well-trained model, while α < 2.0 may
+    suggest overfitting (memorization) and α > 6.0 may suggest
+    under-training. This module also computes SVD-based metrics like stable
+    rank and concentration scores (Gini coefficient) to measure the
+    distribution of information within the weights.
+
+-   **Calibration Analysis**: This assesses the reliability of a model's
+    probabilistic predictions. It primarily uses the Expected Calibration
+    Error (ECE), which measures the discrepancy between a model's confidence
+    and its accuracy. ECE is calculated by partitioning predictions into M
+    confidence bins and computing the weighted average of the difference
+    between each bin's accuracy (acc(B_m)) and confidence (conf(B_m)):
+    ECE = Σ_{m=1 to M} (|B_m|/n) * |acc(B_m) - conf(B_m)|.
+    A lower ECE indicates better calibration. The Brier score is also used
+    as a proper scoring rule that measures both calibration and resolution.
+
+-   **Information Flow Analysis**: This analysis diagnoses network pathologies
+    like information bottlenecks. A key metric is the 'effective rank' of a
+    layer's activation matrix (A). The effective rank is derived from the
+    singular values (σ_i) of A, computed via Singular Value Decomposition
+    (SVD). It is calculated as the exponential of the Shannon entropy of the
+    normalized singular values, providing a measure of the dimensionality of
+    the feature space learned by the layer. A sharp drop in effective rank
+    between layers can indicate a bottleneck where information is lost.
+
+-   **Hyperparameter Optimization (Pareto Analysis)**: For comparing multiple
+    models (e.g., from a hyperparameter sweep), the `create_pareto_analysis`
+    method implements a multi-objective optimization concept. It identifies
+    the 'Pareto front' of models that represent the best possible trade-offs
+    between competing objectives, such as maximizing validation accuracy
+    while minimizing overfitting. A solution is Pareto-optimal if it is
+    impossible to improve one objective without worsening another.
+
+References
+----------
+1.  Martin, C., & Mahoney, M. W. (2019). Predicting the Generalization
+    Gap in Deep Networks with Margin Distributions. ICLR.
+2.  Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration
+    of modern neural networks. ICML.
+3.  Niculescu-Mizil, A., & Caruana, R. (2005). Predicting good
+    probabilities with supervised learning. ICML.
+
 """
 
 import json
