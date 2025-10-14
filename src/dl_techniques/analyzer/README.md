@@ -406,6 +406,10 @@ config = AnalysisConfig(
     save_format='png',
     dpi=300,
 
+    # === JSON Serialization Options to manage file size
+    json_include_per_sample_data=False, # Set to True to include bulky arrays like confidence/entropy for every sample.
+    json_include_raw_esds=False,        # Set to True to include raw eigenvalue arrays for every layer.
+    
     # === Performance & Limits ===
     max_layers_heatmap=12,
     max_layers_info_flow=8,
@@ -503,7 +507,13 @@ These plots provide a layer-by-layer deep dive into the power-law fit that is su
     -   **Interpretation**: A well-trained layer will show the blue dots in the tail (right side of the plot) aligning closely with the red line. A poor fit may indicate that the layer has not developed a clear heavy-tailed structure, which could be a sign of training issues.
 
 ## 8. Troubleshooting
-
+-   **`analysis_results.json` is too large**: By default, the analyzer saves summary statistics to keep the file size small. If you need the raw, per-sample data (e.g., the confidence score for every single prediction), you can enable it in the configuration. Be aware this can increase the JSON file size from kilobytes to many megabytes.
+    ```python
+    config = AnalysisConfig(
+        json_include_per_sample_data=True, # Saves raw confidence/entropy arrays
+        json_include_raw_esds=True         # Saves raw eigenvalue arrays
+    )
+    ```
 -   **Multi-Input Models**: The analyzer has limited support for models with multiple inputs. It will log warnings and automatically skip incompatible analyses (like calibration and information flow) for these models to prevent errors.
 -   **"No training metrics found"**: The analyzer robustly searches for common metric names (`accuracy`, `val_loss`, etc.). If you use non-standard names in your `history` object, analysis will be limited. Ensure your Keras history keys are standard. **See Section 3.3 for the exact required structure of the `training_history` dictionary.**
 -   **Memory Issues**: For very large models or datasets, analysis can be memory-intensive. Reduce the sample size and disable the most expensive analyses in `AnalysisConfig`:

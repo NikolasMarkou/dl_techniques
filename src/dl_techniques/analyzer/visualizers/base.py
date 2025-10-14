@@ -1,5 +1,5 @@
 """
-Enhanced Base Visualizer Interface
+Base Visualizer Interface
 
 Abstract base class for all visualizers with centralized legend management.
 """
@@ -40,7 +40,7 @@ LEGEND_ANCHOR = 'upper left'
 # ---------------------------------------------------------------------
 
 class BaseVisualizer(ABC):
-    """Enhanced abstract base class for all visualizers with centralized legend management."""
+    """Abstract base class for all visualizers with centralized legend management."""
 
     def __init__(self, results: AnalysisResults, config: AnalysisConfig,
                  output_dir: Path, model_colors: Dict[str, str]):

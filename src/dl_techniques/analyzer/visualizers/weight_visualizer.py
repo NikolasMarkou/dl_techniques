@@ -1,5 +1,5 @@
 """
-Enhanced Weight Visualization Module
+Weight Visualization Module
 
 Creates visualizations for weight analysis results with centralized legend management.
 """

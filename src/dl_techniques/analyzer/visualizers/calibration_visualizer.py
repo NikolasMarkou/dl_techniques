@@ -1,5 +1,5 @@
 """
-Enhanced Calibration Visualization Module
+Calibration Visualization Module
 Creates visualizations for calibration analysis results with centralized legend management.
 """
 

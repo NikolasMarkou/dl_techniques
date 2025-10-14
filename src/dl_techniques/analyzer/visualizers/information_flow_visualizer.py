@@ -1,5 +1,5 @@
 """
-Enhanced Information Flow Visualization Module
+Information Flow Visualization Module
 
 Creates visualizations for information flow analysis results with centralized legend management.
 """

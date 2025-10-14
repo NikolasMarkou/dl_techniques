@@ -2,11 +2,14 @@
 Spectral Analysis Visualization Module (WeightWatcher Integration)
 
 Creates visualizations for spectral analysis results, including power-law fits.
+This module is responsible for generating both high-level summary dashboards
+and detailed, per-layer diagnostic plots to interpret the spectral properties
+of model weights.
 """
-import os
+
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogFormatterSciNotation
 from typing import List
 
 # ---------------------------------------------------------------------
@@ -16,80 +19,216 @@ from typing import List
 from .base import BaseVisualizer
 from ..constants import (
     SPECTRAL_DEFAULT_BINS, SPECTRAL_DEFAULT_FIG_SIZE, SPECTRAL_DEFAULT_DPI,
-    MetricNames
+    MetricNames, SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH
 )
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
 class SpectralVisualizer(BaseVisualizer):
-    """Creates visualizations for spectral analysis results."""
+    """
+    Creates visualizations for spectral analysis results.
+
+    This class handles the generation of all plots related to the spectral
+    analysis of model weights, including summary dashboards that compare
+    multiple models and detailed diagnostic plots for individual layers.
+    """
 
     def create_visualizations(self) -> None:
         """
-        Create summary plots and detailed per-layer power-law fit plots.
+        Main entry point for generating all spectral visualizations.
+
+        This method orchestrates the creation of the summary dashboard and the
+        individual, per-layer power-law fit plots. It acts as the primary
+        interface called by the ModelAnalyzer.
         """
+        # Abort if no spectral analysis data is available in the results object.
         if self.results.spectral_analysis is None or self.results.spectral_analysis.empty:
             logger.info("No spectral analysis data to visualize.")
             return
 
-        # 1. Create a summary dashboard
+        # 1. Create a high-level summary dashboard for comparing models.
         self._create_summary_dashboard()
 
-        # 2. Create detailed per-layer plots in a subdirectory
+        # 2. Create detailed diagnostic plots for each analyzed layer, saved in a subdirectory.
         self._create_per_layer_plots()
 
     def _create_summary_dashboard(self) -> None:
-        """Create a summary dashboard comparing models on key spectral metrics."""
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        fig.suptitle('Spectral Analysis Summary', fontsize=16, fontweight='bold')
+        """
+        Create an expanded 2x2 summary dashboard with per-layer evolution plots.
 
-        # Plot 1: Mean Alpha per model
-        self._plot_summary_metric(axes[0], MetricNames.ALPHA, 'Mean Power-Law Exponent (α)')
+        This dashboard provides a comprehensive overview:
+        - Top Row: Violin plots showing the distribution of metrics across all layers for each model.
+        - Bottom Row: Scatter plots showing the evolution of metrics across the network's depth.
+        """
+        # Initialize a 2x2 matplotlib figure.
+        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+        fig.suptitle('Spectral Analysis Summary', fontsize=18, fontweight='bold')
 
-        # Plot 2: Mean Concentration Score per model
-        self._plot_summary_metric(axes[1], MetricNames.CONCENTRATION_SCORE, 'Mean Concentration Score')
+        # --- Top-left: Alpha distributions per model using violin plots. ---
+        self._plot_summary_distribution(axes[0, 0], MetricNames.ALPHA, 'Power-Law Exponent (α) Distribution')
 
-        # Add shared legend
+        # --- Top-right: Concentration Score distributions per model using violin plots. ---
+        self._plot_summary_distribution(axes[0, 1], MetricNames.CONCENTRATION_SCORE, 'Concentration Score Distribution')
+
+        # --- Bottom-left: Alpha value for each layer, shown as a scatter plot. ---
+        self._plot_spectral_evolution_across_layers(
+            axes[1, 0],
+            metric=MetricNames.ALPHA,
+            title='Alpha (α) per Layer',
+            y_label='Power-Law Exponent (α)',
+            add_ref_lines=True  # Adds ideal range and boundaries.
+        )
+
+        # --- Bottom-right: Stable Rank for each layer, shown as a scatter plot. ---
+        self._plot_spectral_evolution_across_layers(
+            axes[1, 1],
+            metric=MetricNames.STABLE_RANK,
+            title='Stable Rank per Layer',
+            y_label='Stable Rank (Effective Dimensionality)',
+            log_scale=True  # Use a log scale for better visualization of rank.
+        )
+
+        # Add a single, shared legend for all models to the figure.
         models_with_data = self._get_models_with_data()
         if models_with_data:
             self._create_figure_legend(fig, title="Models", specific_models=models_with_data)
 
-        plt.tight_layout(rect=[0, 0, 0.9, 0.95])
+        # Adjust layout to prevent titles and labels from overlapping.
+        plt.tight_layout(rect=[0, 0, 0.9, 0.96])
         if self.config.save_plots:
             self._save_figure(fig, 'spectral_summary')
         plt.close(fig)
 
-    def _plot_summary_metric(self, ax: plt.Axes, metric: str, title: str) -> None:
-        """Helper to plot a summary metric as a bar chart."""
+    def _get_alpha_color(self, alpha: float) -> str:
+        """
+        Get a diagnostic color based on the alpha value's interpretation.
+
+        Args:
+            alpha: The power-law exponent value.
+        Returns:
+            A string representing the color (red, green, or orange).
+        """
+        if alpha < SPECTRAL_OVER_TRAINED_THRESH:
+            return 'darkred'
+        elif alpha > SPECTRAL_UNDER_TRAINED_THRESH:
+            return 'darkorange'
+        else:
+            return 'darkgreen'
+
+    def _plot_summary_distribution(self, ax: plt.Axes, metric: str, title: str) -> None:
+        """
+        Plot per-layer metric distributions for each model using VIOLIN PLOTS.
+
+        This now includes a y-axis starting at zero and diagnostic thresholds for the alpha plot.
+
+        Args:
+            ax: The matplotlib Axes object to plot on.
+            metric: The name of the metric to plot from the spectral_analysis DataFrame.
+            title: The title for the subplot.
+        """
         df = self.results.spectral_analysis
-        if metric not in df.columns:
+        if metric not in df.columns or df[metric].isnull().all():
             ax.text(0.5, 0.5, f"Metric '{metric}' not available", ha='center', va='center', transform=ax.transAxes)
             ax.set_title(title)
             ax.axis('off')
             return
 
-        # Group by model and calculate mean
-        summary_data = df.groupby('model_name')[metric].mean()
-        model_order = self._sort_models_consistently(summary_data.index.tolist())
+        model_order = self._sort_models_consistently(df['model_name'].unique().tolist())
 
-        colors = [self._get_model_color(name) for name in model_order]
-        summary_data.loc[model_order].plot(kind='bar', ax=ax, color=colors)
+        data_to_plot = [df[df['model_name'] == name][metric].dropna().values for name in model_order]
+
+        if not any(len(d) > 0 for d in data_to_plot):
+            ax.text(0.5, 0.5, "No data to plot", ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(title)
+            ax.axis('off')
+            return
+
+        parts = ax.violinplot(data_to_plot, showmeans=True, showmedians=False, showextrema=False)
+
+        for i, pc in enumerate(parts['bodies']):
+            color = self._get_model_color(model_order[i])
+            pc.set_facecolor(color)
+            pc.set_edgecolor('black')
+            pc.set_alpha(0.7)
+
+        parts['cmeans'].set_edgecolor('black')
+        parts['cmeans'].set_linewidth(2)
 
         ax.set_title(title)
-        ax.set_ylabel('Mean Value')
-        ax.set_xlabel('')
-        ax.tick_params(axis='x', rotation=45, labelsize=8)
+        ax.set_ylabel('Metric Value Distribution')
+        ax.set_xlabel('Model')
+        ax.set_xticks(np.arange(1, len(model_order) + 1))
+        ax.set_xticklabels(model_order, rotation=45, ha='right')
         ax.grid(True, axis='y', linestyle='--', alpha=0.6)
 
+        # --- NEW: Set y-axis to start at 0 ---
+        ax.set_ylim(bottom=0)
+
+        # --- NEW: Add diagnostic thresholds and ideal range ONLY for the Alpha plot ---
+        if metric == MetricNames.ALPHA:
+            ax.axhspan(SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH, color='green', alpha=0.1, label='Ideal Range')
+            ax.axhline(SPECTRAL_OVER_TRAINED_THRESH, color='red', linestyle=':', label='Over-trained boundary')
+            ax.axhline(SPECTRAL_UNDER_TRAINED_THRESH, color='orange', linestyle=':', label='Under-trained boundary')
+            # Add a local legend for these specific lines.
+            ax.legend(fontsize='small', loc='best')
+
+    def _plot_spectral_evolution_across_layers(self, ax: plt.Axes, metric: str, title: str, y_label: str, log_scale: bool = False, add_ref_lines: bool = False):
+        """
+        Plot per-layer metrics as a SCATTER PLOT to avoid misleading connecting lines.
+
+        Args:
+            ax: The matplotlib Axes object to plot on.
+            metric, title, y_label: Plotting parameters.
+            log_scale: Whether to use a logarithmic y-axis.
+            add_ref_lines: Whether to add reference lines for alpha.
+        """
+        df = self.results.spectral_analysis
+        if metric not in df.columns or df[metric].isnull().all():
+            ax.text(0.5, 0.5, f"Metric '{metric}' not available", ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(title)
+            ax.axis('off')
+            return
+
+        model_order = self._get_models_with_data()
+
+        all_layer_names = sorted(df['name'].unique(), key=lambda x: df[df['name']==x]['layer_id'].min())
+
+        ax.set_xticks(range(len(all_layer_names)))
+        ax.set_xticklabels(all_layer_names, rotation=45, ha='right', fontsize='small')
+
+        for model_name in model_order:
+            model_df = df[df['model_name'] == model_name].sort_values('layer_id')
+            if not model_df.empty:
+                color = self._get_model_color(model_name)
+                x_pos = [all_layer_names.index(name) for name in model_df['name']]
+                ax.scatter(x_pos, model_df[metric].values, color=color, label=model_name, s=50, alpha=0.8, edgecolors='black', linewidth=0.5)
+
+        ax.set_title(title)
+        ax.set_ylabel(y_label)
+        ax.set_xlabel('Layer Name (Network Depth)')
+        ax.grid(True, linestyle='--', alpha=0.6)
+
+        if log_scale:
+            ax.set_yscale('log')
+            ax.yaxis.set_major_formatter(LogFormatterSciNotation(base=10.0))
+
+        if add_ref_lines:
+            ax.axhspan(SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH, color='green', alpha=0.1, label='Ideal Range')
+            ax.axhline(SPECTRAL_OVER_TRAINED_THRESH, color='red', linestyle=':', label='Over-trained boundary')
+            ax.axhline(SPECTRAL_UNDER_TRAINED_THRESH, color='orange', linestyle=':', label='Under-trained boundary')
+            ax.legend(fontsize='small', loc='best')
+
     def _get_models_with_data(self) -> List[str]:
-        """Get models that have spectral analysis data."""
+        """Get a sorted list of models with valid spectral analysis data."""
         if self.results.spectral_analysis is not None and not self.results.spectral_analysis.empty:
             return sorted(self.results.spectral_analysis['model_name'].unique())
         return []
 
     def _create_per_layer_plots(self) -> None:
-        """Create and save power-law fit plots for each analyzed layer."""
+        """
+        Iterate through results to generate a detailed power-law fit plot for each layer.
+        """
         plot_dir = self.output_dir / "spectral_plots"
         if self.config.save_plots:
             plot_dir.mkdir(exist_ok=True)
@@ -98,54 +237,58 @@ class SpectralVisualizer(BaseVisualizer):
         esds = self.results.spectral_esds
 
         for index, row in df.iterrows():
-            model_name = row['model_name']
-            # FIX: Use the DataFrame index, which is the layer_id
-            layer_id = int(index)
+            model_name, layer_id = row['model_name'], int(row['layer_id'])
 
-            if model_name not in esds or layer_id not in esds[model_name]:
+            if not (model_name in esds and layer_id in esds[model_name]):
                 continue
 
             evals = esds[model_name][layer_id]
-            if evals is None or len(evals) == 0:
+            if evals is None or len(evals) == 0 or row.get(MetricNames.STATUS) != 'success':
                 continue
 
-            status = row.get(MetricNames.STATUS)
-            if status != 'success':
-                continue
-
-            alpha = row.get(MetricNames.ALPHA)
-            xmin = row.get(MetricNames.XMIN)
-            D = row.get(MetricNames.D)
-            sigma = row.get(MetricNames.SIGMA)
+            alpha, xmin, D, sigma = row.get(MetricNames.ALPHA), row.get(MetricNames.XMIN), row.get(MetricNames.D), row.get(MetricNames.SIGMA)
             layer_name = row.get('name', f"layer_{layer_id}")
 
             self._plot_powerlaw_fit(evals, alpha, xmin, D, sigma, model_name, layer_name, layer_id, plot_dir)
 
     def _plot_powerlaw_fit(self, evals, alpha, xmin, D, sigma, model_name, layer_name, layer_id, savedir):
-        """Helper function to create and save a single power-law fit plot."""
+        """
+        Create and save an improved, interpretable power-law fit plot for a single layer.
+
+        Args:
+            evals, alpha, xmin, D, sigma: Data and parameters for the plot.
+            model_name, layer_name, layer_id: Identifiers for the layer.
+            savedir: The directory to save the plot in.
+        """
         try:
-            fig = plt.figure(figsize=SPECTRAL_DEFAULT_FIG_SIZE)
-            ax = fig.add_subplot(111)
+            fig, ax = plt.subplots(figsize=SPECTRAL_DEFAULT_FIG_SIZE)
 
             hist, bin_edges = np.histogram(evals, bins=SPECTRAL_DEFAULT_BINS)
             bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
             valid_mask = (hist > 0) & (bin_centers > 0)
             if not np.any(valid_mask):
                 plt.close(fig)
                 return
 
             hist, bin_centers = hist[valid_mask], bin_centers[valid_mask]
-            hist = hist / (np.sum(hist) * (bin_edges[1] - bin_edges[0]))
+            hist = hist / (np.sum(hist) * np.diff(bin_edges)[0])
 
-            ax.loglog(bin_centers, hist, 'o', markersize=4, label='Eigenvalue Distribution')
+            ax.loglog(bin_centers, hist, '.', markersize=8, label='Empirical Spectral Density (ESD)', alpha=0.7)
 
             if xmin > 0 and alpha > 0:
                 x_range = np.logspace(np.log10(xmin), np.log10(np.max(evals)), 100)
-                y_fit = (alpha - 1) * (xmin ** (alpha - 1)) * x_range ** (-alpha)
-                ax.loglog(x_range, y_fit, 'r-', label=f'Power-law fit: α={alpha:.3f}')
-                ax.axvline(x=xmin, color='r', linestyle='--', label=f'xmin={xmin:.3e}')
+                C = (alpha - 1) * (xmin ** (alpha - 1))
+                y_fit = C * x_range ** (-alpha)
 
-            ax.set_title(f"Log-Log ESD for {model_name} - {layer_name}\nα={alpha:.3f}, D={D:.3f}, σ={sigma:.3f}")
+                ax.loglog(x_range, y_fit, 'r-', linewidth=2, label=f'Power-law fit: α={alpha:.3f}')
+                ax.axvline(x=xmin, color='r', linestyle='--', label=f'xmin={xmin:.3e}')
+                ax.axvspan(xmin, ax.get_xlim()[1], color='grey', alpha=0.1, label='Fitted Tail Region')
+
+            title_color = self._get_alpha_color(alpha)
+            title_text = f"Log-Log ESD for {model_name} - {layer_name}\nα={alpha:.3f} (D={D:.3f}, σ={sigma:.3f})"
+            ax.set_title(title_text, color=title_color, fontweight='bold')
+
             ax.set_xlabel("Eigenvalue (λ)")
             ax.set_ylabel("Probability Density")
             ax.legend()
@@ -161,3 +304,5 @@ class SpectralVisualizer(BaseVisualizer):
             logger.warning(f"Error creating power-law plot for layer {layer_id} of {model_name}: {e}")
             if 'fig' in locals() and plt.fignum_exists(fig.number):
                 plt.close(fig)
+
+# ---------------------------------------------------------------------

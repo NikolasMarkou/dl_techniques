@@ -20,13 +20,14 @@ Experimental Design
 - 10,000 test images
 - Standard preprocessing with normalization
 
-**Model Architecture**: A consistent ResNet-inspired CNN is used for both models,
+**Model Architecture**: A consistent ResNet-inspired CNN is used for all models,
 with only the final output layer differing. The base architecture includes:
 - Initial convolutional layer (32 filters)
-- 4 convolutional blocks with residual connections
-- Progressive filter scaling: [32, 64, 128, 256]
+- 6 convolutional blocks with residual connections
+- Progressive filter scaling: [32, 64, 128, 256, 256, 256]
 - Batch normalization and dropout regularization
 - Global average pooling
+- Layer normalization
 - Dense classification layers with L2 regularization
 
 **Output Layers Evaluated**:
@@ -40,26 +41,51 @@ with only the final output layer differing. The base architecture includes:
    Complexity: O(log₂N), offering significant computational advantages for
    large N.
 
+3. **Routing Probabilities**: An alternative routing-based approach using
+   the `RoutingProbabilitiesLayer` on top of dense logits.
+
 Comprehensive Analysis Pipeline
 ------------------------------
 
-The experiment employs a multi-faceted analysis approach to compare the models:
+The experiment employs a multi-faceted analysis approach using ModelAnalyzer:
 
 **Training Analysis**:
-- Training and validation curves for accuracy and loss.
-- Convergence behavior and stability assessment.
-- Early stopping based on validation accuracy.
+- Training and validation curves for accuracy and loss
+- Convergence behavior and stability assessment
+- Early stopping based on validation accuracy
+- Overfitting index and training stability metrics
 
 **Model Performance Evaluation**:
-- Test set accuracy and top-k accuracy.
-- Final loss values.
-- Statistical significance testing (if multiple runs were performed).
+- Test set accuracy and top-k accuracy
+- Final loss values
+- Statistical significance testing (if multiple runs were performed)
 
 **Calibration and Prediction Analysis** (via ModelAnalyzer):
-- Expected Calibration Error (ECE) to measure prediction confidence.
-- Brier score for probabilistic prediction quality.
-- Reliability diagrams and calibration plots.
-- Entropy analysis of the output probability distributions.
+- Expected Calibration Error (ECE) to measure prediction confidence
+- Brier score for probabilistic prediction quality
+- Reliability diagrams and calibration plots
+- Entropy analysis of the output probability distributions
+- Per-class calibration analysis
+
+**Weight and Activation Analysis**:
+- Layer-wise weight distribution statistics
+- Weight health scores and evolution
+- Activation pattern analysis across the network
+- Information flow characteristics
+- Feature specialization metrics
+
+**Spectral Analysis (WeightWatcher)**:
+- Power-law exponent (α) for training quality assessment
+- Concentration scores for information distribution
+- Matrix entropy and stable rank metrics
+- Data-free generalization estimates
+
+**Visual Analysis**:
+- Training history comparison plots
+- Confusion matrices for each output layer
+- Calibration and reliability diagrams
+- Weight distribution visualizations
+- Comprehensive summary dashboard
 
 Expected Outcomes and Insights
 ------------------------------
@@ -72,14 +98,26 @@ This experiment is designed to reveal:
 2. **Training Dynamics**: How does the routing-based learning process affect
    convergence speed and stability compared to the standard softmax?
 
-3. **Prediction Quality**: Do the two layers produce differently calibrated
+3. **Prediction Quality**: Do the different layers produce differently calibrated
    probability distributions? We will investigate if one is inherently more
    or less confident in its predictions.
 
-4. **Scalability Implications**: While CIFAR-10 has only 10 classes, this
+4. **Weight Characteristics**: How do the learned weight distributions differ
+   between the routing approaches and the standard softmax?
+
+5. **Scalability Implications**: While CIFAR-10 has only 10 classes, this
    experiment provides a crucial proof-of-concept for applying the
    `HierarchicalRoutingLayer` to problems with much larger output spaces,
-   such as large-vocabulary language models.
+   such as large-vocabulary language models or fine-grained classification.
+
+Theoretical Foundation
+---------------------
+
+This experiment explores the practical implications of replacing the traditional
+softmax output with hierarchical routing mechanisms, which can offer:
+- Reduced computational complexity (O(log N) vs O(N))
+- Potentially different inductive biases in the learned representations
+- Alternative paths for gradient flow during backpropagation
 """
 
 # ==============================================================================
@@ -93,6 +131,10 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
+
+# ==============================================================================
+# LOCAL IMPORTS
+# ==============================================================================
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
@@ -211,7 +253,7 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 300
+    epochs: int = 3
     batch_size: int = 128
     learning_rate: float = 0.001
     early_stopping_patience: int = 50
@@ -228,12 +270,45 @@ class ExperimentConfig:
 
     # --- Analysis Configuration ---
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
+        # Enable all main analysis modules
         analyze_weights=True,
         analyze_calibration=True,
         analyze_information_flow=True,
+        analyze_training_dynamics=True,
+        analyze_spectral=True,
+
+        # Data sampling configuration
+        n_samples=1000,
+
+        # Weight analysis settings
+        weight_layer_types=['Dense', 'Conv2D'],
+        analyze_biases=False,
+        compute_weight_pca=True,
+
+        # Spectral analysis (WeightWatcher) settings
+        spectral_min_evals=10,
+        spectral_concentration_analysis=True,
+        spectral_randomize=False,
+
+        # Calibration settings
         calibration_bins=15,
+
+        # Training dynamics settings
+        smooth_training_curves=True,
+        smoothing_window=5,
+
+        # Visualization settings
         save_plots=True,
         plot_style='publication',
+        save_format='png',
+        dpi=300,
+
+        # Performance limits
+        max_layers_heatmap=12,
+        max_layers_info_flow=8,
+
+        # Verbosity
+        verbose=True,
     ))
 
 
@@ -247,25 +322,42 @@ def build_residual_block(
     config: ExperimentConfig,
     block_index: int
 ) -> keras.layers.Layer:
-    """Builds a residual block with skip connections."""
+    """
+    Build a residual block with skip connections.
+
+    Args:
+        inputs: Input tensor to the residual block
+        filters: Number of filters in the convolutional layers
+        config: Experiment configuration containing architecture parameters
+        block_index: Index of the current block (for naming layers)
+
+    Returns:
+        Output tensor after applying the residual block
+    """
     shortcut = inputs
+
     x = keras.layers.Conv2D(
         filters, config.kernel_size, padding='same',
         kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
         name=f'conv{block_index}_1'
     )(inputs)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
+
     x = keras.layers.Conv2D(
         filters, config.kernel_size, padding='same',
         kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
         name=f'conv{block_index}_2'
     )(x)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
+
+    # Adjust skip connection if dimensions don't match
     if shortcut.shape[-1] != filters:
         shortcut = keras.layers.Conv2D(
             filters=filters, kernel_size=(1, 1), padding='same',
@@ -274,6 +366,7 @@ def build_residual_block(
         )(shortcut)
         if config.use_batch_norm:
             shortcut = keras.layers.BatchNormalization()(shortcut)
+
     x = keras.layers.Add()([x, shortcut])
     x = keras.layers.Activation('relu')(x)
     return x
@@ -285,7 +378,18 @@ def build_conv_block(
     config: ExperimentConfig,
     block_index: int
 ) -> keras.layers.Layer:
-    """Builds a convolutional block, optionally with residual connections."""
+    """
+    Build a convolutional block, optionally with residual connections.
+
+    Args:
+        inputs: Input tensor to the convolutional block
+        filters: Number of filters in the convolutional layers
+        config: Experiment configuration containing architecture parameters
+        block_index: Index of the current block (for naming and logic)
+
+    Returns:
+        Output tensor after applying the convolutional block
+    """
     if config.use_residual and block_index > 0:
         x = build_residual_block(inputs, filters, config, block_index)
     else:
@@ -298,10 +402,13 @@ def build_conv_block(
         if config.use_batch_norm:
             x = keras.layers.BatchNormalization()(x)
         x = keras.layers.Activation('relu')(x)
+
+    # Apply dropout if specified for this layer
     dropout_rate = (config.dropout_rates[block_index]
                    if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
         x = keras.layers.Dropout(dropout_rate)(x)
+
     return x
 
 
@@ -311,36 +418,46 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
 
     This function constructs a ResNet-inspired CNN. The final layer is determined
     by the `model_type` parameter, allowing for a direct comparison between
-    a standard Softmax and the HierarchicalRoutingLayer.
+    a standard Softmax and alternative routing-based output layers.
 
     Args:
         config: Experiment configuration object.
-        model_type: The type of output layer ('Softmax' or 'HierarchicalRouting').
+        model_type: The type of output layer ('Softmax', 'HierarchicalRouting',
+            or 'RoutingProbabilities').
         name: Name prefix for the model and its layers.
 
     Returns:
-        A compiled Keras model.
+        A compiled Keras model ready for training.
+
+    Raises:
+        ValueError: If an unknown model_type is specified.
     """
     inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
     x = inputs
 
-    # Feature extractor backbone (identical for all models)
+    # === Feature Extractor Backbone (Identical for All Models) ===
     x = keras.layers.Conv2D(
         filters=config.conv_filters[0], kernel_size=(4, 4), strides=(2, 2),
         padding='same', kernel_initializer=config.kernel_initializer,
         kernel_regularizer=keras.regularizers.L2(config.weight_decay),
         name='stem'
     )(x)
+
     if config.use_batch_norm:
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
+
+    # Convolutional blocks
     for i, filters in enumerate(config.conv_filters):
         x = build_conv_block(x, filters, config, i)
+
+    # Global pooling and normalization
     x = keras.layers.GlobalAveragePooling2D()(x)
     x = keras.layers.LayerNormalization()(x)
 
-    # --- Interchangeable Output Layer ---
+    # === Interchangeable Output Layer ===
     if model_type == 'Softmax':
+        # Standard softmax output
         logits = keras.layers.Dense(
             units=config.num_classes,
             kernel_initializer=config.kernel_initializer,
@@ -348,23 +465,29 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
             name='logits'
         )(x)
         predictions = keras.layers.Activation('softmax', name='predictions')(logits)
+
     elif model_type == 'HierarchicalRouting':
+        # Hierarchical routing layer (O(log N) complexity)
         predictions = HierarchicalRoutingLayer(
             output_dim=config.num_classes,
             name='predictions'
         )(x)
+
     elif model_type == 'RoutingProbabilities':
+        # Alternative routing approach
         logits = keras.layers.Dense(
             units=config.num_classes,
             kernel_initializer=config.kernel_initializer,
             kernel_regularizer=keras.regularizers.L2(config.weight_decay),
             name='logits'
         )(x)
-        predictions = RoutingProbabilitiesLayer()(logits)
+        predictions = RoutingProbabilitiesLayer(name='predictions')(logits)
+
     else:
         raise ValueError(f"Unknown model_type: {model_type}. "
                          f"Choose from {config.model_types}")
 
+    # Create and compile model
     model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
 
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
@@ -388,20 +511,28 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """
     Run the complete output layer comparison experiment.
 
-    Orchestrates the pipeline: data loading, training each model type,
-    analysis, visualization, and results reporting.
+    This function orchestrates the entire experimental pipeline, including:
+    1. Dataset loading and preprocessing
+    2. Model training for each output layer type
+    3. Comprehensive model analysis using ModelAnalyzer
+    4. Visualization generation
+    5. Results compilation and reporting
 
     Args:
         config: Experiment configuration object.
 
     Returns:
-        A dictionary containing all experimental results.
+        Dictionary containing all experimental results and analysis.
     """
+    # Set random seed for reproducibility
     keras.utils.set_random_seed(config.random_seed)
+
+    # Create timestamped output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize visualization manager (for confusion matrices)
     vis_manager = VisualizationManager(
         experiment_name=config.experiment_name,
         output_dir=experiment_dir / "visualizations"
@@ -409,20 +540,39 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     vis_manager.register_template("training_curves", TrainingCurvesVisualization)
     vis_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
 
-    logger.info("Starting CIFAR-10 Output Layer Comparison Experiment")
+    # Log experiment start
+    logger.info("=" * 80)
+    logger.info("CIFAR-10 Output Layer Comparison Experiment")
+    logger.info("Hierarchical Routing vs. Softmax")
+    logger.info("=" * 80)
     logger.info(f"Results will be saved to: {experiment_dir}")
+    logger.info("")
+
+    # ===== DATASET LOADING =====
+    logger.info("Loading CIFAR-10 dataset...")
+    cifar10_data = load_and_preprocess_cifar10()
+    logger.info("Dataset loaded successfully")
+    logger.info("")
+
+    # ===== MODEL TRAINING PHASE =====
+    logger.info("=" * 80)
+    logger.info("MODEL TRAINING PHASE")
     logger.info("=" * 80)
 
-    cifar10_data = load_and_preprocess_cifar10()
-
-    trained_models = {}
-    all_histories = {}
+    trained_models = {}  # Store trained models: Dict[str, keras.Model]
+    training_histories = {}  # Store training histories: Dict[str, Dict[str, List[float]]]
 
     for model_type in config.model_types:
-        logger.info(f"--- Training model with {model_type} output layer ---")
+        logger.info(f"\n--- Training model with {model_type} output layer ---")
+
+        # Build model
         model = build_model(config, model_type, model_type)
+
+        # Log model info
+        logger.info(f"Model parameters: {model.count_params():,}")
         model.summary(print_fn=logger.info)
 
+        # Configure training
         training_config = TrainingConfig(
             epochs=config.epochs,
             batch_size=config.batch_size,
@@ -432,36 +582,102 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             output_dir=experiment_dir / "training_plots" / model_type
         )
 
+        # Train the model
         history = train_model(
-            model, cifar10_data.x_train, cifar10_data.y_train,
-            cifar10_data.x_test, cifar10_data.y_test, training_config
+            model,
+            cifar10_data.x_train,
+            cifar10_data.y_train,
+            cifar10_data.x_test,
+            cifar10_data.y_test,
+            training_config
         )
 
+        # Store results
+        # IMPORTANT: Store the .history attribute (Dict[str, List[float]])
+        # This is the correct format for ModelAnalyzer
         trained_models[model_type] = model
-        all_histories[model_type] = history.history
-        logger.info(f"{model_type} training completed!")
+        training_histories[model_type] = history.history
 
+        logger.info(f"{model_type} training completed successfully!")
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("All models trained successfully!")
+    logger.info("=" * 80)
+    logger.info("")
+
+    # ===== MEMORY MANAGEMENT =====
+    logger.info("Triggering garbage collection...")
     gc.collect()
+    logger.info("")
 
-    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
+    # ===== COMPREHENSIVE MODEL ANALYSIS WITH MODEL ANALYZER =====
+    logger.info("=" * 80)
+    logger.info("COMPREHENSIVE MODEL ANALYSIS (ModelAnalyzer)")
+    logger.info("=" * 80)
+    logger.info("")
+
     model_analysis_results = None
+
     try:
+        # Prepare DataInput object for the analyzer
+        # According to README: DataInput(x_data=x_test, y_data=y_test)
+        test_data_input = DataInput(
+            x_data=cifar10_data.x_test,
+            y_data=cifar10_data.y_test
+        )
+
+        logger.info(f"Test data prepared: {test_data_input.x_data.shape}")
+        logger.info(f"Number of models to analyze: {len(trained_models)}")
+        logger.info(f"Training histories available for: {list(training_histories.keys())}")
+        logger.info("")
+
+        # Initialize the ModelAnalyzer
+        # Pass trained_models, training_histories, config, and output_dir
         analyzer = ModelAnalyzer(
             models=trained_models,
+            training_history=training_histories,  # Dict[str, Dict[str, List[float]]]
             config=config.analyzer_config,
             output_dir=experiment_dir / "model_analysis"
         )
-        model_analysis_results = analyzer.analyze(data=DataInput.from_object(cifar10_data))
-        logger.info("Model analysis completed successfully!")
+
+        logger.info("ModelAnalyzer initialized successfully")
+        logger.info("Running comprehensive analysis...")
+        logger.info("")
+
+        # Run comprehensive analysis
+        model_analysis_results = analyzer.analyze(data=test_data_input)
+
+        logger.info("=" * 80)
+        logger.info("ModelAnalyzer completed successfully!")
+        logger.info("=" * 80)
+        logger.info("")
+        logger.info("Generated analysis outputs:")
+        logger.info("  - summary_dashboard.png: High-level overview")
+        logger.info("  - spectral_summary.png: Training quality (power-law α)")
+        logger.info("  - training_dynamics.png: Learning curves and overfitting")
+        logger.info("  - weight_learning_journey.png: Weight evolution")
+        logger.info("  - confidence_calibration_analysis.png: Calibration metrics")
+        logger.info("  - information_flow_analysis.png: Activation patterns")
+        logger.info("  - analysis_results.json: Raw metrics")
+        logger.info("")
+
     except Exception as e:
         logger.error(f"Model analysis failed: {e}", exc_info=True)
+        logger.warning("Continuing with remaining analyses...")
+        logger.info("")
 
-    logger.info("Generating training history and confusion matrix plots...")
+    # ===== ADDITIONAL VISUALIZATION: TRAINING CURVES =====
+    logger.info("=" * 80)
+    logger.info("GENERATING TRAINING CURVE VISUALIZATIONS")
+    logger.info("=" * 80)
+    logger.info("")
+
     # Convert training histories to TrainingHistory objects
-    training_histories = {}
-    for name, hist_dict in all_histories.items():
+    training_history_objects = {}
+    for name, hist_dict in training_histories.items():
         if len(hist_dict.get('loss', [])) > 0:
-            training_histories[name] = TrainingHistory(
+            training_history_objects[name] = TrainingHistory(
                 epochs=list(range(len(hist_dict['loss']))),
                 train_loss=hist_dict['loss'],
                 val_loss=hist_dict.get('val_loss', []),
@@ -474,100 +690,107 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             )
 
     # Plot training history comparison
-    if training_histories:
+    if training_history_objects:
         try:
             vis_manager.visualize(
-                data=training_histories,
+                data=training_history_objects,
                 plugin_name="training_curves",
                 metrics_to_plot=['accuracy', 'loss'],
                 show=False
             )
             logger.info("Training history visualization created")
+            logger.info("")
         except Exception as e:
             logger.error(f"Failed to create training history visualization: {e}")
+            logger.info("")
 
-        # Generate confusion matrices for model comparison
-    raw_predictions = {
-        name: model.predict(cifar10_data.x_test, verbose=0)
-        for name, model in trained_models.items()
-    }
-    class_predictions = {
-        name: np.argmax(preds, axis=1)
-        for name, preds in raw_predictions.items()
-    }
+    # ===== ADDITIONAL VISUALIZATION: CONFUSION MATRICES =====
+    logger.info("=" * 80)
+    logger.info("GENERATING CONFUSION MATRICES")
+    logger.info("=" * 80)
+    logger.info("")
 
-    y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
-    # 1. Create a dictionary to hold the results for all models
-    all_classification_results = {}
+    try:
+        # Generate predictions for all models
+        raw_predictions = {
+            name: model.predict(cifar10_data.x_test, verbose=0)
+            for name, model in trained_models.items()
+        }
+        class_predictions = {
+            name: np.argmax(preds, axis=1)
+            for name, preds in raw_predictions.items()
+        }
 
-    # 2. Loop to populate the dictionary
-    for model_name, y_pred in class_predictions.items():
-        try:
-            # Create the data container for each model
-            classification_data = ClassificationResults(
-                y_true=y_true_indices,
-                y_pred=y_pred,
-                y_prob=raw_predictions[model_name],
-                class_names=cifar10_data.class_names,
-                model_name=model_name
-            )
-            # Add it to our dictionary
-            all_classification_results[model_name] = classification_data
-        except Exception as e:
-            logger.error(f"Failed to prepare classification results for {model_name}: {e}")
+        # Convert y_test to class indices
+        y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
 
-    # 3. Create the multi-model data container
-    if all_classification_results:
-        try:
+        # Create classification results for each model
+        all_classification_results = {}
+        for model_name, y_pred in class_predictions.items():
+            try:
+                classification_data = ClassificationResults(
+                    y_true=y_true_indices,
+                    y_pred=y_pred,
+                    y_prob=raw_predictions[model_name],
+                    class_names=cifar10_data.class_names,
+                    model_name=model_name
+                )
+                all_classification_results[model_name] = classification_data
+            except Exception as e:
+                logger.error(f"Failed to prepare classification results for {model_name}: {e}")
+
+        # Create multi-model visualization
+        if all_classification_results:
             multi_model_data = MultiModelClassification(
                 results=all_classification_results,
                 dataset_name="CIFAR-10"
             )
 
-            # 4. Make a SINGLE call to the visualizer with the aggregated data
             vis_manager.visualize(
                 data=multi_model_data,
                 plugin_name="confusion_matrix",
                 normalize='true',
                 show=False
             )
-            logger.info("Multi-model confusion matrix visualization created.")
-        except Exception as e:
-            logger.error(f"Failed to create multi-model confusion matrix: {e}")
+            logger.info("Multi-model confusion matrix visualization created")
+            logger.info("")
+
+    except Exception as e:
+        logger.error(f"Failed to create confusion matrices: {e}")
+        logger.info("")
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("Evaluating final model performance on test set...")
-    logger.info(f"Test data shape: {cifar10_data.x_test.shape}, {cifar10_data.y_test.shape}")
-    logger.info(f"Test labels sample: {cifar10_data.y_test[:5]}")
+    logger.info("=" * 80)
+    logger.info("FINAL PERFORMANCE EVALUATION")
+    logger.info("=" * 80)
+    logger.info("")
 
     performance_results = {}
 
     for name, model in trained_models.items():
-        logger.info(f"Evaluating model {name}...")
-        logger.info(f"Model {name} metrics: {model.metrics_names}")
+        logger.info(f"Evaluating model: {name}")
 
         # Get model evaluation metrics
-        eval_results = model.evaluate(cifar10_data.x_test, cifar10_data.y_test, verbose=0)
+        eval_results = model.evaluate(
+            cifar10_data.x_test,
+            cifar10_data.y_test,
+            verbose=0
+        )
         metrics_dict = dict(zip(model.metrics_names, eval_results))
-
-        # Debug logging for metric inspection
-        logger.info(f"Raw evaluation metrics for {name}: {metrics_dict}")
 
         # Calculate manual accuracy verification
         predictions = model.predict(cifar10_data.x_test, verbose=0)
         y_true_indices = np.argmax(cifar10_data.y_test, axis=1)
 
-        # Manual top-1 accuracy verification
+        # Manual top-1 accuracy
         manual_top1_acc = np.mean(np.argmax(predictions, axis=1) == y_true_indices)
-        logger.info(f"Manual top-1 accuracy for {name}: {manual_top1_acc:.4f}")
 
-        # Manual top-5 accuracy calculation
+        # Manual top-5 accuracy
         top_5_predictions = np.argsort(predictions, axis=1)[:, -5:]
         manual_top5_acc = np.mean([
             y_true in top5_pred
             for y_true, top5_pred in zip(y_true_indices, top_5_predictions)
         ])
-        logger.info(f"Manual top-5 accuracy for {name}: {manual_top5_acc:.4f}")
 
         # Store standardized metrics
         performance_results[name] = {
@@ -576,25 +799,27 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             'loss': metrics_dict.get('loss', 0.0)
         }
 
-        # Warn about potentially problematic accuracy values
+        # Warn about low accuracy
         final_accuracy = performance_results[name]['accuracy']
         if final_accuracy < 0.2:
             logger.warning(f"Low accuracy detected for {name}: {final_accuracy:.4f}")
-            logger.warning("This may indicate training issues or model problems")
+            logger.warning("This may indicate training issues")
 
-        # Log final metrics for this model
-        logger.info(f"Model {name} final metrics: {performance_results[name]}")
+        logger.info(f"  Accuracy: {performance_results[name]['accuracy']:.4f}")
+        logger.info(f"  Top-5 Accuracy: {performance_results[name]['top_5_accuracy']:.4f}")
+        logger.info(f"  Loss: {performance_results[name]['loss']:.4f}")
+        logger.info("")
 
     # ===== RESULTS COMPILATION =====
     results_payload = {
         'performance_analysis': performance_results,
         'model_analysis': model_analysis_results,
-        'histories': all_histories,
+        'histories': training_histories,
         'trained_models': trained_models
     }
 
     # Print comprehensive summary
-    print_experiment_summary(results_payload)
+    print_experiment_summary(results_payload, config.analyzer_config)
 
     return results_payload
 
@@ -603,79 +828,172 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 # RESULTS REPORTING
 # ==============================================================================
 
-def print_experiment_summary(results: Dict[str, Any]) -> None:
+def print_experiment_summary(
+    results: Dict[str, Any],
+    analyzer_config: AnalysisConfig
+) -> None:
     """
     Print a comprehensive summary of experimental results.
 
     This function generates a detailed report of all experimental outcomes,
-    including performance metrics, calibration analysis, and training progress.
-    The summary is formatted for clear readability and easy interpretation.
+    including performance metrics, calibration analysis, spectral analysis,
+    and training progress. The summary is formatted for clear readability
+    and easy interpretation.
 
     Args:
         results: Dictionary containing all experimental results and analysis
+        analyzer_config: The analyzer configuration used
     """
+    logger.info("")
     logger.info("=" * 80)
     logger.info("EXPERIMENT SUMMARY")
     logger.info("=" * 80)
+    logger.info("")
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("PERFORMANCE METRICS (on Full Test Set):")
-        logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
-        logger.info("-" * 60)
+        logger.info("PERFORMANCE METRICS (Test Set)")
+        logger.info("-" * 80)
+        logger.info(f"{'Model':<30} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
+        logger.info("-" * 80)
 
         for model_name, metrics in results['performance_analysis'].items():
             accuracy = metrics.get('accuracy', 0.0)
             top5_acc = metrics.get('top_5_accuracy', 0.0)
             loss = metrics.get('loss', 0.0)
-            logger.info(f"{model_name:<20} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}")
-
-    # ===== CALIBRATION METRICS SECTION =====
-    model_analysis = results.get('model_analysis')
-    if model_analysis and model_analysis.calibration_metrics:
-        logger.info("CALIBRATION METRICS (from Model Analyzer):")
-        logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
-        logger.info("-" * 65)
-
-        for model_name, cal_metrics in model_analysis.calibration_metrics.items():
-            # Get the corresponding confidence metrics for the same model
-            conf_metrics = model_analysis.confidence_metrics.get(model_name, {})
-
             logger.info(
-                f"{model_name:<20} {cal_metrics.get('ece', 0.0):<12.4f} "
-                f"{cal_metrics.get('brier_score', 0.0):<15.4f} "
-                f"{conf_metrics.get('mean_entropy', 0.0):<12.4f}"
+                f"{model_name:<30} {accuracy:<12.4f} {top5_acc:<12.4f} {loss:<12.4f}"
             )
+        logger.info("")
 
-    # ===== TRAINING METRICS SECTION =====
+    # ===== MODEL ANALYZER RESULTS =====
+    model_analysis = results.get('model_analysis')
+    if model_analysis:
+
+        # --- Calibration Metrics ---
+        if analyzer_config.analyze_calibration and model_analysis.calibration_metrics:
+            logger.info("CALIBRATION METRICS (ModelAnalyzer)")
+            logger.info("-" * 80)
+            logger.info(f"{'Model':<30} {'ECE':<12} {'Brier Score':<15} {'Mean Conf':<12} {'Mean Entropy':<12}")
+            logger.info("-" * 80)
+
+            for model_name, cal_metrics in model_analysis.calibration_metrics.items():
+                conf_metrics = model_analysis.confidence_metrics.get(model_name, {})
+                # Calculate mean confidence from the max_probability array
+                max_probs = conf_metrics.get('max_probability', np.array([0.0]))
+                mean_confidence = np.mean(max_probs) if max_probs.size > 0 else 0.0
+
+                logger.info(
+                    f"{model_name:<30} "
+                    f"{cal_metrics.get('ece', 0.0):<12.4f} "
+                    f"{cal_metrics.get('brier_score', 0.0):<15.4f} "
+                    f"{mean_confidence:<12.4f} "  # Use calculated mean confidence
+                    f"{conf_metrics.get('mean_entropy', 0.0):<12.4f}"
+                )
+            logger.info("")
+
+        # --- Spectral Analysis Results ---
+        if analyzer_config.analyze_spectral and \
+           model_analysis.spectral_analysis is not None and not model_analysis.spectral_analysis.empty:
+            logger.info("SPECTRAL ANALYSIS (WeightWatcher)")
+            logger.info("-" * 80)
+            logger.info(f"{'Model':<30} {'Mean α':<12} {'Concentration':<15} {'Matrix Entropy':<15}")
+            logger.info("-" * 80)
+
+            # CORRECTED LOGIC: The detailed results are in a pandas DataFrame.
+            # We need to group by model to get per-model summary statistics.
+            spectral_df = model_analysis.spectral_analysis
+            per_model_summary = spectral_df.groupby('model_name')[
+                ['alpha', 'concentration_score', 'entropy']
+            ].mean()
+
+            # Iterate through the performance results keys to maintain a consistent model order
+            for model_name in results['performance_analysis'].keys():
+                if model_name in per_model_summary.index:
+                    model_summary = per_model_summary.loc[model_name]
+                    mean_alpha = model_summary.get('alpha', 0.0)
+                    mean_concentration = model_summary.get('concentration_score', 0.0)
+                    mean_entropy = model_summary.get('entropy', 0.0)
+
+                    logger.info(
+                        f"{model_name:<30} {mean_alpha:<12.4f} {mean_concentration:<15.4f} {mean_entropy:<15.4f}"
+                    )
+            logger.info("")
+
+        # --- Training Dynamics ---
+        if analyzer_config.analyze_training_dynamics and model_analysis.training_metrics:
+            logger.info("TRAINING DYNAMICS (ModelAnalyzer)")
+            logger.info("-" * 80)
+            logger.info(f"{'Model':<30} {'Epochs to Conv':<15} {'Overfitting':<15} {'Stability':<12}")
+            logger.info("-" * 80)
+
+            # Get the TrainingMetrics object
+            tm = model_analysis.training_metrics
+
+            # Iterate through the models from the performance results to ensure we have a model name
+            for model_name in results['performance_analysis'].keys():
+                # Access metrics from the TrainingMetrics object using the model name
+                epochs_conv = tm.epochs_to_convergence.get(model_name, 0)
+                overfit = tm.overfitting_index.get(model_name, 0.0)
+                stability = tm.training_stability_score.get(model_name, 0.0)
+
+                logger.info(
+                    f"{model_name:<30} "
+                    f"{epochs_conv:<15} "
+                    f"{overfit:<15.4f} "
+                    f"{stability:<12.4f}"
+                )
+            logger.info("")
+
+    # ===== VALIDATION METRICS FROM TRAINING =====
     if 'histories' in results and results['histories']:
-        # Check if any model actually has training history data
-        has_training_data = False
-        for model_name, history_dict in results['histories'].items():
-            if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
-                history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
-                has_training_data = True
-                break
+        has_training_data = any(
+            history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0
+            for history_dict in results['histories'].values()
+        )
 
         if has_training_data:
-            logger.info("FINAL TRAINING METRICS (on Validation Set):")
-            logger.info(f"{'Model':<20} {'Val Accuracy':<15} {'Val Loss':<12}")
-            logger.info("-" * 50)
+            logger.info("FINAL VALIDATION METRICS (Last Epoch)")
+            logger.info("-" * 80)
+            logger.info(f"{'Model':<30} {'Val Accuracy':<15} {'Val Loss':<12}")
+            logger.info("-" * 80)
 
             for model_name, history_dict in results['histories'].items():
-                # Check if this specific model has actual training data
-                if (history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0 and
-                    history_dict.get('val_loss') and len(history_dict['val_loss']) > 0):
+                if history_dict.get('val_accuracy') and len(history_dict['val_accuracy']) > 0:
                     final_val_acc = history_dict['val_accuracy'][-1]
                     final_val_loss = history_dict['val_loss'][-1]
-                    logger.info(f"{model_name:<20} {final_val_acc:<15.4f} {final_val_loss:<12.4f}")
+                    logger.info(
+                        f"{model_name:<30} "
+                        f"{final_val_acc:<15.4f} "
+                        f"{final_val_loss:<12.4f}"
+                    )
                 else:
-                    logger.info(f"{model_name:<20} {'Not trained':<15} {'Not trained':<12}")
-        else:
-            logger.info("TRAINING STATUS:")
-            logger.info("Models were not trained (epochs=0) - no training metrics available")
+                    logger.info(f"{model_name:<30} {'Not trained':<15} {'Not trained':<12}")
+            logger.info("")
 
     logger.info("=" * 80)
+    logger.info("ANALYSIS COMPLETE")
+    logger.info("=" * 80)
+    logger.info("")
+    logger.info("Key Insights:")
+    logger.info("  - Compare accuracy vs. computational complexity (O(N) vs O(log N))")
+    logger.info("  - Examine calibration differences between output layer types")
+    logger.info("  - Analyze training dynamics and convergence patterns")
+    logger.info("  - Check spectral metrics for training quality assessment")
+    logger.info("")
+    logger.info("Key Outputs:")
+    logger.info("  1. summary_dashboard.png - High-level comparison of all models")
+    logger.info("  2. spectral_summary.png - Training quality (α values)")
+    logger.info("  3. training_dynamics.png - Learning curves and stability")
+    logger.info("  4. confidence_calibration_analysis.png - Reliability analysis")
+    logger.info("  5. analysis_results.json - Raw metrics for further analysis")
+    logger.info("")
+    logger.info("Interpretation Tips:")
+    logger.info("  - Lower ECE & Brier Score = Better calibration")
+    logger.info("  - Power-law α in [2.0, 6.0] = Well-trained model")
+    logger.info("  - Lower Overfitting Index = Better generalization")
+    logger.info("  - Compare routing approaches to identify best trade-offs")
+    logger.info("")
 
 
 # ==============================================================================
@@ -683,23 +1001,54 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 # ==============================================================================
 
 def main() -> None:
-    """Main execution function for running the experiment."""
-    logger.info("CIFAR-10 Output Layer Comparison: Hierarchical Routing vs. Softmax")
-    logger.info("=" * 80)
+    """
+    Main execution function for running the output layer comparison experiment.
 
+    This function serves as the entry point for the experiment, handling
+    configuration setup, experiment execution, and error handling.
+    """
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("CIFAR-10 Output Layer Comparison Experiment")
+    logger.info("Hierarchical Routing vs. Softmax")
+    logger.info("Enhanced with Comprehensive ModelAnalyzer Integration")
+    logger.info("=" * 80)
+    logger.info("")
+
+    # Initialize experiment configuration
     config = ExperimentConfig()
 
+    # Log key configuration parameters
     logger.info("EXPERIMENT CONFIGURATION:")
-    logger.info(f"   Model Types: {config.model_types}")
-    logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
-    logger.info(f"   Loss Function: {config.loss_function.name}")
+    logger.info(f"  Model Types: {config.model_types}")
+    logger.info(f"  Epochs: {config.epochs}, Batch Size: {config.batch_size}")
+    logger.info(f"  Loss Function: {config.loss_function.name}")
+    logger.info(f"  Model Architecture: {len(config.conv_filters)} conv blocks")
+    logger.info("")
+    logger.info("ANALYSIS MODULES ENABLED:")
+    logger.info(f"  - Weight Analysis: {config.analyzer_config.analyze_weights}")
+    logger.info(f"  - Calibration Analysis: {config.analyzer_config.analyze_calibration}")
+    logger.info(f"  - Information Flow: {config.analyzer_config.analyze_information_flow}")
+    logger.info(f"  - Training Dynamics: {config.analyzer_config.analyze_training_dynamics}")
+    logger.info(f"  - Spectral Analysis: {config.analyzer_config.analyze_spectral}")
     logger.info("")
 
     try:
+        # Run the complete experiment
         _ = run_experiment(config)
-        logger.info("Experiment completed successfully!")
+
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("EXPERIMENT COMPLETED SUCCESSFULLY!")
+        logger.info("=" * 80)
+        logger.info("")
+
     except Exception as e:
-        logger.error(f"Experiment failed with error: {e}", exc_info=True)
+        logger.error("")
+        logger.error("=" * 80)
+        logger.error(f"EXPERIMENT FAILED: {e}")
+        logger.error("=" * 80)
+        logger.error("", exc_info=True)
         raise
 
 

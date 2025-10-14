@@ -1,5 +1,5 @@
 """
-Enhanced Training Dynamics Visualization Module
+Training Dynamics Visualization Module
 
 Creates visualizations for training dynamics analysis results with centralized legend management.
 """

@@ -639,6 +639,31 @@ class ModelAnalyzer:
             'multi_input_models': list(self._multi_input_models),
         }
 
+        if not self.config.json_include_per_sample_data:
+            pruned_confidence = {}
+            for model_name, metrics in results_dict.get('confidence_metrics', {}).items():
+                pruned_metrics = {}
+                for key, value in metrics.items():
+                    if isinstance(value, np.ndarray) and value.ndim == 1:
+                        # Replace array with summary statistics
+                        pruned_metrics[key] = {
+                            'mean': float(np.mean(value)),
+                            'std': float(np.std(value)),
+                            'median': float(np.median(value)),
+                            'min': float(np.min(value)),
+                            'max': float(np.max(value))
+                        }
+                    else:
+                        pruned_metrics[key] = value  # Keep non-array values
+                pruned_confidence[model_name] = pruned_metrics
+            results_dict['confidence_metrics'] = pruned_confidence
+
+            # Prune sample_activations from activation_stats
+            for model_name, layers in results_dict.get('activation_stats', {}).items():
+                for layer_name, stats in layers.items():
+                    if 'sample_activations' in stats:
+                        del stats['sample_activations']
+
         # Add spectral analysis DataFrame if it exists
         if self.results.spectral_analysis is not None:
             results_dict['spectral_analysis'] = self.results.spectral_analysis.to_dict(orient='records')

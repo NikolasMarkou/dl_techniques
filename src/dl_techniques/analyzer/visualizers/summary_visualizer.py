@@ -1,5 +1,5 @@
 """
-Enhanced Summary Dashboard Visualization Module
+Summary Dashboard Visualization Module
 
 Creates comprehensive summary dashboard with key insights across all analyses.
 Provides an integrated view of model performance, training dynamics, calibration,

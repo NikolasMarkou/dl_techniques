@@ -64,6 +64,10 @@ class AnalysisConfig:
     show_confidence_intervals: bool = True
     verbose: bool = True
 
+    # JSON serialization options
+    json_include_per_sample_data: bool = False  # Set to False to exclude bulky per-sample arrays (e.g., confidence, entropy)
+    json_include_raw_esds: bool = False         # Set to False to exclude raw eigenvalue arrays from spectral analysis
+
     # Configurable visualization parameters (addressing hardcoded values)
     max_layers_heatmap: int = 12  # Maximum layers to show in weight health heatmap
     max_layers_info_flow: int = 8  # Maximum layers to show in information flow analysis
