@@ -3,7 +3,9 @@ Spectral Analysis Visualization Module (WeightWatcher Integration)
 
 Creates visualizations for spectral analysis results, including power-law fits.
 """
+import os
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List
 
@@ -97,7 +99,8 @@ class SpectralVisualizer(BaseVisualizer):
 
         for index, row in df.iterrows():
             model_name = row['model_name']
-            layer_id = int(row['layer_id'])
+            # FIX: Use the DataFrame index, which is the layer_id
+            layer_id = int(index)
 
             if model_name not in esds or layer_id not in esds[model_name]:
                 continue

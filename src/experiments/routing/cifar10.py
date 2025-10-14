@@ -211,10 +211,10 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 3
+    epochs: int = 300
     batch_size: int = 128
     learning_rate: float = 0.001
-    early_stopping_patience: int = 15
+    early_stopping_patience: int = 50
     monitor_metric: str = 'val_accuracy'
     loss_function: Callable = field(default_factory=lambda: keras.losses.CategoricalCrossentropy(from_logits=False))
 
