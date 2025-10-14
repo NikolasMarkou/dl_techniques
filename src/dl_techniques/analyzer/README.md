@@ -526,8 +526,8 @@ The toolkit is designed to be extensible. You can add your own custom analysis a
 Extend the `BaseAnalyzer` class and implement the `analyze` method.
 
 ```python
-from analyzer.analyzers.base import BaseAnalyzer
-from analyzer.data_types import AnalysisResults, DataInput
+from dl_techniques.analyzer.analyzers.base import BaseAnalyzer
+from dl_techniques.analyzer.data_types import AnalysisResults, DataInput
 
 class MyCustomAnalyzer(BaseAnalyzer):
     def requires_data(self) -> bool:
@@ -549,8 +549,8 @@ class MyCustomAnalyzer(BaseAnalyzer):
 Extend the `BaseVisualizer` class and implement the plotting logic.
 
 ```python
-from analyzer.visualizers.base import BaseVisualizer
 import matplotlib.pyplot as plt
+from dl_techniques.analyzer.visualizers.base import BaseVisualizer
 
 class MyCustomVisualizer(BaseVisualizer):
     def create_visualizations(self) -> None:
