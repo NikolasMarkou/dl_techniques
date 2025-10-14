@@ -4,7 +4,6 @@ A production-ready Keras 3 implementation of the **mini-vec2vec** algorithm for 
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Keras Version](https://img.shields.io/badge/Keras-3.0-red.svg)](https://keras.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Paper](http://img.shields.io/badge/paper-arXiv-B31B1B.svg)](https://arxiv.org/abs/2510.02348)
 
 ## Table of Contents
@@ -16,17 +15,15 @@ A production-ready Keras 3 implementation of the **mini-vec2vec** algorithm for 
 2.  [The Model and Algorithm](#the-model-and-algorithm)
     *   [The Model: A Simple Linear Transformation](#the-model-a-simple-linear-transformation)
     *   [The "Training" Process: An Algorithmic Journey](#the-training-process-an-algorithmic-journey)
-3.  [Installation](#installation)
-4.  [Quick Start](#quick-start)
-5.  [Detailed Usage](#detailed-usage)
+3.  [Quick Start](#quick-start)
+4.  [Detailed Usage](#detailed-usage)
     *   [Data Preparation](#data-preparation)
     *   [Running the Alignment](#running-the-alignment)
     *   [Evaluation](#evaluation)
-6.  [Hyperparameter Guide](#hyperparameter-guide)
-7.  [API Reference](#api-reference)
-8.  [Performance Considerations](#performance-considerations)
-9.  [Model Serialization](#model-serialization)
-10. [References and Citation](#references-and-citation)
+5.  [Hyperparameter Guide](#hyperparameter-guide)
+6.  [API Reference](#api-reference)
+7.  [Performance Considerations](#performance-considerations)
+8.  [Model Serialization](#model-serialization)
 
 ## 1. Overview
 
@@ -87,25 +84,12 @@ The initial `W` is refined through two complementary bootstrapping strategies.
 -   **Refine-1 (Matching-Based)**: `W` is used to transform samples from space A. New, higher-quality nearest-neighbor pairs are found directly in the target space. These pairs are used to compute an updated `W`, and the process is repeated with exponential smoothing.
 -   **Refine-2 (Clustering-Based)**: `W` is used to guide the clustering of space B, creating a very stable, large-scale structural matching. This helps correct any errors from the local, matching-based refinement and produces the final, highly accurate `W`.
 
-## 3. Installation
-
-This implementation can be used as a standalone module or as part of a larger framework.
-
-```bash
-# Clone the repository (if not already done)
-git clone https://github.com/your-username/mini-vec2vec-keras.git
-cd mini-vec2vec-keras
-
-# Install dependencies
-pip install keras tensorflow numpy scikit-learn scipy tqdm
-```
-
-## 4. Quick Start
+## 3. Quick Start
 
 ```python
 import numpy as np
 import keras
-from mini_vec2vec_aligner import MiniVec2VecAligner
+from dl_techniques.models.mini_vec2vec import MiniVec2VecAligner
 
 # Assume you have your embedding matrices loaded
 # Shape: (n_samples, embedding_dim)
@@ -134,7 +118,7 @@ loaded_aligner = keras.models.load_model('mini_vec2vec_aligner.keras')
 realigned_embeddings = loaded_aligner(new_source_data)
 ```
 
-## 5. Detailed Usage
+## 4. Detailed Usage
 
 ### Data Preparation
 
@@ -196,7 +180,7 @@ metrics = evaluate_alignment(aligner, test_A, test_B)
 print(f"Top-1 Accuracy: {metrics['top1_accuracy']:.4f}")
 ```
 
-## 6. Hyperparameter Guide
+## 5. Hyperparameter Guide
 
 #### `approx_clusters` (default: 20)
 -   Number of anchor centroids.
@@ -222,7 +206,7 @@ print(f"Top-1 Accuracy: {metrics['top1_accuracy']:.4f}")
 -   Number of clusters for the final, fine-grained refinement.
 -   **Recommendation**: Use a significantly larger number than `approx_clusters`, typically 10x-25x larger.
 
-## 7. API Reference
+## 6. API Reference
 
 ### `MiniVec2VecAligner`
 
@@ -240,13 +224,13 @@ class MiniVec2VecAligner(keras.Model):
         """Transforms input embeddings using the learned W matrix."""
 ```
 
-## 8. Performance Considerations
+## 7. Performance Considerations
 
 -   **Complexity**: The runtime is dominated by K-Means and Nearest Neighbors searches. It scales linearly with the number of samples and is significantly faster than GAN-based approaches.
 -   **Memory**: Peak memory usage occurs during the creation of relative representations. This is proportional to `(num_samples * approx_clusters * approx_runs)`.
 -   **Optimization**: For very large datasets (> 1M samples), consider reducing `approx_runs` (e.g., to 15-20) and `refine1_sample_size`.
 
-## 9. Model Serialization
+## 8. Model Serialization
 
 The model is fully serializable using the standard Keras API.
 
@@ -260,27 +244,4 @@ loaded_aligner = keras.models.load_model('aligner.keras')
 
 # The loaded model contains the fitted W matrix and is ready for inference
 aligned_vectors = loaded_aligner(new_source_vectors)
-```
-
-## 10. References and Citation
-
-If you use this work in your research, please cite the original paper:
-
-```bibtex
-@article{dar2025minivec2vec,
-  title={mini-vec2vec: Scaling Universal Geometry Alignment with Linear Transformations},
-  author={Dar, Guy},
-  journal={arXiv preprint arXiv:2510.02348},
-  year={2025}
-}
-```
-
-If you use this specific implementation, you can also cite the software:
-```bibtex
-@software{mini_vec2vec_keras_impl,
-  title = {A Keras 3 Implementation of Mini-Vec2Vec},
-  author = {Your Name / Organization},
-  year = {2024},
-  url = {https://github.com/your-username/mini-vec2vec-keras}
-}
 ```

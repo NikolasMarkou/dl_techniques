@@ -9,14 +9,15 @@ This script shows how to:
 """
 
 import os
-import numpy as np
 import keras
+import numpy as np
 from keras import ops
 from typing import Optional, Tuple, Dict
-
-from dl_techniques.models.mini_vec2vec import MiniVec2VecAligner
-from dl_techniques.utils.logger import logger
 from sklearn.neighbors import NearestNeighbors
+
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.models.mini_vec2vec import MiniVec2VecAligner
 
 
 def generate_synthetic_data(

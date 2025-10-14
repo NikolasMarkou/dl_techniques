@@ -16,8 +16,9 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from scipy.optimize import quadratic_assignment
 
+from dl_techniques.utils.logger import logger
 
-@keras.saving.register_keras_serializable(package="dl_techniques.models.mini_vec2vec")
+@keras.saving.register_keras_serializable()
 class MiniVec2VecAligner(keras.Model):
     """
     Keras implementation of the mini-vec2vec unsupervised alignment algorithm.
@@ -212,7 +213,7 @@ class MiniVec2VecAligner(keras.Model):
             Tuple of (source_pairs, target_pairs) where both are numpy arrays
             of shape `(n_samples_A, embedding_dim)`.
         """
-        print(f"Creating pseudo-pairs with {num_runs} runs of anchor alignment...")
+        logger.info(f"Creating pseudo-pairs with {num_runs} runs of anchor alignment...")
         all_relative_A = []
         all_relative_B = []
 
@@ -300,7 +301,7 @@ class MiniVec2VecAligner(keras.Model):
             num_neighbors: Number of neighbors to average.
             smoothing: Exponential smoothing factor (0 < smoothing <= 1).
         """
-        print("Starting Refine-1: Matching-Based Refinement...")
+        logger.info("Starting Refine-1: Matching-Based Refinement...")
         current_W = ops.convert_to_numpy(self.W)
 
         for i in tqdm(range(iterations), desc="Refine-1 Iterations"):
@@ -359,7 +360,7 @@ class MiniVec2VecAligner(keras.Model):
             num_clusters: Number of clusters.
             smoothing: Exponential smoothing factor (0 < smoothing <= 1).
         """
-        print("Starting Refine-2: Clustering-Based Refinement...")
+        logger.info("Starting Refine-2: Clustering-Based Refinement...")
         current_W = ops.convert_to_numpy(self.W)
 
         # Step 1: Cluster source space A
@@ -462,7 +463,7 @@ class MiniVec2VecAligner(keras.Model):
         history = {}
 
         # ===== Stage 1: Preprocessing =====
-        print("Step 1: Preprocessing embeddings...")
+        logger.info("Step 1: Preprocessing embeddings...")
         mean_A = XA.mean(axis=0, keepdims=True)
         mean_B = XB.mean(axis=0, keepdims=True)
         XA_proc = XA - mean_A
@@ -473,20 +474,20 @@ class MiniVec2VecAligner(keras.Model):
         XB_proc = XB_proc / np.linalg.norm(XB_proc, axis=1, keepdims=True)
 
         # ===== Stage 2: Approximate Matching =====
-        print("\nStep 2: Approximate Matching...")
+        logger.info("\nStep 2: Approximate Matching...")
         source_pairs, target_pairs = self._create_pseudo_pairs(
             XA_proc, XB_proc, approx_clusters, approx_runs, approx_neighbors
         )
 
         # ===== Stage 3: Estimate Initial Mapping =====
-        print("\nStep 3: Estimating initial transformation...")
+        logger.info("\nStep 3: Estimating initial transformation...")
         initial_W = self._procrustes(source_pairs, target_pairs)
         self.W.assign(initial_W)
         history["initial_W"] = initial_W
-        print("Initial mapping estimated.")
+        logger.info("Initial mapping estimated.")
 
         # ===== Stage 4: Refine-1 (Matching-Based) =====
-        print("\nStep 4: Applying Matching-Based Refinement (Refine-1)...")
+        logger.info("\nStep 4: Applying Matching-Based Refinement (Refine-1)...")
         self._refine_matching_based(
             XA_proc,
             XB_proc,
@@ -496,10 +497,10 @@ class MiniVec2VecAligner(keras.Model):
             smoothing=smoothing_alpha,
         )
         history["refine1_W"] = ops.convert_to_numpy(self.W)
-        print("Refine-1 complete.")
+        logger.info("Refine-1 complete.")
 
         # ===== Stage 5: Refine-2 (Clustering-Based) =====
-        print("\nStep 5: Applying Clustering-Based Refinement (Refine-2)...")
+        logger.info("\nStep 5: Applying Clustering-Based Refinement (Refine-2)...")
         self._refine_clustering_based(
             XA_proc,
             XB_proc,
@@ -507,9 +508,9 @@ class MiniVec2VecAligner(keras.Model):
             smoothing=smoothing_alpha,
         )
         history["final_W"] = ops.convert_to_numpy(self.W)
-        print("Refine-2 complete.")
+        logger.info("Refine-2 complete.")
 
-        print("\n✓ Alignment finished successfully!")
+        logger.info("\n✓ Alignment finished successfully!")
         return history
 
     def get_config(self) -> Dict[str, Any]:

@@ -1,5 +1,5 @@
 """
-A unified multi-head attention with adaptive temperature.
+A unified multi-head attention with adaptive temperature and optional hierarchical routing
 
 This layer provides a versatile implementation of multi-head attention that
 can operate in both self-attention and cross-attention modes. It extends
@@ -254,6 +254,13 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.use_adaptive_softmax = use_adaptive_softmax
         self.adaptive_softmax_config = adaptive_softmax_config
 
+        # only one of the 2 can be enabled
+        if self.use_adaptive_softmax and self.use_hierarchical_routing:
+            raise ValueError(
+                "Only one of `use_adaptive_softmax` or `use_hierarchical_routing` "
+                "can be set to True."
+            )
+
         # Adaptive temperature softmax configuration and validation
         if self.use_adaptive_softmax:
             if self.adaptive_softmax_config is None:
@@ -307,7 +314,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         ) if self.dropout_rate > 0.0 else None
 
         if self.use_hierarchical_routing:
-            self.hierarchical_routing = RoutingProbabilitiesLayer()
+            self.hierarchical_routing = RoutingProbabilitiesLayer(axis=-1)
         else:
             self.hierarchical_routing = None
 
@@ -368,7 +375,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
 
-        # # Build hierarchical routing layer if exists
+        # Build hierarchical routing layer if exists
+        # NOTE routing layer is lazily built later, no need to instantiate here
         # if self.hierarchical_routing is not None:
         #     # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
         #     attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
@@ -420,44 +428,116 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through multi-head attention with optional masking and adaptive softmax."""
+        """
+        Forward pass through multi-head attention with optional masking and adaptive softmax or hierarchical routing.
+
+        Shape Legend:
+            B: batch_size
+            Q_seq: query sequence length
+            KV_seq: key-value sequence length
+            D: model dimension (self.dim)
+            H: number of heads (self.num_heads)
+            D_h: dimension of each head (self.head_dim)
+        """
+        # --- 1. Initial Setup and Shape Extraction ---
+        # We extract the batch size and query sequence length from the query input.
+        # These values will be used repeatedly for reshaping tensors throughout the process.
+        # query_input shape: (B, Q_seq, D)
         batch_size = ops.shape(query_input)[0]
         query_seq_len = ops.shape(query_input)[1]
 
-        # Determine Q, K, V based on projection strategy
+        # --- 2. Project Inputs to Query, Key, and Value Tensors ---
+        # This is the core projection step. Depending on the `shared_qk_projections`
+        # flag, we use either a single large dense layer for self-attention or
+        # separate dense layers for query and key-value pairs.
+
         if self.shared_qk_projections:
+            # --- 2a. Shared Projection (Self-Attention Only) ---
+            # This mode is parameter-efficient and only applicable for self-attention,
+            # where query, key, and value all originate from the same input tensor.
             if kv_input is not None:
                 raise ValueError(
                     "When `shared_qk_projections=True`, `kv_input` must be None "
                     "(self-attention mode only)."
                 )
-            # Shared projection mode for self-attention
+
+            # Project the single input into a combined Q, K, V tensor.
+            # input shape: (B, Q_seq, D)
+            # qkv_dense projects to 3 * D to hold Q, K, and V data.
+            # qkv shape: (B, Q_seq, 3 * D)
             qkv = self.qkv_dense(query_input)
+
+            # Reshape to separate Q, K, V and split the model dimension into heads.
+            # Shape: (B, Q_seq, 3, H, D_h)
             qkv = ops.reshape(qkv, (batch_size, query_seq_len, 3, self.num_heads, self.head_dim))
+
+            # Transpose to bring the head dimension forward, which is the standard
+            # format for multi-head attention computation: (3, B, H, Q_seq, D_h)
             qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
+
+            # Unpack the first dimension to get separate Q, K, V tensors.
+            # Each tensor shape: (B, H, Q_seq, D_h)
             q, k, v = qkv[0], qkv[1], qkv[2]
+
         else:
-            # Separate projection mode for cross-attention or self-attention
+            # --- 2b. Separate Projections (Cross-Attention or Self-Attention) ---
+            # This is the more general case. If `kv_input` is provided, we perform
+            # cross-attention. Otherwise, we perform self-attention on `query_input`.
             kv_source = kv_input if kv_input is not None else query_input
 
+            # --- Project Query ---
+            # q_dense projects query_input to the model dimension.
+            # query_input shape: (B, Q_seq, D)
+            # q shape (after dense): (B, Q_seq, D)
             q = self.q_dense(query_input)
+            # Reshape and transpose to multi-head format.
+            # Shape (after reshape): (B, Q_seq, H, D_h)
             q = ops.reshape(q, (batch_size, query_seq_len, self.num_heads, self.head_dim))
+            # Shape (after transpose): (B, H, Q_seq, D_h)
             q = ops.transpose(q, (0, 2, 1, 3))
 
+            # --- Project Key and Value ---
+            # kv_source shape: (B, KV_seq, D)
             kv_seq_len = ops.shape(kv_source)[1]
+            # kv_dense projects to 2 * D to hold both K and V data.
+            # kv shape (after dense): (B, KV_seq, 2 * D)
             kv = self.kv_dense(kv_source)
+            # Reshape to separate K, V and split into heads.
+            # Shape (after reshape): (B, KV_seq, 2, H, D_h)
             kv = ops.reshape(kv, (batch_size, kv_seq_len, 2, self.num_heads, self.head_dim))
+            # Transpose to standard multi-head format.
+            # Shape (after transpose): (2, B, H, KV_seq, D_h)
             kv = ops.transpose(kv, (2, 0, 3, 1, 4))
+            # Unpack to get separate K, V tensors.
+            # Each tensor shape: (B, H, KV_seq, D_h)
             k, v = kv[0], kv[1]
 
-        # Scaled dot-product attention
-        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * ops.cast(self.scale, q.dtype)
+        # --- 3. Scaled Dot-Product Attention ---
+        # Now that we have Q, K, and V, we compute the attention scores.
+        # This involves a matrix multiplication between Q and K^T, followed by scaling.
+        # q shape:      (B, H, Q_seq, D_h)
+        # k shape:      (B, H, KV_seq, D_h)
+        # k transposed: (B, H, D_h, KV_seq)
+        # scores shape: (B, H, Q_seq, KV_seq)
+        scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
 
-        # Apply attention mask if provided
+        # Scale scores by the inverse square root of head dimension to prevent gradients
+        # from becoming too small. The cast ensures type compatibility.
+        scores = scores * ops.cast(self.scale, q.dtype)
+
+        # --- 4. Apply Attention Mask (Optional) ---
+        # If a mask is provided, we apply it to the scores. This sets the scores
+        # for masked positions to a very large negative number, so they become
+        # zero after the softmax normalization.
         if attention_mask is not None:
+            # _apply_attention_mask handles broadcasting the mask to the scores' shape.
+            # scores shape remains: (B, H, Q_seq, KV_seq)
             scores = self._apply_attention_mask(scores, attention_mask)
 
-        # Compute attention weights using adaptive or standard softmax
+        # --- 5. Normalize Scores to get Attention Weights ---
+        # We convert the raw scores into a probability distribution (attention weights)
+        # using either a standard softmax, our adaptive softmax, or hierarchical routing.
+        # attn_weights shape will be the same as scores: (B, H, Q_seq, KV_seq)
         if self.use_adaptive_softmax and self.adaptive_softmax is not None:
             attn_weights = self.adaptive_softmax(scores)
         elif self.use_hierarchical_routing and self.hierarchical_routing is not None:
@@ -465,15 +545,35 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         else:
             attn_weights = ops.softmax(scores, axis=-1)
 
-        # Apply dropout if configured
+        # --- 6. Apply Dropout to Attention Weights (Optional) ---
+        # During training, dropout is applied to the attention weights to prevent
+        # the model from becoming over-reliant on a few key-value pairs.
         if self.dropout_layer is not None:
+            # attn_weights shape remains: (B, H, Q_seq, KV_seq)
             attn_weights = self.dropout_layer(attn_weights, training=training)
 
-        # Apply attention to values and reshape output
+        # --- 7. Compute Output by Attending to Values ---
+        # The attention weights are used to compute a weighted sum of the value vectors.
+        # attn_weights shape: (B, H, Q_seq, KV_seq)
+        # v shape:            (B, H, KV_seq, D_h)
+        # out shape (context vectors): (B, H, Q_seq, D_h)
         out = ops.matmul(attn_weights, v)
+
+        # --- 8. Reshape and Project Final Output ---
+        # The outputs from all heads are concatenated and passed through a final
+        # linear projection layer.
+
+        # First, transpose to bring the sequence and head dimensions together.
+        # Shape (after transpose): (B, Q_seq, H, D_h)
         out = ops.transpose(out, (0, 2, 1, 3))
+
+        # Reshape to concatenate the head outputs, effectively merging the heads.
+        # Shape (after reshape): (B, Q_seq, H * D_h) -> (B, Q_seq, D)
         out = ops.reshape(out, (batch_size, query_seq_len, self.dim))
 
+        # Apply the final linear projection. This allows the model to mix information
+        # learned from the different attention heads.
+        # out shape remains: (B, Q_seq, D)
         return self.proj_dense(out)
 
     def compute_output_shape(
