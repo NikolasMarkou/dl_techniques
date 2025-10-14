@@ -220,7 +220,8 @@ class SpectralAnalyzer(BaseAnalyzer):
         summary = self._get_summary(details)
         self._recommendations = self._generate_recommendations(details, summary)
 
-        return details
+        # Convert layer_id index to a column for robust concatenation
+        return details.reset_index()
 
     def _describe_model(self, model: keras.Model) -> pd.DataFrame:
         """
