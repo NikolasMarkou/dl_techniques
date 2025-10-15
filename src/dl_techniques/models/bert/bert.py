@@ -1,11 +1,12 @@
 """
-BERT Model Implementation
+BERT Model Implementation with Pretrained Support
 ==================================================
 
 A complete and refactored implementation of the BERT (Bidirectional Encoder
-Representations from Transformers) architecture. This version is designed as a pure
-foundation model, separating the core encoding logic from task-specific heads for
-maximum flexibility, especially in pre-training and multi-task fine-tuning scenarios.
+Representations from Transformers) architecture with support for loading
+pretrained weights. This version is designed as a pure foundation model,
+separating the core encoding logic from task-specific heads for maximum
+flexibility, especially in pre-training and multi-task fine-tuning scenarios.
 
 Based on: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"
 (Devlin et al., 2018) https://arxiv.org/abs/1810.04805
@@ -19,10 +20,16 @@ Usage Examples:
     from dl_techniques.nlp.heads.factory import create_nlp_head
     from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
 
-    # 1. Create the foundational BERT model
-    bert_encoder = BERT.from_variant("base")
+    # 1. Load pretrained BERT model
+    bert_encoder = BERT.from_variant("base", pretrained=True)
 
-    # 2. Define a task and create a corresponding head
+    # 2. Load from local weights file
+    bert_encoder = BERT.from_variant("large", pretrained="path/to/weights.keras")
+
+    # 3. Create BERT with custom configuration
+    bert_encoder = BERT.from_variant("base", vocab_size=50000)
+
+    # 4. Combine with task-specific head
     sentiment_config = NLPTaskConfig(
         name="sentiment",
         task_type=NLPTaskType.SENTIMENT_ANALYSIS,
@@ -33,7 +40,7 @@ Usage Examples:
         input_dim=bert_encoder.hidden_size
     )
 
-    # 3. Combine them into a final Keras model
+    # 5. Build complete model
     inputs = {
         "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
         "attention_mask": keras.Input(shape=(None,), dtype="int32", name="attention_mask"),
@@ -41,16 +48,11 @@ Usage Examples:
     }
     bert_outputs = bert_encoder(inputs)
     task_outputs = sentiment_head(bert_outputs)
-
     sentiment_model = keras.Model(inputs, task_outputs)
-
-    # 4. Use the model
-    # input_data = ...
-    # results = sentiment_model(input_data)
-    # print(results['logits'].shape) # (batch_size, 3)
 
 """
 
+import os
 import keras
 from typing import Optional, Union, Any, Dict, List
 
@@ -76,10 +78,11 @@ from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
 class BERT(keras.Model):
     """BERT (Bidirectional Encoder Representations from Transformers) model.
 
-    This is a pure encoder implementation, designed to produce contextual token
-    representations. It separates the core transformer architecture from any
-    task-specific layers (like pooling or classification heads), making it highly
-    flexible for pre-training, fine-tuning, and multi-task learning.
+    This is a pure encoder implementation with pretrained weights support,
+    designed to produce contextual token representations. It separates the
+    core transformer architecture from any task-specific layers (like pooling
+    or classification heads), making it highly flexible for pre-training,
+    fine-tuning, and multi-task learning.
 
     The model expects inputs as a dictionary containing 'input_ids', and
     optionally 'attention_mask', 'token_type_ids', and 'position_ids'. It
@@ -182,8 +185,11 @@ class BERT(keras.Model):
             # Create standard BERT-base model
             model = BERT.from_variant("base")
 
-            # Create BERT with advanced features
-            model = BERT.from_variant("large", normalization_type="rms_norm")
+            # Load pretrained BERT-base
+            model = BERT.from_variant("base", pretrained=True)
+
+            # Load from local file
+            model = BERT.from_variant("large", pretrained="path/to/weights.keras")
 
             # Use the model
             inputs = {
@@ -192,20 +198,12 @@ class BERT(keras.Model):
             }
             outputs = model(inputs)
             print(outputs["last_hidden_state"].shape)
-            # (2, 128, 1024)
+            # (2, 128, 768)
 
     """
 
     # Model variant configurations following BERT paper specifications
     MODEL_VARIANTS = {
-        "base": {
-            "hidden_size": 768,
-            "num_layers": 12,
-            "num_heads": 12,
-            "intermediate_size": 3072,
-            "description":
-                "BERT-Base: 110M parameters, suitable for most applications"
-        },
         "large": {
             "hidden_size": 1024,
             "num_layers": 24,
@@ -213,22 +211,45 @@ class BERT(keras.Model):
             "intermediate_size": 4096,
             "description": "BERT-Large: 340M parameters, maximum performance"
         },
+        "base": {
+            "hidden_size": 768,
+            "num_layers": 12,
+            "num_heads": 12,
+            "intermediate_size": 3072,
+            "description": "BERT-Base: 110M parameters, suitable for most applications"
+        },
         "small": {
             "hidden_size": 512,
             "num_layers": 6,
             "num_heads": 8,
             "intermediate_size": 2048,
-            "description":
-                "BERT-Small: Lightweight variant for resource-constrained "
-                "environments"
+            "description": "BERT-Small: Lightweight variant for resource-constrained environments"
         },
         "tiny": {
             "hidden_size": 256,
             "num_layers": 4,
             "num_heads": 4,
-            "intermediate_size": 1024,
-            "description":
-                "BERT-Tiny: Ultra-lightweight for mobile/edge deployment"
+            "intermediate_size": 512,
+            "description": "BERT-Tiny: Ultra-lightweight for mobile/edge deployment"
+        },
+    }
+
+    # Pretrained weights URLs (update these with actual URLs when available)
+    PRETRAINED_WEIGHTS = {
+        "base": {
+            "uncased": "https://example.com/bert_base_uncased.keras",
+            "cased": "https://example.com/bert_base_cased.keras",
+            "multilingual": "https://example.com/bert_base_multilingual.keras",
+        },
+        "large": {
+            "uncased": "https://example.com/bert_large_uncased.keras",
+            "cased": "https://example.com/bert_large_cased.keras",
+        },
+        "small": {
+            "uncased": "https://example.com/bert_small_uncased.keras",
+        },
+        "tiny": {
+            "uncased": "https://example.com/bert_tiny_uncased.keras",
         },
     }
 
@@ -501,18 +522,167 @@ class BERT(keras.Model):
             "attention_mask": attention_mask
         }
 
+    def load_pretrained_weights(
+        self,
+        weights_path: str,
+        skip_mismatch: bool = True,
+        by_name: bool = True
+    ) -> None:
+        """Load pretrained weights into the model.
+
+        This method handles loading weights with smart mismatch handling,
+        particularly useful when the vocabulary size or architecture differs
+        slightly from the pretrained model.
+
+        :param weights_path: Path to the weights file (.keras format).
+        :type weights_path: str
+        :param skip_mismatch: Whether to skip layers with mismatched shapes.
+            Useful when loading weights with different vocab_size or config.
+        :type skip_mismatch: bool
+        :param by_name: Whether to load weights by layer name.
+        :type by_name: bool
+        :raises FileNotFoundError: If weights_path doesn't exist.
+        :raises ValueError: If weights cannot be loaded.
+
+        Example:
+            .. code-block:: python
+
+                model = BERT.from_variant("base", vocab_size=50000)
+                model.load_pretrained_weights(
+                    "bert_base_uncased.keras",
+                    skip_mismatch=True
+                )
+        """
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Weights file not found: {weights_path}")
+
+        try:
+            # Build model if not already built
+            if not self.built:
+                dummy_input = {
+                    "input_ids": keras.random.uniform(
+                        (1, 128), 0, self.vocab_size, dtype="int32"
+                    ),
+                    "attention_mask": keras.ops.ones((1, 128), dtype="int32")
+                }
+                self(dummy_input, training=False)
+
+            logger.info(f"Loading pretrained weights from {weights_path}")
+
+            # Load weights with appropriate settings
+            self.load_weights(
+                weights_path,
+                skip_mismatch=skip_mismatch,
+                by_name=by_name
+            )
+
+            if skip_mismatch:
+                logger.info(
+                    "Weights loaded with skip_mismatch=True. "
+                    "Layers with shape mismatches were skipped (e.g., embedding layer)."
+                )
+            else:
+                logger.info("All weights loaded successfully.")
+
+        except Exception as e:
+            raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
+
+    @staticmethod
+    def _download_weights(
+        variant: str,
+        dataset: str = "uncased",
+        cache_dir: Optional[str] = None
+    ) -> str:
+        """Download pretrained weights from URL.
+
+        :param variant: Model variant name.
+        :type variant: str
+        :param dataset: Dataset/version the weights were trained on.
+            Options: "uncased", "cased", "multilingual".
+        :type dataset: str
+        :param cache_dir: Directory to cache downloaded weights.
+            If None, uses default Keras cache directory.
+        :type cache_dir: Optional[str]
+        :return: Path to the downloaded weights file.
+        :rtype: str
+        :raises ValueError: If variant or dataset is not available.
+
+        Example:
+            .. code-block:: python
+
+                weights_path = BERT._download_weights("base", "uncased")
+        """
+        if variant not in BERT.PRETRAINED_WEIGHTS:
+            raise ValueError(
+                f"No pretrained weights available for variant '{variant}'. "
+                f"Available variants: {list(BERT.PRETRAINED_WEIGHTS.keys())}"
+            )
+
+        if dataset not in BERT.PRETRAINED_WEIGHTS[variant]:
+            raise ValueError(
+                f"No pretrained weights available for dataset '{dataset}'. "
+                f"Available datasets for {variant}: "
+                f"{list(BERT.PRETRAINED_WEIGHTS[variant].keys())}"
+            )
+
+        url = BERT.PRETRAINED_WEIGHTS[variant][dataset]
+
+        logger.info(f"Downloading BERT-{variant} ({dataset}) weights...")
+
+        # Download weights using Keras utility
+        weights_path = keras.utils.get_file(
+            fname=f"bert_{variant}_{dataset}.keras",
+            origin=url,
+            cache_dir=cache_dir,
+            cache_subdir="models/bert"
+        )
+
+        logger.info(f"Weights downloaded to: {weights_path}")
+        return weights_path
+
     @classmethod
-    def from_variant(cls, variant: str, **kwargs: Any) -> "BERT":
+    def from_variant(
+        cls,
+        variant: str,
+        pretrained: Union[bool, str] = False,
+        weights_dataset: str = "uncased",
+        cache_dir: Optional[str] = None,
+        **kwargs: Any
+    ) -> "BERT":
         """Create a BERT model from a predefined variant.
 
         :param variant: The name of the variant, one of "base", "large",
             "small", "tiny".
         :type variant: str
+        :param pretrained: If True, loads pretrained weights from default URL.
+            If string, treats it as a path to local weights file.
+        :type pretrained: Union[bool, str]
+        :param weights_dataset: Dataset/version for pretrained weights.
+            Options: "uncased", "cased", "multilingual".
+            Only used if pretrained=True.
+        :type weights_dataset: str
+        :param cache_dir: Directory to cache downloaded weights.
+        :type cache_dir: Optional[str]
         :param kwargs: Additional arguments to override the variant's defaults.
         :type kwargs: Any
         :return: A BERT model instance configured for the specified variant.
         :rtype: BERT
         :raises ValueError: If the specified variant is not recognized.
+
+        Example:
+            .. code-block:: python
+
+                # Load pretrained BERT-base
+                model = BERT.from_variant("base", pretrained=True)
+
+                # Load pretrained BERT-large (cased)
+                model = BERT.from_variant("large", pretrained=True, weights_dataset="cased")
+
+                # Load from local file
+                model = BERT.from_variant("base", pretrained="path/to/weights.keras")
+
+                # Create with custom vocab size (will skip embedding weights)
+                model = BERT.from_variant("base", pretrained=True, vocab_size=50000)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -526,12 +696,71 @@ class BERT(keras.Model):
         logger.info(f"Creating BERT-{variant.upper()} model")
         logger.info(f"Configuration: {description}")
 
+        # Handle pretrained weights
+        load_weights_path = None
+        skip_mismatch = False
+
+        if pretrained:
+            if isinstance(pretrained, str):
+                # Load from local file path
+                load_weights_path = pretrained
+                logger.info(f"Will load weights from local file: {load_weights_path}")
+            else:
+                # Download from URL
+                try:
+                    load_weights_path = cls._download_weights(
+                        variant=variant,
+                        dataset=weights_dataset,
+                        cache_dir=cache_dir
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to download pretrained weights: {str(e)}. "
+                        f"Continuing with random initialization."
+                    )
+                    load_weights_path = None
+
+            # Determine if we need to skip mismatches
+            # Check if vocab_size differs from default
+            pretrained_vocab_size = cls.DEFAULT_VOCAB_SIZE
+            custom_vocab_size = kwargs.get("vocab_size", config.get("vocab_size"))
+
+            if custom_vocab_size and custom_vocab_size != pretrained_vocab_size:
+                skip_mismatch = True
+                logger.info(
+                    f"vocab_size ({custom_vocab_size}) differs from pretrained "
+                    f"({pretrained_vocab_size}). Will skip embedding layer weights."
+                )
+
+            # Check if other architectural parameters differ
+            pretrained_config_keys = ["hidden_size", "num_layers", "num_heads", "intermediate_size"]
+            for key in pretrained_config_keys:
+                if key in kwargs and kwargs[key] != config.get(key):
+                    skip_mismatch = True
+                    logger.info(
+                        f"{key} differs from pretrained configuration. "
+                        f"Will skip layers with shape mismatches."
+                    )
+
         # Override defaults with kwargs
         config.update(kwargs)
 
-        return cls(**config)
+        # Create model
+        model = cls(**config)
 
+        # Load pretrained weights if available
+        if load_weights_path:
+            try:
+                model.load_pretrained_weights(
+                    weights_path=load_weights_path,
+                    skip_mismatch=skip_mismatch,
+                    by_name=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to load pretrained weights: {str(e)}")
+                raise
 
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return the model's configuration for serialization.
@@ -617,13 +846,16 @@ class BERT(keras.Model):
 def create_bert_with_head(
     bert_variant: str,
     task_config: NLPTaskConfig,
+    pretrained: Union[bool, str] = False,
+    weights_dataset: str = "uncased",
+    cache_dir: Optional[str] = None,
     bert_config_overrides: Optional[Dict[str, Any]] = None,
     head_config_overrides: Optional[Dict[str, Any]] = None,
 ) -> keras.Model:
     """Factory function to create a BERT model with a task-specific head.
 
     This function demonstrates the intended integration pattern:
-    1. Instantiate a foundational `BERT` model.
+    1. Instantiate a foundational `BERT` model (optionally pretrained).
     2. Instantiate a task-specific head from the `dl_techniques.nlp.heads`
        factory.
     3. Combine them into a single, end-to-end `keras.Model`.
@@ -632,6 +864,13 @@ def create_bert_with_head(
     :type bert_variant: str
     :param task_config: An `NLPTaskConfig` object defining the task.
     :type task_config: NLPTaskConfig
+    :param pretrained: If True, loads pretrained weights. If string,
+        path to local weights file.
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset for pretrained weights ("uncased", "cased", etc.).
+    :type weights_dataset: str
+    :param cache_dir: Directory to cache downloaded weights.
+    :type cache_dir: Optional[str]
     :param bert_config_overrides: Optional dictionary to override default BERT
         configuration for the chosen variant. Defaults to None.
     :type bert_config_overrides: Optional[Dict[str, Any]]
@@ -653,10 +892,11 @@ def create_bert_with_head(
                 num_classes=9
             )
 
-            # Create the full model
+            # Create the full model with pretrained BERT
             ner_model = create_bert_with_head(
                 bert_variant="base",
                 task_config=ner_task,
+                pretrained=True,
                 head_config_overrides={"use_task_attention": True}
             )
             ner_model.summary()
@@ -668,8 +908,14 @@ def create_bert_with_head(
         f"Creating BERT-{bert_variant} with a '{task_config.name}' head."
     )
 
-    # 1. Create the foundational BERT model
-    bert_encoder = BERT.from_variant(bert_variant, **bert_config_overrides)
+    # 1. Create the foundational BERT model (with optional pretrained weights)
+    bert_encoder = BERT.from_variant(
+        bert_variant,
+        pretrained=pretrained,
+        weights_dataset=weights_dataset,
+        cache_dir=cache_dir,
+        **bert_config_overrides
+    )
 
     # 2. Create the task head
     task_head = create_nlp_head(
