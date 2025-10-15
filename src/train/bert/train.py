@@ -663,9 +663,18 @@ class MultiTaskBERTModel(keras.Model):
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
+        # Make a deep copy to modify for serialization
+        task_configs_serializable = {
+            name: asdict(config) for name, config in self.task_configs_dict.items()
+        }
+        # Convert Enum to string for serialization
+        for task_dict in task_configs_serializable.values():
+            if 'task_type' in task_dict and isinstance(task_dict['task_type'], NLPTaskType):
+                task_dict['task_type'] = task_dict['task_type'].value
+
         config.update({
             "bert_config": self.bert_config,
-            "task_configs_dict": self.task_configs_dict
+            "task_configs_dict": task_configs_serializable
         })
         return config
 
@@ -678,9 +687,16 @@ class MultiTaskBERTModel(keras.Model):
         :return: Model instance.
         :rtype: MultiTaskBERTModel
         """
+        # Make a deep copy to modify for deserialization
+        task_configs_dict_deserializable = config["task_configs_dict"].copy()
+        # Convert string back to Enum
+        for task_dict in task_configs_dict_deserializable.values():
+            if 'task_type' in task_dict:
+                task_dict['task_type'] = NLPTaskType(task_dict['task_type'])
+
         task_configs = {
             name: TaskConfiguration(**task_dict)
-            for name, task_dict in config["task_configs_dict"].items()
+            for name, task_dict in task_configs_dict_deserializable.items()
         }
         return cls(
             bert_config=config["bert_config"],
