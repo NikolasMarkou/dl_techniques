@@ -21,8 +21,8 @@ Usage:
 ------
 .. code-block:: bash
 
-    python train_bert_multitask.py --config config.yaml
-    python train_bert_multitask.py --bert-variant base --epochs 10 --batch-size 32
+    python train_bert_multiclass.py --config config.yaml
+    python train_bert_multiclass.py --bert-variant base --epochs 10 --batch-size 32
 
 """
 
@@ -33,7 +33,7 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 import tensorflow_datasets as tfds
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import Dict, List, Optional, Any, Callable
 
 # ---------------------------------------------------------------------
@@ -250,7 +250,6 @@ class TaskDataLoader:
         """
         self.task_config = task_config
         self.tokenizer = tokenizer
-        self.tokenizer.max_length = task_config.max_sequence_length
 
     def load_dataset(
             self,
@@ -284,7 +283,7 @@ class TaskDataLoader:
 
         # Apply task-specific preprocessing
         ds = ds.map(
-            self._preprocess_function,
+            self._get_preprocessing_fn(),
             num_parallel_calls=tf.data.AUTOTUNE
         )
 
@@ -294,136 +293,128 @@ class TaskDataLoader:
 
         return ds
 
-    def _preprocess_function(self, example: Dict[str, Any]) -> Dict[str, Any]:
-        """Preprocess a single example.
-
-        :param example: Raw example from dataset.
-        :type example: Dict[str, Any]
-        :return: Preprocessed example.
-        :rtype: Dict[str, Any]
-        """
+    def _get_preprocessing_fn(self) -> Callable:
+        """Returns the appropriate preprocessing function wrapped for tf.data."""
         task_type = self.task_config.task_type
 
         if task_type == NLPTaskType.SENTIMENT_ANALYSIS:
-            return self._preprocess_classification(example)
+            return self._preprocess_classification
         elif task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
-            return self._preprocess_token_classification(example)
+            return self._preprocess_token_classification
         elif task_type == NLPTaskType.QUESTION_ANSWERING:
-            return self._preprocess_question_answering(example)
+            return self._preprocess_question_answering
         else:
             raise ValueError(f"Unknown task type: {task_type}")
 
-    def _preprocess_classification(
-            self,
-            example: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Preprocess classification example.
-
-        :param example: Raw example.
-        :type example: Dict[str, Any]
-        :return: Preprocessed example.
-        :rtype: Dict[str, Any]
-        """
-        # Extract text and label
-        text = example.get("text", example.get("sentence", ""))
-        if isinstance(text, tf.Tensor):
-            text = text.numpy().decode("utf-8")
-
-        label = example.get("label", 0)
-        if isinstance(label, tf.Tensor):
-            label = int(label.numpy())
-
-        # Tokenize
+    def _py_encode_text(self, text_tensor: tf.Tensor) -> Dict[str, np.ndarray]:
+        """Wrapper to run tokenizer's encode method in tf.py_function."""
+        text = text_tensor.numpy().decode("utf-8")
         encoded = self.tokenizer.encode(text)
+        return encoded["input_ids"], encoded["attention_mask"], encoded["token_type_ids"]
+
+    def _preprocess_classification(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        """Preprocess classification example using tf.py_function."""
+        text = example.get("text", example.get("sentence", ""))
+        label = tf.cast(example.get("label", 0), tf.int32)
+
+        input_ids, attention_mask, token_type_ids = tf.py_function(
+            func=self._py_encode_text,
+            inp=[text],
+            Tout=[tf.int32, tf.int32, tf.int32]
+        )
+
+        max_len = self.tokenizer.max_length
+        input_ids.set_shape([max_len])
+        attention_mask.set_shape([max_len])
+        token_type_ids.set_shape([max_len])
 
         return {
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
-            "token_type_ids": encoded["token_type_ids"],
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
             "labels": label
         }
 
-    def _preprocess_token_classification(
-            self,
-            example: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Preprocess token classification example.
+    def _preprocess_token_classification(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        """Preprocess token classification example using tf.py_function."""
+        tokens = example.get("tokens", tf.constant([], dtype=tf.string))
+        ner_tags = example.get("ner_tags", tf.constant([], dtype=tf.int32))
 
-        :param example: Raw example.
-        :type example: Dict[str, Any]
-        :return: Preprocessed example.
-        :rtype: Dict[str, Any]
-        """
-        # Extract tokens and labels
-        tokens = example.get("tokens", [])
-        ner_tags = example.get("ner_tags", [])
+        def _py_process_tokens(tokens_tensor, ner_tags_tensor):
+            token_list = [t.decode("utf-8") for t in tokens_tensor.numpy()]
+            ner_tag_list = ner_tags_tensor.numpy().tolist()
 
-        if isinstance(tokens, tf.Tensor):
-            tokens = [t.numpy().decode("utf-8") for t in tokens]
-        if isinstance(ner_tags, tf.Tensor):
-            ner_tags = ner_tags.numpy().tolist()
+            text = " ".join(token_list)
+            encoded = self.tokenizer.encode(text)
 
-        # Simple tokenization (in production, use subword alignment)
-        text = " ".join(tokens)
-        encoded = self.tokenizer.encode(text)
+            max_len = self.tokenizer.max_length
+            seq_len = min(len(ner_tag_list) + 2, max_len)
+            labels = [0] + ner_tag_list[:seq_len - 2] + [0]
+            labels += [0] * (max_len - len(labels))
 
-        # Align labels with tokens (simplified)
-        seq_len = min(len(ner_tags) + 2, self.task_config.max_sequence_length)
-        labels = [0] + ner_tags[:seq_len - 2] + [0]  # Add padding for CLS/SEP
-        labels += [0] * (self.task_config.max_sequence_length - len(labels))
+            return encoded["input_ids"], encoded["attention_mask"], encoded["token_type_ids"], np.array(labels, dtype=np.int32)
+
+        input_ids, attention_mask, token_type_ids, labels = tf.py_function(
+            func=_py_process_tokens,
+            inp=[tokens, ner_tags],
+            Tout=[tf.int32, tf.int32, tf.int32, tf.int32]
+        )
+
+        max_len = self.tokenizer.max_length
+        input_ids.set_shape([max_len])
+        attention_mask.set_shape([max_len])
+        token_type_ids.set_shape([max_len])
+        labels.set_shape([max_len])
 
         return {
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
-            "token_type_ids": encoded["token_type_ids"],
-            "labels": np.array(labels[:self.task_config.max_sequence_length], dtype=np.int32)
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+            "labels": labels
         }
 
-    def _preprocess_question_answering(
-            self,
-            example: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Preprocess question answering example.
-
-        :param example: Raw example.
-        :type example: Dict[str, Any]
-        :return: Preprocessed example.
-        :rtype: Dict[str, Any]
-        """
-        # Extract question and context
+    def _preprocess_question_answering(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        """Preprocess QA example using tf.py_function."""
         question = example.get("question", "")
         context = example.get("context", "")
-
-        if isinstance(question, tf.Tensor):
-            question = question.numpy().decode("utf-8")
-        if isinstance(context, tf.Tensor):
-            context = context.numpy().decode("utf-8")
-
-        # Combine question and context
-        text = f"{question} {context}"
-        encoded = self.tokenizer.encode(text)
-
-        # Get answer positions (simplified)
         answers = example.get("answers", {})
-        if isinstance(answers, dict) and "answer_start" in answers:
-            start_pos = answers["answer_start"]
-            if isinstance(start_pos, tf.Tensor):
-                start_pos = int(start_pos.numpy()[0] if start_pos.shape[0] > 0 else 0)
-            else:
-                start_pos = int(start_pos[0]) if start_pos else 0
-        else:
-            start_pos = 0
+        answer_start = answers.get("answer_start", tf.constant([0], dtype=tf.int32))
 
-        # Simple position mapping (in production, use proper alignment)
-        start_pos = min(start_pos, self.task_config.max_sequence_length - 1)
-        end_pos = min(start_pos + 10, self.task_config.max_sequence_length - 1)
+        def _py_process_qa(question_t, context_t, start_t):
+            q = question_t.numpy().decode("utf-8")
+            c = context_t.numpy().decode("utf-8")
+            start_pos = int(start_t.numpy()[0] if start_t.shape[0] > 0 else 0)
+
+            text = f"{q} {c}"
+            encoded = self.tokenizer.encode(text)
+
+            max_len = self.tokenizer.max_length
+            start_pos = min(start_pos, max_len - 1)
+            end_pos = min(start_pos + 10, max_len - 1)
+
+            return encoded["input_ids"], encoded["attention_mask"], encoded["token_type_ids"], start_pos, end_pos
+
+        input_ids, attention_mask, token_type_ids, start_pos, end_pos = tf.py_function(
+            func=_py_process_qa,
+            inp=[question, context, answer_start],
+            Tout=[tf.int32, tf.int32, tf.int32, tf.int32, tf.int32]
+        )
+
+        max_len = self.tokenizer.max_length
+        input_ids.set_shape([max_len])
+        attention_mask.set_shape([max_len])
+        token_type_ids.set_shape([max_len])
+        start_pos.set_shape([])
+        end_pos.set_shape([])
 
         return {
-            "input_ids": encoded["input_ids"],
-            "attention_mask": encoded["attention_mask"],
-            "token_type_ids": encoded["token_type_ids"],
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
             "start_positions": start_pos,
-            "end_positions": end_pos
+            "end_positions": end_pos,
+            # Add a dummy 'labels' key for consistency in the training loop
+            "labels": {"start_positions": start_pos, "end_positions": end_pos}
         }
 
     def _generate_synthetic_dataset(self, split: str) -> tf.data.Dataset:
@@ -589,16 +580,32 @@ class MultiTaskBERTModel(keras.Model):
         :param task_config: Task configuration.
         :type task_config: TaskConfiguration
         """
+        # Create the NLPTaskConfig, ensuring that only valid arguments from
+        # head_config are passed to its constructor.
+        nlp_task_config_fields = {f.name for f in fields(NLPTaskConfig)}
+        nlp_task_constructor_args = {
+            k: v for k, v in task_config.head_config.items()
+            if k in nlp_task_config_fields
+        }
         nlp_task_config = NLPTaskConfig(
             name=task_config.name,
             task_type=task_config.task_type,
             num_classes=task_config.num_classes,
-            **task_config.head_config
+            **nlp_task_constructor_args
         )
 
+        # Arguments for the head factory are those in head_config that are
+        # not part of the NLPTaskConfig.
+        head_constructor_args = {
+            k: v for k, v in task_config.head_config.items()
+            if k not in nlp_task_config_fields
+        }
+
+        # Create the head, passing the remaining arguments to the factory
         head = create_nlp_head(
             task_config=nlp_task_config,
-            input_dim=self.bert_config["hidden_size"]
+            input_dim=self.bert_config["hidden_size"],
+            **head_constructor_args
         )
 
         self.task_heads[task_name] = head
@@ -720,10 +727,19 @@ class MultiTaskTrainer:
         self.save_dir = Path(training_config.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize tokenizer
+        # Find global max sequence length across all tasks
+        global_max_length = max(
+            c.max_sequence_length for c in task_configs.values()
+        )
+        logger.info(
+            "Padding all task batches to global max sequence length: "
+            f"{global_max_length}"
+        )
+
+        # Initialize tokenizer with the global max length
         self.tokenizer = SimpleTokenizer(
             vocab_size=training_config.vocab_size,
-            max_length=128  # Will be overridden per task
+            max_length=global_max_length
         )
 
         # Load datasets
@@ -741,6 +757,41 @@ class MultiTaskTrainer:
         # Training state
         self.global_step = 0
         self.epoch = 0
+
+        # Build the model and optimizer before training to initialize weights and state
+        self._build_model_and_optimizer()
+
+        # Create a dictionary of traced train step functions, one for each task.
+        # This is crucial to prevent `task_name` from becoming a symbolic tensor.
+        # We use a helper function to create a closure that captures the Python
+        # string `task_name` for each traced function.
+        self.train_steps: Dict[str, Callable] = {}
+        for task_name in self.task_configs.keys():
+            def create_step_fn(name_for_closure: str) -> Callable:
+                """Creates a specialized train step function for a given task."""
+
+                # This is the function that will be traced. It calls the generic
+                # _train_step with the hard-coded (via closure) task name.
+                def step_fn(inputs, labels):
+                    return self._train_step(inputs, labels, name_for_closure)
+                return tf.function(step_fn)
+
+            self.train_steps[task_name] = create_step_fn(task_name)
+
+    def _build_model_and_optimizer(self) -> None:
+        """Builds the model and optimizer by running a dummy forward pass."""
+        logger.info("Building model and optimizer state...")
+        # Create a dummy batch of the correct shape
+        dummy_input = {
+            "input_ids": tf.zeros((1, self.tokenizer.max_length), dtype=tf.int32),
+            "attention_mask": tf.zeros((1, self.tokenizer.max_length), dtype=tf.int32),
+            "token_type_ids": tf.zeros((1, self.tokenizer.max_length), dtype=tf.int32),
+        }
+        # Run a forward pass to build all model weights
+        _ = self.model(dummy_input, training=False)
+        # Explicitly build the optimizer with the model's variables
+        self.optimizer.build(self.model.trainable_variables)
+        logger.info("Model and optimizer built successfully.")
 
     def _load_all_datasets(self) -> None:
         """Load datasets for all tasks."""
@@ -874,7 +925,6 @@ class MultiTaskTrainer:
                 )
             }
 
-    @tf.function
     def _train_step(
             self,
             inputs: Dict[str, keras.KerasTensor],
@@ -901,10 +951,7 @@ class MultiTaskTrainer:
             task_config = self.task_configs[task_name]
             if task_config.task_type == NLPTaskType.QUESTION_ANSWERING:
                 loss = self.loss_functions[task_name](
-                    {
-                        "start_positions": labels["start_positions"],
-                        "end_positions": labels["end_positions"]
-                    },
+                    labels,
                     task_outputs
                 )
             elif task_config.task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
@@ -979,8 +1026,10 @@ class MultiTaskTrainer:
                 }
                 labels = batch["labels"]
 
-                # Train step
-                loss = self._train_step(inputs, labels, task_name)
+                # Call the appropriate traced function for the task.
+                # The task_name is "baked into" the train_fn, so we don't pass it here.
+                train_fn = self.train_steps[task_name]
+                loss = train_fn(inputs, labels)
 
                 # Logging
                 if self.global_step % self.config.logging_steps == 0:

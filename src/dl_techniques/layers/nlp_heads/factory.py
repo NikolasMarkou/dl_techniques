@@ -21,6 +21,7 @@ from ..norms import create_normalization_layer, NormalizationType
 
 from .task_types import NLPTaskType, NLPTaskConfig
 
+
 # ---------------------------------------------------------------------
 # Base NLP Head Class
 # ---------------------------------------------------------------------
@@ -136,7 +137,7 @@ class BaseNLPHead(keras.layers.Layer):
             }
 
             if self.attention_type == 'multi_head':
-                attn_params['embed_dim'] = self.hidden_size
+                attn_params['dim'] = self.hidden_size
                 attn_params['num_heads'] = 8
             else:
                 attn_params['dim'] = self.hidden_size
@@ -194,7 +195,8 @@ class BaseNLPHead(keras.layers.Layer):
         elif self.pooling_type == 'mean':
             # Mean pooling with attention mask
             if attention_mask is not None:
-                mask_expanded = ops.expand_dims(attention_mask, axis=-1)
+                mask = ops.cast(attention_mask, dtype=sequence.dtype)
+                mask_expanded = ops.expand_dims(mask, axis=-1)
                 sum_embeddings = ops.sum(sequence * mask_expanded, axis=1)
                 sum_mask = ops.sum(mask_expanded, axis=1)
                 return sum_embeddings / ops.maximum(sum_mask, 1e-9)
@@ -204,7 +206,8 @@ class BaseNLPHead(keras.layers.Layer):
         elif self.pooling_type == 'max':
             # Max pooling
             if attention_mask is not None:
-                mask_expanded = ops.expand_dims(attention_mask, axis=-1)
+                mask = ops.cast(attention_mask, dtype=sequence.dtype)
+                mask_expanded = ops.expand_dims(mask, axis=-1)
                 # Set masked positions to very negative value
                 sequence = sequence * mask_expanded + (1 - mask_expanded) * -1e9
             return ops.max(sequence, axis=1)
@@ -215,7 +218,8 @@ class BaseNLPHead(keras.layers.Layer):
             attention_weights = ops.squeeze(attention_weights, axis=-1)
 
             if attention_mask is not None:
-                attention_weights = attention_weights * attention_mask + (1 - attention_mask) * -1e9
+                mask = ops.cast(attention_mask, dtype=attention_weights.dtype)
+                attention_weights = attention_weights * mask + (1 - mask) * -1e9
 
             attention_weights = ops.softmax(attention_weights, axis=-1)
             attention_weights = ops.expand_dims(attention_weights, axis=-1)
@@ -363,11 +367,18 @@ class TextClassificationHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # Build classifier
+        # --- FIX: Determine the correct input dimension for the classifier ---
+        # The dimension depends on whether transformative layers are used.
+        if self.use_ffn or self.use_task_attention or self.use_intermediate:
+            classifier_input_dim = self.hidden_size
+        else:
+            classifier_input_dim = self.input_dim
+
         # Classifier receives features after processing
-        classifier_input = (input_shape[0] if isinstance(input_shape, tuple) else
-                           input_shape.get('hidden_states', (None,))[0], self.hidden_size)
-        self.classifier.build(classifier_input)
+        batch_size = input_shape[0] if isinstance(input_shape, tuple) else \
+            input_shape.get('hidden_states', (None,))[0]
+        classifier_input_shape = (batch_size, classifier_input_dim)
+        self.classifier.build(classifier_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """Compute the output shape of the layer."""
@@ -475,15 +486,21 @@ class TokenClassificationHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # Build token classifier
+        # Determine input shape for the classifier
         if isinstance(input_shape, dict):
             seq_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
         else:
             seq_shape = input_shape
 
+        # --- FIX: Determine the correct input dimension for the classifier ---
+        if self.use_ffn or self.use_task_attention or self.use_intermediate:
+            classifier_input_dim = self.hidden_size
+        else:
+            classifier_input_dim = self.input_dim
+
         # Classifier receives processed sequence
-        classifier_input = (seq_shape[0], seq_shape[1], self.hidden_size)
-        self.token_classifier.build(classifier_input)
+        classifier_input_shape = (seq_shape[0], seq_shape[1], classifier_input_dim)
+        self.token_classifier.build(classifier_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """Compute the output shape of the layer."""
@@ -517,10 +534,8 @@ class TokenClassificationHead(BaseNLPHead):
         # Handle different input formats
         if isinstance(inputs, dict):
             sequence_output = inputs['hidden_states']
-            attention_mask = inputs.get('attention_mask', None)
         else:
             sequence_output = inputs
-            attention_mask = None
 
         # Apply processing to each token
         hidden_states = self.norm(sequence_output)
@@ -592,16 +607,22 @@ class QuestionAnsweringHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # Build start and end classifiers
+        # Determine input shape for the classifiers
         if isinstance(input_shape, dict):
             seq_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
         else:
             seq_shape = input_shape
 
+        # --- FIX: Determine the correct input dimension for the classifiers ---
+        if self.use_ffn or self.use_task_attention or self.use_intermediate:
+            classifier_input_dim = self.hidden_size
+        else:
+            classifier_input_dim = self.input_dim
+
         # Classifiers receive processed sequence
-        classifier_input = (seq_shape[0], seq_shape[1], self.hidden_size)
-        self.start_classifier.build(classifier_input)
-        self.end_classifier.build(classifier_input)
+        classifier_input_shape = (seq_shape[0], seq_shape[1], classifier_input_dim)
+        self.start_classifier.build(classifier_input_shape)
+        self.end_classifier.build(classifier_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """Compute the output shape of the layer."""
@@ -655,8 +676,10 @@ class QuestionAnsweringHead(BaseNLPHead):
 
         # Apply attention mask if provided
         if attention_mask is not None:
-            start_logits = start_logits * attention_mask + (1 - attention_mask) * -1e9
-            end_logits = end_logits * attention_mask + (1 - attention_mask) * -1e9
+            # --- FIX: Cast attention_mask to the same dtype as logits ---
+            mask = ops.cast(attention_mask, dtype=start_logits.dtype)
+            start_logits = start_logits * mask + (1 - mask) * -1e9
+            end_logits = end_logits * mask + (1 - mask) * -1e9
 
         return {
             'start_logits': start_logits,
@@ -713,22 +736,30 @@ class TextSimilarityHead(BaseNLPHead):
         """Build the layer and its sub-layers."""
         # Handle tuple input (pairwise) by using first element shape
         if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
-            input_shape = input_shape[0]
+            base_input_shape = input_shape[0]
+        else:
+            base_input_shape = input_shape
 
         # First build common layers
-        super().build(input_shape)
+        super().build(base_input_shape)
 
-        # Build projection
-        projection_input = (None, self.hidden_size)
-        self.projection.build(projection_input)
+        # --- FIX: Determine the correct input dimension for the projection layer ---
+        # Note: Similarity head doesn't typically use task_attention.
+        if self.use_ffn or self.use_intermediate:
+            projection_input_dim = self.hidden_size
+        else:
+            projection_input_dim = self.input_dim
+
+        projection_input_shape = (None, projection_input_dim)
+        self.projection.build(projection_input_shape)
 
         # Build similarity layers if needed
         if self.similarity_function == 'learned':
             # Combined features: emb1, emb2, emb1*emb2, abs(emb1-emb2)
-            combined_input = (None, self.hidden_size * 4)
+            combined_input_shape = (None, self.hidden_size * 4)
             for layer in self.similarity_layers:
-                layer.build(combined_input)
-                combined_input = (None, layer.units if hasattr(layer, 'units') else 1)
+                layer.build(combined_input_shape)
+                combined_input_shape = (None, layer.units if hasattr(layer, 'units') else 1)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict, List]) -> Dict[str, Tuple]:
         """Compute the output shape of the layer."""
@@ -893,15 +924,21 @@ class TextGenerationHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # Build language modeling head
+        # Determine input shape for the LM head
         if isinstance(input_shape, dict):
             seq_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
         else:
             seq_shape = input_shape
 
+        # --- FIX: Determine the correct input dimension for the LM head ---
+        if self.use_ffn or self.use_task_attention or self.use_intermediate:
+            lm_input_dim = self.hidden_size
+        else:
+            lm_input_dim = self.input_dim
+
         # LM head receives processed sequence
-        lm_input = (seq_shape[0], seq_shape[1], self.hidden_size)
-        self.lm_head.build(lm_input)
+        lm_input_shape = (seq_shape[0], seq_shape[1], lm_input_dim)
+        self.lm_head.build(lm_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """Compute the output shape of the layer."""
@@ -980,10 +1017,15 @@ class MultipleChoiceHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # Build scorer
+        # --- FIX: Determine the correct input dimension for the scorer ---
+        if self.use_ffn or self.use_task_attention or self.use_intermediate:
+            scorer_input_dim = self.hidden_size
+        else:
+            scorer_input_dim = self.input_dim
+
         # Scorer receives pooled representations for each choice
-        scorer_input = (None, self.hidden_size)
-        self.scorer.build(scorer_input)
+        scorer_input_shape = (None, scorer_input_dim)
+        self.scorer.build(scorer_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """Compute the output shape of the layer."""
@@ -1155,11 +1197,14 @@ class MultiTaskNLPHead(keras.layers.Layer):
                 task_config = self.task_configs[task_name]
                 head_input_dim = task_config.hidden_size or self.shared_input_dim
                 if isinstance(input_shape, dict):
-                    head_input = {'hidden_states': (input_shape.get('hidden_states')[0],
-                                                   input_shape.get('hidden_states')[1],
+                    hidden_states_shape = input_shape.get('hidden_states')
+                    head_input = {'hidden_states': (hidden_states_shape[0],
+                                                   hidden_states_shape[1],
                                                    head_input_dim)}
                 else:
-                    head_input = (input_shape[0], input_shape[1], head_input_dim) if len(input_shape) == 3 else (input_shape[0], head_input_dim)
+                    shape = (input_shape[0], input_shape[1], head_input_dim) if len(input_shape) == 3 else \
+                        (input_shape[0], head_input_dim)
+                    head_input = shape
             else:
                 head_input = input_shape
 
