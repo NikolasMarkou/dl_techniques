@@ -35,6 +35,7 @@ from pathlib import Path
 import tensorflow_datasets as tfds
 from dataclasses import dataclass, field, asdict, fields
 from typing import Dict, List, Optional, Any, Callable
+import copy
 
 # ---------------------------------------------------------------------
 # local imports
@@ -664,9 +665,7 @@ class MultiTaskBERTModel(keras.Model):
         """
         config = super().get_config()
         # Make a deep copy to modify for serialization
-        task_configs_serializable = {
-            name: asdict(config) for name, config in self.task_configs_dict.items()
-        }
+        task_configs_serializable = copy.deepcopy(self.task_configs_dict)
         # Convert Enum to string for serialization
         for task_dict in task_configs_serializable.values():
             if 'task_type' in task_dict and isinstance(task_dict['task_type'], NLPTaskType):
@@ -688,7 +687,7 @@ class MultiTaskBERTModel(keras.Model):
         :rtype: MultiTaskBERTModel
         """
         # Make a deep copy to modify for deserialization
-        task_configs_dict_deserializable = config["task_configs_dict"].copy()
+        task_configs_dict_deserializable = copy.deepcopy(config["task_configs_dict"])
         # Convert string back to Enum
         for task_dict in task_configs_dict_deserializable.values():
             if 'task_type' in task_dict:
