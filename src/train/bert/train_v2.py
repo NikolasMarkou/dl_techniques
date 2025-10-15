@@ -21,13 +21,13 @@ Usage:
 ------
 .. code-block:: bash
 
-    python train_bert_multiclass.py --config config.yaml
-    python train_bert_multiclass.py --bert-variant base --epochs 10 --batch-size 32
+    python train.py --config config.yaml
+    python train.py --bert-variant base --epochs 10 --batch-size 32
 
 """
 
-import copy
 import json
+import copy
 import keras
 import argparse
 import numpy as np
@@ -289,10 +289,8 @@ class TaskDataLoader:
             num_parallel_calls=tf.data.AUTOTUNE
         )
 
-        # Batch and prefetch
-        ds = ds.batch(self.task_config.batch_size)
-        ds = ds.prefetch(tf.data.AUTOTUNE)
-
+        # Note: Batching and prefetching is now handled in the trainer
+        # to allow for dynamic batch sizes per task before interleaving.
         return ds
 
     def _get_preprocessing_fn(self) -> Callable:
@@ -330,12 +328,13 @@ class TaskDataLoader:
         attention_mask.set_shape([max_len])
         token_type_ids.set_shape([max_len])
 
-        return {
+        inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "token_type_ids": token_type_ids,
-            "labels": label
         }
+
+        return inputs, label
 
     def _preprocess_token_classification(self, example: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess token classification example using tf.py_function."""
@@ -354,7 +353,8 @@ class TaskDataLoader:
             labels = [0] + ner_tag_list[:seq_len - 2] + [0]
             labels += [0] * (max_len - len(labels))
 
-            return encoded["input_ids"], encoded["attention_mask"], encoded["token_type_ids"], np.array(labels, dtype=np.int32)
+            return encoded["input_ids"], encoded["attention_mask"], encoded["token_type_ids"], np.array(labels,
+                                                                                                        dtype=np.int32)
 
         input_ids, attention_mask, token_type_ids, labels = tf.py_function(
             func=_py_process_tokens,
@@ -368,12 +368,13 @@ class TaskDataLoader:
         token_type_ids.set_shape([max_len])
         labels.set_shape([max_len])
 
-        return {
+        inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
-            "labels": labels
+            "token_type_ids": token_type_ids
         }
+
+        return inputs, labels
 
     def _preprocess_question_answering(self, example: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess QA example using tf.py_function."""
@@ -409,15 +410,14 @@ class TaskDataLoader:
         start_pos.set_shape([])
         end_pos.set_shape([])
 
-        return {
+        inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "token_type_ids": token_type_ids,
-            "start_positions": start_pos,
-            "end_positions": end_pos,
-            # Add a dummy 'labels' key for consistency in the training loop
-            "labels": {"start_positions": start_pos, "end_positions": end_pos}
+            "token_type_ids": token_type_ids
         }
+        labels = {"start_positions": start_pos, "end_positions": end_pos}
+
+        return inputs, labels
 
     def _generate_synthetic_dataset(self, split: str) -> tf.data.Dataset:
         """Generate synthetic dataset for testing.
@@ -530,6 +530,10 @@ class TaskDataLoader:
 class MultiTaskBERTModel(keras.Model):
     """Multi-task BERT model with task-specific heads.
 
+    This model is adapted for use with Keras `model.fit()` by including a
+    custom `train_step`. This allows for efficient multi-task training where
+    loss is only calculated for the active task in each batch.
+
     :param bert_config: Configuration for BERT encoder.
     :type bert_config: Dict[str, Any]
     :param task_configs: Dictionary of task configurations.
@@ -553,6 +557,7 @@ class MultiTaskBERTModel(keras.Model):
         super().__init__(**kwargs)
 
         self.bert_config = bert_config
+        self.task_configs = task_configs
         self.task_configs_dict = {
             name: asdict(config) for name, config in task_configs.items()
         }
@@ -564,6 +569,11 @@ class MultiTaskBERTModel(keras.Model):
         self.task_heads: Dict[str, keras.Model] = {}
         for task_name, task_config in task_configs.items():
             self._build_task_head(task_name, task_config)
+
+        # Loss functions used in the custom train_step
+        self.loss_fns: Dict[str, Callable] = {}
+        for task_name, task_config in self.task_configs.items():
+            self.loss_fns[task_name] = self._get_loss_function(task_config)
 
         logger.info(
             f"Created multi-task model with {len(self.task_heads)} tasks: "
@@ -582,8 +592,6 @@ class MultiTaskBERTModel(keras.Model):
         :param task_config: Task configuration.
         :type task_config: TaskConfiguration
         """
-        # Create the NLPTaskConfig, ensuring that only valid arguments from
-        # head_config are passed to its constructor.
         nlp_task_config_fields = {f.name for f in fields(NLPTaskConfig)}
         nlp_task_constructor_args = {
             k: v for k, v in task_config.head_config.items()
@@ -595,21 +603,15 @@ class MultiTaskBERTModel(keras.Model):
             num_classes=task_config.num_classes,
             **nlp_task_constructor_args
         )
-
-        # Arguments for the head factory are those in head_config that are
-        # not part of the NLPTaskConfig.
         head_constructor_args = {
             k: v for k, v in task_config.head_config.items()
             if k not in nlp_task_config_fields
         }
-
-        # Create the head, passing the remaining arguments to the factory
         head = create_nlp_head(
             task_config=nlp_task_config,
             input_dim=self.bert_config["hidden_size"],
             **head_constructor_args
         )
-
         self.task_heads[task_name] = head
         logger.info(f"Created head for task '{task_name}': {task_config.task_type}")
 
@@ -630,21 +632,17 @@ class MultiTaskBERTModel(keras.Model):
         :return: Dictionary of outputs per task.
         :rtype: Dict[str, Any]
         """
-        # Get BERT outputs
         bert_outputs = self.bert_encoder(inputs, training=training)
         hidden_states = bert_outputs["last_hidden_state"]
         attention_mask = bert_outputs.get("attention_mask")
 
-        # Prepare head inputs
         head_inputs = {
             "hidden_states": hidden_states,
             "attention_mask": attention_mask
         }
 
-        # Run task heads
         outputs = {}
         if task_name is not None:
-            # Single task
             if task_name not in self.task_heads:
                 raise ValueError(f"Unknown task: {task_name}")
             outputs[task_name] = self.task_heads[task_name](
@@ -652,26 +650,118 @@ class MultiTaskBERTModel(keras.Model):
                 training=training
             )
         else:
-            # All tasks
             for name, head in self.task_heads.items():
                 outputs[name] = head(head_inputs, training=training)
 
         return outputs
 
-    def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
+    def train_step(self, data: tuple) -> Dict[str, tf.Tensor]:
+        """Custom train step for multi-task learning.
 
-        :return: Configuration dictionary.
-        :rtype: Dict[str, Any]
+        This method overrides the default Keras `train_step`. It expects data
+        in the format `(x, y)`, where `x` is a dictionary of inputs that
+        includes a special 'task_name' key, and `y` is a dictionary of labels
+        for the active task.
+
+        :param data: A tuple of (inputs, labels).
+        :type data: tuple
+        :return: A dictionary of metrics.
+        :rtype: Dict[str, tf.Tensor]
         """
+        x, y = data
+        task_name_tensor = x.pop("task_name")
+        task_name = tf.constant(list(self.task_configs.keys())[0], dtype=tf.string)
+
+        # Get the Python string value of the task name for this batch.
+        # This is needed because we can't use a symbolic tensor to index
+        # Python dictionaries (like self.task_heads).
+        # We use tf.switch_case to branch execution based on the tensor value.
+
+        # Define a function for each possible task
+        def make_task_fn(name: str):
+            def task_fn():
+                # Identify trainable variables for this task
+                active_head = self.task_heads[name]
+                trainable_vars = self.bert_encoder.trainable_weights + active_head.trainable_weights
+
+                with tf.GradientTape() as tape:
+                    outputs = self(x, task_name=name, training=True)
+                    task_outputs = outputs[name]
+                    labels = y[name]
+
+                    # Compute loss for the active task
+                    loss = self._compute_loss_for_task(name, labels, task_outputs, x.get("attention_mask"))
+
+                # Compute and apply gradients
+                gradients = tape.gradient(loss, trainable_vars)
+                self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+
+                # Update compiled metrics
+                self.compiled_metrics.update_state(y, outputs)
+                return {m.name: m.result() for m in self.metrics}
+
+            return task_fn
+
+        # Create branches for tf.switch_case
+        branches = [
+            (tf.equal(task_name_tensor[0], name), make_task_fn(name))
+            for name in self.task_configs.keys()
+        ]
+
+        # Execute the correct branch
+        return tf.switch_case(branches)
+
+    def _compute_loss_for_task(self, task_name, y_true, y_pred, attention_mask=None):
+        """Helper to compute loss for a specific task."""
+        task_config = self.task_configs[task_name]
+        loss_fn = self.loss_fns[task_name]
+
+        if task_config.task_type == NLPTaskType.QUESTION_ANSWERING:
+            loss = loss_fn(y_true, y_pred)
+        elif task_config.task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
+            loss = self._token_classification_loss(y_true, y_pred, attention_mask)
+        else:
+            loss = loss_fn(y_true, y_pred["logits"])
+
+        return loss
+
+    def _get_loss_function(self, task_config: TaskConfiguration) -> Callable:
+        """Get loss function for a task."""
+        task_type = task_config.task_type
+        if task_type == NLPTaskType.SENTIMENT_ANALYSIS:
+            return keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        elif task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
+            return self._token_classification_loss
+        elif task_type == NLPTaskType.QUESTION_ANSWERING:
+            return self._qa_loss
+        else:
+            return keras.losses.MeanSquaredError()
+
+    def _token_classification_loss(self, y_true, y_pred, attention_mask=None):
+        """Compute token classification loss with masking."""
+        logits = y_pred["logits"]
+        loss = keras.losses.sparse_categorical_crossentropy(y_true, logits, from_logits=True)
+        if attention_mask is not None:
+            mask = keras.ops.cast(attention_mask, loss.dtype)
+            loss = loss * mask
+            return keras.ops.sum(loss) / keras.ops.maximum(keras.ops.sum(mask), 1.0)
+        return keras.ops.mean(loss)
+
+    def _qa_loss(self, y_true, y_pred):
+        """Compute question answering loss."""
+        start_loss = keras.losses.sparse_categorical_crossentropy(y_true["start_positions"], y_pred["start_logits"],
+                                                                  from_logits=True)
+        end_loss = keras.losses.sparse_categorical_crossentropy(y_true["end_positions"], y_pred["end_logits"],
+                                                                from_logits=True)
+        return (keras.ops.mean(start_loss) + keras.ops.mean(end_loss)) / 2.0
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get model configuration for serialization."""
         config = super().get_config()
-        # Make a deep copy to modify for serialization
         task_configs_serializable = copy.deepcopy(self.task_configs_dict)
-        # Convert Enum to string for serialization
         for task_dict in task_configs_serializable.values():
             if 'task_type' in task_dict and isinstance(task_dict['task_type'], NLPTaskType):
                 task_dict['task_type'] = task_dict['task_type'].value
-
         config.update({
             "bert_config": self.bert_config,
             "task_configs_dict": task_configs_serializable
@@ -680,37 +770,31 @@ class MultiTaskBERTModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MultiTaskBERTModel":
-        """Create model from configuration.
-
-        :param config: Configuration dictionary.
-        :type config: Dict[str, Any]
-        :return: Model instance.
-        :rtype: MultiTaskBERTModel
-        """
-        # Make a deep copy to modify for deserialization
+        """Create model from configuration."""
         task_configs_dict_deserializable = copy.deepcopy(config["task_configs_dict"])
-        # Convert string back to Enum
         for task_dict in task_configs_dict_deserializable.values():
             if 'task_type' in task_dict:
                 task_dict['task_type'] = NLPTaskType(task_dict['task_type'])
-
         task_configs = {
             name: TaskConfiguration(**task_dict)
             for name, task_dict in task_configs_dict_deserializable.items()
         }
+        config_copy = config.copy()
+        config_copy.pop("task_configs_dict", None)
         return cls(
             bert_config=config["bert_config"],
-            task_configs=task_configs
+            task_configs=task_configs,
+            **config_copy
         )
 
 
 # ---------------------------------------------------------------------
-# Training Loop
+# Training Loop using Keras model.fit()
 # ---------------------------------------------------------------------
 
 
-class MultiTaskTrainer:
-    """Trainer for multi-task BERT models.
+class MultiTaskTrainerKeras:
+    """Trainer for multi-task BERT models using the Keras `fit` method.
 
     :param model: Multi-task BERT model.
     :type model: MultiTaskBERTModel
@@ -739,415 +823,154 @@ class MultiTaskTrainer:
         self.task_configs = task_configs
         self.config = training_config
 
-        # Setup directories
         self.save_dir = Path(training_config.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Find global max sequence length across all tasks
-        global_max_length = max(
-            c.max_sequence_length for c in task_configs.values()
-        )
-        logger.info(
-            "Padding all task batches to global max sequence length: "
-            f"{global_max_length}"
-        )
+        global_max_length = max(c.max_sequence_length for c in task_configs.values())
+        logger.info(f"Padding all task batches to global max sequence length: {global_max_length}")
 
-        # Initialize tokenizer with the global max length
         self.tokenizer = SimpleTokenizer(
             vocab_size=training_config.vocab_size,
             max_length=global_max_length
         )
 
-        # Load datasets
-        self.train_datasets: Dict[str, tf.data.Dataset] = {}
-        self.val_datasets: Dict[str, tf.data.Dataset] = {}
-        self._load_all_datasets()
+    def _create_multitask_dataset(self, split: str = "train") -> tf.data.Dataset:
+        """Creates a single dataset by sampling from all task-specific datasets.
 
-        # Setup optimizer and loss functions
-        self._setup_training()
-
-        # Metrics tracking
-        self.metrics: Dict[str, Dict[str, keras.metrics.Metric]] = {}
-        self._setup_metrics()
-
-        # Training state
-        self.global_step = 0
-        self.epoch = 0
-
-        # Build the model and optimizer before training to initialize weights and state
-        self._build_model_and_optimizer()
-
-        # Create a dictionary of traced train step functions, one for each task.
-        # This is crucial to prevent `task_name` from becoming a symbolic tensor.
-        # We use a helper function to create a closure that captures the Python
-        # string `task_name` for each traced function.
-        self.train_steps: Dict[str, Callable] = {}
-        for task_name in self.task_configs.keys():
-            def create_step_fn(name_for_closure: str) -> Callable:
-                """Creates a specialized train step function for a given task."""
-
-                # This is the function that will be traced. It calls the generic
-                # _train_step with the hard-coded (via closure) task name.
-                def step_fn(inputs, labels):
-                    return self._train_step(inputs, labels, name_for_closure)
-                return tf.function(step_fn)
-
-            self.train_steps[task_name] = create_step_fn(task_name)
-
-    def _build_model_and_optimizer(self) -> None:
-        """Builds the model and optimizer by running a dummy forward pass."""
-        logger.info("Building model and optimizer state...")
-        # Create a dummy batch of the correct shape
-        dummy_input = {
-            "input_ids": tf.zeros((1, self.tokenizer.max_length), dtype=tf.int32),
-            "attention_mask": tf.zeros((1, self.tokenizer.max_length), dtype=tf.int32),
-            "token_type_ids": tf.zeros((1, self.tokenizer.max_length), dtype=tf.int32),
-        }
-        # Run a forward pass to build all model weights
-        _ = self.model(dummy_input, training=False)
-        # Explicitly build the optimizer with the model's variables
-        self.optimizer.build(self.model.trainable_variables)
-        logger.info("Model and optimizer built successfully.")
-
-    def _load_all_datasets(self) -> None:
-        """Load datasets for all tasks."""
-        logger.info("Loading datasets for all tasks...")
-
+        :param split: The dataset split to load ('train' or 'validation').
+        :type split: str
+        :return: A `tf.data.Dataset` that yields batches for multi-task training.
+        :rtype: tf.data.Dataset
+        """
+        task_datasets = []
         for task_name, task_config in self.task_configs.items():
             loader = TaskDataLoader(task_config, self.tokenizer)
+            dataset_split = task_config.dataset_split_train if split == "train" else task_config.dataset_split_val
 
-            self.train_datasets[task_name] = loader.load_dataset(
-                task_config.dataset_split_train
+            ds = loader.load_dataset(dataset_split)
+
+            # Add the task name to the input dictionary and format labels
+            def format_for_multitask(inputs, labels):
+                inputs['task_name'] = tf.constant(task_name, dtype=tf.string)
+                return inputs, {task_name: labels}
+
+            ds = ds.map(format_for_multitask, num_parallel_calls=tf.data.AUTOTUNE)
+            task_datasets.append(ds.repeat())
+
+        if not task_datasets:
+            raise ValueError("No datasets were loaded. Check task configurations.")
+
+        # Sample from the different task datasets
+        if self.config.use_task_sampling and split == 'train':
+            weights = [
+                config.loss_weight ** (1.0 / self.config.task_sampling_temperature)
+                for config in self.task_configs.values()
+            ]
+            sampling_weights = np.array(weights) / np.sum(weights)
+            logger.info(f"Using task sampling with weights: {sampling_weights}")
+
+            # For tf < 2.16, use tf.data.experimental.sample_from_datasets
+            if hasattr(tf.data.experimental, "sample_from_datasets"):
+                combined_dataset = tf.data.experimental.sample_from_datasets(
+                    task_datasets, weights=sampling_weights
+                )
+            else:  # For tf >= 2.16
+                combined_dataset = tf.data.Dataset.sample_from_datasets(
+                    task_datasets, weights=sampling_weights
+                )
+        else:
+            # For validation or if sampling is off, interleave datasets
+            combined_dataset = tf.data.Dataset.from_tensor_slices(task_datasets).interleave(
+                lambda x: x,
+                cycle_length=len(task_datasets),
+                num_parallel_calls=tf.data.AUTOTUNE
             )
-            self.val_datasets[task_name] = loader.load_dataset(
-                task_config.dataset_split_val
-            )
 
-            logger.info(f"Loaded datasets for task '{task_name}'")
+        # Determine a shared batch size or use the first task's
+        batch_size = next(iter(self.task_configs.values())).batch_size
 
-    def _setup_training(self) -> None:
-        """Setup optimizer and loss functions."""
-        # Create optimizer with learning rate schedule
+        return combined_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    def train(self) -> None:
+        """Configures and runs the training using `model.fit()`."""
+        logger.info("Starting training with Keras `model.fit()`...")
+
+        # 1. Create the combined datasets
+        train_dataset = self._create_multitask_dataset(split="train")
+        val_dataset = self._create_multitask_dataset(split="validation")
+
+        # 2. Prepare for model.compile()
+        losses = {name: self.model.loss_fns[name] for name in self.task_configs}
+        loss_weights = {name: config.loss_weight for name, config in self.task_configs.items()}
+        metrics = {
+            name: keras.metrics.SparseCategoricalAccuracy(name=f"{name}_accuracy")
+            for name, config in self.task_configs.items()
+            if config.task_type in [NLPTaskType.SENTIMENT_ANALYSIS, NLPTaskType.NAMED_ENTITY_RECOGNITION]
+        }
+
         lr_schedule = keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=self.config.learning_rate,
-            decay_steps=self.config.epochs * 1000,  # Approximate
+            decay_steps=self.config.epochs * 1000,  # Approximate steps
             warmup_target=self.config.learning_rate,
             warmup_steps=self.config.warmup_steps
         )
-
-        self.optimizer = keras.optimizers.AdamW(
+        optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=self.config.weight_decay,
             clipnorm=self.config.max_grad_norm
         )
 
-        # Setup loss functions per task
-        self.loss_functions: Dict[str, Callable] = {}
-        for task_name, task_config in self.task_configs.items():
-            self.loss_functions[task_name] = self._get_loss_function(task_config)
-
-        logger.info("Training setup complete")
-
-    def _get_loss_function(
-            self,
-            task_config: TaskConfiguration
-    ) -> Callable:
-        """Get loss function for a task.
-
-        :param task_config: Task configuration.
-        :type task_config: TaskConfiguration
-        :return: Loss function.
-        :rtype: Callable
-        """
-        task_type = task_config.task_type
-
-        if task_type == NLPTaskType.SENTIMENT_ANALYSIS:
-            return keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-        elif task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
-            return self._token_classification_loss
-        elif task_type == NLPTaskType.QUESTION_ANSWERING:
-            return self._qa_loss
-        else:
-            return keras.losses.MeanSquaredError()
-
-    def _token_classification_loss(
-            self,
-            y_true: keras.KerasTensor,
-            y_pred: Dict[str, keras.KerasTensor],
-            attention_mask: Optional[keras.KerasTensor] = None
-    ) -> keras.KerasTensor:
-        """Compute token classification loss with masking.
-
-        :param y_true: True labels.
-        :type y_true: keras.KerasTensor
-        :param y_pred: Predictions dictionary.
-        :type y_pred: Dict[str, keras.KerasTensor]
-        :param attention_mask: Attention mask.
-        :type attention_mask: Optional[keras.KerasTensor]
-        :return: Loss value.
-        :rtype: keras.KerasTensor
-        """
-        logits = y_pred["logits"]
-        loss = keras.losses.sparse_categorical_crossentropy(
-            y_true,
-            logits,
-            from_logits=True
+        # 3. Compile the model
+        self.model.compile(
+            optimizer=optimizer,
+            loss=losses,
+            loss_weights=loss_weights,
+            metrics=metrics,
+            # IMPORTANT: This ensures the custom train_step is used.
+            # It also disables the default Keras loss calculation.
+            run_eagerly=False
         )
 
-        if attention_mask is not None:
-            mask = keras.ops.cast(attention_mask, loss.dtype)
-            loss = loss * mask
-            return keras.ops.sum(loss) / keras.ops.maximum(
-                keras.ops.sum(mask),
-                1.0
+        # 4. Set up callbacks
+        checkpoint_path = self.save_dir / "ckpt-{epoch:02d}-{val_loss:.2f}.keras"
+        callbacks = [
+            keras.callbacks.ModelCheckpoint(
+                filepath=checkpoint_path,
+                monitor="val_loss",
+                save_best_only=True,
+                save_weights_only=False,
+                verbose=1
+            ),
+            keras.callbacks.TensorBoard(
+                log_dir=str(self.save_dir / "logs"),
+                update_freq=self.config.logging_steps
+            ),
+            keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=3,
+                verbose=1
             )
-
-        return keras.ops.mean(loss)
-
-    def _qa_loss(
-            self,
-            y_true: Dict[str, keras.KerasTensor],
-            y_pred: Dict[str, keras.KerasTensor]
-    ) -> keras.KerasTensor:
-        """Compute question answering loss.
-
-        :param y_true: True positions.
-        :type y_true: Dict[str, keras.KerasTensor]
-        :param y_pred: Predicted logits.
-        :type y_pred: Dict[str, keras.KerasTensor]
-        :return: Loss value.
-        :rtype: keras.KerasTensor
-        """
-        start_loss = keras.losses.sparse_categorical_crossentropy(
-            y_true["start_positions"],
-            y_pred["start_logits"],
-            from_logits=True
-        )
-        end_loss = keras.losses.sparse_categorical_crossentropy(
-            y_true["end_positions"],
-            y_pred["end_logits"],
-            from_logits=True
-        )
-
-        return (keras.ops.mean(start_loss) + keras.ops.mean(end_loss)) / 2.0
-
-    def _setup_metrics(self) -> None:
-        """Setup metrics for all tasks."""
-        for task_name, task_config in self.task_configs.items():
-            self.metrics[task_name] = {
-                "loss": keras.metrics.Mean(name=f"{task_name}_loss"),
-                "accuracy": keras.metrics.SparseCategoricalAccuracy(
-                    name=f"{task_name}_accuracy"
-                )
-            }
-
-    def _train_step(
-            self,
-            inputs: Dict[str, keras.KerasTensor],
-            labels: Any,
-            task_name: str
-    ) -> keras.KerasTensor:
-        """Single training step for a task.
-
-        :param inputs: Input tensors.
-        :type inputs: Dict[str, keras.KerasTensor]
-        :param labels: Labels.
-        :type labels: Any
-        :param task_name: Name of the task.
-        :type task_name: str
-        :return: Loss value.
-        :rtype: keras.KerasTensor
-        """
-        # Identify the trainable variables for this specific task to avoid None gradients
-        # for inactive heads.
-        active_head = self.model.task_heads[task_name]
-        trainable_vars = self.model.bert_encoder.trainable_weights + active_head.trainable_weights
-
-        with tf.GradientTape() as tape:
-            # Forward pass
-            outputs = self.model(inputs, task_name=task_name, training=True)
-            task_outputs = outputs[task_name]
-
-            # Compute loss
-            task_config = self.task_configs[task_name]
-            if task_config.task_type == NLPTaskType.QUESTION_ANSWERING:
-                loss = self.loss_functions[task_name](
-                    labels,
-                    task_outputs
-                )
-            elif task_config.task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
-                loss = self._token_classification_loss(
-                    labels,
-                    task_outputs,
-                    inputs.get("attention_mask")
-                )
-            else:
-                loss = self.loss_functions[task_name](labels, task_outputs["logits"])
-
-            # Apply task weight
-            loss = loss * task_config.loss_weight
-
-        # Compute gradients and update
-        gradients = tape.gradient(loss, trainable_vars)
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
-        # Update metrics
-        self.metrics[task_name]["loss"].update_state(loss)
-        if "logits" in task_outputs:
-            self.metrics[task_name]["accuracy"].update_state(
-                labels,
-                task_outputs["logits"]
-            )
-
-        return loss
-
-    def train(self) -> None:
-        """Main training loop."""
-        logger.info("Starting training...")
-        logger.info(f"Training for {self.config.epochs} epochs")
-
-        for epoch in range(self.config.epochs):
-            self.epoch = epoch
-            logger.info(f"\nEpoch {epoch + 1}/{self.config.epochs}")
-
-            # Create iterators for all tasks
-            task_iterators = {
-                name: iter(ds) for name, ds in self.train_datasets.items()
-            }
-
-            # Training loop
-            steps_per_epoch = 1000  # Approximate
-            for step in range(steps_per_epoch):
-                self.global_step += 1
-
-                # Sample a task
-                if self.config.use_task_sampling:
-                    task_name = self._sample_task()
-                else:
-                    # Round-robin
-                    task_name = list(self.task_configs.keys())[
-                        step % len(self.task_configs)
-                        ]
-
-                # Get batch for task
-                try:
-                    batch = next(task_iterators[task_name])
-                except StopIteration:
-                    # Restart iterator
-                    task_iterators[task_name] = iter(
-                        self.train_datasets[task_name]
-                    )
-                    batch = next(task_iterators[task_name])
-
-                # Extract inputs and labels
-                inputs = {
-                    "input_ids": batch["input_ids"],
-                    "attention_mask": batch["attention_mask"],
-                    "token_type_ids": batch["token_type_ids"]
-                }
-                labels = batch["labels"]
-
-                # Call the appropriate traced function for the task.
-                # The task_name is "baked into" the train_fn, so we don't pass it here.
-                train_fn = self.train_steps[task_name]
-                loss = train_fn(inputs, labels)
-
-                # Logging
-                if self.global_step % self.config.logging_steps == 0:
-                    self._log_metrics()
-
-                # Evaluation
-                if self.global_step % self.config.eval_every == 0:
-                    self._evaluate()
-
-                # Checkpointing
-                if self.global_step % self.config.checkpoint_every == 0:
-                    self._save_checkpoint()
-
-            # End of epoch evaluation
-            self._evaluate()
-            self._save_checkpoint()
-
-    def _sample_task(self) -> str:
-        """Sample a task for training using temperature-based sampling.
-
-        :return: Task name.
-        :rtype: str
-        """
-        task_names = list(self.task_configs.keys())
-        weights = [
-            config.loss_weight ** (1.0 / self.config.task_sampling_temperature)
-            for config in self.task_configs.values()
         ]
-        weights = np.array(weights)
-        weights = weights / weights.sum()
 
-        return np.random.choice(task_names, p=weights)
+        # 5. Start training
+        # Approximate steps per epoch for display
+        steps_per_epoch = 1000
+        validation_steps = 200
 
-    def _log_metrics(self) -> None:
-        """Log current metrics."""
-        log_str = f"Step {self.global_step} | "
+        self.model.fit(
+            train_dataset,
+            epochs=self.config.epochs,
+            validation_data=val_dataset,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=validation_steps,
+            callbacks=callbacks,
+            verbose=1
+        )
 
-        for task_name, task_metrics in self.metrics.items():
-            loss = task_metrics["loss"].result()
-            acc = task_metrics["accuracy"].result()
-            log_str += f"{task_name}: loss={loss:.4f}, acc={acc:.4f} | "
-
-        logger.info(log_str)
-
-    def _evaluate(self) -> None:
-        """Evaluate on validation sets."""
-        logger.info("Evaluating...")
-
-        for task_name, val_dataset in self.val_datasets.items():
-            task_metrics = {
-                "loss": keras.metrics.Mean(),
-                "accuracy": keras.metrics.SparseCategoricalAccuracy()
-            }
-            task_config = self.task_configs[task_name]
-
-            for batch in val_dataset.take(100):  # Limit for speed
-                inputs = {
-                    "input_ids": batch["input_ids"],
-                    "attention_mask": batch["attention_mask"],
-                    "token_type_ids": batch["token_type_ids"]
-                }
-                labels = batch["labels"]
-
-                # Forward pass
-                outputs = self.model(inputs, task_name=task_name, training=False)
-                task_outputs = outputs[task_name]
-
-                # Compute loss based on task type, passing the correct arguments
-                if task_config.task_type == NLPTaskType.QUESTION_ANSWERING:
-                    loss = self.loss_functions[task_name](labels, task_outputs)
-                elif task_config.task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
-                    loss = self._token_classification_loss(
-                        labels, task_outputs, inputs.get("attention_mask")
-                    )
-                else:
-                    loss = self.loss_functions[task_name](labels, task_outputs["logits"])
-
-                task_metrics["loss"].update_state(loss)
-
-                # Update accuracy only if logits are present
-                if "logits" in task_outputs:
-                    task_metrics["accuracy"].update_state(
-                        labels,
-                        task_outputs["logits"]
-                    )
-
-            logger.info(
-                f"Validation {task_name}: "
-                f"loss={task_metrics['loss'].result():.4f}, "
-                f"acc={task_metrics['accuracy'].result():.4f}"
-            )
-
-    def _save_checkpoint(self) -> None:
-        """Save model checkpoint."""
-        checkpoint_path = self.save_dir / f"checkpoint_step_{self.global_step}.keras"
-        self.model.save(checkpoint_path)
-        logger.info(f"Saved checkpoint to {checkpoint_path}")
+        # Save final model
+        final_model_path = self.save_dir / "final_model.keras"
+        self.model.save(final_model_path)
+        logger.info(f"Saved final model to {final_model_path}")
 
         # Save training config
         config_path = self.save_dir / "training_config.json"
@@ -1170,8 +993,8 @@ def create_default_tasks() -> Dict[str, TaskConfiguration]:
         "sentiment": TaskConfiguration(
             name="sentiment",
             task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-            dataset_name="imdb_reviews",  # Will use synthetic if not available
-            num_classes=3,
+            dataset_name="imdb_reviews",
+            num_classes=2,
             max_sequence_length=128,
             batch_size=32,
             loss_weight=1.0,
@@ -1184,11 +1007,11 @@ def create_default_tasks() -> Dict[str, TaskConfiguration]:
         "ner": TaskConfiguration(
             name="ner",
             task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-            dataset_name="conll2003",  # Will use synthetic if not available
+            dataset_name="conll2003",
             num_classes=9,
             max_sequence_length=128,
             batch_size=32,
-            loss_weight=1.0,
+            loss_weight=0.8,
             head_config={
                 "dropout_rate": 0.1,
                 "use_task_attention": True,
@@ -1223,17 +1046,15 @@ def main() -> None:
     parser.add_argument(
         "--save-dir",
         type=str,
-        default="checkpoints",
+        default="checkpoints_keras_fit",
         help="Directory to save models"
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     args = parser.parse_args()
 
-    # Set random seeds
     keras.utils.set_random_seed(args.seed)
 
-    # Create training configuration
     training_config = TrainingConfiguration(
         bert_variant=args.bert_variant,
         epochs=args.epochs,
@@ -1242,33 +1063,27 @@ def main() -> None:
         seed=args.seed
     )
 
-    # Create task configurations
     task_configs = create_default_tasks()
-
-    # Override batch size if specified
     if args.batch_size:
         for task_config in task_configs.values():
             task_config.batch_size = args.batch_size
 
-    # Get BERT configuration
     bert_config = BERT.MODEL_VARIANTS[args.bert_variant].copy()
     bert_config.pop("description", None)
 
-    # Create model
     logger.info("Creating multi-task BERT model...")
     model = MultiTaskBERTModel(
         bert_config=bert_config,
         task_configs=task_configs
     )
 
-    # Create trainer
-    trainer = MultiTaskTrainer(
+    # Use the new Keras-native trainer
+    trainer = MultiTaskTrainerKeras(
         model=model,
         task_configs=task_configs,
         training_config=training_config
     )
 
-    # Start training
     trainer.train()
 
     logger.info("Training complete!")
