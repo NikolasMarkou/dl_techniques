@@ -1088,6 +1088,7 @@ class MultiTaskTrainer:
                 "loss": keras.metrics.Mean(),
                 "accuracy": keras.metrics.SparseCategoricalAccuracy()
             }
+            task_config = self.task_configs[task_name]
 
             for batch in val_dataset.take(100):  # Limit for speed
                 inputs = {
@@ -1101,13 +1102,20 @@ class MultiTaskTrainer:
                 outputs = self.model(inputs, task_name=task_name, training=False)
                 task_outputs = outputs[task_name]
 
-                # Compute loss
-                if "logits" in task_outputs:
-                    loss = self.loss_functions[task_name](
-                        labels,
-                        task_outputs["logits"]
+                # Compute loss based on task type, passing the correct arguments
+                if task_config.task_type == NLPTaskType.QUESTION_ANSWERING:
+                    loss = self.loss_functions[task_name](labels, task_outputs)
+                elif task_config.task_type == NLPTaskType.NAMED_ENTITY_RECOGNITION:
+                    loss = self._token_classification_loss(
+                        labels, task_outputs, inputs.get("attention_mask")
                     )
-                    task_metrics["loss"].update_state(loss)
+                else:
+                    loss = self.loss_functions[task_name](labels, task_outputs["logits"])
+
+                task_metrics["loss"].update_state(loss)
+
+                # Update accuracy only if logits are present
+                if "logits" in task_outputs:
                     task_metrics["accuracy"].update_state(
                         labels,
                         task_outputs["logits"]
