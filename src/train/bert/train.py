@@ -1194,18 +1194,6 @@ def create_default_tasks() -> Dict[str, TaskConfiguration]:
                 "use_intermediate": True
             }
         ),
-        "qa": TaskConfiguration(
-            name="qa",
-            task_type=NLPTaskType.QUESTION_ANSWERING,
-            dataset_name="squad",  # Will use synthetic if not available
-            max_sequence_length=256,
-            batch_size=16,
-            loss_weight=1.0,
-            head_config={
-                "dropout_rate": 0.1,
-                "use_intermediate": True
-            }
-        )
     }
 
     return tasks
