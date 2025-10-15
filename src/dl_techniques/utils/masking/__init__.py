@@ -1,4 +1,5 @@
 from .factory import *
+from .strategies import apply_mlm_masking
 
 # ---------------------------------------------------------------------
 # Module exports
@@ -16,4 +17,7 @@ __all__ = [
     "MaskType",
     "MaskConfig",
     "MaskFactory",
+
+    # Strategies
+    "apply_mlm_masking"
 ]
