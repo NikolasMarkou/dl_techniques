@@ -942,6 +942,11 @@ class MultiTaskTrainer:
         :return: Loss value.
         :rtype: keras.KerasTensor
         """
+        # Identify the trainable variables for this specific task to avoid None gradients
+        # for inactive heads.
+        active_head = self.model.task_heads[task_name]
+        trainable_vars = self.model.bert_encoder.trainable_weights + active_head.trainable_weights
+
         with tf.GradientTape() as tape:
             # Forward pass
             outputs = self.model(inputs, task_name=task_name, training=True)
@@ -967,8 +972,8 @@ class MultiTaskTrainer:
             loss = loss * task_config.loss_weight
 
         # Compute gradients and update
-        gradients = tape.gradient(loss, self.model.trainable_weights)
-        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
+        gradients = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         # Update metrics
         self.metrics[task_name]["loss"].update_state(loss)
