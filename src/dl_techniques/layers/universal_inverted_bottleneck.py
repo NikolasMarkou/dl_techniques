@@ -71,8 +71,8 @@ from keras import ops, layers, initializers, regularizers
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.activations import create_activation_layer
+from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
+from dl_techniques.layers.activations import create_activation_layer, ActivationType
 
 # ---------------------------------------------------------------------
 
@@ -137,7 +137,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             Defaults to 'relu' for backward compatibility.
         activation_args: Optional dictionary of activation-specific arguments.
             Passed to the activation factory for customization. Defaults to None.
-        normalization_type: String, type of normalization to use.
+        normalization_type: NormalizationType, type of normalization to use.
             Supports all normalizations from dl_techniques normalization factory.
             Defaults to 'batch_norm' for backward compatibility.
         normalization_args: Optional dictionary of normalization-specific arguments.
@@ -217,9 +217,9 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             kernel_size: int = 3,
             use_dw1: bool = True,
             use_dw2: bool = False,
-            activation_type: str = 'relu',
+            activation_type: ActivationType = 'relu',
             activation_args: Optional[Dict[str, Any]] = None,
-            normalization_type: str = 'batch_norm',
+            normalization_type: NormalizationType = 'batch_norm',
             normalization_args: Optional[Dict[str, Any]] = None,
             dropout_rate: float = 0.0,
             use_squeeze_excitation: bool = False,
