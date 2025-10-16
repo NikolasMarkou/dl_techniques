@@ -175,7 +175,7 @@ class SpectralVisualizer(BaseVisualizer):
 
     def _plot_spectral_evolution_across_layers(self, ax: plt.Axes, metric: str, title: str, y_label: str, log_scale: bool = False, add_ref_lines: bool = False):
         """
-        Plot per-layer metrics as a SCATTER PLOT to avoid misleading connecting lines.
+        Plot per-layer metrics as a SCATTER PLOT with unique labels for duplicate names.
 
         Args:
             ax: The matplotlib Axes object to plot on.
@@ -192,17 +192,39 @@ class SpectralVisualizer(BaseVisualizer):
 
         model_order = self._get_models_with_data()
 
-        all_layer_names = sorted(df['name'].unique(), key=lambda x: df[df['name']==x]['layer_id'].min())
+        # Sort all layers globally by their discovered ID to maintain network order.
+        all_layers_df = df[['layer_id', 'name']].drop_duplicates().sort_values('layer_id')
+        original_layer_names = all_layers_df['name'].tolist()
 
-        ax.set_xticks(range(len(all_layer_names)))
-        ax.set_xticklabels(all_layer_names, rotation=45, ha='right', fontsize='small')
+        # [+] NEW: Generate unique labels for the x-axis to handle name collisions.
+        unique_labels = []
+        name_counts = {}
+        for name in original_layer_names:
+            if name in name_counts:
+                name_counts[name] += 1
+                unique_labels.append(f"{name}_{name_counts[name]}")
+            else:
+                name_counts[name] = 0
+                unique_labels.append(name) # Keep the first one as is
+
+        # Create a mapping from original name and layer_id to its unique x-position.
+        layer_id_to_x_pos = {row['layer_id']: i for i, row in all_layers_df.reset_index().iterrows()}
+
+        # Set up the x-axis with the new unique labels.
+        ax.set_xticks(range(len(unique_labels)))
+        ax.set_xticklabels(unique_labels, rotation=45, ha='right', fontsize='small')
 
         for model_name in model_order:
             model_df = df[df['model_name'] == model_name].sort_values('layer_id')
             if not model_df.empty:
                 color = self._get_model_color(model_name)
-                x_pos = [all_layer_names.index(name) for name in model_df['name']]
-                ax.scatter(x_pos, model_df[metric].values, color=color, label=model_name, s=50, alpha=0.8, edgecolors='black', linewidth=0.5)
+                # Map each layer's ID to its correct x-axis position.
+                x_pos = [layer_id_to_x_pos.get(layer_id) for layer_id in model_df['layer_id']]
+                # Filter out any potential None values if a layer_id isn't in the map
+                valid_x_pos = [p for p in x_pos if p is not None]
+                valid_y_values = model_df[metric].values[:len(valid_x_pos)]
+
+                ax.scatter(valid_x_pos, valid_y_values, color=color, label=model_name, s=50, alpha=0.8, edgecolors='black', linewidth=0.5)
 
         ax.set_title(title)
         ax.set_ylabel(y_label)

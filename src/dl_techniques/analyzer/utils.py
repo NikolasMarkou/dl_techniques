@@ -405,8 +405,8 @@ def recursively_get_layers(layer_or_model: Any) -> List[keras.layers.Layer]:
     Recursively traverses a Keras model or layer to get a flat list of all layers.
 
     This enhanced version correctly handles complex subclassed models where layers
-    might be stored as attributes, in lists, or in dictionaries, which is common
-    in architectures like BERT.
+    might be stored as attributes, in lists, or in dictionaries. It now uses object
+    identity for visited checks to correctly handle layers with duplicate names.
 
     Args:
         layer_or_model: The Keras model or layer to traverse.
@@ -415,85 +415,65 @@ def recursively_get_layers(layer_or_model: Any) -> List[keras.layers.Layer]:
         A flat list of all Keras layers found in their order of discovery.
     """
     all_layers = []
-
-    # Use a queue for breadth-first traversal to maintain a more intuitive layer order
-    # and a set to avoid processing the same layer multiple times.
+    # Use a queue for traversal and a set to track visited layer *objects*.
     queue = [layer_or_model]
-    visited_names = set()
+    # [-] OLD: visited_names = set()
+    # [+] NEW: Track objects, not names.
+    visited_layers = set()
 
     while queue:
         current_layer = queue.pop(0)
 
-        # Keras can sometimes wrap layers, so we get the innermost object
+        # Keras can sometimes wrap layers; get the innermost object.
         if hasattr(current_layer, "_layer"):
             current_layer = getattr(current_layer, "_layer")
 
-        # Avoid cycles and redundant processing
-        # Using name is more robust for models saved and loaded
-        if not hasattr(current_layer, "name") or current_layer.name in visited_names:
-            continue
-        visited_names.add(current_layer.name)
+        # Avoid cycles and redundant processing using object identity.
+        # [-] OLD check was based on name
+        # if not hasattr(current_layer, "name") or current_layer.name in visited_names:
+        #     continue
+        # visited_names.add(current_layer.name)
 
-        # The layer itself is added to our final list
-        # We add all layers, not just primitive ones, but the traversal ensures we see primitives.
+        # [+] NEW check is based on the object itself.
+        if current_layer in visited_layers:
+            continue
+        visited_layers.add(current_layer)
+
         if isinstance(current_layer, keras.layers.Layer):
             all_layers.append(current_layer)
 
         # --- Enhanced Discovery Logic ---
-
-        # 1. Standard Keras containers (Functional models, Sequential)
+        # 1. Standard Keras containers
         if hasattr(current_layer, 'layers') and current_layer.layers:
-            # Add sub-layers to the front of the queue for depth-first-like traversal order
             queue = current_layer.layers + queue
-            continue  # Move to the next item in the queue
+            continue
 
-        # 2. Subclassed models: Check all attributes for layers, lists of layers, or dicts of layers
-        # This is the key part for discovering layers in lists like `self.encoder_layers`
+        # 2. Subclassed models: Check all attributes
         for attr_name in dir(current_layer):
-            if attr_name.startswith("_"):  # Skip private/internal attributes
+            if attr_name.startswith("_"):
                 continue
             try:
                 attr = getattr(current_layer, attr_name)
 
-                # Case A: The attribute is a list or tuple of layers
                 if isinstance(attr, (list, tuple)):
-                    # Add only Keras layers from the list to the queue
                     layer_items = [item for item in attr if isinstance(item, keras.layers.Layer)]
                     if layer_items:
                         queue = layer_items + queue
-
-                # Case B: The attribute is a dictionary of layers
                 elif isinstance(attr, dict):
                     layer_items = [v for v in attr.values() if isinstance(v, keras.layers.Layer)]
                     if layer_items:
                         queue = layer_items + queue
-
-                # Case C: The attribute is a single layer
                 elif isinstance(attr, keras.layers.Layer):
                     queue.insert(0, attr)
-
             except Exception:
-                # Some attributes might not be accessible; safely ignore them.
                 continue
 
-    # The list can contain duplicates if layers are referenced in multiple places.
-    # We use a final pass to create a unique list while preserving order.
-    unique_layers = []
-    seen_layers = set()
-    for layer in all_layers:
-        if layer not in seen_layers:
-            unique_layers.append(layer)
-            seen_layers.add(layer)
-
-    # We want to return only the "leaf" nodes (primitive layers) for analysis.
-    # A leaf layer is one that does not itself contain other layers.
+    # Filter for primitive "leaf" layers that don't contain other layers.
     primitive_layers = [
-        layer for layer in unique_layers
+        layer for layer in all_layers
         if not (hasattr(layer, 'layers') and layer.layers)
     ]
 
-    # If we found no primitive layers (e.g., a single custom layer was passed),
-    # return the unique list as is.
-    return primitive_layers if primitive_layers else unique_layers
+    return primitive_layers if primitive_layers else all_layers
 
 # ---------------------------------------------------------------------
