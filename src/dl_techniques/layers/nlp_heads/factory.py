@@ -71,7 +71,7 @@ class BaseNLPHead(keras.layers.Layer):
             **kwargs: Any
     ) -> None:
         """Initialize the base NLP head."""
-        # --- FIX: Set a default name ONLY if 'name' is not in kwargs. ---
+        # Set a default name ONLY if 'name' is not in kwargs. ---
         # This prevents passing 'name' twice during deserialization, as the
         # saved config will already contain it.
         kwargs.setdefault('name', f"{task_config.name}_head")
@@ -367,7 +367,6 @@ class TextClassificationHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # --- FIX: Determine the correct input dimension for the classifier ---
         # The dimension depends on whether transformative layers are used.
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             classifier_input_dim = self.hidden_size
@@ -492,7 +491,7 @@ class TokenClassificationHead(BaseNLPHead):
         else:
             seq_shape = input_shape
 
-        # --- FIX: Determine the correct input dimension for the classifier ---
+        # Determine the correct input dimension for the classifier
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             classifier_input_dim = self.hidden_size
         else:
@@ -613,7 +612,7 @@ class QuestionAnsweringHead(BaseNLPHead):
         else:
             seq_shape = input_shape
 
-        # --- FIX: Determine the correct input dimension for the classifiers ---
+        # Determine the correct input dimension for the classifiers ---
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             classifier_input_dim = self.hidden_size
         else:
@@ -676,7 +675,7 @@ class QuestionAnsweringHead(BaseNLPHead):
 
         # Apply attention mask if provided
         if attention_mask is not None:
-            # --- FIX: Cast attention_mask to the same dtype as logits ---
+            # Cast attention_mask to the same dtype as logits
             mask = ops.cast(attention_mask, dtype=start_logits.dtype)
             start_logits = start_logits * mask + (1 - mask) * -1e9
             end_logits = end_logits * mask + (1 - mask) * -1e9
@@ -743,7 +742,7 @@ class TextSimilarityHead(BaseNLPHead):
         # First build common layers
         super().build(base_input_shape)
 
-        # --- FIX: Determine the correct input dimension for the projection layer ---
+        # Determine the correct input dimension for the projection layer ---
         # Note: Similarity head doesn't typically use task_attention.
         if self.use_ffn or self.use_intermediate:
             projection_input_dim = self.hidden_size
@@ -930,7 +929,7 @@ class TextGenerationHead(BaseNLPHead):
         else:
             seq_shape = input_shape
 
-        # --- FIX: Determine the correct input dimension for the LM head ---
+        # Determine the correct input dimension for the LM head ---
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             lm_input_dim = self.hidden_size
         else:
@@ -1017,7 +1016,7 @@ class MultipleChoiceHead(BaseNLPHead):
         # First build common layers
         super().build(input_shape)
 
-        # --- FIX: Determine the correct input dimension for the scorer ---
+        # Determine the correct input dimension for the scorer ---
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             scorer_input_dim = self.hidden_size
         else:

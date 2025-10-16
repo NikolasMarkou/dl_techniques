@@ -38,7 +38,7 @@ from transformers import BertTokenizer
 from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
-# Local imports (adjust paths based on your project structure)
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.models.bert import BERT
