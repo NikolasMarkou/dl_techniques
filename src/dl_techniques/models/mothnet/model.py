@@ -21,6 +21,56 @@ fed into a standard classifier (like an SVM or a simple Neural Net), the
 resulting "cyborg" model demonstrates a dramatic reduction in test error
 (20-60% reported in original research) and a significant decrease in data
 requirements (e.g., matching 100-sample performance with only 30 samples).
+
+Usage Paradigms
+---------------
+
+1.  **As a Feature Extractor for "Cyborg" Models (Primary Use Case)**:
+    This is the most powerful way to use MothNet. The model is first trained
+    using its built-in Hebbian learning, then used to generate features for an
+    external, conventional ML model.
+
+    ```python
+    from sklearn.svm import SVC
+    import numpy as np
+
+    # 1. Initialize and train MothNet
+    mothnet = MothNet(num_classes=10, mb_units=4000)
+    # Note: y_train must be one-hot encoded for Hebbian training
+    mothnet.train_hebbian(x_train, y_train_onehot, epochs=5)
+
+    # 2. Create augmented "cyborg" features
+    x_train_cyborg = create_cyborg_features(mothnet, x_train)
+    x_test_cyborg = create_cyborg_features(mothnet, x_test)
+
+    # 3. Train a conventional ML model on the augmented data
+    svm = SVC()
+    svm.fit(x_train_cyborg, y_train)
+    accuracy = svm.score(x_test_cyborg, y_test)
+    print(f"Cyborg SVM Accuracy: {accuracy:.4f}")
+    ```
+
+2.  **As a Standalone Classifier**:
+    The model can also be used directly for classification after Hebbian training.
+    Its performance is strong, but the "cyborg" approach is typically superior as
+    it combines the strengths of both biological and statistical learning.
+
+    ```python
+    # After Hebbian training (as above)...
+    logits = mothnet.predict(x_test)
+    predictions = np.argmax(logits, axis=1)
+
+
+When to Use This Module
+-----------------------
+-   **Primary Target**: Classification tasks with **limited training data**
+    (e.g., 1 to 100 samples per class).
+-   **Problem Domain**: Ideal for high-dimensional, unstructured data like
+    vectorized images, sensor readings, or scientific measurements where
+    feature engineering is challenging.
+-   **Goal**: To significantly boost the performance of existing ML pipelines
+    or to enable effective learning where it was previously impossible due
+    to data scarcity.
 """
 
 import keras
