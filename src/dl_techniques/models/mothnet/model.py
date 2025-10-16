@@ -90,7 +90,7 @@ from dl_techniques.layers.mothnet_blocks import (
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="MothNet")
+@keras.saving.register_keras_serializable()
 class MothNet(keras.Model):
     """
     Complete MothNet architecture combining AL, MB, and Hebbian readout layers.

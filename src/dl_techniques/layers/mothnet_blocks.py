@@ -58,7 +58,7 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="MothNet")
+@keras.saving.register_keras_serializable()
 class AntennalLobeLayer(keras.layers.Layer):
     """
     Antennal Lobe layer implementing competitive inhibition for contrast enhancement.
@@ -277,8 +277,10 @@ class AntennalLobeLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="MothNet")
+
+@keras.saving.register_keras_serializable()
 class MushroomBodyLayer(keras.layers.Layer):
     """
     Mushroom Body layer implementing high-dimensional sparse random projection.
@@ -563,8 +565,9 @@ class MushroomBodyLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="MothNet")
+@keras.saving.register_keras_serializable()
 class HebbianReadoutLayer(keras.layers.Layer):
     """
     Hebbian readout layer implementing local correlation-based learning.
