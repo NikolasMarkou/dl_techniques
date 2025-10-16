@@ -9,7 +9,9 @@ This script demonstrates the full fine-tuning workflow:
 1. Loading a pre-trained BERT encoder.
 2. Loading and preprocessing the IMDB reviews dataset with labels.
 3. Integrating a task-specific head (Sequence Classification) with the encoder.
-4. Configuring and running the fine-tuning process with in-training analysis.
+4. Implementing a configurable two-stage fine-tuning process:
+    a. Stage 1: Train only the classification head with the encoder frozen.
+    b. Stage 2: Unfreeze the encoder and fine-tune the entire model.
 5. Saving the fine-tuned model for inference.
 6. Evaluating the model on sample texts.
 
@@ -47,29 +49,7 @@ from dl_techniques.layers.nlp_heads.task_types import NLPTaskType
 
 
 class FinetuneConfig:
-    """Configuration for BERT Sentiment Analysis fine-tuning.
-
-    :param pretrained_encoder_path: Path to the .keras file of the pretrained BERT encoder.
-    :type pretrained_encoder_path: str
-    :param num_classes: Number of output classes for the classification task.
-    :type num_classes: int
-    :param max_seq_length: Maximum sequence length for training and evaluation.
-    :type max_seq_length: int
-    :param batch_size: Training and validation batch size.
-    :type batch_size: int
-    :param num_epochs: Number of fine-tuning epochs.
-    :type num_epochs: int
-    :param learning_rate: Peak learning rate for the fine-tuning process.
-    :type learning_rate: float
-    :param weight_decay: Weight decay for AdamW optimizer.
-    :type weight_decay: float
-    :param save_dir: Directory to save the final fine-tuned model.
-    :type save_dir: str
-    :param log_dir: Directory for TensorBoard logs.
-    :type log_dir: str
-    :param max_samples: Maximum number of training samples (None for all).
-    :type max_samples: Optional[int]
-    """
+    """Configuration for BERT Sentiment Analysis fine-tuning."""
 
     # Model and paths
     pretrained_encoder_path: str = "results/bert_mlm_pretrain/pretrained_bert_encoder_best.keras"
@@ -81,21 +61,28 @@ class FinetuneConfig:
     # Task configuration
     num_classes: int = 2  # IMDB: 0 (negative), 1 (positive)
 
-    # Training configuration
-    max_seq_length: int = 256
-    batch_size: int = 16
-    num_epochs: int = 5
-    learning_rate: float = 3e-5
-    weight_decay: float = 0.01
-
     # Data configuration
     dataset_name: str = "imdb_reviews"
     max_samples: Optional[int] = None
+    max_seq_length: int = 256
+    batch_size: int = 16
+
+    # --- Two-Stage Fine-tuning Configuration ---
+    run_two_stage_finetuning: bool = True
+
+    # Stage 1: Head Training (Encoder Frozen)
+    stage1_epochs: int = 2
+    stage1_learning_rate: float = 1e-3  # Higher LR for the new head
+
+    # Stage 2: Full Model Fine-tuning (Encoder Unfrozen)
+    stage2_epochs: int = 3  # Total epochs will be stage1 + stage2
+    stage2_learning_rate: float = 3e-5  # Lower LR for fine-tuning the whole model
+    weight_decay: float = 0.01
 
     # In-Training Analysis Configuration
     run_epoch_analysis: bool = True
     analysis_start_epoch: int = 1
-    analysis_epoch_frequency: int = 1  # Analyze every epoch during short fine-tuning
+    analysis_epoch_frequency: int = 1
 
 
 # ---------------------------------------------------------------------
@@ -137,26 +124,11 @@ def preprocess_dataset(
     def tokenize_function(text: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         """Tokenize text and return flat tensors."""
         text = tf.compat.as_str_any(text)
-        encoded = tokenizer(
-            text,
-            max_length=config.max_seq_length,
-            truncation=True,
-            padding='max_length',
-            return_tensors='np'
-        )
-        return (
-            encoded['input_ids'][0],
-            encoded['attention_mask'][0],
-            encoded['token_type_ids'][0],
-            label
-        )
+        encoded = tokenizer(text, max_length=config.max_seq_length, truncation=True, padding='max_length', return_tensors='np')
+        return encoded['input_ids'][0], encoded['attention_mask'][0], encoded['token_type_ids'][0], label
 
     dataset = dataset.map(
-        lambda text, label: tf.py_function(
-            func=tokenize_function,
-            inp=[text, label],
-            Tout=[tf.int32, tf.int32, tf.int32, tf.int64]
-        ),
+        lambda text, label: tf.py_function(func=tokenize_function, inp=[text, label], Tout=[tf.int32, tf.int32, tf.int32, tf.int64]),
         num_parallel_calls=tf.data.AUTOTUNE
     )
 
@@ -168,16 +140,11 @@ def preprocess_dataset(
             'token_type_ids': tf.ensure_shape(token_type_ids, [config.max_seq_length]),
         }
         label = tf.cast(label, dtype=tf.int32)
-        label.set_shape(())  # Set shape for label to ensure it's a scalar
+        label.set_shape(())
         return inputs, label
 
     dataset = dataset.map(structure_to_dict_and_label, num_parallel_calls=tf.data.AUTOTUNE)
-
-    dataset = dataset.cache()
-    dataset = dataset.shuffle(buffer_size=1000)
-    dataset = dataset.batch(config.batch_size, drop_remainder=True)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-
+    dataset = dataset.cache().shuffle(1000).batch(config.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
     logger.info(f"Dataset preprocessed: batch_size={config.batch_size}")
     return dataset
 
@@ -187,32 +154,24 @@ def preprocess_dataset(
 # ---------------------------------------------------------------------
 
 
-def create_sentiment_model(config: FinetuneConfig) -> keras.Model:
-    """Create a sentiment analysis model by combining a pretrained BERT with a task head."""
+def create_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras.Model]:
+    """Create a sentiment analysis model and return both the full model and the encoder."""
     logger.info("=" * 80)
     logger.info("Creating Sentiment Analysis Model")
     logger.info("=" * 80)
 
     logger.info(f"Loading pretrained encoder from: {config.pretrained_encoder_path}")
     try:
-        bert_encoder = keras.models.load_model(config.pretrained_encoder_path)
+        bert_encoder = keras.models.load_model(config.pretrained_encoder_path, custom_objects={"BERT": BERT})
         logger.info("Pretrained BERT encoder loaded successfully.")
     except Exception as e:
         logger.error(f"Failed to load BERT encoder. Ensure the path is correct. Error: {e}")
         raise
 
-    sentiment_task_config = NLPTaskConfig(
-        name="sentiment_analysis",
-        task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        num_classes=config.num_classes,
-        dropout_rate=0.1
-    )
+    sentiment_task_config = NLPTaskConfig(name="sentiment_analysis", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=config.num_classes, dropout_rate=0.1)
     logger.info(f"Task config: {sentiment_task_config.name}, num_classes={config.num_classes}")
 
-    classification_head = create_nlp_head(
-        task_config=sentiment_task_config,
-        input_dim=bert_encoder.hidden_size
-    )
+    classification_head = create_nlp_head(task_config=sentiment_task_config, input_dim=bert_encoder.hidden_size)
     logger.info("Sequence classification head created.")
 
     inputs = {
@@ -227,16 +186,11 @@ def create_sentiment_model(config: FinetuneConfig) -> keras.Model:
     head_inputs = {"hidden_states": cls_token_output}
     task_outputs = classification_head(head_inputs)
 
-    model = keras.Model(
-        inputs=inputs,
-        outputs=task_outputs['logits'],
-        name="bert_sentiment_analyzer"
-    )
-
+    model = keras.Model(inputs=inputs, outputs=task_outputs['logits'], name="bert_sentiment_analyzer")
     logger.info(f"Model created successfully. Total parameters: {model.count_params():,}")
     model.summary(print_fn=logger.info)
 
-    return model
+    return model, bert_encoder
 
 
 # ---------------------------------------------------------------------
@@ -244,13 +198,10 @@ def create_sentiment_model(config: FinetuneConfig) -> keras.Model:
 # ---------------------------------------------------------------------
 
 
-def compile_model(model: keras.Model, config: FinetuneConfig) -> None:
-    """Compile the model with optimizer, loss, and metrics for fine-tuning."""
-    logger.info("Compiling model for fine-tuning...")
-    optimizer = keras.optimizers.AdamW(
-        learning_rate=config.learning_rate,
-        weight_decay=config.weight_decay
-    )
+def compile_model(model: keras.Model, config: FinetuneConfig, learning_rate: float) -> None:
+    """Compile the model with a specific learning rate."""
+    logger.info(f"Compiling model with learning_rate={learning_rate}...")
+    optimizer = keras.optimizers.AdamW(learning_rate=learning_rate, weight_decay=config.weight_decay)
     loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
     metrics = [keras.metrics.SparseCategoricalAccuracy("accuracy")]
     model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
@@ -262,45 +213,34 @@ def create_callbacks(config: FinetuneConfig) -> list:
     logger.info("Creating training callbacks...")
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs(config.log_dir, exist_ok=True)
-
     best_model_filepath = os.path.join(config.checkpoint_dir, "best_sentiment_model.keras")
 
     callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath=best_model_filepath,
-            monitor="val_accuracy",
-            mode="max",
-            save_best_only=True,
-            verbose=1,
-        ),
+        keras.callbacks.ModelCheckpoint(filepath=best_model_filepath, monitor="val_accuracy", mode="max", save_best_only=True, verbose=1),
         keras.callbacks.TensorBoard(log_dir=config.log_dir),
         keras.callbacks.CSVLogger(os.path.join(config.save_dir, "finetuning_log.csv")),
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=3,
-            restore_best_weights=True,
-            verbose=1,
-        ),
+        keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True, verbose=1),
     ]
 
-    # Conditionally add the EpochAnalyzerCallback, mirroring the pre-training script
     if config.run_epoch_analysis:
         analysis_callback = EpochAnalyzerCallback(
-            output_dir=config.analysis_dir,
-            start_epoch=config.analysis_start_epoch,
-            epoch_frequency=config.analysis_epoch_frequency,
-            model_name="BERT-Sentiment-Finetuned"
+            output_dir=config.analysis_dir, start_epoch=config.analysis_start_epoch,
+            epoch_frequency=config.analysis_epoch_frequency, model_name="BERT-Sentiment-Finetuned"
         )
         callbacks.append(analysis_callback)
-
     logger.info(f"Created {len(callbacks)} callbacks.")
     return callbacks
 
+def _merge_histories(h1: keras.callbacks.History, h2: keras.callbacks.History) -> keras.callbacks.History:
+    """Merges two Keras History objects."""
+    for key, value in h2.history.items():
+        h1.history.setdefault(key, []).extend(value)
+    h1.epoch.extend(h2.epoch)
+    return h1
 
 # ---------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------
-
 
 def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras.callbacks.History]:
     """Main function for fine-tuning the sentiment analysis model."""
@@ -315,21 +255,42 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
     tokenizer = create_tokenizer()
     train_dataset = preprocess_dataset(load_dataset(config, split="train"), tokenizer, config)
     val_dataset = preprocess_dataset(load_dataset(config, split="test"), tokenizer, config)
-    model = create_sentiment_model(config)
-    compile_model(model, config)
+    model, bert_encoder = create_sentiment_model(config)
     callbacks = create_callbacks(config)
 
-    logger.info("=" * 80)
-    logger.info("Starting fine-tuning...")
-    logger.info("=" * 80)
+    history = keras.callbacks.History()
 
-    history = model.fit(
-        train_dataset,
-        epochs=config.num_epochs,
-        callbacks=callbacks,
-        validation_data=val_dataset,
-        verbose=1,
-    )
+    if config.run_two_stage_finetuning:
+        # --- Stage 1: Train the head with the encoder frozen ---
+        logger.info("=" * 80)
+        logger.info(f"Starting Stage 1: Head Training for {config.stage1_epochs} epochs")
+        logger.info("=" * 80)
+        bert_encoder.trainable = False
+        compile_model(model, config, learning_rate=config.stage1_learning_rate)
+
+        history1 = model.fit(train_dataset, epochs=config.stage1_epochs, callbacks=callbacks, validation_data=val_dataset, verbose=1)
+        history = _merge_histories(history, history1)
+
+        # --- Stage 2: Fine-tune the entire model ---
+        logger.info("=" * 80)
+        logger.info(f"Starting Stage 2: Full Model Fine-tuning for {config.stage2_epochs} epochs")
+        logger.info("=" * 80)
+        bert_encoder.trainable = True
+        compile_model(model, config, learning_rate=config.stage2_learning_rate)
+
+        # Continue training from the last epoch of stage 1
+        initial_epoch = history.epoch[-1] + 1
+        total_epochs = initial_epoch + config.stage2_epochs
+        history2 = model.fit(train_dataset, epochs=total_epochs, initial_epoch=initial_epoch, callbacks=callbacks, validation_data=val_dataset, verbose=1)
+        history = _merge_histories(history, history2)
+
+    else:
+        # --- Single Stage Fine-tuning ---
+        logger.info("=" * 80)
+        logger.info(f"Starting Single-Stage Fine-tuning for {config.stage2_epochs} epochs")
+        logger.info("=" * 80)
+        compile_model(model, config, learning_rate=config.stage2_learning_rate)
+        history = model.fit(train_dataset, epochs=config.stage2_epochs, callbacks=callbacks, validation_data=val_dataset, verbose=1)
 
     logger.info("=" * 80)
     logger.info("Fine-tuning completed!")
@@ -339,9 +300,9 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
     logger.info(f"Saving final fine-tuned model to {final_model_path}")
     model.save(final_model_path)
 
-    best_epoch = tf.argmax(history.history['val_accuracy']).numpy()
-    best_val_acc = history.history['val_accuracy'][best_epoch]
-    logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch + 1}")
+    best_epoch_idx = tf.argmax(history.history['val_accuracy']).numpy()
+    best_val_acc = history.history['val_accuracy'][best_epoch_idx]
+    logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {history.epoch[best_epoch_idx] + 1}")
 
     return model, history
 
@@ -349,7 +310,6 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
 # ---------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------
-
 
 def evaluate_model(model: keras.Model, tokenizer: BertTokenizer, config: FinetuneConfig) -> None:
     """Evaluate the fine-tuned model on sample sentences."""
@@ -366,18 +326,8 @@ def evaluate_model(model: keras.Model, tokenizer: BertTokenizer, config: Finetun
     labels = ["Negative", "Positive"]
 
     for text in test_texts:
-        inputs = tokenizer(
-            text,
-            max_length=config.max_seq_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="tf",
-        )
-        logits = model.predict({
-            'input_ids': inputs['input_ids'],
-            'attention_mask': inputs['attention_mask'],
-            'token_type_ids': inputs['token_type_ids'],
-        })
+        inputs = tokenizer(text, max_length=config.max_seq_length, truncation=True, padding="max_length", return_tensors="tf")
+        logits = model.predict({'input_ids': inputs['input_ids'], 'attention_mask': inputs['attention_mask'], 'token_type_ids': inputs['token_type_ids']})
         probabilities = tf.nn.softmax(logits, axis=-1)[0]
         predicted_class_id = tf.argmax(probabilities).numpy()
         predicted_label = labels[predicted_class_id]
@@ -385,16 +335,13 @@ def evaluate_model(model: keras.Model, tokenizer: BertTokenizer, config: Finetun
         logger.info(f" -> Predicted: '{predicted_label}' (Confidence: {probabilities[predicted_class_id]:.4f})")
         logger.info("-" * 20)
 
-
 # ---------------------------------------------------------------------
 # Main Entry Point
 # ---------------------------------------------------------------------
 
-
 def main() -> None:
     """Main entry point for BERT fine-tuning script."""
     config = FinetuneConfig()
-
     logger.info("Fine-tuning Configuration:")
     for key, value in vars(config).items():
         if not key.startswith("__"):
@@ -408,7 +355,6 @@ def main() -> None:
     logger.info("Fine-tuning complete! Model is ready for inference.")
     logger.info(f"Load model: keras.models.load_model('{config.save_dir}/bert_sentiment_final_best.keras')")
     logger.info("=" * 80)
-
 
 if __name__ == "__main__":
     main()
