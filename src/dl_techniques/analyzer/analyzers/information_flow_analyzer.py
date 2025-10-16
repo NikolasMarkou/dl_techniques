@@ -74,8 +74,9 @@ from typing import Dict, Any, Optional, List
 # ---------------------------------------------------------------------
 
 from .base import BaseAnalyzer
-from ..data_types import AnalysisResults, DataInput
 from ..config import AnalysisConfig
+from ..utils import recursively_get_layers
+from ..data_types import AnalysisResults, DataInput
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -95,45 +96,81 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
     def analyze(self, results: AnalysisResults, data: Optional[DataInput] = None,
                 cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        """Analyze information flow through network, including activation patterns."""
+        """Analyze information flow using forward hooks for subclassed model compatibility."""
         logger.info("Analyzing information flow and activations...")
 
         if data is None:
             raise ValueError("Data is required for information flow analysis")
 
-        # Get sample data and store batch size for proper tensor handling
         x_sample = data.x_data[:min(200, len(data.x_data))]
         self._batch_size = len(x_sample)
 
-        for model_name, extraction_data in self.layer_extraction_models.items():
-            if extraction_data is None:
-                logger.warning(f"Skipping information flow for {model_name} as no extraction model could be built.")
-                continue
+        for model_name, model in self.models.items():
+            # This check is important for models that haven't been built.
+            if not model.built:
+                try:
+                    # Attempt to build the model with sample data.
+                    model(x_sample)
+                    logger.info(f"Built subclassed model '{model_name}' for analysis.")
+                except Exception as e:
+                    logger.error(
+                        f"Failed to build model '{model_name}'. Skipping information flow analysis. Error: {e}")
+                    continue
 
-            extraction_model = extraction_data['model']
-            layer_info = extraction_data['layer_info']
+            # This dictionary will store the captured activations.
+            captured_outputs = {}
+            # This list will store the hook handles so we can remove them later.
+            hook_handles = []
 
             try:
-                # Get multi-layer outputs
-                layer_outputs = extraction_model.predict(x_sample, verbose=0)
+                # 1. Get all layers recursively and identify which ones to analyze.
+                all_layers = recursively_get_layers(model)
+                extraction_layers = self._get_extraction_layers(all_layers)
 
-                # Handle single output case
-                if not isinstance(layer_outputs, list):
-                    layer_outputs = [layer_outputs]
+                if not extraction_layers:
+                    logger.warning(f"No suitable layers for information flow analysis in '{model_name}'.")
+                    continue
 
-                # Analyze each layer
+                # 2. Define the hook function that will be attached to each layer.
+                def forward_hook(layer, inputs, outputs):
+                    # Keras hooks can pass tensors or NumPy arrays. Convert to NumPy.
+                    # We use a unique layer name to handle multiple layers with the same class name.
+                    captured_outputs[layer.name] = keras.ops.convert_to_numpy(outputs)
+
+                # 3. Register the hook on each target layer.
+                for layer in extraction_layers:
+                    handle = layer.register_forward_hook(forward_hook)
+                    hook_handles.append(handle)
+
+                # 4. Run a forward pass to trigger the hooks.
+                model.predict(x_sample, verbose=0)
+
+                # 5. Process the captured activations.
                 layer_analysis = {}
-                for i, (output, info) in enumerate(zip(layer_outputs, layer_info)):
-                    analysis = self._analyze_layer_information(output, info)
-                    layer_analysis[info['name']] = analysis
+                for i, layer in enumerate(extraction_layers):
+                    if layer.name in captured_outputs:
+                        output_tensor = captured_outputs[layer.name]
+                        layer_info = {'name': layer.name, 'type': layer.__class__.__name__}
+                        analysis = self._analyze_layer_information(output_tensor, layer_info)
+                        layer_analysis[layer.name] = analysis
+                    else:
+                        logger.debug(f"No activation captured for layer '{layer.name}' in model '{model_name}'.")
 
                 results.information_flow[model_name] = layer_analysis
 
-                # Store detailed activation stats for key layers
-                self._analyze_key_layer_activations(model_name, layer_outputs, layer_info, results)
+                # This part can be adapted or simplified if needed. We pass the captured
+                # activations and layer info to the detailed analysis function.
+                layer_outputs_list = [captured_outputs.get(l.name) for l in extraction_layers]
+                layer_info_list = [{'name': l.name, 'type': l.__class__.__name__} for l in extraction_layers]
+                self._analyze_key_layer_activations(model_name, layer_outputs_list, layer_info_list, results)
+
             except Exception as e:
                 logger.error(f"Failed to analyze information flow for {model_name}: {e}")
-                continue
+            finally:
+                # 6. CRITICAL: Remove all hooks to restore the model to its original state.
+                for handle in hook_handles:
+                    handle.remove()
+                logger.debug(f"Removed {len(hook_handles)} hooks from model '{model_name}'.")
 
     def _setup_activation_models(self) -> None:
         """Set up models for extracting intermediate activations."""
@@ -174,20 +211,17 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                              f"This can happen with complex, non-standard model architectures. Skipping.")
                 self.layer_extraction_models[model_name] = None
 
-    def _get_extraction_layers(self, model: keras.Model) -> List[keras.layers.Layer]:
-        """Get a list of layer objects suitable for information flow analysis."""
+    def _get_extraction_layers(self, layers: List[keras.layers.Layer]) -> List[keras.layers.Layer]:
+        """Get a list of layer objects suitable for information flow analysis from a flat list."""
         extraction_layers = []
-        for layer in model.layers:
-            if isinstance(layer, keras.layers.InputLayer):
-                continue
-
+        for layer in layers:
+            # We don't need to check for InputLayer as it won't be in the recursive list.
             if isinstance(layer, (keras.layers.Conv2D, keras.layers.Dense,
                                   keras.layers.BatchNormalization, keras.layers.LayerNormalization,
                                   keras.layers.ReLU, keras.layers.PReLU, keras.layers.ELU,
                                   keras.layers.GlobalAveragePooling2D, keras.layers.GlobalMaxPooling2D)):
-                if hasattr(layer, 'output'):
-                    extraction_layers.append(layer)
-
+                # We can analyze any layer that has an output.
+                extraction_layers.append(layer)
         return extraction_layers
 
     def _safely_flatten_activations(self, output: np.ndarray) -> tuple:

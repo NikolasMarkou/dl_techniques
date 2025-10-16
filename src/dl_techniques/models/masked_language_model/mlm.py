@@ -342,6 +342,41 @@ class MaskedLanguageModel(keras.Model):
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
 
+    def test_step(
+            self, data: Union[Dict[str, keras.KerasTensor], Tuple]
+    ) -> Dict[str, keras.KerasTensor]:
+        """Custom validation step for MLM with dynamic masking."""
+        if isinstance(data, tuple):
+            inputs, _, _ = keras.utils.unpack_x_y_sample_weight(data)
+        else:
+            inputs = data
+
+        # Perform dynamic masking just like in the training step
+        masked_inputs, labels, masked_positions = self._mask_tokens(inputs)
+
+        # Forward pass
+        encoder_outputs = self.encoder(masked_inputs, training=False)
+        sequence_output = encoder_outputs["last_hidden_state"]
+        logits = self._apply_mlm_head(sequence_output, training=False)
+
+        # Compute loss
+        loss = self.compute_loss(
+            y=labels,
+            y_pred=logits,
+            sample_weight=masked_positions,
+        )
+
+        # Manually update the state of the metrics
+        self.loss_tracker.update_state(loss)
+        self.acc_metric.update_state(
+            y_true=labels,
+            y_pred=logits,
+            sample_weight=masked_positions
+        )
+
+        # Return a dict mapping metric names to current value
+        return {m.name: m.result() for m in self.metrics}
+
     def compute_loss(
             self,
             x: Optional[keras.KerasTensor] = None,

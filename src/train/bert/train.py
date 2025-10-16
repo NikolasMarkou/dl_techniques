@@ -44,6 +44,7 @@ from typing import Dict, Optional, Tuple
 from dl_techniques.models.bert import BERT
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 from dl_techniques.models.masked_language_model import MaskedLanguageModel, visualize_mlm_predictions
 
 # ---------------------------------------------------------------------
@@ -101,10 +102,16 @@ class TrainingConfig:
     save_dir: str = "results/bert_mlm_pretrain"
     log_dir: str = "results/bert_mlm_pretrain/logs"
     checkpoint_dir: str = "results/bert_mlm_pretrain/checkpoints"
+    analysis_dir: str = "results/bert_mlm_pretrain/epoch_analysis"
 
     # Data configuration
     dataset_name: str = "imdb_reviews"
     max_samples: Optional[int] = 10000  # Limit for quick testing
+
+    # In-Training Analysis Configuration
+    run_epoch_analysis: bool = True  # Master switch
+    analysis_start_epoch: int = 1
+    analysis_epoch_frequency: int = 5
 
 
 # ---------------------------------------------------------------------
@@ -144,11 +151,12 @@ def load_dataset(
     logger.info(f"Loading {config.dataset_name} dataset ({split} split)...")
 
     # Load dataset
-    dataset = tfds.load(
+    dataset, info = tfds.load(
         config.dataset_name,
         split=split,
         as_supervised=False,
-        shuffle_files=True
+        shuffle_files=True,
+        with_info=True,
     )
 
     # Extract text field (IMDB has 'text' field)
@@ -158,9 +166,14 @@ def load_dataset(
     )
 
     # Limit samples if specified
-    if config.max_samples is not None:
+    if config.max_samples is not None and split == "train":
         dataset = dataset.take(config.max_samples)
-        logger.info(f"Limited to {config.max_samples} samples")
+        logger.info(f"Limited training data to {config.max_samples} samples")
+    elif split != "train":
+        # Also limit validation data for faster evaluation cycles
+        dataset = dataset.take(config.max_samples // 5 if config.max_samples else 2000)
+        logger.info("Limited validation data for faster evaluation")
+
 
     return dataset
 
@@ -250,12 +263,19 @@ def preprocess_dataset(
 
     dataset = dataset.map(tuple_to_dict, num_parallel_calls=tf.data.AUTOTUNE)
 
+    # Cache the tokenized and processed dataset in memory.
+    # This should be done *after* the expensive mapping/tokenization steps
+    # and *before* shuffling, batching, and repeating. Since `.take()` was
+    # called earlier, we are only caching the relevant subset of the data,
+    # which resolves the warning and dramatically improves performance.
+    dataset = dataset.cache()
+
     # Shuffle, batch, and prefetch
     dataset = dataset.shuffle(buffer_size=1000)
     dataset = dataset.batch(config.batch_size, drop_remainder=True)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
-    logger.info(f"Dataset preprocessed: batch_size={config.batch_size}")
+    logger.info(f"Dataset preprocessed and cached: batch_size={config.batch_size}")
 
     return dataset
 
@@ -421,15 +441,16 @@ def create_callbacks(config: TrainingConfig) -> list:
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs(config.log_dir, exist_ok=True)
 
+    # Define a single file path for the best model checkpoint
+    best_model_filepath = os.path.join(config.checkpoint_dir, "best_model.keras")
+
     callbacks = [
-        # Model checkpointing
+        # Model checkpointing: Save only the best model based on validation loss
         keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(
-                config.checkpoint_dir,
-                "bert_mlm_epoch_{epoch:02d}_loss_{loss:.4f}.keras"
-            ),
-            save_freq='epoch',
-            save_best_only=False,
+            filepath=best_model_filepath,
+            monitor="val_loss",
+            mode="min",
+            save_best_only=True,
             verbose=1,
         ),
 
@@ -447,9 +468,9 @@ def create_callbacks(config: TrainingConfig) -> list:
             append=True,
         ),
 
-        # Early stopping (optional - commented out for full training)
+        # Early stopping
         keras.callbacks.EarlyStopping(
-            monitor='loss',
+            monitor='val_loss',
             patience=15,
             restore_best_weights=True,
             verbose=1,
@@ -460,12 +481,24 @@ def create_callbacks(config: TrainingConfig) -> list:
             on_epoch_end=lambda epoch, logs: logger.info(
                 f"Epoch {epoch + 1}: "
                 f"loss={logs['loss']:.4f}, "
-                f"accuracy={logs['accuracy']:.4f}"
+                f"accuracy={logs['accuracy']:.4f}, "
+                f"val_loss={logs.get('val_loss', 'N/A'):.4f}, "
+                f"val_accuracy={logs.get('val_accuracy', 'N/A'):.4f}"
             )
         ),
     ]
 
-    logger.info(f"Created {len(callbacks)} callbacks")
+    # Conditionally add the EpochAnalyzerCallback
+    if config.run_epoch_analysis:
+        analysis_callback = EpochAnalyzerCallback(
+            output_dir=config.analysis_dir,
+            start_epoch=config.analysis_start_epoch,
+            epoch_frequency=config.analysis_epoch_frequency,
+            model_name=f"BERT-{config.bert_variant}"
+        )
+        callbacks.append(analysis_callback)
+
+    logger.info(f"Created {len(callbacks)} callbacks. Best model will be saved to {best_model_filepath}")
 
     return callbacks
 
@@ -497,12 +530,14 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     # Step 1: Create tokenizer
     tokenizer = create_tokenizer(config)
 
-    # Step 2: Load and preprocess dataset
-    raw_dataset = load_dataset(config, split="train")
-    train_dataset = preprocess_dataset(raw_dataset, tokenizer, config)
+    # Step 2: Load and preprocess datasets
+    raw_train_dataset = load_dataset(config, split="train")
+    train_dataset = preprocess_dataset(raw_train_dataset, tokenizer, config)
+
+    raw_val_dataset = load_dataset(config, split="test") # Using test set for validation
+    val_dataset = preprocess_dataset(raw_val_dataset, tokenizer, config)
 
     # Calculate steps per epoch
-    # Note: We need to estimate since we're using .take() and streaming
     steps_per_epoch = config.max_samples // config.batch_size if config.max_samples else 1000
     logger.info(f"Estimated steps per epoch: {steps_per_epoch}")
 
@@ -524,6 +559,7 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
         train_dataset,
         epochs=config.num_epochs,
         callbacks=callbacks,
+        validation_data=val_dataset,
         verbose=1,
     )
 
@@ -531,24 +567,31 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     logger.info("Training completed!")
     logger.info("=" * 80)
 
-    # Step 7: Save final model
-    final_model_path = os.path.join(config.save_dir, "bert_mlm_final.keras")
-    logger.info(f"Saving final model to {final_model_path}")
+    # Note: The 'best' model is already saved by the checkpoint callback.
+    # The EarlyStopping callback with `restore_best_weights=True` ensures that
+    # the `mlm_model` object holds the weights of the best epoch.
+
+    # Step 7: Save final model (which holds the best weights)
+    final_model_path = os.path.join(config.save_dir, "bert_mlm_final_best.keras")
+    logger.info(f"Saving final model with best weights to {final_model_path}")
     mlm_model.save(final_model_path)
 
     # Step 8: Save pretrained encoder separately
-    encoder_path = os.path.join(config.save_dir, "pretrained_bert_encoder.keras")
-    logger.info(f"Saving pretrained encoder to {encoder_path}")
+    encoder_path = os.path.join(config.save_dir, "pretrained_bert_encoder_best.keras")
+    logger.info(f"Saving best pretrained encoder to {encoder_path}")
     mlm_model.encoder.save(encoder_path)
 
     # Print summary statistics
     logger.info("=" * 80)
     logger.info("Training Summary")
     logger.info("=" * 80)
-    logger.info(f"Total epochs: {config.num_epochs}")
-    logger.info(f"Final loss: {history.history['loss'][-1]:.4f}")
-    logger.info(f"Final accuracy: {history.history['accuracy'][-1]:.4f}")
-    logger.info(f"Model saved to: {config.save_dir}")
+    logger.info(f"Total epochs run: {len(history.history['loss'])}")
+    # Find the best epoch results
+    best_epoch = tf.argmin(history.history['val_loss']).numpy()
+    best_val_loss = history.history['val_loss'][best_epoch]
+    best_val_acc = history.history['val_accuracy'][best_epoch]
+    logger.info(f"Best epoch: {best_epoch + 1} (val_loss: {best_val_loss:.4f}, val_accuracy: {best_val_acc:.4f})")
+    logger.info(f"Model with best weights saved to: {config.save_dir}")
     logger.info("=" * 80)
 
     return mlm_model, history
@@ -643,7 +686,7 @@ def main() -> None:
 
     logger.info("=" * 80)
     logger.info("Pre-training complete! Encoder ready for fine-tuning.")
-    logger.info(f"Load encoder: keras.models.load_model('{config.save_dir}/pretrained_bert_encoder.keras')")
+    logger.info(f"Load encoder: keras.models.load_model('{config.save_dir}/pretrained_bert_encoder_best.keras')")
     logger.info("=" * 80)
 
 

@@ -327,6 +327,19 @@ class SummaryVisualizer(BaseVisualizer):
             table_data: 2D list containing table cell data.
             headers: List of column header strings.
         """
+
+        if not table_data:
+            ax.text(
+                ANNOTATION_X_CENTER, ANNOTATION_Y_CENTER,
+                "No performance metrics available\n(Evaluation requires test data)",
+                ha='center', va='center',
+                transform=ax.transAxes,
+                fontsize=NO_DATA_MESSAGE_FONT_SIZE
+            )
+            ax.set_title("Performance Metrics") # Still give the plot a title
+            ax.axis('off')
+            return # Exit early to prevent the crash
+
         # Create the table with proper positioning
         table = ax.table(
             cellText=table_data,

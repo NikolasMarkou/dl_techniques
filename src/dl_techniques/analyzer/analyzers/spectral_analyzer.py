@@ -79,7 +79,7 @@ import keras
 import warnings
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 # Suppress scipy/numpy warnings in eigenvalue calculations
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -96,6 +96,7 @@ from ..constants import (
 )
 from .. import spectral_metrics
 from .. import spectral_utils
+from ..utils import recursively_get_layers
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -150,22 +151,28 @@ class SpectralAnalyzer(BaseAnalyzer):
         else:
             logger.warning("Spectral analysis did not produce any results for any model.")
 
-
     def _analyze_single_model(self, model: keras.Model) -> pd.DataFrame:
         """
         Perform spectral analysis on a single Keras model.
         """
         # Create basic description of the model to find analyzable layers
-        details = self._describe_model(model)
+        # This now returns both the details DataFrame and the flattened list of layers.
+        details, all_layers = self._describe_model(model)
         self._esd_cache: Dict[int, np.ndarray] = {}
 
         if details.empty:
             logger.warning(f"No layers found in model '{model.name}' that meet the criteria for spectral analysis.")
-            return details
+            return details.reset_index()  # Return empty but correctly formatted DataFrame
 
         # Perform detailed analysis on each qualifying layer
         for layer_id in details.index:
-            layer = model.layers[layer_id]
+            # [-] OLD, BUGGY LINE:
+            # layer = model.layers[layer_id]
+
+            # [+] NEW, CORRECT LINE:
+            # Use the flattened list with the correct index.
+            layer = all_layers[layer_id]
+
             logger.debug(f"Analyzing layer {layer_id}: {layer.name}")
 
             # Extract weights, dimensions, and other properties
@@ -198,7 +205,8 @@ class SpectralAnalyzer(BaseAnalyzer):
                 rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(rand_Wmats, N, M, n_comp)
                 rand_distance = spectral_metrics.jensen_shannon_distance(evals, rand_evals)
                 ww_softrank = np.max(rand_evals) / np.max(evals) if np.max(evals) > 0 else 0
-                randomization_metrics = {'rand_sv_max': rand_sv_max, 'rand_distance': rand_distance, 'ww_softrank': ww_softrank}
+                randomization_metrics = {'rand_sv_max': rand_sv_max, 'rand_distance': rand_distance,
+                                         'ww_softrank': ww_softrank}
 
             metrics = {
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),
@@ -223,12 +231,19 @@ class SpectralAnalyzer(BaseAnalyzer):
         # Convert layer_id index to a column for robust concatenation
         return details.reset_index()
 
-    def _describe_model(self, model: keras.Model) -> pd.DataFrame:
+    def _describe_model(self, model: keras.Model) -> Tuple[pd.DataFrame, List[keras.layers.Layer]]:
         """
-        Describe the model architecture to find analyzable layers.
+        Describe the model architecture to find all analyzable layers, including nested ones.
+
+        Returns:
+            A tuple containing:
+            - A pandas DataFrame with metadata for each analyzable layer.
+            - The flat list of all layers discovered recursively.
         """
         details = pd.DataFrame()
-        for layer_id, layer in enumerate(model.layers):
+        all_layers = recursively_get_layers(model)
+
+        for layer_id, layer in enumerate(all_layers):
             layer_type = spectral_utils.infer_layer_type(layer)
             has_weights, weights, _, _ = spectral_utils.get_layer_weights_and_bias(layer)
             if not has_weights or layer_type == LayerType.UNKNOWN:
@@ -248,7 +263,8 @@ class SpectralAnalyzer(BaseAnalyzer):
 
         if not details.empty:
             details.set_index('layer_id', inplace=True)
-        return details
+
+        return details, all_layers
 
     def _get_summary(self, details_df: pd.DataFrame) -> Dict[str, float]:
         """
