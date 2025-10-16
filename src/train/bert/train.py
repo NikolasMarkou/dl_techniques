@@ -473,12 +473,9 @@ def compile_model(
         clipnorm=1.0,  # Gradient clipping
     )
 
-    # Compile model
+    # Compile model. The model's `metrics` property will be used automatically.
     mlm_model.compile(
         optimizer=optimizer,
-        metrics=[
-            keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
-        ],
     )
 
     logger.info(

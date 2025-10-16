@@ -202,10 +202,19 @@ class MaskedLanguageModel(keras.Model):
             name="mlm_output",
         )
 
+        # Add metric trackers for manual control
+        self.loss_tracker = keras.metrics.Mean(name="loss")
+        self.acc_metric = keras.metrics.SparseCategoricalAccuracy(name="accuracy")
+
         logger.info(
             f"Created MaskedLanguageModel: vocab_size={self.vocab_size}, "
             f"mask_ratio={self.mask_ratio}, hidden_size={self.hidden_size}"
         )
+
+    @property
+    def metrics(self):
+        """List of metrics for Keras to track."""
+        return [self.loss_tracker, self.acc_metric]
 
     def _validate_config(
             self,
@@ -322,12 +331,16 @@ class MaskedLanguageModel(keras.Model):
         gradients = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        return self.compute_metrics(
-            x=None,
-            y=labels,
+        # Manually update the state of the metrics
+        self.loss_tracker.update_state(loss)
+        self.acc_metric.update_state(
+            y_true=labels,
             y_pred=logits,
-            sample_weight=masked_positions,
+            sample_weight=masked_positions
         )
+
+        # Return a dict mapping metric names to current value
+        return {m.name: m.result() for m in self.metrics}
 
     def compute_loss(
             self,
@@ -378,4 +391,4 @@ class MaskedLanguageModel(keras.Model):
         encoder = keras.saving.deserialize_keras_object(encoder_config)
         return cls(encoder=encoder, **config)
 
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------

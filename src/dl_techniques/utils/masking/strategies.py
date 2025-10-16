@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
-# ---------------------------------------------------------------------
+# -----------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
@@ -84,7 +84,6 @@ def apply_mlm_masking(
     should_mask = (mask_probabilities < mask_ratio) & ~non_maskable
 
     # Decide on the corruption strategy for each token.
-    # We generate probabilities for all tokens, which is XLA-friendly.
     corruption_probs = tf.random.uniform(input_shape, dtype=tf.float32)
     mask_threshold = 1.0 - random_token_ratio - unchanged_ratio
     random_threshold = 1.0 - unchanged_ratio
@@ -97,23 +96,24 @@ def apply_mlm_masking(
         corruption_probs < random_threshold
     )
 
-    # Generate a full tensor of random tokens. This is XLA-compatible because
-    # the shape is static for the batch.
+    # Generate tensors for all possible outcomes
     random_tokens = tf.random.uniform(
         shape=input_shape, minval=0, maxval=vocab_size, dtype=input_ids.dtype
     )
-
-    # Start with original IDs and apply corruptions using tf.where, which is
-    # efficient and XLA-friendly.
-
-    # First, replace tokens with random tokens where specified
-    masked_input_ids = tf.where(random_token_mask, random_tokens, input_ids)
-
-    # Next, replace tokens with the [MASK] token where specified.
-    # This correctly overwrites the original IDs but not the random ones.
-    masked_input_ids = tf.where(
-        mask_token_mask, mask_token_id, masked_input_ids
+    mask_values = tf.fill(
+        dims=input_shape,
+        value=tf.cast(mask_token_id, dtype=input_ids.dtype)
     )
+
+    # Use a nested tf.where to select the final token id, restoring the
+    # original order of operations to avoid a subtle XLA compiler bug.
+
+    # 1. First, apply random tokens where needed.
+    intermediate_ids = tf.where(random_token_mask, random_tokens, input_ids)
+
+    # 2. Then, apply mask tokens. This overwrites original IDs from the step above,
+    # but preserves the random tokens because the masks are mutually exclusive.
+    masked_input_ids = tf.where(mask_token_mask, mask_values, intermediate_ids)
 
     return masked_input_ids, labels, should_mask
 
