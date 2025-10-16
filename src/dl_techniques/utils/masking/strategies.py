@@ -68,6 +68,7 @@ def apply_mlm_masking(
     :rtype: Tuple[tf.Tensor, tf.Tensor, tf.Tensor]
     """
     labels = tf.identity(input_ids)
+    input_shape = tf.shape(input_ids)
 
     # Create a boolean mask for tokens that should *never* be masked
     non_maskable = tf.zeros_like(input_ids, dtype=tf.bool)
@@ -79,52 +80,39 @@ def apply_mlm_masking(
         non_maskable = tf.logical_or(non_maskable, padding_mask)
 
     # Determine which tokens to mask (mask_ratio of non-special tokens)
-    mask_probabilities = tf.random.uniform(tf.shape(input_ids), dtype=tf.float32)
+    mask_probabilities = tf.random.uniform(input_shape, dtype=tf.float32)
     should_mask = (mask_probabilities < mask_ratio) & ~non_maskable
-    masked_indices = tf.where(should_mask)
 
-    num_masked = tf.shape(masked_indices)[0]
-    # The `if num_masked == 0:` block is removed as it's redundant and causes
-    # a graph error. TensorFlow ops below handle the zero-mask case correctly.
-
-    # Decide on the corruption strategy for each masked token
-    # 80% -> [MASK], 10% -> random token, 10% -> unchanged
-    corruption_probs = tf.random.uniform(shape=(num_masked,), dtype=tf.float32)
+    # Decide on the corruption strategy for each token.
+    # We generate probabilities for all tokens, which is XLA-friendly.
+    corruption_probs = tf.random.uniform(input_shape, dtype=tf.float32)
     mask_threshold = 1.0 - random_token_ratio - unchanged_ratio
     random_threshold = 1.0 - unchanged_ratio
 
     # 80% -> Replace with [MASK]
-    mask_token_mask = corruption_probs < mask_threshold
-    mask_token_indices = tf.boolean_mask(masked_indices, mask_token_mask)
+    mask_token_mask = should_mask & (corruption_probs < mask_threshold)
 
     # 10% -> Replace with random token
-    random_token_mask = (corruption_probs >= mask_threshold) & (
+    random_token_mask = should_mask & (corruption_probs >= mask_threshold) & (
         corruption_probs < random_threshold
     )
-    random_token_indices = tf.boolean_mask(masked_indices, random_token_mask)
 
-    # Generate random tokens for replacement
-    num_random = tf.shape(random_token_indices)[0]
+    # Generate a full tensor of random tokens. This is XLA-compatible because
+    # the shape is static for the batch.
     random_tokens = tf.random.uniform(
-        shape=(num_random,), minval=0, maxval=vocab_size, dtype=tf.int32
+        shape=input_shape, minval=0, maxval=vocab_size, dtype=input_ids.dtype
     )
 
-    # Start with original IDs and apply corruptions
-    masked_input_ids = input_ids
+    # Start with original IDs and apply corruptions using tf.where, which is
+    # efficient and XLA-friendly.
 
-    # Apply [MASK] replacements. The `if` condition is removed as
-    # tensor_scatter_nd_update handles empty indices correctly.
-    mask_values = tf.fill(
-        (tf.shape(mask_token_indices)[0],), mask_token_id
-    )
-    masked_input_ids = tf.tensor_scatter_nd_update(
-        masked_input_ids, mask_token_indices, mask_values
-    )
+    # First, replace tokens with random tokens where specified
+    masked_input_ids = tf.where(random_token_mask, random_tokens, input_ids)
 
-    # Apply random token replacements. The `if` condition is removed as
-    # tensor_scatter_nd_update handles empty indices correctly.
-    masked_input_ids = tf.tensor_scatter_nd_update(
-        masked_input_ids, random_token_indices, random_tokens
+    # Next, replace tokens with the [MASK] token where specified.
+    # This correctly overwrites the original IDs but not the random ones.
+    masked_input_ids = tf.where(
+        mask_token_mask, mask_token_id, masked_input_ids
     )
 
     return masked_input_ids, labels, should_mask
