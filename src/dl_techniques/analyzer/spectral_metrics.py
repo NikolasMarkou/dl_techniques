@@ -168,107 +168,124 @@ def fit_powerlaw(
         xmin: Optional[float] = None
 ) -> Tuple[float, float, float, float, int, str, str]:
     """
-    Fit eigenvalues to a power-law distribution using maximum likelihood estimation.
+    Fit eigenvalues to a power-law distribution using a robust xmin search.
+    This implementation is aligned with the methodology in the WeightWatcher library.
 
     Args:
         evals: Array of eigenvalues to fit.
-        xmin: Minimum x value for fitting. If None, automatically determined.
+        xmin: Not used for fitting, as the optimal xmin is found automatically.
+              Included for API consistency if needed.
 
     Returns:
         Tuple containing:
             - alpha: Power-law exponent.
-            - xmin: Minimum x value used for fitting.
-            - D: Kolmogorov-Smirnov statistic.
+            - xmin: Minimum eigenvalue used for fitting (found automatically).
+            - D: Kolmogorov-Smirnov statistic for the fit.
             - sigma: Standard error of alpha.
-            - num_pl_spikes: Number of eigenvalues in power-law tail.
+            - num_pl_spikes: Number of eigenvalues in the power-law tail.
             - status: Success or failure status string.
             - warning: Warning message string (if any).
     """
-    # Initialize return values
-    alpha = -1
-    D = -1
-    sigma = -1
-    if xmin is None or xmin <= 0:
-        xmin = np.min(evals[evals > SPECTRAL_EVALS_THRESH])
-    num_pl_spikes = -1
-    status = "failed"
-    warning = ""
+    # 1. Initialization and Data Preparation
+    alpha, D, sigma, optimal_xmin, num_pl_spikes = -1.0, -1.0, -1.0, -1.0, -1
+    status, warning = "failed", ""
 
-    # Ensure we have enough eigenvalues
     if len(evals) < SPECTRAL_DEFAULT_MIN_EVALS:
         logger.warning("Not enough eigenvalues for power-law fitting")
-        return alpha, xmin, D, sigma, num_pl_spikes, status, warning
+        return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, warning
 
     try:
-        # Filter out very small eigenvalues
-        nz_evals = evals[evals > SPECTRAL_EVALS_THRESH]
+        data = np.asarray(np.sort(evals[evals > SPECTRAL_EVALS_THRESH]), dtype=np.float64)
+        if len(data) < 2:
+            return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "not enough data > thresh"
 
-        # Simple power-law estimation (using MLE for discrete power-law)
-        # For continuous power-law, alpha = 1 + n / (∑log(xi/xmin))
-        filtered_evals = nz_evals[nz_evals >= xmin]
-        n = len(filtered_evals)
+        # 2. Replicate the core logic of WWFit: search for optimal xmin
+        N = len(data)
+        xmins = data[:-1]
+        log_data = np.log(data)
 
-        if n > 0:
-            alpha = 1 + n / np.sum(np.log(filtered_evals / xmin))
-            sigma = (alpha - 1) / np.sqrt(n)
+        alphas = np.zeros(N - 1, dtype=np.float64)
+        Ds = np.ones(N - 1, dtype=np.float64)
 
-            # Calculate Kolmogorov-Smirnov statistic
-            # Compare empirical CDF with theoretical power-law CDF
-            empirical_cdf = np.arange(1, n + 1) / n
-            theoretical_cdf = 1 - (filtered_evals / xmin) ** (1 - alpha)
-            D = np.max(np.abs(empirical_cdf - theoretical_cdf))
+        for i, current_xmin in enumerate(xmins):
+            n_tail = float(N - i)
+            # MLE for alpha for a given xmin
+            current_alpha = 1.0 + n_tail / (np.sum(log_data[i:]) - n_tail * log_data[i])
+            alphas[i] = current_alpha
 
-            num_pl_spikes = n
-            status = "success"
+            if current_alpha > 1:
+                # Theoretical CDF for power law: P(x) = 1 - (x/xmin)^(-alpha+1)
+                theoretical_cdf = 1 - (data[i:] / current_xmin) ** (-current_alpha + 1)
+                # Empirical CDF
+                empirical_cdf = np.arange(n_tail) / n_tail
+                # KS distance D is the max difference
+                Ds[i] = np.max(np.abs(theoretical_cdf - empirical_cdf))
 
-            # Add warning based on alpha value
-            if alpha < SPECTRAL_OVER_TRAINED_THRESH:
-                warning = "over-trained"
-            elif alpha > SPECTRAL_UNDER_TRAINED_THRESH:
-                warning = "under-trained"
+        # 3. Find the xmin that minimizes the KS distance D
+        best_i = np.argmin(Ds)
+        optimal_xmin = xmins[best_i]
+        alpha = alphas[best_i]
+        D = Ds[best_i]
+
+        # Calculate sigma for the best fit
+        n_tail_optimal = N - best_i
+        sigma = (alpha - 1.0) / np.sqrt(n_tail_optimal)
+        num_pl_spikes = int(n_tail_optimal)
+        status = "success"
+
+        # 4. Add warning based on alpha value
+        if alpha < SPECTRAL_OVER_TRAINED_THRESH:
+            warning = "over-trained"
+        elif alpha > SPECTRAL_UNDER_TRAINED_THRESH:
+            warning = "under-trained"
 
     except Exception as e:
         logger.warning(f"Power-law fitting failed: {e}")
+        status = "failed"
+        warning = str(e)
 
-    return alpha, xmin, D, sigma, num_pl_spikes, status, warning
+    return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, warning
 
 # ---------------------------------------------------------------------
 
+
 def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
     """
-    Calculate the matrix entropy from singular values.
-
-    The matrix entropy is computed as H = -sum(p_i * log(p_i)) / log(rank),
-    where p_i are the normalized eigenvalues and rank is the effective rank.
+    Calculate the matrix entropy from singular values, aligned with WeightWatcher.
 
     Args:
         singular_values: Array of singular values from SVD.
-        N: Maximum dimension of the matrix.
+        N: Maximum dimension of the matrix for rank calculation.
 
     Returns:
         Matrix entropy (float). Returns -1.0 if calculation fails.
     """
     try:
-        # Calculate matrix rank
-        tol = np.max(singular_values) * N * np.finfo(singular_values.dtype).eps
-        rank = np.sum(singular_values > tol)
+        if len(singular_values) == 0 or np.max(singular_values) < SPECTRAL_EPSILON:
+            return 0.0
 
-        # Calculate eigenvalues from singular values
-        evals = singular_values * singular_values
+        # 1. Calculate matrix rank using the same tolerance as WeightWatcher/NumPy
+        S = singular_values
+        tol = np.max(S) * max(S.shape) * np.finfo(S.dtype).eps
+        rank = np.count_nonzero(S > tol)
 
-        # Calculate probabilities
-        p = evals / (np.sum(evals) + SPECTRAL_EPSILON)
+        # 2. Calculate eigenvalues from singular values
+        evals = S * S
 
-        # Remove practically zero probabilities
-        p = p[p > 0]
+        # 3. Calculate probabilities
+        evals_sum = np.sum(evals)
+        if evals_sum < SPECTRAL_EPSILON:
+            return 0.0
 
-        # Ensure rank is at least 1
-        rank = max(rank, 1)
+        p = evals / evals_sum
 
-        # Calculate entropy with proper log(rank) handling
-        log_rank = np.log(rank) if rank > 1 else np.log(2)  # Avoid log(1)=0 division
-        entropy = -np.sum(p * np.log(p)) / log_rank
+        # 4. Add epsilon to prevent log(0), matching WeightWatcher's approach
+        p_clipped = p[p > 0]
 
+        # 5. Handle log(rank) denominator correctly
+        log_rank = np.log(rank) if rank > 1 else 1.0  # Avoid division by zero if rank is 1
+
+        entropy = -np.sum(p_clipped * np.log(p_clipped)) / log_rank
         return entropy
     except Exception as e:
         logger.warning(f"Error calculating matrix entropy: {e}")
@@ -375,12 +392,7 @@ def calculate_dominance_ratio(evals: np.ndarray) -> float:
 def calculate_participation_ratio(vector: np.ndarray) -> float:
     """
     Calculate the participation ratio of a vector, a measure of localization.
-
-    The participation ratio is defined as:
-    PR = (sum(v_i^2))^2 / sum(v_i^4)
-
-    A low participation ratio indicates the vector's energy is concentrated in
-    a few elements (localized).
+    This formula is aligned with the implementation in WeightWatcher.
 
     Args:
         vector: Eigenvector or other vector to analyze.
@@ -388,22 +400,14 @@ def calculate_participation_ratio(vector: np.ndarray) -> float:
     Returns:
         Participation ratio. Lower values indicate more localization.
     """
-    # Normalize the vector
-    vec_norm = np.linalg.norm(vector)
-    if vec_norm < SPECTRAL_EPSILON:
-        return float('inf')
+    # WeightWatcher uses the ratio of L2 to L4 norms.
+    norm2 = np.linalg.norm(vector, ord=2)
+    norm4 = np.linalg.norm(vector, ord=4)
 
-    vec = vector / vec_norm
+    if norm4 < SPECTRAL_EPSILON:
+        return 0.0 # Changed from inf to 0.0 for a more stable metric
 
-    # Calculate participation ratio
-    vec_sq = vec ** 2
-    numerator = np.sum(vec_sq) ** 2
-    denominator = np.sum(vec_sq ** 2)
-
-    if denominator < SPECTRAL_EPSILON:
-        return float('inf')
-
-    return numerator / denominator
+    return norm2 / norm4
 
 # ---------------------------------------------------------------------
 
@@ -658,28 +662,54 @@ def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
 
 # ---------------------------------------------------------------------
 
+def rescale_eigenvalues(evals: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Rescale eigenvalues by their L2 norm to sqrt(N), aligned with WeightWatcher."""
+    N = len(evals)
+    if N == 0:
+        return evals, 1.0
+
+    wnorm = np.sqrt(np.sum(evals))
+    if wnorm < SPECTRAL_EPSILON:
+        return evals, 1.0
+
+    wscale = np.sqrt(N) / wnorm
+    rescaled_evals = (wscale * wscale) * evals
+    return rescaled_evals, wscale
+
+
 def compute_detX_constraint(evals: np.ndarray) -> int:
     """
     Identify the number of eigenvalues necessary to satisfy det(X) = 1.
+    This version is aligned with WeightWatcher, including the crucial rescaling step.
 
     Args:
-        evals: Array of eigenvalues (assumed to be sorted in descending order).
+        evals: Array of eigenvalues (will be rescaled internally).
 
     Returns:
         Number of eigenvalues in the tail needed to satisfy the constraint.
     """
-    # Sort eigenvalues in descending order
-    sorted_evals = np.sort(evals)[::-1]
-    num_evals = len(sorted_evals)
+    if evals is None or len(evals) < 2:
+        return 0
 
-    # Find first index where product of eigenvalues >= 1
-    prod = 1.0
-    for idx in range(num_evals):
-        prod *= sorted_evals[idx]
-        if prod >= 1.0:
-            return idx + 1
+    # CRITICAL: Rescale eigenvalues first, as in WeightWatcher
+    rescaled_evals, _ = rescale_eigenvalues(evals)
 
-    return num_evals  # If no constraint is satisfied, keep all eigenvalues
+    # Sort eigenvalues in ascending order to match WeightWatcher's logic
+    sorted_evals = np.sort(rescaled_evals)
+
+    # Iterate from the end of the spectrum (largest evals) backwards
+    for idx in range(len(sorted_evals) - 1, 0, -1):
+        # Product of the tail of the spectrum
+        detX = np.prod(sorted_evals[idx:])
+        if detX < 1.0:
+            # If the product drops below 1, the previous index was the correct one.
+            # The number of evals is the total length minus the index where we stopped.
+            num_smooth = len(sorted_evals) - (idx + 1)
+            # However, WW's logic has a slight off-by-one, let's replicate exactly
+            num_evals_in_tail = len(sorted_evals) - idx
+            return num_evals_in_tail
+
+    return len(sorted_evals)
 
 # ---------------------------------------------------------------------
 
