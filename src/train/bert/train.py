@@ -34,18 +34,17 @@ import os
 import keras
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from typing import Dict, Any, Optional, Tuple
 from transformers import BertTokenizer
+from typing import Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # Local imports (adjust paths based on your project structure)
 # ---------------------------------------------------------------------
 
 from dl_techniques.models.bert import BERT
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.masked_language_model import MaskedLanguageModel, visualize_mlm_predictions
-
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -88,7 +87,7 @@ class TrainingConfig:
 
     # Training configuration
     batch_size: int = 32
-    num_epochs: int = 3
+    num_epochs: int = 100
     learning_rate: float = 5e-4  # Higher LR for tiny model
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
@@ -99,9 +98,9 @@ class TrainingConfig:
     unchanged_ratio: float = 0.1
 
     # Paths
-    save_dir: str = "output/bert_mlm_pretrain"
-    log_dir: str = "logs/bert_mlm"
-    checkpoint_dir: str = "output/bert_mlm_pretrain/checkpoints"
+    save_dir: str = "results/bert_mlm_pretrain"
+    log_dir: str = "results/bert_mlm_pretrain/logs"
+    checkpoint_dir: str = "results/bert_mlm_pretrain/checkpoints"
 
     # Data configuration
     dataset_name: str = "imdb_reviews"
@@ -332,91 +331,6 @@ def create_bert_mlm_model(
 # Training Configuration
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.training")
-class WarmupCosineDecay(keras.optimizers.schedules.LearningRateSchedule):
-    """A learning rate schedule that combines linear warmup with cosine decay.
-
-    This schedule is commonly used for training Transformer models like BERT.
-
-    1.  **Warmup Phase:** Linearly increases the learning rate from 0 to
-        `peak_learning_rate` over `warmup_steps`.
-    2.  **Decay Phase:** After warmup, the learning rate follows a cosine decay
-        from `peak_learning_rate` down to `alpha * peak_learning_rate` over
-        the remaining `total_steps - warmup_steps`.
-
-    :param peak_learning_rate: The maximum learning rate after warmup.
-    :type peak_learning_rate: float
-    :param total_steps: The total number of training steps.
-    :type total_steps: int
-    :param warmup_steps: The number of steps for the linear warmup phase.
-    :type warmup_steps: int
-    :param alpha: The minimum learning rate as a fraction of `peak_learning_rate`.
-        Defaults to 0.0.
-    :type alpha: float
-    :param name: Optional name for the schedule.
-    :type name: Optional[str]
-    """
-
-    def __init__(
-        self,
-        peak_learning_rate: float,
-        total_steps: int,
-        warmup_steps: int,
-        alpha: float = 0.0,
-        name: Optional[str] = None
-    ):
-        """Initializes the WarmupCosineDecay schedule."""
-        super().__init__()
-        self.peak_learning_rate = peak_learning_rate
-        self.total_steps = total_steps
-        self.warmup_steps = warmup_steps
-        self.alpha = alpha
-        self.name = name
-
-        if warmup_steps >= total_steps:
-            raise ValueError(
-                f"warmup_steps ({warmup_steps}) must be less than "
-                f"total_steps ({total_steps})."
-            )
-
-        # Pre-create the internal schedules for efficiency
-        self.warmup_schedule = keras.optimizers.schedules.PolynomialDecay(
-            initial_learning_rate=0.0,
-            decay_steps=self.warmup_steps,
-            end_learning_rate=self.peak_learning_rate,
-            power=1.0,
-        )
-        self.decay_schedule = keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=self.peak_learning_rate,
-            decay_steps=self.total_steps - self.warmup_steps,
-            alpha=self.alpha,
-        )
-
-    def __call__(self, step: tf.Tensor) -> tf.Tensor:
-        """Calculates the learning rate for a given step.
-
-        :param step: The current training step (a scalar `tf.Tensor`).
-        :type step: tf.Tensor
-        :return: The learning rate for the current step.
-        :rtype: tf.Tensor
-        """
-        with tf.name_scope(self.name or "WarmupCosineDecay"):
-            step = tf.cast(step, dtype=tf.float32)
-            return tf.cond(
-                step < self.warmup_steps,
-                lambda: self.warmup_schedule(step),
-                lambda: self.decay_schedule(step - self.warmup_steps),
-            )
-
-    def get_config(self) -> Dict[str, Any]:
-        """Returns the configuration of the schedule for serialization."""
-        return {
-            "peak_learning_rate": self.peak_learning_rate,
-            "total_steps": self.total_steps,
-            "warmup_steps": self.warmup_steps,
-            "alpha": self.alpha,
-            "name": self.name,
-        }
 
 def create_learning_rate_schedule(
     config: TrainingConfig,
@@ -439,12 +353,21 @@ def create_learning_rate_schedule(
         f"warmup_steps={warmup_steps}"
     )
 
-    return WarmupCosineDecay(
-        peak_learning_rate=config.learning_rate,
-        total_steps=total_steps,
-        warmup_steps=warmup_steps,
+    # 1. Create the primary (post-warmup) schedule
+    primary_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=config.learning_rate,
+        decay_steps=total_steps - warmup_steps,
         alpha=0.0
     )
+
+    # 2. Wrap it with the WarmupSchedule
+    warmup_schedule = WarmupSchedule(
+        warmup_steps=warmup_steps,
+        primary_schedule=primary_schedule,
+        warmup_start_lr=1e-7  # A small starting learning rate
+    )
+
+    return warmup_schedule
 
 
 def compile_model(
@@ -525,12 +448,12 @@ def create_callbacks(config: TrainingConfig) -> list:
         ),
 
         # Early stopping (optional - commented out for full training)
-        # keras.callbacks.EarlyStopping(
-        #     monitor='loss',
-        #     patience=2,
-        #     restore_best_weights=True,
-        #     verbose=1,
-        # ),
+        keras.callbacks.EarlyStopping(
+            monitor='loss',
+            patience=15,
+            restore_best_weights=True,
+            verbose=1,
+        ),
 
         # Learning rate logging
         keras.callbacks.LambdaCallback(
