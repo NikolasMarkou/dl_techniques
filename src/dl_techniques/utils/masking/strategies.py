@@ -84,8 +84,8 @@ def apply_mlm_masking(
     masked_indices = tf.where(should_mask)
 
     num_masked = tf.shape(masked_indices)[0]
-    if num_masked == 0:
-        return input_ids, labels, should_mask
+    # The `if num_masked == 0:` block is removed as it's redundant and causes
+    # a graph error. TensorFlow ops below handle the zero-mask case correctly.
 
     # Decide on the corruption strategy for each masked token
     # 80% -> [MASK], 10% -> random token, 10% -> unchanged
@@ -112,20 +112,20 @@ def apply_mlm_masking(
     # Start with original IDs and apply corruptions
     masked_input_ids = input_ids
 
-    # Apply [MASK] replacements
-    if tf.shape(mask_token_indices)[0] > 0:
-        mask_values = tf.fill(
-            (tf.shape(mask_token_indices)[0],), mask_token_id
-        )
-        masked_input_ids = tf.tensor_scatter_nd_update(
-            masked_input_ids, mask_token_indices, mask_values
-        )
+    # Apply [MASK] replacements. The `if` condition is removed as
+    # tensor_scatter_nd_update handles empty indices correctly.
+    mask_values = tf.fill(
+        (tf.shape(mask_token_indices)[0],), mask_token_id
+    )
+    masked_input_ids = tf.tensor_scatter_nd_update(
+        masked_input_ids, mask_token_indices, mask_values
+    )
 
-    # Apply random token replacements
-    if tf.shape(random_token_indices)[0] > 0:
-        masked_input_ids = tf.tensor_scatter_nd_update(
-            masked_input_ids, random_token_indices, random_tokens
-        )
+    # Apply random token replacements. The `if` condition is removed as
+    # tensor_scatter_nd_update handles empty indices correctly.
+    masked_input_ids = tf.tensor_scatter_nd_update(
+        masked_input_ids, random_token_indices, random_tokens
+    )
 
     return masked_input_ids, labels, should_mask
 

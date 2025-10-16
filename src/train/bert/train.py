@@ -34,7 +34,7 @@ import os
 import keras
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from typing import Dict, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 from transformers import BertTokenizer
 
 # ---------------------------------------------------------------------
@@ -42,8 +42,10 @@ from transformers import BertTokenizer
 # ---------------------------------------------------------------------
 
 from dl_techniques.models.bert import BERT
-from dl_techniques.models.masked_language_model import MaskedLanguageModel, visualize_mlm_predictions
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.masked_language_model import MaskedLanguageModel, visualize_mlm_predictions
+
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -182,19 +184,25 @@ def preprocess_dataset(
     """
     logger.info("Preprocessing dataset...")
 
-    def tokenize_function(text: tf.Tensor) -> Dict[str, tf.Tensor]:
+    def tokenize_function(text: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         """Tokenize a single text sample.
 
         :param text: Input text string.
         :type text: tf.Tensor
-        :return: Dictionary with tokenized inputs.
-        :rtype: Dict[str, tf.Tensor]
+        :return: Tuple of (input_ids, attention_mask, token_type_ids).
+        :rtype: Tuple[tf.Tensor, tf.Tensor, tf.Tensor]
         """
         # Decode bytes to string if necessary
-        if text.dtype == tf.string:
-            text = text.numpy().decode('utf-8')
+        if isinstance(text, bytes):
+            text = text.decode('utf-8')
+        elif hasattr(text, 'numpy'):
+            text_np = text.numpy()
+            if isinstance(text_np, bytes):
+                text = text_np.decode('utf-8')
+            else:
+                text = str(text_np)
         else:
-            text = text.numpy()
+            text = str(text)
 
         # Tokenize using HuggingFace tokenizer
         encoded = tokenizer(
@@ -205,40 +213,43 @@ def preprocess_dataset(
             return_tensors='np'
         )
 
-        return {
-            'input_ids': encoded['input_ids'][0],
-            'attention_mask': encoded['attention_mask'][0],
-            'token_type_ids': encoded['token_type_ids'][0],
-        }
+        return (
+            encoded['input_ids'][0],
+            encoded['attention_mask'][0],
+            encoded['token_type_ids'][0],
+        )
 
-    # Apply tokenization
+    # Apply tokenization - py_function returns a tuple
     dataset = dataset.map(
         lambda x: tf.py_function(
             tokenize_function,
             [x],
-            {
-                'input_ids': tf.int32,
-                'attention_mask': tf.int32,
-                'token_type_ids': tf.int32,
-            }
+            [tf.int32, tf.int32, tf.int32]  # List of output types
         ),
         num_parallel_calls=tf.data.AUTOTUNE
     )
 
-    # Set shapes (required after py_function)
-    dataset = dataset.map(
-        lambda x: {
-            'input_ids': tf.ensure_shape(
-                x['input_ids'], [config.max_seq_length]
-            ),
-            'attention_mask': tf.ensure_shape(
-                x['attention_mask'], [config.max_seq_length]
-            ),
-            'token_type_ids': tf.ensure_shape(
-                x['token_type_ids'], [config.max_seq_length]
-            ),
+    # Convert tuple to dictionary and set shapes
+    def tuple_to_dict(input_ids: tf.Tensor, attention_mask: tf.Tensor,
+                      token_type_ids: tf.Tensor) -> Dict[str, tf.Tensor]:
+        """Convert tuple output to dictionary format.
+
+        :param input_ids: Token IDs.
+        :type input_ids: tf.Tensor
+        :param attention_mask: Attention mask.
+        :type attention_mask: tf.Tensor
+        :param token_type_ids: Token type IDs.
+        :type token_type_ids: tf.Tensor
+        :return: Dictionary with proper shapes.
+        :rtype: Dict[str, tf.Tensor]
+        """
+        return {
+            'input_ids': tf.ensure_shape(input_ids, [config.max_seq_length]),
+            'attention_mask': tf.ensure_shape(attention_mask, [config.max_seq_length]),
+            'token_type_ids': tf.ensure_shape(token_type_ids, [config.max_seq_length]),
         }
-    )
+
+    dataset = dataset.map(tuple_to_dict, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Shuffle, batch, and prefetch
     dataset = dataset.shuffle(buffer_size=1000)
@@ -280,8 +291,7 @@ def create_bert_mlm_model(
     )
 
     logger.info(
-        f"BERT encoder created: {encoder.count_params():,} parameters, "
-        f"hidden_size={encoder.hidden_size}"
+        f"BERT encoder created with hidden_size={encoder.hidden_size}"
     )
 
     # Create MLM wrapper
@@ -300,8 +310,19 @@ def create_bert_mlm_model(
         layer_norm_eps=1e-12,
     )
 
+    # Build the model to count parameters
+    logger.info("Building model...")
+    dummy_input = {
+        'input_ids': tf.ones((1, config.max_seq_length), dtype=tf.int32),
+        'attention_mask': tf.ones((1, config.max_seq_length), dtype=tf.int32),
+        'token_type_ids': tf.zeros((1, config.max_seq_length), dtype=tf.int32),
+    }
+    _ = mlm_model(dummy_input, training=False)
+
     logger.info(
-        f"MLM model created: {mlm_model.count_params():,} total parameters"
+        f"MLM model built: {mlm_model.count_params():,} total parameters "
+        f"({encoder.count_params():,} encoder + "
+        f"{mlm_model.count_params() - encoder.count_params():,} MLM head)"
     )
 
     return mlm_model
@@ -311,6 +332,91 @@ def create_bert_mlm_model(
 # Training Configuration
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable(package="dl_techniques.training")
+class WarmupCosineDecay(keras.optimizers.schedules.LearningRateSchedule):
+    """A learning rate schedule that combines linear warmup with cosine decay.
+
+    This schedule is commonly used for training Transformer models like BERT.
+
+    1.  **Warmup Phase:** Linearly increases the learning rate from 0 to
+        `peak_learning_rate` over `warmup_steps`.
+    2.  **Decay Phase:** After warmup, the learning rate follows a cosine decay
+        from `peak_learning_rate` down to `alpha * peak_learning_rate` over
+        the remaining `total_steps - warmup_steps`.
+
+    :param peak_learning_rate: The maximum learning rate after warmup.
+    :type peak_learning_rate: float
+    :param total_steps: The total number of training steps.
+    :type total_steps: int
+    :param warmup_steps: The number of steps for the linear warmup phase.
+    :type warmup_steps: int
+    :param alpha: The minimum learning rate as a fraction of `peak_learning_rate`.
+        Defaults to 0.0.
+    :type alpha: float
+    :param name: Optional name for the schedule.
+    :type name: Optional[str]
+    """
+
+    def __init__(
+        self,
+        peak_learning_rate: float,
+        total_steps: int,
+        warmup_steps: int,
+        alpha: float = 0.0,
+        name: Optional[str] = None
+    ):
+        """Initializes the WarmupCosineDecay schedule."""
+        super().__init__()
+        self.peak_learning_rate = peak_learning_rate
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+        self.alpha = alpha
+        self.name = name
+
+        if warmup_steps >= total_steps:
+            raise ValueError(
+                f"warmup_steps ({warmup_steps}) must be less than "
+                f"total_steps ({total_steps})."
+            )
+
+        # Pre-create the internal schedules for efficiency
+        self.warmup_schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=0.0,
+            decay_steps=self.warmup_steps,
+            end_learning_rate=self.peak_learning_rate,
+            power=1.0,
+        )
+        self.decay_schedule = keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=self.peak_learning_rate,
+            decay_steps=self.total_steps - self.warmup_steps,
+            alpha=self.alpha,
+        )
+
+    def __call__(self, step: tf.Tensor) -> tf.Tensor:
+        """Calculates the learning rate for a given step.
+
+        :param step: The current training step (a scalar `tf.Tensor`).
+        :type step: tf.Tensor
+        :return: The learning rate for the current step.
+        :rtype: tf.Tensor
+        """
+        with tf.name_scope(self.name or "WarmupCosineDecay"):
+            step = tf.cast(step, dtype=tf.float32)
+            return tf.cond(
+                step < self.warmup_steps,
+                lambda: self.warmup_schedule(step),
+                lambda: self.decay_schedule(step - self.warmup_steps),
+            )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Returns the configuration of the schedule for serialization."""
+        return {
+            "peak_learning_rate": self.peak_learning_rate,
+            "total_steps": self.total_steps,
+            "warmup_steps": self.warmup_steps,
+            "alpha": self.alpha,
+            "name": self.name,
+        }
 
 def create_learning_rate_schedule(
     config: TrainingConfig,
@@ -333,37 +439,12 @@ def create_learning_rate_schedule(
         f"warmup_steps={warmup_steps}"
     )
 
-    # Warmup schedule
-    warmup_schedule = keras.optimizers.schedules.PolynomialDecay(
-        initial_learning_rate=0.0,
-        decay_steps=warmup_steps,
-        end_learning_rate=config.learning_rate,
-        power=1.0,
+    return WarmupCosineDecay(
+        peak_learning_rate=config.learning_rate,
+        total_steps=total_steps,
+        warmup_steps=warmup_steps,
+        alpha=0.0
     )
-
-    # Cosine decay after warmup
-    decay_schedule = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=config.learning_rate,
-        decay_steps=total_steps - warmup_steps,
-        alpha=0.0,
-    )
-
-    # Combine warmup and decay
-    def learning_rate_fn(step: tf.Tensor) -> tf.Tensor:
-        """Combined learning rate schedule.
-
-        :param step: Current training step.
-        :type step: tf.Tensor
-        :return: Learning rate for the current step.
-        :rtype: tf.Tensor
-        """
-        return tf.cond(
-            step < warmup_steps,
-            lambda: warmup_schedule(step),
-            lambda: decay_schedule(step - warmup_steps),
-        )
-
-    return learning_rate_fn
 
 
 def compile_model(
@@ -647,8 +728,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Enable mixed precision for faster training (optional)
-    # keras.mixed_precision.set_global_policy('mixed_float16')
-
-    # Run training
     main()
