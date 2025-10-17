@@ -231,12 +231,17 @@ def create_callbacks(config: FinetuneConfig) -> list:
     logger.info(f"Created {len(callbacks)} callbacks.")
     return callbacks
 
-def _merge_histories(h1: keras.callbacks.History, h2: keras.callbacks.History) -> keras.callbacks.History:
-    """Merges two Keras History objects."""
-    for key, value in h2.history.items():
-        h1.history.setdefault(key, []).extend(value)
-    h1.epoch.extend(h2.epoch)
-    return h1
+
+def _merge_histories(base_history: keras.callbacks.History,
+                     new_history: keras.callbacks.History) -> keras.callbacks.History:
+    """Merges a new Keras History object into a base one."""
+    for key, value in new_history.history.items():
+        base_history.history.setdefault(key, []).extend(value)
+
+    # The 'epoch' attribute is a list of epoch indices (e.g., [0, 1, 2])
+    base_history.epoch.extend(new_history.epoch)
+
+    return base_history
 
 # ---------------------------------------------------------------------
 # Training
@@ -258,7 +263,8 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
     model, bert_encoder = create_sentiment_model(config)
     callbacks = create_callbacks(config)
 
-    history = keras.callbacks.History()
+    # This will hold the final, combined history.
+    final_history: keras.callbacks.History
 
     if config.run_two_stage_finetuning:
         # --- Stage 1: Train the head with the encoder frozen ---
@@ -268,8 +274,10 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
         bert_encoder.trainable = False
         compile_model(model, config, learning_rate=config.stage1_learning_rate)
 
-        history1 = model.fit(train_dataset, epochs=config.stage1_epochs, callbacks=callbacks, validation_data=val_dataset, verbose=1)
-        history = _merge_histories(history, history1)
+        # The history from the first stage becomes our base.
+        history1 = model.fit(train_dataset, epochs=config.stage1_epochs, callbacks=callbacks,
+                             validation_data=val_dataset, verbose=1)
+        final_history = history1
 
         # --- Stage 2: Fine-tune the entire model ---
         logger.info("=" * 80)
@@ -279,10 +287,13 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
         compile_model(model, config, learning_rate=config.stage2_learning_rate)
 
         # Continue training from the last epoch of stage 1
-        initial_epoch = history.epoch[-1] + 1
+        initial_epoch = final_history.epoch[-1] + 1
         total_epochs = initial_epoch + config.stage2_epochs
-        history2 = model.fit(train_dataset, epochs=total_epochs, initial_epoch=initial_epoch, callbacks=callbacks, validation_data=val_dataset, verbose=1)
-        history = _merge_histories(history, history2)
+        history2 = model.fit(train_dataset, epochs=total_epochs, initial_epoch=initial_epoch, callbacks=callbacks,
+                             validation_data=val_dataset, verbose=1)
+
+        # Merge the second history into the first one
+        final_history = _merge_histories(final_history, history2)
 
     else:
         # --- Single Stage Fine-tuning ---
@@ -290,7 +301,9 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
         logger.info(f"Starting Single-Stage Fine-tuning for {config.stage2_epochs} epochs")
         logger.info("=" * 80)
         compile_model(model, config, learning_rate=config.stage2_learning_rate)
-        history = model.fit(train_dataset, epochs=config.stage2_epochs, callbacks=callbacks, validation_data=val_dataset, verbose=1)
+        # In this case, there's only one history object.
+        final_history = model.fit(train_dataset, epochs=config.stage2_epochs, callbacks=callbacks,
+                                  validation_data=val_dataset, verbose=1)
 
     logger.info("=" * 80)
     logger.info("Fine-tuning completed!")
@@ -300,12 +313,11 @@ def finetune_sentiment_model(config: FinetuneConfig) -> Tuple[keras.Model, keras
     logger.info(f"Saving final fine-tuned model to {final_model_path}")
     model.save(final_model_path)
 
-    best_epoch_idx = tf.argmax(history.history['val_accuracy']).numpy()
-    best_val_acc = history.history['val_accuracy'][best_epoch_idx]
-    logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {history.epoch[best_epoch_idx] + 1}")
+    best_epoch_idx = tf.argmax(final_history.history['val_accuracy']).numpy()
+    best_val_acc = final_history.history['val_accuracy'][best_epoch_idx]
+    logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {final_history.epoch[best_epoch_idx] + 1}")
 
-    return model, history
-
+    return model, final_history
 
 # ---------------------------------------------------------------------
 # Evaluation
