@@ -25,14 +25,19 @@ Example
     TensorShape([1, 32])
 """
 
-from typing import Dict, List, Literal, Optional, Union
 
+import tiktoken
 import numpy as np
 import tensorflow as tf
-import tiktoken
+from typing import Dict, List, Literal, Optional, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 def get_special_token_ids(
     encoding_name: str = "cl100k_base"
@@ -76,6 +81,7 @@ def get_special_token_ids(
 
     return special_tokens
 
+# ---------------------------------------------------------------------
 
 class TiktokenPreprocessor:
     """Callable preprocessor adapting Tiktoken for BERT-style model inputs.
@@ -538,3 +544,5 @@ class TiktokenPreprocessor:
             f"max_length={self.max_length}, "
             f"vocab_size={self.vocab_size})"
         )
+
+# ---------------------------------------------------------------------
