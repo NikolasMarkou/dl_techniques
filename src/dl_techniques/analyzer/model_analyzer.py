@@ -437,8 +437,7 @@ class ModelAnalyzer:
         return self.results
 
     def _cache_predictions(self, data: DataInput) -> None:
-        """
-        Cache model predictions to avoid redundant computation.
+        """Cache model predictions to avoid redundant computation.
 
         Pre-computes and stores model predictions and evaluations to be reused
         across different analyses. Also handles sampling if dataset is too large.
@@ -448,79 +447,54 @@ class ModelAnalyzer:
         """
         x_data, y_data = data.x_data, data.y_data
 
-        # Sample data if it exceeds configured maximum to maintain performance
-        if len(x_data) > self.config.n_samples:
-            indices = np.random.choice(len(x_data), self.config.n_samples, replace=False)
-            x_data = x_data[indices]
+        # --- REFINED SAMPLING LOGIC FOR DICTIONARY INPUT ---
+        # Determine the number of samples from the first key if x_data is a dict
+        num_samples_total = len(next(iter(x_data.values()))) if isinstance(x_data, dict) else len(x_data)
+
+        if num_samples_total > self.config.n_samples:
+            indices = np.random.choice(num_samples_total, self.config.n_samples, replace=False)
+            if isinstance(x_data, dict):
+                x_data = {key: val[indices] for key, val in x_data.items()}
+            else:
+                x_data = x_data[indices]
             y_data = y_data[indices]
 
         logger.info("Caching model predictions...")
 
-        # Compute predictions for each model
         for model_name, model in tqdm(self.models.items(), desc="Computing predictions"):
             try:
-                # Handle multi-input models with clear logging
-                if model_name in self._multi_input_models:
-                    logger.warning(f"Model {model_name} has multiple inputs. "
-                                   "Prediction caching is limited for multi-input architectures. "
-                                   "Some analyses may be skipped or have reduced functionality.")
-
-                    # Set cache to indicate multi-input status without attempting prediction
-                    self._prediction_cache[model_name] = {
-                        CACHE_KEY_PREDICTIONS: None,
-                        CACHE_KEY_X_DATA: x_data,
-                        CACHE_KEY_Y_DATA: y_data,
-                        CACHE_KEY_MULTI_INPUT: True,
-                        CACHE_KEY_STATUS: STATUS_SKIPPED_MULTI_INPUT
-                    }
-                    continue
-
-                # Standard single-input model prediction
                 predictions = model.predict(x_data, verbose=0)
+
+                # The output of a fine-tuned model is logits. We need probabilities for calibration.
+                probabilities = keras.ops.softmax(predictions, axis=-1)
+
                 self._prediction_cache[model_name] = {
-                    CACHE_KEY_PREDICTIONS: predictions,
+                    'predictions': np.array(probabilities),  # Store probabilities
+                    'logits': np.array(predictions),  # Also store logits
                     CACHE_KEY_X_DATA: x_data,
                     CACHE_KEY_Y_DATA: y_data,
-                    CACHE_KEY_MULTI_INPUT: False,
+                    CACHE_KEY_MULTI_INPUT: model_name in self._multi_input_models,
                     CACHE_KEY_STATUS: STATUS_SUCCESS
                 }
             except Exception as e:
-                logger.error(f"Failed to cache predictions for {model_name}: {e}")
+                logger.error(f"Failed to cache predictions for {model_name}: {e}", exc_info=True)
                 self._prediction_cache[model_name] = {
-                    CACHE_KEY_PREDICTIONS: None,
-                    CACHE_KEY_X_DATA: x_data,
-                    CACHE_KEY_Y_DATA: y_data,
-                    CACHE_KEY_ERROR: str(e),
-                    CACHE_KEY_STATUS: STATUS_ERROR
+                    CACHE_KEY_PREDICTIONS: None, 'logits': None,
+                    CACHE_KEY_X_DATA: x_data, CACHE_KEY_Y_DATA: y_data,
+                    CACHE_KEY_ERROR: str(e), CACHE_KEY_STATUS: STATUS_ERROR
                 }
 
-        # Evaluate models with improved error handling
         self._evaluate_models(x_data, y_data)
 
-    def _evaluate_models(self, x_data: np.ndarray, y_data: np.ndarray) -> None:
-        """
-        Evaluate models and store performance metrics.
-
-        Computes standard metrics (loss, accuracy) for each model and handles
-        various edge cases including multi-input models and evaluation failures.
+    def _evaluate_models(self, x_data: Union[np.ndarray, Dict[str, np.ndarray]], y_data: np.ndarray) -> None:
+        """Evaluate models and store performance metrics.
 
         Args:
-            x_data: Input data for evaluation.
+            x_data: Input data for evaluation (can be dict or array).
             y_data: Target data for evaluation.
         """
         for model_name, model in self.models.items():
             try:
-                # Skip evaluation for multi-input models to avoid errors
-                if model_name in self._multi_input_models:
-                    logger.info(f"Skipping evaluation for multi-input model {model_name}")
-                    self.results.model_metrics[model_name] = {
-                        'loss': DEFAULT_METRIC_VALUE,
-                        'accuracy': DEFAULT_METRIC_VALUE,
-                        CACHE_KEY_STATUS: STATUS_MULTI_INPUT_SKIPPED
-                    }
-                    continue
-
-                # Attempt standard model evaluation
                 try:
                     metrics = model.evaluate(x_data, y_data, verbose=0)
                 except (ValueError, TypeError) as eval_error:
@@ -533,34 +507,28 @@ class ModelAnalyzer:
                     }
                     continue
 
-                # Process evaluation results
                 metric_names = getattr(model, 'metrics_names', ['loss'])
                 metric_dict = {CACHE_KEY_STATUS: STATUS_SUCCESS}
 
-                # Handle both single metric and multiple metrics cases
                 if isinstance(metrics, (list, tuple)):
                     for i, name in enumerate(metric_names):
                         if i < len(metrics):
                             metric_dict[name] = float(metrics[i])
                 else:
-                    # Single metric case
                     metric_dict[metric_names[0] if metric_names else 'loss'] = float(metrics)
 
-                # Standardize accuracy metric naming by checking existing metric names
                 for name in list(metric_dict.keys()):
-                    if name in ACCURACY_METRIC_PATTERNS:
+                    if any(p in name for p in ['acc', 'accuracy']):
                         metric_dict['accuracy'] = metric_dict[name]
-                        break  # Stop after finding the first suitable accuracy metric
+                        break
 
                 self.results.model_metrics[model_name] = metric_dict
 
             except Exception as e:
-                logger.warning(f"Could not evaluate model {model_name}: {e}")
+                logger.warning(f"Could not evaluate model {model_name}: {e}", exc_info=True)
                 self.results.model_metrics[model_name] = {
-                    'loss': DEFAULT_METRIC_VALUE,
-                    'accuracy': DEFAULT_METRIC_VALUE,
-                    CACHE_KEY_STATUS: STATUS_ERROR,
-                    CACHE_KEY_ERROR: str(e)
+                    'loss': DEFAULT_METRIC_VALUE, 'accuracy': DEFAULT_METRIC_VALUE,
+                    CACHE_KEY_STATUS: STATUS_ERROR, CACHE_KEY_ERROR: str(e)
                 }
 
     def _create_visualizations(self, analysis_types: Set[str]) -> None:
