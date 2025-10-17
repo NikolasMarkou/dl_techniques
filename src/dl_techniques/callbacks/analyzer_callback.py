@@ -103,7 +103,7 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
 
             epoch_output_dir = os.path.join(self.output_dir, f"epoch_{current_epoch:03d}")
             logger.info(
-                f"\n--- Running EpochAnalyzerCallback for epoch {current_epoch} ---"
+                f"Running EpochAnalyzerCallback for epoch {current_epoch} ---"
             )
             logger.info(f"Saving results to: {epoch_output_dir}")
 
@@ -120,7 +120,7 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
                 _ = analyzer.analyze()
 
                 logger.info(
-                    f"--- Epoch {current_epoch} analysis complete ---"
+                    f" Epoch {current_epoch} analysis complete ---"
                 )
 
             except Exception as e:

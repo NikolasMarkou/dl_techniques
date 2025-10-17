@@ -1,51 +1,41 @@
-"""
-BERT Pre-training Script with Masked Language Modeling
-=======================================================
+"""BERT Pre-training Script with Masked Language Modeling.
 
 A complete training script for pre-training BERT foundation models using
 the Masked Language Modeling (MLM) objective on a small text dataset.
 
 This script demonstrates the full workflow:
 1. Loading and preprocessing text data from tensorflow-datasets
-2. Creating tokenization pipeline
+2. Creating tokenization pipeline with TiktokenPreprocessor
 3. Building BERT encoder and MLM wrapper
 4. Configuring training with learning rate schedules and callbacks
 5. Pre-training the model
 6. Saving the pretrained encoder for downstream tasks
 
-Usage:
-------
-    python train_bert_mlm.py
-
 The script uses the IMDB reviews dataset as a small, readily available
 corpus for demonstration. For production, replace with larger datasets
 like Wikipedia or BookCorpus.
-
-Requirements:
-------------
-    - tensorflow >= 2.18.0
-    - keras >= 3.8.0
-    - tensorflow-datasets
-    - transformers (HuggingFace)
-
 """
 
 import os
 import keras
+import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from transformers import BertTokenizer
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.models.bert import BERT
+from dl_techniques.models.masked_language_model import (
+    MaskedLanguageModel,
+    visualize_mlm_predictions
+)
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
-from dl_techniques.models.masked_language_model import MaskedLanguageModel, visualize_mlm_predictions
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -57,7 +47,7 @@ class TrainingConfig:
 
     :param bert_variant: BERT model variant ('tiny', 'small', 'base', 'large').
     :type bert_variant: str
-    :param vocab_size: Vocabulary size for tokenizer.
+    :param vocab_size: Vocabulary size (for Tiktoken cl100k_base: 100277).
     :type vocab_size: int
     :param max_seq_length: Maximum sequence length for training.
     :type max_seq_length: int
@@ -83,12 +73,19 @@ class TrainingConfig:
 
     # Model configuration
     bert_variant: str = "tiny"  # Use 'tiny' for quick testing
-    vocab_size: int = 30522  # BERT default vocabulary size
+    vocab_size: int = 100277  # Tiktoken cl100k_base vocab size
     max_seq_length: int = 128
+
+    # Tokenizer configuration
+    encoding_name: str = "cl100k_base"  # Tiktoken encoding
+    cls_token_id: int = 100264  # [CLS] token ID for Tiktoken
+    sep_token_id: int = 100265  # [SEP] token ID for Tiktoken
+    pad_token_id: int = 100266  # [PAD] token ID for Tiktoken
+    mask_token_id: int = 100267  # [MASK] token ID for Tiktoken
 
     # Training configuration
     batch_size: int = 32
-    num_epochs: int = 100
+    num_epochs: int = 3
     learning_rate: float = 5e-4  # Higher LR for tiny model
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
@@ -99,10 +96,10 @@ class TrainingConfig:
     unchanged_ratio: float = 0.1
 
     # Paths
-    save_dir: str = "results/bert_mlm_pretrain"
-    log_dir: str = "results/bert_mlm_pretrain/logs"
-    checkpoint_dir: str = "results/bert_mlm_pretrain/checkpoints"
-    analysis_dir: str = "results/bert_mlm_pretrain/epoch_analysis"
+    save_dir: str = "results/bert_pretrain"
+    log_dir: str = "results/bert_pretrain/logs"
+    checkpoint_dir: str = "results/bert_pretrain/checkpoints"
+    analysis_dir: str = "results/bert_pretrain/epoch_analysis"
 
     # Data configuration
     dataset_name: str = "imdb_reviews"
@@ -118,21 +115,37 @@ class TrainingConfig:
 # Data Pipeline
 # ---------------------------------------------------------------------
 
-
-def create_tokenizer(config: TrainingConfig) -> BertTokenizer:
-    """Create and configure BERT tokenizer.
+def create_tokenizer(config: TrainingConfig) -> TiktokenPreprocessor:
+    """Create and configure Tiktoken preprocessor.
 
     :param config: Training configuration.
     :type config: TrainingConfig
-    :return: Configured BertTokenizer instance.
-    :rtype: BertTokenizer
+    :return: Configured TiktokenPreprocessor instance.
+    :rtype: TiktokenPreprocessor
     """
-    logger.info("Loading BERT tokenizer...")
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    logger.info(f"Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
-    logger.info(f"Special tokens: {tokenizer.all_special_tokens}")
-    logger.info(f"Mask token: '{tokenizer.mask_token}' (ID: {tokenizer.mask_token_id})")
-    return tokenizer
+    logger.info("Initializing TiktokenPreprocessor...")
+    preprocessor = TiktokenPreprocessor(
+        encoding_name=config.encoding_name,
+        max_length=config.max_seq_length,
+        cls_token_id=config.cls_token_id,
+        sep_token_id=config.sep_token_id,
+        pad_token_id=config.pad_token_id,
+        mask_token_id=config.mask_token_id,
+        truncation=True,
+        padding='max_length',
+    )
+    logger.info(
+        f"TiktokenPreprocessor initialized: "
+        f"vocab_size={preprocessor.vocab_size}, "
+        f"encoding={config.encoding_name}"
+    )
+    logger.info(
+        f"Special tokens: [CLS]={config.cls_token_id}, "
+        f"[SEP]={config.sep_token_id}, "
+        f"[PAD]={config.pad_token_id}, "
+        f"[MASK]={config.mask_token_id}"
+    )
+    return preprocessor
 
 
 def load_dataset(
@@ -148,7 +161,9 @@ def load_dataset(
     :return: TensorFlow dataset.
     :rtype: tf.data.Dataset
     """
-    logger.info(f"Loading {config.dataset_name} dataset ({split} split)...")
+    logger.info(
+        f"Loading {config.dataset_name} dataset ({split} split)..."
+    )
 
     # Load dataset
     dataset, info = tfds.load(
@@ -168,67 +183,69 @@ def load_dataset(
     # Limit samples if specified
     if config.max_samples is not None and split == "train":
         dataset = dataset.take(config.max_samples)
-        logger.info(f"Limited training data to {config.max_samples} samples")
+        logger.info(
+            f"Limited training data to {config.max_samples} samples"
+        )
     elif split != "train":
         # Also limit validation data for faster evaluation cycles
-        dataset = dataset.take(config.max_samples // 5 if config.max_samples else 2000)
+        limit = (
+            config.max_samples // 5 if config.max_samples else 2000
+        )
+        dataset = dataset.take(limit)
         logger.info("Limited validation data for faster evaluation")
-
 
     return dataset
 
 
 def preprocess_dataset(
     dataset: tf.data.Dataset,
-    tokenizer: BertTokenizer,
+    preprocessor: TiktokenPreprocessor,
     config: TrainingConfig
 ) -> tf.data.Dataset:
     """Preprocess text dataset for MLM training.
 
     :param dataset: Raw text dataset.
     :type dataset: tf.data.Dataset
-    :param tokenizer: BERT tokenizer.
-    :type tokenizer: BertTokenizer
+    :param preprocessor: Tiktoken preprocessor.
+    :type preprocessor: TiktokenPreprocessor
     :param config: Training configuration.
     :type config: TrainingConfig
     :return: Preprocessed dataset ready for training.
     :rtype: tf.data.Dataset
     """
-    logger.info("Preprocessing dataset...")
+    logger.info("Preprocessing dataset with TiktokenPreprocessor...")
 
-    def tokenize_function(text: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        """Tokenize a single text sample.
+    def tokenize_function(
+        text: tf.Tensor
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Tokenize a single text sample using TiktokenPreprocessor.
 
         :param text: Input text string.
         :type text: tf.Tensor
         :return: Tuple of (input_ids, attention_mask, token_type_ids).
-        :rtype: Tuple[tf.Tensor, tf.Tensor, tf.Tensor]
+        :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray]
         """
         # Decode bytes to string if necessary
         if isinstance(text, bytes):
-            text = text.decode('utf-8')
+            text_str = text.decode('utf-8')
         elif hasattr(text, 'numpy'):
             text_np = text.numpy()
             if isinstance(text_np, bytes):
-                text = text_np.decode('utf-8')
+                text_str = text_np.decode('utf-8')
             else:
-                text = str(text_np)
+                text_str = str(text_np)
         else:
-            text = str(text)
+            text_str = str(text)
 
-        # Tokenize using HuggingFace tokenizer
-        encoded = tokenizer(
-            text,
-            max_length=config.max_seq_length,
-            truncation=True,
-            padding='max_length',
-            return_tensors='np'
-        )
+        # Tokenize using TiktokenPreprocessor
+        # The preprocessor returns a dict with batch dimension (1, seq_len)
+        encoded = preprocessor(text_str, return_tensors='np')
 
+        # Extract and squeeze to remove batch dimension
         return (
-            encoded['input_ids'][0],
-            encoded['attention_mask'][0],
-            encoded['token_type_ids'][0],
+            encoded['input_ids'][0],  # Shape: (seq_len,)
+            encoded['attention_mask'][0],  # Shape: (seq_len,)
+            encoded['token_type_ids'][0],  # Shape: (seq_len,)
         )
 
     # Apply tokenization - py_function returns a tuple
@@ -242,8 +259,11 @@ def preprocess_dataset(
     )
 
     # Convert tuple to dictionary and set shapes
-    def tuple_to_dict(input_ids: tf.Tensor, attention_mask: tf.Tensor,
-                      token_type_ids: tf.Tensor) -> Dict[str, tf.Tensor]:
+    def tuple_to_dict(
+        input_ids: tf.Tensor,
+        attention_mask: tf.Tensor,
+        token_type_ids: tf.Tensor
+    ) -> Dict[str, tf.Tensor]:
         """Convert tuple output to dictionary format.
 
         :param input_ids: Token IDs.
@@ -256,18 +276,26 @@ def preprocess_dataset(
         :rtype: Dict[str, tf.Tensor]
         """
         return {
-            'input_ids': tf.ensure_shape(input_ids, [config.max_seq_length]),
-            'attention_mask': tf.ensure_shape(attention_mask, [config.max_seq_length]),
-            'token_type_ids': tf.ensure_shape(token_type_ids, [config.max_seq_length]),
+            'input_ids': tf.ensure_shape(
+                input_ids,
+                [config.max_seq_length]
+            ),
+            'attention_mask': tf.ensure_shape(
+                attention_mask,
+                [config.max_seq_length]
+            ),
+            'token_type_ids': tf.ensure_shape(
+                token_type_ids,
+                [config.max_seq_length]
+            ),
         }
 
-    dataset = dataset.map(tuple_to_dict, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(
+        tuple_to_dict,
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
 
-    # Cache the tokenized and processed dataset in memory.
-    # This should be done *after* the expensive mapping/tokenization steps
-    # and *before* shuffling, batching, and repeating. Since `.take()` was
-    # called earlier, we are only caching the relevant subset of the data,
-    # which resolves the warning and dramatically improves performance.
+    # Cache the tokenized and processed dataset in memory
     dataset = dataset.cache()
 
     # Shuffle, batch, and prefetch
@@ -275,7 +303,10 @@ def preprocess_dataset(
     dataset = dataset.batch(config.batch_size, drop_remainder=True)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
-    logger.info(f"Dataset preprocessed and cached: batch_size={config.batch_size}")
+    logger.info(
+        f"Dataset preprocessed and cached: "
+        f"batch_size={config.batch_size}"
+    )
 
     return dataset
 
@@ -287,18 +318,17 @@ def preprocess_dataset(
 
 def create_bert_mlm_model(
     config: TrainingConfig,
-    tokenizer: BertTokenizer
 ) -> MaskedLanguageModel:
     """Create BERT encoder and MLM wrapper.
 
     :param config: Training configuration.
     :type config: TrainingConfig
-    :param tokenizer: BERT tokenizer for special token IDs.
-    :type tokenizer: BertTokenizer
     :return: MaskedLanguageModel ready for training.
     :rtype: MaskedLanguageModel
     """
-    logger.info(f"Creating BERT-{config.bert_variant.upper()} encoder...")
+    logger.info(
+        f"Creating BERT-{config.bert_variant.upper()} encoder..."
+    )
 
     # Create BERT encoder
     encoder = BERT.from_variant(
@@ -313,16 +343,24 @@ def create_bert_mlm_model(
         f"BERT encoder created with hidden_size={encoder.hidden_size}"
     )
 
+    # Create list of special token IDs for Tiktoken
+    special_token_ids = [
+        config.cls_token_id,
+        config.sep_token_id,
+        config.pad_token_id,
+        config.mask_token_id,
+    ]
+
     # Create MLM wrapper
     logger.info("Creating MaskedLanguageModel wrapper...")
     mlm_model = MaskedLanguageModel(
         encoder=encoder,
         vocab_size=config.vocab_size,
         mask_ratio=config.mask_ratio,
-        mask_token_id=tokenizer.mask_token_id,
+        mask_token_id=config.mask_token_id,
         random_token_ratio=config.random_token_ratio,
         unchanged_ratio=config.unchanged_ratio,
-        special_token_ids=tokenizer.all_special_ids,
+        special_token_ids=special_token_ids,
         mlm_head_activation="gelu",
         initializer_range=0.02,
         mlm_head_dropout=0.1,
@@ -332,16 +370,28 @@ def create_bert_mlm_model(
     # Build the model to count parameters
     logger.info("Building model...")
     dummy_input = {
-        'input_ids': tf.ones((1, config.max_seq_length), dtype=tf.int32),
-        'attention_mask': tf.ones((1, config.max_seq_length), dtype=tf.int32),
-        'token_type_ids': tf.zeros((1, config.max_seq_length), dtype=tf.int32),
+        'input_ids': tf.ones(
+            (1, config.max_seq_length),
+            dtype=tf.int32
+        ),
+        'attention_mask': tf.ones(
+            (1, config.max_seq_length),
+            dtype=tf.int32
+        ),
+        'token_type_ids': tf.zeros(
+            (1, config.max_seq_length),
+            dtype=tf.int32
+        ),
     }
     _ = mlm_model(dummy_input, training=False)
 
+    encoder_params = encoder.count_params()
+    total_params = mlm_model.count_params()
+    head_params = total_params - encoder_params
+
     logger.info(
-        f"MLM model built: {mlm_model.count_params():,} total parameters "
-        f"({encoder.count_params():,} encoder + "
-        f"{mlm_model.count_params() - encoder.count_params():,} MLM head)"
+        f"MLM model built: {total_params:,} total parameters "
+        f"({encoder_params:,} encoder + {head_params:,} MLM head)"
     )
 
     return mlm_model
@@ -416,24 +466,23 @@ def compile_model(
         clipnorm=1.0,  # Gradient clipping
     )
 
-    # Compile model. The model's `metrics` property will be used automatically.
-    mlm_model.compile(
-        optimizer=optimizer,
-    )
+    # Compile model
+    mlm_model.compile(optimizer=optimizer)
 
     logger.info(
         f"Model compiled: optimizer=AdamW, "
-        f"peak_lr={config.learning_rate}, weight_decay={config.weight_decay}"
+        f"peak_lr={config.learning_rate}, "
+        f"weight_decay={config.weight_decay}"
     )
 
 
-def create_callbacks(config: TrainingConfig) -> list:
+def create_callbacks(config: TrainingConfig) -> List[keras.callbacks.Callback]:
     """Create training callbacks.
 
     :param config: Training configuration.
     :type config: TrainingConfig
     :return: List of Keras callbacks.
-    :rtype: list
+    :rtype: List[keras.callbacks.Callback]
     """
     logger.info("Creating training callbacks...")
 
@@ -441,11 +490,14 @@ def create_callbacks(config: TrainingConfig) -> list:
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs(config.log_dir, exist_ok=True)
 
-    # Define a single file path for the best model checkpoint
-    best_model_filepath = os.path.join(config.checkpoint_dir, "best_model.keras")
+    # Define file path for the best model checkpoint
+    best_model_filepath = os.path.join(
+        config.checkpoint_dir,
+        "best_model.keras"
+    )
 
     callbacks = [
-        # Model checkpointing: Save only the best model based on validation loss
+        # Model checkpointing
         keras.callbacks.ModelCheckpoint(
             filepath=best_model_filepath,
             monitor="val_loss",
@@ -498,7 +550,10 @@ def create_callbacks(config: TrainingConfig) -> list:
         )
         callbacks.append(analysis_callback)
 
-    logger.info(f"Created {len(callbacks)} callbacks. Best model will be saved to {best_model_filepath}")
+    logger.info(
+        f"Created {len(callbacks)} callbacks. "
+        f"Best model will be saved to {best_model_filepath}"
+    )
 
     return callbacks
 
@@ -508,7 +563,9 @@ def create_callbacks(config: TrainingConfig) -> list:
 # ---------------------------------------------------------------------
 
 
-def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.callbacks.History]:
+def train_bert_mlm(
+    config: TrainingConfig
+) -> Tuple[MaskedLanguageModel, keras.callbacks.History]:
     """Main training function for BERT MLM pre-training.
 
     :param config: Training configuration.
@@ -517,7 +574,7 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     :rtype: Tuple[MaskedLanguageModel, keras.callbacks.History]
     """
     logger.info("=" * 80)
-    logger.info("BERT Masked Language Model Pre-training")
+    logger.info("BERT Masked Language Model Pre-training with Tiktoken")
     logger.info("=" * 80)
 
     # Set random seeds for reproducibility
@@ -528,21 +585,32 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     os.makedirs(config.save_dir, exist_ok=True)
 
     # Step 1: Create tokenizer
-    tokenizer = create_tokenizer(config)
+    preprocessor = create_tokenizer(config)
 
     # Step 2: Load and preprocess datasets
     raw_train_dataset = load_dataset(config, split="train")
-    train_dataset = preprocess_dataset(raw_train_dataset, tokenizer, config)
+    train_dataset = preprocess_dataset(
+        raw_train_dataset,
+        preprocessor,
+        config
+    )
 
-    raw_val_dataset = load_dataset(config, split="test") # Using test set for validation
-    val_dataset = preprocess_dataset(raw_val_dataset, tokenizer, config)
+    raw_val_dataset = load_dataset(config, split="test")
+    val_dataset = preprocess_dataset(
+        raw_val_dataset,
+        preprocessor,
+        config
+    )
 
     # Calculate steps per epoch
-    steps_per_epoch = config.max_samples // config.batch_size if config.max_samples else 1000
+    steps_per_epoch = (
+        config.max_samples // config.batch_size
+        if config.max_samples else 1000
+    )
     logger.info(f"Estimated steps per epoch: {steps_per_epoch}")
 
     # Step 3: Create model
-    mlm_model = create_bert_mlm_model(config, tokenizer)
+    mlm_model = create_bert_mlm_model(config)
 
     # Step 4: Compile model
     compile_model(mlm_model, config, steps_per_epoch)
@@ -567,17 +635,21 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     logger.info("Training completed!")
     logger.info("=" * 80)
 
-    # Note: The 'best' model is already saved by the checkpoint callback.
-    # The EarlyStopping callback with `restore_best_weights=True` ensures that
-    # the `mlm_model` object holds the weights of the best epoch.
-
     # Step 7: Save final model (which holds the best weights)
-    final_model_path = os.path.join(config.save_dir, "bert_mlm_final_best.keras")
-    logger.info(f"Saving final model with best weights to {final_model_path}")
+    final_model_path = os.path.join(
+        config.save_dir,
+        "bert_mlm_final_best.keras"
+    )
+    logger.info(
+        f"Saving final model with best weights to {final_model_path}"
+    )
     mlm_model.save(final_model_path)
 
     # Step 8: Save pretrained encoder separately
-    encoder_path = os.path.join(config.save_dir, "pretrained_bert_encoder_best.keras")
+    encoder_path = os.path.join(
+        config.save_dir,
+        "pretrained_bert_encoder_best.keras"
+    )
     logger.info(f"Saving best pretrained encoder to {encoder_path}")
     mlm_model.encoder.save(encoder_path)
 
@@ -586,11 +658,16 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     logger.info("Training Summary")
     logger.info("=" * 80)
     logger.info(f"Total epochs run: {len(history.history['loss'])}")
+
     # Find the best epoch results
     best_epoch = tf.argmin(history.history['val_loss']).numpy()
     best_val_loss = history.history['val_loss'][best_epoch]
     best_val_acc = history.history['val_accuracy'][best_epoch]
-    logger.info(f"Best epoch: {best_epoch + 1} (val_loss: {best_val_loss:.4f}, val_accuracy: {best_val_acc:.4f})")
+    logger.info(
+        f"Best epoch: {best_epoch + 1} "
+        f"(val_loss: {best_val_loss:.4f}, "
+        f"val_accuracy: {best_val_acc:.4f})"
+    )
     logger.info(f"Model with best weights saved to: {config.save_dir}")
     logger.info("=" * 80)
 
@@ -604,19 +681,18 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
 
 def evaluate_model(
     mlm_model: MaskedLanguageModel,
-    tokenizer: BertTokenizer,
+    preprocessor: TiktokenPreprocessor,
     config: TrainingConfig
 ) -> None:
     """Evaluate the trained model and visualize predictions.
 
     :param mlm_model: Trained MaskedLanguageModel.
     :type mlm_model: MaskedLanguageModel
-    :param tokenizer: BERT tokenizer.
-    :type tokenizer: BertTokenizer
+    :param preprocessor: Tiktoken preprocessor.
+    :type preprocessor: TiktokenPreprocessor
     :param config: Training configuration.
     :type config: TrainingConfig
     """
-
     logger.info("=" * 80)
     logger.info("Model Evaluation")
     logger.info("=" * 80)
@@ -629,27 +705,35 @@ def evaluate_model(
         "The plot was confusing but the effects were great.",
     ]
 
-    # Tokenize test samples
-    test_inputs = tokenizer(
+    # Tokenize test samples using TiktokenPreprocessor
+    test_inputs = preprocessor.batch_encode(
         test_texts,
-        max_length=config.max_seq_length,
-        truncation=True,
-        padding='max_length',
         return_tensors='np'
     )
 
-    # Convert to dict of tensors
+    # Convert to dict of TensorFlow tensors
     test_batch = {
-        'input_ids': tf.constant(test_inputs['input_ids'], dtype=tf.int32),
-        'attention_mask': tf.constant(test_inputs['attention_mask'], dtype=tf.int32),
-        'token_type_ids': tf.constant(test_inputs['token_type_ids'], dtype=tf.int32),
+        'input_ids': tf.constant(
+            test_inputs['input_ids'],
+            dtype=tf.int32
+        ),
+        'attention_mask': tf.constant(
+            test_inputs['attention_mask'],
+            dtype=tf.int32
+        ),
+        'token_type_ids': tf.constant(
+            test_inputs['token_type_ids'],
+            dtype=tf.int32
+        ),
     }
 
     # Visualize predictions
+    # Note: visualize_mlm_predictions expects a tokenizer with decode method
+    # TiktokenPreprocessor has a decode method, so it should work
     visualize_mlm_predictions(
         mlm_model=mlm_model,
         inputs=test_batch,
-        tokenizer=tokenizer,
+        tokenizer=preprocessor,
         num_samples=4
     )
 
@@ -667,6 +751,8 @@ def main() -> None:
     # Log configuration
     logger.info("Training Configuration:")
     logger.info(f"  - BERT variant: {config.bert_variant}")
+    logger.info(f"  - Tokenizer: TiktokenPreprocessor")
+    logger.info(f"  - Encoding: {config.encoding_name}")
     logger.info(f"  - Vocabulary size: {config.vocab_size}")
     logger.info(f"  - Max sequence length: {config.max_seq_length}")
     logger.info(f"  - Batch size: {config.batch_size}")
@@ -681,12 +767,17 @@ def main() -> None:
     mlm_model, history = train_bert_mlm(config)
 
     # Evaluate model
-    tokenizer = create_tokenizer(config)
-    evaluate_model(mlm_model, tokenizer, config)
+    preprocessor = create_tokenizer(config)
+    evaluate_model(mlm_model, preprocessor, config)
 
     logger.info("=" * 80)
-    logger.info("Pre-training complete! Encoder ready for fine-tuning.")
-    logger.info(f"Load encoder: keras.models.load_model('{config.save_dir}/pretrained_bert_encoder_best.keras')")
+    logger.info(
+        "Pre-training complete! Encoder ready for fine-tuning."
+    )
+    logger.info(
+        f"Load encoder: keras.models.load_model("
+        f"'{config.save_dir}/pretrained_bert_encoder_best.keras')"
+    )
     logger.info("=" * 80)
 
 
