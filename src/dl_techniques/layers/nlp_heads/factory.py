@@ -15,12 +15,11 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 
 from ..activations import ActivationType
 from ..standard_blocks import DenseBlock
-from ..ffn.factory import create_ffn_layer, FFNType
+from ..ffn import create_ffn_layer, FFNType
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
 
 from .task_types import NLPTaskType, NLPTaskConfig
-
 
 # ---------------------------------------------------------------------
 # Base NLP Head Class
