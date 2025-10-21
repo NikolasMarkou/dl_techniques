@@ -5,8 +5,8 @@ Comprehensive task type definitions and configuration helpers for Visual Languag
 Designed to work with multi-modal foundation models that process both vision and text.
 """
 
-from dataclasses import dataclass
 from enum import Enum, unique
+from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Set
 
 
