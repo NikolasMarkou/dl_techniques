@@ -127,7 +127,7 @@ graph TD
     end
     
     T1 & T2 & TN & T4 --> E{Concatenate All Tokens}
-    E --> F(Massive Token Sequence<br/>(Very Long & Fragmented))
+    E --> F(Massive Token Sequence<br/>Very Long & Fragmented)
     F --> G[[LLM]]
 
     style A fill:#f9f,stroke:#333,stroke-width:2px
