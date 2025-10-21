@@ -86,7 +86,7 @@ from .attention.factory import create_attention_layer, AttentionType
 # Type definitions for enhanced type safety
 # ---------------------------------------------------------------------
 
-NormalizationPosition = Literal['post', 'pre']
+NormalizationPositionType = Literal['post', 'pre']
 
 # ---------------------------------------------------------------------
 
@@ -250,7 +250,7 @@ class TransformerLayer(keras.layers.Layer):
             attention_type: AttentionType = 'multi_head',
             attention_args: Optional[Dict[str, Any]] = None,
             normalization_type: NormalizationType = 'layer_norm',
-            normalization_position: NormalizationPosition = 'post',
+            normalization_position: NormalizationPositionType = 'post',
             attention_norm_args: Optional[Dict[str, Any]] = None,
             ffn_norm_args: Optional[Dict[str, Any]] = None,
             ffn_type: FFNType = 'mlp',

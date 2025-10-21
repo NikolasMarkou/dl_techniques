@@ -64,7 +64,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
-from dl_techniques.layers.transformer import FFNType, NormalizationPosition, NormalizationType
+from dl_techniques.layers.transformer import FFNType, NormalizationPositionType, NormalizationType
 
 # ---------------------------------------------------------------------
 
@@ -252,7 +252,7 @@ class FNet(keras.Model):
         pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
         position_embedding_type: str = "absolute",
         normalization_type: NormalizationType = "layer_norm",
-        normalization_position: NormalizationPosition = "post",
+        normalization_position: NormalizationPositionType = "post",
         ffn_type: FFNType = "mlp",
         use_stochastic_depth: bool = False,
         stochastic_depth_rate: float = 0.1,

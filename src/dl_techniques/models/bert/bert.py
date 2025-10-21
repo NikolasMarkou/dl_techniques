@@ -66,7 +66,7 @@ from dl_techniques.layers.transformer import (
     AttentionType,
     TransformerLayer,
     NormalizationType,
-    NormalizationPosition,
+    NormalizationPositionType,
 )
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
@@ -280,7 +280,7 @@ class BERT(keras.Model):
         position_embedding_type: str = "absolute",
         use_cache: bool = True,
         normalization_type: NormalizationType = "layer_norm",
-        normalization_position: NormalizationPosition = "post",
+        normalization_position: NormalizationPositionType = "post",
         attention_type: AttentionType = "multi_head",
         ffn_type: FFNType = "mlp",
         use_stochastic_depth: bool = False,

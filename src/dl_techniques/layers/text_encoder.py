@@ -98,7 +98,7 @@ from ..utils.logger import logger
 from .embedding import create_embedding_layer
 from .sequence_pooling import SequencePooling, PoolingStrategy
 from .norms import create_normalization_layer, NormalizationType
-from .transformer import TransformerLayer, AttentionType, NormalizationPosition, FFNType
+from .transformer import TransformerLayer, AttentionType, NormalizationPositionType, FFNType
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -360,7 +360,7 @@ class TextEncoder(keras.layers.Layer):
             positional_type: PositionalType = 'learned',
             attention_type: AttentionType = 'multi_head',
             normalization_type: NormalizationType = 'layer_norm',
-            normalization_position: NormalizationPosition = 'post',
+            normalization_position: NormalizationPositionType = 'post',
             ffn_type: FFNType = 'mlp',
             use_token_type_embedding: bool = False,
             type_vocab_size: int = 2,
@@ -989,7 +989,7 @@ def create_text_encoder(
         positional_type: PositionalType = 'learned',
         attention_type: AttentionType = 'multi_head',
         normalization_type: NormalizationType = 'layer_norm',
-        normalization_position: NormalizationPosition = 'post',
+        normalization_position: NormalizationPositionType = 'post',
         ffn_type: FFNType = 'mlp',
         dropout: float = 0.1,
         **kwargs: Any

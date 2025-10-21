@@ -80,7 +80,7 @@ from .norms import create_normalization_layer
 from .transformer import (
     TransformerLayer,
     NormalizationType,
-    NormalizationPosition,
+    NormalizationPositionType,
     AttentionType,
     FFNType
 )
@@ -308,7 +308,7 @@ class VisionEncoder(keras.layers.Layer):
             patch_embed_type: PatchEmbedType = 'linear',
             attention_type: AttentionType = 'multi_head',
             normalization_type: NormalizationType = 'layer_norm',
-            normalization_position: NormalizationPosition = 'post',
+            normalization_position: NormalizationPositionType = 'post',
             ffn_type: FFNType = 'mlp',
             use_cls_token: bool = True,
             output_mode: PoolingStrategy = 'cls',
@@ -826,7 +826,7 @@ def create_vision_encoder(
         patch_embed_type: PatchEmbedType = 'linear',
         attention_type: AttentionType = 'multi_head',
         normalization_type: NormalizationType = 'layer_norm',
-        normalization_position: NormalizationPosition = 'post',
+        normalization_position: NormalizationPositionType = 'post',
         ffn_type: FFNType = 'mlp',
         use_cls_token: bool = True,
         output_mode: PoolingStrategy = 'cls',

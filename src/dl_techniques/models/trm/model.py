@@ -5,15 +5,15 @@ This model performs recursive reasoning to solve complex tasks by repeatedly
 applying a small, shared neural network over a variable number of steps. It
 integrates the principles of Adaptive Computation Time (ACT) to learn how
 many computational steps are necessary for a given problem, allowing it to
-dynamically allocate resources. The model's `forward` method encapsulates
+dynamically allocate resources. The model's `call` method encapsulates
 a single step of this adaptive, recursive process.
 
 The architecture is conceptually divided into two nested levels of recursion:
 1.  An outer ACT loop, managed externally by the training script, which
-    calls this model's `forward` method repeatedly. This loop allows the
+    calls this model's `call` method repeatedly. This loop allows the
     model to progressively refine its solution over multiple "thought" steps.
 2.  An inner, fixed-cycle reasoning process within the `TRMInner` submodule.
-    During each single call to this model's `forward` method, the inner
+    During each single call to this model's `call` method, the inner
     module performs a multi-step update of its latent states (`z_H`, `z_L`),
     representing a focused burst of computation.
 
@@ -39,27 +39,33 @@ References:
 """
 
 import keras
+from keras import ops
 import tensorflow as tf
-from keras import ops, layers, initializers
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
-# local imports
+# Local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformer import (
+    TransformerLayer,
+    FFNType,
+    AttentionType,
+    NormalizationType,
+    NormalizationPositionType
+)
 
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
-class TRMReasoningModule(layers.Layer):
+class TRMReasoningModule(keras.layers.Layer):
     """
     A module that stacks multiple TransformerLayers for the reasoning process.
 
     This layer serves as the core computational engine of the TRM, applying a
-    sequence of transformations to the latent states. It is composed of `L_layers`
+    sequence of transformations to the latent states. It is composed of `num_layers`
     instances of the `TransformerLayer`, demonstrating the composite layer pattern
     where sub-layers are orchestrated.
 
@@ -84,44 +90,82 @@ class TRMReasoningModule(layers.Layer):
     - Each `TransformerBlock` is a `TransformerLayer` instance.
 
     Args:
-        config (Dict[str, Any]): A dictionary containing model configuration parameters.
-            Expected keys include:
-            - `hidden_size` (int): The dimensionality of the hidden states.
-            - `expansion` (float): Factor to determine the FFN intermediate size.
-            - `num_heads` (int): Number of attention heads.
-            - `seq_len` (int): The length of the input sequence.
-            - `puzzle_emb_len` (int): Length of the puzzle embedding prefix.
-            - `rope_theta` (float, optional): Theta value for RoPE.
-            - `L_layers` (int): The number of `TransformerLayer` instances to stack.
+        hidden_size (int): The dimensionality of the hidden states.
+        num_heads (int): Number of attention heads in each transformer layer.
+        expansion (float): Factor to determine the FFN intermediate size. The
+            intermediate size is computed as `int(hidden_size * expansion)`.
+        num_layers (int): The number of `TransformerLayer` instances to stack.
+        seq_len (int): The length of the input sequence.
+        puzzle_emb_len (int): Length of the puzzle embedding prefix. Default is 16.
+        rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
+            Default is 10000.0.
+        attention_type (str): Type of attention mechanism to use. Default is 'multi_head'.
+        ffn_type (str): Type of feed-forward network to use. Default is 'swiglu'.
+        normalization_type (str): Type of normalization layer to use. Default is 'rms_norm'.
+        normalization_position (str): Position of normalization ('pre' or 'post').
+            Default is 'post'.
+        dropout_rate (float): Dropout rate for transformer layers. Default is 0.0.
+        attention_dropout_rate (float): Dropout rate specifically for attention.
+            Default is 0.0.
         **kwargs: Additional arguments for the `keras.layers.Layer` base class.
     """
 
-    def __init__(self, config: Dict[str, Any], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        expansion: float,
+        num_layers: int,
+        seq_len: int,
+        puzzle_emb_len: int = 16,
+        rope_theta: float = 10000.0,
+        attention_type: AttentionType = 'multi_head',
+        ffn_type: FFNType = 'swiglu',
+        normalization_type: NormalizationType = 'rms_norm',
+        normalization_position: NormalizationPositionType = 'post',
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
-        self.config = config
+
+        # Store all configuration parameters as instance attributes
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.expansion = expansion
+        self.num_layers = num_layers
+        self.seq_len = seq_len
+        self.puzzle_emb_len = puzzle_emb_len
+        self.rope_theta = rope_theta
+        self.attention_type = attention_type
+        self.ffn_type = ffn_type
+        self.normalization_type = normalization_type
+        self.normalization_position = normalization_position
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
 
         # Calculate intermediate size for the FFN inside the TransformerLayer
-        intermediate_size = int(config["hidden_size"] * config["expansion"])
+        intermediate_size = int(hidden_size * expansion)
 
-        # CREATE sub-layers in __init__ as per the guide's Golden Rule.
+        # CREATE sub-layers in __init__ as per the Golden Rule.
         # These layers are instantiated but not yet built.
         self.layers_list = [
             TransformerLayer(
-                hidden_size=config["hidden_size"],
-                num_heads=config["num_heads"],
+                hidden_size=hidden_size,
+                num_heads=num_heads,
                 intermediate_size=intermediate_size,
-                attention_type='multi_head',
+                attention_type=attention_type,
                 attention_args={
-                    'max_seq_len': config["seq_len"] + config.get("puzzle_emb_len", 16),
-                    'rope_theta': config.get("rope_theta", 10000.0)
+                    'max_seq_len': seq_len + puzzle_emb_len,
+                    'rope_theta': rope_theta
                 },
-                normalization_type='rms_norm',
-                normalization_position='post',
-                ffn_type='swiglu',
-                dropout_rate=0.0,
-                attention_dropout_rate=0.0,
+                normalization_type=normalization_type,
+                normalization_position=normalization_position,
+                ffn_type=ffn_type,
+                dropout_rate=dropout_rate,
+                attention_dropout_rate=attention_dropout_rate,
                 name=f"transformer_block_{i}"
-            ) for i in range(config["L_layers"])
+            ) for i in range(num_layers)
         ]
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -154,8 +198,10 @@ class TRMReasoningModule(layers.Layer):
 
         Args:
             hidden_states (keras.KerasTensor): The primary latent state tensor.
-            input_injection (keras.KerasTensor): The tensor to be added to the hidden_states at the start.
-            training (Optional[bool]): Boolean flag for training mode, passed to sub-layers.
+            input_injection (keras.KerasTensor): The tensor to be added to the
+                hidden_states at the start.
+            training (Optional[bool]): Boolean flag for training mode, passed to
+                sub-layers.
 
         Returns:
             keras.KerasTensor: The transformed hidden_states tensor.
@@ -165,206 +211,326 @@ class TRMReasoningModule(layers.Layer):
             hidden_states = layer(hidden_states, training=training)
         return hidden_states
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """The output shape is identical to the input shape."""
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape (Tuple[Optional[int], ...]): Shape of the input tensor.
+
+        Returns:
+            Tuple[Optional[int], ...]: The output shape is identical to the input shape.
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dict[str, Any]: Configuration dictionary containing all parameters needed
+                to reconstruct this layer.
+        """
         config = super().get_config()
-        # Store the full configuration dictionary, ensuring all parameters
-        # needed for __init__ are present.
-        config.update({"config": self.config})
+        config.update({
+            'hidden_size': self.hidden_size,
+            'num_heads': self.num_heads,
+            'expansion': self.expansion,
+            'num_layers': self.num_layers,
+            'seq_len': self.seq_len,
+            'puzzle_emb_len': self.puzzle_emb_len,
+            'rope_theta': self.rope_theta,
+            'attention_type': self.attention_type,
+            'ffn_type': self.ffn_type,
+            'normalization_type': self.normalization_type,
+            'normalization_position': self.normalization_position,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
+        })
         return config
+
 
 # ---------------------------------------------------------------------
 
+
 @keras.saving.register_keras_serializable()
-class TRMInner(layers.Layer):
+class TRMInner(keras.layers.Layer):
     """
     The inner computational core of the TRM model.
 
-    This layer orchestrates a single, multi-cycle reasoning step. It manages the
-    input embeddings and the recursive application of the `TRMReasoningModule`
-    to update the latent states `z_H` and `z_L`. It demonstrates a complex
-    composite layer with both sub-layers and its own weights.
+    This layer orchestrates the computation within a single step of the outer
+    ACT loop. It maintains two latent states: `z_H` (high-level) and `z_L`
+    (low-level), and updates them through a series of reasoning modules. The
+    layer also produces output logits and halting probabilities.
 
-    **Intent**: To encapsulate one full reasoning "thought process" of the TRM,
-    including state updates and output generation, which can be called
-    recursively by the parent model.
+    **Intent**: To encapsulate the inner fixed-cycle reasoning process, where
+    each call represents a focused burst of computation on the latent states.
 
     **Architecture**:
-    1.  Input token IDs and puzzle IDs are converted to embeddings.
-    2.  The core logic involves a nested loop structure:
-        - Outer loop (`H_cycles`): Updates high-level state `z_H`.
-        - Inner loop (`L_cycles`): Refines low-level state `z_L`.
-        - Both loops utilize the same `TRMReasoningModule` (`L_level`).
-    3.  Final `z_H` is used to produce token logits (`lm_head`) and
-        halting Q-values (`q_head`).
+    The layer consists of:
+    - Token embedding projection
+    - Two-level reasoning modules (H_level and L_level)
+    - Language modeling head
+    - Halting probability head
 
     Args:
-        config (Dict[str, Any]): A dictionary containing model configuration parameters.
+        vocab_size (int): Size of the vocabulary for token embeddings.
+        hidden_size (int): Dimensionality of hidden states.
+        num_heads (int): Number of attention heads in transformer layers.
+        expansion (float): Factor to determine FFN intermediate size.
+        seq_len (int): Length of the input sequence (excluding puzzle embedding).
+        puzzle_emb_len (int): Length of the puzzle embedding prefix. Default is 16.
+        h_layers (int): Number of layers in the H_level reasoning module.
+        l_layers (int): Number of layers in the L_level reasoning module.
+        rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
+            Default is 10000.0.
+        attention_type (str): Type of attention mechanism to use. Default is 'multi_head'.
+        ffn_type (str): Type of feed-forward network to use. Default is 'swiglu'.
+        normalization_type (str): Type of normalization layer to use. Default is 'rms_norm'.
+        normalization_position (str): Position of normalization ('pre' or 'post').
+            Default is 'post'.
+        dropout_rate (float): Dropout rate for transformer layers. Default is 0.0.
+        attention_dropout_rate (float): Dropout rate specifically for attention.
+            Default is 0.0.
         **kwargs: Additional arguments for the `keras.layers.Layer` base class.
     """
 
-    def __init__(self, config: Dict[str, Any], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        num_heads: int,
+        expansion: float,
+        seq_len: int,
+        puzzle_emb_len: int = 16,
+        h_layers: int = 2,
+        l_layers: int = 2,
+        rope_theta: float = 10000.0,
+        attention_type: AttentionType = 'multi_head',
+        ffn_type: FFNType = 'swiglu',
+        normalization_type: NormalizationType = 'rms_norm',
+        normalization_position: NormalizationPositionType = 'post',
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
-        self.config = config
 
-        self.embed_scale = self.config["hidden_size"] ** 0.5
-        embed_init_std = 1.0 / self.embed_scale
+        # Store all configuration parameters as instance attributes
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.expansion = expansion
+        self.seq_len = seq_len
+        self.puzzle_emb_len = puzzle_emb_len
+        self.h_layers = h_layers
+        self.l_layers = l_layers
+        self.rope_theta = rope_theta
+        self.attention_type = attention_type
+        self.ffn_type = ffn_type
+        self.normalization_type = normalization_type
+        self.normalization_position = normalization_position
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
 
-        # --- CREATE sub-layers in __init__ (unbuilt) ---
-        self.embed_tokens = layers.Embedding(
-            self.config["vocab_size"],
-            self.config["hidden_size"],
-            embeddings_initializer=initializers.TruncatedNormal(stddev=embed_init_std),
-            name="embed_tokens",
+        # CREATE sub-layers in __init__ following the Golden Rule
+        # Token embedding layer
+        self.token_emb = keras.layers.Embedding(
+            input_dim=vocab_size,
+            output_dim=hidden_size,
+            name="token_embedding"
         )
-        self.lm_head = layers.Dense(self.config["vocab_size"], use_bias=False, name="lm_head")
-        self.q_head = layers.Dense(2, use_bias=True, name="q_head")
 
-        self.puzzle_emb_len = self.config.get("puzzle_emb_len", 16)
-        self.puzzle_emb = layers.Embedding(
-            self.config["num_puzzle_identifiers"],
-            self.config["puzzle_emb_ndim"],
-            embeddings_initializer="zeros",
-            name="puzzle_emb",
+        # Reasoning modules for high and low level processing
+        self.H_level = TRMReasoningModule(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            expansion=expansion,
+            num_layers=h_layers,
+            seq_len=seq_len,
+            puzzle_emb_len=puzzle_emb_len,
+            rope_theta=rope_theta,
+            attention_type=attention_type,
+            ffn_type=ffn_type,
+            normalization_type=normalization_type,
+            normalization_position=normalization_position,
+            dropout_rate=dropout_rate,
+            attention_dropout_rate=attention_dropout_rate,
+            name="H_level"
+        )
+        self.L_level = TRMReasoningModule(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            expansion=expansion,
+            num_layers=l_layers,
+            seq_len=seq_len,
+            puzzle_emb_len=puzzle_emb_len,
+            rope_theta=rope_theta,
+            attention_type=attention_type,
+            ffn_type=ffn_type,
+            normalization_type=normalization_type,
+            normalization_position=normalization_position,
+            dropout_rate=dropout_rate,
+            attention_dropout_rate=attention_dropout_rate,
+            name="L_level"
         )
 
-        self.L_level = TRMReasoningModule(config, name="L_level")
+        # Output heads
+        self.lm_head = keras.layers.Dense(
+            vocab_size,
+            use_bias=False,
+            name="lm_head"
+        )
+        self.q_head = keras.layers.Dense(2, name="q_head")
 
-        # --- Initialize weight attributes to None ---
-        # Weights will be created in build() as per the guide's Golden Rule.
-        self.H_init = None
-        self.L_init = None
-
-    def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
+    def build(self, input_shape: Optional[Any] = None) -> None:
         """
-        Build sub-layers and create initial state weights.
+        Build the layer and its sub-components.
 
-        This method correctly separates weight creation (`add_weight`) and
-        sub-layer building from `__init__`, adhering to the guide's core principles.
+        This method explicitly builds all sub-layers and creates the initial
+        state weights. Following the composite layer pattern ensures all weights
+        exist before serialization/deserialization.
+
+        Args:
+            input_shape (Optional[Any]): Shape of the input. Can be None since
+                this layer creates its own initial states.
         """
-        if self.built:
-            return
+        # Compute the full sequence length
+        full_seq_len = self.seq_len + self.puzzle_emb_len
 
-        # CREATE the layer's own weights using add_weight().
+        # Shape for latent states: (batch, seq_len, hidden_size)
+        # We use (None, ...) to allow variable batch size
+        latent_shape = (None, full_seq_len, self.hidden_size)
+
+        # Build token embedding layer
+        # Input shape for embedding is (batch, seq_len)
+        self.token_emb.build((None, self.seq_len))
+
+        # Build reasoning modules with the full latent shape
+        self.H_level.build(latent_shape)
+        self.L_level.build(latent_shape)
+
+        # Build output heads
+        # lm_head takes (batch, seq_len, hidden_size)
+        self.lm_head.build(latent_shape)
+        # q_head takes the first token: (batch, hidden_size)
+        self.q_head.build((None, self.hidden_size))
+
+        # Create initial state weights
+        # These are learnable initial states that will be used to reset
+        # the carry when a sequence starts or restarts.
         self.H_init = self.add_weight(
             name="H_init",
-            shape=(self.config["hidden_size"],),
-            initializer=initializers.TruncatedNormal(stddev=1.0),
+            shape=(1, full_seq_len, self.hidden_size),
+            initializer="zeros",
             trainable=True,
         )
         self.L_init = self.add_weight(
             name="L_init",
-            shape=(self.config["hidden_size"],),
-            initializer=initializers.TruncatedNormal(stddev=1.0),
+            shape=(1, full_seq_len, self.hidden_size),
+            initializer="zeros",
             trainable=True,
         )
 
-        # BUILD all sub-layers explicitly with their expected input shapes.
-        # This is CRITICAL for robust serialization and deserialization.
-        seq_plus_puzzle_len = self.config["seq_len"] + self.puzzle_emb_len
-        full_shape = (None, seq_plus_puzzle_len, self.config["hidden_size"])
-        hidden_state_shape = (None, self.config["hidden_size"])
-
-        self.embed_tokens.build(None)  # Embedding layers can be built with None shape.
-        self.puzzle_emb.build(None)
-        self.L_level.build(full_shape)
-        self.lm_head.build(full_shape)
-        self.q_head.build(hidden_state_shape)
-
+        # Call parent build
         super().build(input_shape)
-
-    def _input_embeddings(
-            self,
-            inputs: keras.KerasTensor,
-            puzzle_identifiers: keras.KerasTensor
-    ) -> keras.KerasTensor:
-        """
-        Constructs the combined input embeddings for the model.
-
-        This helper method combines token and puzzle embeddings into a single
-        tensor that serves as the input injection for the reasoning modules.
-
-        Args:
-            inputs (keras.KerasTensor): The input token IDs. Shape: `(batch, seq_len)`.
-            puzzle_identifiers (keras.KerasTensor): The puzzle IDs. Shape: `(batch,)`.
-
-        Returns:
-            keras.KerasTensor: The combined and scaled embeddings.
-                Shape: `(batch, puzzle_emb_len + seq_len, hidden_size)`.
-        """
-        token_embedding = self.embed_tokens(inputs)
-        puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
-
-        # Pad or reshape the puzzle embedding to match the expected format
-        target_puzzle_dim = self.puzzle_emb_len * self.config["hidden_size"]
-        pad_count = target_puzzle_dim - self.config["puzzle_emb_ndim"]
-        if pad_count > 0:
-            puzzle_embedding = ops.pad(puzzle_embedding, [[0, 0], [0, pad_count]])
-
-        puzzle_embedding = ops.reshape(
-            puzzle_embedding, (-1, self.puzzle_emb_len, self.config["hidden_size"])
-        )
-
-        embedding = ops.concatenate([puzzle_embedding, token_embedding], axis=1)
-        return embedding * self.embed_scale
 
     def call(
             self,
-            inner_carry: Dict[str, keras.KerasTensor],
-            batch: Dict[str, keras.KerasTensor],
+            carry: Dict[str, keras.KerasTensor],
+            data: Dict[str, keras.KerasTensor],
             training: Optional[bool] = None
     ) -> Tuple[Dict[str, keras.KerasTensor], keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """A single step of the recursive reasoning process."""
-        z_H, z_L = inner_carry["z_H"], inner_carry["z_L"]
-        input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        """
+        Perform a single inner reasoning step.
 
-        # H_cycles-1 iterations without gradient flow for state evolution.
-        for _ in range(self.config["H_cycles"] - 1):
-            z_L_no_grad = tf.stop_gradient(z_L)
-            z_H_no_grad = tf.stop_gradient(z_H)
+        Args:
+            carry (Dict[str, keras.KerasTensor]): Dictionary containing latent states:
+                - `z_H` (keras.KerasTensor): High-level latent state.
+                - `z_L` (keras.KerasTensor): Low-level latent state.
+            data (Dict[str, keras.KerasTensor]): Dictionary containing input data:
+                - `inputs` (keras.KerasTensor): Input token IDs.
+            training (Optional[bool]): Boolean flag for training mode.
 
-            # Inner L-level cycles
-            temp_z_L = z_L_no_grad
-            for _ in range(self.config["L_cycles"]):
-                temp_z_L = self.L_level(
-                    temp_z_L, z_H_no_grad + input_embeddings, training=training
-                )
-            z_L = temp_z_L
+        Returns:
+            Tuple containing:
+            - new_carry (Dict[str, keras.KerasTensor]): Updated latent states
+                with gradients detached.
+            - logits (keras.KerasTensor): Output logits for sequence prediction.
+            - (q_halt, q_continue) (Tuple[keras.KerasTensor, keras.KerasTensor]):
+                Halting probability logits.
+        """
+        z_H = carry["z_H"]
+        z_L = carry["z_L"]
 
-            # H-level update
-            z_H = self.L_level(z_H_no_grad, z_L, training=training)
+        # Embed the input tokens
+        input_emb = self.token_emb(data["inputs"])
 
-        # Final iteration with gradient flow
-        for _ in range(self.config["L_cycles"]):
-            z_L = self.L_level(z_L, z_H + input_embeddings, training=training)
-        z_H = self.L_level(z_H, z_L, training=training)
+        # Pad embedding to match full sequence length (including puzzle embedding)
+        batch_size = ops.shape(input_emb)[0]
+        puzzle_emb_padding = ops.zeros(
+            (batch_size, self.puzzle_emb_len, self.hidden_size),
+            dtype=input_emb.dtype
+        )
+        input_emb_padded = ops.concatenate([puzzle_emb_padding, input_emb], axis=1)
 
-        # Detach new carry states from the graph for the next iteration
-        new_carry = {"z_H": tf.stop_gradient(z_H), "z_L": tf.stop_gradient(z_L)}
+        # Update low-level state
+        z_L = self.L_level(z_L, input_emb_padded, training=training)
 
+        # Update high-level state
+        z_H = self.H_level(z_H, z_L, training=training)
+
+        # Detach new carry states from the computation graph for the next iteration
+        # This prevents gradients from flowing through multiple unrolled steps
+        new_carry = {
+            "z_H": tf.stop_gradient(z_H),
+            "z_L": tf.stop_gradient(z_L)
+        }
+
+        # Generate output logits (excluding puzzle embedding positions)
         logits = self.lm_head(z_H)[:, self.puzzle_emb_len:]
+
+        # Generate halting probabilities from the first token
         q_logits = self.q_head(z_H[:, 0])
         q_halt, q_continue = q_logits[..., 0], q_logits[..., 1]
 
         return new_carry, logits, (q_halt, q_continue)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dict[str, Any]: Configuration dictionary containing all parameters needed
+                to reconstruct this layer.
+        """
         config = super().get_config()
-        config.update({"config": self.config})
+        config.update({
+            'vocab_size': self.vocab_size,
+            'hidden_size': self.hidden_size,
+            'num_heads': self.num_heads,
+            'expansion': self.expansion,
+            'seq_len': self.seq_len,
+            'puzzle_emb_len': self.puzzle_emb_len,
+            'h_layers': self.h_layers,
+            'l_layers': self.l_layers,
+            'rope_theta': self.rope_theta,
+            'attention_type': self.attention_type,
+            'ffn_type': self.ffn_type,
+            'normalization_type': self.normalization_type,
+            'normalization_position': self.normalization_position,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
+        })
         return config
+
 
 # ---------------------------------------------------------------------
 
-# dl_techniques/models/trm/model.py
 
-"""
-... (file content above this class is unchanged) ...
-"""
 @keras.saving.register_keras_serializable()
 class TinyRecursiveReasoningModel(keras.Model):
     """
@@ -393,26 +559,110 @@ class TinyRecursiveReasoningModel(keras.Model):
       - `current_data`: The input data for non-halted items.
 
     Args:
-        config (Dict[str, Any]): Dictionary containing all model hyperparameters.
+        vocab_size (int): Size of the vocabulary for token embeddings.
+        hidden_size (int): Dimensionality of hidden states.
+        num_heads (int): Number of attention heads in transformer layers.
+        expansion (float): Factor to determine FFN intermediate size.
+        seq_len (int): Length of the input sequence (excluding puzzle embedding).
+        puzzle_emb_len (int): Length of the puzzle embedding prefix. Default is 16.
+        h_layers (int): Number of layers in the H_level reasoning module. Default is 2.
+        l_layers (int): Number of layers in the L_level reasoning module. Default is 2.
+        halt_max_steps (int): Maximum number of ACT steps allowed. Default is 10.
+        halt_exploration_prob (float): Probability of exploration during halting
+            decisions. Default is 0.1.
+        no_act_continue (bool): Whether to use simple halting (True) or Q-learning
+            based halting (False). Default is True.
+        rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
+            Default is 10000.0.
+        attention_type (str): Type of attention mechanism to use. Default is 'multi_head'.
+        ffn_type (str): Type of feed-forward network to use. Default is 'swiglu'.
+        normalization_type (str): Type of normalization layer to use. Default is 'rms_norm'.
+        normalization_position (str): Position of normalization ('pre' or 'post').
+            Default is 'post'.
+        dropout_rate (float): Dropout rate for transformer layers. Default is 0.0.
+        attention_dropout_rate (float): Dropout rate specifically for attention.
+            Default is 0.0.
         **kwargs: Additional arguments for the `keras.Model` base class.
     """
 
-    def __init__(self, config: Dict[str, Any], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        num_heads: int,
+        expansion: float,
+        seq_len: int,
+        puzzle_emb_len: int = 16,
+        h_layers: int = 2,
+        l_layers: int = 2,
+        halt_max_steps: int = 10,
+        halt_exploration_prob: float = 0.1,
+        no_act_continue: bool = True,
+        rope_theta: float = 10000.0,
+        attention_type: AttentionType = 'multi_head',
+        ffn_type: FFNType = 'swiglu',
+        normalization_type: NormalizationType = 'rms_norm',
+        normalization_position: NormalizationPositionType = 'post',
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
-        self.config = config
-        # CREATE the main sub-layer in __init__. We will explicitly build it
-        # in this model's `build` method to ensure its weights are available
-        # before the first `call`.
-        self.inner = TRMInner(config, name="trm_inner")
 
-    def build(self, input_shape: Any):
+        # Store all configuration parameters as instance attributes
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.expansion = expansion
+        self.seq_len = seq_len
+        self.puzzle_emb_len = puzzle_emb_len
+        self.h_layers = h_layers
+        self.l_layers = l_layers
+        self.halt_max_steps = halt_max_steps
+        self.halt_exploration_prob = halt_exploration_prob
+        self.no_act_continue = no_act_continue
+        self.rope_theta = rope_theta
+        self.attention_type = attention_type
+        self.ffn_type = ffn_type
+        self.normalization_type = normalization_type
+        self.normalization_position = normalization_position
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+
+        # CREATE the main sub-layer in __init__ following the Golden Rule.
+        # We will explicitly build it in this model's `build` method to ensure
+        # its weights are available before the first `call`.
+        self.inner = TRMInner(
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            expansion=expansion,
+            seq_len=seq_len,
+            puzzle_emb_len=puzzle_emb_len,
+            h_layers=h_layers,
+            l_layers=l_layers,
+            rope_theta=rope_theta,
+            attention_type=attention_type,
+            ffn_type=ffn_type,
+            normalization_type=normalization_type,
+            normalization_position=normalization_position,
+            dropout_rate=dropout_rate,
+            attention_dropout_rate=attention_dropout_rate,
+            name="trm_inner"
+        )
+
+    def build(self, input_shape: Optional[Any] = None) -> None:
         """
-        Builds the model and its inner layer.
+        Build the model and its inner layer.
 
         This explicit build call is crucial. It ensures that `self.inner.H_init`
         and `self.inner.L_init` are created before the `call` method tries to
         access them for the state reset logic. Without this, an error occurs
         because the weights don't exist yet on the first call.
+
+        Args:
+            input_shape (Optional[Any]): Shape of the input. Not used since the
+                inner layer handles its own shape inference.
         """
         if not self.inner.built:
             self.inner.build()
@@ -420,17 +670,30 @@ class TinyRecursiveReasoningModel(keras.Model):
 
     def initial_carry(self, batch: Dict[str, keras.KerasTensor]) -> Dict[str, Any]:
         """
-        Creates the initial state for the ACT loop.
+        Create the initial state for the ACT loop.
+
+        This method initializes all state variables needed for the recursive
+        reasoning process, including latent states, step counters, halting flags,
+        and current data.
 
         Args:
-            batch (Dict[str, keras.KerasTensor]): A batch of input data.
+            batch (Dict[str, keras.KerasTensor]): A batch of input data containing:
+                - `inputs` (keras.KerasTensor): Input token IDs with shape
+                    (batch_size, seq_len).
 
         Returns:
-            Dict[str, Any]: The initial `carry` dictionary.
+            Dict[str, Any]: The initial `carry` dictionary containing:
+                - `inner_carry`: Initial latent states (all zeros).
+                - `steps`: Step counter initialized to 0.
+                - `halted`: Boolean mask initialized to True (triggers reset on first step).
+                - `current_data`: Data tensor initialized to zeros.
         """
         batch_size = ops.shape(batch["inputs"])[0]
-        puzzle_emb_len = self.config.get("puzzle_emb_len", 16)
-        full_shape = (batch_size, self.config["seq_len"] + puzzle_emb_len, self.config["hidden_size"])
+        full_shape = (
+            batch_size,
+            self.seq_len + self.puzzle_emb_len,
+            self.hidden_size
+        )
 
         return {
             "inner_carry": {
@@ -450,85 +713,151 @@ class TinyRecursiveReasoningModel(keras.Model):
             training: Optional[bool] = None
     ) -> Tuple[Dict[str, Any], Dict[str, keras.KerasTensor]]:
         """
-        Performs one step of the ACT reasoning process.
+        Perform one step of the ACT reasoning process.
+
+        This method implements a single iteration of the adaptive computation loop.
+        It handles state resetting for newly started sequences, delegates computation
+        to the inner layer, and manages the halting logic.
 
         Args:
-            carry (Dict[str, Any]): The state from the previous step.
-            batch (Dict[str, keras.KerasTensor]): The current batch of data.
-            training (Optional[bool]): Boolean flag for training mode.
+            carry (Dict[str, Any]): The state from the previous step containing:
+                - `inner_carry`: Latent states from previous step.
+                - `steps`: Current step count.
+                - `halted`: Boolean mask of halted sequences.
+                - `current_data`: Current input data.
+            batch (Dict[str, keras.KerasTensor]): The current batch of data containing:
+                - `inputs`: Input token IDs.
+            training (Optional[bool]): Boolean flag for training mode. Affects halting
+                behavior (training uses learned halting, inference uses max steps).
 
         Returns:
-            A tuple containing:
+            Tuple containing:
             - new_carry (Dict[str, Any]): The updated state for the next step.
-            - outputs (Dict[str, keras.KerasTensor]): The model outputs for this step.
+            - outputs (Dict[str, keras.KerasTensor]): The model outputs for this step:
+                - `logits`: Prediction logits.
+                - `q_halt_logits`: Halting probability logits.
+                - `q_continue_logits`: Continuation probability logits.
+                - `target_q_continue` (optional): Target Q-value for Bellman update
+                    (only present during training with Q-learning).
         """
         inner_carry = carry["inner_carry"]
         halted = carry["halted"]
 
         # Reset inner state (z_H, z_L) for newly started sequences using
         # the initial state weights from the (now built) `inner` layer.
+        # Broadcasting is handled by ops.where with appropriate expansion.
         reset_flag = ops.expand_dims(halted, axis=(-1, -2))
         z_H = ops.where(reset_flag, self.inner.H_init, inner_carry["z_H"])
         z_L = ops.where(reset_flag, self.inner.L_init, inner_carry["z_L"])
 
+        # Reset step counter for newly started sequences
         steps = ops.where(halted, 0, carry["steps"])
 
         # Update the data for sequences that have not yet halted.
+        # For halted sequences, use new batch data; for non-halted, keep current.
         current_data = {}
         for k, v in batch.items():
+            # Expand halted mask to match data dimensions
             expand_dims = (1,) * (len(v.shape) - 1)
             halted_expanded = ops.reshape(halted, (-1, *expand_dims))
             current_data[k] = ops.where(halted_expanded, v, carry["current_data"][k])
 
+        # Perform inner reasoning step
         new_inner_carry, logits, (q_halt, q_continue) = self.inner(
             {"z_H": z_H, "z_L": z_L}, current_data, training=training
         )
 
-        outputs = {"logits": logits, "q_halt_logits": q_halt, "q_continue_logits": q_continue}
+        # Prepare outputs
+        outputs = {
+            "logits": logits,
+            "q_halt_logits": q_halt,
+            "q_continue_logits": q_continue
+        }
 
         # --- Halting Logic (No Gradients) ---
+        # Increment step counter
         steps = steps + 1
-        is_last_step = steps >= self.config["halt_max_steps"]
+
+        # Check if maximum steps reached
+        is_last_step = steps >= self.halt_max_steps
         new_halted = is_last_step
 
-        if training and self.config["halt_max_steps"] > 1:
-            if self.config.get("no_ACT_continue", True):
+        if training and self.halt_max_steps > 1:
+            # Training mode: use learned halting signals
+            if self.no_act_continue:
+                # Simple halting: halt if q_halt > 0
                 halt_signal = q_halt > 0
             else:
+                # Q-learning halting: halt if q_halt > q_continue
                 halt_signal = q_halt > q_continue
             new_halted = new_halted | halt_signal
 
+            # Exploration: randomly force continuation for some sequences
             rand_val = keras.random.uniform(ops.shape(q_halt))
-            explore_halt = rand_val < self.config["halt_exploration_prob"]
+            explore_halt = rand_val < self.halt_exploration_prob
             min_halt_steps = ops.cast(explore_halt, "int32") * keras.random.randint(
-                ops.shape(steps), 2, self.config["halt_max_steps"] + 1
+                ops.shape(steps), 2, self.halt_max_steps + 1
             )
             new_halted = new_halted & (steps >= min_halt_steps)
 
-            if not self.config.get("no_ACT_continue", True):
-                # Lookahead one step to get target Q-value for Bellman update
+            if not self.no_act_continue:
+                # Q-learning: compute target Q-value for Bellman update
+                # Lookahead one step to get target Q-value
                 _, _, (next_q_halt, next_q_continue) = self.inner(
                     new_inner_carry, current_data, training=training
                 )
-                target_q = ops.where(is_last_step, next_q_halt, ops.maximum(next_q_halt, next_q_continue))
+                # Target is the maximum Q-value at the next state
+                target_q = ops.where(
+                    is_last_step,
+                    next_q_halt,
+                    ops.maximum(next_q_halt, next_q_continue)
+                )
                 outputs["target_q_continue"] = ops.sigmoid(target_q)
 
         if not training:
-            # During inference, only halt at the maximum step limit.
+            # Inference mode: only halt at the maximum step limit
             new_halted = is_last_step
 
+        # Construct new carry state
         new_carry = {
             "inner_carry": new_inner_carry,
             "steps": steps,
             "halted": new_halted,
             "current_data": current_data,
         }
+
         return new_carry, outputs
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dict[str, Any]: Configuration dictionary containing all parameters needed
+                to reconstruct this model.
+        """
         config = super().get_config()
-        config.update({"config": self.config})
+        config.update({
+            'vocab_size': self.vocab_size,
+            'hidden_size': self.hidden_size,
+            'num_heads': self.num_heads,
+            'expansion': self.expansion,
+            'seq_len': self.seq_len,
+            'puzzle_emb_len': self.puzzle_emb_len,
+            'h_layers': self.h_layers,
+            'l_layers': self.l_layers,
+            'halt_max_steps': self.halt_max_steps,
+            'halt_exploration_prob': self.halt_exploration_prob,
+            'no_act_continue': self.no_act_continue,
+            'rope_theta': self.rope_theta,
+            'attention_type': self.attention_type,
+            'ffn_type': self.ffn_type,
+            'normalization_type': self.normalization_type,
+            'normalization_position': self.normalization_position,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
+        })
         return config
+
 
 # ---------------------------------------------------------------------

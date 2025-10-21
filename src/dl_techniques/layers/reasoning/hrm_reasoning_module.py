@@ -46,7 +46,7 @@ from ..transformer import (
     TransformerLayer,
     AttentionType,
     NormalizationType,
-    NormalizationPosition,
+    NormalizationPositionType,
     FFNType
 )
 
@@ -98,7 +98,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         ffn_expansion_factor: int = 4,
         attention_type: AttentionType = 'multi_head',
         normalization_type: NormalizationType = 'rms_norm',
-        normalization_position: NormalizationPosition = 'post',
+        normalization_position: NormalizationPositionType = 'post',
         ffn_type: FFNType = 'swiglu',
         dropout_rate: float = 0.0,
         use_bias: bool = False,
