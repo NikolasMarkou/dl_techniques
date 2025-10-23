@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes twenty different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes twenty-one different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -32,6 +32,7 @@ The following layers are supported by the factory system with automated paramete
 | `shared_weights_cross` | `SharedWeightsCrossAttention`| Cross-attention between modalities with shared weights. | Efficient multi-modal learning where different data types exchange information. | `(batch, total_seq_len, dim)` |
 | `spatial` | `SpatialAttention` | Spatial attention module from CBAM. | CNNs to highlight spatially significant feature regions. | `(batch, H, W, channels)` |
 | `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, window_size², dim)` |
+| `window_zigzag` | `WindowZigZagAttention` | Windowed attention with zigzag relative position bias. | Vision models where frequency-domain relationships are important. | `(batch, window_size², dim)` |
 
 ## Factory Interface
 
@@ -335,6 +336,21 @@ attn = create_attention_layer(
 )
 ```
 
+### `window_zigzag`
+**Required:** `dim`, `window_size`, `num_heads`  
+**Optional:** `attn_dropout_rate` (default: 0.0), `qkv_bias` (default: True), `use_hierarchical_routing` (default: False), `use_adaptive_softmax` (default: False)
+```python
+# Create a zigzag window attention with adaptive softmax
+attn = create_attention_layer(
+    'window_zigzag',
+    dim=96,
+    window_size=7,
+    num_heads=4,
+    use_adaptive_softmax=True,
+    adaptive_softmax_config={'min_temp': 0.1, 'max_temp': 2.0}
+)
+```
+
 ## Direct Layer Instantiation
 
 While the factory is recommended, direct instantiation is always available.
@@ -437,7 +453,3 @@ ERROR Failed to create 'group_query' layer (GroupedQueryAttention). Required par
 -   **`create_attention_from_config(config)`**: Creates a layer from a configuration dictionary.
 -   **`validate_attention_config(attention_type, **kwargs)`**: Validates parameters before creation.
 -   **`get_attention_info()`**: Returns a dictionary with details about all available attention types.
-
-### Types
-
--   **`AttentionType`**: A `Literal` type defining all valid attention type strings.

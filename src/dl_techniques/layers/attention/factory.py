@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports sixteen different attention mechanisms, from standard multi-head attention
+The factory supports seventeen different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -55,6 +55,7 @@ from .perceiver_attention import PerceiverAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 from .spatial_attention import SpatialAttention
 from .window_attention import WindowAttention
+from .window_attention_zigzag import WindowZigZagAttention
 
 # ---------------------------------------------------------------------
 # Type Definitions
@@ -76,7 +77,8 @@ AttentionType = Literal[
     'perceiver',
     'shared_weights_cross',
     'spatial',
-    'window'
+    'window',
+    'window_zigzag'
 ]
 """
 Type alias for supported attention mechanisms.
@@ -531,6 +533,37 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(W²) per window vs O(n²) global attention',
         'paper': 'Swin Transformer: Hierarchical Vision Transformer using Shifted Windows'
+    },
+    'window_zigzag': {
+        'class': WindowZigZagAttention,
+        'description': (
+            'Advanced windowed multi-head attention with a zigzag-ordered relative position '
+            'bias to prioritize frequency-domain locality. Supports optional advanced '
+            'normalization via adaptive temperature softmax or hierarchical routing as '
+            'alternatives to standard softmax, improving calibration.'
+        ),
+        'required_params': ['dim', 'window_size', 'num_heads'],
+        'optional_params': {
+            'qkv_bias': True,
+            'qk_scale': None,
+            'attn_dropout_rate': 0.0,
+            'proj_dropout_rate': 0.0,
+            'proj_bias': True,
+            'use_hierarchical_routing': False,
+            'use_adaptive_softmax': False,
+            'adaptive_softmax_config': None,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'Vision transformers processing image data where frequency-domain relationships '
+            'are important. Advanced normalization options are suitable for models requiring '
+            'better calibration or exploring alternatives to softmax.'
+        ),
+        'complexity': 'O(W²) per window, same as standard window attention',
+        'paper': "Extends 'Swin Transformer' with zigzag bias and advanced normalization"
     }
 }
 """
@@ -688,6 +721,14 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
             raise ValueError(
                 f"For group_query attention, num_heads ({kwargs['num_heads']}) "
                 f"must be divisible by num_kv_heads ({kwargs['num_kv_heads']})"
+            )
+    if attention_type == 'window_zigzag':
+        use_adaptive = kwargs.get('use_adaptive_softmax', False)
+        use_routing = kwargs.get('use_hierarchical_routing', False)
+        if use_adaptive and use_routing:
+            raise ValueError(
+                "For window_zigzag attention, 'use_adaptive_softmax' and "
+                "'use_hierarchical_routing' cannot both be True."
             )
 
     logger.debug(
