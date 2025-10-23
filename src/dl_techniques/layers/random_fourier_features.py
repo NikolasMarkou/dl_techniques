@@ -77,9 +77,6 @@ from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers, constraints
 
 # ---------------------------------------------------------------------
-# Random Fourier Features Layer
-# ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class RFFKernelLayer(keras.layers.Layer):
