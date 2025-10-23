@@ -16,13 +16,18 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import ops, layers, initializers, activations
-from typing import Optional, Union, Tuple, List, Callable, Any, Dict, Literal
+from typing import Optional, Union, Tuple, List, Any, Dict, Literal
 
-# Import factories from dl_techniques
-from dl_techniques.layers.norms import create_normalization_layer
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.norms import create_normalization_layer
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable(package="xLSTM")
 class sLSTMCell(keras.layers.Layer):
@@ -147,8 +152,11 @@ class sLSTMCell(keras.layers.Layer):
         self.bias_regularizer = bias_regularizer
 
         # Activation functions
-        self.f_activation = activations.get(forget_gate_activation)
-        self.i_activation = activations.get('exp')
+        self.f_activation = (
+            activations.get(forget_gate_activation)
+            if forget_gate_activation != "exp"
+            else None
+        )
         self.o_activation = activations.get('sigmoid')
         self.z_activation = activations.get('tanh')
 
@@ -280,6 +288,7 @@ class sLSTMCell(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable(package="xLSTM")
 class sLSTMLayer(keras.layers.Layer):
@@ -426,6 +435,9 @@ class sLSTMLayer(keras.layers.Layer):
             initial_state=initial_state,
         )
 
+    def compute_output_shape(self, input_shape):
+        return self.rnn.compute_output_shape(input_shape)
+
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration of the layer."""
         config = super().get_config()
@@ -534,7 +546,7 @@ class mLSTMCell(keras.layers.Layer):
             raise ValueError(f"`num_heads` must be positive, but got {num_heads}")
         if units % num_heads != 0:
             raise ValueError(
-                f"`units` ({units}) must be divisible by `num_heads` ({num_heads})"
+                f"units ({units}) must be divisible by `num_heads` ({num_heads})"
             )
 
         self.units = units
@@ -647,12 +659,10 @@ class mLSTMCell(keras.layers.Layer):
         i_size = self.num_heads
         f_size = self.num_heads
 
-        splits = [q_size, k_size, v_size, i_size, f_size]
-        q_proj, k_proj, v_proj, i_proj, f_proj, o_proj = ops.split(
-            projections,
-            splits + [self.units],
-            axis=-1
-        )
+        sections = [q_size, k_size, v_size, i_size, f_size]
+        indices = np.cumsum(sections)
+        projections_list = ops.split(projections, indices.tolist(), axis=-1)
+        q_proj, k_proj, v_proj, i_proj, f_proj, o_proj = projections_list
 
         # Reshape to multi-head format
         q_t = ops.reshape(q_proj, (batch_size, self.num_heads, self.key_dim))
@@ -857,6 +867,9 @@ class mLSTMLayer(keras.layers.Layer):
             initial_state=initial_state,
         )
 
+    def compute_output_shape(self, input_shape):
+        return self.rnn.compute_output_shape(input_shape)
+
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration of the layer."""
         config = super().get_config()
@@ -885,6 +898,7 @@ class mLSTMLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable(package="xLSTM")
 class sLSTMBlock(keras.layers.Layer):
@@ -1080,6 +1094,7 @@ class sLSTMBlock(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable(package="xLSTM")
 class mLSTMBlock(keras.layers.Layer):
