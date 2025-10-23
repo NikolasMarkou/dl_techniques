@@ -148,7 +148,7 @@ class SwinTransformerBlock(keras.layers.Layer):
            ↓
     LayerNorm → Window Partition → WindowAttention → Window Merge
            ↓                                              ↓
-    StochasticDepth ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ← ←
+    StochasticDepth ←------------------------------------ ←
            ↓
     Residual Connection (+)
            ↓

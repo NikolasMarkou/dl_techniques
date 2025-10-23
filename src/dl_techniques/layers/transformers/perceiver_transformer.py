@@ -347,7 +347,10 @@ class PerceiverTransformerLayer(keras.layers.Layer):
 
         return output
 
-    def compute_output_shape(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         if isinstance(input_shape, list):
             return input_shape[0]  # Same as query input shape
@@ -370,3 +373,5 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

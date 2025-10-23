@@ -40,11 +40,11 @@ class Gemma3TransformerBlock(keras.layers.Layer):
     Input(shape=[..., hidden_size])
            ↓
     InputLayerNorm(x) → Attention → PostAttnLayerNorm → + Residual
-           ↓                                              ↑
+           ↓                                               ↑
            x ──────────────────────────────────────────────┘
            ↓
     PreFFNLayerNorm(x) → FFN → PostFFNNorm → + Residual
-           ↓                                        ↑
+           ↓                                         ↑
            x ────────────────────────────────────────┘
            ↓
     Output(shape=[..., hidden_size])

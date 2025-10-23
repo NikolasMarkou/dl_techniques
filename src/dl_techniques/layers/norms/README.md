@@ -1,44 +1,36 @@
-# Normalization Factory Utility Guide
+# Normalization Module
+
+The `dl_techniques.layers.norms` module provides a comprehensive collection of normalization mechanisms for deep learning, with a unified factory interface for consistent layer creation, configuration management, and parameter validation.
 
 ## Overview
 
-The Normalization Factory is a centralized utility for creating normalization layers in the dl_techniques framework. It provides a unified interface for accessing all available normalization techniques, making it easy to experiment with different approaches and maintain consistent code patterns.
+This module includes fifteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
 
-The factory method is available at: `dl_techniques.layers.norms.create_normalization_layer`
+## Available Normalization Types
 
-## Key Benefits
+The following layers are supported by the factory system with automated parameter validation and defaults:
 
-1. **Unified Interface**: Single function call to create any supported normalization layer
-2. **Type Safety**: Full type hints and validation for all parameters
-3. **Comprehensive Coverage**: Supports all normalization layers in dl_techniques
-4. **Easy Experimentation**: Switch between normalization types by changing a single parameter
-5. **Consistent Configuration**: Standardized parameter handling across all layer types
-6. **Robust Validation**: Built-in parameter validation and error handling
+| Type | Class | Description | Use Case | Input Shape |
+|------|-------|-------------|----------|-------------|
+| `layer_norm` | `LayerNormalization` | Standard Keras normalization with learnable scale and bias. | General purpose normalization for transformers and deep networks. | Arbitrary |
+| `batch_norm` | `BatchNormalization` | Standard Keras normalization with moving batch statistics. | Convolutional networks and batch-based training. | Arbitrary |
+| `rms_norm` | `RMSNorm` | Root Mean Square normalization without centering for efficiency. | Transformers, especially for faster training and inference. | Arbitrary |
+| `zero_centered_rms_norm`| `ZeroCenteredRMSNorm` | Combines RMSNorm efficiency with LayerNorm's zero-mean stability. | Large language models (LLMs) requiring enhanced training stability. | Arbitrary |
+| `zero_centered_band_rms_norm`| `ZeroCenteredBandRMSNorm` | Adds a learnable band constraint to Zero-Centered RMSNorm. | Advanced LLMs for maximum stability and controlled flexibility. | Arbitrary |
+| `band_rms` | `BandRMS` | RMS normalization with a learnable, bounded magnitude constraint. | Imposing "thick spherical shell" constraints for stable training. | Arbitrary |
+| `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary |
+| `band_logit_norm` | `BandLogitNorm` | L2 normalization with a learned scaling factor bounded in a band. | Classification tasks with constrained logit magnitude. | Arbitrary |
+| `global_response_norm`| `GlobalResponseNormalization` | Global Response Normalization (GRN) from ConvNeXt V2. | ConvNeXt-style architectures to enhance inter-channel competition. | 2D, 3D, or 4D tensors |
+| `logit_norm` | `LogitNorm` | Temperature-scaled L2 normalization for classification logits. | Classification with calibrated confidence estimates. | Arbitrary |
+| `max_logit_norm` | `MaxLogitNorm` | L2 normalization on logits to separate magnitude and direction. | Out-of-distribution (OOD) detection and uncertainty estimation. | Arbitrary |
+| `decoupled_max_logit` | `DecoupledMaxLogit` | Decouples MaxLogit into cosine similarity and L2 norm components. | Advanced OOD detection with component analysis. | Arbitrary |
+| `dml_plus_focal` | `DMLPlus` | DML+ variant returning the MaxCosine component for OOD detection. | Specialized "focal" models in the DML+ framework. | Arbitrary |
+| `dml_plus_center` | `DMLPlus` | DML+ variant returning the MaxNorm component for OOD detection. | Specialized "center" models in the DML+ framework. | Arbitrary |
+| `dynamic_tanh` | `DynamicTanh` | Learnable scaled hyperbolic tangent as a LayerNorm alternative. | Normalization-free transformer architectures. | Arbitrary |
 
-## Supported Normalization Types
+## Factory Interface
 
-### Standard Keras Layers
-- `layer_norm`: LayerNormalization - Standard normalization with learnable scale and bias
-- `batch_norm`: BatchNormalization - Batch-based normalization with moving statistics
-
-### dl_techniques Specialized Layers
-- `rms_norm`: Root Mean Square normalization without centering
-- `zero_centered_rms_norm`: Zero-centered RMS normalization combining RMSNorm efficiency with LayerNorm stability
-- `zero_centered_band_rms_norm`: Combines zero-centering, RMS, and band constraints for maximum stability
-- `band_rms`: RMS normalization with bounded magnitude constraints
-- `adaptive_band_rms`: Adaptive RMS with log-transformed scaling
-- `band_logit_norm`: Band-constrained logit normalization for classification
-- `global_response_norm`: Global Response Normalization from ConvNeXt
-- `logit_norm`: Temperature-scaled normalization for classification
-- `max_logit_norm`: MaxLogit normalization for out-of-distribution detection
-- `decoupled_max_logit`: Decoupled MaxLogit (DML) with constant decoupling
-- `dml_plus_focal`: DML+ focal model variant
-- `dml_plus_center`: DML+ center model variant
-- `dynamic_tanh`: Dynamic Tanh normalization for normalization-free transformers
-
-## Basic Usage
-
-### Simple Layer Creation
+### Basic Usage
 
 ```python
 from dl_techniques.layers.norms import create_normalization_layer
@@ -46,531 +38,291 @@ from dl_techniques.layers.norms import create_normalization_layer
 # Create a standard layer normalization
 layer_norm = create_normalization_layer('layer_norm', name='my_norm')
 
-# Create RMS normalization with custom epsilon
+# Create RMS normalization with custom epsilon and scaling enabled
 rms_norm = create_normalization_layer('rms_norm', epsilon=1e-8, use_scale=True)
 
-# Create Zero-Centered RMS normalization for enhanced stability
-zero_centered_rms = create_normalization_layer(
-    'zero_centered_rms_norm', 
-    epsilon=1e-5, 
-    use_scale=True
-)
-
 # Create Zero-Centered Band RMS for maximum stability and control
-zero_centered_band_rms = create_normalization_layer(
+zc_band_rms = create_normalization_layer(
     'zero_centered_band_rms_norm',
     max_band_width=0.1,
     epsilon=1e-6
 )
 ```
 
-### Integration with Transformer Layers
+### Configuration-Based Creation
 
 ```python
-@keras.saving.register_keras_serializable()
-class MyTransformerLayer(keras.layers.Layer):
-    def __init__(self, normalization_type='layer_norm', **norm_kwargs, **kwargs):
-        super().__init__(**kwargs)
-        self.normalization_type = normalization_type
-        self.norm_kwargs = norm_kwargs
-        
-        # Create normalization layers using the factory
-        self.attention_norm = self._create_normalization_layer('attention_norm')
-        self.ffn_norm = self._create_normalization_layer('ffn_norm')
+from dl_techniques.layers.norms import create_normalization_from_config
 
-    def _create_normalization_layer(self, name):
-        return create_normalization_layer(
-            normalization_type=self.normalization_type,
-            name=name,
-            **self.norm_kwargs
-        )
+config = {
+    'type': 'zero_centered_rms_norm',
+    'epsilon': 1e-5,
+    'use_scale': True,
+    'axis': -1,
+    'name': 'llm_norm_block_1'
+}
+
+zc_rms_layer = create_normalization_from_config(config)
 ```
 
-## Advanced Configuration
-
-### Layer-Specific Parameters
-
-Each normalization type supports specific parameters. Use kwargs to pass them:
+### Parameter Discovery
 
 ```python
-# Standard RMS Norm with custom axis and scaling
-rms_layer = create_normalization_layer(
-    'rms_norm',
-    axis=(-2, -1),  # Normalize over multiple axes
-    use_scale=True,
-    epsilon=1e-6
-)
+from dl_techniques.layers.norms import get_normalization_info
 
-# Zero-Centered RMS Norm for large language models
-zero_centered_layer = create_normalization_layer(
-    'zero_centered_rms_norm',
-    axis=-1,
-    use_scale=True,
-    epsilon=1e-5,  # Slightly larger for stability
-    scale_initializer='ones'
-)
+# Get information about all normalization types
+info = get_normalization_info()
 
-# Zero-Centered Band RMS for ultimate stability
-zero_centered_band_layer = create_normalization_layer(
-    'zero_centered_band_rms_norm',
-    max_band_width=0.08,  # Tighter constraint
-    axis=-1,
-    epsilon=1e-7
-)
-
-# Global Response Normalization
-grn_layer = create_normalization_layer(
-    'global_response_norm',
-    eps=1e-6,  # Note: GRN uses 'eps' not 'epsilon'
-    gamma_initializer='ones',
-    beta_initializer='zeros'
-)
-
-# Dynamic Tanh for normalization-free transformers
-dyt_layer = create_normalization_layer(
-    'dynamic_tanh',
-    alpha_init_value=0.5,
-    axis=[-1]
-)
+# Print details for a specific type
+zc_band_rms_info = info['zero_centered_band_rms_norm']
+print(f"Description: {zc_band_rms_info['description']}")
+print(f"Parameters: {zc_band_rms_info['parameters']}")
 ```
 
-### Parameter Validation
-
-Use the validation function to check configurations before creating layers:
+### Validation
 
 ```python
 from dl_techniques.layers.norms import validate_normalization_config
 
-# Validate configuration
+# Validate configuration before creation
 try:
     validate_normalization_config(
-        'zero_centered_band_rms_norm',
+        'band_rms',
         axis=-1,
         max_band_width=0.1,
         epsilon=1e-5
     )
     print("Configuration is valid")
 except ValueError as e:
-    print(f"Invalid configuration: {e}")
+    print(f"Validation error: {e}")
 ```
 
-## Information and Discovery
+## Layer-Specific Parameters
 
-### Get Available Normalization Types
-
+### `layer_norm`
+**Optional:** `axis` (default: -1), `epsilon` (default: 1e-3), `center` (default: True), `scale` (default: True)
 ```python
-from dl_techniques.layers.norms import get_normalization_info
-
-# Get information about all supported types
-info = get_normalization_info()
-
-# Print available types
-for norm_type, details in info.items():
-    print(f"{norm_type}: {details['description']}")
-    print(f"  Parameters: {details['parameters']}")
-    print(f"  Use case: {details['use_case']}")
-    print()
+norm = create_normalization_layer(
+    'layer_norm',
+    epsilon=1e-5,
+    axis=-1
+)
 ```
 
-### Type Hints and IDE Support
-
-The utility provides full type hints for better IDE support:
-
+### `batch_norm`
+**Optional:** `axis` (default: -1), `momentum` (default: 0.99), `epsilon` (default: 1e-3), `center` (default: True), `scale` (default: True)
 ```python
-from dl_techniques.layers.norms import NormalizationType
-
-def create_model_with_norm(norm_type: NormalizationType):
-    """Function with type-safe normalization selection."""
-    return create_normalization_layer(norm_type)
-
-# IDE will suggest valid normalization types
-layer = create_model_with_norm('rms_norm')  # ✓ Valid
-layer = create_model_with_norm('zero_centered_band_rms_norm')  # ✓ Valid
-layer = create_model_with_norm('invalid')   # ✗ Type error
+norm = create_normalization_layer(
+    'batch_norm',
+    momentum=0.9,
+    axis=-1
+)
 ```
 
-## Common Usage Patterns
-
-### 1. Configurable Model Architecture
-
+### `rms_norm`
+**Optional:** `axis` (default: -1), `epsilon` (default: 1e-6), `use_scale` (default: True), `scale_initializer` (default: 'ones')
 ```python
-class ConfigurableModel(keras.Model):
-    def __init__(self, normalization_type='layer_norm', **norm_kwargs):
-        super().__init__()
-        self.norm_type = normalization_type
-        self.norm_kwargs = norm_kwargs
-        
-        # Create layers with configurable normalization
-        self.dense1 = keras.layers.Dense(512)
-        self.norm1 = create_normalization_layer(normalization_type, **norm_kwargs)
-        
-        self.dense2 = keras.layers.Dense(256)
-        self.norm2 = create_normalization_layer(normalization_type, **norm_kwargs)
-        
-        self.output_layer = keras.layers.Dense(10, activation='softmax')
-    
-    def call(self, inputs):
-        x = self.dense1(inputs)
-        x = self.norm1(x)
-        x = keras.activations.relu(x)
-        
-        x = self.dense2(x)
-        x = self.norm2(x)
-        x = keras.activations.relu(x)
-        
-        return self.output_layer(x)
-
-# Easy to experiment with different normalizations
-model1 = ConfigurableModel('layer_norm')
-model2 = ConfigurableModel('rms_norm', use_scale=True)
-model3 = ConfigurableModel('zero_centered_rms_norm', epsilon=1e-5)
-model4 = ConfigurableModel('zero_centered_band_rms_norm', max_band_width=0.08)
-```
-
-### 2. Large Language Model Normalization
-
-```python
-class LLMBlock(keras.layers.Layer):
-    """Language model block with advanced normalization options."""
-    
-    def __init__(
-        self, 
-        hidden_size=768,
-        normalization_type='zero_centered_rms_norm',  # Default to enhanced stability
-        **norm_kwargs
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        
-        # Use zero-centered RMS norm for better stability in large models
-        self.attention_norm = create_normalization_layer(
-            normalization_type,
-            name='attention_norm',
-            **norm_kwargs
-        )
-        
-        self.ffn_norm = create_normalization_layer(
-            normalization_type,
-            name='ffn_norm', 
-            **norm_kwargs
-        )
-        
-        # Other layers...
-        self.attention = keras.layers.MultiHeadAttention(
-            num_heads=12, key_dim=64
-        )
-        self.ffn = keras.layers.Dense(hidden_size * 4, activation='gelu')
-        self.output_proj = keras.layers.Dense(hidden_size)
-    
-    def call(self, inputs):
-        # Pre-normalization pattern
-        norm_inputs = self.attention_norm(inputs)
-        attn_out = self.attention(norm_inputs, norm_inputs)
-        x = inputs + attn_out
-        
-        norm_x = self.ffn_norm(x)
-        ffn_out = self.output_proj(self.ffn(norm_x))
-        return x + ffn_out
-
-# Create LLM with different normalization strategies
-stable_llm = LLMBlock(normalization_type='zero_centered_rms_norm', epsilon=1e-5)
-ultra_stable_llm = LLMBlock(normalization_type='zero_centered_band_rms_norm', max_band_width=0.1)
-fast_llm = LLMBlock(normalization_type='rms_norm', use_scale=True)
-```
-
-### 3. Hyperparameter Sweeps
-
-```python
-def create_model_variants():
-    """Create multiple model variants for comparison."""
-    
-    normalizations = [
-        ('layer_norm', {}),
-        ('rms_norm', {'use_scale': True}),
-        ('zero_centered_rms_norm', {'epsilon': 1e-5, 'use_scale': True}),
-        ('zero_centered_band_rms_norm', {'max_band_width': 0.1}),
-        ('global_response_norm', {}),
-        ('dynamic_tanh', {'alpha_init_value': 0.5})
-    ]
-    
-    models = {}
-    for norm_type, kwargs in normalizations:
-        models[norm_type] = ConfigurableModel(norm_type, **kwargs)
-    
-    return models
-
-# Create all variants for comparison
-model_variants = create_model_variants()
-```
-
-### 4. Layer Factory Pattern
-
-```python
-class LayerFactory:
-    """Factory for creating standardized layer combinations."""
-    
-    @staticmethod
-    def create_norm_dense_block(
-        units: int,
-        normalization_type: str = 'zero_centered_rms_norm',  # Default to enhanced stability
-        activation: str = 'relu',
-        **norm_kwargs
-    ):
-        """Create a normalized dense block."""
-        
-        class NormDenseBlock(keras.layers.Layer):
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                self.dense = keras.layers.Dense(units)
-                self.norm = create_normalization_layer(normalization_type, **norm_kwargs)
-                self.activation = keras.layers.Activation(activation)
-            
-            def call(self, inputs):
-                x = self.dense(inputs)
-                x = self.norm(x)
-                return self.activation(x)
-        
-        return NormDenseBlock()
-
-# Use factory to create standardized blocks
-stable_block = LayerFactory.create_norm_dense_block(256, 'zero_centered_rms_norm')
-ultra_stable_block = LayerFactory.create_norm_dense_block(256, 'zero_centered_band_rms_norm', max_band_width=0.05)
-fast_block = LayerFactory.create_norm_dense_block(256, 'rms_norm')
-```
-
-### 5. Configuration-Based Creation
-
-```python
-from dl_techniques.layers.norms import create_normalization_from_config
-
-# Configuration dictionary approach
-normalization_configs = {
-    'stable_llm': {
-        'type': 'zero_centered_rms_norm',
-        'epsilon': 1e-5,
-        'use_scale': True,
-        'axis': -1
-    },
-    'ultra_stable': {
-        'type': 'zero_centered_band_rms_norm',
-        'max_band_width': 0.08,
-        'epsilon': 1e-6
-    },
-    'fast_training': {
-        'type': 'rms_norm',
-        'use_scale': True,
-        'epsilon': 1e-6
-    }
-}
-
-def create_model_from_config(config_name):
-    config = normalization_configs[config_name]
-    norm_layer = create_normalization_from_config(config)
-    return norm_layer
-
-# Easy configuration switching
-stable_norm = create_model_from_config('stable_llm')
-ultra_stable_norm = create_model_from_config('ultra_stable')
-```
-
-## Best Practices
-
-### 1. Configuration Management
-
-Store normalization configurations in dictionaries for easy management:
-
-```python
-NORMALIZATION_CONFIGS = {
-    'standard': {'type': 'layer_norm', 'epsilon': 1e-6},
-    'fast': {'type': 'rms_norm', 'use_scale': True},
-    'stable_llm': {'type': 'zero_centered_rms_norm', 'epsilon': 1e-5, 'use_scale': True},
-    'ultra_stable': {'type': 'zero_centered_band_rms_norm', 'max_band_width': 0.1},
-    'efficient': {'type': 'global_response_norm'},
-    'normfree': {'type': 'dynamic_tanh', 'alpha_init_value': 0.5}
-}
-
-def create_model(config_name='standard'):
-    config = NORMALIZATION_CONFIGS[config_name].copy()
-    norm_type = config.pop('type')
-    return create_normalization_layer(norm_type, **config)
-```
-
-### 2. Model-Specific Defaults
-
-Choose appropriate defaults for different model types:
-
-```python
-# Transformer/LLM models - prioritize stability
-def create_transformer_norm(**kwargs):
-    defaults = {
-        'type': 'zero_centered_rms_norm',
-        'epsilon': 1e-5,
-        'use_scale': True
-    }
-    defaults.update(kwargs)
-    norm_type = defaults.pop('type')
-    return create_normalization_layer(norm_type, **defaults)
-
-# Vision models - prioritize efficiency
-def create_vision_norm(**kwargs):
-    defaults = {
-        'type': 'global_response_norm',
-        'eps': 1e-6
-    }
-    defaults.update(kwargs)
-    norm_type = defaults.pop('type')
-    return create_normalization_layer(norm_type, **defaults)
-```
-
-### 3. Error Handling
-
-Always validate configurations in production code:
-
-```python
-def safe_create_normalization_layer(norm_type, **kwargs):
-    """Safely create normalization layer with validation."""
-    try:
-        validate_normalization_config(norm_type, **kwargs)
-        return create_normalization_layer(norm_type, **kwargs)
-    except ValueError as e:
-        logger.error(f"Invalid normalization config: {e}")
-        # Fallback to safe default
-        return create_normalization_layer('layer_norm')
-```
-
-### 4. Documentation
-
-Document the normalization choices in your models:
-
-```python
-class DocumentedModel(keras.Model):
-    """
-    Model with configurable normalization.
-    
-    Args:
-        normalization_type: Type of normalization to use. Options:
-            - 'layer_norm': Standard normalization (default)
-            - 'rms_norm': Faster RMS-based normalization
-            - 'zero_centered_rms_norm': Enhanced stability RMS normalization
-            - 'zero_centered_band_rms_norm': Ultimate stability and flexibility (recommended for LLMs)
-            - See get_normalization_info() for full list
-    """
-    
-    def __init__(self, normalization_type='layer_norm', **kwargs):
-        super().__init__()
-        # Implementation...
-```
-
-## Migration Guide
-
-### From Manual Layer Creation
-
-**Before:**
-```python
-def _create_normalization_layer(self, name):
-    if self.normalization_type == 'layer_norm':
-        return keras.layers.LayerNormalization(epsilon=self.epsilon, name=name)
-    elif self.normalization_type == 'rms_norm':
-        return RMSNorm(epsilon=self.epsilon, name=name)
-    # ... many more elif statements
-    else:
-        raise ValueError(f"Unknown type: {self.normalization_type}")
-```
-
-**After:**
-```python
-def _create_normalization_layer(self, name):
-    return create_normalization_layer(
-        normalization_type=self.normalization_type,
-        name=name,
-        epsilon=self.epsilon,
-        **self.norm_kwargs
-    )
-```
-
-### Benefits of Migration
-
-1. **Reduced Code**: Eliminate repetitive layer creation logic
-2. **Better Coverage**: Access to all dl_techniques normalization layers
-3. **Type Safety**: Better IDE support and error checking
-4. **Consistency**: Standardized parameter handling
-5. **Maintainability**: Central location for normalization logic updates
-6. **Enhanced Stability**: Easy access to advanced normalization techniques like ZeroCenteredBandRMSNorm
-
-### Recommended Migration Path for LLMs
-
-For existing large language models, consider migrating to Zero-Centered variants for maximum stability:
-
-```python
-# Old approach - standard RMS norm
-old_norm = RMSNorm(epsilon=1e-6, use_scale=True)
-
-# New approach - enhanced stability
-new_norm = create_normalization_layer(
-    'zero_centered_rms_norm',
-    epsilon=1e-5,  # Slightly larger for stability
+norm = create_normalization_layer(
+    'rms_norm',
+    epsilon=1e-5,
     use_scale=True
 )
+```
 
-# Ultimate stability approach
-ultra_stable_norm = create_normalization_layer(
+### `zero_centered_rms_norm`
+**Optional:** `axis` (default: -1), `epsilon` (default: 1e-6), `use_scale` (default: True), `scale_initializer` (default: 'ones')
+```python
+norm = create_normalization_layer(
+    'zero_centered_rms_norm',
+    epsilon=1e-5,
+    use_scale=True
+)
+```
+
+### `zero_centered_band_rms_norm`
+**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: L2(1e-5))
+```python
+norm = create_normalization_layer(
     'zero_centered_band_rms_norm',
-    max_band_width=0.1,
+    max_band_width=0.08,
     epsilon=1e-6
 )
 ```
 
-## Troubleshooting
+### `band_rms`
+**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: L2(1e-5))
+```python
+norm = create_normalization_layer(
+    'band_rms',
+    max_band_width=0.2,
+    band_initializer='ones'
+)
+```
 
-### Common Issues
+### `adaptive_band_rms`
+**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: None)
+```python
+norm = create_normalization_layer(
+    'adaptive_band_rms',
+    max_band_width=0.15,
+    axis=(1, 2) # Spatial normalization
+)
+```
 
-1. **Invalid Parameter Error**: Check parameter names using `get_normalization_info()`
-2. **Type Error**: Ensure normalization_type is one of the supported values
-3. **Import Error**: Verify all dl_techniques normalization modules are available
-4. **Stability Issues**: Consider using 'zero_centered_rms_norm' or 'zero_centered_band_rms_norm'
+### `band_logit_norm`
+**Optional:** `max_band_width` (default: 0.01), `axis` (default: -1), `epsilon` (default: 1e-7)
+```python
+norm = create_normalization_layer(
+    'band_logit_norm',
+    max_band_width=0.05
+)
+```
 
-### Debug Example
+### `global_response_norm`
+**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros')
+```python
+# Note: factory maps `epsilon` to `eps` if `eps` is not provided
+norm = create_normalization_layer(
+    'global_response_norm',
+    eps=1e-5 
+)
+```
+
+### `logit_norm`
+**Optional:** `temperature` (default: 0.04), `axis` (default: -1), `epsilon` (default: 1e-7)
+```python
+norm = create_normalization_layer(
+    'logit_norm',
+    temperature=0.1
+)
+```
+
+### `max_logit_norm`
+**Optional:** `axis` (default: -1), `epsilon` (default: 1e-7)
+```python
+norm = create_normalization_layer('max_logit_norm')
+```
+
+### `decoupled_max_logit`
+**Optional:** `constant` (default: 1.0), `axis` (default: -1), `epsilon` (default: 1e-7)
+```python
+norm = create_normalization_layer(
+    'decoupled_max_logit',
+    constant=0.8
+)
+```
+
+### `dml_plus_focal` / `dml_plus_center`
+These types create a `DMLPlus` layer with `model_type` set to `'focal'` or `'center'`.
+**Optional:** `axis` (default: -1), `epsilon` (default: 1e-7)
+```python
+# Focal model variant
+focal_norm = create_normalization_layer('dml_plus_focal')
+
+# Center model variant
+center_norm = create_normalization_layer('dml_plus_center')
+```
+
+### `dynamic_tanh`
+**Optional:** `axis` (default: -1), `alpha_init_value` (default: 0.5), `kernel_initializer` (default: 'ones'), `bias_initializer` (default: 'zeros')
+```python
+norm = create_normalization_layer(
+    'dynamic_tanh',
+    alpha_init_value=0.7 # Recommended for attention
+)
+```
+
+## Direct Layer Instantiation
+
+While the factory is recommended for consistency and safety, direct instantiation is always available.
 
 ```python
-# Debug normalization layer creation
-try:
-    layer = create_normalization_layer('zero_centered_band_rms_norm', max_band_width=0.1)
-    print("Layer created successfully")
-except Exception as e:
-    print(f"Error: {e}")
+from dl_techniques.layers.norms import RMSNorm, ZeroCenteredBandRMSNorm, GlobalResponseNormalization
+
+# Direct instantiation (bypasses factory validation and defaults)
+rms_norm = RMSNorm(epsilon=1e-5, use_scale=True)
+zc_band_rms = ZeroCenteredBandRMSNorm(max_band_width=0.1)
+grn = GlobalResponseNormalization(eps=1e-6)
+```
+
+## Integration Patterns
+
+### In a Custom Transformer Block
+
+```python
+import keras
+from dl_techniques.layers.norms import create_normalization_layer
+
+@keras.saving.register_keras_serializable()
+class TransformerBlock(keras.layers.Layer):
+    def __init__(self, normalization_type='zero_centered_rms_norm', **norm_kwargs):
+        super().__init__()
+        self.normalization_type = normalization_type
+        self.norm_kwargs = norm_kwargs
+        
+        # Create normalization layers using the factory for enhanced stability
+        self.attention_norm = create_normalization_layer(
+            self.normalization_type, name='attention_norm', **self.norm_kwargs
+        )
+        self.ffn_norm = create_normalization_layer(
+            self.normalization_type, name='ffn_norm', **self.norm_kwargs
+        )
+        # ... other layers like Attention, FFN
     
-    # Get valid parameters for debugging
-    info = get_normalization_info()
-    print(f"Valid parameters: {info['zero_centered_band_rms_norm']['parameters']}")
+    def call(self, inputs):
+        # Pre-normalization pattern
+        norm_inputs = self.attention_norm(inputs)
+        # attn_out = self.attention(norm_inputs, norm_inputs)
+        # ... rest of the block
+        return inputs # Placeholder
 ```
 
-### Performance Considerations
-
-Different normalization types have different computational costs:
+### In Model Builders with Configuration Files
 
 ```python
-# Performance ranking (approximate, from fastest to slowest)
-PERFORMANCE_RANKING = [
-    'rms_norm',                    # Fastest - no mean computation
-    'zero_centered_rms_norm',      # Fast - single mean computation
-    'zero_centered_band_rms_norm', # Fast - adds sigmoid and multiply
-    'dynamic_tanh',                # Fast - simple operations
-    'layer_norm',                  # Standard - mean and variance
-    'band_rms',                    # Moderate - constrained operations
-    'global_response_norm',        # Moderate - additional operations
-    'batch_norm'                   # Variable - depends on batch size
-]
+import json
+from dl_techniques.layers.norms import create_normalization_from_config
 
-def choose_normalization_by_performance(priority='balanced'):
-    """Choose normalization based on performance requirements."""
-    if priority == 'speed':
-        return 'rms_norm'
-    elif priority == 'stability':
-        return 'zero_centered_band_rms_norm'  
-    elif priority == 'balanced':
-        return 'zero_centered_rms_norm'  # Good balance of speed and stability
-    else:
-        return 'layer_norm'  # Safe default
+# Load configuration from file
+with open('model_config.json', 'r') as f:
+    config = json.load(f)
+
+# Create normalization layer from the 'normalization' section of the config
+# config['normalization'] = {'type': 'zero_centered_band_rms_norm', 'max_band_width': 0.1}
+norm_layer = create_normalization_from_config(config['normalization'])
 ```
 
-This normalization factory utility provides a robust, type-safe, and comprehensive solution for managing normalization layers across the dl_techniques framework. The addition of Zero-Centered Band RMSNorm offers maximum training stability and controlled expressiveness, making it an excellent choice for state-of-the-art large language models and advanced transformer architectures.
+## Parameter Validation
+
+The factory performs comprehensive validation on layer creation.
+
+**Unknown Normalization Type:**
+```python
+# Raises ValueError: "Unknown normalization type: 'vanilla_norm'"
+create_normalization_layer('vanilla_norm')
+```
+
+**Invalid Value Ranges:**
+```python
+# Raises ValueError: "max_band_width must be between 0 and 1, got 1.5"
+create_normalization_layer('band_rms', max_band_width=1.5)
+
+# Raises ValueError: "epsilon must be positive, got -1e-06"
+create_normalization_layer('rms_norm', epsilon=-1e-6)
+```
+
+**Invalid Parameters for a Type:**
+```python
+# Raises ValueError: "Invalid parameters for dynamic_tanh: {'epsilon'}"
+# DynamicTanh does not use the epsilon parameter.
+validate_normalization_config('dynamic_tanh', epsilon=1e-6)
+```
+
+## API Reference
+
+### Functions
+
+-   **`create_normalization_layer(normalization_type, name=None, epsilon=1e-6, **kwargs)`**: Factory for creating normalization layers with validation.
+-   **`create_normalization_from_config(config)`**: Creates a layer from a configuration dictionary.
+-   **`validate_normalization_config(normalization_type, **kwargs)`**: Validates parameters before creation, raising a `ValueError` on failure.
+-   **`get_normalization_info()`**: Returns a dictionary with details about all available normalization types, including their descriptions, parameters, and use cases.
