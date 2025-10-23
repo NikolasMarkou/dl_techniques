@@ -91,9 +91,9 @@ from typing import Optional, Dict, Any, Literal, Tuple
 # ---------------------------------------------------------------------
 
 from .embedding import create_embedding_layer
-from .masking import create_mask, MaskConfig, combine_masks
 from .norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, FFNType, NormalizationPositionType
+from dl_techniques.utils.masking import create_mask, MaskConfig, combine_masks
 
 # ---------------------------------------------------------------------
 # Type definitions

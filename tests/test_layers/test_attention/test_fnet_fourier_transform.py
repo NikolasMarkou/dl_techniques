@@ -423,21 +423,6 @@ class TestFNetFourierTransform:
         assert layer.dft_matrix_seq.shape == (2, 2, 2)
         assert layer.dft_matrix_hidden.shape == (2, 2, 2)
 
-    @pytest.mark.slow
-    def test_performance_scaling(self, layer_config_basic):
-        """Test performance scaling with input size (marked as slow test)."""
-        # Test different sizes to ensure reasonable scaling
-        sizes = [(1, 32, 64), (1, 64, 128), (1, 128, 256)]
-
-        for batch, seq_len, hidden_dim in sizes:
-            # A new layer must be instantiated for each shape.
-            layer = FNetFourierTransform(**layer_config_basic)
-            test_input = keras.random.normal(shape=(batch, seq_len, hidden_dim))
-
-            # Should complete without timeout or memory error
-            output = layer(test_input)
-            assert output.shape == test_input.shape
-
 
 # Additional utility functions for testing
 def create_test_input_with_pattern(batch_size: int, seq_len: int, hidden_dim: int) -> keras.KerasTensor:

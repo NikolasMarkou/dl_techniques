@@ -50,6 +50,7 @@ from typing import Dict, List, Optional, Tuple, Any
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class OneHotEncoding(keras.layers.Layer):
     """One-hot encoding layer for categorical features with enhanced efficiency.
 

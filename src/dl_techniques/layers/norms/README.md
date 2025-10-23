@@ -24,6 +24,7 @@ The factory method is available at: `dl_techniques.layers.norms.create_normaliza
 ### dl_techniques Specialized Layers
 - `rms_norm`: Root Mean Square normalization without centering
 - `zero_centered_rms_norm`: Zero-centered RMS normalization combining RMSNorm efficiency with LayerNorm stability
+- `zero_centered_band_rms_norm`: Combines zero-centering, RMS, and band constraints for maximum stability
 - `band_rms`: RMS normalization with bounded magnitude constraints
 - `adaptive_band_rms`: Adaptive RMS with log-transformed scaling
 - `band_logit_norm`: Band-constrained logit normalization for classification
@@ -55,11 +56,11 @@ zero_centered_rms = create_normalization_layer(
     use_scale=True
 )
 
-# Create Band RMS with constraints
-band_rms = create_normalization_layer(
-    'band_rms', 
+# Create Zero-Centered Band RMS for maximum stability and control
+zero_centered_band_rms = create_normalization_layer(
+    'zero_centered_band_rms_norm',
     max_band_width=0.1,
-    epsilon=1e-7
+    epsilon=1e-6
 )
 ```
 
@@ -109,12 +110,12 @@ zero_centered_layer = create_normalization_layer(
     scale_initializer='ones'
 )
 
-# Band RMS with tight constraints
-band_layer = create_normalization_layer(
-    'band_rms',
-    max_band_width=0.05,  # Tighter constraint
+# Zero-Centered Band RMS for ultimate stability
+zero_centered_band_layer = create_normalization_layer(
+    'zero_centered_band_rms_norm',
+    max_band_width=0.08,  # Tighter constraint
     axis=-1,
-    epsilon=1e-8
+    epsilon=1e-7
 )
 
 # Global Response Normalization
@@ -143,9 +144,9 @@ from dl_techniques.layers.norms import validate_normalization_config
 # Validate configuration
 try:
     validate_normalization_config(
-        'zero_centered_rms_norm',
+        'zero_centered_band_rms_norm',
         axis=-1,
-        use_scale=True,
+        max_band_width=0.1,
         epsilon=1e-5
     )
     print("Configuration is valid")
@@ -184,7 +185,7 @@ def create_model_with_norm(norm_type: NormalizationType):
 
 # IDE will suggest valid normalization types
 layer = create_model_with_norm('rms_norm')  # ✓ Valid
-layer = create_model_with_norm('zero_centered_rms_norm')  # ✓ Valid
+layer = create_model_with_norm('zero_centered_band_rms_norm')  # ✓ Valid
 layer = create_model_with_norm('invalid')   # ✗ Type error
 ```
 
@@ -223,7 +224,7 @@ class ConfigurableModel(keras.Model):
 model1 = ConfigurableModel('layer_norm')
 model2 = ConfigurableModel('rms_norm', use_scale=True)
 model3 = ConfigurableModel('zero_centered_rms_norm', epsilon=1e-5)
-model4 = ConfigurableModel('band_rms', max_band_width=0.1)
+model4 = ConfigurableModel('zero_centered_band_rms_norm', max_band_width=0.08)
 ```
 
 ### 2. Large Language Model Normalization
@@ -273,8 +274,8 @@ class LLMBlock(keras.layers.Layer):
 
 # Create LLM with different normalization strategies
 stable_llm = LLMBlock(normalization_type='zero_centered_rms_norm', epsilon=1e-5)
+ultra_stable_llm = LLMBlock(normalization_type='zero_centered_band_rms_norm', max_band_width=0.1)
 fast_llm = LLMBlock(normalization_type='rms_norm', use_scale=True)
-standard_llm = LLMBlock(normalization_type='layer_norm')
 ```
 
 ### 3. Hyperparameter Sweeps
@@ -287,7 +288,7 @@ def create_model_variants():
         ('layer_norm', {}),
         ('rms_norm', {'use_scale': True}),
         ('zero_centered_rms_norm', {'epsilon': 1e-5, 'use_scale': True}),
-        ('band_rms', {'max_band_width': 0.1}),
+        ('zero_centered_band_rms_norm', {'max_band_width': 0.1}),
         ('global_response_norm', {}),
         ('dynamic_tanh', {'alpha_init_value': 0.5})
     ]
@@ -333,8 +334,8 @@ class LayerFactory:
 
 # Use factory to create standardized blocks
 stable_block = LayerFactory.create_norm_dense_block(256, 'zero_centered_rms_norm')
+ultra_stable_block = LayerFactory.create_norm_dense_block(256, 'zero_centered_band_rms_norm', max_band_width=0.05)
 fast_block = LayerFactory.create_norm_dense_block(256, 'rms_norm')
-constrained_block = LayerFactory.create_norm_dense_block(128, 'band_rms', max_band_width=0.1)
 ```
 
 ### 5. Configuration-Based Creation
@@ -350,15 +351,15 @@ normalization_configs = {
         'use_scale': True,
         'axis': -1
     },
+    'ultra_stable': {
+        'type': 'zero_centered_band_rms_norm',
+        'max_band_width': 0.08,
+        'epsilon': 1e-6
+    },
     'fast_training': {
         'type': 'rms_norm',
         'use_scale': True,
         'epsilon': 1e-6
-    },
-    'constrained': {
-        'type': 'band_rms',
-        'max_band_width': 0.1,
-        'epsilon': 1e-7
     }
 }
 
@@ -369,7 +370,7 @@ def create_model_from_config(config_name):
 
 # Easy configuration switching
 stable_norm = create_model_from_config('stable_llm')
-fast_norm = create_model_from_config('fast_training')
+ultra_stable_norm = create_model_from_config('ultra_stable')
 ```
 
 ## Best Practices
@@ -383,7 +384,7 @@ NORMALIZATION_CONFIGS = {
     'standard': {'type': 'layer_norm', 'epsilon': 1e-6},
     'fast': {'type': 'rms_norm', 'use_scale': True},
     'stable_llm': {'type': 'zero_centered_rms_norm', 'epsilon': 1e-5, 'use_scale': True},
-    'constrained': {'type': 'band_rms', 'max_band_width': 0.1},
+    'ultra_stable': {'type': 'zero_centered_band_rms_norm', 'max_band_width': 0.1},
     'efficient': {'type': 'global_response_norm'},
     'normfree': {'type': 'dynamic_tanh', 'alpha_init_value': 0.5}
 }
@@ -419,17 +420,6 @@ def create_vision_norm(**kwargs):
     defaults.update(kwargs)
     norm_type = defaults.pop('type')
     return create_normalization_layer(norm_type, **defaults)
-
-# Fast inference models - prioritize speed
-def create_fast_norm(**kwargs):
-    defaults = {
-        'type': 'rms_norm',
-        'use_scale': True,
-        'epsilon': 1e-6
-    }
-    defaults.update(kwargs)
-    norm_type = defaults.pop('type')
-    return create_normalization_layer(norm_type, **defaults)
 ```
 
 ### 3. Error Handling
@@ -461,8 +451,8 @@ class DocumentedModel(keras.Model):
         normalization_type: Type of normalization to use. Options:
             - 'layer_norm': Standard normalization (default)
             - 'rms_norm': Faster RMS-based normalization
-            - 'zero_centered_rms_norm': Enhanced stability RMS normalization (recommended for LLMs)
-            - 'band_rms': Constrained RMS for stability
+            - 'zero_centered_rms_norm': Enhanced stability RMS normalization
+            - 'zero_centered_band_rms_norm': Ultimate stability and flexibility (recommended for LLMs)
             - See get_normalization_info() for full list
     """
     
@@ -482,8 +472,6 @@ def _create_normalization_layer(self, name):
         return keras.layers.LayerNormalization(epsilon=self.epsilon, name=name)
     elif self.normalization_type == 'rms_norm':
         return RMSNorm(epsilon=self.epsilon, name=name)
-    elif self.normalization_type == 'zero_centered_rms_norm':
-        return ZeroCenteredRMSNorm(epsilon=self.epsilon, name=name)
     # ... many more elif statements
     else:
         raise ValueError(f"Unknown type: {self.normalization_type}")
@@ -503,15 +491,15 @@ def _create_normalization_layer(self, name):
 ### Benefits of Migration
 
 1. **Reduced Code**: Eliminate repetitive layer creation logic
-2. **Better Coverage**: Access to all dl_techniques normalization layers including Zero-Centered RMSNorm
+2. **Better Coverage**: Access to all dl_techniques normalization layers
 3. **Type Safety**: Better IDE support and error checking
 4. **Consistency**: Standardized parameter handling
 5. **Maintainability**: Central location for normalization logic updates
-6. **Enhanced Stability**: Easy access to advanced normalization techniques
+6. **Enhanced Stability**: Easy access to advanced normalization techniques like ZeroCenteredBandRMSNorm
 
 ### Recommended Migration Path for LLMs
 
-For existing large language models, consider migrating to Zero-Centered RMSNorm:
+For existing large language models, consider migrating to Zero-Centered variants for maximum stability:
 
 ```python
 # Old approach - standard RMS norm
@@ -523,6 +511,13 @@ new_norm = create_normalization_layer(
     epsilon=1e-5,  # Slightly larger for stability
     use_scale=True
 )
+
+# Ultimate stability approach
+ultra_stable_norm = create_normalization_layer(
+    'zero_centered_band_rms_norm',
+    max_band_width=0.1,
+    epsilon=1e-6
+)
 ```
 
 ## Troubleshooting
@@ -532,25 +527,21 @@ new_norm = create_normalization_layer(
 1. **Invalid Parameter Error**: Check parameter names using `get_normalization_info()`
 2. **Type Error**: Ensure normalization_type is one of the supported values
 3. **Import Error**: Verify all dl_techniques normalization modules are available
-4. **Stability Issues**: Consider using 'zero_centered_rms_norm' for better training stability
+4. **Stability Issues**: Consider using 'zero_centered_rms_norm' or 'zero_centered_band_rms_norm'
 
 ### Debug Example
 
 ```python
 # Debug normalization layer creation
 try:
-    layer = create_normalization_layer('zero_centered_rms_norm', use_scale=True)
+    layer = create_normalization_layer('zero_centered_band_rms_norm', max_band_width=0.1)
     print("Layer created successfully")
 except Exception as e:
     print(f"Error: {e}")
     
     # Get valid parameters for debugging
     info = get_normalization_info()
-    print(f"Valid parameters: {info['zero_centered_rms_norm']['parameters']}")
-    
-    # Try with minimal configuration
-    fallback_layer = create_normalization_layer('zero_centered_rms_norm')
-    print("Fallback layer created")
+    print(f"Valid parameters: {info['zero_centered_band_rms_norm']['parameters']}")
 ```
 
 ### Performance Considerations
@@ -561,7 +552,8 @@ Different normalization types have different computational costs:
 # Performance ranking (approximate, from fastest to slowest)
 PERFORMANCE_RANKING = [
     'rms_norm',                    # Fastest - no mean computation
-    'zero_centered_rms_norm',      # Fast - single mean computation  
+    'zero_centered_rms_norm',      # Fast - single mean computation
+    'zero_centered_band_rms_norm', # Fast - adds sigmoid and multiply
     'dynamic_tanh',                # Fast - simple operations
     'layer_norm',                  # Standard - mean and variance
     'band_rms',                    # Moderate - constrained operations
@@ -574,11 +566,11 @@ def choose_normalization_by_performance(priority='balanced'):
     if priority == 'speed':
         return 'rms_norm'
     elif priority == 'stability':
-        return 'zero_centered_rms_norm'  
+        return 'zero_centered_band_rms_norm'  
     elif priority == 'balanced':
         return 'zero_centered_rms_norm'  # Good balance of speed and stability
     else:
         return 'layer_norm'  # Safe default
 ```
 
-This normalization factory utility provides a robust, type-safe, and comprehensive solution for managing normalization layers across the dl_techniques framework. The addition of Zero-Centered RMSNorm offers enhanced training stability while maintaining computational efficiency, making it particularly suitable for large language models and advanced transformer architectures.
+This normalization factory utility provides a robust, type-safe, and comprehensive solution for managing normalization layers across the dl_techniques framework. The addition of Zero-Centered Band RMSNorm offers maximum training stability and controlled expressiveness, making it an excellent choice for state-of-the-art large language models and advanced transformer architectures.

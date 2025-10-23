@@ -24,8 +24,8 @@ Input(shape=[..., input_dim])
    │ Dense → ReLU-k  │ BasisFunc → Dense
    │                 │ (no bias)
    │        ↘       ↙│
-   │     Element-wise │
-   │        Add       │
+   │     Element-wise│
+   │        Add      │
    └─────────────────┘
        ↓
    [Optional: BatchNorm]

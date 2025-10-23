@@ -26,15 +26,17 @@ from .logit_norm import LogitNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .dynamic_tanh import DynamicTanh
 from .zero_centered_rms_norm import ZeroCenteredRMSNorm
+from .zero_centered_band_rms_norm import ZeroCenteredBandRMSNorm
 
 # ---------------------------------------------------------------------
 
 NormalizationType = Literal[
-    'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm', 'band_rms',
-    'adaptive_band_rms', 'band_logit_norm', 'global_response_norm', 'logit_norm',
-    'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center',
-    'dynamic_tanh'
+    'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
+    'zero_centered_band_rms_norm', 'band_rms', 'adaptive_band_rms',
+    'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
+    'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
 ]
+
 
 # ---------------------------------------------------------------------
 
@@ -58,6 +60,7 @@ def create_normalization_layer(
             - 'batch_norm': Standard Keras BatchNormalization
             - 'rms_norm': Root Mean Square normalization
             - 'zero_centered_rms_norm': Zero-centered RMS normalization with mean centering
+            - 'zero_centered_band_rms_norm': Combines zero-centering, RMS, and band constraints
             - 'band_rms': RMS normalization with bounded constraints
             - 'adaptive_band_rms': Adaptive RMS with log-transformed scaling
             - 'band_logit_norm': Band-constrained logit normalization
@@ -85,6 +88,11 @@ def create_normalization_layer(
                 - axis: Normalization axis (int or tuple)
                 - use_scale: Whether to use learnable scale parameter
                 - scale_initializer: Initializer for scale parameter
+
+            zero_centered_band_rms_norm:
+                - max_band_width: Maximum band width constraint
+                - axis: Normalization axis
+                - band_initializer: Initializer for band parameter
 
             band_rms/adaptive_band_rms:
                 - max_band_width: Maximum band width constraint
@@ -133,14 +141,6 @@ def create_normalization_layer(
             epsilon=1e-5
         )
 
-        # Standard RMS normalization
-        rms_norm = create_normalization_layer(
-            'rms_norm',
-            name='rms_norm_layer',
-            axis=-1,
-            use_scale=True
-        )
-
         # Zero-centered RMS normalization for enhanced stability
         zero_centered_rms = create_normalization_layer(
             'zero_centered_rms_norm',
@@ -150,12 +150,12 @@ def create_normalization_layer(
             epsilon=1e-5
         )
 
-        # Band RMS with custom constraints
-        band_rms = create_normalization_layer(
-            'band_rms',
-            name='constrained_norm',
-            max_band_width=0.05,
-            epsilon=1e-7
+        # Zero-centered Band RMS for maximum stability
+        zero_centered_band_rms = create_normalization_layer(
+            'zero_centered_band_rms_norm',
+            name='stable_constrained_norm',
+            max_band_width=0.1,
+            epsilon=1e-6
         )
 
         # Global Response Normalization
@@ -163,14 +163,6 @@ def create_normalization_layer(
             'global_response_norm',
             name='grn_layer',
             eps=1e-6
-        )
-
-        # Dynamic Tanh for normalization-free transformers
-        dynamic_norm = create_normalization_layer(
-            'dynamic_tanh',
-            name='dynamic_norm',
-            alpha_init_value=0.5,
-            axis=[-1]
         )
         ```
 
@@ -180,8 +172,8 @@ def create_normalization_layer(
         - Some normalization types may ignore certain parameters if they're not applicable
         - For specialized normalization layers, refer to their individual documentation
           for detailed parameter descriptions and usage guidelines
-        - Zero-centered RMS normalization is particularly beneficial for large language
-          models and transformer architectures where training stability is crucial
+        - Zero-centered RMS and Zero-centered Band RMS are particularly beneficial for
+          large language models and transformer architectures
     """
     # Prepare base parameters
     layer_kwargs = kwargs.copy()
@@ -208,6 +200,11 @@ def create_normalization_layer(
         # Zero-centered RMS normalization with enhanced stability
         layer_kwargs.setdefault('epsilon', epsilon)
         return ZeroCenteredRMSNorm(**layer_kwargs)
+
+    elif normalization_type == 'zero_centered_band_rms_norm':
+        # Zero-centered RMS with band constraints
+        layer_kwargs.setdefault('epsilon', epsilon)
+        return ZeroCenteredBandRMSNorm(**layer_kwargs)
 
     elif normalization_type == 'band_rms':
         # RMS normalization with bounded constraints
@@ -266,15 +263,17 @@ def create_normalization_layer(
 
     else:
         supported_types = [
-            'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm', 'band_rms',
-            'adaptive_band_rms', 'band_logit_norm', 'global_response_norm', 'logit_norm',
-            'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center',
-            'dynamic_tanh'
+            'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
+            'zero_centered_band_rms_norm', 'band_rms', 'adaptive_band_rms',
+            'band_logit_norm', 'global_response_norm', 'logit_norm',
+            'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal',
+            'dml_plus_center', 'dynamic_tanh'
         ]
         raise ValueError(
             f"Unknown normalization type: '{normalization_type}'. "
             f"Supported types: {', '.join(supported_types)}"
         )
+
 
 # ---------------------------------------------------------------------
 
@@ -292,7 +291,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         info = get_normalization_info()
         print(info['rms_norm']['description'])
         print(info['zero_centered_rms_norm']['use_case'])
-        print(info['band_rms']['parameters'])
+        print(info['zero_centered_band_rms_norm']['parameters'])
         ```
     """
     return {
@@ -315,6 +314,11 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
             'description': 'Zero-centered RMS normalization combining RMSNorm efficiency with LayerNorm stability',
             'parameters': ['axis', 'epsilon', 'use_scale', 'scale_initializer'],
             'use_case': 'Large language models and transformers requiring enhanced training stability'
+        },
+        'zero_centered_band_rms_norm': {
+            'description': 'Combines zero-centering, RMS, and band constraints for maximum stability',
+            'parameters': ['max_band_width', 'axis', 'epsilon', 'band_initializer', 'band_regularizer'],
+            'use_case': 'Advanced transformer and LLM architectures for ultimate stability and flexibility'
         },
         'band_rms': {
             'description': 'RMS normalization with bounded magnitude constraints',
@@ -368,6 +372,7 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         }
     }
 
+
 # ---------------------------------------------------------------------
 
 def validate_normalization_config(
@@ -392,11 +397,11 @@ def validate_normalization_config(
         # This will pass
         validate_normalization_config('rms_norm', axis=-1, use_scale=True)
 
-        # This will also pass - zero-centered RMS norm
+        # This will also pass - zero-centered band RMS norm
         validate_normalization_config(
-            'zero_centered_rms_norm',
+            'zero_centered_band_rms_norm',
             axis=-1,
-            use_scale=True,
+            max_band_width=0.1,
             epsilon=1e-5
         )
 
@@ -421,7 +426,7 @@ def validate_normalization_config(
         )
 
     # Type-specific validations
-    if normalization_type in ['band_rms', 'adaptive_band_rms', 'band_logit_norm']:
+    if normalization_type in ['band_rms', 'adaptive_band_rms', 'band_logit_norm', 'zero_centered_band_rms_norm']:
         if 'max_band_width' in kwargs:
             max_band_width = kwargs['max_band_width']
             if not isinstance(max_band_width, (int, float)) or max_band_width <= 0:
@@ -453,6 +458,7 @@ def validate_normalization_config(
 
     return True
 
+
 # ---------------------------------------------------------------------
 
 
@@ -480,14 +486,13 @@ def create_normalization_from_config(config: Dict[str, Any]) -> keras.layers.Lay
 
     Example:
         ```python
-        # Configuration for zero-centered RMS normalization
+        # Configuration for zero-centered band RMS normalization
         config = {
-            'type': 'zero_centered_rms_norm',
+            'type': 'zero_centered_band_rms_norm',
             'name': 'llm_norm',
             'epsilon': 1e-5,
             'axis': -1,
-            'use_scale': True,
-            'scale_initializer': 'ones'
+            'max_band_width': 0.1,
         }
 
         layer = create_normalization_from_config(config)

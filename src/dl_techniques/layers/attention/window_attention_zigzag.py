@@ -350,7 +350,8 @@ class WindowZigZagAttention(keras.layers.Layer):
         N_target = self.window_size * self.window_size
         if N_actual > N_target:
             raise ValueError(
-                f"Input sequence length ({N_actual}) > window area ({N_target})."
+                f"Input sequence length ({N_actual}) cannot be greater than "
+                f"window area ({N_target})."
             )
 
         # --- PADDING ---
@@ -376,8 +377,14 @@ class WindowZigZagAttention(keras.layers.Layer):
             if attention_mask is None:
                 attention_mask = padding_mask
             else:
-                # Multiplication acts as a logical AND.
-                attention_mask = attention_mask * padding_mask
+                # The user mask is for the original sequence length. Pad it to
+                # the target length before combining.
+                mask_padding = ops.zeros(
+                    (B_actual, padding_amount), dtype=attention_mask.dtype)
+                padded_user_mask = ops.concatenate(
+                    [attention_mask, mask_padding], axis=1)
+                # Multiplication acts as a logical AND, combining both masks.
+                attention_mask = padded_user_mask * padding_mask
 
         B, N, C = ops.shape(padded_inputs)
 

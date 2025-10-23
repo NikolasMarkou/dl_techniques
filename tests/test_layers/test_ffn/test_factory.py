@@ -665,8 +665,14 @@ class TestFFNFactory:
 
         info = get_ffn_info()
 
-        # Should have exactly 7 factory-supported types
-        expected_types = {'mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp'}
+        # Should have exactly these factory-supported types
+        expected_types = {
+            'mlp',
+            'swiglu',
+            'differential',
+            'glu', 'geglu', 'residual', 'swin_mlp',
+            'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic'
+        }
         actual_types = set(info.keys())
 
         assert actual_types == expected_types, f"Expected {expected_types}, got {actual_types}"
@@ -681,9 +687,20 @@ class TestFFNFactory:
             'glu': {'hidden_dim': 256, 'output_dim': 128},
             'geglu': {'hidden_dim': 256, 'output_dim': 128},
             'residual': {'hidden_dim': 256, 'output_dim': 128},
-            'swin_mlp': {'hidden_dim': 256}
+            'swin_mlp': {'hidden_dim': 256},
+
+            'counting': {'count_dim': 256, 'output_dim': 128},
+            'gated_mlp': {'filters': 256},
+            'power_mlp': {'units': 256},
+            'orthoglu': {'hidden_dim': 256, 'output_dim': 128},
+            'logic': {'logic_dim': 256, 'output_dim': 128}
         }
-        valid_types: List[FFNType] = ['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']
+        valid_types: List[FFNType] = ['mlp',
+            'swiglu',
+            'differential',
+            'glu', 'geglu', 'residual', 'swin_mlp',
+            'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic'
+        ]
         for ffn_type in valid_types:
             layer = create_ffn_layer(ffn_type, **configs[ffn_type])
             assert layer is not None
