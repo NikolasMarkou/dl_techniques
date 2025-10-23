@@ -24,12 +24,12 @@ from typing import Optional, Union, Tuple, List, Any, Dict, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.norms import create_normalization_layer
+from ..ffn import create_ffn_layer
+from ..norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+@keras.saving.register_keras_serializable()
 class sLSTMCell(keras.layers.Layer):
     """
     Scalar LSTM (sLSTM) Cell with exponential gating and normalizer state.
@@ -290,7 +290,7 @@ class sLSTMCell(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+@keras.saving.register_keras_serializable()
 class sLSTMLayer(keras.layers.Layer):
     """
     Scalar LSTM (sLSTM) layer for processing sequences.
@@ -465,7 +465,7 @@ class sLSTMLayer(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+@keras.saving.register_keras_serializable()
 class mLSTMCell(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) Cell with matrix memory and covariance update rule.
@@ -753,7 +753,7 @@ class mLSTMCell(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+@keras.saving.register_keras_serializable()
 class mLSTMLayer(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) layer for processing sequences.
@@ -900,7 +900,7 @@ class mLSTMLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+@keras.saving.register_keras_serializable()
 class sLSTMBlock(keras.layers.Layer):
     """
     sLSTM residual block with post-normalization architecture.
@@ -1096,7 +1096,7 @@ class sLSTMBlock(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+@keras.saving.register_keras_serializable()
 class mLSTMBlock(keras.layers.Layer):
     """
     mLSTM residual block with pre-up-projection architecture.
@@ -1324,3 +1324,5 @@ class mLSTMBlock(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
