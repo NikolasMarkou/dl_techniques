@@ -63,8 +63,8 @@ from typing import Optional, Any, Tuple, Union, Dict, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from .ffn import FFNType
-from .norms import NormalizationType
+from ..ffn import FFNType
+from ..norms import NormalizationType
 from .transformer import TransformerLayer
 
 # ---------------------------------------------------------------------

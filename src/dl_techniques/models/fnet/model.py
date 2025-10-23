@@ -64,7 +64,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
-from dl_techniques.layers.transformer import FFNType, NormalizationPositionType, NormalizationType
+from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
 
 # ---------------------------------------------------------------------
 
@@ -756,6 +756,7 @@ def create_fnet_with_head(
     cache_dir: Optional[str] = None,
     fnet_config_overrides: Optional[Dict[str, Any]] = None,
     head_config_overrides: Optional[Dict[str, Any]] = None,
+    sequence_length: Optional[int] = None,
 ) -> keras.Model:
     """Factory function to create an FNet model with a task-specific head.
 
@@ -782,6 +783,11 @@ def create_fnet_with_head(
     :param head_config_overrides: Optional dictionary to override default head
         configuration. Defaults to None.
     :type head_config_overrides: Optional[Dict[str, Any]]
+    :param sequence_length: The fixed sequence length for the model's inputs.
+        If None, the model will have dynamic sequence length, but this may
+        not be compatible with FNet's Fourier Transform layer which
+        requires a known length at build time. Defaults to None.
+    :type sequence_length: Optional[int]
     :return: A complete `keras.Model` ready for the specified task.
     :rtype: keras.Model
 
@@ -802,6 +808,7 @@ def create_fnet_with_head(
                 fnet_variant="base",
                 task_config=ner_task,
                 pretrained=True,
+                sequence_length=128, # Provide a fixed length
                 head_config_overrides={"use_task_attention": True}
             )
             ner_model.summary()
@@ -828,13 +835,14 @@ def create_fnet_with_head(
     )
 
     # 3. Define inputs and build the end-to-end model
+    input_shape = (sequence_length,) if sequence_length is not None else (None,)
     inputs = {
-        "input_ids": keras.Input(shape=(None,), dtype="int32", name="input_ids"),
+        "input_ids": keras.Input(shape=input_shape, dtype="int32", name="input_ids"),
         "attention_mask": keras.Input(
-            shape=(None,), dtype="int32", name="attention_mask"
+            shape=input_shape, dtype="int32", name="attention_mask"
         ),
         "token_type_ids": keras.Input(
-            shape=(None,), dtype="int32", name="token_type_ids"
+            shape=input_shape, dtype="int32", name="token_type_ids"
         ),
     }
 

@@ -11,7 +11,7 @@ from keras import layers, ops, initializers
 from typing import Optional, Union, Tuple, Dict, Any
 import numpy as np
 
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 
 
 @keras.utils.register_keras_serializable()

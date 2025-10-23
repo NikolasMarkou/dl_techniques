@@ -7,7 +7,7 @@ import tempfile
 import os
 from typing import Any, Dict
 
-from dl_techniques.layers.vision_encoder import (
+from dl_techniques.layers.transformers.vision_encoder import (
     VisionEncoder,
     create_vision_encoder,
     create_vit_encoder,

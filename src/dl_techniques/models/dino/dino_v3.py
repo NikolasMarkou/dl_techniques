@@ -54,7 +54,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.norms import create_normalization_layer

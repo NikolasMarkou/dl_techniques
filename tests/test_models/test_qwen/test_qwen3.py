@@ -27,7 +27,7 @@ from dl_techniques.models.qwen.qwen3 import (
     create_qwen3_generation,
     create_qwen3_classification,
 )
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 
 class TestQwen3ModelBasic:
     """Test basic Qwen3 model functionality with standard transformer blocks."""

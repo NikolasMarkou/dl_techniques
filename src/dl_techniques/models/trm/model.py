@@ -47,7 +47,7 @@ from typing import Optional, Tuple, Dict, Any
 # Local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.transformer import (
+from dl_techniques.layers.transformers import (
     TransformerLayer,
     FFNType,
     AttentionType,

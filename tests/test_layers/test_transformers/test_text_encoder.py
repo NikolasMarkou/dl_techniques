@@ -7,7 +7,7 @@ import tempfile
 import os
 from typing import Any, Dict
 
-from dl_techniques.layers.text_encoder import (
+from dl_techniques.layers.transformers.text_encoder import (
     TextEncoder,
     create_text_encoder,
     create_bert_encoder,

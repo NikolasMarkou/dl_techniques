@@ -76,7 +76,7 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.factory import create_embedding_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 

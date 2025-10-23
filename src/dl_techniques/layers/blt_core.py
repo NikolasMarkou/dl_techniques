@@ -86,9 +86,8 @@ from typing import Optional, Union
 
 from .embedding.positional_embedding import PositionalEmbedding
 from .embedding.rotary_position_embedding import RotaryPositionEmbedding
-
-from dl_techniques.layers.reasoning.hrm_reasoning_module import HierarchicalReasoningModule
-from dl_techniques.layers.reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
+from .reasoning.hrm_reasoning_module import HierarchicalReasoningModule
+from .reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 
 from .blt_blocks import (
     ByteTokenizer, EntropyModel,

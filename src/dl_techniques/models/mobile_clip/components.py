@@ -6,7 +6,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 
 

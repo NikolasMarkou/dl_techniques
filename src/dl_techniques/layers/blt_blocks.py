@@ -222,7 +222,7 @@ from typing import Optional, Dict, Any, List, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from .transformer import TransformerLayer
+from .transformers.transformer import TransformerLayer
 from .attention.multi_head_attention import MultiHeadAttention
 from .embedding.positional_embedding import PositionalEmbedding
 

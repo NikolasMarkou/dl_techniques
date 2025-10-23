@@ -54,7 +54,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
+from dl_techniques.utils.logger import logger
 from .swin_transformer_block import SwinTransformerBlock
 
 # ---------------------------------------------------------------------

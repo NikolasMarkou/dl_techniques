@@ -28,7 +28,7 @@ from typing import Optional, Union, Any, Dict, List, Tuple, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.mann import MannLayer
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetworkLayer

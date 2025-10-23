@@ -6,7 +6,7 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.layer_scale import LearnableMultiplier, MultiplierType
 
 # ---------------------------------------------------------------------

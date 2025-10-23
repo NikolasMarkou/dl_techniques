@@ -8,7 +8,7 @@ import os
 import warnings
 from typing import Any, Dict
 
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers.transformer import TransformerLayer
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 

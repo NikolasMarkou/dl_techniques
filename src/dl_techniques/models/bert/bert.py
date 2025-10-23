@@ -61,7 +61,7 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import (
+from dl_techniques.layers.transformers import (
     FFNType,
     AttentionType,
     TransformerLayer,

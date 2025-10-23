@@ -75,8 +75,8 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable
 # local imports
 # ---------------------------------------------------------------------
 
-from .embedding import create_embedding_layer
-from .norms import create_normalization_layer
+from ..embedding import create_embedding_layer
+from ..norms import create_normalization_layer
 from .transformer import (
     TransformerLayer,
     NormalizationType,
@@ -84,7 +84,7 @@ from .transformer import (
     AttentionType,
     FFNType
 )
-from .sequence_pooling import SequencePooling, PoolingStrategy
+from ..sequence_pooling import SequencePooling, PoolingStrategy
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety

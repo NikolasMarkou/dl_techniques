@@ -64,7 +64,7 @@ from keras import layers, initializers, regularizers, ops
 # local imports
 # ---------------------------------------------------------------------
 
-from .transformer import TransformerLayer
+from .transformers.transformer import TransformerLayer
 
 # ---------------------------------------------------------------------
 
@@ -365,3 +365,5 @@ class RouterLayer(keras.layers.Layer):
         """Creates a layer from its config, properly deserializing sub-layers."""
         config['transformer_layer'] = keras.saving.deserialize_keras_object(config['transformer_layer'])
         return cls(**config)
+
+# ---------------------------------------------------------------------

@@ -7,7 +7,7 @@ import tempfile
 from dl_techniques.layers.ffn.swin_mlp import SwinMLP
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.attention.window_attention import WindowAttention
-from dl_techniques.layers.swin_transformer_block import SwinTransformerBlock
+from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
 
 
 class TestSwinTransformerBlock:

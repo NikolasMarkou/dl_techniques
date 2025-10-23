@@ -63,29 +63,16 @@ model = DINOv1(
 """
 
 import keras
-import numpy as np
-from typing import List, Optional, Union, Tuple, Dict, Any, Literal
+from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
-# Local imports - using existing layers from the framework
+# local imports
 # ---------------------------------------------------------------------
 
-# Use existing transformer layer
-from dl_techniques.layers.transformer import TransformerLayer
-
-# Use existing embedding layers
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
-
-# Use existing normalization factory
 from dl_techniques.layers.norms import create_normalization_layer
-
-# Use existing FFN factory
-from dl_techniques.layers.ffn.factory import create_ffn_from_config
-
-# Use existing stochastic depth
-from dl_techniques.layers.stochastic_depth import StochasticDepth
-
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------

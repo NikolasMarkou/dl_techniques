@@ -57,7 +57,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.transformer import TransformerLayer, FFNType, NormalizationType
+from dl_techniques.layers.transformers import TransformerLayer, FFNType, NormalizationType
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import PositionEmbeddingSine2D
 
 # ---------------------------------------------------------------------

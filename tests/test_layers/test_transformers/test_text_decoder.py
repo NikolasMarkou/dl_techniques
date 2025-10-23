@@ -7,7 +7,7 @@ import tempfile
 import os
 from typing import Any, Dict, Tuple
 
-from dl_techniques.layers.text_decoder import TextDecoder
+from dl_techniques.layers.transformers.text_decoder import TextDecoder
 
 
 class TestTextDecoder:

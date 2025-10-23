@@ -38,7 +38,7 @@ model = create_swin_transformer("large", num_classes=100, input_shape=(384, 384,
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
+from keras import layers, initializers, regularizers
 from typing import List, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -48,7 +48,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.embedding import create_embedding_layer
-from dl_techniques.layers.swin_transformer_block import SwinTransformerBlock
+from dl_techniques.layers.transformers.swin_transformer_block import SwinTransformerBlock
 
 # ---------------------------------------------------------------------
 

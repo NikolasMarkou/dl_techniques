@@ -118,14 +118,14 @@ Technical Notes:
 
 import os
 import keras
-from typing import List, Optional, Union, Dict, Any, Tuple
+from typing import List, Optional, Union, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..layers.ffn.power_mlp_layer import PowerMLPLayer
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.ffn.power_mlp_layer import PowerMLPLayer
 
 
 # ---------------------------------------------------------------------

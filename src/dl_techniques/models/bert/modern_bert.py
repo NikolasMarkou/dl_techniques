@@ -95,7 +95,7 @@ from typing import Optional, Union, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
 

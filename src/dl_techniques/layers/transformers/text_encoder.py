@@ -94,10 +94,10 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, Callable, List
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from .embedding import create_embedding_layer
-from .sequence_pooling import SequencePooling, PoolingStrategy
-from .norms import create_normalization_layer, NormalizationType
+from dl_techniques.utils.logger import logger
+from ..embedding import create_embedding_layer
+from ..sequence_pooling import SequencePooling, PoolingStrategy
+from ..norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, NormalizationPositionType, FFNType
 
 # ---------------------------------------------------------------------

@@ -53,7 +53,7 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 
 # ---------------------------------------------------------------------
 
