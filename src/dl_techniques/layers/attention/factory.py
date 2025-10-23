@@ -380,11 +380,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_initializer': "zeros",
             'kernel_regularizer': None,
             'bias_regularizer': None,
+            'use_hierarchical_routing': False,
             'use_adaptive_softmax': False,
-            'min_temp': 0.1,
-            'max_temp': 1.0,
-            'entropy_threshold': 0.5,
-            'polynomial_coeffs': None,
+            'adaptive_softmax_config': None,
         },
         'use_case': (
             'Core component for encoder-decoder models, Perceiver-style architectures, and any '
@@ -654,7 +652,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
             )
 
     # Validate positive float parameters
-    positive_float_params = ['min_temp', 'max_temp']
+    positive_float_params = []
     for param in positive_float_params:
         if param in kwargs and kwargs[param] <= 0:
             raise ValueError(
@@ -664,8 +662,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     # Validate probability/rate parameters (0.0 to 1.0)
     rate_params = [
         'dropout_rate', 'attention_dropout_rate', 'attn_dropout_rate',
-        'proj_dropout_rate', 'lambda_init', 'rope_percentage',
-        'entropy_threshold'
+        'proj_dropout_rate', 'lambda_init', 'rope_percentage'
     ]
     for param in rate_params:
         if param in kwargs and not (0.0 <= kwargs[param] <= 1.0):

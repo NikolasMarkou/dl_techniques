@@ -224,16 +224,16 @@ attn = create_attention_layer(
 ```
 
 ### `multi_head_cross`
-**Note:** This is a powerful base layer not directly exposed via the factory. Instantiate it directly for advanced use cases like adaptive temperature softmax. `multi_head` and `perceiver` are simplified wrappers around this layer.  
 **Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0), `shared_qk_projections` (default: False), `use_adaptive_softmax` (default: False)
+**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0), `shared_qk_projections` (default: False), `use_adaptive_softmax` (default: False), `use_hierarchical_routing` (default: False), `adaptive_softmax_config` (default: None)
 ```python
-from dl_techniques.layers.attention import MultiHeadCrossAttention
-# Cross-attention with adaptive temperature
-attn = MultiHeadCrossAttention(
+# Create a cross-attention layer with adaptive temperature
+attn = create_attention_layer(
+    'multi_head_cross',
     dim=512,
     num_heads=8,
-    use_adaptive_softmax=True
+    use_adaptive_softmax=True,
+    adaptive_softmax_config={'min_temp': 0.2, 'max_temp': 1.5}
 )
 ```
 

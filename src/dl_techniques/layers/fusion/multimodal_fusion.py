@@ -298,7 +298,7 @@ class MultiModalFusion(keras.layers.Layer):
                         attn_config.setdefault('dim', self.dim)
 
                         attn_layer = create_attention_layer(
-                            'multi_head_cross',
+                            attention_type='multi_head_cross',
                             name=f'cross_attn_{layer_idx}_{i}_to_{j}',
                             **attn_config
                         )
@@ -311,7 +311,7 @@ class MultiModalFusion(keras.layers.Layer):
 
                 # Create normalization layer for this modality
                 norm_layer = create_normalization_layer(
-                    self.norm_type,
+                    normalization_type=self.norm_type,
                     name=f'norm_{layer_idx}_{i}',
                     **self.norm_config
                 )
@@ -324,7 +324,7 @@ class MultiModalFusion(keras.layers.Layer):
                 ffn_config['output_dim'] = self.dim
 
                 ffn_layer = create_ffn_layer(
-                    self.ffn_type,
+                    ffn_type=self.ffn_type,
                     name=f'ffn_{layer_idx}_{i}',
                     **ffn_config
                 )
@@ -343,7 +343,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create projection layer for concatenated features
         proj_layer = keras.layers.Dense(
-            self.dim,
+            units=self.dim,
             activation=self.activation,
             name='concat_projection',
             kernel_initializer=self.kernel_initializer,
@@ -360,7 +360,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create normalization layer
         norm_layer = create_normalization_layer(
-            self.norm_type,
+            normalization_type=self.norm_type,
             name='concat_norm',
             **self.norm_config
         )
@@ -398,7 +398,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create normalization layer
         norm_layer = create_normalization_layer(
-            self.norm_type,
+            normalization_type=self.norm_type,
             name='elementwise_norm',
             **self.norm_config
         )
@@ -411,7 +411,7 @@ class MultiModalFusion(keras.layers.Layer):
         ffn_config['output_dim'] = self.dim
 
         ffn_layer = create_ffn_layer(
-            self.ffn_type,
+            ffn_type=self.ffn_type,
             name='elementwise_ffn',
             **ffn_config
         )
@@ -431,7 +431,7 @@ class MultiModalFusion(keras.layers.Layer):
         # Create gating layers for each modality
         for i in range(num_modalities):
             gate = keras.layers.Dense(
-                self.dim,
+                units=self.dim,
                 activation='sigmoid',  # Sigmoid for gating [0, 1]
                 name=f'gate_{i}',
                 kernel_initializer=self.kernel_initializer,
@@ -444,7 +444,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create projection for gated concatenated features
         proj = keras.layers.Dense(
-            self.dim,
+            units=self.dim,
             activation=self.activation,
             name='gated_projection',
             kernel_initializer=self.kernel_initializer,
@@ -459,7 +459,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create normalization layer
         norm = create_normalization_layer(
-            self.norm_type,
+            normalization_type=self.norm_type,
             name='gated_norm',
             **self.norm_config
         )
@@ -483,7 +483,7 @@ class MultiModalFusion(keras.layers.Layer):
             attn_config.setdefault('dim', self.dim)
 
             attn_layer = create_attention_layer(
-                'multi_head_cross',
+                attention_type='multi_head_cross',
                 name=f'pool_attention_{i}',
                 **attn_config
             )
@@ -493,7 +493,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create projection for pooled features
         proj = keras.layers.Dense(
-            self.dim,
+            units=self.dim,
             activation=self.activation,
             name='pool_projection',
             kernel_initializer=self.kernel_initializer,
@@ -525,7 +525,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create projection for flattened bilinear features
         proj = keras.layers.Dense(
-            self.dim,
+            units=self.dim,
             activation=self.activation,
             name='bilinear_projection',
             kernel_initializer=self.kernel_initializer,
@@ -542,7 +542,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create normalization layer
         norm = create_normalization_layer(
-            self.norm_type,
+            normalization_type=self.norm_type,
             name='bilinear_norm',
             **self.norm_config
         )
@@ -567,7 +567,7 @@ class MultiModalFusion(keras.layers.Layer):
         # Create multiple projection layers for tensor decomposition
         for i in range(self.num_tensor_projections):
             proj = keras.layers.Dense(
-                self.dim,
+                units=self.dim,
                 activation=self.activation,
                 name=f'tensor_proj_{i}',
                 kernel_initializer=self.kernel_initializer,
@@ -580,7 +580,7 @@ class MultiModalFusion(keras.layers.Layer):
 
         # Create final projection layer
         final_proj = keras.layers.Dense(
-            self.dim,
+            units=self.dim,
             name='tensor_final_proj',
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
