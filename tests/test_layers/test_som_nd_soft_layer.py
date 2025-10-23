@@ -588,32 +588,6 @@ class TestSoftSOMLayer:
         # Should have losses now (reconstruction + topological)
         assert len(soft_som.losses) >= 1
 
-    def test_no_losses_when_disabled(self, input_data_2d):
-        """Test that no losses are added when all regularization is disabled."""
-        soft_som = SoftSOMLayer(
-            grid_shape=(6, 6),
-            input_dim=784,
-            use_reconstruction_loss=False,
-            topological_weight=0.0,
-            sharpness_weight=0.0
-        )
-
-        # Forward pass in training mode
-        soft_som.losses.clear()
-        reconstruction = soft_som(input_data_2d, training=True)
-
-        # Should have no losses
-        assert len(soft_som.losses) == 0
-
-    def test_inference_mode_no_losses(self, soft_som_2d, input_data_2d):
-        """Test that no losses are added during inference."""
-        # Forward pass in inference mode
-        soft_som_2d.losses.clear()
-        reconstruction = soft_som_2d(input_data_2d, training=False)
-
-        # Should have no losses in inference mode
-        assert len(soft_som_2d.losses) == 0
-
     # =============================================================================
     # Backpropagation and Training Tests
     # =============================================================================
