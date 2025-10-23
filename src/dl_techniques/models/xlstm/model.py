@@ -4,11 +4,6 @@ xLSTM (Extended Long Short-Term Memory) Implementation.
 This module provides a production-ready implementation of the xLSTM architecture
 from the paper "xLSTM: Extended Long Short-Term Memory" (arXiv:2405.04517v2).
 
-The implementation follows the dl_techniques framework standards:
-- Uses normalization factory for all normalization layers
-- Uses FFN factory for feed-forward networks
-- Follows Keras 3 custom layer/model guidelines
-- Implements proper serialization and build patterns
 
 References:
     Beck, M., et al. (2024). xLSTM: Extended Long Short-Term Memory.
@@ -19,11 +14,16 @@ import keras
 from keras import layers, initializers
 from typing import Optional, Union, Any, Dict, Literal
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.time_series.xlstm_blocks import mLSTMBlock, sLSTMBlock
 
-@keras.saving.register_keras_serializable(package="xLSTM")
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
 class xLSTM(keras.Model):
     """
     Complete xLSTM architecture with stacked sLSTM and mLSTM blocks.
@@ -314,3 +314,5 @@ class xLSTM(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> 'xLSTM':
         """Create model from configuration."""
         return cls(**config)
+
+# ---------------------------------------------------------------------
