@@ -64,6 +64,7 @@ output_partial = window_attn(x_partial) # Shape: (4, 20, 96)
 """
 
 import keras
+import tensorflow as tf
 from typing import Tuple, Optional, Dict, Any, Union
 
 # ---------------------------------------------------------------------
@@ -311,47 +312,37 @@ class WindowAttention(keras.layers.Layer):
         Returns:
             Output tensor of shape (B, N_actual, C)
         """
-        B_actual, N_actual, C_actual = keras.ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
+        B_actual, N_actual, C_actual = input_shape[0], input_shape[1], input_shape[2]
         N_target = self.window_size * self.window_size
 
-        if N_actual > N_target:
-            raise ValueError(
-                f"Input sequence length ({N_actual}) cannot be greater than the "
-                f"window area ({N_target})."
-            )
+        # Use tf.Assert for runtime validation. This is graph-compatible.
+        tf.Assert(tf.less_equal(N_actual, N_target), [
+            "Input sequence length (", N_actual, ") cannot be greater than the window area (", N_target, ")."
+        ])
 
-        # --- START PADDING LOGIC ---
-        padded_inputs = inputs
-        padding_mask = None
-        if N_actual < N_target:
-            padding_amount = N_target - N_actual
-            # Pad inputs with zeros to match the window size
-            padding_tensor = keras.ops.zeros((B_actual, padding_amount, C_actual), dtype=inputs.dtype)
-            padded_inputs = keras.ops.concatenate([inputs, padding_tensor], axis=1)
+        # --- START PADDING & MASKING LOGIC (unconditional graph-compatible ops) ---
+        padding_amount = N_target - N_actual
 
-            # Create an internal mask to ignore padded tokens
-            padding_mask = keras.ops.concatenate([
-                keras.ops.ones((B_actual, N_actual), dtype="int32"),
-                keras.ops.zeros((B_actual, padding_amount), dtype="int32")
-            ], axis=1)
+        # Pad inputs if necessary. If padding_amount is 0, this is a no-op.
+        padding_tensor = keras.ops.zeros((B_actual, padding_amount, C_actual), dtype=inputs.dtype)
+        padded_inputs = keras.ops.concatenate([inputs, padding_tensor], axis=1)
 
-        # Merge the internal padding mask with any user-provided mask
+        # Create an internal mask for padded tokens.
+        internal_padding_mask = keras.ops.concatenate([
+            keras.ops.ones((B_actual, N_actual), dtype="int32"),
+            keras.ops.zeros((B_actual, padding_amount), dtype="int32")
+        ], axis=1)
+
+        # Merge with user-provided attention_mask if it exists.
+        final_attention_mask = internal_padding_mask
         if attention_mask is not None:
-            # Pad user mask to target size if necessary
-            if keras.ops.shape(attention_mask)[1] < N_target:
-                 padding_amount_mask = N_target - keras.ops.shape(attention_mask)[1]
-                 mask_padding = keras.ops.zeros((B_actual, padding_amount_mask), dtype=attention_mask.dtype)
-                 attention_mask = keras.ops.concatenate([attention_mask, mask_padding], axis=1)
-
-            if padding_mask is not None:
-                # Combine masks using multiplication (logical AND)
-                attention_mask = keras.ops.cast(attention_mask, dtype="int32") * padding_mask
-            # If no padding_mask, user mask is used directly
-        elif padding_mask is not None:
-            attention_mask = padding_mask
-        # If both are None, attention_mask remains None
-
-        # --- END PADDING LOGIC ---
+            user_mask_len = keras.ops.shape(attention_mask)[1]
+            mask_padding_amount = N_target - user_mask_len
+            mask_padding = keras.ops.zeros((B_actual, mask_padding_amount), dtype=attention_mask.dtype)
+            padded_user_mask = keras.ops.concatenate([attention_mask, mask_padding], axis=1)
+            final_attention_mask = keras.ops.cast(padded_user_mask, "int32") * internal_padding_mask
+        # --- END PADDING & MASKING LOGIC ---
 
         B, N, C = keras.ops.shape(padded_inputs) # Now B, N_target, C
 
@@ -372,23 +363,22 @@ class WindowAttention(keras.layers.Layer):
             self.relative_position_bias_table,
             keras.ops.reshape(self.relative_position_index, (-1,)),
             axis=0
-        )  # (N*N, num_heads)
+        )  # (N_target*N_target, num_heads)
 
         relative_position_bias = keras.ops.reshape(
-            relative_position_bias, (N, N, -1)
+            relative_position_bias, (N_target, N_target, -1)
         )  # (N, N, num_heads)
 
         relative_position_bias = keras.ops.transpose(relative_position_bias, (2, 0, 1))  # (num_heads, N, N)
         attn = attn + keras.ops.expand_dims(relative_position_bias, 0)  # (B, num_heads, N, N)
 
-        # Apply attention mask if provided
-        if attention_mask is not None:
-            # Reshape mask for broadcasting: (B, 1, 1, N)
-            broadcast_mask = keras.ops.reshape(attention_mask, (B, 1, 1, N))
-            # Convert mask to additive form: 1 -> 0, 0 -> -inf
-            inf_value = keras.ops.convert_to_tensor(-1e9, dtype=attn.dtype)
-            additive_mask = (1.0 - keras.ops.cast(broadcast_mask, dtype=attn.dtype)) * inf_value
-            attn = attn + additive_mask
+        # Apply attention mask
+        # Reshape mask for broadcasting: (B, 1, 1, N)
+        broadcast_mask = keras.ops.reshape(final_attention_mask, (B, 1, 1, N))
+        # Convert mask to additive form: 1 -> 0, 0 -> -inf
+        inf_value = keras.ops.convert_to_tensor(-1e9, dtype=attn.dtype)
+        additive_mask = (1.0 - keras.ops.cast(broadcast_mask, dtype=attn.dtype)) * inf_value
+        attn = attn + additive_mask
 
         # Apply softmax
         attn = keras.ops.softmax(attn, axis=-1)  # (B, num_heads, N, N)
@@ -409,13 +399,12 @@ class WindowAttention(keras.layers.Layer):
         if self.proj_dropout is not None:
             x = self.proj_dropout(x, training=training)
 
-        # --- START UN-PADDING LOGIC ---
-        # Remove padding from the output if it was added
-        if N_actual < N_target:
-            x = x[:, :N_actual, :]
-        # --- END UN-PADDING LOGIC ---
+        # --- UN-PADDING LOGIC ---
+        # Slice the output tensor back to the original sequence length.
+        # If no padding was added (padding_amount=0), this is a no-op.
+        output = x[:, :N_actual, :]
 
-        return x
+        return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape (identical to input shape)."""

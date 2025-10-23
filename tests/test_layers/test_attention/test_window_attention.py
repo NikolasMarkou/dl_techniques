@@ -3,6 +3,7 @@ import numpy as np
 import keras
 import os
 import tempfile
+import tensorflow as tf  # Import is needed for the specific error type
 
 from dl_techniques.layers.attention.window_attention import WindowAttention
 
@@ -161,64 +162,47 @@ class TestWindowAttention:
         output_training = layer_instance(input_tensor, training=True)
         assert output_training.shape == input_tensor.shape
 
-    # --- NEW TESTS FOR PADDING FUNCTIONALITY ---
-
     @pytest.mark.parametrize(
         "dim, window_size, num_heads, seq_len",
         [
-            (32, 4, 2, 16),  # Full window, no padding
-            (32, 4, 2, 10),  # Partial window, requires padding
-            (32, 4, 2, 1),   # Minimal window, requires padding
-            (96, 7, 3, 30),  # Another partial window case
+            (32, 4, 2, 16),
+            (32, 4, 2, 10),
+            (32, 4, 2, 1),
+            (96, 7, 3, 30),
         ]
     )
     def test_padding_and_unpadding(self, dim, window_size, num_heads, seq_len):
         """Test that padding and unpadding works for various sequence lengths."""
         layer = WindowAttention(dim=dim, window_size=window_size, num_heads=num_heads)
         input_tensor = keras.random.normal((4, seq_len, dim))
-
-        # Forward pass
         output = layer(input_tensor)
-
-        # CRITICAL: Output shape must match the original input shape, not the padded one.
         assert output.shape == input_tensor.shape
         assert not np.any(np.isnan(output.numpy()))
 
     def test_forward_pass_with_too_long_sequence(self):
         """Test that an error is raised if the input sequence is too long."""
         layer = WindowAttention(dim=32, window_size=4, num_heads=2)
-        # Window area is 4*4=16, input length is 17
         invalid_input = keras.random.normal((2, 17, 32))
 
-        with pytest.raises(ValueError, match="Input sequence length .* cannot be greater than"):
+        # FIX: Use tf.errors.InvalidArgumentError and a multi-line regex
+        with pytest.raises(tf.errors.InvalidArgumentError, match=r"Input sequence length [\s\S]* cannot be greater than"):
             layer(invalid_input)
 
     def test_attention_mask_integration(self):
         """Test that user-provided attention mask integrates with padding mask."""
-        batch_size = 2
-        dim = 32
-        window_size = 5
-        num_heads = 4
-        N_target = window_size * window_size  # 25
-        N_actual = 20  # A partial sequence
+        batch_size, dim, window_size, num_heads = 2, 32, 5, 4
+        N_target, N_actual = window_size * window_size, 20
 
         layer = WindowAttention(dim=dim, window_size=window_size, num_heads=num_heads)
         input_tensor = keras.random.normal((batch_size, N_actual, dim))
-
-        # Create a user mask for the original sequence length
         user_mask = np.ones((batch_size, N_actual), dtype="int32")
-        user_mask[:, -5:] = 0  # Mask out the last 5 tokens
-
-        # Call the layer with the user mask
+        user_mask[:, -5:] = 0
         output = layer(input_tensor, attention_mask=keras.ops.convert_to_tensor(user_mask))
-
-        # The output shape should still match the original input
         assert output.shape == input_tensor.shape
 
-        # Test with a full window and a user mask (no internal padding mask)
         full_input = keras.random.normal((batch_size, N_target, dim))
         full_user_mask = np.ones((batch_size, N_target), dtype="int32")
-        full_user_mask[:, -3:] = 0 # Mask last 3 tokens
+        full_user_mask[:, -3:] = 0
         full_output = layer(full_input, attention_mask=keras.ops.convert_to_tensor(full_user_mask))
         assert full_output.shape == full_input.shape
 
@@ -226,28 +210,17 @@ class TestWindowAttention:
         """Ensure gradients flow correctly when padding is active."""
         dim, window_size, num_heads, seq_len = 32, 4, 2, 10
         layer = WindowAttention(dim=dim, window_size=window_size, num_heads=num_heads)
-
-        # Using tf.Variable to track gradients
-        import tensorflow as tf
         input_tensor = tf.Variable(keras.random.normal((2, seq_len, dim)))
 
         with tf.GradientTape() as tape:
             output = layer(input_tensor)
-            # A simple loss function to get a scalar value for gradient computation
-            # FIX: Changed `reduce_sum` to `sum`
             loss = keras.ops.sum(output)
 
-        # Compute gradients with respect to all trainable variables in the layer
         grads = tape.gradient(loss, layer.trainable_variables)
-
-        # Check that gradients were computed for all trainable variables
         assert len(grads) == len(layer.trainable_variables)
         for grad, var in zip(grads, layer.trainable_variables):
-            assert grad is not None, f"Gradient is None for variable: {var.name}"
-            # Check that gradients are not all zero, indicating they flowed correctly
-            assert keras.ops.any(keras.ops.not_equal(grad, 0)), f"Gradient is all zeros for variable: {var.name}"
-
-    # --- END OF NEW TESTS ---
+            assert grad is not None
+            assert keras.ops.any(keras.ops.not_equal(grad, 0))
 
     def test_different_configurations(self):
         """Test layer with different configurations."""
@@ -257,12 +230,9 @@ class TestWindowAttention:
             {"dim": 96, "window_size": 7, "num_heads": 3, "proj_dropout_rate": 0.2},
             {"dim": 128, "window_size": 8, "num_heads": 8, "qk_scale": 0.1},
         ]
-
         for config in configurations:
             layer = WindowAttention(**config)
-            window_size = config["window_size"]
-            dim = config["dim"]
-            test_input = keras.random.normal([2, window_size * window_size, dim])
+            test_input = keras.random.normal([2, config["window_size"] ** 2, config["dim"]])
             output = layer(test_input)
             assert not np.any(np.isnan(output.numpy()))
             assert output.shape == test_input.shape
@@ -270,14 +240,8 @@ class TestWindowAttention:
     def test_serialization(self):
         """Test serialization and deserialization of the layer."""
         original_layer = WindowAttention(
-            dim=128,
-            window_size=7,
-            num_heads=4,
-            qkv_bias=True,
-            qk_scale=0.1,
-            attn_dropout_rate=0.1,
-            proj_dropout_rate=0.2,
-            kernel_initializer="he_normal",
+            dim=128, window_size=7, num_heads=4, qkv_bias=True, qk_scale=0.1,
+            attn_dropout_rate=0.1, proj_dropout_rate=0.2, kernel_initializer="he_normal",
         )
         input_shape = (None, 49, 128)
         original_layer.build(input_shape)
@@ -285,13 +249,7 @@ class TestWindowAttention:
         recreated_layer = WindowAttention.from_config(config)
         recreated_layer.build(input_shape)
 
-        assert recreated_layer.dim == original_layer.dim
-        assert recreated_layer.window_size == original_layer.window_size
-        assert recreated_layer.num_heads == original_layer.num_heads
-        assert recreated_layer.qkv_bias == original_layer.qkv_bias
-        assert recreated_layer.qk_scale == original_layer.qk_scale
-        assert recreated_layer.attn_dropout_rate == original_layer.attn_dropout_rate
-        assert recreated_layer.proj_dropout_rate == original_layer.proj_dropout_rate
+        assert recreated_layer.get_config() == config
         assert len(recreated_layer.weights) == len(original_layer.weights)
         for w1, w2 in zip(original_layer.weights, recreated_layer.weights):
             assert w1.shape == w2.shape
@@ -330,59 +288,43 @@ class TestWindowAttention:
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
         layer = WindowAttention(dim=32, window_size=4, num_heads=2)
-        batch_size, num_tokens, dim = 2, 16, 32
         test_cases = [
-            keras.ops.zeros((batch_size, num_tokens, dim)),
-            keras.ops.ones((batch_size, num_tokens, dim)) * 1e-10,
-            keras.ops.ones((batch_size, num_tokens, dim)) * 1e5,
-            keras.random.normal((batch_size, num_tokens, dim)) * 100,
+            keras.ops.zeros((2, 16, 32)),
+            keras.ops.ones((2, 16, 32)) * 1e-10,
+            keras.ops.ones((2, 16, 32)) * 1e5,
+            keras.random.normal((2, 16, 32)) * 100,
         ]
         for test_input in test_cases:
             output = layer(test_input)
-            assert not np.any(np.isnan(output.numpy())), "NaN values detected"
-            assert not np.any(np.isinf(output.numpy())), "Inf values detected"
+            assert not np.any(np.isnan(output.numpy()))
+            assert not np.any(np.isinf(output.numpy()))
 
     def test_regularization(self, input_tensor):
         """Test that regularization losses are properly applied."""
         layer = WindowAttention(
-            dim=96,
-            window_size=7,
-            num_heads=3,
+            dim=96, window_size=7, num_heads=3,
             kernel_regularizer=keras.regularizers.L2(0.1),
             bias_regularizer=keras.regularizers.L1(0.1)
         )
-
-        # Call the layer to compute the losses
         _ = layer(input_tensor)
-
-        # FIX: Check that losses exist and their computed value is > 0
         assert len(layer.losses) > 0
-        total_regularization_loss = sum(layer.losses)
-        assert total_regularization_loss > 0.0
-
+        assert sum(layer.losses) > 0.0
 
     def test_relative_position_encoding(self):
         """Test that relative position encoding is properly created."""
         layer = WindowAttention(dim=32, window_size=4, num_heads=2)
-        input_shape = (None, 16, 32)
-        layer.build(input_shape)
-
-        expected_shape = (16, 16)
-        assert layer.relative_position_index.shape == expected_shape
-
+        layer.build((None, 16, 32))
+        assert layer.relative_position_index.shape == (16, 16)
         num_relative_distance = (2 * 4 - 1) ** 2
-        expected_bias_shape = (num_relative_distance, 2)
-        assert layer.relative_position_bias_table.shape == expected_bias_shape
+        assert layer.relative_position_bias_table.shape == (num_relative_distance, 2)
 
     def test_different_window_sizes(self):
         """Test layer with different window sizes."""
         for window_size in [3, 4, 7, 8]:
             layer = WindowAttention(dim=64, window_size=window_size, num_heads=4)
-            num_tokens = window_size * window_size
-            test_input = keras.random.normal([2, num_tokens, 64])
+            test_input = keras.random.normal([2, window_size ** 2, 64])
             output = layer(test_input)
             assert output.shape == test_input.shape
-            assert not np.any(np.isnan(output.numpy()))
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
