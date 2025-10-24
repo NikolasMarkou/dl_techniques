@@ -520,7 +520,10 @@ class WindowZigZagAttention(keras.layers.Layer):
     """
 
     def __init__(
-        self, dim: int, window_size: int, num_heads: int, **kwargs: Any
+        self,
+        dim: int,
+        window_size: int,
+        num_heads: int, **kwargs: Any
     ):
         super().__init__(name=kwargs.pop("name", "window_zigzag_attention"))
         self.dim = dim
