@@ -43,18 +43,9 @@ management. The gating enables the model to dynamically control the lifespan
 of information, while the delta rule provides a precise mechanism for writing
 new, error-corrected information into memory.
 
-Mathematical Foundation:
-
-The conceptual update at each timestep `t` can be summarized as:
-`S_t = α_t * S_{t-1} + β_t * ΔS_t`
-where `ΔS_t` is the memory update derived from the delta rule using the
-current key `K_t` and value `V_t`. This formulation allows the network to
-learn complex temporal dependencies by deciding when to preserve, forget, or
-intensely update its associative memory based on the input sequence.
-
-Additional architectural features like short convolutions on Q, K, and V are
-used to inject local, position-aware context into the representations before
-the main recurrent update, further enhancing the model's performance.
+This implementation is highly configurable, allowing for different normalization
+schemes for Q, K, and V, and a customizable output feed-forward network (FFN)
+to replace the default output gating mechanism.
 
 References:
 
@@ -70,7 +61,7 @@ efficient and powerful sequence models. The core concepts are derived from:
 """
 
 import keras
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 from keras import initializers, layers, ops, regularizers
 
 # ---------------------------------------------------------------------
@@ -78,9 +69,11 @@ from keras import initializers, layers, ops, regularizers
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .norms import create_normalization_layer
+from .ffn.factory import create_ffn_from_config, FFNType
+from .norms import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class GatedDeltaNet(keras.layers.Layer):
@@ -93,9 +86,9 @@ class GatedDeltaNet(keras.layers.Layer):
     This layer implements a sophisticated linear transformer variant that combines:
     - Delta rule mechanism for targeted memory updates
     - Adaptive gating for rapid memory erasure and control
-    - Zero-Centered RMS normalization for training stability
+    - Configurable normalization (default: Zero-Centered RMS) for Q, K, V
     - Short convolution for position-based addressing
-    - Output gating with sigmoid activation for selective information flow
+    - Configurable output FFN (default: Gated Linear Unit) for selective flow
 
     **Intent**: Provide an efficient alternative to standard attention that excels
     at in-context retrieval and long-context understanding while maintaining
@@ -107,47 +100,41 @@ class GatedDeltaNet(keras.layers.Layer):
            ↓
     Q/K/V Linear Projections
            ↓
-    Zero-Centered RMSNorm → Short Conv1D (Q, K, V)
-           ↓                     ↓
-    Alpha/Beta Gating ←----------┘
+    Configurable Norm → Short Conv1D (Q, K, V) → Configurable Activation
+           ↓                                             ↓
+    Alpha/Beta Gating ←----------------------------------┘
            ↓
-    Delta Rule Update (with gating: α_t * delta_update + (1-α_t) * S_{t-1})
+    Delta Rule Update (with gating)
            ↓
-    Output Projection → Sigmoid Gate (⊗) → Output
+    Reshape & Project
+           ↓
+    Configurable Output FFN (default: GLU Gate) → Output
     ```
 
-    **Mathematical Operations**:
-    1. **QKV Transform**: Q = Linear_q(x), K = Linear_k(x), V = Linear_v(x)
-    2. **Normalization**: Q_norm = RMSNorm(Q), K_norm = RMSNorm(K), V_norm = RMSNorm(V)
-    3. **Convolution**: Q_conv = Conv1D(Q_norm), K_conv = Conv1D(K_norm), V_conv = Conv1D(V_norm)
-    4. **Gating Parameters**: α = sigmoid(Linear_α(x)), β = sigmoid(Linear_β(x))
-    5. **Delta Rule**: S_t = α_t * (S_{t-1} + β_t * V_t * K_t^T) + (1-α_t) * S_{t-1}
-    6. **Output**: output = Q_t @ S_t, projected = Linear_out(output), gated = sigmoid(Linear_gate(projected)) ⊗ projected
-
-    The delta rule minimizes MSE between desired and predicted output at each timestep,
-    making it particularly effective for associative recall and in-context retrieval tasks.
-
     Args:
-        dim: Integer, the model dimension size. Must be positive and divisible by num_heads.
-            This determines the input/output feature size and state dimension.
-        num_heads: Integer, number of attention heads for multi-head processing.
-            Must be positive. Each head operates independently on dim//num_heads dimensions.
+        dim: Integer, the model dimension size. Must be positive.
+        num_heads: Integer, number of attention heads. Must be positive.
         max_seq_len: Integer, the maximum sequence length for the `while_loop`.
-            This sets the `maximum_iterations` to prevent excessively long loops.
         head_dim: Optional integer, dimension per head. If None, defaults to dim // num_heads.
-            Allows for custom head dimensionality independent of input dimension.
-        conv_kernel_size: Integer, kernel size for short convolution layers.
-            Typically 4 for position-based addressing. Must be positive. Defaults to 4.
-        dropout_rate: Float between 0 and 1, dropout rate applied to intermediate representations.
-            Used for regularization during training. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias terms in linear layers.
-            Modern architectures often omit bias for efficiency. Defaults to False.
-        kernel_initializer: String or initializer, initialization for linear layer weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer, initialization for bias weights (if used).
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for linear layer weights.
-        bias_regularizer: Optional regularizer for bias weights.
+        conv_kernel_size: Integer, kernel size for short convolution layers. Defaults to 4.
+        dropout_rate: Float, dropout rate for regularization. Defaults to 0.0.
+        activation: String or callable, activation function applied after convolutions. Defaults to 'silu'.
+        normalization_type: NormalizationType, type of normalization to use for Q, K, V.
+            Defaults to 'zero_centered_rms_norm'.
+        q_norm_args: Optional dict of arguments for the Q normalization layer.
+        k_norm_args: Optional dict of arguments for the K normalization layer.
+        v_norm_args: Optional dict of arguments for the V normalization layer.
+        ffn_type: Optional[FFNType], type of feed-forward network for the output stage.
+            If None (default), uses the original gated linear unit output.
+            Otherwise, replaces the output projection with a specified FFN from the factory.
+        ffn_args: Optional dict of arguments for the custom FFN layer.
+        intermediate_size: Optional int, intermediate size for standard FFNs if `ffn_type` is used.
+            Defaults to `dim * 4` if not provided.
+        use_bias: Boolean, whether to use bias in linear layers. Defaults to False.
+        kernel_initializer: String or initializer for weights. Defaults to 'glorot_uniform'.
+        bias_initializer: String or initializer for biases. Defaults to 'zeros'.
+        kernel_regularizer: Optional regularizer for weights.
+        bias_regularizer: Optional regularizer for biases.
         **kwargs: Additional arguments for Layer base class.
 
     Input shape:
@@ -155,28 +142,27 @@ class GatedDeltaNet(keras.layers.Layer):
 
     Output shape:
         3D tensor with shape: `(batch_size, sequence_length, dim)`.
-        Same shape as input, preserving sequence structure.
 
     Example:
         ```python
-        # Basic configuration
+        # Default configuration (Zero-Centered RMSNorm, SiLU activation, GLU output)
         layer = GatedDeltaNet(dim=768, num_heads=12, max_seq_len=2048)
 
-        # Advanced configuration with custom parameters
-        layer = GatedDeltaNet(
+        # Using LayerNorm, GELU activation, and a SwiGLU FFN output
+        layer_custom = GatedDeltaNet(
             dim=768,
             num_heads=12,
             max_seq_len=4096,
-            head_dim=128,
-            conv_kernel_size=4,
-            dropout_rate=0.1,
-            use_bias=False,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
+            activation='gelu',
+            normalization_type='layer_norm',
+            ffn_type='swiglu',
+            intermediate_size=3072, # 768 * 4
+            dropout_rate=0.1
         )
 
         # Usage in model
-        inputs = keras.Input(shape=(seq_len, 768))
-        outputs = layer(inputs)
+        inputs = keras.Input(shape=(None, 768))
+        outputs = layer_custom(inputs)
         ```
     """
 
@@ -188,6 +174,14 @@ class GatedDeltaNet(keras.layers.Layer):
         head_dim: Optional[int] = None,
         conv_kernel_size: int = 4,
         dropout_rate: float = 0.0,
+        activation: Union[str, Callable] = "silu",
+        normalization_type: NormalizationType = "zero_centered_rms_norm",
+        q_norm_args: Optional[Dict[str, Any]] = None,
+        k_norm_args: Optional[Dict[str, Any]] = None,
+        v_norm_args: Optional[Dict[str, Any]] = None,
+        ffn_type: Optional[FFNType] = None,
+        ffn_args: Optional[Dict[str, Any]] = None,
+        intermediate_size: Optional[int] = None,
         use_bias: bool = False,
         kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, initializers.Initializer] = "zeros",
@@ -209,6 +203,26 @@ class GatedDeltaNet(keras.layers.Layer):
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.conv_kernel_size = conv_kernel_size
         self.dropout_rate = dropout_rate
+        self.activation = activation
+        self.normalization_type = normalization_type
+        self.q_norm_args = q_norm_args or (
+            {"epsilon": 1e-5, "use_scale": True}
+            if normalization_type == "zero_centered_rms_norm"
+            else {}
+        )
+        self.k_norm_args = k_norm_args or (
+            {"epsilon": 1e-5, "use_scale": True}
+            if normalization_type == "zero_centered_rms_norm"
+            else {}
+        )
+        self.v_norm_args = v_norm_args or (
+            {"epsilon": 1e-5, "use_scale": True}
+            if normalization_type == "zero_centered_rms_norm"
+            else {}
+        )
+        self.ffn_type = ffn_type
+        self.ffn_args = ffn_args or {}
+        self.intermediate_size = intermediate_size
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -220,133 +234,53 @@ class GatedDeltaNet(keras.layers.Layer):
         self.v_dim = self.num_heads * self.head_dim * 2
 
         # Q/K/V projections
-        self.q_proj = layers.Dense(
-            self.qk_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="q_proj",
-        )
-        self.k_proj = layers.Dense(
-            self.qk_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="k_proj",
-        )
-        self.v_proj = layers.Dense(
-            self.v_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="v_proj",
-        )
+        self.q_proj = layers.Dense(self.qk_dim, use_bias=use_bias, name="q_proj")
+        self.k_proj = layers.Dense(self.qk_dim, use_bias=use_bias, name="k_proj")
+        self.v_proj = layers.Dense(self.v_dim, use_bias=use_bias, name="v_proj")
 
-        # Zero-Centered RMS Normalization layers
-        self.q_norm = create_normalization_layer(
-            "zero_centered_rms_norm", epsilon=1e-5, use_scale=True, name="q_norm"
-        )
-        self.k_norm = create_normalization_layer(
-            "zero_centered_rms_norm", epsilon=1e-5, use_scale=True, name="k_norm"
-        )
-        self.v_norm = create_normalization_layer(
-            "zero_centered_rms_norm", epsilon=1e-5, use_scale=True, name="v_norm"
-        )
+        # Configurable Normalization layers
+        self.q_norm = self._create_normalization_layer("q_norm", self.q_norm_args)
+        self.k_norm = self._create_normalization_layer("k_norm", self.k_norm_args)
+        self.v_norm = self._create_normalization_layer("v_norm", self.v_norm_args)
 
         # Short convolution layers (depthwise separable)
         self.q_conv = layers.Conv1D(
-            filters=self.qk_dim,
-            kernel_size=conv_kernel_size,
-            padding="causal",
-            groups=self.qk_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="q_conv",
+            self.qk_dim, conv_kernel_size, padding="causal", groups=self.qk_dim, name="q_conv"
         )
         self.k_conv = layers.Conv1D(
-            filters=self.qk_dim,
-            kernel_size=conv_kernel_size,
-            padding="causal",
-            groups=self.qk_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="k_conv",
+            self.qk_dim, conv_kernel_size, padding="causal", groups=self.qk_dim, name="k_conv"
         )
         self.v_conv = layers.Conv1D(
-            filters=self.v_dim,
-            kernel_size=conv_kernel_size,
-            padding="causal",
-            groups=self.v_dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            name="v_conv",
+            self.v_dim, conv_kernel_size, padding="causal", groups=self.v_dim, name="v_conv"
         )
 
         # Gating parameter projections (alpha and beta)
-        self.alpha_proj = layers.Dense(
-            self.num_heads,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="alpha_proj",
-        )
-        self.beta_proj = layers.Dense(
-            self.num_heads,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="beta_proj",
-        )
+        self.alpha_proj = layers.Dense(self.num_heads, use_bias=use_bias, name="alpha_proj")
+        self.beta_proj = layers.Dense(self.num_heads, use_bias=use_bias, name="beta_proj")
 
-        # Output projection layer
-        self.output_proj = layers.Dense(
-            self.dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="output_proj",
-        )
+        # Configurable Output FFN
+        self.use_default_ffn = self.ffn_type is None
+        if self.use_default_ffn:
+            self.output_proj = layers.Dense(self.dim, use_bias=use_bias, name="output_proj")
+            self.output_gate_linear = layers.Dense(
+                self.dim, use_bias=use_bias, name="output_gate_linear"
+            )
+        else:
+            self.output_ffn = self._create_ffn_layer("output_ffn")
 
-        # SiLU activation for intermediate processing
-        self.silu = layers.Activation("silu", name="silu")
+        # Configurable activation layer
+        self.activation_layer = layers.Activation(self.activation, name="conv_activation")
 
         # Dropout for regularization
-        if dropout_rate > 0.0:
-            self.dropout = layers.Dropout(dropout_rate, name="dropout")
-        else:
-            self.dropout = None
-
-        # Output gate
-        self.output_gate_linear = layers.Dense(
-            self.dim,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="output_gate_linear",
+        self.dropout = (
+            layers.Dropout(dropout_rate, name="dropout") if dropout_rate > 0.0 else None
         )
 
         logger.info(
             f"GatedDeltaNet initialized: dim={dim}, "
             f"num_heads={num_heads}, head_dim={self.head_dim}, "
-            f"max_seq_len={self.max_seq_len}, "
-            f"qk_dim={self.qk_dim}, v_dim={self.v_dim}"
+            f"max_seq_len={self.max_seq_len}, activation='{self.activation}', "
+            f"norm='{self.normalization_type}', ffn='{self.ffn_type or 'default_gated'}'"
         )
 
     def _validate_inputs(
@@ -377,24 +311,64 @@ class GatedDeltaNet(keras.layers.Layer):
                 f"conv_kernel_size must be positive, got {conv_kernel_size}"
             )
         if not 0.0 <= dropout_rate <= 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
+
+    def _create_normalization_layer(
+        self, name: str, custom_args: Dict[str, Any]
+    ) -> keras.layers.Layer:
+        """Creates a normalization layer from the factory."""
+        try:
+            return create_normalization_layer(
+                normalization_type=self.normalization_type, name=name, **custom_args
+            )
+        except (TypeError, ValueError) as e:
             raise ValueError(
-                f"dropout_rate must be in [0, 1], got {dropout_rate}"
+                f"Failed to create '{self.normalization_type}' norm layer named '{name}'. "
+                f"Check parameter compatibility. Custom args: {custom_args}. Error: {e}"
+            )
+
+    def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
+        """Creates an FFN layer from the factory for the output stage."""
+        if self.intermediate_size is None:
+            self.intermediate_size = self.dim * 4  # Sensible default
+
+        # The FFN's role is to project qk_dim -> dim.
+        config = {
+            "type": self.ffn_type,
+            "name": name,
+            "output_dim": self.dim,
+            "hidden_dim": self.intermediate_size,
+            "dropout_rate": self.dropout_rate,
+            "use_bias": self.use_bias,
+            "kernel_initializer": self.kernel_initializer,
+            "bias_initializer": self.bias_initializer,
+        }
+        config.update(self.ffn_args)
+        try:
+            return create_ffn_from_config(config)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Failed to create '{self.ffn_type}' FFN layer. "
+                f"Check for parameter incompatibility. Custom args: {self.ffn_args}. Error: {e}"
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all sub-layers.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
+        """Build the layer and all sub-layers."""
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {input_shape}")
         batch_size, seq_len, features = input_shape
         if features != self.dim:
-            raise ValueError(
-                f"Input feature dimension ({features}) must match dim ({self.dim})"
-            )
+            raise ValueError(f"Input feature dim ({features}) must match layer dim ({self.dim})")
+
+        # Set common initializers/regularizers for dense layers
+        for layer in [self.q_proj, self.k_proj, self.v_proj, self.alpha_proj, self.beta_proj]:
+            layer.kernel_initializer = self.kernel_initializer
+            layer.bias_initializer = self.bias_initializer
+            layer.kernel_regularizer = self.kernel_regularizer
+            layer.bias_regularizer = self.bias_regularizer
+        for layer in [self.q_conv, self.k_conv, self.v_conv]:
+            layer.kernel_initializer = self.kernel_initializer
+            layer.bias_initializer = self.bias_initializer
 
         self.q_proj.build(input_shape)
         self.k_proj.build(input_shape)
@@ -410,8 +384,20 @@ class GatedDeltaNet(keras.layers.Layer):
         self.v_conv.build(v_shape)
         self.alpha_proj.build(input_shape)
         self.beta_proj.build(input_shape)
-        self.output_proj.build((batch_size, seq_len, self.qk_dim))
-        self.output_gate_linear.build((batch_size, seq_len, self.dim))
+
+        self.activation_layer.build(q_shape)
+
+        ffn_input_shape = (batch_size, seq_len, self.qk_dim)
+        if self.use_default_ffn:
+            self.output_proj.kernel_initializer = self.kernel_initializer
+            self.output_proj.bias_initializer = self.bias_initializer
+            self.output_proj.build(ffn_input_shape)
+            self.output_gate_linear.kernel_initializer = self.kernel_initializer
+            self.output_gate_linear.bias_initializer = self.bias_initializer
+            self.output_gate_linear.build((batch_size, seq_len, self.dim))
+        else:
+            self.output_ffn.build(ffn_input_shape)
+
         super().build(input_shape)
 
     def delta_rule_update(
@@ -423,170 +409,89 @@ class GatedDeltaNet(keras.layers.Layer):
         beta: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Apply gated delta rule update using `keras.ops.while_loop`.
+        """Apply gated delta rule update using `keras.ops.while_loop`."""
+        batch_size, seq_len, _, _ = ops.shape(q)
 
-        This implements the core gated delta rule mechanism sequentially, making it
-        compatible with dynamic sequence lengths.
-        S_t = α_t * S_{t-1} + (β_t * K_t * V_t^T)
-
-        Args:
-            q: Query tensor of shape (batch_size, seq_len, num_heads, head_dim).
-            k: Key tensor of shape (batch_size, seq_len, num_heads, head_dim).
-            v: Value tensor of shape (batch_size, seq_len, num_heads, 2*head_dim).
-            alpha: Gating parameter α_t of shape (batch_size, seq_len, num_heads).
-            beta: Update strength β_t of shape (batch_size, seq_len, num_heads).
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, num_heads, head_dim).
-        """
-        batch_size = ops.shape(q)[0]
-        seq_len = ops.shape(q)[1]
-
-        # Initial values for the loop variables
         i = ops.convert_to_tensor(0, dtype="int32")
         initial_state = ops.zeros(
-            (batch_size, self.num_heads, self.head_dim, self.head_dim),
-            dtype=q.dtype,
+            (batch_size, self.num_heads, self.head_dim, self.head_dim), dtype=q.dtype
         )
-        # Pre-allocate an output tensor in transposed layout for efficient updates
         outputs_transposed = ops.zeros(
-            (seq_len, batch_size, self.num_heads, self.head_dim),
-            dtype=q.dtype,
+            (seq_len, batch_size, self.num_heads, self.head_dim), dtype=q.dtype
         )
 
-        def condition(i, current_state, outputs_transposed):
-            # Loop until the counter `i` reaches the sequence length
+        def condition(i, state, outputs):
             return ops.less(i, seq_len)
 
-        def body(i, current_state, outputs_transposed):
-            # Slice inputs for the current timestep `i`
-            q_t = q[:, i]  # Shape: (B, H, D)
-            k_t = k[:, i]  # Shape: (B, H, D)
-            v_t = v[:, i]  # Shape: (B, H, 2*D)
-            alpha_t = alpha[:, i]  # Shape: (B, H)
-            beta_t = beta[:, i]  # Shape: (B, H)
+        def body(i, state, outputs):
+            q_t, k_t, v_t = q[:, i], k[:, i], v[:, i]
+            alpha_t, beta_t = alpha[:, i], beta[:, i]
+            v_t_1, v_t_2 = ops.split(v_t, 2, axis=-1)
 
-            # Using ops.split is robust for shape inference.
-            v_t_1, v_t_2 = ops.split(v_t, indices_or_sections=2, axis=-1)
+            k_exp = ops.expand_dims(k_t, -1)
+            v_exp = ops.expand_dims(v_t_1, -2)
+            delta = ops.matmul(k_exp, v_exp)
 
-            # --- State Update Logic ---
-            # Shapes: (B, H, D, 1) @ (B, H, 1, D) -> (B, H, D, D)
-            k_t_expanded = ops.expand_dims(k_t, -1)
-            v_t_1_expanded = ops.expand_dims(v_t_1, -2)
-            delta_update = ops.matmul(k_t_expanded, v_t_1_expanded)
+            beta_exp = ops.expand_dims(ops.expand_dims(beta_t, -1), -1)
+            alpha_exp = ops.expand_dims(ops.expand_dims(alpha_t, -1), -1)
+            next_state = alpha_exp * state + beta_exp * delta
 
-            # Apply gating parameters, expanding them to broadcast correctly
-            beta_t_expanded = ops.expand_dims(ops.expand_dims(beta_t, -1), -1)
-            scaled_delta = beta_t_expanded * delta_update
-            alpha_t_expanded = ops.expand_dims(
-                ops.expand_dims(alpha_t, -1), -1
+            q_exp = ops.expand_dims(q_t, -2)
+            output_t = ops.squeeze(ops.matmul(q_exp, next_state), axis=-2) + v_t_2
+
+            next_outputs = ops.scatter_update(
+                outputs, ops.expand_dims([i], -1), ops.expand_dims(output_t, 0)
             )
+            return i + 1, next_state, next_outputs
 
-            # S_t = alpha_t * S_{t-1} + (beta_t * K_t * V_t^T)
-            next_state = alpha_t_expanded * current_state + scaled_delta
-
-            # --- Output Calculation ---
-            # Shapes: (B, H, 1, D) @ (B, H, D, D) -> (B, H, 1, D)
-            q_t_expanded = ops.expand_dims(q_t, -2)
-            output_t = ops.matmul(q_t_expanded, next_state)
-            output_t = ops.squeeze(output_t, axis=-2)  # -> (B, H, D)
-            output_t = output_t + v_t_2  # Add residual part of V
-
-            # --- Accumulate Output ---
-            # Update the transposed outputs tensor at index `i`.
-            # `scatter_update` works on the first axis.
-            indices = ops.expand_dims([i], axis=-1)  # Shape: (1, 1)
-            updates = ops.expand_dims(output_t, 0)  # Shape: (1, B, H, D)
-
-            next_outputs_transposed = ops.scatter_update(
-                outputs_transposed, indices, updates
-            )
-
-            # Return the updated loop variables
-            return (i + 1, next_state, next_outputs_transposed)
-
-        # Execute the while loop
-        _, _, final_outputs_transposed = ops.while_loop(
+        _, _, final_outputs = ops.while_loop(
             cond=condition,
             body=body,
             loop_vars=(i, initial_state, outputs_transposed),
-            maximum_iterations=self.max_seq_len
+            maximum_iterations=self.max_seq_len,
         )
-
-        # Transpose outputs back to (batch_size, seq_len, ...)
-        outputs = ops.transpose(final_outputs_transposed, [1, 0, 2, 3])
-        return outputs
+        return ops.transpose(final_outputs, [1, 0, 2, 3])
 
     def call(
         self, inputs: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the Gated DeltaNet layer.
+        """Forward pass through the Gated DeltaNet layer."""
+        batch_size, seq_len, _ = ops.shape(inputs)
 
-        Args:
-            inputs: Input tensor of shape (batch_size, sequence_length, dim).
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of shape (batch_size, sequence_length, dim).
-        """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
-
-        # Linear projections for Q, K, V
         q = self.q_proj(inputs, training=training)
         k = self.k_proj(inputs, training=training)
         v = self.v_proj(inputs, training=training)
 
-        # Zero-centered RMS normalization
         q_norm = self.q_norm(q, training=training)
         k_norm = self.k_norm(k, training=training)
         v_norm = self.v_norm(v, training=training)
 
-        # Short convolution for position encoding
-        q_conv = self.silu(self.q_conv(q_norm, training=training))
-        k_conv = self.silu(self.k_conv(k_norm, training=training))
-        v_conv = self.silu(self.v_conv(v_norm, training=training))
+        q_conv = self.activation_layer(self.q_conv(q_norm, training=training))
+        k_conv = self.activation_layer(self.k_conv(k_norm, training=training))
+        v_conv = self.activation_layer(self.v_conv(v_norm, training=training))
 
-        # Reshape to multi-head format
-        q_heads = ops.reshape(
-            q_conv, (batch_size, seq_len, self.num_heads, self.head_dim)
-        )
-        k_heads = ops.reshape(
-            k_conv, (batch_size, seq_len, self.num_heads, self.head_dim)
-        )
-        v_heads = ops.reshape(
-            v_conv, (batch_size, seq_len, self.num_heads, 2 * self.head_dim)
-        )
+        q_heads = ops.reshape(q_conv, (batch_size, seq_len, self.num_heads, self.head_dim))
+        k_heads = ops.reshape(k_conv, (batch_size, seq_len, self.num_heads, self.head_dim))
+        v_heads = ops.reshape(v_conv, (batch_size, seq_len, self.num_heads, 2 * self.head_dim))
 
-        # Compute gating parameters
         alpha = ops.sigmoid(self.alpha_proj(inputs, training=training))
         beta = ops.sigmoid(self.beta_proj(inputs, training=training))
 
-        # Apply dropout if enabled
         if training and self.dropout is not None:
             q_heads = self.dropout(q_heads, training=training)
             k_heads = self.dropout(k_heads, training=training)
             v_heads = self.dropout(v_heads, training=training)
 
-        # Apply gated delta rule update
-        delta_output = self.delta_rule_update(
-            q_heads, k_heads, v_heads, alpha, beta, training=training
-        )
+        delta_output = self.delta_rule_update(q_heads, k_heads, v_heads, alpha, beta)
+        delta_output = ops.reshape(delta_output, (batch_size, seq_len, self.qk_dim))
 
-        # Reshape and project output
-        delta_output = ops.reshape(
-            delta_output, (batch_size, seq_len, self.qk_dim)
-        )
-        delta_output = self.output_proj(delta_output, training=training)
+        if self.use_default_ffn:
+            projected_output = self.output_proj(delta_output, training=training)
+            gate = ops.sigmoid(self.output_gate_linear(projected_output, training=training))
+            gated_output = gate * projected_output
+        else:
+            gated_output = self.output_ffn(delta_output, training=training)
 
-        # Apply output gating
-        gate = ops.sigmoid(
-            self.output_gate_linear(delta_output, training=training)
-        )
-        gated_output = gate * delta_output
         return gated_output
 
     def compute_output_shape(
@@ -606,19 +511,19 @@ class GatedDeltaNet(keras.layers.Layer):
                 "head_dim": self.head_dim,
                 "conv_kernel_size": self.conv_kernel_size,
                 "dropout_rate": self.dropout_rate,
+                "activation": self.activation,
+                "normalization_type": self.normalization_type,
+                "q_norm_args": self.q_norm_args,
+                "k_norm_args": self.k_norm_args,
+                "v_norm_args": self.v_norm_args,
+                "ffn_type": self.ffn_type,
+                "ffn_args": self.ffn_args,
+                "intermediate_size": self.intermediate_size,
                 "use_bias": self.use_bias,
-                "kernel_initializer": initializers.serialize(
-                    self.kernel_initializer
-                ),
-                "bias_initializer": initializers.serialize(
-                    self.bias_initializer
-                ),
-                "kernel_regularizer": regularizers.serialize(
-                    self.kernel_regularizer
-                ),
-                "bias_regularizer": regularizers.serialize(
-                    self.bias_regularizer
-                ),
+                "kernel_initializer": initializers.serialize(self.kernel_initializer),
+                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+                "bias_regularizer": regularizers.serialize(self.bias_regularizer),
             }
         )
         return config
