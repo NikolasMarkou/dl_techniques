@@ -1,8 +1,8 @@
 """
-CoShNet (Complex Shearlet Network) Implementation - Refined Version
+CoShNet (Complex Shearlet Network) Implementation
 ================================================================
 
-This module implements a refined CoShNet architecture, following modern Keras 3 patterns
+This module implements  CoShNet architecture, following modern Keras 3 patterns
 and best practices. CoShNet is a hybrid complex-valued neural network that combines
 fixed shearlet transforms with learnable complex-valued layers for efficient image
 classification.

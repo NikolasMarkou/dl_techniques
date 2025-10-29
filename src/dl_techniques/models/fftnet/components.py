@@ -1,5 +1,5 @@
 """
-FFTNet (Spectre) Implementation for Keras 3.x
+FFTNet (Spectre)
 ==============================================
 
 This module implements the FFTNet/Spectre architecture, which provides frequency-domain
