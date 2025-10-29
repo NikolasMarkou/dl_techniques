@@ -14,8 +14,8 @@ from keras import initializers, ops
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------

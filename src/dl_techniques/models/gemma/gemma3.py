@@ -3,17 +3,17 @@ A complete implementation of the Gemma 3 architecture following Modern Keras 3
 best practices for custom models, ensuring robustness and serializability.
 """
 
-from typing import Any, Dict, List, Optional, Union
 
 import keras
 from keras import initializers, layers, ops
+from typing import Any, Dict, List, Optional, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms import create_normalization_layer
 
 from .components import Gemma3TransformerBlock
 
