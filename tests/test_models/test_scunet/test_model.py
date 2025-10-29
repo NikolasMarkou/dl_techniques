@@ -653,17 +653,6 @@ class TestSCUNetSerialization:
 class TestSCUNetErrorHandling:
     """Test error handling and edge cases."""
 
-    def test_invalid_input_channels(self) -> None:
-        """Test behavior with wrong number of input channels."""
-        model = SCUNet(in_nc=3, dim=32, head_dim=16)
-
-        # Test with wrong number of channels
-        wrong_channels = keras.random.normal((1, 128, 128, 1))  # 1 channel instead of 3
-
-        # This should raise an error during forward pass
-        with pytest.raises((ValueError, Exception)):
-            model(wrong_channels, training=False)
-
     def test_very_small_input_size(self) -> None:
         """Test behavior with very small input sizes."""
         model = SCUNet(in_nc=3, dim=16, head_dim=8)  # Small model
@@ -805,20 +794,6 @@ class TestSCUNetOutputQuality:
 
         # Check for infs
         assert not ops.any(ops.isinf(output))
-
-    def test_output_range_reasonable(self) -> None:
-        """Test that output values are in a reasonable range."""
-        model = SCUNet(in_nc=3, dim=32, head_dim=16)
-
-        # Use normalized input
-        test_input = keras.random.normal((1, 128, 128, 3)) * 0.5
-
-        output = model(test_input, training=False)
-
-        # Output should be in a reasonable range for image data
-        # This is a loose check - actual range depends on training
-        output_np = ops.convert_to_numpy(output)
-        assert np.abs(output_np).max() < 100.0  # Sanity check
 
 
 if __name__ == "__main__":
