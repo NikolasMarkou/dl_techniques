@@ -8,8 +8,6 @@ A production-ready, fully-featured implementation of **Deep Residual Networks (R
 
 This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices, featuring pretrained weight support, deep supervision training, and full serialization capabilities that work seamlessly across TensorFlow, PyTorch, and JAX backends.
 
-**Location**: `dl_techniques.models.resnet`
-
 ---
 
 ## Table of Contents
@@ -31,8 +29,7 @@ This implementation follows the `dl_techniques` framework standards and modern K
 15. [Testing & Validation](#15-testing--validation)
 16. [Troubleshooting & FAQs](#16-troubleshooting--faqs)
 17. [Technical Details](#17-technical-details)
-18. [Requirements](#18-requirements)
-19. [Citation](#19-citation)
+18. [Citation](#18-citation)
 
 ---
 
@@ -2476,18 +2473,7 @@ ResNet-152: 11.6 GFLOPs
 
 ---
 
-## 18. Requirements
-
-```txt
-python>=3.9
-keras>=3.8.0
-tensorflow>=2.18.0  # or torch, or jax
-numpy>=1.19.0
-```
-
----
-
-## 19. Citation
+## 18. Citation
 
 ```bibtex
 @inproceedings{he2016deep,
