@@ -67,8 +67,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.sampling import Sampling
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.sampling import Sampling
 
 # ---------------------------------------------------------------------
 

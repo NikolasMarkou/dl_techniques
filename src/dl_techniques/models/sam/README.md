@@ -3043,11 +3043,3 @@ boxes = keras.ops.convert_to_tensor([[[x1, y1, x2, y2]]])  # Shape: (B, N, 4)
 # Masks: Low-res mask hint
 masks = keras.random.normal(shape=(B, 1, 256, 256))  # Shape: (B, 1, H, W)
 ```
-
----
-
-**End of README**
-
-For more information, examples, and updates, visit the `dl_techniques` documentation or the GitHub repository.
-
-**Happy Segmenting! 🎨**
