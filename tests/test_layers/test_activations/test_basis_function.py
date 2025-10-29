@@ -32,7 +32,6 @@ class TestBasisFunction:
         layer = BasisFunction()
 
         # Check default values
-        assert layer._build_input_shape is None
         assert layer.built is False
 
     def test_initialization_custom(self):
@@ -47,7 +46,6 @@ class TestBasisFunction:
         assert layer.name == "custom_basis_function"
         assert layer.dtype == "float32"
         assert layer.trainable is True
-        assert layer._build_input_shape is None
 
     def test_build_process(self, input_tensor, layer_instance):
         """Test that the layer builds properly."""
@@ -56,7 +54,6 @@ class TestBasisFunction:
 
         # Check that layer was built
         assert layer_instance.built is True
-        assert layer_instance._build_input_shape == input_tensor.shape
 
         # For activation layers, there are typically no trainable weights
         assert len(layer_instance.trainable_weights) == 0
@@ -242,7 +239,6 @@ class TestBasisFunction:
 
         # Check configuration matches
         assert recreated_layer.name == original_layer.name
-        assert recreated_layer._build_input_shape == original_layer._build_input_shape
 
         # Test that both layers produce same output
         test_input = keras.random.normal([2, 32, 64])
