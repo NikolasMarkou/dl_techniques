@@ -291,13 +291,13 @@ class MaskDecoder(keras.layers.Layer):
         # IoU prediction head
         # Predicts mask quality score for each mask token
         self.iou_prediction_head = keras.Sequential([
-            layers.Dense(
-                keras.iou_head_hidden_dim,
+            keras.layers.Dense(
+                self.iou_head_hidden_dim,
                 activation=activation,
                 name="iou_dense1"
             ),
-            layers.Dense(
-                keras.self.num_mask_tokens,
+            keras.layers.Dense(
+                self.num_mask_tokens,
                 name="iou_dense2"
             )
         ], name="iou_prediction_head")
