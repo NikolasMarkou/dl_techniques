@@ -1,4 +1,4 @@
-# Vision Task Heads Integration Guide
+# Vision Task Heads
 
 ## Overview
 

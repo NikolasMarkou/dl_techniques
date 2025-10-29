@@ -1,4 +1,4 @@
-# NLP Task Heads: Integration Guide
+# NLP Task Heads
 
 ## 1. Overview & Philosophy
 
