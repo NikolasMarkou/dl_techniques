@@ -920,3 +920,5 @@ class ImageEncoderViT(keras.Model):
             "activation": self.activation,
         })
         return config
+
+# ---------------------------------------------------------------------

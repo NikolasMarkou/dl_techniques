@@ -108,14 +108,11 @@ from keras import layers, ops
 from typing import Optional, Tuple, Any, Dict, Literal
 
 # ---------------------------------------------------------------------
-# Factory imports for normalization
+# local imports
 # ---------------------------------------------------------------------
-from dl_techniques.layers.norms import create_normalization_layer
 
-# ---------------------------------------------------------------------
-# Local imports
-# ---------------------------------------------------------------------
 from .transformer import TwoWayTransformer
+from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 

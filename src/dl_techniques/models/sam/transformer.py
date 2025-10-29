@@ -1,5 +1,5 @@
 """
-SAM Two-Way Transformer Implementation in Keras 3
+SAM Two-Way Transformer Implementation
 =================================================
 
 This file provides a Keras 3 implementation of the Two-Way Transformer used
