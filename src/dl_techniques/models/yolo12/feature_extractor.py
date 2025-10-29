@@ -358,6 +358,7 @@ class YOLOv12FeatureExtractor(keras.Model):
         """Create model from configuration."""
         return cls(**config)
 
+# ---------------------------------------------------------------------
 
 def create_yolov12_feature_extractor(
         input_shape: Tuple[int, int, int] = (640, 640, 3),
