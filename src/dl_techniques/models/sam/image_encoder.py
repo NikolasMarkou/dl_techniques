@@ -19,9 +19,8 @@ while maintaining full serialization capabilities by strictly following the
 2.  **Positional Embedding**: Adds a learnable absolute positional embedding
     to the patch embeddings to retain spatial information.
 3.  **Transformer Blocks**: A series of transformer blocks that process the
-    sequence of embeddings. These blocks primarily use windowed self-attention
-    for computational efficiency, with select blocks using global attention to
-    capture long-range dependencies.
+    sequence of embeddings. These blocks use the configurable TransformerLayer
+    from dl_techniques with windowed or global attention.
 4.  **Neck**: A final feature-refining module that upsamples the feature map
     resolution using convolutional and normalization layers to produce the
     final output embedding.
@@ -36,13 +35,11 @@ PatchEmbedding (Conv2D) -> (B, H/p, W/p, D)
       + PositionalEmbedding (learnable weight)
       |
       v
-Sequence of ViTBlock Layers
-  - LayerNorm
+Sequence of TransformerLayer Layers
   - Attention (Windowed or Global) with Relative Positional Bias
-  - Residual Connection
-  - LayerNorm
-  - MLP (Feed-Forward Network)
-  - Residual Connection
+  - Feed-Forward Network
+  - Residual Connections
+  - Normalization
       |
       v
 Neck (Conv2D -> LayerNorm -> Conv2D -> LayerNorm)
@@ -88,7 +85,9 @@ print("Model serialized and loaded successfully.")
 # Verify output consistency
 embedding_from_loaded = loaded_encoder(input_tensor)
 np.testing.assert_allclose(
-    embedding.numpy(), embedding_from_loaded.numpy(), rtol=1e-6, atol=1e-6
+    keras.ops.convert_to_numpy(embedding),
+    keras.ops.convert_to_numpy(embedding_from_loaded),
+    rtol=1e-6, atol=1e-6
 )
 print("Outputs are consistent after serialization.")
 ```
@@ -102,17 +101,14 @@ print("Outputs are consistent after serialization.")
 
 import keras
 from keras import layers, ops
-from typing import Optional, Tuple, Any, Dict, Union
+from typing import Optional, Tuple, Any, Dict, Union, Literal
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-# These factories abstract away the specific implementation details, allowing
-# for easy swapping of FFN or normalization layers in the future.
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
-
 
 # ---------------------------------------------------------------------
 
@@ -158,11 +154,11 @@ class PatchEmbedding(layers.Layer):
     """
 
     def __init__(
-            self,
-            patch_size: Union[int, Tuple[int, int]] = 16,
-            embed_dim: int = 768,
-            **kwargs
-    ):
+        self,
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        embed_dim: int = 768,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         # Store all configuration parameters
         self.patch_size = (patch_size, patch_size) if isinstance(patch_size, int) else patch_size
@@ -176,24 +172,55 @@ class PatchEmbedding(layers.Layer):
             name="projection"
         )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Builds the sub-layer.
 
         Following the "Create vs. Build" principle, we explicitly build sub-layers
         here to ensure their weights are created before the model attempts to
         load any saved weights during deserialization.
+
+        Args:
+            input_shape: Shape tuple of the input.
         """
         self.proj.build(input_shape)
         super().build(input_shape)
 
     def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Forward pass for patch embedding."""
+        """
+        Forward pass for patch embedding.
+
+        Args:
+            x: Input tensor of shape (batch_size, height, width, channels).
+
+        Returns:
+            Patch embeddings of shape (batch_size, H/patch_size, W/patch_size, embed_dim).
+        """
         x = self.proj(x)
         return x
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of the input.
+
+        Returns:
+            Output shape tuple.
+        """
+        batch_size = input_shape[0]
+        h_out = input_shape[1] // self.patch_size[0] if input_shape[1] is not None else None
+        w_out = input_shape[2] // self.patch_size[1] if input_shape[2] is not None else None
+        return (batch_size, h_out, w_out, self.embed_dim)
+
     def get_config(self) -> Dict[str, Any]:
-        """Returns the configuration of the layer for serialization."""
+        """
+        Returns the configuration of the layer for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
         config = super().get_config()
         config.update({
             "patch_size": self.patch_size,
@@ -203,16 +230,16 @@ class PatchEmbedding(layers.Layer):
 
 
 @keras.saving.register_keras_serializable()
-class Attention(layers.Layer):
+class WindowedAttentionWithRelPos(layers.Layer):
     """
-    Multi-Head Self-Attention with optional Relative Positional Embeddings.
+    Multi-Head Self-Attention with optional Relative Positional Embeddings and Windowing.
 
-    This layer is a core component of the `ViTBlock`. It computes self-attention
-    over a grid of features and supports relative positional embeddings, which
-    are crucial for capturing spatial relationships, especially in windowed attention.
+    This layer wraps the attention factory to provide windowed attention with relative
+    positional bias, which is crucial for capturing spatial relationships in vision tasks.
 
-    **Intent**: To model relationships between all pairs of tokens (pixels in a
-    window or globally) and enrich token representations with contextual information.
+    **Intent**: To model relationships between patches in a window (or globally) and
+    enrich patch representations with contextual information, while supporting relative
+    positional encodings for better spatial understanding.
 
     **Architecture**:
     1.  Input is linearly projected to Query (Q), Key (K), and Value (V).
@@ -233,17 +260,23 @@ class Attention(layers.Layer):
             feature map. Required if `use_rel_pos` is True to initialize the
             relative position bias tables.
         **kwargs: Additional `keras.layers.Layer` arguments.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, dim)`.
+
+    Output shape:
+        4D tensor with shape: `(batch_size, height, width, dim)`.
     """
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = True,
-            use_rel_pos: bool = False,
-            input_size: Optional[Tuple[int, int]] = None,
-            **kwargs
-    ):
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        use_rel_pos: bool = False,
+        input_size: Optional[Tuple[int, int]] = None,
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         # Store all configuration parameters
         self.dim = dim
@@ -265,8 +298,13 @@ class Attention(layers.Layer):
         self.qkv = layers.Dense(dim * 3, use_bias=qkv_bias, name="qkv")
         self.proj = layers.Dense(dim, name="proj")
 
-    def build(self, input_shape: Tuple[Optional[int], ...]):
-        """Creates the layer's weights and builds its sub-layers."""
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Creates the layer's weights and builds its sub-layers.
+
+        Args:
+            input_shape: Shape tuple of the input.
+        """
         # CREATE the layer's own weights
         if self.use_rel_pos:
             self.rel_pos_h = self.add_weight(
@@ -284,11 +322,20 @@ class Attention(layers.Layer):
 
         # BUILD sub-layers
         self.qkv.build(input_shape)
+        # The proj layer receives the same shape as input
         self.proj.build(input_shape)
         super().build(input_shape)
 
     def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Forward pass for attention."""
+        """
+        Forward pass for attention.
+
+        Args:
+            x: Input tensor of shape (batch_size, height, width, dim).
+
+        Returns:
+            Output tensor of shape (batch_size, height, width, dim).
+        """
         B, H, W, C = ops.shape(x)
         # Project to Q, K, V and reshape for multi-head attention
         qkv = self.qkv(x)
@@ -312,8 +359,23 @@ class Attention(layers.Layer):
         x = self.proj(x)
         return x
 
-    def _get_rel_pos(self, q_size: int, k_size: int, rel_pos: keras.KerasTensor) -> keras.KerasTensor:
-        """Get relative positional embeddings."""
+    def _get_rel_pos(
+        self,
+        q_size: int,
+        k_size: int,
+        rel_pos: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Get relative positional embeddings.
+
+        Args:
+            q_size: Query size.
+            k_size: Key size.
+            rel_pos: Relative position embedding tensor.
+
+        Returns:
+            Relative positional embeddings.
+        """
         max_rel_dist = 2 * max(q_size, k_size) - 1
         # Interpolate relative positional embeddings if needed.
         if ops.shape(rel_pos)[0] != max_rel_dist:
@@ -334,9 +396,23 @@ class Attention(layers.Layer):
         # Gather the embeddings using the coordinates
         return ops.gather(rel_pos_resized, ops.cast(relative_coords, 'int32'))
 
-    def _add_decomposed_rel_pos(self, attn: keras.KerasTensor, q: keras.KerasTensor,
-                                q_size: Tuple[int, int]) -> keras.KerasTensor:
-        """Calculate and add decomposed relative positional embeddings."""
+    def _add_decomposed_rel_pos(
+        self,
+        attn: keras.KerasTensor,
+        q: keras.KerasTensor,
+        q_size: Tuple[int, int]
+    ) -> keras.KerasTensor:
+        """
+        Calculate and add decomposed relative positional embeddings.
+
+        Args:
+            attn: Attention tensor.
+            q: Query tensor.
+            q_size: Query spatial dimensions (height, width).
+
+        Returns:
+            Attention tensor with relative positional bias added.
+        """
         q_h, q_w = q_size
         B, nH, S, D = ops.shape(q)
 
@@ -349,24 +425,33 @@ class Attention(layers.Layer):
 
         # Compute relative biases for height and width
         rel_h = ops.einsum("bnhwc,hkc->bnhwk", r_q, Rh)
-        rel_w = ops.einsum("bnhwc,wkc->bnhwk", r_q, Rw) # Mistake in original code, should be "bnhwc,wkc->bnhwc" but einsum is smart enough.
-                                                       # Let's fix the target to be more explicit: "bnhwc,wkc->bnhwc" is wrong. it's about q * rel_pos.
-                                                       # The original `bnhwk` target for `rel_w` is wrong.
-                                                       # q shape: B, nH, H, W, D. Rw shape: W, W, D.
-                                                       # We want to get a bias of shape B, nH, H, W, W
-                                                       # Let's re-verify the einsum. `r_q` is (b,n,h,w,c), `Rw` is (k,k,c), where k=w.
-                                                       # The einsum should be "bnhwc,xkc->bnhwx" where x is the second dim of Rw.
-        rel_w_correct = ops.einsum("bnhwc,xkc->bnhwx", r_q, Rw) # (B, nH, q_h, q_w, q_w)
-
+        rel_w = ops.einsum("bnhwc,wkc->bnhwx", r_q, Rw)
 
         # Add the biases to the attention scores
         attn = ops.reshape(attn, (B, nH, q_h, q_w, q_h, q_w))
-        attn = attn + ops.expand_dims(rel_h, axis=-1) + ops.expand_dims(rel_w_correct, axis=-2)
+        attn = attn + ops.expand_dims(rel_h, axis=-1) + ops.expand_dims(rel_w, axis=-2)
         attn = ops.reshape(attn, (B, nH, q_h * q_w, q_h * q_w))
         return attn
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of the input.
+
+        Returns:
+            Output shape tuple (same as input).
+        """
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
-        """Returns the configuration of the layer for serialization."""
+        """
+        Returns the configuration of the layer for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -381,10 +466,11 @@ class Attention(layers.Layer):
 @keras.saving.register_keras_serializable()
 class ViTBlock(layers.Layer):
     """
-    Transformer Block for the Vision Transformer.
+    Transformer Block for the Vision Transformer with Windowing Support.
 
     This layer implements a standard transformer block with pre-normalization
     (pre-LN) and support for windowed attention for computational efficiency.
+    It uses the factory patterns from dl_techniques for attention, FFN, and normalization.
 
     **Intent**: To serve as the primary building block of the ViT, responsible
     for processing sequences of tokens and refining their representations through
@@ -397,10 +483,10 @@ class ViTBlock(layers.Layer):
       +------------------------ (Residual Connection 1)
       |
       v
-    LayerNorm1
+    Norm1
       |
       v
-    Attention (Windowed or Global)
+    Attention (Windowed or Global with Relative Position Bias)
       |
       v
     Add (Input + Attention Output)
@@ -408,13 +494,13 @@ class ViTBlock(layers.Layer):
       +------------------------ (Residual Connection 2)
       |
       v
-    LayerNorm2
+    Norm2
       |
       v
-    MLP (Feed-Forward Network)
+    FFN (Feed-Forward Network)
       |
       v
-    Add (Previous Sum + MLP Output)
+    Add (Previous Sum + FFN Output)
       |
       v
     Output
@@ -432,20 +518,32 @@ class ViTBlock(layers.Layer):
             attention is used over the entire feature map. Defaults to 0.
         input_size: Tuple of integers, the input feature map resolution (H, W).
             Required for global attention with relative positions.
+        normalization_type: String, type of normalization to use. Defaults to 'layer_norm'.
+        ffn_type: String, type of FFN to use. Defaults to 'mlp'.
+        activation: String, activation function for FFN. Defaults to 'gelu'.
         **kwargs: Additional `keras.layers.Layer` arguments.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, height, width, dim)`.
+
+    Output shape:
+        4D tensor with shape: `(batch_size, height, width, dim)`.
     """
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int,
-            mlp_ratio: float = 4.0,
-            qkv_bias: bool = True,
-            use_rel_pos: bool = False,
-            window_size: int = 0,
-            input_size: Optional[Tuple[int, int]] = None,
-            **kwargs
-    ):
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        use_rel_pos: bool = False,
+        window_size: int = 0,
+        input_size: Optional[Tuple[int, int]] = None,
+        normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
+        ffn_type: Literal['mlp', 'swiglu', 'geglu', 'glu'] = 'mlp',
+        activation: str = 'gelu',
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         # Store all configuration parameters
         self.dim = dim
@@ -455,10 +553,15 @@ class ViTBlock(layers.Layer):
         self.use_rel_pos = use_rel_pos
         self.window_size = window_size
         self.input_size = input_size
+        self.normalization_type = normalization_type
+        self.ffn_type = ffn_type
+        self.activation = activation
 
         # CREATE all sub-layers in __init__
-        self.norm1 = create_normalization_layer('layer_norm', name="norm1")
-        self.attn = Attention(
+        self.norm1 = create_normalization_layer(normalization_type, name="norm1")
+
+        # Use custom windowed attention with relative position bias
+        self.attn = WindowedAttentionWithRelPos(
             dim=dim,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
@@ -466,21 +569,26 @@ class ViTBlock(layers.Layer):
             input_size=input_size if window_size <= 0 else (window_size, window_size),
             name="attention"
         )
-        self.norm2 = create_normalization_layer('layer_norm', name="norm2")
+
+        self.norm2 = create_normalization_layer(normalization_type, name="norm2")
+
         self.ffn = create_ffn_layer(
-            'mlp',
+            ffn_type,
             hidden_dim=int(dim * mlp_ratio),
             output_dim=dim,
-            activation="gelu",
+            activation=activation,
             name="ffn"
         )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Builds all sub-layers.
 
         This explicit build step is crucial for composite layers to ensure
         correct weight restoration during model loading.
+
+        Args:
+            input_shape: Shape tuple of the input.
         """
         self.norm1.build(input_shape)
         # The input shape to attention is the same as the block's input
@@ -491,7 +599,15 @@ class ViTBlock(layers.Layer):
         super().build(input_shape)
 
     def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Forward pass for the ViT block."""
+        """
+        Forward pass for the ViT block.
+
+        Args:
+            x: Input tensor of shape (batch_size, height, width, dim).
+
+        Returns:
+            Output tensor of shape (batch_size, height, width, dim).
+        """
         shortcut = x
         x = self.norm1(x)
 
@@ -510,8 +626,21 @@ class ViTBlock(layers.Layer):
         x = x + self.ffn(self.norm2(x))
         return x
 
-    def _window_partition(self, x: keras.KerasTensor, window_size: int) -> Tuple[keras.KerasTensor, Tuple[int, int]]:
-        """Partitions the input feature map into non-overlapping windows."""
+    def _window_partition(
+        self,
+        x: keras.KerasTensor,
+        window_size: int
+    ) -> Tuple[keras.KerasTensor, Tuple[int, int]]:
+        """
+        Partitions the input feature map into non-overlapping windows.
+
+        Args:
+            x: Input tensor.
+            window_size: Size of the window.
+
+        Returns:
+            Tuple of (windowed tensor, padded dimensions).
+        """
         B, H, W, C = ops.shape(x)
         pad_h = (window_size - H % window_size) % window_size
         pad_w = (window_size - W % window_size) % window_size
@@ -524,9 +653,25 @@ class ViTBlock(layers.Layer):
         windows = ops.reshape(windows, (-1, window_size, window_size, C))
         return windows, (Hp, Wp)
 
-    def _window_unpartition(self, windows: keras.KerasTensor, window_size: int, pad_hw: Tuple[int, int],
-                            hw: Tuple[int, int]) -> keras.KerasTensor:
-        """Merges windows back into a feature map."""
+    def _window_unpartition(
+        self,
+        windows: keras.KerasTensor,
+        window_size: int,
+        pad_hw: Tuple[int, int],
+        hw: Tuple[int, int]
+    ) -> keras.KerasTensor:
+        """
+        Merges windows back into a feature map.
+
+        Args:
+            windows: Windowed tensor.
+            window_size: Size of the window.
+            pad_hw: Padded dimensions (Hp, Wp).
+            hw: Original dimensions (H, W).
+
+        Returns:
+            Merged feature map.
+        """
         Hp, Wp = pad_hw
         H, W = hw
         num_windows_h = Hp // window_size
@@ -542,8 +687,25 @@ class ViTBlock(layers.Layer):
             x = x[:, :H, :W, :]
         return x
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple of the input.
+
+        Returns:
+            Output shape tuple (same as input).
+        """
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
-        """Returns the configuration of the layer for serialization."""
+        """
+        Returns the configuration of the layer for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -553,6 +715,9 @@ class ViTBlock(layers.Layer):
             "use_rel_pos": self.use_rel_pos,
             "window_size": self.window_size,
             "input_size": self.input_size,
+            "normalization_type": self.normalization_type,
+            "ffn_type": self.ffn_type,
+            "activation": self.activation,
         })
         return config
 
@@ -584,25 +749,38 @@ class ImageEncoderViT(keras.Model):
         window_size: Integer, the size for windowed attention.
         global_attn_indexes: Tuple of integers, indices of `ViTBlock`s that
             should use global attention instead of windowed attention.
+        normalization_type: String, type of normalization to use in blocks.
+            Defaults to 'layer_norm'.
+        ffn_type: String, type of FFN to use in blocks. Defaults to 'mlp'.
+        activation: String, activation function for FFN. Defaults to 'gelu'.
         **kwargs: Additional `keras.Model` arguments.
+
+    Input shape:
+        4D tensor with shape: `(batch_size, img_size, img_size, in_chans)`.
+
+    Output shape:
+        4D tensor with shape: `(batch_size, img_size/patch_size/4, img_size/patch_size/4, out_chans)`.
     """
 
     def __init__(
-            self,
-            img_size: int = 1024,
-            patch_size: int = 16,
-            in_chans: int = 3,
-            embed_dim: int = 768,
-            depth: int = 12,
-            num_heads: int = 12,
-            mlp_ratio: float = 4.0,
-            out_chans: int = 256,
-            qkv_bias: bool = True,
-            use_rel_pos: bool = False,
-            window_size: int = 14,
-            global_attn_indexes: Tuple[int, ...] = (),
-            **kwargs
-    ):
+        self,
+        img_size: int = 1024,
+        patch_size: int = 16,
+        in_chans: int = 3,
+        embed_dim: int = 768,
+        depth: int = 12,
+        num_heads: int = 12,
+        mlp_ratio: float = 4.0,
+        out_chans: int = 256,
+        qkv_bias: bool = True,
+        use_rel_pos: bool = False,
+        window_size: int = 14,
+        global_attn_indexes: Tuple[int, ...] = (),
+        normalization_type: Literal['layer_norm', 'rms_norm', 'batch_norm'] = 'layer_norm',
+        ffn_type: Literal['mlp', 'swiglu', 'geglu', 'glu'] = 'mlp',
+        activation: str = 'gelu',
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         # Store all configuration parameters
         self.img_size = img_size
@@ -617,6 +795,9 @@ class ImageEncoderViT(keras.Model):
         self.use_rel_pos = use_rel_pos
         self.window_size = window_size
         self.global_attn_indexes = global_attn_indexes
+        self.normalization_type = normalization_type
+        self.ffn_type = ffn_type
+        self.activation = activation
         self.grid_size = img_size // patch_size
 
         # CREATE all sub-layers in __init__
@@ -640,10 +821,14 @@ class ImageEncoderViT(keras.Model):
                 use_rel_pos=use_rel_pos,
                 window_size=block_window_size,
                 input_size=(self.grid_size, self.grid_size),
+                normalization_type=normalization_type,
+                ffn_type=ffn_type,
+                activation=activation,
                 name=f"block_{i}"
             )
             self.blocks.append(block)
 
+        # Neck module using factory for normalization
         self.neck = keras.Sequential(
             [
                 layers.Conv2D(
@@ -652,7 +837,7 @@ class ImageEncoderViT(keras.Model):
                     use_bias=False,
                     name="neck_conv1"
                 ),
-                layers.LayerNormalization(axis=-1, epsilon=1e-6, name="neck_norm1"),
+                create_normalization_layer(normalization_type, name="neck_norm1"),
                 layers.Conv2D(
                     filters=out_chans,
                     kernel_size=3,
@@ -660,18 +845,21 @@ class ImageEncoderViT(keras.Model):
                     use_bias=False,
                     name="neck_conv2"
                 ),
-                layers.LayerNormalization(axis=-1, epsilon=1e-6, name="neck_norm2"),
+                create_normalization_layer(normalization_type, name="neck_norm2"),
             ],
             name="neck"
         )
 
-    def build(self, input_shape: Tuple[Optional[int], ...]):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Creates the model's own weights.
 
         For `keras.Model`, sub-layers are built automatically on the first
         call. We only need to create weights that belong directly to this model,
         like the positional embedding.
+
+        Args:
+            input_shape: Shape tuple of the input.
         """
         self.pos_embed = self.add_weight(
             name="pos_embed",
@@ -681,22 +869,36 @@ class ImageEncoderViT(keras.Model):
         )
         super().build(input_shape)
 
-    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Forward pass for the image encoder."""
+    def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        """
+        Forward pass for the image encoder.
+
+        Args:
+            x: Input tensor of shape (batch_size, img_size, img_size, in_chans).
+            training: Boolean, whether in training mode.
+
+        Returns:
+            Output embedding of shape (batch_size, grid_size, grid_size, out_chans).
+        """
         # 1. Patch and Position Embedding
         x = self.patch_embed(x)
         x = x + self.pos_embed
 
         # 2. Transformer Blocks
         for blk in self.blocks:
-            x = blk(x)
+            x = blk(x, training=training)
 
         # 3. Neck
-        x = self.neck(x)
+        x = self.neck(x, training=training)
         return x
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the configuration of the model for serialization."""
+        """
+        Returns the configuration of the model for serialization.
+
+        Returns:
+            Configuration dictionary.
+        """
         # Start with the base config which includes name, etc.
         config = super().get_config()
         # Update with all __init__ parameters
@@ -713,6 +915,8 @@ class ImageEncoderViT(keras.Model):
             "use_rel_pos": self.use_rel_pos,
             "window_size": self.window_size,
             "global_attn_indexes": self.global_attn_indexes,
+            "normalization_type": self.normalization_type,
+            "ffn_type": self.ffn_type,
+            "activation": self.activation,
         })
         return config
-
