@@ -517,7 +517,14 @@ class MaskDecoder(keras.layers.Layer):
             "iou_head_hidden_dim": self.iou_head_hidden_dim,
             "normalization_type": self.normalization_type,
             "activation": self.activation,
+            "transformer": keras.layers.serialize(self.transformer),
         })
         # Note: self.transformer is passed in __init__ as a layer,
         # so Keras automatically handles its serialization
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MaskDecoder":
+        """Creates a MaskDecoder from its config."""
+        config["transformer"] = keras.layers.deserialize(config.pop("transformer"))
+        return cls(**config)

@@ -1,5 +1,5 @@
 """
-SAM Prompt Encoder Implementation in Keras 3
+SAM Prompt Encoder
 ============================================
 
 This file provides a Keras 3 implementation of the prompt encoder from the
@@ -411,7 +411,7 @@ class PromptEncoder(layers.Layer):
             Positional encoding tensor of shape
             (1, image_embedding_size[0], image_embedding_size[1], embed_dim).
         """
-        pe = self.pe_layer(self.image_embedding_size)  # (C, H, W)
+        pe = self.pe_layer(size=self.image_embedding_size)  # (C, H, W)
         pe = ops.transpose(pe, (1, 2, 0))  # (H, W, C)
         return ops.expand_dims(pe, axis=0)  # (1, H, W, C)
 
@@ -632,4 +632,3 @@ class PromptEncoder(layers.Layer):
         return config
 
 # ---------------------------------------------------------------------
-

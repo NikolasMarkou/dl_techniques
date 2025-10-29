@@ -349,6 +349,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
             - updated_queries: Shape (batch_size, num_queries, embedding_dim)
             - updated_keys: Shape (batch_size, num_keys, embedding_dim)
         """
+
         # 1. Self-attention block on queries
         if self.skip_first_layer_pe:
             # First block: don't add PE to self-attention
@@ -623,11 +624,11 @@ class TwoWayTransformer(layers.Layer):
         super().build(input_shape)
 
     def call(
-        self,
-        image_embedding: keras.KerasTensor,
-        image_pe: keras.KerasTensor,
-        point_embedding: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            image_embedding: keras.KerasTensor,
+            image_pe: keras.KerasTensor,
+            point_embedding: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
         Forward pass through the two-way transformer.
@@ -649,6 +650,9 @@ class TwoWayTransformer(layers.Layer):
         # Reshape image embeddings from (B, H, W, C) to (B, H*W, C) for attention
         B, H, W, C = ops.shape(image_embedding)
         image_embedding_flat = ops.reshape(image_embedding, (B, H * W, C))
+
+        # Broadcast image PE to match batch size and reshape
+        image_pe = ops.broadcast_to(image_pe, (B, H, W, C))
         image_pe_flat = ops.reshape(image_pe, (B, H * W, C))
 
         # Initialize queries and keys

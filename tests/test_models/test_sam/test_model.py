@@ -216,7 +216,7 @@ class TestSAMForwardPass:
         outputs = small_model({
             'image': image,
             'points': (points_coords, points_labels),
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -229,8 +229,9 @@ class TestSAMForwardPass:
         assert keras.ops.shape(outputs['masks'])[3] == 256  # width
 
         # Check masks are binary
-        unique_values = keras.ops.unique(keras.ops.reshape(outputs['masks'], (-1,)))[0]
-        assert keras.ops.all((unique_values == 0) | (unique_values == 1))
+        masks_tensor = outputs['masks']
+        is_binary = keras.ops.logical_or(masks_tensor == 0, masks_tensor == 1)
+        assert keras.ops.all(is_binary)
 
     def test_forward_with_boxes(self, small_model):
         """Test forward pass with box prompts."""
@@ -240,7 +241,7 @@ class TestSAMForwardPass:
         outputs = small_model({
             'image': image,
             'boxes': boxes,
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -255,7 +256,7 @@ class TestSAMForwardPass:
         outputs = small_model({
             'image': image,
             'masks': mask_prompt,
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -274,7 +275,7 @@ class TestSAMForwardPass:
             'image': image,
             'points': points,
             'boxes': boxes,
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -289,7 +290,7 @@ class TestSAMForwardPass:
         )
 
         outputs = small_model(
-            {'image': image, 'points': points, 'original_size': (256, 256)},
+            {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))},
             multimask_output=True
         )
 
@@ -306,7 +307,7 @@ class TestSAMForwardPass:
         )
 
         outputs = small_model(
-            {'image': image, 'points': points, 'original_size': (256, 256)},
+            {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))},
             multimask_output=False
         )
 
@@ -317,7 +318,7 @@ class TestSAMForwardPass:
     def test_forward_missing_image(self, small_model):
         """Test that missing image raises error."""
         with pytest.raises(ValueError, match="must contain 'image' key"):
-            small_model({'original_size': (256, 256)})
+            small_model({'original_size': keras.ops.convert_to_tensor((256, 256))})
 
     def test_forward_missing_original_size(self, small_model):
         """Test that missing original_size raises error."""
@@ -335,12 +336,12 @@ class TestSAMForwardPass:
         )
 
         outputs_train = small_model(
-            {'image': image, 'points': points, 'original_size': (256, 256)},
+            {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))},
             training=True
         )
 
         outputs_eval = small_model(
-            {'image': image, 'points': points, 'original_size': (256, 256)},
+            {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))},
             training=False
         )
 
@@ -435,7 +436,7 @@ class TestSAMSerialization:
             keras.ops.convert_to_tensor([[[100.0, 100.0]]]),
             keras.ops.convert_to_tensor([[1]])
         )
-        inputs = {'image': image, 'points': points, 'original_size': (256, 256)}
+        inputs = {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))}
 
         # Get outputs from original model
         outputs_original = small_model(inputs, multimask_output=True)
@@ -643,7 +644,7 @@ class TestSAMShapeConsistency:
             outputs = model({
                 'image': image,
                 'points': points,
-                'original_size': (256, 256)
+                'original_size': keras.ops.convert_to_tensor((256, 256))
             })
 
             assert keras.ops.shape(outputs['masks'])[0] == batch_size
@@ -663,7 +664,7 @@ class TestSAMShapeConsistency:
             outputs = model({
                 'image': image,
                 'points': points,
-                'original_size': original_size
+                'original_size': keras.ops.convert_to_tensor(original_size)
             })
 
             assert keras.ops.shape(outputs['masks'])[2] == original_size[0]
@@ -679,7 +680,7 @@ class TestSAMShapeConsistency:
 
         # Multimask output
         outputs_multi = model(
-            {'image': image, 'points': points, 'original_size': (256, 256)},
+            {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))},
             multimask_output=True
         )
         assert keras.ops.shape(outputs_multi['iou_predictions'])[0] == 2  # batch
@@ -687,7 +688,7 @@ class TestSAMShapeConsistency:
 
         # Single mask output
         outputs_single = model(
-            {'image': image, 'points': points, 'original_size': (256, 256)},
+            {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))},
             multimask_output=False
         )
         assert keras.ops.shape(outputs_single['iou_predictions'])[0] == 2  # batch
@@ -735,7 +736,7 @@ class TestSAMEdgeCases:
         outputs = model({
             'image': image,
             'points': points,
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -754,7 +755,7 @@ class TestSAMEdgeCases:
         outputs = model({
             'image': image,
             'points': points,
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -772,7 +773,7 @@ class TestSAMEdgeCases:
         outputs = model({
             'image': image,
             'points': points,
-            'original_size': (256, 256)
+            'original_size': keras.ops.convert_to_tensor((256, 256))
         })
 
         assert 'masks' in outputs
@@ -791,7 +792,7 @@ class TestSAMEdgeCases:
             outputs = model({
                 'image': image,
                 'points': points,
-                'original_size': (h, w)
+                'original_size': keras.ops.convert_to_tensor((h, w))
             })
 
             # Output should match original size
@@ -805,7 +806,7 @@ class TestSAMEdgeCases:
             keras.ops.convert_to_tensor([[[128.0, 128.0]]]),
             keras.ops.convert_to_tensor([[1]])
         )
-        inputs = {'image': image, 'points': points, 'original_size': (256, 256)}
+        inputs = {'image': image, 'points': points, 'original_size': keras.ops.convert_to_tensor((256, 256))}
 
         # Test with different thresholds
         model.mask_threshold = 0.0
