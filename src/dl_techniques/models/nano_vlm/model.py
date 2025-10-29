@@ -101,8 +101,8 @@ from typing import Dict, Optional, Tuple, Union, Any, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers.text_decoder import TextDecoder
 from dl_techniques.layers.transformers.text_encoder import TextEncoder
-from dl_techniques.layers.transformers.vision_encoder import VisionEncoder, create_vision_encoder
 from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion, FusionStrategy
+from dl_techniques.layers.transformers.vision_encoder import VisionEncoder, create_vision_encoder
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
