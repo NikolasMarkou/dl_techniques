@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.swin_conv_block import SwinConvBlock
+from dl_techniques.layers.transformers.swin_conv_block import SwinConvBlock
 
 # ---------------------------------------------------------------------
 
