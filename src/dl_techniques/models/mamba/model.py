@@ -1,14 +1,52 @@
 """
-Mamba (v1) State Space Model Implementation
+Mamba State Space Model Implementation
 ============================================
 
-A complete implementation of the Mamba (v1) architecture as described in
-"Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
-(Gu & Dao, 2023) https://arxiv.org/abs/2312.00752
+Mamba provides an alternative to the popular Transformer architecture for
+modeling long sequences. It is built upon the structured state space
+model (SSM) paradigm, but introduces a critical "selection" mechanism that
+allows it to operate with linear-time complexity in sequence length,
+a significant improvement over the quadratic complexity of attention.
 
-This implementation provides a pure foundation model separating the core
-selective state space logic from task-specific heads, following the same
-architectural principles as BERT in dl_techniques.
+Architecturally, the model consists of a stack of Mamba blocks. Each block
+applies a selective SSM to its input, allowing it to modulate how much
+information is propagated or forgotten at each step based on the content
+of the input sequence itself.
+
+The foundational mathematical concept is the linear time-invariant (LTI)
+state space model, a cornerstone of control theory. A continuous-time SSM
+is defined by the differential equations:
+    1. h'(t) = Ah(t) + Bx(t)  (State equation)
+    2. y(t) = Ch(t) + Dx(t)  (Output equation)
+Here, x(t) is the input, h(t) is a latent state vector, and y(t) is the
+output. The matrices (A, B, C, D) are the model parameters that govern
+the system's dynamics.
+
+To be used in a deep learning model, this continuous system is discretized
+into a recurrent formulation using a step size Δ:
+    h_k = Āh_{k-1} + B̄x_k
+    y_k = Ch_k + Dx_k
+
+where Ā and B̄ are derived from A, B, and Δ. This recurrent form can
+model sequences, but its time-invariant nature (fixed Ā, B̄) limits its
+expressiveness for complex data like language.
+
+Mamba's key innovation is to make the SSM parameters input-dependent,
+thereby breaking the time-invariance and enabling selectivity. The crucial
+parameters (step size Δ, and projections B and C) are no longer fixed but
+are instead computed dynamically from the input tokens x_k at each time
+step. This allows the model to selectively remember relevant information
+and forget irrelevant details by changing the system dynamics on the fly.
+For instance, a large Δ allows the state to be forgotten quickly, while a
+small Δ preserves it. This content-aware reasoning is what allows Mamba
+to effectively manage long-range dependencies.
+
+While this selection mechanism makes the model powerful, it prevents the
+use of a fast parallel convolutional computation method available to LTI
+SSMs. To maintain efficiency, Mamba employs a hardware-aware parallel
+scan algorithm. This algorithm allows the recurrent computation to be
+executed efficiently on modern accelerators like GPUs, achieving linear-time
+complexity while preserving the model's selective capabilities.
 
 The Mamba architecture uses a selective state space mechanism that allows
 the model to efficiently capture long-range dependencies in sequences while
@@ -62,6 +100,11 @@ Architecture:
     - Causal 1D convolution
     - Selective SSM with data-dependent Δ, B, C parameters
     - Output gating and projection
+
+References:
+    - Gu, A., & Dao, T. (2023). Mamba: Linear-Time Sequence Modeling with
+      Selective State Spaces. arXiv preprint arXiv:2312.00752.
+      https://arxiv.org/abs/2312.00752
 """
 
 import keras
@@ -72,7 +115,9 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
 from .components import MambaResidualBlock
+
 
 # ---------------------------------------------------------------------
 
@@ -493,5 +538,132 @@ class Mamba(keras.Model):
         logger.info(
             f"  - Internal dimension: {int(self.expand * self.d_model)}"
         )
+
+# ---------------------------------------------------------------------
+# Integration with NLP Task Heads
+# ---------------------------------------------------------------------
+
+def create_mamba_with_head(
+        mamba_variant: str,
+        task_config: NLPTaskConfig,
+        pretrained: Union[bool, str] = False,
+        mamba_config_overrides: Optional[Dict[str, Any]] = None,
+        head_config_overrides: Optional[Dict[str, Any]] = None,
+) -> keras.Model:
+    """Factory function to create a Mamba model with a task-specific head.
+
+    This function demonstrates the intended integration pattern for Mamba:
+    1. Instantiate a foundational `Mamba` model (optionally pretrained).
+    2. Instantiate a task-specific head from the `dl_techniques.nlp.heads`
+       factory.
+    3. Combine them into a single, end-to-end `keras.Model`.
+
+    Unlike BERT, Mamba does not inherently use an attention mask or token type
+    IDs. This function only requires `input_ids` and creates a padding mask
+    on-the-fly for compatibility with heads that might use it (e.g., for pooling).
+
+    :param mamba_variant: The Mamba variant to use (e.g., "130m", "base").
+    :type mamba_variant: str
+    :param task_config: An `NLPTaskConfig` object defining the task, which must
+        include `vocab_size`.
+    :type task_config: NLPTaskConfig
+    :param pretrained: If True, attempts to load pretrained weights (not yet
+        implemented). If string, path to local weights file.
+    :type pretrained: Union[bool, str]
+    :param mamba_config_overrides: Optional dictionary to override default Mamba
+        configuration for the chosen variant. Defaults to None.
+    :type mamba_config_overrides: Optional[Dict[str, Any]]
+    :param head_config_overrides: Optional dictionary to override default head
+        configuration. Defaults to None.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :return: A complete `keras.Model` ready for the specified task.
+    :rtype: keras.Model
+
+    Example:
+        .. code-block:: python
+
+            from dl_techniques.layers.nlp_heads import NLPTaskType
+
+            # Define a task for sequence classification
+            seq_cls_task = NLPTaskConfig(
+                name="sentiment_analysis",
+                task_type=NLPTaskType.SEQUENCE_CLASSIFICATION,
+                num_classes=3,
+                vocab_size=50257  # Mamba needs vocab_size at creation
+            )
+
+            # Create the full model with a Mamba-130m encoder
+            model = create_mamba_with_head(
+                mamba_variant="130m",
+                task_config=seq_cls_task,
+                pretrained=False, # No public weights yet
+                head_config_overrides={"dropout_rate": 0.15}
+            )
+            model.summary()
+    """
+    mamba_config_overrides = mamba_config_overrides or {}
+    head_config_overrides = head_config_overrides or {}
+
+    logger.info(
+        f"Creating Mamba-{mamba_variant} with a '{task_config.name}' head."
+    )
+
+    if not hasattr(task_config, 'vocab_size') or not task_config.vocab_size:
+        raise ValueError(
+            "The `task_config` must have a 'vocab_size' attribute "
+            "to create a Mamba model."
+        )
+
+    # 1. Create the foundational Mamba model
+    mamba_encoder = Mamba.from_variant(
+        mamba_variant,
+        vocab_size=task_config.vocab_size,
+        pretrained=pretrained,
+        **mamba_config_overrides,
+    )
+
+    # 2. Create the task head
+    task_head = create_nlp_head(
+        task_config=task_config,
+        input_dim=mamba_encoder.d_model,  # Pass Mamba's hidden size
+        **head_config_overrides,
+    )
+
+    # 3. Define inputs and build the end-to-end model
+    # Mamba only requires input_ids
+    inputs = {
+        "input_ids": keras.Input(
+            shape=(None,), dtype="int32", name="input_ids"
+        ),
+    }
+
+    # Get hidden states from the encoder
+    encoder_outputs = mamba_encoder(inputs)
+
+    # Create a mask for compatibility with heads that might need it
+    # (e.g., for masked pooling).
+    attention_mask = keras.ops.not_equal(
+        inputs["input_ids"], mamba_encoder.pad_token_id
+    )
+
+    # Pass encoder outputs to the task head
+    head_inputs = {
+        "hidden_states": encoder_outputs["last_hidden_state"],
+        "attention_mask": attention_mask,
+    }
+    task_outputs = task_head(head_inputs)
+
+    # Create the final model
+    model_name = f"mamba_{mamba_variant}_with_{task_config.name}_head"
+    model = keras.Model(
+        inputs=inputs,
+        outputs=task_outputs,
+        name=model_name
+    )
+
+    logger.info(
+        f"Successfully created model with {model.count_params():,} parameters."
+    )
+    return model
 
 # ---------------------------------------------------------------------

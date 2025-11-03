@@ -1,8 +1,44 @@
 """
 CLIP (Contrastive Language-Image Pre-training) Model Implementation.
 
-Based on: "Learning Transferable Visual Representations from Natural Language
-Supervision" (Radford et al., 2021) https://arxiv.org/abs/2103.00020
+CLIP learns a shared, multimodal embedding space where visual and textual
+concepts that correspond to each other are located closely. This is
+achieved through a dual-encoder architecture: a Vision Transformer (ViT)
+processes images, and a standard text Transformer processes natural
+language descriptions. Both encoders project their respective inputs into
+feature vectors within this common space.
+
+The model is optimized via a contrastive learning objective. Given a batch
+of N (image, text) pairs, the encoders produce N image features and N text
+features. After L2 normalization, the cosine similarity between every
+image feature and every text feature is calculated, forming an N x N
+similarity matrix. The diagonal of this matrix represents the similarity
+of N correct pairs, while the off-diagonal elements represent the
+N² - N incorrect pairs.
+
+The learning task is to maximize the similarity on the diagonal (correct
+pairs) while minimizing it on the off-diagonal. This is framed as a
+prediction problem: for a given image, the model predicts which of the N
+text captions is its true partner. A symmetric objective is computed for
+predicting the correct image for each text caption.
+
+A learnable temperature parameter, τ, scales the logits (similarity scores)
+before the softmax operation. This parameter controls the sharpness of the
+predicted probability distribution, effectively tuning the model's focus on
+hard-negative examples. The final training loss is the average of two
+cross-entropy losses: one for image-to-text predictions (computed over
+the rows of the similarity matrix) and one for text-to-image predictions
+(computed over the columns).
+
+This approach allows CLIP to learn robust visual representations directly
+from raw text, enabling powerful zero-shot transfer capabilities to a wide
+range of downstream tasks without requiring direct fine-tuning.
+
+References:
+    - Radford, A., et al. (2021). Learning Transferable Visual
+      Representations from Natural Language Supervision. In Proceedings of
+      the 38th International Conference on Machine Learning (ICML).
+      https://arxiv.org/abs/2103.00020
 
 Mathematical Framework:
     1. Image encoder: f_I(image) → R^d (ViT with patches)
