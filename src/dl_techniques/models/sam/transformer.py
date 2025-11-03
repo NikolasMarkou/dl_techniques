@@ -27,7 +27,7 @@ the image representation to be refined based on the prompts.
 **Data Flow (per block)**:
 ```
 Queries_in (tokens), Keys_in (image features)
-    |
+    │
     v
 ┌─────────────────────────────────────────┐
 │ 1. Self-Attention on Queries            │
@@ -35,23 +35,23 @@ Queries_in (tokens), Keys_in (image features)
 │    Queries' = Queries + Attention(Q,K,V)│
 │    Queries' = Norm(Queries')            │
 └─────────────────────────────────────────┘
-    |
+    │
     v
-┌─────────────────────────────────────────┐
-│ 2. Cross-Attention (Token to Image)     │
-│    Q = Queries' + PE                    │
-│    K, V = Keys + PE, Keys               │
+┌───────────────────────────────────────────┐
+│ 2. Cross-Attention (Token to Image)       │
+│    Q = Queries' + PE                      │
+│    K, V = Keys + PE, Keys                 │
 │    Queries'' = Queries' + Attention(Q,K,V)│
-│    Queries'' = Norm(Queries'')          │
-└─────────────────────────────────────────┘
-    |
+│    Queries'' = Norm(Queries'')            │
+└───────────────────────────────────────────┘
+    │
     v
-┌─────────────────────────────────────────┐
-│ 3. MLP/FFN on Queries                   │
+┌───────────────────────────────────────────┐
+│ 3. MLP/FFN on Queries                     │
 │    Queries''' = Queries'' + FFN(Queries'')│
-│    Queries''' = Norm(Queries''')        │
-└─────────────────────────────────────────┘
-    |
+│    Queries''' = Norm(Queries''')          │
+└───────────────────────────────────────────┘
+    │
     v
 ┌─────────────────────────────────────────┐
 │ 4. Cross-Attention (Image to Token)     │
@@ -60,7 +60,7 @@ Queries_in (tokens), Keys_in (image features)
 │    Keys' = Keys + Attention(Q,K,V)      │
 │    Keys' = Norm(Keys')                  │
 └─────────────────────────────────────────┘
-    |
+    │
     v
 Queries_out, Keys_out
 ```

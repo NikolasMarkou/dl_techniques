@@ -26,10 +26,10 @@ is used as a placeholder.
 **Data Flow**:
 ```
 Points (B, N, 2) --+
-Labels (B, N) ----> _embed_points() -> Sparse Embeddings (B, N, D) --+
-                                                                      |
-Boxes (B, 1, 4) --> _embed_boxes() --> Sparse Embeddings (B, 2, D) ---+--> Concat
-                                                                      |
+Labels (B, N) ----> _embed_points() -> Sparse Embeddings (B, N, D) -----+
+                                                                        │
+Boxes (B, 1, 4) --> _embed_boxes() --> Sparse Embeddings (B, 2, D) -----+--> Concat
+                                                                        │
 (No points/boxes)--> not_a_point_embed --> Sparse Embeddings (B, 1, D) -+
 
 Masks (B, 1, H, W) -> _embed_masks (CNN) -> Dense Embeddings (B, H_emb, W_emb, D)

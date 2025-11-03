@@ -1,8 +1,8 @@
 # Vision Transformer (ViT)
 
-[![Keras 3](https://img-shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
-[![Python](https://img-shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![TensorFlow](https://img-shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
+[![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
 A production-ready, fully-featured implementation of the **Vision Transformer (ViT)** in **Keras 3**, based on the paper ["An Image Is Worth 16x16 Words: Transformers for Image Recognition at Scale"](https://arxiv.org/abs/2010.11929) by Dosovitskiy et al. (2020).
 

@@ -28,22 +28,22 @@ while maintaining full serialization capabilities by strictly following the
 **Data Flow**:
 ```
 Input Image (B, H, W, C)
-      |
+      │
       v
 PatchEmbedding (Conv2D) -> (B, H/p, W/p, D)
-      |
+      │
       + PositionalEmbedding (learnable weight)
-      |
+      │
       v
 Sequence of TransformerLayer Layers
   - Attention (Windowed or Global) with Relative Positional Bias
   - Feed-Forward Network
   - Residual Connections
   - Normalization
-      |
+      │
       v
 Neck (Conv2D -> LayerNorm -> Conv2D -> LayerNorm)
-      |
+      │
       v
 Output Embedding (B, H_emb, W_emb, D_out)
 ```

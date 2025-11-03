@@ -16,17 +16,17 @@ main sub-components.
 **Architecture Overview**:
 ```
                             SAM Model
-                                |
+                                │
         ┌───────────────────────┼───────────────────────┐
-        |                       |                       |
+        │                       │                       │
         v                       v                       v
   Image Encoder          Prompt Encoder          Mask Decoder
   (ViT Backbone)         (Multi-modal)           (Transformer)
-        |                       |                       |
+        │                       │                       │
         v                       v                       v
   Image Features         Sparse + Dense              Masks
   (B, H/16, W/16, C)     Prompt Embeddings          (B, N, H, W)
-                                |                       |
+                                │                       │
                                 └───────────────────────┘
                                       IoU Predictions
                                          (B, N)
@@ -35,33 +35,33 @@ main sub-components.
 **Data Flow**:
 ```
 Input Image (B, H, W, 3)
-    |
+    │
     v
 Preprocessing (normalize + pad)
-    |
+    │
     v
 Image Encoder (ViT) ──────────────────> Image Embeddings (B, H', W', C)
-                                              |
-Input Prompts:                                |
-- Points (coords, labels)                     |
-- Boxes (x1, y1, x2, y2)                      |
-- Masks (B, 1, H, W)                          |
-    |                                         |
-    v                                         |
+                                              │
+Input Prompts:                                │
+- Points (coords, labels)                     │
+- Boxes (x1, y1, x2, y2)                      │
+- Masks (B, 1, H, W)                          │
+    │                                         │
+    v                                         │
 Prompt Encoder ──> Sparse Embeddings (B, N, C)|
                   Dense Embeddings (B, H', W', C)
-                                              |
+                                              │
     ┌─────────────────────────────────────────┘
-    |
+    │
     v
 Mask Decoder (Two-Way Transformer + Hypernetwork)
-    |
+    │
     v
 Low-Res Masks (B, N, H/4, W/4)
-    |
+    │
     v
 Postprocessing (upscale + threshold)
-    |
+    │
     v
 Output Masks (B, N, H, W)
 IoU Predictions (B, N)

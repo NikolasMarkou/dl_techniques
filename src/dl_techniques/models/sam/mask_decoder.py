@@ -31,28 +31,28 @@ several key components:
 ```
 Image Embeddings (B, H, W, C) ─────┐
 Dense Prompt Embeddings (B, H, W, C) ─> Add ─> Source
-                                              |
-IoU Token (1, C) ──┐                          |
-Mask Tokens (N, C) ─┴─> Output Tokens        |
-Sparse Prompts (B, M, C) ─> Concat ─> Tokens |
-                                              |
+                                              │
+IoU Token (1, C) ──┐                          │
+Mask Tokens (N, C) ─┴─> Output Tokens         │
+Sparse Prompts (B, M, C) ─> Concat ─> Tokens  │
+                                              │
                                               v
                                      Two-Way Transformer
-                                              |
+                                              │
                      ┌────────────────────────┴────────────────────┐
                      v                                             v
               Updated Tokens                              Updated Source
               (B, N+M, C)                                  (B, H, W, C)
-                     |                                             |
-         ┌───────────┴──────────┐                                 v
+                     │                                             │
+         ┌───────────┴──────────┐                                  v
          v                      v                          Upscale (4x)
-    IoU Token           Mask Tokens                               |
-         |              (B, N, C)                                 v
-         v                      |                          (B, H*4, W*4, C/8)
-    IoU Head                    v                                 |
-         |              Hypernetwork MLPs                         |
-         v              (B, N, C/8)                               |
-    IoU Predictions            |                                  |
+    IoU Token           Mask Tokens                                │
+         │              (B, N, C)                                  v
+         v                      │                          (B, H*4, W*4, C/8)
+    IoU Head                    v                                 │
+         │              Hypernetwork MLPs                         │
+         v              (B, N, C/8)                               │
+    IoU Predictions            │                                  │
     (B, N)                     └──────────> Matrix Multiply <─────┘
                                                    |
                                                    v

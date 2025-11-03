@@ -8,8 +8,6 @@ A production-ready, fully-featured implementation of the **Segment Anything Mode
 
 This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices, providing a modular, well-documented, and fully serializable codebase that works seamlessly across TensorFlow, PyTorch, and JAX backends.
 
-**Location**: `dl_techniques.models.sam`
-
 ---
 
 ## Table of Contents
@@ -209,7 +207,7 @@ Input Image (Any Size)
     └─► Shape: (B, 1024, 1024, 3)
 
 
-STEP 2: Image Encoding (Run Once per Image) ⏱️ ~200ms
+STEP 2: Image Encoding (Run Once per Image) ️ ~200ms
 ────────────────────────────────────────────
 Image (B, 1024, 1024, 3)
     │
@@ -228,7 +226,7 @@ Image (B, 1024, 1024, 3)
             └─► Output: (B, 64, 64, 256) ← IMAGE EMBEDDING
 
 
-STEP 3: Prompt Encoding (Run per Prompt) ⏱️ ~2ms
+STEP 3: Prompt Encoding (Run per Prompt) ~2ms
 ──────────────────────────────────────────
 
 3a. Sparse Prompts (Points & Boxes)
@@ -253,7 +251,7 @@ Mask Hint (B, 1, H, W)
             └─► Dense Embedding (B, 64, 64, 256)
 
 
-STEP 4: Mask Decoding ⏱️ ~8ms
+STEP 4: Mask Decoding ~8ms
 ──────────────────────────────
 Inputs:
   - Image Embedding (B, 64, 64, 256)
@@ -385,7 +383,7 @@ Input: (B, 1024, 1024, 3)
   │
   ▼
 ┌──────────────────────────────────────┐
-│   Transformer Block 1                │   ┐
+│   Transformer Block 1                │ ──┐
 │   ├─ Layer Norm                      │   │
 │   ├─ Windowed Self-Attention         │   │
 │   │   • Window Size: 14×14           │   │
@@ -401,7 +399,7 @@ Input: (B, 1024, 1024, 3)
 ┌──────────────────────────────────────┐   │
 │   Transformer Block 2-N              │   │
 │   (Some use Global Attention)        │   │
-└──────────────────────────────────────┘   ┘
+└──────────────────────────────────────┘ ──┘
   │
   ▼ (B, 64, 64, D)
 ┌──────────────────────────────────────┐
@@ -2993,6 +2991,7 @@ This implementation is based on the work by Kirillov et al. (2023) and follows t
 
 ```python
 # Create model
+import keras
 from dl_techniques.models.sam import SAM
 model = SAM.from_variant('vit_b')  # or 'vit_l', 'vit_h'
 
