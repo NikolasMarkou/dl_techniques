@@ -7,7 +7,7 @@ from typing import Dict, Any
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.trm.model import TinyRecursiveReasoningModel, TRMInner, TRMReasoningModule
+from dl_techniques.models.trm import TRM, TRMInner, TRMReasoningModule
 
 
 class TestTRMModelBasic:
@@ -22,15 +22,12 @@ class TestTRMModelBasic:
             "seq_len": 16,
             "expansion": 2.0,
             "num_heads": 4,
-            "L_layers": 2,
-            "H_cycles": 2,
-            "L_cycles": 2,
-            "num_puzzle_identifiers": 10,
-            "puzzle_emb_ndim": 32,
+            "l_layers": 2,
+            "h_layers": 2,
             "puzzle_emb_len": 4,
             "halt_max_steps": 5,
             "halt_exploration_prob": 0.1,
-            "no_ACT_continue": True,
+            "no_act_continue": True,
         }
 
     @pytest.fixture(scope="class")
@@ -42,23 +39,19 @@ class TestTRMModelBasic:
                 np.random.randint(0, tiny_config['vocab_size'], size=(batch_size, tiny_config['seq_len'])),
                 dtype='int32'
             ),
-            "puzzle_identifiers": keras.ops.convert_to_tensor(
-                np.random.randint(0, tiny_config['num_puzzle_identifiers'], size=(batch_size,)),
-                dtype='int32'
-            ),
         }
 
     def test_model_creation(self, tiny_config: Dict[str, Any]):
         """Test basic model creation and sub-layer initialization."""
-        model = TinyRecursiveReasoningModel(tiny_config)
+        model = TRM(**tiny_config)
         assert isinstance(model.inner, TRMInner)
         assert isinstance(model.inner.L_level, TRMReasoningModule)
-        assert len(model.inner.L_level.layers_list) == tiny_config['L_layers']
-        assert model.config == tiny_config
+        assert len(model.inner.L_level.layers_list) == tiny_config['l_layers']
+        assert len(model.inner.H_level.layers_list) == tiny_config['h_layers']
 
     def test_initial_carry(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, keras.KerasTensor]):
         """Test the initial_carry method for correct state structure and shapes."""
-        model = TinyRecursiveReasoningModel(tiny_config)
+        model = TRM(**tiny_config)
         carry = model.initial_carry(sample_batch)
 
         batch_size = sample_batch["inputs"].shape[0]
@@ -85,7 +78,7 @@ class TestTRMModelBasic:
         # Make the test deterministic by forcing exploration, which prevents immediate halting.
         config = tiny_config.copy()
         config["halt_exploration_prob"] = 1.0
-        model = TinyRecursiveReasoningModel(config)
+        model = TRM(**config)
         initial_carry = model.initial_carry(sample_batch)
 
         # Run one step
@@ -106,7 +99,7 @@ class TestTRMModelBasic:
 
     def test_multi_step_loop_simulation(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, keras.KerasTensor]):
         """Simulate the external ACT loop and verify state progression."""
-        model = TinyRecursiveReasoningModel(tiny_config)
+        model = TRM(**tiny_config)
         carry = model.initial_carry(sample_batch)
 
         max_steps = tiny_config["halt_max_steps"]
@@ -132,7 +125,7 @@ class TestTRMModelBasic:
 
     def test_state_reset_on_halt(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, keras.KerasTensor]):
         """Verify that z_H and z_L are reset when an item is halted."""
-        model = TinyRecursiveReasoningModel(tiny_config)
+        model = TRM(**tiny_config)
         # Build the model to access inner weights
         _ = model(model.initial_carry(sample_batch), sample_batch)
 
@@ -173,27 +166,25 @@ class TestTRMModelBasic:
 class TestTRMModelConfigurations:
     """Test various model configurations."""
 
-    def test_different_cycle_configs(self):
-        """Test the model with different H_cycles and L_cycles."""
+    def test_different_layer_configs(self):
+        """Test the model with different h_layers and l_layers."""
         configs_to_test = [
-            {"H_cycles": 1, "L_cycles": 1},
-            {"H_cycles": 3, "L_cycles": 1},
-            {"H_cycles": 1, "L_cycles": 3},
+            {"h_layers": 1, "l_layers": 1},
+            {"h_layers": 3, "l_layers": 1},
+            {"h_layers": 1, "l_layers": 3},
         ]
         base_config = {
             "vocab_size": 50, "hidden_size": 16, "seq_len": 8,
-            "expansion": 2.0, "num_heads": 2, "L_layers": 1,
-            "num_puzzle_identifiers": 5, "puzzle_emb_ndim": 16,
+            "expansion": 2.0, "num_heads": 2,
             "puzzle_emb_len": 2, "halt_max_steps": 3,
-            "no_ACT_continue": True, "halt_exploration_prob": 0.1,
+            "no_act_continue": True, "halt_exploration_prob": 0.1,
         }
 
-        for cycle_config in configs_to_test:
-            config = {**base_config, **cycle_config}
-            model = TinyRecursiveReasoningModel(config)
+        for layer_config in configs_to_test:
+            config = {**base_config, **layer_config}
+            model = TRM(**config)
             batch = {
                 "inputs": keras.ops.zeros((1, config['seq_len']), dtype='int32'),
-                "puzzle_identifiers": keras.ops.zeros((1,), dtype='int32'),
             }
             carry = model.initial_carry(batch)
             _, outputs = model(carry, batch)
@@ -202,21 +193,20 @@ class TestTRMModelConfigurations:
             assert outputs["logits"].shape == (1, config['seq_len'], config['vocab_size'])
 
     def test_bellman_update_config(self):
-        """Test that target_q_continue is produced when no_ACT_continue is False."""
+        """Test that target_q_continue is produced when no_act_continue is False."""
         config = {
             "vocab_size": 50, "hidden_size": 16, "seq_len": 8,
-            "expansion": 2.0, "num_heads": 2, "L_layers": 1, "H_cycles": 1, "L_cycles": 1,
-            "num_puzzle_identifiers": 5, "puzzle_emb_ndim": 16, "puzzle_emb_len": 2,
-            "halt_max_steps": 3, "no_ACT_continue": False, "halt_exploration_prob": 0.0,
+            "expansion": 2.0, "num_heads": 2, "l_layers": 1, "h_layers": 1,
+            "puzzle_emb_len": 2,
+            "halt_max_steps": 3, "no_act_continue": False, "halt_exploration_prob": 0.0,
         }
-        model = TinyRecursiveReasoningModel(config)
+        model = TRM(**config)
         batch = {
             "inputs": keras.ops.zeros((2, config['seq_len']), dtype='int32'),
-            "puzzle_identifiers": keras.ops.zeros((2,), dtype='int32'),
         }
         carry = model.initial_carry(batch)
 
-        # In training mode with no_ACT_continue=False, we expect a Bellman target
+        # In training mode with no_act_continue=False, we expect a Bellman target
         _, outputs = model(carry, batch, training=True)
         assert "target_q_continue" in outputs
         assert outputs["target_q_continue"].shape == (2,)
@@ -234,10 +224,10 @@ class TestTRMModelSerialization:
         """Create a config for serialization testing."""
         return {
             "vocab_size": 100, "hidden_size": 32, "seq_len": 16, "expansion": 2.0,
-            "num_heads": 4, "L_layers": 2, "H_cycles": 2, "L_cycles": 2,
-            "num_puzzle_identifiers": 10, "puzzle_emb_ndim": 32, "puzzle_emb_len": 4,
+            "num_heads": 4, "l_layers": 2, "h_layers": 2,
+            "puzzle_emb_len": 4,
             "halt_max_steps": 5, "rope_theta": 10000.0, "halt_exploration_prob": 0.1,
-            "no_ACT_continue": True,
+            "no_act_continue": True,
         }
 
     @pytest.fixture
@@ -250,15 +240,11 @@ class TestTRMModelSerialization:
                                   size=(batch_size, serializable_config['seq_len'])),
                 dtype='int32'
             ),
-            "puzzle_identifiers": keras.ops.convert_to_tensor(
-                np.random.randint(0, serializable_config['num_puzzle_identifiers'], size=(batch_size,)),
-                dtype='int32'
-            ),
         }
 
     def test_serialization_cycle(self, serializable_config: Dict[str, Any], sample_batch: Dict[str, Any]):
         """Test full serialization and deserialization cycle."""
-        original_model = TinyRecursiveReasoningModel(serializable_config)
+        original_model = TRM(**serializable_config)
         initial_carry = original_model.initial_carry(sample_batch)
 
         # Run one step to build the model completely
@@ -270,7 +256,7 @@ class TestTRMModelSerialization:
 
             # Register custom objects for loading if they are in a local file
             custom_objects = {
-                "TinyRecursiveReasoningModel": TinyRecursiveReasoningModel,
+                "TinyRecursiveReasoningModel": TRM,
                 "TRMInner": TRMInner,
                 "TRMReasoningModule": TRMReasoningModule
             }
@@ -294,12 +280,12 @@ class TestTRMModelSerialization:
 
     def test_config_reconstruction(self, serializable_config: Dict[str, Any]):
         """Test that the model can be reconstructed from its config."""
-        model = TinyRecursiveReasoningModel(serializable_config)
+        model = TRM(**serializable_config)
         config = model.get_config()
 
-        reconstructed_model = TinyRecursiveReasoningModel.from_config(config)
+        reconstructed_model = TRM.from_config(config)
 
-        assert reconstructed_model.config == model.config
+        assert reconstructed_model.get_config() == model.get_config()
         assert len(reconstructed_model.inner.L_level.layers_list) == len(model.inner.L_level.layers_list)
 
 
@@ -315,15 +301,12 @@ class TestTRMIntegration:
             "seq_len": 16,
             "expansion": 2.0,
             "num_heads": 4,
-            "L_layers": 2,
-            "H_cycles": 2,
-            "L_cycles": 2,
-            "num_puzzle_identifiers": 10,
-            "puzzle_emb_ndim": 32,
+            "l_layers": 2,
+            "h_layers": 2,
             "puzzle_emb_len": 4,
             "halt_max_steps": 5,
             "halt_exploration_prob": 0.1,
-            "no_ACT_continue": True,
+            "no_act_continue": True,
         }
 
     @pytest.fixture(scope="class")
@@ -335,15 +318,11 @@ class TestTRMIntegration:
                 np.random.randint(0, tiny_config['vocab_size'], size=(batch_size, tiny_config['seq_len'])),
                 dtype='int32'
             ),
-            "puzzle_identifiers": keras.ops.convert_to_tensor(
-                np.random.randint(0, tiny_config['num_puzzle_identifiers'], size=(batch_size,)),
-                dtype='int32'
-            ),
         }
 
     def test_end_to_end_training_simulation(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, Any]):
         """Test a complete simulated training step with gradient flow."""
-        model = TinyRecursiveReasoningModel(tiny_config)
+        model = TRM(**tiny_config)
         optimizer = keras.optimizers.Adam(learning_rate=1e-3)
         loss_fn = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 

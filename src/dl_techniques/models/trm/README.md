@@ -2,11 +2,11 @@
 
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
 A production-ready, fully-featured Keras 3 implementation of the **Tiny Recursive Model (TRM)**, a highly parameter-efficient architecture designed for complex reasoning tasks. TRM challenges the "bigger is better" paradigm by using a small, shared neural network that is applied recursively to refine its solution over a variable number of steps.
 
-This implementation adapts the original PyTorch model from the paper "[Less is More: Recursive Reasoning with Tiny Networks](https://arxiv.org/abs/2510.04871)" to Keras 3. It incorporates the principles of **Adaptive Computation Time (ACT)**, allowing the model to dynamically learn how many "thinking" steps are needed for a given problem. The code adheres to modern Keras best practices, ensuring it is modular, well-documented, and fully serializable across TensorFlow, PyTorch, and JAX backends.
+This implementation adapts the original PyTorch model from the paper "[Less is More: Recursive Reasoning with Tiny Networks](https://arxiv.org/abs/2510.04871)" to Keras 3. It incorporates the principles of **Adaptive Computation Time (ACT)**, allowing the model to dynamically learn how many "thinking" steps are needed for a given problem. The code adheres to modern Keras best practices, ensuring it is modular, well-documented, and fully serializable.
 
 ---
 
@@ -192,12 +192,12 @@ STEP 3: OUTPUT GENERATION
 - Prediction Head: `logits = lm_head(z_H_new)`.
 - Halting Head: `(q_halt, q_continue) = q_head(z_H_new[:, 0])`.
 
-STEP 4: HALTING LOGIC
-─────────────────────
+STEP 4: HALTING LOGIC & STATE UPDATE
+────────────────────────────────────
 - Increment `steps` counter.
 - Update `carry["halted"]` mask based on `q_halt`, `q_continue`, and `max_steps`.
-- Detach gradients from `z_H_new` and `z_L_new` before placing them in the
-  `new_carry` to prevent backpropagation through time.
+- Detach gradients from `z_H_new` and `z_L_new` using `tf.stop_gradient` before
+  placing them in the `new_carry` to prevent backpropagation through time.
 
 OUTPUTS:
 - `new_carry`: The updated state for the next step.
@@ -225,7 +225,7 @@ OUTPUTS:
     5.  **Q Head**: A `Dense` layer that projects the first token of `z_H` to two logits representing the halt and continue probabilities.
 -   **Learnable Initial States**: Crucially, this layer owns the `H_init` and `L_init` weights, which act as the "reset" state for the reasoning process.
 
-### 4.3 `TinyRecursiveReasoningModel`
+### 4.3 `TRM` (The Model)
 
 -   **Purpose**: The main `keras.Model` class that the user interacts with. It manages the outer ACT loop's state and logic.
 -   **Responsibilities**:
@@ -254,10 +254,10 @@ import tensorflow as tf
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.trm.model import TinyRecursiveReasoningModel
+from dl_techniques.models.trm.model import TRM
 
 # 1. Create a TRM model
-model = TinyRecursiveReasoningModel(
+model = TRM(
     vocab_size=12,
     hidden_size=256,
     num_heads=4,
@@ -285,21 +285,21 @@ print(f"Initial step count: {carry['steps'][0].numpy()}")
 new_carry, outputs = model(carry, dummy_batch, training=True)
 print("\n✅ Single reasoning step complete!")
 print(f"New step count: {new_carry['steps'][0].numpy()}")
-print(f"Logits shape: {outputs['logits'].shape}") # (batch_size, seq_len, vocab_size)
-print(f"Halted mask: {new_carry['halted'].numpy().any()}") # Some might halt
+print(f"Logits shape: {outputs['logits'].shape}")  # (batch_size, seq_len, vocab_size)
+print(f"Halted mask: {new_carry['halted'].numpy().any()}")  # Some might halt
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Classes
+### 6.1 Model & Layers
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`TinyRecursiveReasoningModel`** | `...trm.model.TinyRecursiveReasoningModel` | The main Keras `Model`. Manages the ACT loop state and executes single reasoning steps. |
-| **`TRMInner`** | `...trm.model.TRMInner` | A Keras `Layer` that performs the core two-level reasoning (`z_L`, `z_H`) for one step. |
-| **`TRMReasoningModule`** | `...trm.model.TRMReasoningModule` | A Keras `Layer` composed of a stack of `TransformerLayer` instances. Used for both H- and L-level processing. |
+| **`TRM`** | `...trm.model` | The main Keras `Model`. Manages the ACT loop state and executes single reasoning steps. |
+| **`TRMInner`** | `...trm.components` | A Keras `Layer` that performs the core two-level reasoning (`z_L`, `z_H`) for one step. |
+| **`TRMReasoningModule`** | `...trm.components` | A Keras `Layer` composed of a stack of `TransformerLayer` instances. Used for both H- and L-level processing. |
 
 ### 6.2 Core Building Block
 
@@ -322,13 +322,15 @@ TRM does not have named variants like "base" or "large." Instead, its architectu
 ### Example: LLaMA-Style Variant (Pre-Norm, RMSNorm, SwiGLU)
 
 ```python
+from dl_techniques.models.trm.model import TRM
+
 # This configuration mimics modern LLM architectures
-llama_style_trm = TinyRecursiveReasoningModel(
-    vocab_size=12,
+llama_style_trm = TRM(
+    vocab_size=32000,
     hidden_size=512,
     num_heads=8,
     expansion=2.66, # Common in LLaMA-style models
-    seq_len=900,
+    seq_len=1024,
     normalization_position='pre',  # Pre-normalization
     normalization_type='rms_norm', # RMS Normalization
     ffn_type='swiglu',             # SwiGLU FFN
@@ -338,13 +340,15 @@ llama_style_trm = TinyRecursiveReasoningModel(
 ### Example: Classic Transformer Variant (Post-Norm, LayerNorm, ReLU/GELU)
 
 ```python
+from dl_techniques.models.trm.model import TRM
+
 # This configuration is closer to the original "Attention Is All You Need" paper
-classic_trm = TinyRecursiveReasoningModel(
-    vocab_size=12,
+classic_trm = TRM(
+    vocab_size=32000,
     hidden_size=512,
     num_heads=8,
     expansion=4.0,
-    seq_len=900,
+    seq_len=1024,
     normalization_position='post', # Post-normalization
     normalization_type='layer_norm',# Standard LayerNorm
     ffn_type='mlp',                # Standard MLP FFN
@@ -367,18 +371,17 @@ import keras
 # Assume `model` and `dummy_batch` are created as in the Quick Start guide
 optimizer = keras.optimizers.Adam()
 loss_fn = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+dummy_labels = dummy_batch["inputs"] # For simplicity, use inputs as labels
 
 # --- Start of the external ACT training loop ---
-carry = model.initial_carry(dummy_batch)
-all_step_outputs = []
-halted_mask_history = []
-
 with tf.GradientTape() as tape:
+    carry = model.initial_carry(dummy_batch)
+    all_step_outputs = []
+    
     # Unroll the reasoning process
     for step in range(model.halt_max_steps):
         carry, outputs = model(carry, dummy_batch, training=True)
         all_step_outputs.append(outputs)
-        halted_mask_history.append(carry["halted"])
         
         # Optimization: Stop if all sequences in the batch have halted
         if tf.reduce_all(carry["halted"]):
@@ -386,13 +389,13 @@ with tf.GradientTape() as tape:
             
     # --- ACT Loss Calculation ---
     # This is a simplified example. A proper ACT loss also includes a ponder cost.
-    # We weight the loss at each step by the probability of not having halted yet.
+    # We weight the loss at each step by the probability of not have halted yet.
     total_loss = 0.0
     p_continue = 1.0 # Probability of having reached the current step
     
     for i, outputs in enumerate(all_step_outputs):
         # Calculate cross-entropy loss for this step
-        step_loss = loss_fn(dummy_batch["inputs"], outputs["logits"])
+        step_loss = loss_fn(dummy_labels, outputs["logits"])
         
         # Calculate halting probabilities for this step
         q_probs = keras.ops.softmax(
@@ -427,7 +430,7 @@ By setting `no_act_continue=False`, you enable a more sophisticated halting mech
 
 ```python
 # Create a model with Q-learning enabled
-q_learning_model = TinyRecursiveReasoningModel(
+q_learning_model = TRM(
     # ... other params ...
     no_act_continue=False
 )
@@ -457,7 +460,7 @@ TRM is built on Transformer layers, making it an ideal candidate for mixed preci
 keras.mixed_precision.set_global_policy('mixed_float16')
 
 # Create model (will automatically use mixed precision)
-model = TinyRecursiveReasoningModel(...)
+model = TRM(...)
 model.compile(...)
 
 # When training, use a LossScaleOptimizer to prevent numeric underflow.
@@ -488,13 +491,13 @@ model.compile(...)
 
 ## 12. Serialization & Deployment
 
-The `TinyRecursiveReasoningModel` and all its custom layers are fully serializable using Keras 3's modern `.keras` format, thanks to the adherence to best practices.
+The `TRM` model and all its custom layers (`TRMInner`, `TRMReasoningModule`) are fully serializable using Keras 3's modern `.keras` format. This is possible because each custom component is decorated with `@keras.saving.register_keras_serializable()`.
 
 ### Saving and Loading
 
 ```python
 # Create and train model
-model = TinyRecursiveReasoningModel(...)
+model = TRM(...)
 # ... training loop ...
 
 # Save the entire model to a single file
@@ -518,34 +521,38 @@ You can validate the implementation with simple tests to ensure model creation a
 ```python
 import keras
 import tensorflow as tf
-from dl_techniques.models.trm.model import TinyRecursiveReasoningModel
+from dl_techniques.models.trm.model import TRM
+
 
 def test_model_creation():
     """Test that a model can be created."""
-    model = TinyRecursiveReasoningModel(
+    model = TRM(
         vocab_size=12, hidden_size=64, num_heads=2, expansion=2.0, seq_len=50
     )
     assert model is not None
     print("✓ TRM creation successful")
 
+
 def test_single_step_execution():
     """Test that a single step updates the state correctly."""
-    model = TinyRecursiveReasoningModel(
+    model = TRM(
         vocab_size=12, hidden_size=64, num_heads=2, expansion=2.0, seq_len=50
     )
     batch = {"inputs": tf.zeros((4, 50), dtype=tf.int32)}
-    
+
     # Initial state
     carry = model.initial_carry(batch)
     assert tf.reduce_all(carry["halted"])
     assert tf.reduce_all(carry["steps"] == 0)
-    
+
     # First step
-    new_carry, outputs = model(carry, batch)
-    assert not tf.reduce_all(new_carry["halted"]) # Should start processing
+    new_carry, outputs = model(carry, batch, training=False)
+    # In inference, halts only at max steps. In training, it can halt early.
+    assert not tf.reduce_all(new_carry["halted"])
     assert tf.reduce_all(new_carry["steps"] == 1)
     assert outputs["logits"].shape == (4, 50, 12)
     print("✓ Single step execution and state update are correct")
+
 
 # Run tests
 if __name__ == '__main__':
@@ -575,7 +582,7 @@ A: The `carry` is a Python dictionary that holds the model's state between recur
 
 **Q: Why are gradients stopped between steps with `tf.stop_gradient`?**
 
-A: This is a crucial design choice to make training stable. It prevents backpropagation through the entire unrolled sequence of steps (which can be very long). Instead, the model is trained to improve its *next* step based on the *current* state, treating each reasoning step as a distinct unit.
+A: This is a crucial design choice to make training stable. It prevents backpropagation through the entire unrolled sequence of steps (which can be very long). Instead, the model is trained to improve its *next* step based on the *current* state, treating each reasoning step as a distinct unit. This implementation uses the native `tf.stop_gradient` for robustness with the TensorFlow backend.
 
 **Q: What are the `H_init` and `L_init` weights for?**
 
@@ -587,7 +594,7 @@ A: They are learnable tensors that represent the model's optimal "blank slate" o
 
 ### Gradient Control and State Management
 
-The separation of the `carry` state between steps is critical. Inside the `call` method, the updated `z_H` and `z_L` states are wrapped in `tf.stop_gradient` before being placed in the `new_carry`. This means that when the optimizer computes gradients, it only looks at the computation within the *current* step. The model learns to produce a good output and a good *next state*, but the gradient path does not flow back through all previous states. This avoids the vanishing/exploding gradient problems common in traditional RNNs and makes training deep recursive models feasible.
+The separation of the `carry` state between steps is critical. Inside the `TRMInner.call` method, the updated `z_H` and `z_L` states are wrapped in `tf.stop_gradient` before being placed in the `new_carry`. This means that when the optimizer computes gradients, it only looks at the computation within the *current* step. The model learns to produce a good output and a good *next state*, but the gradient path does not flow back through all previous states. This avoids the vanishing/exploding gradient problems common in traditional RNNs and makes training deep recursive models feasible.
 
 ### Q-Learning Halting Mechanism
 
