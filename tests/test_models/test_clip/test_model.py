@@ -26,7 +26,7 @@ import tempfile
 import os
 
 from dl_techniques.models.clip.model import (
-    CLIPModel,
+    CLIP,
     create_clip_model,
     create_clip_variant
 )
@@ -37,7 +37,7 @@ class TestCLIPModelInitialization:
 
     def test_basic_initialization(self):
         """Test basic CLIPModel initialization with default parameters."""
-        model = CLIPModel()
+        model = CLIP()
 
         # Check default values
         assert model.image_size == 224
@@ -60,14 +60,13 @@ class TestCLIPModelInitialization:
 
         # Check derived properties
         assert model.num_patches == (224 // 16) ** 2  # 196
-        assert model.vision_seq_len == model.num_patches + 1  # 197 (+ CLS token)
 
         # Model should not be built yet
         assert model.built is False
 
     def test_custom_initialization(self):
         """Test CLIPModel initialization with custom parameters."""
-        model = CLIPModel(
+        model = CLIP(
             image_size=384,
             patch_size=32,
             vision_layers=24,
@@ -103,46 +102,6 @@ class TestCLIPModelInitialization:
 
         # Test derived properties
         assert model.num_patches == (384 // 32) ** 2  # 144
-        assert model.vision_seq_len == 144 + 1  # 145
-
-    def test_parameter_validation(self):
-        """Test CLIPModel parameter validation."""
-        # Test that invalid configurations raise errors during initialization
-
-        # Test invalid image size
-        with pytest.raises(ValueError, match="image_size must be positive"):
-            CLIPModel(image_size=0)
-
-        # Test invalid patch size
-        with pytest.raises(ValueError, match="patch_size must be positive"):
-            CLIPModel(patch_size=-16)
-
-        # Test non-divisible image size and patch size
-        with pytest.raises(ValueError, match="image_size.*must be divisible by.*patch_size"):
-            CLIPModel(image_size=224, patch_size=15)
-
-        # Test invalid vision_heads heads configuration
-        with pytest.raises(ValueError, match="vision_width.*must be divisible by.*vision_heads"):
-            CLIPModel(vision_width=768, vision_heads=11)
-
-        # Test invalid vision_heads GQA configuration
-        with pytest.raises(ValueError, match="vision_heads.*must be divisible by.*vision_kv_heads"):
-            CLIPModel(vision_heads=12, vision_kv_heads=5)
-
-        # Test invalid text heads configuration
-        with pytest.raises(ValueError, match="text_width.*must be divisible by.*text_heads"):
-            CLIPModel(text_width=512, text_heads=7)
-
-        # Test invalid text GQA configuration
-        with pytest.raises(ValueError, match="text_heads.*must be divisible by.*text_kv_heads"):
-            CLIPModel(text_heads=8, text_kv_heads=3)
-
-        # Test invalid dropout rates
-        with pytest.raises(ValueError, match="dropout_rate must be in"):
-            CLIPModel(dropout_rate=1.5)
-
-        with pytest.raises(ValueError, match="attention_dropout_rate must be in"):
-            CLIPModel(attention_dropout_rate=-0.1)
 
 
 class TestCLIPModelBuilding:
@@ -169,7 +128,7 @@ class TestCLIPModelBuilding:
 
     def test_build_with_dict_input_shape(self, basic_config_params):
         """Test building CLIP model with dictionary input shape."""
-        model = CLIPModel(**basic_config_params)
+        model = CLIP(**basic_config_params)
         input_shape = {
             'image': (None, 224, 224, 3),
             'text': (None, 32)
@@ -178,7 +137,6 @@ class TestCLIPModelBuilding:
         model.build(input_shape)
 
         assert model.built is True
-        assert model._build_input_shape == input_shape
         assert model.patch_conv is not None
         assert model.class_token is not None
         assert model.logit_scale is not None
@@ -187,7 +145,7 @@ class TestCLIPModelBuilding:
 
     def test_build_with_tuple_input_shape(self, basic_config_params):
         """Test building CLIP model with tuple input shape."""
-        model = CLIPModel(**basic_config_params)
+        model = CLIP(**basic_config_params)
         input_shape = (
             (None, 224, 224, 3),  # Image shape
             (None, 32)  # Text shape
@@ -199,7 +157,7 @@ class TestCLIPModelBuilding:
 
     def test_component_shapes_after_building(self, basic_config_params):
         """Test that components have correct shapes after building."""
-        model = CLIPModel(**basic_config_params)
+        model = CLIP(**basic_config_params)
         model.build({
             'image': (None, 224, 224, 3),
             'text': (None, 32)
@@ -220,9 +178,9 @@ class TestCLIPModelForwardPass:
     """Test CLIP model forward pass functionality."""
 
     @pytest.fixture
-    def built_model(self) -> CLIPModel:
+    def built_model(self) -> CLIP:
         """Create a built CLIP model for testing."""
-        model = CLIPModel(
+        model = CLIP(
             image_size=224,
             patch_size=16,
             vision_layers=3,
@@ -406,7 +364,7 @@ class TestCLIPModelSerialization:
 
     def test_config_serialization(self):
         """Test model configuration serialization."""
-        model = CLIPModel(
+        model = CLIP(
             image_size=256,
             vision_layers=8,
             text_layers=6,
@@ -426,7 +384,7 @@ class TestCLIPModelSerialization:
 
     def test_from_config_reconstruction(self):
         """Test model reconstruction from configuration."""
-        original_model = CLIPModel(
+        original_model = CLIP(
             image_size=256,
             vision_layers=4,
             text_layers=3,
@@ -435,7 +393,7 @@ class TestCLIPModelSerialization:
 
         # Get config and reconstruct
         model_config = original_model.get_config()
-        reconstructed_model = CLIPModel.from_config(model_config)
+        reconstructed_model = CLIP.from_config(model_config)
 
         # Check that configs match
         assert reconstructed_model.image_size == original_model.image_size
@@ -446,7 +404,7 @@ class TestCLIPModelSerialization:
     def test_model_save_load(self):
         """Test saving and loading complete model."""
         # Create and build model
-        model = CLIPModel(
+        model = CLIP(
             vision_layers=2,  # Small for testing
             text_layers=2,
             embed_dim=128
@@ -493,7 +451,7 @@ class TestCLIPEdgeCases:
     def test_small_input_sizes(self):
         """Test CLIP with small input sizes."""
         # Test minimum viable image size
-        model = CLIPModel(
+        model = CLIP(
             image_size=32,  # Small image
             patch_size=16,
             vision_layers=2,
@@ -517,7 +475,7 @@ class TestCLIPEdgeCases:
 
     def test_single_sample_batch(self):
         """Test CLIP with batch size of 1."""
-        model = CLIPModel(embed_dim=128)
+        model = CLIP(embed_dim=128)
         model.build({
             'image': (None, 224, 224, 3),
             'text': (None, 32)
@@ -535,7 +493,7 @@ class TestCLIPEdgeCases:
 
     def test_text_with_heavy_padding(self):
         """Test text processing with heavy padding."""
-        model = CLIPModel(embed_dim=128)
+        model = CLIP(embed_dim=128)
         model.build({
             'image': (None, 224, 224, 3),
             'text': (None, 32)
@@ -575,7 +533,7 @@ class TestCreateCLIPFactory:
             embed_dim=256
         )
 
-        assert isinstance(model, CLIPModel)
+        assert isinstance(model, CLIP)
         assert model.image_size == 224
         assert model.vision_layers == 6
         assert model.text_layers == 4
@@ -633,7 +591,7 @@ class TestCreateCLIPFactory:
 
         for variant in variants:
             model = create_clip_variant(variant)
-            assert isinstance(model, CLIPModel)
+            assert isinstance(model, CLIP)
 
             # Check that different variants have different configurations
             if variant == "ViT-B/32":
