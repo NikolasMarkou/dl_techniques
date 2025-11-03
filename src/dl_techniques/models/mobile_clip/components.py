@@ -508,3 +508,5 @@ class MobileClipTextEncoder(keras.layers.Layer):
             'embed_scale': self.embed_scale,
         })
         return config
+
+# ---------------------------------------------------------------------
