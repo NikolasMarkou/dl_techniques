@@ -16,7 +16,7 @@
   <img src="https://raw.github.com/nikolasmarkou/dl_techniques/main/imgs/logo_v2.png" alt="Deep Learning Techniques Logo" width="350">
 </p>
 
-In the rapidly evolving landscape of AI research, groundbreaking techniques are often scattered across countless repositories, disparate implementations, and dense academic papers. **dl_techniques** emerges as a unified, curated, and production-ready arsenal for advanced deep learning. Pioneered and sponsored by [Electi Consulting](https://electiconsulting.com), this library is more than a collection of layers—it is the definitive toolkit for researchers and engineers to design, train, and dissect state-of-the-art neural networks.
+In the rapidly evolving landscape of AI research, groundbreaking techniques are often scattered across countless repositories, disparate implementations, and dense academic papers. **dl_techniques** emerges as a unified, curated, and production-ready arsenal for advanced deep learning. Pioneered and sponsored by [Electi Consulting](https://electiconsulting.com), this library is more than a collection of components—it is the definitive toolkit for researchers and engineers to design, train, and dissect state-of-the-art neural networks.
 
 We bridge the chasm between theoretical innovation and practical application, providing faithful, efficient, and enterprise-validated components. From next-generation attention mechanisms and graph neural networks to information-theoretic loss functions and an unparalleled model analysis suite, `dl_techniques` is your strategic advantage for pushing the boundaries of deep learning.
 
@@ -41,15 +41,15 @@ We bridge the chasm between theoretical innovation and practical application, pr
 This library is a comprehensive suite of tools organized into five key pillars, developed through rigorous research and validated in real-world enterprise applications:
 
 <details>
-<summary><b>1. State-of-the-Art Architectures & Models (130+ Implementations)</b></summary>
+<summary><b>1. State-of-the-Art Architectures & Models (150+ Implementations)</b></summary>
 <p>
 
-- **Battle-Tested Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`**, **`Mamba`**, and modern **`BERT`** variants featuring Block-wise Latent Transformers (BLT) and Hierarchical Reasoning.
-- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`FastVLM`**, **`NanoVLM`**, **`DINOv1/v2/v3`**, **`SigLIP-ViT`**, and the seminal object detection model **`DETR`**.
-- **Next-Generation CNNs**: Advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`MobileNetV4`**, the recursively-defined **`FractalNet`**, **`CoShNet`**, and the ultra-efficient **`SqueezeNet`** family.
-- **Specialized Architectures**: Task-specific models like **`DepthAnything`** for monocular depth estimation, a complete **`VAE`** for generative modeling, and full **`Capsule Networks`** (CapsNet) with dynamic routing.
-- **Advanced Time Series & Forecasting**: State-of-the-art forecasting models including **`TiRex`** with quantile prediction and an enhanced implementation of **`N-BEATS`**.
-- **Experimental Frontiers**: Explore novel concepts including **`Graph Neural Networks`** (GNNs) and Kolmogorov-Arnold Networks (**`KAN`**).
+- **Next-Generation Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`** (including MEGA & SOM variants), **`Mamba`**, and modern **`BERT`** variants featuring Block-wise Latent Transformers (BLT) and Hierarchical Reasoning Models (HRM).
+- **Vision & Multimodal Powerhouses**: A comprehensive suite including **`CLIP`**, **`FastVLM`**, **`NanoVLM`** (including a score-based World Model), **`DINOv1/v2/v3`**, **`SigLIP-ViT`**, object detection with **`DETR`** and **`YOLOv12`**, and the **`Segment Anything Model (SAM)`**.
+- **Advanced CNNs**: A rich collection of advanced convolutional architectures such as **`ConvNeXtV1/V2`**, **`MobileNetV1-V4`**, the recursively-defined **`FractalNet`**, the complex shearlet-based **`CoShNet`**, and the ultra-efficient **`SqueezeNet`** family.
+- **Time Series & Forecasting**: State-of-the-art forecasting models including the probabilistic **`TiRex`** with quantile prediction, an enhanced implementation of **`N-BEATS`**, and the novel **`xLSTM`**.
+- **Generative & Specialized Models**: Task-specific models like **`DepthAnything`** for monocular depth estimation, a complete **`Variational Autoencoder (VAE)`** framework, full **`Capsule Networks`** (CapsNet) with dynamic routing, and unsupervised aligners like `Mini-Vec2Vec`.
+- **Experimental Frontiers**: Explore novel concepts including a wide range of **`Graph Neural Networks`** (GNNs) in `RELGT`, Kolmogorov-Arnold Networks (**`KAN`**), and bio-mimetic models like `MothNet`.
 </p>
 </details>
 
@@ -57,11 +57,12 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>2. A Modular Arsenal of Advanced Layers (290+ Components)</b></summary>
 <p>
 
-- **Pioneering Attention Mechanisms**: Go beyond standard attention with **`DifferentialMultiHeadAttention`**, modern **`HopfieldAttention`**, **`GroupQueryAttention`**, and efficient alternatives like `FNetFourierTransform`.
-- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating over **15 attention mechanisms**, **15+ normalization variants**, and multiple Feed-Forward Network (**FFN**) types with a single line of code.
-- **Graph & Structural Primitives**: Configurable **GNN layers** with multiple aggregation strategies, **`Relational Graph Transformer`** (RELGT) blocks, and **`Entity-Graph Refinement`** for learning hierarchical relationships.
-- **Mixture of Experts (MoE) System**: A complete MoE implementation with configurable FFN experts, multiple gating strategies (including **SoftMoE**), and integrated training utilities.
-- **Probabilistic & Statistical Layers**: Build models that reason about uncertainty with **`Mixture Density Networks`** (MDN), **`Normalizing Flows`**, and time series analysis layers for residual autocorrelation.
+- **Pioneering Attention Mechanisms**: Go beyond standard attention with **`DifferentialMultiHeadAttention`**, modern **`HopfieldAttention`**, **`GroupQueryAttention`**, `CapsuleRoutingAttention`, and efficient alternatives like `FNetFourierTransform` and `RingAttention`.
+- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating over **15+ attention mechanisms**, **15+ normalization variants** (including `BandRMS`, `LogitNorm`), and **10+ Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code.
+- **Graph & Structural Primitives**: Configurable **GNN layers** with multiple aggregation strategies (`GCN`, `GAT`, `GraphSAGE`), **`Relational Graph Transformer`** (RELGT) blocks, and **`Entity-Graph Refinement`** for learning hierarchical relationships.
+- **Mixture of Experts (MoE) System**: A complete MoE implementation with configurable FFN experts, multiple gating strategies (including **SoftMoE** and Cosine Gating), and integrated training utilities.
+- **Probabilistic & Statistical Layers**: Build models that reason about uncertainty with **`Mixture Density Networks`** (MDN), **`Normalizing Flows`**, and time series analysis layers for residual autocorrelation (`ResidualACFLayer`).
+- **Advanced Embeddings**: A full suite of positional and semantic embeddings including standard, sinusoidal, **`Rotary Position Embedding (RoPE)`**, and its modern variants like `DualRotaryPositionEmbedding`.
 </p>
 </details>
 
@@ -69,10 +70,10 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>3. A Unified Command Center for Model Analysis & Introspection</b></summary>
 <p>
 
-- **Holistic Model Analysis**: A powerful `ModelAnalyzer` to benchmark models across six critical dimensions: training dynamics, weight health, prediction calibration, information flow, and advanced spectral analysis.
+- **Holistic Model Analysis**: A powerful `ModelAnalyzer` to benchmark models across six critical dimensions: training dynamics, weight health, prediction calibration, information flow, and advanced spectral analysis. Its modular design includes specialized analyzers like `CalibrationAnalyzer`, `WeightAnalyzer`, and `InformationFlowAnalyzer`.
 - **Publication-Ready Visualizations**: Automatically generate insightful visualizations, interactive summary dashboards, and comparative analysis plots with integrated statistical significance testing.
-- **Predictive Generalization with Spectral Analysis**: Integrate the power of **WeightWatcher** to assess generalization potential by analyzing the spectral properties (eigenvalues) of weight matrices—often without needing test data.
-- **Specialized Diagnostic Tools**: Deep-dive modules for diagnosing overconfidence (`CalibrationAnalyzer`), information bottlenecks (`InformationFlowAnalyzer`), weight decay (`WeightAnalyzer`), and learning efficiency (`TrainingDynamicsAnalyzer`).
+- **Predictive Generalization with Spectral Analysis**: Integrate the power of **WeightWatcher** through our `SpectralAnalyzer` to assess generalization potential by analyzing the spectral properties (eigenvalues) of weight matrices—often without needing test data.
+- **Deep Diagnostic Toolkit**: Move beyond accuracy to diagnose overconfidence (`CalibrationAnalyzer`), information bottlenecks (`InformationFlowAnalyzer`), weight decay and similarity (`WeightAnalyzer`), and learning efficiency (`TrainingDynamicsAnalyzer`).
 </p>
 </details>
 
@@ -80,9 +81,9 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>4. Next-Generation Loss Functions & Optimization (20+ Specialized Losses)</b></summary>
 <p>
 
-- **Optimize What Matters with `AnyLoss`**: A groundbreaking framework that transforms any confusion-matrix-based metric (e.g., F1-score, Balanced Accuracy) into a differentiable loss function for direct optimization.
-- **Information-Theoretic & Robust Losses**: Train more robust models with `GoodhartAwareLoss` to combat spurious correlations, calibration-focused losses like `BrierScoreLoss`, and the uncertainty-aware `FocalUncertaintyLoss`.
-- **Domain-Specific Loss Functions**: Specialized losses for vision-language (`CLIPContrastiveLoss`), segmentation (`Dice`, `Focal`, `Tversky`), time series (`MASELoss`, `SMAPELoss`), and generative modeling (`WassersteinLoss` with gradient penalty).
+- **Optimize What Matters with `AnyLoss`**: A groundbreaking framework that transforms any confusion-matrix-based metric (e.g., F1-score, Balanced Accuracy, Matthews Correlation Coefficient) into a differentiable loss function for direct optimization on imbalanced data.
+- **Information-Theoretic & Robust Losses**: Train more robust models with `GoodhartAwareLoss` to combat spurious correlations, calibration-focused losses like `BrierScoreLoss`, the uncertainty-aware `FocalUncertaintyLoss`, and `DINO`'s self-distillation loss.
+- **Domain-Specific Loss Functions**: Specialized losses for vision-language (`CLIPContrastiveLoss`, `SigLIPLoss`), segmentation (`Dice`, `Focal`, `Tversky`), time series (`MASELoss`, `SMAPELoss`), and generative modeling (`WassersteinLoss` with gradient penalty).
 - **Advanced Optimization Suite**: Leverage smart learning rate schedulers like `WarmupSchedule`, utilities for `DeepSupervision` in multi-scale architectures, and a suite of advanced regularizers (`SoftOrthogonal`, `SRIP`).
 </p>
 </details>
@@ -91,9 +92,9 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>5. Enterprise-Grade Training & Deployment Infrastructure</b></summary>
 <p>
 
-- **Accelerated Development with Training Pipelines**: Over 25 ready-to-use training scripts for all major architectures, establishing standardized and reproducible workflows for training, validation, and testing.
-- **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager, and enhanced model serialization with custom object support.
-- **Assured Reliability**: An extensive suite of over 600 unit and integration tests ensures the correctness and stability of every component.
+- **Accelerated Development with Training Pipelines**: Over **25+ ready-to-use training scripts** (`src/train/`) for all major architectures, establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
+- **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
+- **Assured Reliability**: An extensive suite of over **600+ unit and integration tests** (`tests/`) ensures the correctness and stability of every component.
 - **Validated Performance**: Rigorous benchmarks against reference implementations and established academic results to guarantee numerical accuracy and performance.
 </p>
 </details>
@@ -104,7 +105,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 
 *   **From Theory to Tensors, Instantly**: We consolidate the fragmented landscape of AI research. Instead of hunting down dozens of disparate GitHub repos, you get a single, cohesive framework with faithful implementations of cutting-edge research.
 *   **Built for Battle, Validated in the Enterprise**: This is not a toy library. Every component has been hardened and validated in demanding enterprise applications, ensuring robustness, efficiency, and production-readiness.
-*   **Unprecedented Introspection**: Move beyond accuracy scores. Our first-class analysis toolkit is designed to answer the *why* behind your model's behavior, providing deep insights that are critical for building trustworthy AI.
+*   **Unprecedented Introspection**: Move beyond accuracy scores. Our first-class analysis toolkit is designed to answer the *why* behind your model's behavior, providing deep insights that are critical for building trustworthy and reliable AI.
 *   **Engineered for Experimentation**: Our innovative factory patterns and modular design are built for rapid prototyping. Swap attention mechanisms, normalization layers, or even entire architectural blocks with a single line of code.
 *   **Modern, Maintainable, and Future-Proof**: Built from the ground up for Keras 3 and modern Python, `dl_techniques` adheres to the highest standards of software engineering, ensuring it's easy to use, extend, and maintain.
 
@@ -300,53 +301,51 @@ node_embeddings = gnn([node_features, adjacency_matrix])
 
 ## In-Depth Documentation
 
-This library is engineered to be a living knowledge base, bridging the gap between academia and industry. Our documentation goes beyond API specs to provide the theoretical foundations behind each component.
+This library is engineered to be a living knowledge base, bridging the gap between academia and industry. Our documentation is split into two primary resources: in-depth theoretical guides and a comprehensive API reference.
 
-### Core Documentation
+### Tutorials & Deep Dives (`research/`)
 
+Our `research/` directory contains over 50 articles providing the theoretical foundations, implementation details, and best practices behind key components. Highlights include:
+
+-   **[Complete Transformer Guide (2025)](./research/2025_transformer_architectures.md)**: A production-focused guide to implementing state-of-the-art Transformer architectures.
 -   **[Model Analyzer Guide](./research/model_analyzer.md)**: A comprehensive tutorial for the advanced model analysis toolkit.
 -   **[AnyLoss Framework](./research/anyloss_classification_metrics_loss_functions.md)**: A deep dive into the theory and practice of direct metric optimization.
--   **[Complete Transformer Guide (2025)](./research/2025_transformer_architectures.md)**: A production-focused guide to implementing state-of-the-art Transformer architectures.
-
-### Architecture & Implementation Guides
-
 -   **[Chronological Neural Architectures](./research/neural_network_architectures.md)**: An extensive chronological guide to influential architectures with implementation notes.
 -   **[Band-Constrained Normalization](./research/bcn_thesis.md)**: A novel normalization technique that preserves magnitude information within bounded constraints.
--   **[OrthoBlock & Orthonormal Regularization](./research/orthoblock.md)**: A guide to structured feature learning with orthogonal constraints.
 -   **[Mixture Density Networks](./research/mdn.md)**: The theory and best practices for implementing probabilistic models.
 
-### API Reference
-For detailed, auto-generated documentation on every module, class, and function, please refer to the `docs/` directory.
+### API Reference (`docs/`)
+For detailed, auto-generated documentation on every module, class, and function, please refer to the `docs/` directory or the online documentation.
 
 ---
 
 ## Project Structure
 
-The repository is organized for clarity and maintainability.
+The repository is organized for clarity, maintainability, and ease of contribution.
 
 ```
 dl_techniques/
 ├── src/dl_techniques/
-│   ├── layers/                # 220+ specialized layer implementations
-│   │   ├── attention/         # Modern attention mechanisms with factory
-│   │   ├── norms/             # Advanced normalization with factory
-│   │   ├── ffn/               # Feed-forward networks with factory
+│   ├── models/                # 150+ complete, ready-to-train model implementations
+│   │   ├── qwen/              # Qwen3 family (Base, MEGA, SOM)
+│   │   ├── dino/              # DINO v1, v2, v3
+│   │   ├── fastvlm/           # Fast Vision-Language Models
+│   │   └── ...
+│   ├── layers/                # 290+ specialized layer implementations
+│   │   ├── attention/         # 15+ modern attention mechanisms with factory
+│   │   ├── norms/             # 15+ advanced normalization layers with factory
+│   │   ├── ffn/               # 10+ feed-forward networks with factory
 │   │   ├── graphs/            # Graph neural network components
-│   │   ├── moe/               # Mixture of Experts implementation
-│   │   └── statistics/        # Statistical and probabilistic layers
-│   ├── models/                # 130+ complete architecture implementations
-│   │   ├── qwen/              # Qwen3 language model family
-│   │   ├── fastvlm/           # Fast vision-language models
-│   │   ├── tirex/             # Advanced time series forecasting
-│   │   └── detr/              # DETR object detection model
-│   ├── losses/                # 20+ specialized loss functions
-│   ├── analyzer/              # Comprehensive model analysis toolkit
-│   ├── regularizers/          # Advanced regularization techniques
-│   └── utils/                 # Core utilities and data handlers
-├── docs/                      # Auto-generated API documentation
-├── research/                  # In-depth articles and theoretical guides
-├── src/train/                 # 25+ ready-to-use training pipelines
-└── tests/                     # 600+ unit and integration tests
+│   │   ├── moe/               # Mixture of Experts (MoE) system
+│   │   └── statistics/        # Statistical and probabilistic layers (MDN, Flows)
+│   ├── losses/                # 20+ specialized loss functions (AnyLoss, Goodhart, etc.)
+│   ├── analyzer/              # Comprehensive model analysis toolkit and visualizers
+│   ├── regularizers/          # Advanced regularization techniques (SRIP, Orthogonal)
+│   └── utils/                 # Core utilities, loggers, and data handlers
+├── research/                  # 50+ in-depth articles and theoretical guides
+├── src/train/                 # 25+ ready-to-use training pipelines and scripts
+├── tests/                     # 600+ unit and integration tests ensuring component reliability
+└── docs/                      # Auto-generated API documentation
 ```
 
 ---
@@ -390,7 +389,7 @@ See the [LICENSE](./LICENSE) file for complete details.
 
 ## Acknowledgments
 
-This library is proudly sponsored and pioneered by **[Electi Consulting](https://electiconsulting.com)**, a premier AI consultancy specializing in enterprise artificial intelligence, blockchain technology, and cryptographic solutions. The practical validation and enterprise-ready nature of these components has been made possible through Electi's extensive experience deploying AI solutions across:
+This library is proudly sponsored and pioneered by **[Electi Consulting](https://electiconsulting.com)**, a premier AI consultancy specializing in enterprise artificial intelligence, blockchain technology, and cryptographic solutions. The practical validation and enterprise-ready nature of these components has been made possible through Electi's extensive experience deploying state-of-the-art AI solutions across diverse industries:
 
 - **Financial Services**: High-frequency trading, risk assessment, and fraud detection.
 - **Maritime Industry**: Route optimization, predictive maintenance, and cargo management.
@@ -480,5 +479,3 @@ This library stands on the shoulders of giants. Our implementations are grounded
 </details>
 
 *Complete bibliographic information is available in the documentation for individual modules.*
-
----
