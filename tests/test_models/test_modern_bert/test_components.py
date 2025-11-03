@@ -7,7 +7,7 @@ import os
 from keras import ops
 from typing import Dict, Any
 
-from dl_techniques.models.bert.components import (
+from dl_techniques.models.modern_bert.components import (
     ByteTokenizer,
     HashNGramEmbedding,
     ModernBertBltEmbeddings,

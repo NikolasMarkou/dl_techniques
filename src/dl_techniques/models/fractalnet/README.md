@@ -140,25 +140,25 @@ This approach successfully trains very deep networks by treating depth as a form
 Like most CNNs, FractalNet processes an image through several stages, progressively downsampling the spatial resolution while increasing the number of feature channels.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                      FractalNet Architecture Stages              │
-│                                                                  │
-│  Input Image ───►┌──────────────────┐  (Downsamples 2x)          │
+┌─────────────────────────────────────────────────────────────────────┐
+│                      FractalNet Architecture Stages                 │
+│                                                                     │
+│  Input Image ───►┌──────────────────┐  (Downsamples 2x)             │
 │   (H, W)         │   Fractal Stage 1  │  (e.g., Depth=2, Filters=32)│
-│                  └────────┬─────────┘                            │
-│                           │ (H/2, W/2)                           │
-│                  ┌────────▼─────────┐  (Downsamples 2x)          │
-│                  │ Fractal Stage 2  │  (e.g.Depth=3, Filters=64) │
-│                  └────────┬─────────┘                            │
-│                           │ (H/4, W/4)                           │
-│                  ┌────────▼─────────┐  (Downsamples 2x)          │
-│                  │ Fractal Stage 3  │  (e.g.Depth=3, Filters=128)│
-│                  └────────┬─────────┘                            │
-│                           │ (H/8, W/8)                           │
-│                  ┌────────▼──────────┐                           │
-│                  │ Classification Head│                          │
-│                  └────────────────────┘                          │
-└──────────────────────────────────────────────────────────────────┘
+│                  └────────┬─────────┘                               │
+│                           │ (H/2, W/2)                              │
+│                  ┌────────▼─────────┐  (Downsamples 2x)             │
+│                  │ Fractal Stage 2  │  (e.g.Depth=3, Filters=64)    │
+│                  └────────┬─────────┘                               │
+│                           │ (H/4, W/4)                              │
+│                  ┌────────▼─────────┐  (Downsamples 2x)             │
+│                  │ Fractal Stage 3  │  (e.g.Depth=3, Filters=128)   │
+│                  └────────┬─────────┘                               │
+│                           │ (H/8, W/8)                              │
+│                  ┌────────▼──────────┐                              │
+│                  │ Classification Head│                             │
+│                  └────────────────────┘                             │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### The Complete Data Flow
