@@ -726,65 +726,64 @@ def analyze_models(
     results['model_analysis'] = analysis_results
 
     # ===== Visualization =====
-    if config.analyzer_config.generate_visualizations:
-        logger.info("")
-        logger.info("Generating visualizations...")
+    logger.info("")
+    logger.info("Generating visualizations...")
 
-        vis_manager = VisualizationManager(output_dir=config.output_dir)
+    vis_manager = VisualizationManager(output_dir=config.output_dir)
 
-        # Training curves comparison
-        training_histories = {
-            name: TrainingHistory(
-                train_loss=hist.get('loss', []),
-                val_loss=hist.get('val_loss', []),
-                train_metrics={'accuracy': hist.get('accuracy', [])},
-                val_metrics={'accuracy': hist.get('val_accuracy', [])}
-            )
-            for name, hist in histories.items()
-        }
+    # Training curves comparison
+    training_histories = {
+        name: TrainingHistory(
+            train_loss=hist.get('loss', []),
+            val_loss=hist.get('val_loss', []),
+            train_metrics={'accuracy': hist.get('accuracy', [])},
+            val_metrics={'accuracy': hist.get('val_accuracy', [])}
+        )
+        for name, hist in histories.items()
+    }
+
+    vis_manager.add_visualization(
+        TrainingCurvesVisualization(
+            histories=training_histories,
+            title="Training Curves: Attention Mechanisms Comparison"
+        )
+    )
+
+    # Confusion matrices for each model
+    for model_name, model in models.items():
+        predictions = model.predict(data.x_test, verbose=0)
+
+        classification_results = ClassificationResults(
+            y_true=data.y_test,
+            y_pred=predictions,
+            class_names=data.class_names
+        )
 
         vis_manager.add_visualization(
-            TrainingCurvesVisualization(
-                histories=training_histories,
-                title="Training Curves: Attention Mechanisms Comparison"
+            ConfusionMatrixVisualization(
+                results=classification_results,
+                title=f"Confusion Matrix: {model_name}"
             )
         )
 
-        # Confusion matrices for each model
-        for model_name, model in models.items():
-            predictions = model.predict(data.x_test, verbose=0)
+    # Multi-model classification comparison
+    all_predictions = {
+        name: model.predict(data.x_test, verbose=0)
+        for name, model in models.items()
+    }
 
-            classification_results = ClassificationResults(
-                y_true=data.y_test,
-                y_pred=predictions,
-                class_names=data.class_names
-            )
-
-            vis_manager.add_visualization(
-                ConfusionMatrixVisualization(
-                    results=classification_results,
-                    title=f"Confusion Matrix: {model_name}"
-                )
-            )
-
-        # Multi-model classification comparison
-        all_predictions = {
-            name: model.predict(data.x_test, verbose=0)
-            for name, model in models.items()
-        }
-
-        vis_manager.add_visualization(
-            MultiModelClassification(
-                y_true=data.y_test,
-                predictions=all_predictions,
-                class_names=data.class_names,
-                title="Model Comparison: Attention Mechanisms"
-            )
+    vis_manager.add_visualization(
+        MultiModelClassification(
+            y_true=data.y_test,
+            predictions=all_predictions,
+            class_names=data.class_names,
+            title="Model Comparison: Attention Mechanisms"
         )
+    )
 
-        # Generate all plots
-        vis_manager.generate_all()
-        logger.info(f"Visualizations saved to: {config.output_dir}")
+    # Generate all plots
+    vis_manager.generate_all()
+    logger.info(f"Visualizations saved to: {config.output_dir}")
 
     return results
 
