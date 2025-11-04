@@ -376,7 +376,7 @@ def create_attention_layer(
             adaptive_softmax_config={
                 'min_temp': 0.1,
                 'max_temp': 2.0,
-                'entropy_weight': 0.5
+                'entropy_threshold': 0.5
             },
             name=f'window_zigzag_adaptive_attn_{dim}_{index}'
         )
