@@ -128,16 +128,16 @@ class MannLayer(keras.layers.Layer):
     **Architecture**:
     ```
           ┌───────────────────┐
-    Input─► Controller (RNN)  ├─► Head Parameter Generator (Dense)
+   Input─►│ Controller (RNN)  ├─► Head Parameter Generator (Dense)
       ▲   │ (LSTM/GRU)        │               │
       │   └───────────────────┘               ▼
-      │           ▲          ┌──────────────────────────────────┐
-      │           │          │           Addressing Logic       │
-      │       Read Vectors   │ ┌─────────┐  ┌───────────┐ ┌─────┤
-      │           │          │ │ Content │► │ Location  │►│ Final Weights │
-      │           │          │ └─────────┘  └───────────┘ └─────┤
-      │   ┌───────┴───────┐  └──────────────────────────────────┘
-      └─ ─┤ External Memory ◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+      │           ▲          ┌────────────────────────────────────────────┐
+      │           │          │           Addressing Logic                 │
+      │       Read Vectors   │ ┌─────────┐  ┌───────────┐ ┌──────────────┐│
+      │           │          │ │ Content │► │ Location  │►│ Final Weights││
+      │           │          │ └─────────┘  └───────────┘ └──────────────┘│
+      │   ┌───────┴───────┐  └────────────────────────────────────────────┘
+      └─ ─┤External Memory│ ◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
           │ (Read/Write)  │            Write/Erase Operations
           └───────────────┘
     ```
