@@ -297,7 +297,16 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
 
         self.query = KANLinear(**kan_params, name="kan_query")
         self.key = KANLinear(**kan_params, name="kan_key")
-        self.value = KANLinear(**kan_params, name="kan_value")
+
+        self.value = keras.layers.Dense(
+            self.dim,
+            use_bias=False,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name="value",
+        )
 
         self.proj = keras.layers.Dense(
             self.dim,

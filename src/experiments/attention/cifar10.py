@@ -8,7 +8,7 @@ on the CIFAR-10 image classification task:
 1. **WindowAttention**: Standard windowed multi-head self-attention from Swin Transformer
 2. **WindowZigZagAttention**: Windowed attention with zigzag position bias and optional
    adaptive normalization strategies (adaptive softmax, hierarchical routing)
-3. **KANWindowAttention**: Windowed attention with KAN (Kolmogorov-Arnold Network)
+3. **WindowKAN**: Windowed attention with KAN (Kolmogorov-Arnold Network)
    projections that learn B-spline activation functions
 
 Research Questions
@@ -69,7 +69,7 @@ Dense(10) + Softmax
    - Standard softmax normalization (baseline)
    - Comparison with adaptive temperature softmax variant
 
-3. **KANWindowAttention**:
+3. **WindowKAN**:
    - KAN-based Q, K, V projections
    - Learnable B-spline activations
    - Grid size: 5, Spline order: 3
@@ -113,7 +113,7 @@ Expected Outcomes
 2. **WindowZigZagAttention**: May show improved performance if zigzag ordering
    provides better inductive bias for CIFAR-10's image patterns
 
-3. **KANWindowAttention**: Higher expressiveness from learnable activations may
+3. **WindowKAN**: Higher expressiveness from learnable activations may
    lead to better accuracy but potentially slower training and higher risk of
    overfitting given the small dataset
 
@@ -539,7 +539,7 @@ def get_model_name(attention_type: str) -> str:
         'window': 'WindowAttention',
         'window_zigzag': 'WindowZigZag',
         'window_zigzag_adaptive': 'WindowZigZag+Adaptive',
-        'window_kan': 'KANWindowAttention'
+        'window_kan': 'WindowKAN'
     }
     return name_mapping.get(attention_type, attention_type)
 
@@ -1044,7 +1044,7 @@ def main() -> None:
     logger.info("")
     logger.info("=" * 80)
     logger.info("CIFAR-10 Window Attention Comparison Experiment")
-    logger.info("WindowAttention vs WindowZigZag vs KANWindowAttention")
+    logger.info("WindowAttention vs WindowZigZag vs WindowKAN")
     logger.info("=" * 80)
     logger.info("")
 
