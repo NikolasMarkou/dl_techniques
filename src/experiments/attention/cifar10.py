@@ -232,8 +232,8 @@ class ExperimentConfig:
     validation_split: float = 0.1  # For manual splitting
 
     # Training callbacks configuration
-    early_stopping_patience: int = 10
-    reduce_lr_patience: int = 10
+    early_stopping_patience: int = 15
+    reduce_lr_patience: int = 15
     reduce_lr_factor: float = 0.5
     min_learning_rate: float = 1e-7
     monitor_metric: str = 'val_accuracy'
@@ -729,7 +729,12 @@ def analyze_models(
     logger.info("")
     logger.info("Generating visualizations...")
 
-    vis_manager = VisualizationManager(output_dir=config.output_dir)
+    vis_manager = (
+        VisualizationManager(
+            experiment_name="attention_comparison",
+            output_dir=config.output_dir
+        )
+    )
 
     # Training curves comparison
     training_histories = {
