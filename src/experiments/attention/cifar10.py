@@ -138,7 +138,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 
 # ==============================================================================
 # LOCAL IMPORTS
@@ -221,11 +221,11 @@ class ExperimentConfig:
     # KAN-specific parameters
     kan_grid_size: int = 5
     kan_spline_order: int = 3
-    kan_activation: str = 'swish'
+    kan_activation: str = 'gelu'
     kan_regularization: float = 0.01
 
     # Training configuration
-    epochs: int = 50
+    epochs: int = 3
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
@@ -233,9 +233,9 @@ class ExperimentConfig:
 
     # Training callbacks configuration
     early_stopping_patience: int = 10
-    reduce_lr_patience: int = 5
+    reduce_lr_patience: int = 10
     reduce_lr_factor: float = 0.5
-    min_learning_rate: float = 1e-6
+    min_learning_rate: float = 1e-7
     monitor_metric: str = 'val_accuracy'
 
     # Analysis configuration
@@ -706,21 +706,22 @@ def analyze_models(
     logger.info("")
     logger.info("Running ModelAnalyzer...")
 
-    analyzer = ModelAnalyzer(config=config.analyzer_config)
 
     # Prepare data input for analyzer
     data_input = DataInput(
-        x_test=data.x_test,
-        y_test=data.y_test,
-        class_names=data.class_names
+        x_data=data.x_test,
+        y_data=data.y_test
     )
 
-    # Analyze all models
-    analysis_results = analyzer.analyze_models(
-        models=models,
-        data=data_input,
-        histories=histories
+    # Initialize ModelAnalyzer with all required arguments as per README.
+    analyzer = ModelAnalyzer(
+        models = models,
+        training_history = histories,
+        config = config.analyzer_config,
+        output_dir = config.output_dir
     )
+
+    analysis_results = analyzer.analyze(data_input)
 
     results['model_analysis'] = analysis_results
 
