@@ -31,11 +31,8 @@ import keras
 from keras import ops, layers
 import tensorflow as tf
 
+
 from dl_techniques.layers.kan_linear import KANLinear
-
-
-
-
 
 
 class TestKANLinear:
@@ -128,10 +125,10 @@ class TestKANLinear:
     def test_invalid_initialization(self) -> None:
         """Test error conditions during initialization."""
         # Test invalid features
-        with pytest.raises(ValueError, match="Features must be positive"):
+        with pytest.raises(ValueError, match="Features must be a positive integer."):
             KANLinear(features=0)
 
-        with pytest.raises(ValueError, match="Features must be positive"):
+        with pytest.raises(ValueError, match="Features must be a positive integer."):
             KANLinear(features=-5)
 
         # Test invalid grid size vs spline order
