@@ -727,71 +727,70 @@ def analyze_models(
     results['model_analysis'] = analysis_results
 
     # ===== Visualization =====
-    if config.analyzer_config.generate_visualizations:
-        logger.info("")
-        logger.info("Generating visualizations...")
+    logger.info("")
+    logger.info("Generating visualizations...")
 
-        viz_manager = VisualizationManager(
-            experiment_name="window_attention_comparison",
-            output_dir=config.output_dir
+    viz_manager = VisualizationManager(
+        experiment_name="window_attention_comparison",
+        output_dir=config.output_dir
+    )
+
+    # Register the visualization templates to be used, as per the new API.
+    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
+    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
+
+    # --- 1. Training Curves Comparison ---
+    training_histories_data = {
+        name: TrainingHistory(
+            epochs=list(range(len(hist.get('loss', [])))),
+            train_loss=hist.get('loss', []),
+            val_loss=hist.get('val_loss', []),
+            train_metrics={'accuracy': hist.get('accuracy', [])},
+            val_metrics={'accuracy': hist.get('val_accuracy', [])}
         )
+        for name, hist in histories.items()
+    }
+    viz_manager.visualize(
+        data=training_histories_data,
+        plugin_name="training_curves",
+        title="Training Curves: Attention Mechanisms Comparison"
+    )
 
-        # Register the visualization templates to be used, as per the new API.
-        viz_manager.register_template("training_curves", TrainingCurvesVisualization)
-        viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
-        viz_manager.register_template("roc_pr_curves", ROCPRCurves)
+    # Pre-calculate predictions for all models to avoid redundant calls
+    all_predictions = {
+        name: model.predict(data.x_test, verbose=0)
+        for name, model in models.items()
+    }
 
-        # --- 1. Training Curves Comparison ---
-        training_histories_data = {
-            name: TrainingHistory(
-                epochs=list(range(len(hist.get('loss', [])))),
-                train_loss=hist.get('loss', []),
-                val_loss=hist.get('val_loss', []),
-                train_metrics={'accuracy': hist.get('accuracy', [])},
-                val_metrics={'accuracy': hist.get('val_accuracy', [])}
-            )
-            for name, hist in histories.items()
-        }
-        viz_manager.visualize(
-            data=training_histories_data,
-            plugin_name="training_curves",
-            title="Training Curves: Attention Mechanisms Comparison"
-        )
-
-        # Pre-calculate predictions for all models to avoid redundant calls
-        all_predictions = {
-            name: model.predict(data.x_test, verbose=0)
-            for name, model in models.items()
-        }
-
-        # --- 2. Individual Confusion Matrices ---
-        for model_name, predictions in all_predictions.items():
-            classification_results = ClassificationResults(
-                y_true=data.y_test,
-                y_pred=np.argmax(predictions, axis=1),  # y_pred requires class indices
-                y_prob=predictions,                       # y_prob requires probabilities
-                class_names=data.class_names,
-                model_name=model_name
-            )
-            viz_manager.visualize(
-                data=classification_results,
-                plugin_name="confusion_matrix",
-                title=f"Confusion Matrix: {model_name}"
-            )
-
-        # --- 3. Multi-Model Comparison (ROC & PR Curves) ---
-        multi_model_data = MultiModelClassification(
+    # --- 2. Individual Confusion Matrices ---
+    for model_name, predictions in all_predictions.items():
+        classification_results = ClassificationResults(
             y_true=data.y_test,
-            predictions=all_predictions,
-            class_names=data.class_names
+            y_pred=np.argmax(predictions, axis=1),  # y_pred requires class indices
+            y_prob=predictions,                       # y_prob requires probabilities
+            class_names=data.class_names,
+            model_name=model_name
         )
         viz_manager.visualize(
-            data=multi_model_data,
-            plugin_name="roc_pr_curves",
-            title="ROC & PR Curves: Attention Mechanisms Comparison"
+            data=classification_results,
+            plugin_name="confusion_matrix",
+            title=f"Confusion Matrix: {model_name}"
         )
 
-        logger.info(f"Visualizations saved to: {config.output_dir}")
+    # --- 3. Multi-Model Comparison (ROC & PR Curves) ---
+    multi_model_data = MultiModelClassification(
+        y_true=data.y_test,
+        predictions=all_predictions,
+        class_names=data.class_names
+    )
+    viz_manager.visualize(
+        data=multi_model_data,
+        plugin_name="roc_pr_curves",
+        title="ROC & PR Curves: Attention Mechanisms Comparison"
+    )
+
+    logger.info(f"Visualizations saved to: {config.output_dir}")
 
     return results
 
