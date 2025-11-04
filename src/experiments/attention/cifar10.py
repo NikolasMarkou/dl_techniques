@@ -208,7 +208,7 @@ class ExperimentConfig:
     """
     # Model architecture
     attention_types: List[str] = field(default_factory=lambda: [
-        'kan_window',
+        'window_kan',
         'window_zigzag_adaptive',
         'window_zigzag',
         'window',
@@ -330,7 +330,7 @@ def create_attention_layer(
 
     Args:
         attention_type: Type of attention ('window', 'window_zigzag',
-                       'window_zigzag_adaptive', 'kan_window')
+                       'window_zigzag_adaptive', 'window_kan')
         dim: Embedding dimension
         window_size: Window size for local attention
         num_heads: Number of attention heads
@@ -382,7 +382,7 @@ def create_attention_layer(
             name=f'window_zigzag_adaptive_attn_{dim}_{index}'
         )
 
-    elif attention_type == 'kan_window':
+    elif attention_type == 'window_kan':
         return WindowAttentionKAN(
             dim=dim,
             window_size=window_size,
@@ -539,7 +539,7 @@ def get_model_name(attention_type: str) -> str:
         'window': 'WindowAttention',
         'window_zigzag': 'WindowZigZag',
         'window_zigzag_adaptive': 'WindowZigZag+Adaptive',
-        'kan_window': 'KANWindowAttention'
+        'window_kan': 'KANWindowAttention'
     }
     return name_mapping.get(attention_type, attention_type)
 
@@ -763,12 +763,15 @@ def analyze_models(
         for name, model in models.items()
     }
 
+    # Convert y_true from one-hot to class indices for compatibility
+    y_true_indices = np.argmax(data.y_test, axis=1)
+
     # --- 2. Individual Confusion Matrices ---
     for model_name, predictions in all_predictions.items():
         classification_results = ClassificationResults(
-            y_true=data.y_test,
-            y_pred=np.argmax(predictions, axis=1),  # y_pred requires class indices
-            y_prob=predictions,                       # y_prob requires probabilities
+            y_true=y_true_indices,
+            y_pred=np.argmax(predictions, axis=1),
+            y_prob=predictions,
             class_names=data.class_names,
             model_name=model_name
         )
@@ -780,9 +783,16 @@ def analyze_models(
 
     # --- 3. Multi-Model Comparison (ROC & PR Curves) ---
     multi_model_data = MultiModelClassification(
-        y_true=data.y_test,
-        predictions=all_predictions,
-        class_names=data.class_names
+        results={
+            name: ClassificationResults(
+                y_true=y_true_indices,
+                y_pred=np.argmax(preds, axis=1),
+                y_prob=preds,
+                class_names=data.class_names,
+                model_name=name
+            ) for name, preds in all_predictions.items()
+        },
+        dataset_name="CIFAR-10"
     )
     viz_manager.visualize(
         data=multi_model_data,
