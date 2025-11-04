@@ -58,6 +58,8 @@ This implementation provides the core Mamba architecture as a **foundation model
 - Its unique **Selection Mechanism** makes its internal parameters input-dependent, allowing it to selectively remember or forget information, similar to attention but far more efficiently.
 - The result is Transformer-level quality on language tasks while excelling on ultra-long-context tasks where Transformers are computationally infeasible.
 
+![image](mamba_v1_ssm_selection.png)
+
 ### Real-World Impact
 
 Mamba's efficiency and power unlock new possibilities for long-sequence tasks:
