@@ -207,8 +207,8 @@ class ExperimentConfig:
     """
     # Model architecture
     attention_types: List[str] = field(default_factory=lambda: [
+        'kan_window',
         'window_zigzag_adaptive',
-        'kan_window'
         'window_zigzag',
         'window',
     ])
@@ -225,7 +225,7 @@ class ExperimentConfig:
     kan_regularization: float = 0.01
 
     # Training configuration
-    epochs: int = 1
+    epochs: int = 50
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
