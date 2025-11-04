@@ -1,94 +1,14 @@
 """
-A Keras model implementing a Self-Organizing Map (SOM) as an associative memory system.
+Self-Organizing Map (SOM) Model for Associative Memory and Pattern Organization.
 
-This model demonstrates how Self-Organizing Maps can function as topological memory structures
-that learn to organize and recall patterns in an unsupervised manner. The SOM creates a
-low-dimensional (2D grid) representation of high-dimensional input data while preserving
-topological relationships, making it an effective tool for data visualization, clustering,
-and associative memory tasks.
+This module provides a complete Keras Model implementation of Self-Organizing Maps
+as topological memory structures. SOMs learn to organize and recall patterns in an
+unsupervised manner, creating low-dimensional representations of high-dimensional
+data while preserving topological relationships.
 
-**Core Functionality:**
-
-The SOMModel wraps a SOM2dLayer and provides a complete framework for:
-
-1. **Unsupervised Learning**: Trains on input data to create a topological map where
-   similar inputs activate nearby neurons in the grid, forming clusters of related memories.
-
-2. **Associative Memory**: Once trained, the model can recall stored "memories" by finding
-   the Best Matching Unit (BMU) for new inputs and retrieving similar patterns from the
-   learned representation.
-
-3. **Classification**: Can be extended for supervised learning by fitting class prototypes
-   to specific grid locations, enabling classification based on topological similarity.
-
-4. **Memory Visualization**: Provides extensive visualization tools to understand how
-   memories are organized, including grid visualization, class distribution maps,
-   U-matrices for cluster boundaries, and memory recall demonstrations.
-
-**Key Concepts:**
-
-- **Best Matching Unit (BMU)**: The neuron in the grid that most closely matches an input
-- **Topological Preservation**: Similar inputs map to nearby locations in the grid
-- **Neighborhood Learning**: Updates not only the BMU but also neighboring neurons
-- **Competitive Learning**: Neurons compete to represent different input patterns
-
-**Training Process:**
-
-1. For each input sample, find the BMU (neuron with weights closest to the input)
-2. Update the BMU and its neighbors to become more similar to the input
-3. Gradually reduce learning rate and neighborhood size over time
-4. Result: A organized map where similar patterns cluster together
-
-**Memory Retrieval:**
-
-1. Present a query pattern to the trained SOM
-2. Find the BMU that best matches the query
-3. Retrieve the stored prototype (neuron weights) and similar training samples
-4. Demonstrate associative recall by showing related memories
-
-**Applications:**
-
-- **Data Visualization**: Project high-dimensional data to 2D while preserving structure
-- **Clustering**: Discover natural groupings in data without supervision
-- **Dimensionality Reduction**: Create meaningful low-dimensional representations
-- **Anomaly Detection**: Identify patterns that don't fit the learned topology
-- **Classification**: Use topology for nearest-neighbor-like classification
-- **Memory Systems**: Model associative memory and pattern completion
-
-**Visualization Capabilities:**
-
-- **Grid Visualization**: Shows learned prototypes as a 2D grid (especially useful for image data)
-- **Class Distribution**: Maps how different classes are distributed across the topology
-- **U-Matrix**: Reveals cluster boundaries and data structure
-- **Hit Histogram**: Shows which areas of the memory space are most active
-- **Memory Recall**: Demonstrates how the SOM retrieves similar memories for a query
-
-**Example Use Cases:**
-
-1. **MNIST Digit Organization**: Train on handwritten digits to see how the SOM organizes
-   digit prototypes topologically, with similar digits (e.g., 6 and 8) located near each other.
-
-2. **Customer Segmentation**: Organize customer data to find natural market segments
-   while preserving relationships between similar customer types.
-
-3. **Color Organization**: Learn color relationships and create smooth transitions
-   across the color space in the 2D grid.
-
-4. **Gene Expression Analysis**: Organize genes or samples based on expression patterns
-   while maintaining biological relationships.
-
-**Memory System Analogy:**
-
-Think of the SOM as a library where books (data samples) are organized on shelves (grid neurons)
-such that similar books are placed near each other. When you want to find a book (query),
-you go to the most relevant shelf (BMU) and can also browse nearby shelves for related content.
-The librarian (training process) learns this organization by repeatedly placing books in
-locations that make sense based on their content similarity.
-
-This implementation extends the basic SOM concept by adding classification capabilities
-through class prototypes and comprehensive visualization tools for understanding the
-learned memory structure, making it particularly useful for educational purposes and
-research into associative memory systems.
+The implementation demonstrates how neural memory systems can be built using
+competitive learning and neighborhood-based updates to create structured
+representations useful for clustering, visualization, and associative recall.
 """
 
 import time
@@ -100,7 +20,7 @@ import matplotlib.pyplot as plt
 from typing import Tuple, Optional, Union, List, Dict, Any
 
 # ---------------------------------------------------------------------
-# local imports
+# Local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -112,33 +32,165 @@ from dl_techniques.layers.memory.som_2d_layer import SOM2dLayer
 @keras.saving.register_keras_serializable()
 class SOMModel(keras.Model):
     """
-    A Keras model implementing a Self-Organizing Map as a memory structure.
+    Self-Organizing Map model implementing associative memory and topological learning.
 
-    This model wraps the SOM layer and provides additional methods for training
-    and visualization specific to Self-Organizing Maps, demonstrating how
-    SOMs can function as associative memory systems.
+    This model wraps a SOM2dLayer to provide a complete framework for unsupervised
+    learning, pattern organization, and memory-based classification. It demonstrates
+    how competitive learning creates topological maps where similar inputs activate
+    nearby neurons, forming a structured memory system suitable for clustering,
+    visualization, and associative recall tasks.
 
-    Parameters
-    ----------
-    map_size : Tuple[int, int]
-        Size of the SOM grid (height, width).
-    input_dim : int
-        Dimensionality of the input data.
-    initial_learning_rate : float, optional
-        Initial learning rate for weight updates. Defaults to 0.1.
-    sigma : float, optional
-        Initial neighborhood radius. Defaults to 1.0.
-    neighborhood_function : str, optional
-        Type of neighborhood function to use ('gaussian' or 'bubble').
-        Defaults to 'gaussian'.
-    weights_initializer : Union[str, keras.initializers.Initializer], optional
-        Initialization method for weights. Defaults to 'random_uniform'.
-    regularizer : Optional[keras.regularizers.Regularizer], optional
-        Regularizer function applied to the weights. Defaults to None.
-    name : str, optional
-        Name of the model. Defaults to None.
-    **kwargs : Any
-        Additional keyword arguments for the base Model class.
+    **Intent**: Provide a complete, production-ready implementation of Self-Organizing
+    Maps that can function as an associative memory system for data visualization,
+    clustering, dimensionality reduction, and classification tasks while maintaining
+    topological relationships in the learned representation.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch_size, input_dim])
+            ↓
+    SOM2dLayer: Competitive Learning
+    - Find Best Matching Unit (BMU)
+    - Update BMU and neighbors
+    - Preserve topology
+            ↓
+    Output: (BMU coordinates, quantization error)
+    - BMU coords: shape=[batch_size, 2]
+    - Quant error: shape=[batch_size]
+    ```
+
+    **Memory Organization Process**:
+    1. **Competition**: For each input, neurons compete to be the Best Matching Unit
+    2. **Cooperation**: BMU and neighboring neurons update toward the input
+    3. **Adaptation**: Learning rate and neighborhood decay over training
+    4. **Result**: Topological map where similar patterns cluster together
+
+    **Key Concepts**:
+    - **Best Matching Unit (BMU)**: Neuron with weights closest to input
+    - **Topological Preservation**: Similar inputs map to nearby grid locations
+    - **Neighborhood Learning**: Updates extend beyond BMU to neighbors
+    - **Competitive Learning**: Neurons compete to represent input patterns
+
+    **Training Process**:
+    The training follows these steps per sample:
+    1. Find BMU (neuron most similar to input)
+    2. Update BMU weights toward input
+    3. Update neighbor weights based on distance from BMU
+    4. Gradually reduce learning rate and neighborhood size
+
+    **Memory Retrieval**:
+    For associative recall:
+    1. Present query pattern to trained SOM
+    2. Find BMU that best matches query
+    3. Retrieve stored prototype (BMU weights)
+    4. Optionally find similar training samples
+
+    **Applications**:
+    - **Data Visualization**: Project high-dimensional data to 2D grid
+    - **Clustering**: Discover natural groupings without supervision
+    - **Dimensionality Reduction**: Create meaningful low-dimensional maps
+    - **Anomaly Detection**: Identify patterns outside learned topology
+    - **Classification**: Use topology for nearest-neighbor classification
+    - **Memory Systems**: Model associative memory and pattern completion
+
+    Args:
+        map_size: Tuple of (height, width) defining the 2D grid dimensions.
+            Larger maps provide finer-grained organization but require more
+            training. Typical sizes range from (10, 10) to (50, 50).
+        input_dim: Integer dimensionality of input vectors. Must match the
+            feature dimension of training data.
+        initial_learning_rate: Float learning rate at start of training.
+            Controls how much neurons update toward inputs. Typical values
+            range from 0.1 to 0.5. Defaults to 0.1.
+        sigma: Float initial neighborhood radius. Determines how many
+            neighboring neurons are updated along with the BMU. Larger values
+            preserve more topology early in training. Defaults to 1.0.
+        neighborhood_function: String specifying neighborhood kernel type.
+            Options are 'gaussian' (smooth falloff) or 'bubble' (hard cutoff).
+            Defaults to 'gaussian'.
+        weights_initializer: Weight initialization strategy. Can be string
+            name ('random_uniform', 'glorot_uniform') or Initializer instance.
+            Defaults to 'random_uniform'.
+        regularizer: Optional weight regularizer to prevent overfitting.
+            Can be L1, L2, or custom Regularizer instance. Defaults to None.
+        class_prototypes: Optional dictionary mapping class labels to BMU
+            coordinates for classification. Typically computed via
+            fit_class_prototypes() rather than provided directly. Defaults to None.
+        name: Optional name for the model. Defaults to None.
+        **kwargs: Additional keyword arguments for Model base class.
+
+    Input shape:
+        2D tensor with shape: `(batch_size, input_dim)`.
+        Input data should be normalized for best results.
+
+    Output shape:
+        Tuple of two tensors:
+        - BMU coordinates: `(batch_size, 2)` with integer grid positions
+        - Quantization errors: `(batch_size,)` with distance to BMU
+
+    Attributes:
+        som_layer: The underlying SOM2dLayer performing competitive learning.
+        class_prototypes: Dict mapping class labels to representative BMU positions.
+        map_size: Stored grid dimensions (height, width).
+        input_dim: Stored input dimensionality.
+
+    Methods:
+        train(): Train the SOM on data to organize the memory structure.
+        fit_class_prototypes(): Map classes to grid locations for classification.
+        predict_class(): Classify inputs using learned class prototypes.
+        visualize_grid(): Display learned neuron prototypes as a 2D grid.
+        visualize_class_distribution(): Show how classes map across the grid.
+        visualize_u_matrix(): Display cluster boundaries in the learned map.
+        visualize_hit_histogram(): Show activation frequency across neurons.
+        visualize_memory_recall(): Demonstrate associative memory retrieval.
+
+    Example:
+        ```python
+        # Create SOM for MNIST digits (28x28 = 784 dimensions)
+        som = SOMModel(
+            map_size=(20, 20),
+            input_dim=784,
+            initial_learning_rate=0.1,
+            sigma=2.0
+        )
+
+        # Train on data to organize memory
+        history = som.train(
+            x_train,
+            epochs=10,
+            batch_size=32
+        )
+
+        # Fit class prototypes for classification
+        som.fit_class_prototypes(x_train, y_train)
+
+        # Classify new data
+        predictions = som.predict_class(x_test)
+
+        # Visualize the learned memory structure
+        som.visualize_grid()
+        som.visualize_class_distribution(x_train, y_train)
+
+        # Demonstrate memory recall
+        som.visualize_memory_recall(
+            test_sample=x_test[0],
+            x_train=x_train,
+            y_train=y_train
+        )
+        ```
+
+    Note:
+        For Models, Keras automatically handles sub-layer building during the
+        first forward pass. The build() method explicitly builds the SOM layer
+        to ensure proper weight initialization and serialization support.
+
+        Input data should typically be normalized (e.g., to [0, 1] or [-1, 1])
+        for optimal convergence. The SOM is particularly effective for high-
+        dimensional data where traditional visualization methods fail.
+
+        Class prototypes must be fitted before classification can be performed.
+        The model supports both supervised (with labels) and unsupervised (without
+        labels) modes of operation.
     """
 
     def __init__(
@@ -150,14 +202,24 @@ class SOMModel(keras.Model):
             neighborhood_function: str = 'gaussian',
             weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
             regularizer: Optional[keras.regularizers.Regularizer] = None,
-            class_prototypes: Optional[Dict] = None,
+            class_prototypes: Optional[Dict[int, Tuple[int, int]]] = None,
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the SOM model."""
+        """Initialize the SOM model with configuration parameters."""
         super().__init__(name=name, **kwargs)
 
-        # Store configuration for serialization
+        # Validate inputs
+        if len(map_size) != 2 or any(dim <= 0 for dim in map_size):
+            raise ValueError(f"map_size must be tuple of two positive integers, got {map_size}")
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+        if initial_learning_rate <= 0:
+            raise ValueError(f"initial_learning_rate must be positive, got {initial_learning_rate}")
+        if sigma <= 0:
+            raise ValueError(f"sigma must be positive, got {sigma}")
+
+        # Store configuration for serialization and introspection
         self.map_size = map_size
         self.input_dim = input_dim
         self.initial_learning_rate = initial_learning_rate
@@ -165,8 +227,12 @@ class SOMModel(keras.Model):
         self.neighborhood_function = neighborhood_function
         self.weights_initializer = weights_initializer
         self.regularizer = regularizer
+        self.class_prototypes = class_prototypes
 
-        # Create the SOM layer
+        # Track build state
+        self._is_built = False
+
+        # Create the SOM layer - instantiated in __init__, built in build()
         self.som_layer = SOM2dLayer(
             map_size=map_size,
             input_dim=input_dim,
@@ -177,23 +243,23 @@ class SOMModel(keras.Model):
             regularizer=regularizer
         )
 
-        # Class prototypes for classification and memory retrieval
-        self.class_prototypes = class_prototypes
-        self._is_built = False
-
-    def build(self, input_shape: Tuple[int, ...]) -> None:
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the model layers.
+        Build the model by initializing the SOM layer.
 
-        Parameters
-        ----------
-        input_shape : Tuple[int, ...]
-            Shape of the input tensor.
+        This method explicitly builds the SOM layer to ensure proper weight
+        initialization and serialization support. Called automatically on
+        first forward pass or can be called explicitly.
+
+        Args:
+            input_shape: Shape tuple of input data, typically (batch_size, input_dim).
         """
         if not self._is_built:
-            # Build the SOM layer
+            # Explicitly build the SOM layer for proper serialization
             self.som_layer.build(input_shape)
             self._is_built = True
+
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -202,22 +268,24 @@ class SOMModel(keras.Model):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Forward pass for the SOM model.
+        Forward pass computing Best Matching Units and quantization errors.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Boolean indicating whether the model should behave in
-            training mode or inference mode.
+        In training mode, this also updates neuron weights via competitive learning.
+        In inference mode, only BMU coordinates and errors are computed.
 
-        Returns
-        -------
-        Tuple[keras.KerasTensor, keras.KerasTensor]
-            A tuple containing:
-            - BMU coordinates of shape (batch_size, 2)
-            - Quantization error of shape (batch_size,)
+        Args:
+            inputs: Input tensor of shape (batch_size, input_dim). Should be
+                normalized for best results.
+            training: Boolean or None indicating training mode. When True,
+                performs weight updates. When False or None, only performs
+                inference. Defaults to None.
+
+        Returns:
+            Tuple containing:
+            - bmu_coords: Integer tensor of shape (batch_size, 2) with grid
+                coordinates of the Best Matching Unit for each input.
+            - quant_errors: Float tensor of shape (batch_size,) with Euclidean
+                distances between inputs and their BMUs (quantization error).
         """
         return self.som_layer(inputs, training=training)
 
@@ -230,45 +298,80 @@ class SOMModel(keras.Model):
             verbose: int = 1
     ) -> Dict[str, List[float]]:
         """
-        Train the SOM on the given data, organizing it into a topological memory structure.
+        Train the SOM to organize input data into a topological memory structure.
 
-        Parameters
-        ----------
-        x_train : np.ndarray
-            Training data of shape (n_samples, input_dim).
-        epochs : int, optional
-            Number of training epochs. Defaults to 10.
-        batch_size : int, optional
-            Number of samples per batch. Defaults to 32.
-        shuffle : bool, optional
-            Whether to shuffle the data before each epoch. Defaults to True.
-        verbose : int, optional
-            Verbosity level (0, 1, or 2). Defaults to 1.
+        This method performs unsupervised learning via competitive learning,
+        where neurons compete to represent input patterns and organize themselves
+        to preserve topological relationships. The learning rate and neighborhood
+        size decay over training for stable convergence.
 
-        Returns
-        -------
-        Dict[str, List[float]]
-            Training history containing 'mean_quantization_error' per epoch.
+        Args:
+            x_train: Training data array of shape (n_samples, input_dim) or
+                (n_samples, height, width) for images. Automatically flattened
+                if needed. Should be normalized to [0, 1] or similar range.
+            epochs: Number of complete passes through the training data.
+                More epochs allow finer organization but risk overfitting.
+                Typical values: 10-100. Defaults to 10.
+            batch_size: Number of samples per gradient update. Larger batches
+                provide more stable updates but slower convergence. Typical
+                values: 16-128. Defaults to 32.
+            shuffle: Whether to shuffle training data before each epoch.
+                Recommended for better convergence. Defaults to True.
+            verbose: Verbosity level controlling logging frequency.
+                0: silent, 1: progress updates every 10%, 2: every epoch.
+                Defaults to 1.
+
+        Returns:
+            Dictionary containing training history with keys:
+            - 'mean_quantization_error': List of average quantization errors
+                per epoch. Lower values indicate better organization.
+
+        Example:
+            ```python
+            # Train with default settings
+            history = som.train(x_train, epochs=10)
+
+            # Train with custom settings
+            history = som.train(
+                x_train,
+                epochs=50,
+                batch_size=64,
+                shuffle=True,
+                verbose=2
+            )
+
+            # Plot training curve
+            plt.plot(history['mean_quantization_error'])
+            plt.xlabel('Epoch')
+            plt.ylabel('Quantization Error')
+            plt.show()
+            ```
+
+        Note:
+            The quantization error represents how well inputs match their BMUs.
+            Decreasing error indicates successful organization. Very low errors
+            may indicate overfitting if the map size is too large.
         """
-        # Ensure the model is built
+        # Ensure model is built before training
         if not self._is_built:
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Set the max iterations
+        # Configure total training iterations for decay schedules
         total_iterations = epochs * (len(x_train) // batch_size)
         if total_iterations == 0 and len(x_train) > 0:
-            total_iterations = epochs # Handle cases where len(x_train) < batch_size
+            total_iterations = epochs  # Handle case where batch_size > dataset size
         self.som_layer.max_iterations.assign(float(total_iterations))
 
-        # Training history
+        # Initialize training history
         history = {'mean_quantization_error': []}
 
+        # Training loop over epochs
         for epoch in range(epochs):
             start_time = time.time()
             epoch_quant_errors = []
 
-            # Shuffle data if needed
+            # Shuffle data if requested for better convergence
             if shuffle:
                 indices = np.arange(len(x_train))
                 np.random.shuffle(indices)
@@ -276,27 +379,28 @@ class SOMModel(keras.Model):
             else:
                 x_train_shuffled = x_train
 
-            # Train in batches
+            # Process data in batches
             for i in range(0, len(x_train_shuffled), batch_size):
                 x_batch = x_train_shuffled[i:i + batch_size]
                 if x_batch.shape[0] == 0:
                     continue
 
-                # Flatten the data right before passing to the model
+                # Flatten spatial dimensions if needed (e.g., images)
                 x_batch = x_batch.reshape(x_batch.shape[0], -1)
                 x_batch_tensor = ops.convert_to_tensor(x_batch)
 
-                # Forward pass in training mode (weights are updated inside)
+                # Forward pass with training=True triggers weight updates
                 _, quant_errors = self.som_layer(x_batch_tensor, training=True)
 
-                # Use keras.ops for mean calculation
+                # Track quantization error for monitoring
                 avg_error = ops.mean(quant_errors)
                 epoch_quant_errors.append(ops.convert_to_numpy(avg_error))
 
-            # Compute average error for the epoch
+            # Compute and store epoch statistics
             avg_error = np.mean(epoch_quant_errors) if epoch_quant_errors else 0.0
             history['mean_quantization_error'].append(avg_error)
 
+            # Log progress based on verbosity level
             if verbose > 0 and (epoch % max(1, epochs // 10) == 0 or epoch == epochs - 1):
                 end_time = time.time()
                 logger.info(
@@ -306,79 +410,143 @@ class SOMModel(keras.Model):
 
         return history
 
-    def fit_class_prototypes(self, x_train: np.ndarray, y_train: np.ndarray) -> None:
+    def fit_class_prototypes(
+            self,
+            x_train: np.ndarray,
+            y_train: np.ndarray
+    ) -> None:
         """
-        Fit class prototypes by finding the most common BMU for each class.
+        Learn class-to-grid mappings by finding representative BMU for each class.
 
-        This method maps each class to its most representative location in the SOM grid,
-        which can be used for classification and demonstrates how SOMs store and
-        retrieve class-specific "memories".
+        This method analyzes how training samples of each class map to the SOM
+        grid and identifies the most representative neuron (BMU) for each class.
+        These prototypes enable classification of new samples based on topological
+        similarity and demonstrate how SOMs store class-specific "memories".
 
-        Parameters
-        ----------
-        x_train : np.ndarray
-            Training data of shape (n_samples, input_dim).
-        y_train : np.ndarray
-            Training labels of shape (n_samples,).
+        The process finds where each class naturally clusters in the trained map,
+        providing interpretable class organization that respects the learned topology.
+
+        Args:
+            x_train: Training data array of shape (n_samples, input_dim) or
+                (n_samples, height, width) for images. Should be the same data
+                used to train the SOM for accurate prototype fitting.
+            y_train: Class labels array of shape (n_samples,) with integer
+                class indices. Each unique value represents a distinct class.
+
+        Raises:
+            ValueError: If y_train contains no valid samples or if model is not built.
+
+        Example:
+            ```python
+            # Train SOM first
+            som.train(x_train, epochs=10)
+
+            # Fit class prototypes for classification
+            som.fit_class_prototypes(x_train, y_train)
+
+            # View learned mappings
+            for class_id, bmu in som.class_prototypes.items():
+                print(f"Class {class_id} → Grid position {bmu}")
+
+            # Now classification is enabled
+            predictions = som.predict_class(x_test)
+            ```
+
+        Note:
+            This method should be called after training the SOM. The prototypes
+            represent the most common grid location for each class, which may
+            not capture all class variation if the class has multiple clusters.
+
+            For multi-modal classes (classes with multiple clusters), consider
+            using distance-based classification or allowing multiple prototypes
+            per class in extended implementations.
         """
-        # Ensure the model is built
+        # Ensure model is built
         if not self._is_built:
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Convert to tensor and find BMU for each sample
+        # Find BMU for each training sample
         x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
 
-        # Unique classes
+        # Get unique class labels
         unique_classes = np.unique(y_train)
 
-        # Create class to BMU mapping
+        # Map each class to its most representative BMU
         class_to_bmu = {}
 
         for c in unique_classes:
-            # Get indices where y_train == c
-            class_indices = np.where(y_train == c)[0]
+            # Find all samples belonging to this class
+            class_mask = (y_train == c)
+            class_bmus = bmu_indices[class_mask]
 
-            # Get BMUs for this class using the indices
-            class_samples = bmu_indices[class_indices]
-            if len(class_samples) == 0:
+            if len(class_bmus) == 0:
                 continue
 
             # Convert to tuples for counting
-            bmu_tuples = [tuple(bmu) for bmu in class_samples]
+            bmu_tuples = [tuple(bmu) for bmu in class_bmus]
 
-            # Find the most common BMU for this class
+            # Find the most frequently activated BMU for this class
             bmu_counts = Counter(bmu_tuples)
             most_common_bmu = bmu_counts.most_common(1)[0][0]
 
-            # Store the prototype
+            # Store as class prototype
             class_to_bmu[c] = most_common_bmu
 
         self.class_prototypes = class_to_bmu
+        logger.info(f"Fitted {len(class_to_bmu)} class prototypes")
 
-    def predict_class(self, x_test: np.ndarray) -> np.ndarray:
+    def predict_class(
+            self,
+            x_test: np.ndarray
+    ) -> np.ndarray:
         """
-        Predict classes for test data using the fitted class prototypes.
+        Classify samples using fitted class prototypes and topological similarity.
 
-        This demonstrates the associative memory retrieval function of SOMs,
-        where the model recalls the class based on similarity to stored prototypes.
+        This method demonstrates associative memory retrieval where the SOM
+        recalls class labels based on similarity to stored prototypes. Each test
+        sample is mapped to its BMU, which is then matched to the nearest class
+        prototype in the grid topology.
 
-        Parameters
-        ----------
-        x_test : np.ndarray
-            Test data of shape (n_samples, input_dim).
+        The classification leverages the topological organization learned during
+        training, making predictions based on location in the memory structure
+        rather than direct feature matching.
 
-        Returns
-        -------
-        np.ndarray
-            Predicted class labels of shape (n_samples,).
+        Args:
+            x_test: Test data array of shape (n_samples, input_dim) or
+                (n_samples, height, width) for images. Should use the same
+                normalization as training data.
 
-        Raises
-        ------
-        ValueError
-            If class prototypes have not been fitted yet.
+        Returns:
+            Array of predicted class labels with shape (n_samples,). Each value
+            is an integer corresponding to the nearest class prototype.
+
+        Raises:
+            ValueError: If class prototypes have not been fitted. Call
+                fit_class_prototypes() before prediction.
+
+        Example:
+            ```python
+            # After training and fitting prototypes
+            predictions = som.predict_class(x_test)
+
+            # Evaluate accuracy
+            accuracy = np.mean(predictions == y_test)
+            print(f"Classification accuracy: {accuracy:.2%}")
+
+            # For samples without exact BMU match, uses nearest prototype
+            # This provides robustness to novel patterns
+            ```
+
+        Note:
+            If a test sample's BMU doesn't match any trained prototype exactly,
+            the method finds the closest prototype by Euclidean distance in the
+            2D grid. This provides graceful handling of out-of-distribution samples.
+
+            Classification accuracy depends on how well the SOM's topology
+            separates classes. Visualize class distribution to diagnose issues.
         """
         if self.class_prototypes is None:
             raise ValueError(
@@ -386,32 +554,31 @@ class SOMModel(keras.Model):
                 "Call fit_class_prototypes() first."
             )
 
-        # Convert to tensor and find BMU for each test sample
+        # Find BMU for each test sample
         x_test_tensor = ops.convert_to_tensor(x_test.reshape(x_test.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_test_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
 
-        # Convert BMUs to tuples
+        # Convert BMUs to tuples for lookup
         bmu_tuples = [tuple(bmu) for bmu in bmu_indices]
 
-        # Prepare a mapping from BMU to class
+        # Create reverse mapping from BMU to class
         bmu_to_class = {bmu: c for c, bmu in self.class_prototypes.items()}
 
-        # Predict classes
+        # Predict class for each sample
         predictions = []
         for bmu in bmu_tuples:
-            # Find the closest prototype if exact BMU was not seen in training
-            if bmu not in bmu_to_class:
-                # Calculate distances to all prototypes
+            # Check for exact prototype match
+            if bmu in bmu_to_class:
+                predictions.append(bmu_to_class[bmu])
+            else:
+                # Find nearest prototype in grid space for novel BMUs
                 distances = {
                     c: np.sum((np.array(bmu) - np.array(prototype)) ** 2)
                     for c, prototype in self.class_prototypes.items()
                 }
-                # Find the closest
                 closest_class = min(distances, key=distances.get)
                 predictions.append(closest_class)
-            else:
-                predictions.append(bmu_to_class[bmu])
 
         return np.array(predictions)
 
@@ -422,39 +589,73 @@ class SOMModel(keras.Model):
             save_path: Optional[str] = None
     ) -> None:
         """
-        Visualize the SOM grid by showing each neuron's weight vector.
+        Visualize the learned SOM grid showing neuron prototype memories.
 
-        This visualization shows how the SOM has organized the input space
-        into a 2D memory structure where each cell represents a prototype memory.
+        This visualization displays the weight vectors of each neuron in the 2D
+        grid, providing insight into how the SOM has organized the input space.
+        For image data (square input dimensions), neurons are displayed as
+        reconstructed images. For other data, weight vector norms are shown as
+        a heatmap.
 
-        Parameters
-        ----------
-        figsize : Tuple[int, int], optional
-            Figure size (width, height) in inches. Defaults to (10, 10).
-        cmap : str, optional
-            Colormap to use for visualization. Defaults to 'viridis'.
-        save_path : str, optional
-            If provided, the visualization will be saved to this path.
+        The visualization reveals the topological organization where similar
+        prototypes cluster together, demonstrating the memory structure.
+
+        Args:
+            figsize: Tuple of (width, height) in inches for the figure size.
+                Larger values provide more detail for large grids.
+                Defaults to (10, 10).
+            cmap: Matplotlib colormap name for visualization. Used for image
+                grids ('gray' for grayscale images) or heatmaps ('viridis').
+                Defaults to 'viridis'.
+            save_path: Optional file path to save the visualization. If None,
+                displays interactively. Supports formats like .png, .pdf, .svg.
+                Defaults to None.
+
+        Example:
+            ```python
+            # Basic visualization
+            som.visualize_grid()
+
+            # For MNIST (28x28 images), shows digit prototypes
+            som.visualize_grid(cmap='gray')
+
+            # Save high-resolution version
+            som.visualize_grid(
+                figsize=(15, 15),
+                cmap='gray',
+                save_path='som_prototypes.png'
+            )
+            ```
+
+        Note:
+            For image data, the visualization is most informative when input_dim
+            is a perfect square (e.g., 784 = 28×28). Non-square dimensions fall
+            back to displaying weight vector norms as a heatmap.
+
+            The grid shows smooth transitions between nearby neurons, confirming
+            proper topological preservation. Abrupt changes suggest discontinuities
+            in the learned representation.
         """
+        # Get neuron weights as grid: (height, width, input_dim)
         weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, input_dim = weights.shape
 
         plt.figure(figsize=figsize)
 
-        # Check if the input dimension is a perfect square (likely an image)
+        # Check if input dimension is a perfect square (likely images)
         side_length_f = np.sqrt(input_dim)
         if side_length_f == int(side_length_f):
+            # Visualize as image grid
             side_length = int(side_length_f)
-            # Create a grid to display all neurons
             full_grid = np.zeros((grid_height * side_length, grid_width * side_length))
 
-            # Fill the grid with neuron weight vectors as images
+            # Tile neuron weights as images
             for i in range(grid_height):
                 for j in range(grid_width):
                     neuron_weights = weights[i, j].reshape(side_length, side_length)
                     full_grid[
-                    i * side_length:(i + 1) * side_length,
-                    j * side_length:(j + 1) * side_length
+                        i * side_length:(i + 1) * side_length,
+                        j * side_length:(j + 1) * side_length
                     ] = neuron_weights
 
             plt.imshow(full_grid, cmap='gray')
@@ -462,11 +663,9 @@ class SOMModel(keras.Model):
             plt.axis('off')
 
         else:
-            # For other types of data, show a simplified visualization
-            # Calculate the norm of each weight vector
+            # For non-image data, show weight vector norms as heatmap
             weight_norms = np.linalg.norm(weights, axis=2)
 
-            # Create a heatmap
             plt.imshow(weight_norms, cmap=cmap, interpolation='nearest')
             plt.colorbar(label='Weight Vector Norm')
             plt.title('SOM Grid - Weight Vector Norms')
@@ -489,73 +688,112 @@ class SOMModel(keras.Model):
             save_path: Optional[str] = None
     ) -> None:
         """
-        Visualize how different classes are distributed across the SOM grid.
+        Visualize how different classes distribute across the SOM grid topology.
 
-        This shows how the SOM organizes memories by class, demonstrating
-        its topological preservation properties.
+        This visualization maps training samples to their BMUs and colors them
+        by class, revealing how the SOM organizes different classes topologically.
+        Well-separated classes should occupy distinct grid regions, while similar
+        classes may have overlapping territories.
 
-        Parameters
-        ----------
-        x_data : np.ndarray
-            Data samples of shape (n_samples, input_dim).
-        y_data : np.ndarray
-            Label for each sample of shape (n_samples,).
-        figsize : Tuple[int, int], optional
-            Figure size (width, height) in inches. Defaults to (10, 10).
-        cmap : str, optional
-            Colormap to use for different classes. Defaults to 'tab10'.
-        alpha : float, optional
-            Transparency level for markers. Defaults to 0.5.
-        marker_size : int, optional
-            Size of markers. Defaults to 100.
-        save_path : str, optional
-            If provided, the visualization will be saved to this path.
+        Class prototypes (if fitted) are overlaid as starred markers, showing the
+        representative locations for classification.
+
+        Args:
+            x_data: Data samples of shape (n_samples, input_dim) to visualize.
+                Typically training data used to train the SOM.
+            y_data: Class labels of shape (n_samples,). Can be integer labels
+                or one-hot encoded. Automatically converted to class indices.
+            figsize: Tuple of (width, height) in inches for the figure.
+                Defaults to (10, 10).
+            cmap: Matplotlib colormap for class colors. 'tab10' provides
+                distinct colors for up to 10 classes. Use 'tab20' for more.
+                Defaults to 'tab10'.
+            alpha: Transparency of data points (0=transparent, 1=opaque).
+                Lower values help visualize overlapping regions.
+                Defaults to 0.5.
+            marker_size: Size of scatter plot markers in points squared.
+                Defaults to 100.
+            save_path: Optional file path to save visualization.
+                Defaults to None.
+
+        Example:
+            ```python
+            # Basic class distribution
+            som.visualize_class_distribution(x_train, y_train)
+
+            # With prototypes overlaid (requires fit_class_prototypes)
+            som.fit_class_prototypes(x_train, y_train)
+            som.visualize_class_distribution(x_train, y_train)
+
+            # Customize appearance
+            som.visualize_class_distribution(
+                x_train, y_train,
+                cmap='Set3',
+                alpha=0.3,
+                marker_size=50,
+                save_path='class_distribution.png'
+            )
+            ```
+
+        Note:
+            This visualization is crucial for diagnosing classification issues.
+            Overlapping classes in the grid indicate that the SOM cannot separate
+            them, suggesting either insufficient training, inadequate map size,
+            or inherent class similarity.
+
+            The legend is placed outside the plot area to avoid obscuring data.
         """
-        # Convert to tensor and find BMU for each sample
+        # Find BMU for each sample
         x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
 
         plt.figure(figsize=figsize)
 
-        # Create a scatter plot of BMUs colored by class
         # Convert one-hot encoded labels to class indices if needed
         if len(y_data.shape) > 1 and y_data.shape[1] > 1:
             y_data_indices = np.argmax(y_data, axis=1)
         else:
             y_data_indices = y_data
 
+        # Get unique classes and color mapping
         unique_classes = np.unique(y_data_indices)
         colors = plt.cm.get_cmap(cmap, len(unique_classes))
 
-        # Plot each class
+        # Plot each class separately for legend
         for i, c in enumerate(unique_classes):
-            # Get indices where y_data_indices == c
-            class_indices = np.where(y_data_indices == c)[0]
-
-            # Get BMUs for this class using the indices
-            class_bmus = bmu_indices[class_indices]
+            # Get samples belonging to this class
+            class_mask = (y_data_indices == c)
+            class_bmus = bmu_indices[class_mask]
 
             plt.scatter(
-                class_bmus[:, 1], class_bmus[:, 0],
-                color=colors(i), label=f'Class {c}',
-                alpha=alpha, s=marker_size
+                class_bmus[:, 1],  # x-coordinate (width)
+                class_bmus[:, 0],  # y-coordinate (height)
+                color=colors(i),
+                label=f'Class {c}',
+                alpha=alpha,
+                s=marker_size
             )
 
-        # Add class prototypes if available
+        # Overlay class prototypes if available
         if self.class_prototypes is not None:
             for c, bmu in self.class_prototypes.items():
                 plt.scatter(
-                    bmu[1], bmu[0], color='black', marker='*',
+                    bmu[1], bmu[0],  # (width, height)
+                    color='black',
+                    marker='*',
                     s=marker_size * 2,
-                    label=f'Prototype {c}' if c == unique_classes[0] else ""
+                    edgecolors='white',
+                    linewidths=1,
+                    label='Prototype' if c == unique_classes[0] else "",
+                    zorder=10  # Ensure prototypes are on top
                 )
 
         plt.title('Class Distribution in SOM Memory Space')
         plt.xlabel('Grid Width')
         plt.ylabel('Grid Height')
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True)
+        plt.grid(True, alpha=0.3)
 
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
@@ -569,33 +807,62 @@ class SOMModel(keras.Model):
             save_path: Optional[str] = None
     ) -> None:
         """
-        Visualize the U-Matrix (Unified Distance Matrix) of the SOM.
+        Visualize the Unified Distance Matrix (U-Matrix) revealing cluster boundaries.
 
-        The U-Matrix visualizes the distances between neighboring neurons,
-        which helps identify cluster boundaries in the SOM's memory space.
+        The U-Matrix displays the average distance between each neuron and its
+        neighbors in weight space. High values (bright regions) indicate cluster
+        boundaries where dissimilar patterns meet, while low values (dark regions)
+        indicate coherent clusters of similar patterns.
 
-        Parameters
-        ----------
-        figsize : Tuple[int, int], optional
-            Figure size (width, height) in inches. Defaults to (10, 10).
-        cmap : str, optional
-            Colormap to use for visualization. Defaults to 'viridis_r'.
-        save_path : str, optional
-            If provided, the visualization will be saved to this path.
+        This visualization is essential for understanding the cluster structure
+        learned by the SOM, revealing natural groupings in the data.
+
+        Args:
+            figsize: Tuple of (width, height) in inches for the figure.
+                Defaults to (10, 10).
+            cmap: Matplotlib colormap where bright indicates boundaries.
+                'viridis_r' (reversed) makes boundaries bright. Can also use
+                'hot', 'plasma_r', etc. Defaults to 'viridis_r'.
+            save_path: Optional file path to save visualization.
+                Defaults to None.
+
+        Example:
+            ```python
+            # Basic U-Matrix visualization
+            som.visualize_u_matrix()
+
+            # Bright regions show cluster boundaries
+            som.visualize_u_matrix(cmap='hot')
+
+            # Save for publication
+            som.visualize_u_matrix(
+                figsize=(12, 12),
+                cmap='plasma_r',
+                save_path='umatrix.png'
+            )
+            ```
+
+        Note:
+            The U-Matrix complements class distribution visualizations by showing
+            data structure without requiring labels. Sharp boundaries in the
+            U-Matrix suggest clear cluster separation, while gradual transitions
+            indicate continuous variation in the data space.
+
+            For interpretation: dark valleys = clusters, bright ridges = boundaries.
         """
+        # Get neuron weights as grid
         weights = ops.convert_to_numpy(self.som_layer.get_weights_as_grid())
         grid_height, grid_width, _ = weights.shape
 
-        # Create the U-Matrix
+        # Compute U-Matrix values
         u_matrix = np.zeros((grid_height, grid_width))
 
-        # For each neuron, calculate average distance to its neighbors
         for i in range(grid_height):
             for j in range(grid_width):
-                # Get the neuron's weight vector
+                # Current neuron's weight vector
                 weight = weights[i, j]
 
-                # Get the indices of the neighboring neurons
+                # Collect neighboring neurons (8-connectivity)
                 neighbors = []
                 for di in [-1, 0, 1]:
                     for dj in [-1, 0, 1]:
@@ -605,13 +872,14 @@ class SOMModel(keras.Model):
                         if 0 <= ni < grid_height and 0 <= nj < grid_width:
                             neighbors.append((ni, nj))
 
-                # Calculate the average distance to neighbors
+                # Calculate average distance to neighbors
                 if neighbors:
                     neighbor_weights = np.array([weights[ni, nj] for ni, nj in neighbors])
                     distances = np.linalg.norm(weight - neighbor_weights, axis=1)
                     avg_distance = np.mean(distances)
                     u_matrix[i, j] = avg_distance
 
+        # Visualize
         plt.figure(figsize=figsize)
         plt.imshow(u_matrix, cmap=cmap, interpolation='nearest')
         plt.colorbar(label='Average Distance to Neighbors')
@@ -633,44 +901,65 @@ class SOMModel(keras.Model):
             save_path: Optional[str] = None
     ) -> np.ndarray:
         """
-        Visualize a hit histogram showing how many samples map to each neuron.
+        Visualize activation frequency across the SOM grid (hit histogram).
 
-        This visualization shows which areas of the memory space are most
-        frequently activated by the input data.
+        This visualization shows how many training samples map to each neuron,
+        revealing which areas of the memory space are most active and which are
+        underutilized. Uniform utilization indicates good map organization, while
+        many "dead" neurons suggest overparameterization or poor initialization.
 
-        Parameters
-        ----------
-        x_data : np.ndarray
-            Data samples of shape (n_samples, input_dim).
-        figsize : Tuple[int, int], optional
-            Figure size (width, height) in inches. Defaults to (10, 10).
-        cmap : str, optional
-            Colormap to use for visualization. Defaults to 'viridis'.
-        log_scale : bool, optional
-            Whether to use log scale for the color mapping. Defaults to False.
-        save_path : str, optional
-            If provided, the visualization will be saved to this path.
+        Args:
+            x_data: Data samples of shape (n_samples, input_dim) to analyze.
+                Typically the training data.
+            figsize: Tuple of (width, height) in inches. Defaults to (10, 10).
+            cmap: Matplotlib colormap for the heatmap. Defaults to 'viridis'.
+            log_scale: Whether to use logarithmic color scaling. Useful when
+                activation frequencies vary by orders of magnitude. Defaults to False.
+            save_path: Optional file path to save visualization. Defaults to None.
 
-        Returns
-        -------
-        np.ndarray
-            The hit histogram array.
+        Returns:
+            Array of shape (grid_height, grid_width) containing hit counts for
+            each neuron. Useful for quantitative analysis of map utilization.
+
+        Example:
+            ```python
+            # Basic hit histogram
+            hits = som.visualize_hit_histogram(x_train)
+
+            # With log scale for large variance
+            som.visualize_hit_histogram(x_train, log_scale=True)
+
+            # Analyze utilization
+            total_neurons = np.prod(hits.shape)
+            active_neurons = np.sum(hits > 0)
+            print(f"Active neurons: {active_neurons}/{total_neurons}")
+            ```
+
+        Note:
+            "Dead" neurons (zero hits) may indicate the map is too large for the
+            dataset or that training didn't converge. A well-trained SOM should
+            have most neurons active, though some imbalance is normal due to
+            uneven data distribution.
+
+            The hit histogram helps diagnose training issues and choose appropriate
+            map sizes for the dataset.
         """
-        # Convert to tensor and find BMU for each sample
+        # Find BMU for each sample
         x_data_tensor = ops.convert_to_tensor(x_data.reshape(x_data.shape[0], -1))
         bmu_indices, _ = self.som_layer(x_data_tensor, training=False)
         bmu_indices = ops.convert_to_numpy(bmu_indices)
 
-        # Create a histogram
+        # Create histogram
         hit_histogram = np.zeros((self.som_layer.map_size[0], self.som_layer.map_size[1]))
 
         for bmu in bmu_indices:
             hit_histogram[bmu[0], bmu[1]] += 1
 
+        # Visualize
         plt.figure(figsize=figsize)
 
         if log_scale and np.max(hit_histogram) > 0:
-            # Add a small constant to avoid log(0)
+            # Use log scale for better visualization of varying frequencies
             hit_histogram_log = np.log1p(hit_histogram)
             plt.imshow(hit_histogram_log, cmap=cmap, interpolation='nearest')
             plt.colorbar(label='Log(Hits + 1)')
@@ -701,53 +990,91 @@ class SOMModel(keras.Model):
             save_path: Optional[str] = None
     ) -> None:
         """
-        Visualize how the SOM recalls similar memories for a given test sample.
+        Demonstrate associative memory recall for a query sample.
 
-        This demonstrates the associative memory property of SOMs by showing
-        the input sample and the memories it activates.
+        This visualization shows how the SOM retrieves similar memories for a
+        given input, demonstrating the associative memory property. It displays:
+        1. The query sample (test input)
+        2. The memory prototype (BMU weights) that best matches the query
+        3. Similar training samples that map to nearby grid locations
 
-        Parameters
-        ----------
-        test_sample : np.ndarray
-            A single test sample of shape (input_dim,).
-        n_similar : int, optional
-            Number of similar samples to retrieve. Defaults to 5.
-        x_train : np.ndarray, optional
-            Training data to find similar samples. Required if finding similar samples.
-        y_train : np.ndarray, optional
-            Labels for the training data.
-        figsize : Tuple[int, int], optional
-            Figure size (width, height) in inches. Defaults to (15, 3).
-        cmap : str, optional
-            Colormap to use for visualization. Defaults to 'gray'.
-        save_path : str, optional
-            If provided, the visualization will be saved to this path.
+        This illustrates how SOMs function as content-addressable memory where
+        partial or noisy inputs can retrieve complete, similar memories.
+
+        Args:
+            test_sample: Single test sample of shape (input_dim,) or (1, input_dim).
+                This is the query to the associative memory.
+            n_similar: Number of similar training samples to retrieve and display.
+                Defaults to 5.
+            x_train: Optional training data of shape (n_samples, input_dim) for
+                finding similar samples. If None, only shows query and prototype.
+                Defaults to None.
+            y_train: Optional training labels for annotating similar samples.
+                Defaults to None.
+            figsize: Tuple of (width, height) in inches. Should be wide enough
+                for all panels. Defaults to (15, 3).
+            cmap: Matplotlib colormap for visualization. Use 'gray' for grayscale
+                images. Defaults to 'gray'.
+            save_path: Optional file path to save visualization. Defaults to None.
+
+        Example:
+            ```python
+            # Basic memory recall (query + prototype only)
+            som.visualize_memory_recall(x_test[0])
+
+            # With similar samples from training set
+            som.visualize_memory_recall(
+                test_sample=x_test[0],
+                x_train=x_train,
+                y_train=y_train,
+                n_similar=10
+            )
+
+            # Save for presentation
+            som.visualize_memory_recall(
+                x_test[42],
+                x_train=x_train,
+                y_train=y_train,
+                figsize=(20, 4),
+                save_path='memory_recall.png'
+            )
+            ```
+
+        Note:
+            This visualization is particularly powerful for image data where you
+            can see how partial or noisy query images retrieve complete prototypes
+            and similar examples, demonstrating the SOM's pattern completion
+            capability.
+
+            Similar samples are found by proximity in grid space (nearby BMUs),
+            which respects the learned topology. This differs from direct feature
+            similarity and may retrieve semantically related patterns.
         """
         # Reshape test sample if needed
         if len(test_sample.shape) == 1:
             test_sample = test_sample.reshape(1, -1)
 
-        # Convert to tensor and find the BMU for the test sample
+        # Find BMU for the test sample
         test_sample_tensor = ops.convert_to_tensor(test_sample)
         bmu_indices, _ = self.som_layer(test_sample_tensor, training=False)
         bmu_index = ops.convert_to_numpy(bmu_indices[0])
 
-        # Get the weights of the BMU (the memory prototype)
+        # Get the BMU's weight vector (memory prototype)
         bmu_weights = ops.convert_to_numpy(
             self.som_layer.weights_map[bmu_index[0], bmu_index[1]]
         )
 
-        # Check if we can find similar training samples
+        # Find similar training samples if provided
         similar_samples = []
         similar_labels = []
 
         if x_train is not None:
-            # Convert to tensor and find BMUs for all training samples
+            # Find BMUs for all training samples
             x_train_tensor = ops.convert_to_tensor(x_train.reshape(x_train.shape[0], -1))
             train_bmu_indices, _ = self.som_layer(x_train_tensor, training=False)
             train_bmu_indices = ops.convert_to_numpy(train_bmu_indices)
 
-            # Find samples that map to the same or neighboring BMUs
+            # Find samples with BMUs close to the query's BMU
             distances = np.sum((train_bmu_indices - bmu_index) ** 2, axis=1)
             similar_indices = np.argsort(distances)[:n_similar]
 
@@ -755,36 +1082,34 @@ class SOMModel(keras.Model):
             if y_train is not None:
                 similar_labels = [y_train[i] for i in similar_indices]
 
-        # Visualize
+        # Determine if data represents images
+        side_length_f = np.sqrt(test_sample.shape[1])
+        is_image = (side_length_f == int(side_length_f))
+        if is_image:
+            side_length = int(side_length_f)
+
+        # Create visualization
         plt.figure(figsize=figsize)
 
-        # Determine if the data represents images
-        side_length_f = np.sqrt(test_sample.shape[1])
-        if side_length_f == int(side_length_f):
-            is_image = True
-            side_length = int(side_length_f)
-        else:
-            is_image = False
-
-        # Plot the test sample
+        # Plot test sample (query)
         plt.subplot(1, n_similar + 2, 1)
         if is_image:
             plt.imshow(test_sample.reshape(side_length, side_length), cmap=cmap)
             plt.title("Test Sample")
+            plt.axis('off')
         else:
             plt.bar(range(len(test_sample[0])), test_sample[0])
             plt.title("Test Sample")
-        plt.axis('off' if is_image else 'on')
 
-        # Plot the BMU weights (memory prototype)
+        # Plot BMU weights (memory prototype)
         plt.subplot(1, n_similar + 2, 2)
         if is_image:
             plt.imshow(bmu_weights.reshape(side_length, side_length), cmap=cmap)
             plt.title("Memory Prototype")
+            plt.axis('off')
         else:
             plt.bar(range(len(bmu_weights)), bmu_weights)
             plt.title("Memory Prototype")
-        plt.axis('off' if is_image else 'on')
 
         # Plot similar samples if available
         for i, sim_sample in enumerate(similar_samples):
@@ -795,10 +1120,10 @@ class SOMModel(keras.Model):
                     plt.title(f"Similar {similar_labels[i]}")
                 else:
                     plt.title(f"Similar {i + 1}")
+                plt.axis('off')
             else:
                 plt.bar(range(len(sim_sample)), sim_sample)
                 plt.title(f"Similar {i + 1}")
-            plt.axis('off' if is_image else 'on')
 
         plt.suptitle("SOM Memory Recall: Test Sample → Memory Prototype → Similar Samples")
         plt.tight_layout()
@@ -810,16 +1135,19 @@ class SOMModel(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get configuration for the model.
+        Return configuration dictionary for model serialization.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Configuration dictionary for the model.
+        This method is called by Keras during model saving to get all necessary
+        parameters for reconstructing the model. All constructor parameters must
+        be included for proper serialization.
+
+        Returns:
+            Dictionary containing all configuration parameters passed to __init__.
+            Includes serialized initializers and regularizers.
         """
         config = super().get_config()
 
-        # Prepare prototypes for JSON serialization by ensuring keys are standard Python ints
+        # Ensure class prototypes use standard Python types for JSON serialization
         prototypes_for_config = None
         if self.class_prototypes is not None:
             prototypes_for_config = {
@@ -843,17 +1171,17 @@ class SOMModel(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'SOMModel':
         """
-        Create a model from its configuration.
+        Create model instance from configuration dictionary.
 
-        Parameters
-        ----------
-        config : Dict[str, Any]
-            Configuration dictionary.
+        This method is called by Keras during model loading to reconstruct the
+        model from saved configuration. It deserializes complex objects and
+        converts JSON-compatible types back to their original forms.
 
-        Returns
-        -------
-        SOMModel
-            New instance of the model.
+        Args:
+            config: Configuration dictionary from get_config().
+
+        Returns:
+            New instance of SOMModel with the saved configuration.
         """
         # Deserialize complex objects
         if config.get('weights_initializer'):
@@ -865,8 +1193,8 @@ class SOMModel(keras.Model):
                 config['regularizer']
             )
 
-        # When loading from config, JSON serialization might convert keys to strings
-        # and tuples to lists. We need to convert them back to the correct types.
+        # JSON serialization converts tuples to lists and may stringify keys
+        # Convert back to expected types
         prototypes_config = config.get("class_prototypes")
         if prototypes_config is not None:
             config["class_prototypes"] = {
