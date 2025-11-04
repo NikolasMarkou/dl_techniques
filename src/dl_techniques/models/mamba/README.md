@@ -152,9 +152,9 @@ Normalized Input (B, L, D)
     └── `z` Stream (Gating Path):
         └─► SiLU Activation ──► Gating signal
             │
-    ┌───────┴────────┐
+    ┌───────┴──────────┐
     │ Gating Operation │
-    └───────┬────────┘
+    └───────┬──────────┘
             │
     Element-wise product: `y` * SiLU(`z`)
             │
