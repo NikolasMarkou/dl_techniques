@@ -2,7 +2,7 @@
 
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.16+-orange.svg)](https://www.tensorflow.org/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18+-orange.svg)](https://www.tensorflow.org/)
 
 A production-ready, fully-featured implementation of the **Mamba** architecture in **Keras 3**. This implementation is based on the original paper by Gu and Dao, providing a pure foundation model that separates the core sequence modeling logic from task-specific heads for maximum flexibility.
 
