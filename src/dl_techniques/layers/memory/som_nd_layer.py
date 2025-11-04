@@ -126,6 +126,7 @@ References
 import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Dict, Any, Callable
+import numpy as np
 
 # ---------------------------------------------------------------------
 # local imports
@@ -162,25 +163,25 @@ class SOMLayer(keras.layers.Layer):
     Parameters
     ----------
     grid_shape : Tuple[int, ...]
-        The shape of the SOM neuron grid. For example, `(10, 10)` for a 2D grid 
+        The shape of the SOM neuron grid. For example, `(10, 10)` for a 2D grid
         or `(5, 5, 5)` for a 3D grid.
     input_dim : int
         The dimensionality of the input data vectors.
     initial_learning_rate : float, optional
         The starting learning rate for weight updates. Defaults to 0.1.
     decay_function : Callable, optional
-        Optional callable that takes the current iteration and max iterations 
-        and returns a new learning rate. If `None`, a linear decay is used. 
+        Optional callable that takes the current iteration and max iterations
+        and returns a new learning rate. If `None`, a linear decay is used.
         Defaults to `None`.
     sigma : float, optional
         The initial radius of the neighborhood function. Defaults to 1.0.
     neighborhood_function : str, optional
-        The type of neighborhood function to use. Can be either `'gaussian'` 
+        The type of neighborhood function to use. Can be either `'gaussian'`
         or `'bubble'`. Defaults to `'gaussian'`.
     weights_initializer : str or keras.initializers.Initializer, optional
         Initialization method for the SOM weights. Supports standard Keras
-        initializers as well as special strings `'random'` (uniform in [0, 1]) 
-        and `'sample'` (falls back to `'random'`). Defaults to `'random'`.
+        initializers as well as special strings `'random'` (uniform in [0, 1])
+        and `'sample'` (falls back to `'random'`). Defaults to `'random_uniform'`.
     regularizer : keras.regularizers.Regularizer, optional
         Optional regularizer function applied to the weights. Defaults to `None`.
     name : str, optional
@@ -243,7 +244,7 @@ class SOMLayer(keras.layers.Layer):
             decay_function: Optional[Callable] = None,
             sigma: float = 1.0,
             neighborhood_function: str = 'gaussian',
-            weights_initializer: Union[str, keras.initializers.Initializer] = 'random',
+            weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
             regularizer: Optional[keras.regularizers.Regularizer] = None,
             name: Optional[str] = None,
             **kwargs: Any
@@ -265,6 +266,7 @@ class SOMLayer(keras.layers.Layer):
 
         self.grid_shape = grid_shape
         self.grid_dim = len(grid_shape)
+        self.num_neurons = int(np.prod(self.grid_shape))
         self.input_dim = input_dim
         self.initial_learning_rate = initial_learning_rate
         self.sigma = sigma
@@ -275,7 +277,7 @@ class SOMLayer(keras.layers.Layer):
         self._regularizer_config = regularizer
 
         # Handle special string initializers vs. Keras standard initializers
-        if isinstance(weights_initializer, str) and weights_initializer in ['random', 'sample']:
+        if isinstance(weights_initializer, str) and weights_initializer == 'sample':
             self.weights_initializer = None  # Use custom logic in build
         else:
             self.weights_initializer = keras.initializers.get(weights_initializer)
@@ -337,7 +339,7 @@ class SOMLayer(keras.layers.Layer):
 
         # Handle weight initialization
         if self.weights_initializer is None:
-            # Handle special strings 'random' and 'sample'.
+            # Handle special strings 'sample'.
             # 'sample' requires input data, which isn't available here, so it
             # falls back to random uniform, matching original behavior.
             initializer = keras.initializers.RandomUniform(minval=0.0, maxval=1.0, seed=42)

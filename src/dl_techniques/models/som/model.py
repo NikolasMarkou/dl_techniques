@@ -132,7 +132,7 @@ class SOMModel(keras.Model):
         Type of neighborhood function to use ('gaussian' or 'bubble').
         Defaults to 'gaussian'.
     weights_initializer : Union[str, keras.initializers.Initializer], optional
-        Initialization method for weights. Defaults to 'random'.
+        Initialization method for weights. Defaults to 'random_uniform'.
     regularizer : Optional[keras.regularizers.Regularizer], optional
         Regularizer function applied to the weights. Defaults to None.
     name : str, optional
@@ -148,8 +148,9 @@ class SOMModel(keras.Model):
             initial_learning_rate: float = 0.1,
             sigma: float = 1.0,
             neighborhood_function: str = 'gaussian',
-            weights_initializer: Union[str, keras.initializers.Initializer] = 'random',
+            weights_initializer: Union[str, keras.initializers.Initializer] = 'random_uniform',
             regularizer: Optional[keras.regularizers.Regularizer] = None,
+            class_prototypes: Optional[Dict] = None,
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -177,7 +178,7 @@ class SOMModel(keras.Model):
         )
 
         # Class prototypes for classification and memory retrieval
-        self.class_prototypes = None
+        self.class_prototypes = class_prototypes
         self._is_built = False
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
@@ -220,7 +221,7 @@ class SOMModel(keras.Model):
         """
         return self.som_layer(inputs, training=training)
 
-    def train_som(
+    def train(
             self,
             x_train: np.ndarray,
             epochs: int = 10,
@@ -247,7 +248,7 @@ class SOMModel(keras.Model):
         Returns
         -------
         Dict[str, List[float]]
-            Training history containing 'quantization_error' per epoch.
+            Training history containing 'mean_quantization_error' per epoch.
         """
         # Ensure the model is built
         if not self._is_built:
@@ -256,10 +257,12 @@ class SOMModel(keras.Model):
 
         # Set the max iterations
         total_iterations = epochs * (len(x_train) // batch_size)
+        if total_iterations == 0 and len(x_train) > 0:
+            total_iterations = epochs # Handle cases where len(x_train) < batch_size
         self.som_layer.max_iterations.assign(float(total_iterations))
 
         # Training history
-        history = {'quantization_error': []}
+        history = {'mean_quantization_error': []}
 
         for epoch in range(epochs):
             start_time = time.time()
@@ -276,6 +279,8 @@ class SOMModel(keras.Model):
             # Train in batches
             for i in range(0, len(x_train_shuffled), batch_size):
                 x_batch = x_train_shuffled[i:i + batch_size]
+                if x_batch.shape[0] == 0:
+                    continue
 
                 # Flatten the data right before passing to the model
                 x_batch = x_batch.reshape(x_batch.shape[0], -1)
@@ -289,13 +294,13 @@ class SOMModel(keras.Model):
                 epoch_quant_errors.append(ops.convert_to_numpy(avg_error))
 
             # Compute average error for the epoch
-            avg_error = np.mean(epoch_quant_errors)
-            history['quantization_error'].append(avg_error)
+            avg_error = np.mean(epoch_quant_errors) if epoch_quant_errors else 0.0
+            history['mean_quantization_error'].append(avg_error)
 
             if verbose > 0 and (epoch % max(1, epochs // 10) == 0 or epoch == epochs - 1):
                 end_time = time.time()
                 logger.info(
-                    f"Epoch {epoch + 1}/{epochs} - Quantization Error: {avg_error:.6f} - "
+                    f"Epoch {epoch + 1}/{epochs} - Mean Quantization Error: {avg_error:.6f} - "
                     f"Time: {end_time - start_time:.2f}s"
                 )
 
@@ -338,6 +343,8 @@ class SOMModel(keras.Model):
 
             # Get BMUs for this class using the indices
             class_samples = bmu_indices[class_indices]
+            if len(class_samples) == 0:
+                continue
 
             # Convert to tuples for counting
             bmu_tuples = [tuple(bmu) for bmu in class_samples]
@@ -351,7 +358,7 @@ class SOMModel(keras.Model):
 
         self.class_prototypes = class_to_bmu
 
-    def predict_classes(self, x_test: np.ndarray) -> np.ndarray:
+    def predict_class(self, x_test: np.ndarray) -> np.ndarray:
         """
         Predict classes for test data using the fitted class prototypes.
 
@@ -408,7 +415,7 @@ class SOMModel(keras.Model):
 
         return np.array(predictions)
 
-    def visualize_som_grid(
+    def visualize_grid(
             self,
             figsize: Tuple[int, int] = (10, 10),
             cmap: str = 'viridis',
@@ -434,11 +441,10 @@ class SOMModel(keras.Model):
 
         plt.figure(figsize=figsize)
 
-        # For MNIST or similar image data
-        if input_dim in [28 * 28, 32 * 32, 64 * 64]:
-            # Reshape each weight vector to an image
-            side_length = int(np.sqrt(input_dim))
-
+        # Check if the input dimension is a perfect square (likely an image)
+        side_length_f = np.sqrt(input_dim)
+        if side_length_f == int(side_length_f):
+            side_length = int(side_length_f)
             # Create a grid to display all neurons
             full_grid = np.zeros((grid_height * side_length, grid_width * side_length))
 
@@ -452,7 +458,7 @@ class SOMModel(keras.Model):
                     ] = neuron_weights
 
             plt.imshow(full_grid, cmap='gray')
-            plt.title('SOM Memory Grid - Prototype Digit Memories')
+            plt.title('SOM Memory Grid - Prototype Memories')
             plt.axis('off')
 
         else:
@@ -656,7 +662,7 @@ class SOMModel(keras.Model):
         bmu_indices = ops.convert_to_numpy(bmu_indices)
 
         # Create a histogram
-        hit_histogram = np.zeros((self.som_layer.grid_height, self.som_layer.grid_width))
+        hit_histogram = np.zeros((self.som_layer.map_size[0], self.som_layer.map_size[1]))
 
         for bmu in bmu_indices:
             hit_histogram[bmu[0], bmu[1]] += 1
@@ -753,9 +759,10 @@ class SOMModel(keras.Model):
         plt.figure(figsize=figsize)
 
         # Determine if the data represents images
-        if test_sample.shape[1] in [28 * 28, 32 * 32, 64 * 64]:
+        side_length_f = np.sqrt(test_sample.shape[1])
+        if side_length_f == int(side_length_f):
             is_image = True
-            side_length = int(np.sqrt(test_sample.shape[1]))
+            side_length = int(side_length_f)
         else:
             is_image = False
 
@@ -811,6 +818,14 @@ class SOMModel(keras.Model):
             Configuration dictionary for the model.
         """
         config = super().get_config()
+
+        # Prepare prototypes for JSON serialization by ensuring keys are standard Python ints
+        prototypes_for_config = None
+        if self.class_prototypes is not None:
+            prototypes_for_config = {
+                int(k): v for k, v in self.class_prototypes.items()
+            }
+
         config.update({
             'map_size': self.map_size,
             'input_dim': self.input_dim,
@@ -821,6 +836,7 @@ class SOMModel(keras.Model):
                 keras.initializers.get(self.weights_initializer)
             ),
             'regularizer': keras.regularizers.serialize(self.regularizer) if self.regularizer else None,
+            'class_prototypes': prototypes_for_config,
         })
         return config
 
@@ -849,6 +865,14 @@ class SOMModel(keras.Model):
                 config['regularizer']
             )
 
+        # When loading from config, JSON serialization might convert keys to strings
+        # and tuples to lists. We need to convert them back to the correct types.
+        prototypes_config = config.get("class_prototypes")
+        if prototypes_config is not None:
+            config["class_prototypes"] = {
+                int(k): tuple(v) for k, v in prototypes_config.items()
+            }
+
         return cls(**config)
 
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------------------
