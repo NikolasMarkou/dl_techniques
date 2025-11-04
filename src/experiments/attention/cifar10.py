@@ -150,7 +150,7 @@ from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.layers.attention import (
     WindowAttention,
     WindowZigZagAttention,
-    KANWindowAttention
+    WindowAttentionKAN
 )
 
 from sklearn.model_selection import train_test_split
@@ -161,7 +161,8 @@ from dl_techniques.visualization import (
     ClassificationResults,
     TrainingCurvesVisualization,
     ConfusionMatrixVisualization,
-    MultiModelClassification
+    MultiModelClassification,
+    ROCPRCurves
 )
 
 from dl_techniques.analyzer import (
@@ -382,7 +383,7 @@ def create_attention_layer(
         )
 
     elif attention_type == 'kan_window':
-        return KANWindowAttention(
+        return WindowAttentionKAN(
             dim=dim,
             window_size=window_size,
             num_heads=num_heads,

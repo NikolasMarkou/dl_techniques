@@ -1,4 +1,4 @@
-from .kan_window_attention import KANWindowAttention
+from .window_attention_kan import WindowAttentionKAN
 from .window_attention_zigzag import WindowZigZagAttention
 from .window_attention import WindowAttention
 

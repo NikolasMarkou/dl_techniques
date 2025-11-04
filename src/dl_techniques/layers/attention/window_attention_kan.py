@@ -26,7 +26,7 @@ from ..kan_linear import KANLinear
 
 
 @keras.saving.register_keras_serializable()
-class SingleKANWindowAttention(keras.layers.Layer):
+class SingleWindowAttentionKAN(keras.layers.Layer):
     """
     Multi-head self-attention with KAN projections for windowed attention.
 
@@ -557,7 +557,7 @@ class SingleKANWindowAttention(keras.layers.Layer):
 
 
 @keras.saving.register_keras_serializable()
-class KANWindowAttention(keras.layers.Layer):
+class WindowAttentionKAN(keras.layers.Layer):
     """
     KAN-enhanced windowed multi-head self-attention for sequences.
 
@@ -727,7 +727,7 @@ class KANWindowAttention(keras.layers.Layer):
         self.kwargs = kwargs
 
         # CREATE internal attention layer in __init__
-        self.attention = SingleKANWindowAttention(
+        self.attention = SingleWindowAttentionKAN(
             dim=dim,
             window_size=window_size,
             num_heads=num_heads,
@@ -942,7 +942,7 @@ class KANWindowAttention(keras.layers.Layer):
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "KANWindowAttention":
+    def from_config(cls, config: Dict[str, Any]) -> "WindowAttentionKAN":
         """
         Create layer from configuration dictionary.
 

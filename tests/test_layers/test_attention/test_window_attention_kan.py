@@ -1,5 +1,5 @@
 """
-Comprehensive test suite for KANWindowAttention layer.
+Comprehensive test suite for WindowAttentionKAN layer.
 
 Tests follow the patterns established for WindowAttention testing,
 adapted for KAN-based projection layers.
@@ -12,9 +12,9 @@ import os
 import tempfile
 import tensorflow as tf
 
-from dl_techniques.layers.attention.kan_window_attention import (
-    KANWindowAttention,
-    SingleKANWindowAttention,
+from dl_techniques.layers.attention.window_attention_kan import (
+    WindowAttentionKAN,
+    SingleWindowAttentionKAN,
 )
 
 
@@ -41,7 +41,7 @@ def build_kan_transformer_block(
         Output tensor after transformer block.
     """
     x1 = keras.layers.LayerNormalization(epsilon=1e-6)(inputs)
-    attn_out = KANWindowAttention(
+    attn_out = WindowAttentionKAN(
         dim=dim, window_size=window_size, num_heads=num_heads, **kan_kwargs
     )(x1)
     x = keras.layers.Add()([inputs, attn_out])
@@ -51,8 +51,8 @@ def build_kan_transformer_block(
     return keras.layers.Add()([x, mlp_out])
 
 
-class TestSingleKANWindowAttention:
-    """Test suite for the SingleKANWindowAttention layer."""
+class TestSingleWindowAttentionKAN:
+    """Test suite for the SingleWindowAttentionKAN layer."""
 
     @pytest.fixture
     def input_tensor(self):
@@ -62,13 +62,13 @@ class TestSingleKANWindowAttention:
     @pytest.fixture
     def layer_instance(self):
         """Create a default layer instance for testing."""
-        return SingleKANWindowAttention(
+        return SingleWindowAttentionKAN(
             dim=96, window_size=7, num_heads=3
         )
 
     def test_initialization_defaults(self):
         """Test initialization with default KAN parameters."""
-        layer = SingleKANWindowAttention(
+        layer = SingleWindowAttentionKAN(
             dim=128, window_size=7, num_heads=4
         )
         assert layer.dim == 128
@@ -90,7 +90,7 @@ class TestSingleKANWindowAttention:
     def test_initialization_custom(self):
         """Test initialization with custom KAN parameters."""
         custom_regularizer = keras.regularizers.L2(1e-4)
-        layer = SingleKANWindowAttention(
+        layer = SingleWindowAttentionKAN(
             dim=64,
             window_size=8,
             num_heads=8,
@@ -122,35 +122,35 @@ class TestSingleKANWindowAttention:
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors."""
         with pytest.raises(ValueError, match="dim must be positive"):
-            SingleKANWindowAttention(dim=-10, window_size=7, num_heads=3)
+            SingleWindowAttentionKAN(dim=-10, window_size=7, num_heads=3)
 
         with pytest.raises(ValueError, match="window_size must be positive"):
-            SingleKANWindowAttention(dim=96, window_size=0, num_heads=3)
+            SingleWindowAttentionKAN(dim=96, window_size=0, num_heads=3)
 
         with pytest.raises(ValueError, match="num_heads must be positive"):
-            SingleKANWindowAttention(dim=96, window_size=7, num_heads=-3)
+            SingleWindowAttentionKAN(dim=96, window_size=7, num_heads=-3)
 
         with pytest.raises(ValueError, match="dim .* must be divisible by num_heads"):
-            SingleKANWindowAttention(dim=97, window_size=7, num_heads=3)
+            SingleWindowAttentionKAN(dim=97, window_size=7, num_heads=3)
 
         with pytest.raises(
             ValueError, match="attn_dropout_rate must be between 0.0 and 1.0"
         ):
-            SingleKANWindowAttention(
+            SingleWindowAttentionKAN(
                 dim=96, window_size=7, num_heads=3, attn_dropout_rate=1.1
             )
 
         with pytest.raises(
             ValueError, match="kan_grid_size must be positive"
         ):
-            SingleKANWindowAttention(
+            SingleWindowAttentionKAN(
                 dim=96, window_size=7, num_heads=3, kan_grid_size=0
             )
 
         with pytest.raises(
             ValueError, match="kan_regularization_factor must be non-negative"
         ):
-            SingleKANWindowAttention(
+            SingleWindowAttentionKAN(
                 dim=96, window_size=7, num_heads=3, kan_regularization_factor=-0.1
             )
 
@@ -189,7 +189,7 @@ class TestSingleKANWindowAttention:
 
     def test_attention_mask(self):
         """Test that attention mask works correctly."""
-        layer = SingleKANWindowAttention(dim=32, window_size=5, num_heads=4)
+        layer = SingleWindowAttentionKAN(dim=32, window_size=5, num_heads=4)
         input_tensor = keras.random.normal((2, 25, 32))  # 5x5 window
 
         # Create mask that masks last 5 tokens
@@ -204,7 +204,7 @@ class TestSingleKANWindowAttention:
 
     def test_padding_handling(self):
         """Test that the layer handles sequences shorter than window area."""
-        layer = SingleKANWindowAttention(dim=32, window_size=7, num_heads=4)
+        layer = SingleWindowAttentionKAN(dim=32, window_size=7, num_heads=4)
 
         # Test with various sequence lengths < 49
         for seq_len in [10, 25, 40, 48]:
@@ -215,7 +215,7 @@ class TestSingleKANWindowAttention:
 
     def test_gradient_flow(self):
         """Ensure gradients flow correctly through KAN layers."""
-        layer = SingleKANWindowAttention(dim=32, window_size=4, num_heads=2)
+        layer = SingleWindowAttentionKAN(dim=32, window_size=4, num_heads=2)
         input_tensor = tf.Variable(keras.random.normal((2, 16, 32)))
 
         with tf.GradientTape() as tape:
@@ -242,20 +242,20 @@ class TestSingleKANWindowAttention:
             "proj_dropout_rate": 0.2,
         }
 
-        original_layer = SingleKANWindowAttention(**config)
+        original_layer = SingleWindowAttentionKAN(**config)
         input_shape = (None, 49, config["dim"])
         original_layer.build(input_shape)
 
         layer_config = original_layer.get_config()
-        recreated_layer = SingleKANWindowAttention.from_config(layer_config)
+        recreated_layer = SingleWindowAttentionKAN.from_config(layer_config)
         recreated_layer.build(input_shape)
 
         assert recreated_layer.get_config() == layer_config
         assert len(recreated_layer.weights) == len(original_layer.weights)
 
 
-class TestKANWindowAttention:
-    """Test suite for the refactored KANWindowAttention layer."""
+class TestWindowAttentionKAN:
+    """Test suite for the refactored WindowAttentionKAN layer."""
 
     @pytest.fixture
     def input_tensor(self):
@@ -265,13 +265,13 @@ class TestKANWindowAttention:
     @pytest.fixture
     def layer_instance(self):
         """Create a default layer instance for testing."""
-        return KANWindowAttention(dim=96, window_size=7, num_heads=3)
+        return WindowAttentionKAN(dim=96, window_size=7, num_heads=3)
 
     def test_initialization_defaults(self):
         """Test initialization with default parameters on the inner attention layer."""
-        layer = KANWindowAttention(dim=128, window_size=7, num_heads=4)
+        layer = WindowAttentionKAN(dim=128, window_size=7, num_heads=4)
         inner_attn = layer.attention
-        assert isinstance(inner_attn, SingleKANWindowAttention)
+        assert isinstance(inner_attn, SingleWindowAttentionKAN)
         assert inner_attn.dim == 128
         assert inner_attn.window_size == 7
         assert inner_attn.num_heads == 4
@@ -289,7 +289,7 @@ class TestKANWindowAttention:
     def test_initialization_custom(self):
         """Test initialization with custom KAN parameters passed to the inner layer."""
         custom_regularizer = keras.regularizers.L2(1e-4)
-        layer = KANWindowAttention(
+        layer = WindowAttentionKAN(
             dim=64,
             window_size=8,
             num_heads=8,
@@ -323,18 +323,18 @@ class TestKANWindowAttention:
 
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors during initialization."""
-        # These should propagate from SingleKANWindowAttention
+        # These should propagate from SingleWindowAttentionKAN
         with pytest.raises(ValueError, match="dim must be positive"):
-            KANWindowAttention(dim=-10, window_size=7, num_heads=3)
+            WindowAttentionKAN(dim=-10, window_size=7, num_heads=3)
 
         with pytest.raises(ValueError, match="window_size must be positive"):
-            KANWindowAttention(dim=96, window_size=0, num_heads=3)
+            WindowAttentionKAN(dim=96, window_size=0, num_heads=3)
 
         with pytest.raises(ValueError, match="num_heads must be positive"):
-            KANWindowAttention(dim=96, window_size=7, num_heads=-3)
+            WindowAttentionKAN(dim=96, window_size=7, num_heads=-3)
 
         with pytest.raises(ValueError, match="dim .* must be divisible by num_heads"):
-            KANWindowAttention(dim=97, window_size=7, num_heads=3)
+            WindowAttentionKAN(dim=97, window_size=7, num_heads=3)
 
     def test_build_process(self, input_tensor, layer_instance):
         """Test that the layer and its sub-layer build properly."""
@@ -387,7 +387,7 @@ class TestKANWindowAttention:
         self, dim, window_size, num_heads, seq_len
     ):
         """Test that padding and unpadding works for various sequence lengths."""
-        layer = KANWindowAttention(
+        layer = WindowAttentionKAN(
             dim=dim, window_size=window_size, num_heads=num_heads
         )
         input_tensor = keras.random.normal((4, seq_len, dim))
@@ -433,7 +433,7 @@ class TestKANWindowAttention:
     )
     def test_comprehensive_configurations(self, config, seq_len):
         """Test various layer configurations with different sequence lengths."""
-        layer = KANWindowAttention(**config)
+        layer = WindowAttentionKAN(**config)
         input_tensor = keras.random.normal((2, seq_len, config["dim"]))
         output = layer(input_tensor, training=True)
         assert output.shape == input_tensor.shape
@@ -441,7 +441,7 @@ class TestKANWindowAttention:
 
     def test_attention_mask_integration(self):
         """Test that a user-provided attention mask works correctly."""
-        layer = KANWindowAttention(dim=32, window_size=5, num_heads=4)
+        layer = WindowAttentionKAN(dim=32, window_size=5, num_heads=4)
         input_tensor = keras.random.normal((2, 55, 32))
 
         # Mask last 5 tokens
@@ -457,7 +457,7 @@ class TestKANWindowAttention:
 
     def test_gradient_flow(self):
         """Ensure gradients flow correctly for the whole layer."""
-        layer = KANWindowAttention(dim=32, window_size=4, num_heads=2)
+        layer = WindowAttentionKAN(dim=32, window_size=4, num_heads=2)
         input_tensor = tf.Variable(keras.random.normal((2, 10, 32)))
 
         with tf.GradientTape() as tape:
@@ -501,12 +501,12 @@ class TestKANWindowAttention:
     )
     def test_serialization_comprehensive(self, config):
         """Test serialization and deserialization with various configurations."""
-        original_layer = KANWindowAttention(**config)
+        original_layer = WindowAttentionKAN(**config)
         input_shape = (None, 50, config["dim"])
         original_layer.build(input_shape)
 
         layer_config = original_layer.get_config()
-        recreated_layer = KANWindowAttention.from_config(layer_config)
+        recreated_layer = WindowAttentionKAN.from_config(layer_config)
         recreated_layer.build(input_shape)
 
         assert recreated_layer.get_config() == layer_config
@@ -515,7 +515,7 @@ class TestKANWindowAttention:
     def test_model_save_load(self, input_tensor):
         """Test saving and loading a model with the KAN window attention layer."""
         inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = KANWindowAttention(
+        x = WindowAttentionKAN(
             dim=96, window_size=7, num_heads=3, name="kan_window_attn"
         )(inputs)
         x = keras.layers.LayerNormalization()(x)
@@ -538,7 +538,7 @@ class TestKANWindowAttention:
                 err_msg="Predictions should match after save/load",
             )
             assert isinstance(
-                loaded_model.get_layer("kan_window_attn"), KANWindowAttention
+                loaded_model.get_layer("kan_window_attn"), WindowAttentionKAN
             )
 
     def test_transformer_block_integration(self):
@@ -562,7 +562,7 @@ class TestKANWindowAttention:
 
     def test_numerical_stability(self):
         """Test layer stability with extreme input values."""
-        layer = KANWindowAttention(dim=32, window_size=4, num_heads=2)
+        layer = WindowAttentionKAN(dim=32, window_size=4, num_heads=2)
 
         test_cases = [
             keras.ops.zeros((2, 15, 32)),
@@ -578,7 +578,7 @@ class TestKANWindowAttention:
 
     def test_regularization(self, input_tensor):
         """Test that regularization losses from the inner layer are collected."""
-        layer = KANWindowAttention(
+        layer = WindowAttentionKAN(
             dim=96,
             window_size=7,
             num_heads=3,
@@ -592,7 +592,7 @@ class TestKANWindowAttention:
 
     def test_relative_position_encoding_attributes(self):
         """Test that relative position encoding attributes exist on the inner layer."""
-        layer = KANWindowAttention(dim=32, window_size=4, num_heads=2)
+        layer = WindowAttentionKAN(dim=32, window_size=4, num_heads=2)
         layer.build((None, 10, 32))
         inner_attn = layer.attention
 
@@ -610,7 +610,7 @@ class TestKANWindowAttention:
 
     def test_kan_specific_parameters(self):
         """Test that KAN-specific parameters are correctly set and used."""
-        layer = KANWindowAttention(
+        layer = WindowAttentionKAN(
             dim=96,
             window_size=7,
             num_heads=3,
@@ -637,14 +637,14 @@ class TestKANWindowAttention:
         input_tensor = keras.random.normal((2, 50, 96))
 
         # Create two layers with different KAN configurations
-        layer1 = KANWindowAttention(
+        layer1 = WindowAttentionKAN(
             dim=96,
             window_size=7,
             num_heads=3,
             kan_grid_size=5,
             kan_spline_order=3,
         )
-        layer2 = KANWindowAttention(
+        layer2 = WindowAttentionKAN(
             dim=96,
             window_size=7,
             num_heads=3,
@@ -662,7 +662,7 @@ class TestKANWindowAttention:
 
     def test_window_partitioning_and_merging(self):
         """Test internal window partitioning and merging operations."""
-        layer = KANWindowAttention(dim=32, window_size=4, num_heads=2)
+        layer = WindowAttentionKAN(dim=32, window_size=4, num_heads=2)
 
         # Create a grid tensor
         grid = keras.random.normal((2, 8, 8, 32))  # 8x8 grid, divisible by 4
