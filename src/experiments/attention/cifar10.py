@@ -207,10 +207,10 @@ class ExperimentConfig:
     """
     # Model architecture
     attention_types: List[str] = field(default_factory=lambda: [
-        'window',
-        'window_zigzag',
         'window_zigzag_adaptive',
         'kan_window'
+        'window_zigzag',
+        'window',
     ])
     conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128])
     attention_dim: int = 64
