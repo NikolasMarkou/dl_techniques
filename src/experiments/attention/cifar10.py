@@ -520,15 +520,15 @@ def build_attention_model(
     x = keras.layers.Activation('relu', name='relu_dense')(x)
 
     # Output layer
-    outputs = keras.layers.Dense(
+    logits = keras.layers.Dense(
         num_classes,
-        activation='softmax',
+        activation='linear',
         kernel_initializer='glorot_uniform',
-        name='output'
+        name='logits'
     )(x)
 
     # Create model
-    model = keras.Model(inputs=inputs, outputs=outputs, name=f'model_{attention_type}')
+    model = keras.Model(inputs=inputs, outputs=logits, name=f'model_{attention_type}')
 
     return model
 
@@ -596,7 +596,7 @@ def train_and_evaluate_model(
             learning_rate=config.learning_rate,
             weight_decay=config.weight_decay
         ),
-        loss=keras.losses.CategoricalCrossentropy(),
+        loss=keras.losses.CategoricalCrossentropy(from_logits=True),
         metrics=['accuracy']
     )
 
@@ -680,8 +680,8 @@ def analyze_models(
     for model_name, model in models.items():
         # Test set evaluation
         test_loss, test_acc = model.evaluate(
-            data.x_test,
-            data.y_test,
+            x=data.x_test,
+            y=data.y_test,
             batch_size=config.batch_size,
             verbose=0
         )
@@ -722,7 +722,7 @@ def analyze_models(
     )
 
     # Analyze all models using the correct method.
-    analysis_results = analyzer.analyze(data_input)
+    analysis_results = analyzer.analyze(data=data_input)
 
     results['model_analysis'] = analysis_results
 

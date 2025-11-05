@@ -117,7 +117,7 @@ class CalibrationAnalyzer(BaseAnalyzer):
             if y_pred_proba is None:
                 logger.warning(f"Could not find predictions for {model_name}: attempting to get logits")
                 y_pred_logits = model_cache.get('logits', None)
-                if y_pred_logits is None:
+                if y_pred_logits is not None:
                     y_pred_proba = keras.ops.softmax(y_pred_logits, axis=-1)
                 else:
                     logger.warning(f"Could not find logits for {model_name}")
