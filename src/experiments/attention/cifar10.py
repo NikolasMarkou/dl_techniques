@@ -457,7 +457,6 @@ def build_attention_model(
             config=config
         )
         x = attn_layer(x)
-        x = keras.layers.Dropout(config.dropout_rate, name=f'drop_attn_block{i}')(x)
         x = keras.layers.Add(name=f'add_attn_block{i}')([x_res, x])
 
         # --- MLP Sub-block ---
