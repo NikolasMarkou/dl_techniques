@@ -1,48 +1,65 @@
 """
-SqueezeNet V1 Model Implementation
-==================================================
+SqueezeNet architecture for efficient classification.
 
-A complete implementation of the SqueezeNet architecture achieving AlexNet-level
-accuracy with 50x fewer parameters.
+This model encapsulates the SqueezeNet architecture, a convolutional neural
+network designed to achieve AlexNet-level accuracy on ImageNet with
+approximately 50 times fewer parameters. The design centers on a novel
+building block, the "Fire module," which systematically reduces the
+parameter count while preserving representational power.
 
-Based on: "SqueezeNet: AlexNet-level accuracy with 50x fewer parameters
-and <0.5MB model size" (Iandola et al., 2016)
-https://arxiv.org/abs/1602.07360
+Architectural Overview:
+    SqueezeNet's macro-architecture consists of a standalone convolutional
+    layer (the "stem"), followed by a series of eight Fire modules, and
+    concludes with a final convolutional layer and global pooling (the
+    "head"). Max-pooling layers are strategically placed after the stem and
+    certain Fire modules to downsample feature maps.
 
-Key Features:
-------------
-- Modular design using Fire modules as building blocks
-- Support for multiple SqueezeNet variants (1.0, 1.1, custom)
-- Simple and complex bypass connections
-- Configurable squeeze ratio for parameter efficiency
-- Flexible head design (classification, feature extraction)
-- Complete serialization support
-- Production-ready implementation
+    The core innovation is the Fire module, which comprises two stages:
+    1.  A "squeeze" stage: This consists of a convolutional layer with only
+        1x1 filters. Its purpose is to reduce the channel dimensionality of
+    its input tensor, acting as a bottleneck.
+    2.  An "expand" stage: This stage takes the output of the squeeze layer
+        and feeds it into two parallel convolutional layers—one with 1x1
+        filters and another with 3x3 filters. The outputs of these two
+        layers are then concatenated along the channel dimension.
 
-Architecture Principles:
------------------------
-1. Replace 3x3 filters with 1x1 filters where possible
-2. Decrease input channels to 3x3 filters using squeeze layers
-3. Downsample late in the network for larger activation maps
+    This model also supports the integration of residual "bypass"
+    connections, similar to those in ResNet. These connections are added
+    around certain Fire modules to improve gradient flow and enable the
+    training of deeper SqueezeNet variants.
 
-Model Variants:
---------------
-- SqueezeNet 1.0: Original architecture with 50x fewer params than AlexNet
-- SqueezeNet 1.1: 2.4x less computation and slightly fewer parameters
-- SqueezeNet with Bypass: Enhanced with residual connections
+Foundational Principles and Intuition:
+    The architecture is guided by three primary strategies for creating a
+    parameter-efficient CNN:
 
-Usage Examples:
--------------
-```python
-# ImageNet model
-model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
+    1.  Replace 3x3 filters with 1x1 filters: A significant portion of the
+        computation and parameters in a CNN is in its 3x3 convolutions.
+        A 1x1 filter has 9 times fewer parameters than a 3x3 filter,
+        providing a direct and effective way to reduce model size. The
+        Fire module's expand layer heavily utilizes 1x1 convolutions.
 
-# CIFAR-10 model
-model = SqueezeNetV1.from_variant("1.1", num_classes=10, input_shape=(32, 32, 3))
+    2.  Decrease input channels to 3x3 filters: The number of parameters
+        in a convolutional layer is calculated as `(input_channels) *
+        (output_channels) * (kernel_height * kernel_width)`. The "squeeze"
+        layer's primary function is to reduce the `input_channels` term
+        for the subsequent 3x3 convolution in the "expand" layer. This
+        bottleneck design is the most critical factor in SqueezeNet's
+        parameter efficiency.
 
-# Custom configuration
-model = create_squeezenet_v1("1.0_bypass", num_classes=100)
-```
+    3.  Downsample late in the network: The authors postulate that larger
+        activation maps (achieved by delaying pooling) can lead to higher
+        classification accuracy by preserving more spatial information.
+        SqueezeNet performs max-pooling later in the network compared to
+        its predecessors, allowing representations to develop over a larger
+        spatial extent before being downsampled.
+
+References:
+    -   Iandola et al., "SqueezeNet: AlexNet-level accuracy with 50x fewer
+        parameters and <0.5MB model size" (2016).
+        https://arxiv.org/abs/1602.07360
+    -   He et al., "Deep Residual Learning for Image Recognition" (2015)
+        (for the bypass connection concept).
+        https://arxiv.org/abs/1512.03385
 """
 
 import keras

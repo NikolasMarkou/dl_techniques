@@ -1,52 +1,64 @@
 """
-SqueezeNodule-Net V2 Model Implementation
-==================================================
+SqueezeNodule-Net architecture for medical imaging.
 
-An improved SqueezeNet architecture for efficient lung nodule classification
-achieving better accuracy with comparable or fewer parameters.
+This model presents an evolution of the SqueezeNet architecture, specifically
+optimized for tasks such as lung nodule classification from CT scans. It
+achieves improved accuracy and computational performance by introducing
+targeted modifications to SqueezeNet's core building block, the Fire module,
+and by adjusting the network's information bottleneck.
 
-Based on: "An improved SqueezeNet model for the diagnosis of lung cancer in CT scans"
-(Tsivgoulis et al., 2022)
-https://doi.org/10.1016/j.mlwa.2022.100399
+Architectural Overview:
+    The macro-architecture of SqueezeNodule-Net is largely inherited from
+    the original SqueezeNet: it begins with a convolutional stem, followed
+    by a series of eight modified "Fire" modules interspersed with
+    max-pooling layers for downsampling, and concludes with a classification
+    head.
 
-Key Features:
-------------
-- Simplified Fire modules with only 3x3 expand convolutions
-- Two variants with different squeeze ratios
-- Optimized for medical image classification
-- Better runtime and classification performance than SqueezeNet
-- Support for both 2D and 3D image inputs
+    The primary innovation lies in the micro-architecture of its fundamental
+    building block, the `SimplifiedFireModule`. This module alters the
+    original Fire module design in two significant ways:
+    1.  It completely removes the 1x1 convolutional path within the "expand"
+        layer, retaining only the 3x3 convolutional path.
+    2.  It employs a different strategy for the "squeeze ratio," which
+        governs the degree of channel compression.
 
-Architecture Improvements:
--------------------------
-- Removes 1x1 expand convolutions from Fire modules
-- Uses higher squeeze ratios for better information flow
-- V1: SR=0.25 with s1x1=16
-- V2: SR=0.50 with s1x1=32 (except last 2 modules with SR=0.25)
+Foundational Principles and Intuition:
+    The design of SqueezeNodule-Net is motivated by hypotheses about feature
+    learning in the context of medical imaging, leading to two key changes
+    from the original SqueezeNet principles:
 
-Model Variants:
---------------
-- SqueezeNodule-Net V1: Lighter, 15.8% fewer parameters than SqueezeNet
-- SqueezeNodule-Net V2: Better accuracy, 23% more parameters but faster convergence
+    -   Enforced Spatial Feature Extraction: The original Fire module's
+        "expand" layer contained parallel 1x1 and 3x3 convolutions. The 1x1
+        path learns channel-wise combinations without spatial context,
+        while the 3x3 path captures local spatial patterns. By eliminating
+        the 1x1 expand path, SqueezeNodule-Net forces the module to learn
+        features that are exclusively derived from local spatial context.
+        The underlying assumption is that for tasks like nodule
+        classification, where texture and local shape are paramount, such
+        spatially-aware feature learning is more effective and parameter-
+        efficient than a mixed approach.
 
-Performance Improvements (2D):
------------------------------
-- V1: 93.2% accuracy, 94.6% specificity, 89.2% sensitivity
-- V2: 94.3% accuracy, 95.3% specificity, 91.3% sensitivity
+    -   Widened Information Bottleneck: The "squeeze ratio" (SR), defined
+        as the ratio of squeeze filters (`s1x1`) to expand filters (`e3x3`),
+        controls the severity of the information bottleneck in each module.
+        The original SqueezeNet used a very low SR (e.g., 0.125), creating
+        an aggressive bottleneck to maximize parameter reduction. In
+        contrast, SqueezeNodule-Net variants use a significantly higher
+        SR (e.g., 0.25 or 0.50). This creates a wider bottleneck, allowing
+        more channels of information to flow through the module. The
+        intuition is that retaining a richer feature representation at
+        each stage is critical for distinguishing subtle diagnostic
+        patterns in medical images, leading to faster convergence and
+        higher final accuracy, even if it slightly increases the parameter
+        count compared to the most aggressive SqueezeNet variants.
 
-Usage Examples:
--------------
-```python
-# For lung nodule classification
-model = SqueezeNoduleNetV2(num_classes=2, input_shape=(50, 50, 1))
-
-# For 3D CT scans
-model = SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2,
-                                        input_shape=(32, 32, 32, 1))
-
-# For standard ImageNet
-model = create_squeezenodule_net_v2("v2", num_classes=1000)
-```
+References:
+    -   Tsivgoulis et al., "An improved SqueezeNet model for the diagnosis
+        of lung cancer in CT scans" (2022).
+        https://doi.org/10.1016/j.mlwa.2022.100399
+    -   Iandola et al., "SqueezeNet: AlexNet-level accuracy with 50x fewer
+        parameters and <0.5MB model size" (2016).
+        https://arxiv.org/abs/1602.07360
 """
 
 import keras

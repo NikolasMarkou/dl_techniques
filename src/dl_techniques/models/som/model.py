@@ -1,14 +1,69 @@
 """
-Self-Organizing Map (SOM) Model for Associative Memory and Pattern Organization.
+Self-Organizing Map for topological memory and pattern organization.
 
-This module provides a complete Keras Model implementation of Self-Organizing Maps
-as topological memory structures. SOMs learn to organize and recall patterns in an
-unsupervised manner, creating low-dimensional representations of high-dimensional
-data while preserving topological relationships.
+This model provides a complete framework for a Self-Organizing Map (SOM),
+an unsupervised neural network that learns to produce a low-dimensional,
+discretized representation of high-dimensional input data. The SOM forms
+a topological map where the spatial arrangement of neurons on a 2D grid
+reflects the intrinsic relationships within the input data, making it a
+powerful tool for clustering, visualization, and associative memory.
 
-The implementation demonstrates how neural memory systems can be built using
-competitive learning and neighborhood-based updates to create structured
-representations useful for clustering, visualization, and associative recall.
+Architectural Overview:
+    The core of the model is a 2D grid of neurons, where each neuron `i`
+    maintains a prototype or weight vector `w_i` of the same dimension as
+    the input space. The learning process is competitive and cooperative,
+    unfolding in three key steps for each training input vector `x`:
+    1.  **Competition**: All neurons on the grid compete to be the "winner"
+        by calculating their distance to the input vector. The neuron
+        whose weight vector is most similar to the input is designated
+        the Best Matching Unit (BMU).
+    2.  **Cooperation**: The BMU determines the spatial center of a
+        neighborhood of excited neurons on the grid. The BMU and its
+        topological neighbors are activated for learning.
+    3.  **Adaptation**: The weight vectors of the activated neurons are
+        updated to become more similar to the input vector. The magnitude
+        of the update is dependent on the neuron's distance from the BMU
+        within the neighborhood.
+
+    This iterative process causes neighboring neurons in the grid to learn
+    to represent similar input patterns, effectively organizing the map to
+    preserve the topological structure of the input data space.
+
+Foundational Mathematics and Intuition:
+    The SOM algorithm is defined by two primary mathematical operations:
+    finding the BMU and updating the weights.
+
+    -   **BMU Selection (Competition)**: The BMU, denoted by index `c`, is
+        found by minimizing the Euclidean distance between the input vector
+        `x` and the weight vector `w_i` of each neuron `i`:
+        `c = argmin_i || x(t) - w_i(t) ||`
+        This step identifies the neuron that currently serves as the best
+        prototype for the given input.
+
+    -   **Weight Update (Adaptation)**: The weights of all neurons are then
+        updated according to the rule:
+        `w_i(t+1) = w_i(t) + η(t) * h_ci(t) * (x(t) - w_i(t))`
+        -   `η(t)` is the learning rate, a monotonically decreasing
+            function of time `t`. It controls the magnitude of weight
+            changes, starting larger for coarse organization and becoming
+            smaller for fine-tuning.
+        -   `h_ci(t)` is the neighborhood function, which is the cornerstone
+            of topological preservation. It depends on the grid distance
+            between neuron `i` and the BMU `c`. A common choice is the
+            Gaussian function:
+            `h_ci(t) = exp(-||r_i - r_c||^2 / (2 * σ(t)^2))`
+            where `r_i` and `r_c` are the grid coordinates and `σ(t)` is
+            the neighborhood radius, which also decreases over time.
+
+    The intuition behind the decaying neighborhood radius `σ(t)` is crucial.
+    Initially, a large `σ` allows distant neurons to be influenced by the
+    BMU, establishing a coarse, global order on the map. As `σ` shrinks,
+    the updates become localized, allowing the map to fine-tune its
+    representation of the local data topology.
+
+References:
+    -   Kohonen, T. (1990). The self-organizing map. *Proceedings of the
+        IEEE*, 78(9), 1464-1480.
 """
 
 import time
