@@ -82,7 +82,6 @@ class TestSingleWindowAttentionKAN:
         assert layer.kan_grid_size == 5
         assert layer.kan_spline_order == 3
         assert layer.kan_activation == "swish"
-        assert layer.kan_regularization_factor == 0.01
         assert isinstance(
             layer.kernel_initializer, keras.initializers.GlorotUniform
         )
@@ -97,7 +96,6 @@ class TestSingleWindowAttentionKAN:
             kan_grid_size=8,
             kan_spline_order=4,
             kan_activation="gelu",
-            kan_regularization_factor=0.05,
             qk_scale=0.1,
             attn_dropout_rate=0.1,
             proj_dropout_rate=0.2,
@@ -115,7 +113,6 @@ class TestSingleWindowAttentionKAN:
         assert layer.kan_grid_size == 8
         assert layer.kan_spline_order == 4
         assert layer.kan_activation == "gelu"
-        assert layer.kan_regularization_factor == 0.05
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert layer.kernel_regularizer == custom_regularizer
 
@@ -145,13 +142,6 @@ class TestSingleWindowAttentionKAN:
         ):
             SingleWindowAttentionKAN(
                 dim=96, window_size=7, num_heads=3, kan_grid_size=0
-            )
-
-        with pytest.raises(
-            ValueError, match="kan_regularization_factor must be non-negative"
-        ):
-            SingleWindowAttentionKAN(
-                dim=96, window_size=7, num_heads=3, kan_regularization_factor=-0.1
             )
 
     def test_build_process(self, input_tensor, layer_instance):
@@ -296,7 +286,6 @@ class TestWindowAttentionKAN:
             kan_grid_size=8,
             kan_spline_order=4,
             kan_activation="gelu",
-            kan_regularization_factor=0.05,
             qk_scale=0.1,
             attn_dropout_rate=0.1,
             proj_dropout_rate=0.2,
@@ -315,7 +304,6 @@ class TestWindowAttentionKAN:
         assert inner_attn.kan_grid_size == 8
         assert inner_attn.kan_spline_order == 4
         assert inner_attn.kan_activation == "gelu"
-        assert inner_attn.kan_regularization_factor == 0.05
         assert isinstance(
             inner_attn.kernel_initializer, keras.initializers.HeNormal
         )
@@ -495,7 +483,6 @@ class TestWindowAttentionKAN:
                 "window_size": 4,
                 "num_heads": 2,
                 "proj_bias": False,
-                "kan_regularization_factor": 0.05,
             },
         ],
     )
@@ -584,7 +571,6 @@ class TestWindowAttentionKAN:
             num_heads=3,
             kernel_regularizer=keras.regularizers.L2(0.1),
             bias_regularizer=keras.regularizers.L1(0.1),
-            kan_regularization_factor=0.1,
         )
         _ = layer(input_tensor)
         assert len(layer.losses) > 0
@@ -617,14 +603,12 @@ class TestWindowAttentionKAN:
             kan_grid_size=8,
             kan_spline_order=4,
             kan_activation="gelu",
-            kan_regularization_factor=0.05,
         )
 
         inner_attn = layer.attention
         assert inner_attn.kan_grid_size == 8
         assert inner_attn.kan_spline_order == 4
         assert inner_attn.kan_activation == "gelu"
-        assert inner_attn.kan_regularization_factor == 0.05
 
         # Check that KAN layers are using these parameters
         # (This would require access to KANLinear internals)

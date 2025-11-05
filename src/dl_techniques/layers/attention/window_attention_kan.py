@@ -89,8 +89,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         kan_spline_order: Integer, order of the basis functions. Defaults to 3.
         kan_activation: String, base activation function for the KAN layer.
             Defaults to 'swish'.
-        kan_regularization_factor: Float, regularization strength for KAN
-            weights. Defaults to 0.01.
         qk_scale: Optional float, override for query-key scaling factor.
             If None, uses `head_dim ** -0.5`. Defaults to None.
         attn_dropout_rate: Float between 0 and 1, dropout rate for attention
@@ -125,7 +123,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         kan_grid_size: int = 5,
         kan_spline_order: int = 3,
         kan_activation: str = "swish",
-        kan_regularization_factor: float = 0.01,
         qk_scale: Optional[float] = None,
         attn_dropout_rate: float = 0.0,
         proj_dropout_rate: float = 0.0,
@@ -175,11 +172,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
             raise ValueError(
                 f"kan_spline_order must be positive, got {kan_spline_order}"
             )
-        if kan_regularization_factor < 0:
-            raise ValueError(
-                "kan_regularization_factor must be non-negative, "
-                f"got {kan_regularization_factor}"
-            )
 
         # --- Store ALL configuration parameters for serialization ---
         self.dim = dim
@@ -196,7 +188,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
         self.kan_activation = kan_activation
-        self.kan_regularization_factor = kan_regularization_factor
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -240,7 +231,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
             grid_size=self.kan_grid_size,
             spline_order=self.kan_spline_order,
             activation=self.kan_activation,
-            regularization_factor=self.kan_regularization_factor,
             name="key",  # Corrected typo: was "value"
         )
 
@@ -408,7 +398,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
                 "kan_activation": self.kan_activation,
-                "kan_regularization_factor": self.kan_regularization_factor,
                 "qk_scale": self.qk_scale,
                 "attn_dropout_rate": self.attn_dropout_rate,
                 "proj_dropout_rate": self.proj_dropout_rate,

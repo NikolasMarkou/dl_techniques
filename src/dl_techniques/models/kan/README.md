@@ -2,11 +2,11 @@
 
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
 A production-ready, fully-featured implementation of the **Kolmogorov-Arnold Network (KAN)** architecture in **Keras 3**. This implementation is based on the recent paper by Liu et al. and provides a powerful alternative to traditional Multi-Layer Perceptrons (MLPs).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key feature is its use of **learnable activation functions** on the edges of the network, parameterized by B-splines. This allows KANs to learn complex, non-linear relationships with potentially greater accuracy and parameter efficiency than MLPs.
+This implementation follows modern Keras 3 best practices, providing a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key feature is its use of **learnable activation functions** on the edges of the network, parameterized by B-splines. This allows KANs to learn complex, non-linear relationships with potentially greater accuracy and parameter efficiency than MLPs.
 
 ---
 
@@ -41,10 +41,10 @@ Each of these learnable activations is parameterized as a B-spline, allowing the
 
 ### Key Innovations of this Implementation
 
-1.  **Dual-Pathway `KANLinear` Layer**: The core `KANLinear` layer combines a standard linear transformation with a learnable spline-based transformation. This provides both stability (from the linear path) and high expressiveness (from the spline path).
+1.  **Faithful Architecture**: The core `KANLinear` layer accurately implements the `y_j = Σ_i φ_ij(x_i)` structure from the paper, where `φ_ij` is a learnable activation on the edge connecting input `i` to output `j`.
 2.  **Keras 3 Native & Serializable**: The entire architecture is built using modern Keras 3 functional patterns, ensuring it is fully serializable to the `.keras` format and compatible with TensorFlow, PyTorch, and JAX.
 3.  **Model Variants & Factories**: Includes predefined variants (`micro`, `small`, `medium`, etc.) and easy-to-use factory functions (`from_variant`, `from_layer_sizes`) for rapid model creation.
-4.  **Numerical Stability**: The implementation incorporates several techniques like input normalization, gradient clipping, and careful weight initialization to ensure stable training.
+4.  **Adaptive Grids**: Includes a `update_grid_from_samples` method to allow the B-spline grids to adapt to the data distribution, a key feature for performance.
 
 ### Why KAN Matters
 
@@ -72,11 +72,9 @@ Model: Kolmogorov-Arnold Network (KAN)
 ### Real-World Impact
 
 KANs are particularly promising for tasks where the underlying function is complex and not well-approximated by standard activation functions:
-
 -   **Scientific Discovery**: Fitting symbolic formulas to data, solving PDEs.
 -   **Finance**: Modeling complex, non-linear relationships in financial markets.
 -   **Control Systems**: Learning intricate control policies in reinforcement learning.
--   **Image Processing**: Representing complex image transformations that go beyond simple convolutions.
 
 ---
 
@@ -85,22 +83,6 @@ KANs are particularly promising for tasks where the underlying function is compl
 ### The Rigidity of Fixed Activation Functions
 
 MLPs have been incredibly successful, but their core design relies on a fundamental assumption: that complex functions can be approximated by composing many simple, *fixed* non-linearities (like ReLU).
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Challenge of Fixed Non-Linearities                     │
-│                                                             │
-│  1. The ReLU function is a simple ramp. To approximate a    │
-│     sine wave, an MLP needs many ReLU units, effectively    │
-│     creating a piecewise linear approximation. This can be  │
-│     inefficient.                                            │
-│                                                             │
-│  2. The "best" non-linearity is data-dependent. For some    │
-│     problems, a periodic function might be ideal; for       │
-│     others, a saturating one. An MLP cannot adapt its       │
-│     activations.                                            │
-└─────────────────────────────────────────────────────────────┘
-```
 
 This rigidity means MLPs might require a very large number of neurons and parameters to accurately model a function, especially if that function has a complex, non-standard shape.
 
@@ -113,8 +95,8 @@ KANs remove this constraint by making the activation function itself a learnable
 │  The KAN Flexible Solution                                  │
 │                                                             │
 │  1. Learnable Splines: Each connection in a KAN learns a    │
-│     univariate function represented as a B-spline. By       │
-│     adjusting the spline coefficients, the model can shape  │
+│     univariate function `φ(x)` represented as a B-spline.   │
+│     By adjusting spline coefficients, the model can shape   │
 │     this function to whatever form best fits the data.      │
 │                                                             │
 │  2. Expressiveness & Efficiency: A single KAN connection    │
@@ -123,8 +105,8 @@ KANs remove this constraint by making the activation function itself a learnable
 │     achieve better accuracy with fewer parameters.          │
 │                                                             │
 │  3. Interpretability: After training, you can plot the      │
-│     learned spline function for any connection to understand│
-│     how the model is transforming a specific feature.       │
+│     learned spline function `φ_ij` for any connection to    │
+│     understand how the model transforms a specific feature. │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -134,24 +116,24 @@ KANs remove this constraint by making the activation function itself a learnable
 
 ### The High-Level Architecture
 
-A KAN model is a stack of `KANLinear` layers, which operate in sequence to transform the input features.
+A KAN model is a stack of `KANLinear` layers. The final activation (e.g., `softmax`) is applied separately after the last layer.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                     KAN Model Architecture                       │
 │                                                                  │
 │  Input Features ───►┌───────────┐                                │
-│                     │ KANLinear │ (Layer 1)                      │
-│                     └─────┬─────┘                                │
-│                           │                                      │
-│                     ┌─────▼─────┐                                │
-│                     │ KANLinear │ (Layer 2)                      │
+│                     │ KANLinear │ (Layer 1, outputs logits)      │
 │                     └─────┬─────┘                                │
 │                           │                                      │
 │                         .....                                    │
 │                           │                                      │
 │                     ┌─────▼─────┐                                │
-│                     │ KANLinear │ (Layer N)                      │
+│                     │ KANLinear │ (Layer N, outputs logits)      │
+│                     └─────┬─────┘                                │
+│                           │                                      │
+│                     ┌─────▼─────┐                                │
+│                     │ Activation│ (e.g., Softmax)                │
 │                     └─────┬─────┘                                │
 │                           │                                      │
 │                     ┌─────▼─────┐                                │
@@ -162,39 +144,40 @@ A KAN model is a stack of `KANLinear` layers, which operate in sequence to trans
 
 ### The Complete Data Flow (Inside a `KANLinear` Layer)
 
+The output `y_j` is the sum of learned activation functions `φ_ij` applied to each input `x_i`.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     KANLinear Layer Data Flow                           │
 └─────────────────────────────────────────────────────────────────────────┘
 
-STEP 1: DUAL-PATHWAY TRANSFORMATION
+Input x (B, F_in)
+    │
+    ▼
+For each connection from input i to output j:
+    │
+    ├─► Path 1: Base Activation
+    │   └─► `base_activation(x_i)` -> `base_val`
+    │
+    └─► Path 2: Spline Activation
+        ├─► `_compute_bspline_basis(x_i)` -> `basis` (num_basis,)
+        └─► `einsum('k,k->', basis, C_ijk)` -> `spline_val`
+
+    │
+    ▼
+STEP 1: COMBINE TO FORM φ_ij(x_i)
 ─────────────────────────────────
-Input (B, F_in)
-    │
-    ├─► Path 1: Base Transform (Linear)
-    │   └─► `x @ W_base` -> `base_output` (B, F_out)
-    │
-    └─► Path 2: Spline Transform (Non-Linear)
-        ├─► `_normalize_inputs(x)`
-        ├─► `_compute_spline_basis(x_norm)` -> `spline_basis` (B, F_in, num_basis)
-        ├─► `einsum('...ik,iok->...o', spline_basis, W_spline)` -> `spline_output` (B, F_out)
-        └─► `spline_output * spline_scaler` -> `scaled_spline_output` (B, F_out)
+`φ_ij(x_i) = w_base_ij * base_val + w_spline_ij * spline_val`
 
 
-STEP 2: COMBINATION & ACTIVATION
-────────────────────────────────
-`base_output` (B, F_out)
-`scaled_spline_output` (B, F_out)
-    │
-    ├─► `total_output = base_output + scaled_spline_output`
-    │    (Residual connection is used if dimensions match)
-    │
-    └─► `activated_output = activation_fn(total_output)`
+STEP 2: AGGREGATE TO FORM OUTPUT y_j
+─────────────────────────────────
+`y_j = Σ_i φ_ij(x_i)`
 
 
 STEP 3: FINAL OUTPUT
 ────────────────────────────────
-Output (B, F_out)
+Output y (B, F_out)
 ```
 
 ---
@@ -203,10 +186,10 @@ Output (B, F_out)
 
 ### 4.1 `KANLinear` Layer
 
-The fundamental building block of a KAN.
--   **`base_weight`**: A standard weight matrix for a linear transformation. This provides a stable, residual-like path that helps with optimization.
--   **`spline_weight`**: A tensor of coefficients for the B-spline basis functions. These are the learnable parameters that define the shape of the activation function for each `(input_feature, output_feature)` pair.
--   **`spline_scaler`**: A learnable scaling factor that controls the magnitude of the spline component, allowing the model to balance the linear and non-linear paths.
+The fundamental building block of a KAN. It learns a unique activation `φ_ij` for each connection.
+-   **`spline_weight`**: A tensor of coefficients for the B-spline basis functions. These are the learnable parameters that define the shape of the spline component for each `(input_feature, output_feature)` pair.
+-   **`spline_scaler` & `base_scaler`**: Learnable scalars that control the magnitude of the spline and base components respectively, allowing the model to balance the two paths.
+-   **`base_activation`**: A fixed activation function (e.g., `'swish'`) that provides a well-behaved, residual-like component to each learnable activation, aiding optimization.
 -   **`grid_size`**: Controls the number of pieces in the piecewise polynomial spline. A larger grid allows for more complex functions but increases parameters and the risk of overfitting.
 -   **`spline_order`**: The degree of the polynomial pieces (e.g., 3 for cubic splines). This determines the smoothness of the learned functions.
 
@@ -214,7 +197,8 @@ The fundamental building block of a KAN.
 
 A Keras `Model` subclass that stacks `KANLinear` layers.
 -   It is constructed using the Keras functional API within the `__init__` method, a modern best practice that ensures robust serialization.
--   It provides convenient factory methods like `from_variant` and `from_layer_sizes` to simplify model creation for common use cases.
+-   It handles the application of a final activation function (like `softmax`) after the last `KANLinear` layer, which produces raw logits.
+-   It provides convenient factory methods like `from_variant` and `from_layer_sizes` to simplify model creation.
 
 ---
 
@@ -284,29 +268,25 @@ print(f"Ground Truth: {ground_truth:.4f}")
 
 **Purpose**: The main Keras `Model` subclass that assembles the KAN architecture.
 
-**Location**: `dl_techniques.models.kan.model.KAN`
-
 ```python
 from dl_techniques.models.kan.model import KAN
 
 # Create a custom KAN model
 layer_configs = [
-    {"features": 32, "grid_size": 8},
-    {"features": 16, "grid_size": 5},
-    {"features": 1, "activation": "linear"} # Regression output
+    {"features": 32, "grid_size": 8, "base_activation": "gelu"},
+    {"features": 16, "grid_size": 5, "base_activation": "gelu"},
+    {"features": 1, "activation": "linear"} # Final activation for regression
 ]
 model = KAN(layer_configs=layer_configs, input_features=10)
 ```
 
 ### 6.2 Factory Functions
 
-**Location**: `dl_techniques.models.kan.model`
-
 #### `create_compiled_kan(...)`
 The recommended high-level factory for creating a compiled, ready-to-train KAN model from a variant.
 
 #### `KAN.from_variant(...)`
-Class method to create a KAN model from standard configurations (`tiny`, `small`, etc.).
+Class method to create a KAN model from standard configurations (`micro`, `small`, etc.).
 
 #### `KAN.from_layer_sizes(...)`
 Class method to create a KAN with a uniform configuration for all layers, defined only by their sizes.
@@ -317,7 +297,7 @@ Class method to create a KAN with a uniform configuration for all layers, define
 
 This implementation provides several standard configurations.
 
-| Variant | Hidden Features | Grid Size | Spline Order | Default Activation | Use Case |
+| Variant | Hidden Features | Grid Size | Spline Order | Base Activation | Use Case |
 |:---:|:---|:---:|:---:|:---:|:---|
 | **`micro`** | `[16, 8]` | 3 | 3 | `swish`| Quick tests, simple functions |
 | **`small`** | `[64, 32, 16]` | 5 | 3 | `swish`| MNIST, small datasets |
@@ -330,12 +310,12 @@ This implementation provides several standard configurations.
 You can easily override the default settings of a variant.
 
 ```python
-# Create a 'medium' KAN but use a smaller grid and a different activation
+# Create a 'medium' KAN but use a smaller grid and a different base activation
 model = KAN.from_variant(
     "medium",
     input_features=256,
     num_classes=10,
-    override_config={"grid_size": 5, "activation": "silu"}
+    override_config={"grid_size": 5, "base_activation": "silu"}
 )
 ```
 
@@ -355,6 +335,7 @@ x_train = x_train.reshape(-1, 784).astype("float32") / 255.0
 x_test = x_test.reshape(-1, 784).astype("float32") / 255.0
 
 # 2. Create and compile a 'small' KAN for classification
+# The factory automatically adds a softmax activation for num_classes > 1
 model = create_compiled_kan(
     variant="small",
     input_features=784,
@@ -377,8 +358,10 @@ Define every layer's configuration manually for full control.
 from dl_techniques.models.kan.model import KAN
 
 layer_configs = [
-    {"features": 64, "grid_size": 8, "spline_order": 3, "activation": "gelu"},
-    {"features": 32, "grid_size": 5, "spline_order": 2, "activation": "gelu"},
+    {"features": 64, "grid_size": 8, "spline_order": 3, "base_activation": "gelu"},
+    {"features": 32, "grid_size": 5, "spline_order": 2, "base_activation": "gelu"},
+    # The last KANLinear layer produces logits; 'activation' specifies the
+    # final activation to be applied *after* this layer.
     {"features": 10, "grid_size": 5, "activation": "softmax"}
 ]
 
@@ -392,9 +375,13 @@ custom_model.compile(optimizer="adamw", loss="sparse_categorical_crossentropy")
 
 ### Pattern 1: Visualizing the Learned Activation Functions
 
-One of KAN's biggest advantages is interpretability. You can inspect the learned non-linear functions.
+One of KAN's biggest advantages is interpretability. You can inspect the learned non-linear functions `φ_ij`.
 
 ```python
+import matplotlib.pyplot as plt
+import numpy as np
+import keras
+
 # Assume 'model' is a trained KAN model
 first_kan_layer = model.get_layer("kan_layer_0")
 
@@ -402,25 +389,30 @@ first_kan_layer = model.get_layer("kan_layer_0")
 input_feature_idx = 0
 output_feature_idx = 0
 
-# Extract the spline weights for this specific connection
-spline_weights = first_kan_layer.spline_weight[input_feature_idx, output_feature_idx, :]
+# Extract weights for the specific connection (i, j)
+spline_w = first_kan_layer.spline_weight[input_feature_idx, output_feature_idx, :]
+spline_s = first_kan_layer.spline_scaler[input_feature_idx, output_feature_idx]
+base_s = first_kan_layer.base_scaler[input_feature_idx, output_feature_idx]
 
 # Generate a range of input values to plot
-x_plot = np.linspace(first_kan_layer.grid_range[0], first_kan_layer.grid_range[1], 100)
-x_plot_tensor = keras.ops.convert_to_tensor(x_plot, dtype="float32")
+x_plot = np.linspace(first_kan_layer.grid_range[0], first_kan_layer.grid_range[1], 200)
+x_tensor = keras.ops.convert_to_tensor(x_plot, dtype=model.dtype)
 
-# Compute the spline basis for these values
-basis_functions = first_kan_layer._compute_spline_basis(x_plot_tensor[:, np.newaxis])
-basis_values = basis_functions[:, 0, :] # Extract for our single feature
+# 1. Compute spline component
+basis_vals = first_kan_layer._compute_bspline_basis(x_tensor)
+spline_val = keras.ops.einsum('bi,i->b', basis_vals, spline_w)
 
-# Compute the learned function by combining basis with weights
-learned_function = keras.ops.einsum('ib,b->i', basis_values, spline_weights)
+# 2. Compute base component
+base_val = first_kan_layer.base_activation_fn(x_tensor)
+
+# 3. Combine them to get the full activation function φ_ij(x)
+phi_ij = (base_s * base_val) + (spline_s * spline_val)
 
 # Plot the result
-plt.figure()
-plt.plot(x_plot, learned_function, label=f"Learned f(x) for ({input_feature_idx} -> {output_feature_idx})")
-plt.xlabel("Input Feature Value")
-plt.ylabel("Learned Transformation")
+plt.figure(figsize=(10, 6))
+plt.plot(x_plot, phi_ij, label=f"φ(x) for connection ({input_feature_idx} -> {output_feature_idx})")
+plt.xlabel("Input Feature Value (x_i)")
+plt.ylabel("Learned Transformation (φ_ij)")
 plt.title("KAN Learned Activation Function")
 plt.legend()
 plt.grid(True)
@@ -432,6 +424,8 @@ plt.show()
 You can use `KANLinear` as a drop-in replacement for `Dense` in any Keras model.
 
 ```python
+from dl_techniques.layers.kan_linear import KANLinear
+
 inputs = keras.Input(shape=(28, 28, 1))
 x = keras.layers.Conv2D(32, 3, activation="relu")(inputs)
 x = keras.layers.Flatten()(x)
@@ -449,15 +443,11 @@ hybrid_model = keras.Model(inputs, outputs)
 
 ### Mixed Precision Training
 
-For larger variants (`medium`, `large`), mixed precision can significantly speed up training on compatible GPUs.
+For larger variants, mixed precision can significantly speed up training on compatible GPUs.
 
 ```python
-# Enable mixed precision globally
 keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
-model = create_compiled_kan(variant="large", ...)
-# ... compile and fit ...
+model = create_compiled_kan(variant="large", ...) # Model will use mixed precision
 ```
 
 ### XLA Compilation
@@ -465,7 +455,7 @@ model = create_compiled_kan(variant="large", ...)
 Use `jit_compile=True` for graph compilation, which can provide a speed boost.
 
 ```python
-model = create_compiled_kan(variant="medium", ...)
+model = create_compiled_kan(...)
 model.compile(optimizer="adam", loss="...", jit_compile=True)
 ```
 
@@ -475,22 +465,37 @@ model.compile(optimizer="adam", loss="...", jit_compile=True)
 
 ### The `grid_size` vs. Overfitting Trade-off
 
--   **Start small (`grid_size=3` to `5`)**: This encourages the model to learn smoother, more general functions and prevents overfitting.
--   **Increase if underfitting**: If the model loss plateaus too high, a larger `grid_size` (e.g., 7-10) can provide the necessary capacity to fit the data better. Be aware that this increases parameter count and memory usage significantly.
+-   **Start small (`grid_size=3` to `5`)**: This encourages smoother, general functions and prevents overfitting.
+-   **Increase if underfitting**: If loss plateaus too high, a larger `grid_size` (e.g., 7-10) provides more capacity. This increases parameter count significantly.
 
-### Network Depth and Width
+### Adaptive Grids
 
-KANs can often achieve high performance with shallower and narrower architectures compared to MLPs. Start with a small variant and only scale up if necessary.
+For best performance, periodically update the B-spline grids to match the distribution of activations. This can be done with a Keras Callback.
 
-### Regularization
+```python
+class KANGridUpdateCallback(keras.callbacks.Callback):
+    def __init__(self, data, update_freq=5):
+        super().__init__()
+        self.data = data
+        self.update_freq = update_freq
 
-The `regularization_factor` applies L2 regularization to both the base and spline weights. This is crucial for preventing the learned splines from becoming too "wiggly" and overfitting to noise in the training data.
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % self.update_freq == 0:
+            for layer in self.model.layers:
+                if isinstance(layer, KANLinear):
+                    layer.update_grid_from_samples(self.data)
+            print(f"\nUpdated KAN grids at epoch {epoch + 1}")
+
+# Usage:
+# grid_updater = KANGridUpdateCallback(X_train[:1000])
+# model.fit(..., callbacks=[grid_updater])
+```
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `KAN` model and the `KANLinear` layer are fully serializable using Keras 3's modern `.keras` format, thanks to the `@keras.saving.register_keras_serializable()` decorator.
+The `KAN` model and `KANLinear` layer are fully serializable using Keras 3's modern `.keras` format.
 
 ### Saving and Loading
 
@@ -502,7 +507,7 @@ model = create_compiled_kan(variant="small", ...)
 # Save the entire model
 model.save('my_kan_model.keras')
 
-# Load the model in a new session without needing custom_objects
+# Load the model without needing custom_objects
 loaded_model = keras.models.load_model('my_kan_model.keras')
 ```
 
@@ -515,26 +520,16 @@ import keras
 import numpy as np
 from dl_techniques.models.kan.model import KAN
 
-def test_model_creation_all_variants():
-    """Test model creation for all variants."""
-    for variant in KAN.VARIANT_CONFIGS.keys():
-        model = KAN.from_variant(variant, input_features=64, num_classes=10)
-        assert model is not None
-        print(f"✓ KAN-{variant} created successfully")
-
 def test_forward_pass_shape():
     """Test the output shape of a forward pass."""
-    model = KAN.from_variant("tiny", input_features=32, num_classes=5)
+    model = KAN.from_variant("micro", input_features=32, num_classes=5)
     dummy_input = np.random.rand(4, 32)
     output = model.predict(dummy_input)
-    assert output.shape == (4, 5) # (batch_size, num_classes)
+    assert output.shape == (4, 5)
     print("✓ Forward pass has correct shape")
 
-# Run tests
-if __name__ == '__main__':
-    test_model_creation_all_variants()
-    test_forward_pass_shape()
-    print("\n✅ All tests passed!")
+# Run test
+test_forward_pass_shape()
 ```
 
 ---
@@ -543,23 +538,23 @@ if __name__ == '__main__':
 
 **Issue 1: Training is slow compared to an MLP.**
 
--   **Cause**: The `KANLinear` layer is more computationally intensive than a standard `Dense` layer due to the spline basis computation. The number of parameters also scales with `grid_size`.
--   **Solution**: 1) Start with a smaller `grid_size`. 2) Use a shallower/narrower KAN architecture. 3) Enable mixed precision and XLA compilation.
+-   **Cause**: `KANLinear` is more computationally intensive than `Dense` due to B-spline computation. Parameter count also scales with `grid_size`.
+-   **Solution**: 1) Start with a smaller `grid_size`. 2) Use a shallower/narrower KAN. 3) Enable mixed precision and XLA compilation.
 
 **Issue 2: The model is overfitting.**
 
--   **Cause**: The `grid_size` is too large, allowing the splines to fit noise. The regularization might be too weak.
--   **Solution**: 1) Reduce `grid_size`. 2) Increase the `regularization_factor`. 3) Add dropout layers between `KANLinear` layers if needed.
+-   **Cause**: `grid_size` is too large, allowing splines to fit noise.
+-   **Solution**: 1) Reduce `grid_size`. 2) Add L2 regularization via the `kernel_regularizer` argument in `KANLinear`. 3) Add dropout layers between `KANLinear` layers.
 
 ### Frequently Asked Questions
 
 **Q: When should I choose KAN over a standard MLP?**
 
-A: Use a KAN when you suspect the underlying relationships in your data are highly non-linear and not well captured by standard activations like ReLU or GELU. KANs are also a great choice when interpretability is important, as you can visualize the learned functions. For simple problems or when speed is the absolute priority, an MLP is still a strong baseline.
+A: Use a KAN when you suspect the underlying relationships in your data are highly non-linear and not well captured by standard activations. KANs are also a great choice when interpretability is important. For simple problems or when speed is the absolute priority, an MLP is still a strong baseline.
 
-**Q: How is this implementation's spline calculation different from the original paper?**
+**Q: How do I choose the `base_activation`?**
 
-A: For enhanced numerical stability and simpler implementation, this version uses a Gaussian-like basis for the B-splines rather than the classic recursive definition. This approach is more robust to a wide range of inputs and easier to implement reliably across different backends, while still providing the necessary functional expressiveness.
+A: The `base_activation` (e.g., `'swish'`) provides a well-behaved "scaffold" for the learnable spline. `swish` or `gelu` are good defaults as they are smooth and non-monotonic, giving the spline a good starting point.
 
 ---
 
@@ -567,11 +562,11 @@ A: For enhanced numerical stability and simpler implementation, this version use
 
 ### Kolmogorov-Arnold Representation Theorem
 
-The theoretical foundation for KANs is the Kolmogorov-Arnold theorem, which states that any multivariate continuous function `f(x1, ..., xn)` can be represented as a finite sum of compositions of univariate functions: `f(x) = Σ_q Φ_q( Σ_p ψ_{q,p}(x_p) )`. A two-layer KAN is a direct neural network realization of this theorem, where the first `KANLinear` layer learns the inner functions `ψ` and the second learns the outer functions `Φ`.
+The theoretical foundation for KANs states that any multivariate continuous function `f(x1, ..., xn)` can be represented as a finite sum of compositions of univariate functions: `f(x) = Σ_q Φ_q( Σ_p ψ_{q,p}(x_p) )`. A two-layer KAN is a direct neural network realization of this theorem.
 
 ### B-Spline Parameterization
 
-A B-spline is a piecewise polynomial function defined by a set of control points. By representing the learnable activation as a linear combination of B-spline basis functions, the model can approximate any continuous function on a given interval (`grid_range`). The learnable `spline_weight` parameters are essentially the control points that shape the function.
+A B-spline is a piecewise polynomial function. By representing the learnable activation as a linear combination of B-spline basis functions, the model can approximate any continuous function on a given interval (`grid_range`). The learnable `spline_weight` parameters are the control points that shape the function.
 
 ---
 
