@@ -224,7 +224,7 @@ class ExperimentConfig:
     kan_regularization: float = 0.01
 
     # Training configuration
-    epochs: int = 50
+    epochs: int = 100
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
