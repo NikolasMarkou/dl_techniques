@@ -81,6 +81,7 @@ References:
         -Attention" (2022). https://arxiv.org/abs/2205.13233
 """
 
+import math
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -438,6 +439,13 @@ class WindowZigZagAttention(keras.layers.Layer):
         self.attention = _CoreAttention(
             dim=dim, window_size=window_size, num_heads=num_heads, **kwargs
         )
+        # Attributes to be computed in build() for XLA compatibility
+        self.H = None
+        self.W = None
+        self.N_grid = None
+        self.pad_len_seq = None
+        self.zigzag_indices = None
+        self.inverse_zigzag_indices = None
 
     @staticmethod
     def _generate_zigzag_indices(
@@ -473,10 +481,31 @@ class WindowZigZagAttention(keras.layers.Layer):
         return zigzag_indices
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        N_actual = input_shape[1]
+        if N_actual is None:
+            raise ValueError(
+                "WindowZigZagAttention requires a fixed sequence length for "
+                "XLA compatibility when generating zigzag indices. Received "
+                "`None` for the sequence dimension in input_shape."
+            )
+
+        # Calculate grid dimensions and padding as static values
+        self.H = self.W = int(math.ceil(math.sqrt(N_actual)))
+        self.N_grid = self.H * self.W
+        self.pad_len_seq = self.N_grid - N_actual
+
+        # Generate indices as constant tensors.
+        H_tensor = keras.ops.convert_to_tensor(self.H, dtype="int32")
+        W_tensor = keras.ops.convert_to_tensor(self.W, dtype="int32")
+        self.zigzag_indices = self._generate_zigzag_indices(H_tensor, W_tensor)
+        self.inverse_zigzag_indices = keras.ops.argsort(self.zigzag_indices)
+
+        # Build the internal attention layer
         self.attention.build(
             (None, self.num_tokens_in_window, self.dim)
         )
         super().build(input_shape)
+
 
     def call(
         self,
@@ -489,22 +518,13 @@ class WindowZigZagAttention(keras.layers.Layer):
         win_len = self.num_tokens_in_window
 
         # --- 1. Pad sequence and form a square grid ---
-        H = W = keras.ops.cast(
-            keras.ops.ceil(keras.ops.sqrt(keras.ops.cast(N_actual, "float32"))),
-            "int32",
-        )
-        N_grid = H * W
-        pad_len_seq = N_grid - N_actual
         padded_inputs = keras.ops.pad(
-            inputs, [[0, 0], [0, pad_len_seq], [0, 0]]
+            inputs, [[0, 0], [0, self.pad_len_seq], [0, 0]]
         )
 
         # --- 2. Generate zigzag indices and reorder sequence ---
-        zigzag_indices = self._generate_zigzag_indices(H, W)
-        inverse_zigzag_indices = keras.ops.argsort(zigzag_indices)
-
         expanded_indices = keras.ops.expand_dims(
-            keras.ops.expand_dims(zigzag_indices, 0), 2
+            keras.ops.expand_dims(self.zigzag_indices, 0), 2
         )
         broadcasted_indices = keras.ops.repeat(
             expanded_indices, repeats=B, axis=0
@@ -517,21 +537,21 @@ class WindowZigZagAttention(keras.layers.Layer):
         zigzag_mask = None
         if attention_mask is not None:
             padded_mask = keras.ops.pad(
-                attention_mask, [[0, 0], [0, pad_len_seq]]
+                attention_mask, [[0, 0], [0, self.pad_len_seq]]
             )
             broadcastable_mask_indices = keras.ops.expand_dims(
-                zigzag_indices, 0
+                self.zigzag_indices, 0
             )
             zigzag_mask = keras.ops.take_along_axis(
                 padded_mask, broadcastable_mask_indices, axis=1
             )
 
         # --- 4. Pad zigzag sequence and partition into 1D windows ---
-        pad_len_win = (win_len - (N_grid % win_len)) % win_len
+        pad_len_win = (win_len - (self.N_grid % win_len)) % win_len
         padded_zigzag_seq = keras.ops.pad(
             zigzag_sequence, [[0, 0], [0, pad_len_win], [0, 0]]
         )
-        num_windows = (N_grid + pad_len_win) // win_len
+        num_windows = (self.N_grid + pad_len_win) // win_len
         windows = keras.ops.reshape(
             padded_zigzag_seq, (B * num_windows, win_len, C)
         )
@@ -554,11 +574,11 @@ class WindowZigZagAttention(keras.layers.Layer):
         merged_zigzag_seq = keras.ops.reshape(
             attn_windows, (B, num_windows * win_len, C)
         )
-        unpadded_zigzag_seq = merged_zigzag_seq[:, :N_grid, :]
+        unpadded_zigzag_seq = merged_zigzag_seq[:, :self.N_grid, :]
 
         # --- 7. Apply inverse zigzag reordering ---
         expanded_inverse_indices = keras.ops.expand_dims(
-            keras.ops.expand_dims(inverse_zigzag_indices, 0), 2
+            keras.ops.expand_dims(self.inverse_zigzag_indices, 0), 2
         )
         broadcasted_inverse_indices = keras.ops.repeat(
             expanded_inverse_indices, repeats=B, axis=0
