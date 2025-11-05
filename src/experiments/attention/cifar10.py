@@ -484,17 +484,7 @@ def build_attention_model(
     # 4. Global Average Pooling over the sequence dimension
     x = keras.layers.GlobalAveragePooling1D(name='gap')(x)
 
-    # 5. Classification Head
-    x = keras.layers.Dense(
-        256,
-        kernel_initializer='he_normal',
-        kernel_regularizer=keras.regularizers.l2(config.weight_decay),
-        name='dense1'
-    )(x)
-    x = keras.layers.Dropout(config.dropout_rate, name='drop_dense')(x)
-    x = keras.layers.Activation('relu', name='relu_dense')(x)
-
-    # Output layer
+    # 5. Output layer
     logits = keras.layers.Dense(
         num_classes,
         activation='linear',
