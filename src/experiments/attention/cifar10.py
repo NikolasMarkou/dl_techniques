@@ -215,7 +215,7 @@ class ExperimentConfig:
         'window',
     ])
     attention_dim: int = 64
-    num_attention_layers: int = 2
+    num_attention_layers: int = 5
     mlp_dim_multiplier: int = 4
     window_size: int = 4  # For 16×16 feature maps
     num_heads: int = 4
