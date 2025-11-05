@@ -390,7 +390,6 @@ def create_attention_layer(
             kan_grid_size=config.kan_grid_size,
             kan_spline_order=config.kan_spline_order,
             kan_activation=config.kan_activation,
-            kan_regularization_factor=config.kan_regularization,
             attn_dropout_rate=dropout_rate,
             proj_dropout_rate=dropout_rate,
             name=f'kan_window_attn_{dim}_{index}'
