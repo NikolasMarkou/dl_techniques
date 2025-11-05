@@ -1,91 +1,87 @@
-"""WindowZigZagAttention Layer.
+"""
+A windowed multi-head attention on a zigzag-reordered sequence.
 
-A Keras layer implementing a configurable windowed multi-head self-attention.
-This layer takes a 1D sequence of tokens, internally reshapes it into a 2D
-grid, and then physically reorders the grid's tokens into a 1D sequence
-following a zigzag pattern.
+This layer provides a specialized form of self-attention that first
+reorders a sequence based on a two-dimensional zigzag scan before applying
+local, windowed attention. The primary motivation is to induce a locality
+bias that is sensitive to frequency-domain proximity, a concept borrowed
+from classical image compression algorithms like JPEG.
 
-Standard windowed attention is then applied to this zigzag-ordered sequence.
-This approach ensures that attention is computed between tokens that are
-neighbors in the zigzag scan, which often corresponds to proximity in the
-frequency domain (e.g., in DCT coefficients).
+Architectural Overview:
+    The layer operates through a series of transformations designed to
+    restructure the input sequence for its specialized attention mechanism:
+    1.  Grid Reshaping: The input 1D sequence of length `N` is first
+        conceptually arranged into the smallest possible square 2D grid
+        (H x W), with zero-padding applied if `N` is not a perfect square.
+    2.  Zigzag Reordering: The tokens in this 2D grid are then physically
+        reordered into a new 1D sequence by following a zigzag scan path.
+        This scan traverses the grid along its anti-diagonals, grouping
+        tokens that are proximate in the 2D frequency domain.
+    3.  Window Partitioning: This new zigzag-ordered 1D sequence is
+        partitioned into non-overlapping, fixed-size windows.
+    4.  Local Attention: Standard multi-head self-attention is computed
+        independently within each 1D window. This step is computationally
+        efficient, scaling linearly with the sequence length.
+    5.  Inverse Reordering: The outputs from the attention windows are
+        merged and then reordered back into their original 2D grid
+        positions using an inverse zigzag transformation.
+    6.  Sequence Flattening: Finally, the 2D grid is flattened back into a
+        1D sequence, and the initial padding is removed to match the
+        original input length.
 
-The layer also supports two advanced, optional normalization strategies as
-alternatives to the traditional softmax function:
+Foundational Mathematics and Intuition:
+    The core of this layer lies in its fusion of windowed attention with
+    zigzag scanning.
 
-1.  **Adaptive Temperature Softmax**: Dynamically adjusts the sharpness of the
-    attention distribution based on its entropy, helping to prevent
-    over-confidence and improve model calibration.
-2.  **Hierarchical Routing**: A parameter-free, deterministic alternative that
-    computates attention probabilities by routing mass through a fixed binary
-    tree.
+    -   Zigzag Scan: This technique linearizes a 2D data grid by tracing a
+        path that prioritizes elements based on the sum of their
+        coordinates (i.e., `row + col`). In signal processing, particularly
+        with transformations like the Discrete Cosine Transform (DCT), this
+        ordering groups low-frequency coefficients (top-left of the grid)
+        before high-frequency coefficients (bottom-right). By applying
+        attention to windows of this reordered sequence, the model can
+        focus on relationships between components of similar frequency bands.
 
-Conceptual Overview
--------------------
+    -   Windowed Attention: To maintain computational tractability, attention
+        is not computed across the entire sequence. Instead, following the
+        paradigm of models like the Swin Transformer, the attention
+        mechanism is constrained to local windows. This reduces the
+        complexity from O(N^2) to O(N * k^2), where `k` is the window size.
 
-The layer's operational flow is as follows:
+    -   Advanced Normalization (Optional): The layer can replace the
+        standard softmax function for attention weight computation with two
+        alternatives:
+        1.  Adaptive Temperature Softmax: This method addresses potential
+            model over-confidence by dynamically scaling the logits before
+            the softmax operation. The temperature `τ` is adjusted based on
+            the entropy of the attention distribution, leading to better
+            calibrated models. A higher temperature (softer distribution)
+            is used for uncertain, high-entropy scores, while a lower
+            temperature (sharper distribution) is used for confident,
+            low-entropy scores.
+        2.  Hierarchical Routing: As a parameter-free alternative to softmax,
+            this deterministic method computes attention probabilities by
+            routing a total probability mass of 1.0 through a fixed binary
+            tree. At each node, incoming mass is split between its two
+            children based on their relative activation scores. The final
+            attention weights are the accumulated mass at the leaf nodes,
+            providing a sparse and computationally distinct alternative to
+            the standard exponential function.
 
-1.  **Input**: A tensor of shape ``(B, N, C)``.
-2.  **Grid Formation**: The sequence of length `N` is arranged into the smallest
-    possible square grid (`H x W`), padding if necessary.
-3.  **Zigzag Reordering**: The tokens in the `(B, H, W, C)` grid are flattened
-    into a sequence `(B, H*W, C)` following a zigzag scan pattern.
-4.  **Window Partitioning**: This 1D zigzag sequence is partitioned into
-    non-overlapping windows of size `window_size*window_size`.
-5.  **Local Attention**: Within each 1D window, multi-head self-attention is
-    computed by the `_CoreAttention` layer, using one of the configurable
-    normalization methods.
-6.  **Window Merging**: The processed windows are stitched back together into a
-    single zigzag-ordered sequence.
-7.  **Inverse Zigzag Reordering**: The sequence is reordered back into its
-    original `(B, H, W, C)` grid layout.
-8.  **Output**: The grid is un-padded and flattened back to a sequence of the
-    original length `N`, resulting in a tensor of shape ``(B, N, C)``.
-
-Key Features & Benefits:
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-1.  **Frequency-Domain Locality**: The zigzag reordering explicitly groups
-    tokens that are close in the frequency domain for attention computation.
-2.  **Advanced Normalization**: Offers state-of-the-art alternatives to
-    softmax that can improve performance and calibration.
-3.  **End-to-End Logic**: Handles all padding, grid formation, reordering, and
-    windowing internally, accepting any 1D sequence as input.
-
-Usage Example:
-~~~~~~~~~~~~~~
-.. code-block:: python
-
-    import keras
-
-    # Input sequence of 150 tokens. The layer will form a 13x13 grid,
-    # reorder it via zigzag, and partition the resulting sequence into
-    # windows of size 49 (7*7).
-    x = keras.random.normal((2, 150, 96))
-
-    # Standard usage with zigzag reordering and softmax
-    zigzag_attn = WindowZigZagAttention(dim=96, window_size=7, num_heads=4)
-    output_softmax = zigzag_attn(x) # Shape: (2, 150, 96)
-
-    # With hierarchical routing instead of softmax
-    routing_attn = WindowZigZagAttention(
-        dim=96, window_size=7, num_heads=4, use_hierarchical_routing=True
-    )
-    output_routing = routing_attn(x) # Shape: (2, 150, 96)
-
-    # With adaptive temperature softmax for better calibration
-    adaptive_attn = WindowZigZagAttention(
-        dim=96, window_size=7, num_heads=4,
-        use_adaptive_softmax=True,
-        adaptive_softmax_config={"min_temp": 0.1, "max_temp": 2.0}
-    )
-    output_adaptive = adaptive_attn(x) # Shape: (2, 150, 96)
-
+References:
+    -   Windowed Attention: Liu et al., "Swin Transformer: Hierarchical
+        Vision Transformer using Shifted Windows" (2021).
+        https://arxiv.org/abs/2103.14030
+    -   Zigzag Scan: A foundational concept in the JPEG image compression
+        standard.
+    -   Adaptive Temperature Softmax: Ding et al., "Adaptive Temperature
+        Scaling for Better Calibrated and More Accurate Models" (2021).
+        https://arxiv.org/abs/2102.10599
+    -   Hierarchical Routing: Hassani, "NOMAD: N-th Order-of-Magnitude
+        -Attention" (2022). https://arxiv.org/abs/2205.13233
 """
 
 import keras
-import numpy as np
-import tensorflow as tf
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -460,22 +456,37 @@ class WindowZigZagAttention(keras.layers.Layer):
         )
 
     @staticmethod
-    def _py_generate_zigzag_indices(h, w):
-        """Generates flat indices for a zigzag scan. Pure Python for py_function."""
-        h, w = int(h), int(w)
-        coords = []
-        r, c = 0, 0
-        for _ in range(h * w):
-            coords.append(r * w + c)
-            if (r + c) % 2 == 0:
-                if c == w - 1: r += 1
-                elif r == 0: c += 1
-                else: r -= 1; c += 1
-            else:
-                if r == h - 1: c += 1
-                elif c == 0: r += 1
-                else: r += 1; c -= 1
-        return np.array(coords, dtype=np.int32)
+    def _generate_zigzag_indices(
+        H: keras.KerasTensor, W: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Generates flat indices for a zigzag scan of an HxW grid using keras ops."""
+        # Create coordinate grids
+        r_coords = keras.ops.arange(0, H, dtype="int32")
+        c_coords = keras.ops.arange(0, W, dtype="int32")
+        r_grid, c_grid = keras.ops.meshgrid(r_coords, c_coords, indexing="ij")
+
+        # Flatten to 1D coordinate vectors
+        r_flat = keras.ops.reshape(r_grid, (-1,))
+        c_flat = keras.ops.reshape(c_grid, (-1,))
+
+        # Primary sorting key: anti-diagonal index (r + c)
+        s = r_flat + c_flat
+
+        # Secondary sorting key: depends on the anti-diagonal's parity
+        # On odd anti-diagonals (s % 2 == 1), r increases (ascending order)
+        # On even anti-diagonals (s % 2 == 0), r decreases (descending order)
+        # We simulate descending order by sorting on (H - 1 - r)
+        secondary_key = keras.ops.where(
+            s % 2 == 1, r_flat, H - 1 - r_flat
+        )
+
+        # Combine keys for a stable lexicographical sort simulation.
+        # The primary key is scaled by a value larger than the max secondary key.
+        combined_key = s * H + secondary_key
+
+        # The sorted indices of the combined key give the zigzag order
+        zigzag_indices = keras.ops.argsort(combined_key)
+        return zigzag_indices
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         self.attention.build(
@@ -505,12 +516,7 @@ class WindowZigZagAttention(keras.layers.Layer):
         )
 
         # --- 2. Generate zigzag indices and reorder sequence ---
-        zigzag_indices = tf.py_function(
-            func=self._py_generate_zigzag_indices,
-            inp=[H, W],
-            Tout=tf.int32,
-        )
-        zigzag_indices.set_shape((None,))  # Set shape for graph compatibility
+        zigzag_indices = self._generate_zigzag_indices(H, W)
         inverse_zigzag_indices = keras.ops.argsort(zigzag_indices)
 
         expanded_indices = keras.ops.expand_dims(
@@ -529,7 +535,6 @@ class WindowZigZagAttention(keras.layers.Layer):
             padded_mask = keras.ops.pad(
                 attention_mask, [[0, 0], [0, pad_len_seq]]
             )
-            # Use broadcastable indices to reorder the mask
             broadcastable_mask_indices = keras.ops.expand_dims(
                 zigzag_indices, 0
             )
@@ -609,3 +614,5 @@ class WindowZigZagAttention(keras.layers.Layer):
         return cls(
             dim=dim, window_size=window_size, num_heads=num_heads, **config_copy
         )
+
+# ---------------------------------------------------------------------
