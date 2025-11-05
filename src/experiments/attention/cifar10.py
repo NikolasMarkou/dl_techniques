@@ -230,7 +230,7 @@ class ExperimentConfig:
     kan_regularization: float = 0.01
 
     # Training configuration
-    epochs: int = 100
+    epochs: int = 10
     batch_size: int = 32
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
@@ -350,8 +350,7 @@ def create_attention_layer(
             window_size=window_size,
             num_heads=num_heads,
             qkv_bias=True,
-            attn_dropout_rate=dropout_rate,
-            proj_dropout_rate=dropout_rate,
+            dropout_rate=dropout_rate,
             name=f'window_attn_{dim}_{index}'
         )
 
@@ -361,8 +360,7 @@ def create_attention_layer(
             window_size=window_size,
             num_heads=num_heads,
             qkv_bias=True,
-            attn_dropout_rate=dropout_rate,
-            proj_dropout_rate=dropout_rate,
+            dropout_rate=dropout_rate,
             use_hierarchical_routing=False,
             use_adaptive_softmax=False,
             name=f'window_zigzag_attn_{dim}_{index}'
@@ -374,8 +372,7 @@ def create_attention_layer(
             window_size=window_size,
             num_heads=num_heads,
             qkv_bias=True,
-            attn_dropout_rate=dropout_rate,
-            proj_dropout_rate=dropout_rate,
+            dropout_rate=dropout_rate,
             use_hierarchical_routing=False,
             use_adaptive_softmax=True,
             adaptive_softmax_config={
@@ -392,8 +389,7 @@ def create_attention_layer(
             window_size=window_size,
             num_heads=num_heads,
             qkv_bias=True,
-            attn_dropout_rate=dropout_rate,
-            proj_dropout_rate=dropout_rate,
+            dropout_rate=dropout_rate,
             use_hierarchical_routing=True,
             use_adaptive_softmax=False,
             name=f'window_zigzag_hierarchical_attn_{dim}_{index}'
