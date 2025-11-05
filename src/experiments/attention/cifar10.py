@@ -214,8 +214,8 @@ class ExperimentConfig:
         'window_kan',
         'window',
     ])
-    attention_dim: int = 256
-    num_attention_layers: int = 5
+    attention_dim: int = 128
+    num_attention_layers: int = 8
     mlp_dim_multiplier: int = 4
     window_size: int = 4  # For 16×16 feature maps
     num_heads: int = 4
