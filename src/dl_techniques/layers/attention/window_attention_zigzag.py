@@ -517,20 +517,16 @@ class WindowZigZagAttention(keras.layers.Layer):
         B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
         win_len = self.num_tokens_in_window
 
-        # --- 1. Pad sequence and form a square grid ---
+        # --- 1. Pad sequence to grid size ---
         padded_inputs = keras.ops.pad(
             inputs, [[0, 0], [0, self.pad_len_seq], [0, 0]]
         )
 
-        # --- 2. Generate zigzag indices and reorder sequence ---
-        expanded_indices = keras.ops.expand_dims(
-            keras.ops.expand_dims(self.zigzag_indices, 0), 2
-        )
-        broadcasted_indices = keras.ops.repeat(
-            expanded_indices, repeats=B, axis=0
-        )
+        # --- 2. Reorder sequence using zigzag indices ---
+        # Reshape indices to (1, N_grid, 1) to enable broadcasting over batch and channel dims
+        broadcastable_indices = keras.ops.reshape(self.zigzag_indices, (1, self.N_grid, 1))
         zigzag_sequence = keras.ops.take_along_axis(
-            padded_inputs, broadcasted_indices, axis=1
+            padded_inputs, broadcastable_indices, axis=1
         )
 
         # --- 3. Handle attention mask through reordering ---
@@ -539,9 +535,8 @@ class WindowZigZagAttention(keras.layers.Layer):
             padded_mask = keras.ops.pad(
                 attention_mask, [[0, 0], [0, self.pad_len_seq]]
             )
-            broadcastable_mask_indices = keras.ops.expand_dims(
-                self.zigzag_indices, 0
-            )
+            # Reshape indices to (1, N_grid) for broadcasting over batch dim
+            broadcastable_mask_indices = keras.ops.expand_dims(self.zigzag_indices, 0)
             zigzag_mask = keras.ops.take_along_axis(
                 padded_mask, broadcastable_mask_indices, axis=1
             )
@@ -577,14 +572,10 @@ class WindowZigZagAttention(keras.layers.Layer):
         unpadded_zigzag_seq = merged_zigzag_seq[:, :self.N_grid, :]
 
         # --- 7. Apply inverse zigzag reordering ---
-        expanded_inverse_indices = keras.ops.expand_dims(
-            keras.ops.expand_dims(self.inverse_zigzag_indices, 0), 2
-        )
-        broadcasted_inverse_indices = keras.ops.repeat(
-            expanded_inverse_indices, repeats=B, axis=0
-        )
+        # Reshape indices to (1, N_grid, 1) for broadcasting
+        broadcastable_inverse_indices = keras.ops.reshape(self.inverse_zigzag_indices, (1, self.N_grid, 1))
         sequence_unpadded = keras.ops.take_along_axis(
-            unpadded_zigzag_seq, broadcasted_inverse_indices, axis=1
+            unpadded_zigzag_seq, broadcastable_inverse_indices, axis=1
         )
 
         # --- 8. Un-pad sequence to original length ---
