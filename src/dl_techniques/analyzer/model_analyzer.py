@@ -181,6 +181,7 @@ STATUS_SKIPPED_MULTI_INPUT: str = 'skipped_multi_input'
 STATUS_UNKNOWN: str = 'unknown'
 
 # Cache entry keys
+CACHE_KEY_LOGITS: str = 'logits'
 CACHE_KEY_PREDICTIONS: str = 'predictions'
 CACHE_KEY_X_DATA: str = 'x_data'
 CACHE_KEY_Y_DATA: str = 'y_data'
@@ -469,8 +470,8 @@ class ModelAnalyzer:
                 probabilities = keras.ops.softmax(predictions, axis=-1)
 
                 self._prediction_cache[model_name] = {
-                    'predictions': np.array(probabilities),  # Store probabilities
-                    'logits': np.array(predictions),  # Also store logits
+                    CACHE_KEY_PREDICTIONS: np.array(probabilities),  # Store probabilities
+                    CACHE_KEY_LOGITS: np.array(predictions),  # Also store logits
                     CACHE_KEY_X_DATA: x_data,
                     CACHE_KEY_Y_DATA: y_data,
                     CACHE_KEY_MULTI_INPUT: model_name in self._multi_input_models,
@@ -479,9 +480,12 @@ class ModelAnalyzer:
             except Exception as e:
                 logger.error(f"Failed to cache predictions for {model_name}: {e}", exc_info=True)
                 self._prediction_cache[model_name] = {
-                    CACHE_KEY_PREDICTIONS: None, 'logits': None,
-                    CACHE_KEY_X_DATA: x_data, CACHE_KEY_Y_DATA: y_data,
-                    CACHE_KEY_ERROR: str(e), CACHE_KEY_STATUS: STATUS_ERROR
+                    CACHE_KEY_PREDICTIONS: None,
+                    CACHE_KEY_LOGITS: None,
+                    CACHE_KEY_X_DATA: x_data,
+                    CACHE_KEY_Y_DATA: y_data,
+                    CACHE_KEY_ERROR: str(e),
+                    CACHE_KEY_STATUS: STATUS_ERROR
                 }
 
         self._evaluate_models(x_data, y_data)
