@@ -114,7 +114,7 @@ class _CoreAttention(keras.layers.Layer):
         num_heads: Integer, number of attention heads.
         qkv_bias: Boolean, whether to use a bias term in the QKV projection.
         qk_scale: Optional float, override for query scaling factor.
-        attn_dropout_rate: Float, dropout rate for attention probabilities.
+        dropout_rate: Float, dropout rate for attention probabilities.
         proj_dropout_rate: Float, dropout rate for the final output projection.
         proj_bias: Boolean, whether to use a bias term in the output projection.
         use_hierarchical_routing: Boolean, if True, uses hierarchical routing
@@ -133,8 +133,7 @@ class _CoreAttention(keras.layers.Layer):
         num_heads: int,
         qkv_bias: bool = True,
         qk_scale: Optional[float] = None,
-        attn_dropout_rate: float = 0.0,
-        proj_dropout_rate: float = 0.0,
+        dropout_rate: float = 0.0,
         proj_bias: bool = True,
         use_hierarchical_routing: bool = False,
         use_adaptive_softmax: bool = False,
@@ -166,13 +165,9 @@ class _CoreAttention(keras.layers.Layer):
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads})"
             )
-        if not (0.0 <= attn_dropout_rate <= 1.0):
+        if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(
-                f"attn_dropout_rate must be in [0, 1], got {attn_dropout_rate}"
-            )
-        if not (0.0 <= proj_dropout_rate <= 1.0):
-            raise ValueError(
-                f"proj_dropout_rate must be in [0, 1], got {proj_dropout_rate}"
+                f"attn_dropout_rate must be in [0, 1], got {dropout_rate}"
             )
         if use_adaptive_softmax and use_hierarchical_routing:
             raise ValueError(
@@ -192,8 +187,7 @@ class _CoreAttention(keras.layers.Layer):
         self.qkv_bias = qkv_bias
         self.qk_scale = qk_scale
         self.proj_bias = proj_bias
-        self.attn_dropout_rate = attn_dropout_rate
-        self.proj_dropout_rate = proj_dropout_rate
+        self.dropout_rate = dropout_rate
         self.use_hierarchical_routing = use_hierarchical_routing
         self.use_adaptive_softmax = use_adaptive_softmax
         self.adaptive_softmax_config = adaptive_softmax_config
@@ -225,13 +219,8 @@ class _CoreAttention(keras.layers.Layer):
             self.dim, use_bias=self.proj_bias, name="proj", **dense_kwargs
         )
         self.attn_dropout = (
-            keras.layers.Dropout(self.attn_dropout_rate, name="attn_dropout")
-            if self.attn_dropout_rate > 0.0
-            else None
-        )
-        self.proj_dropout = (
-            keras.layers.Dropout(self.proj_dropout_rate, name="proj_dropout")
-            if self.proj_dropout_rate > 0.0
+            keras.layers.Dropout(self.dropout_rate, name="attn_dropout")
+            if self.dropout_rate > 0.0
             else None
         )
         self.hierarchical_routing = (
@@ -257,8 +246,6 @@ class _CoreAttention(keras.layers.Layer):
         self.proj.build(padded_shape)
         if self.attn_dropout is not None:
             self.attn_dropout.build(None)
-        if self.proj_dropout is not None:
-            self.proj_dropout.build(padded_shape)
 
         attn_scores_shape = (
             input_shape[0],
@@ -353,8 +340,6 @@ class _CoreAttention(keras.layers.Layer):
         x = keras.ops.transpose(x, (0, 2, 1, 3))
         x = keras.ops.reshape(x, (B, N, C))
         x = self.proj(x, training=training)
-        if self.proj_dropout is not None:
-            x = self.proj_dropout(x, training=training)
 
         # --- UN-PADDING ---
         return x[:, :N_actual, :]
@@ -370,8 +355,7 @@ class _CoreAttention(keras.layers.Layer):
             "dim": self.dim, "window_size": self.window_size,
             "num_heads": self.num_heads, "qkv_bias": self.qkv_bias,
             "qk_scale": self.qk_scale,
-            "attn_dropout_rate": self.attn_dropout_rate,
-            "proj_dropout_rate": self.proj_dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "proj_bias": self.proj_bias,
             "use_hierarchical_routing": self.use_hierarchical_routing,
             "use_adaptive_softmax": self.use_adaptive_softmax,

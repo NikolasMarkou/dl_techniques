@@ -337,7 +337,6 @@ class TransformerLayer(keras.layers.Layer):
 
         # Dropout layers
         self.dropout = layers.Dropout(self.dropout_rate, name='dropout')
-        self.attention_dropout = layers.Dropout(self.attention_dropout_rate, name='attention_dropout')
 
         # Stochastic depth layers (if enabled)
         self.attention_stochastic_depth = None
@@ -405,6 +404,7 @@ class TransformerLayer(keras.layers.Layer):
                 'dim': self.hidden_size,
                 'window_size': self.window_size,
                 'num_heads': self.num_heads,
+                'dropout_rate': self.attention_dropout_rate,
                 'name': name
             }
         elif self.attention_type == 'group_query':
@@ -421,7 +421,7 @@ class TransformerLayer(keras.layers.Layer):
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
                 'head_dim': self.hidden_size // self.num_heads,
-                'dropout_rate': self.dropout_rate,
+                'dropout_rate': self.attention_dropout_rate,
                 'lambda_init': self.lambda_init,
                 'name': name
             }
@@ -594,7 +594,6 @@ class TransformerLayer(keras.layers.Layer):
                 x = self.attention(x, attention_mask=attention_mask, layer_idx=layer_idx, training=training)
             else:
                 x = self.attention(x, attention_mask=attention_mask, training=training)
-            x = self.attention_dropout(x, training=training)
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
             attention_output = x + residual
@@ -621,7 +620,6 @@ class TransformerLayer(keras.layers.Layer):
                     inputs,
                     attention_mask=attention_mask,
                     training=training)
-            x = self.attention_dropout(x, training=training)
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
             attention_output = self.attention_norm(x + residual, training=training)

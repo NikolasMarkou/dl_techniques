@@ -44,8 +44,7 @@ class TestWindowAttention:
         assert inner_attn.qkv_bias is True
         assert inner_attn.qk_scale is None
         assert inner_attn.scale == 32 ** -0.5
-        assert inner_attn.attn_dropout_rate == 0.0
-        assert inner_attn.proj_dropout_rate == 0.0
+        assert inner_attn.dropout_rate == 0.0
         assert isinstance(inner_attn.kernel_initializer, keras.initializers.GlorotUniform)
 
     def test_initialization_custom(self):
@@ -53,7 +52,7 @@ class TestWindowAttention:
         custom_regularizer = keras.regularizers.L2(1e-4)
         layer = WindowAttention(
             dim=64, window_size=8, num_heads=8, qkv_bias=False, qk_scale=0.1,
-            attn_dropout_rate=0.1, proj_dropout_rate=0.2, kernel_initializer="he_normal",
+            dropout_rate=0.1, kernel_initializer="he_normal",
             kernel_regularizer=custom_regularizer,
         )
         inner_attn = layer.attention
@@ -64,8 +63,7 @@ class TestWindowAttention:
         assert inner_attn.qkv_bias is False
         assert inner_attn.qk_scale == 0.1
         assert inner_attn.scale == 0.1
-        assert inner_attn.attn_dropout_rate == 0.1
-        assert inner_attn.proj_dropout_rate == 0.2
+        assert inner_attn.dropout_rate == 0.1
         assert isinstance(inner_attn.kernel_initializer, keras.initializers.HeNormal)
         assert inner_attn.kernel_regularizer == custom_regularizer
 
@@ -79,8 +77,6 @@ class TestWindowAttention:
             WindowAttention(dim=96, window_size=7, num_heads=-3)
         with pytest.raises(ValueError, match="dim .* must be divisible by num_heads"):
             WindowAttention(dim=97, window_size=7, num_heads=3)
-        with pytest.raises(ValueError, match="attn_dropout_rate must be between 0.0 and 1.0"):
-            WindowAttention(dim=96, window_size=7, num_heads=3, attn_dropout_rate=1.1)
 
     def test_build_process(self, input_tensor, layer_instance):
         """Test that the layer and its sub-layer build properly."""
@@ -136,8 +132,7 @@ class TestWindowAttention:
         [
             ({"dim": 32, "window_size": 4, "num_heads": 2}, 17),
             ({"dim": 60, "window_size": 5, "num_heads": 5, "qkv_bias": False}, 99),
-            ({"dim": 128, "window_size": 8, "num_heads": 16, "attn_dropout_rate": 0.1}, 250),
-            ({"dim": 48, "window_size": 6, "num_heads": 6, "proj_dropout_rate": 0.1, "proj_bias": False}, 48),
+            ({"dim": 128, "window_size": 8, "num_heads": 16, "dropout_rate": 0.1}, 250),
         ]
     )
     def test_comprehensive_configurations(self, config, seq_len):
@@ -175,7 +170,7 @@ class TestWindowAttention:
         "config",
         [
             {"dim": 128, "window_size": 7, "num_heads": 4, "qkv_bias": True, "qk_scale": 0.1,
-             "attn_dropout_rate": 0.1, "proj_dropout_rate": 0.2, "kernel_initializer": "he_normal"},
+             "dropout_rate": 0.1, "kernel_initializer": "he_normal"},
             {"dim": 64, "window_size": 8, "num_heads": 8, "qkv_bias": False},
             {"dim": 32, "window_size": 4, "num_heads": 2, "proj_bias": False},
         ]

@@ -211,7 +211,9 @@ class ExperimentConfig:
     """
     # Model architecture
     attention_types: List[str] = field(default_factory=lambda: [
-        'window_kan',
+        'window_zigzag_hierarchical',
+        'window_zigzag_adaptive',
+        'window_zigzag',
         'window',
     ])
     attention_dim: int = 128
@@ -219,7 +221,7 @@ class ExperimentConfig:
     mlp_dim_multiplier: int = 4
     window_size: int = 4  # For 16×16 feature maps
     num_heads: int = 4
-    dropout_rate: float = 0.3
+    dropout_rate: float = 0.1
 
     # KAN-specific parameters
     kan_grid_size: int = 5
@@ -384,6 +386,19 @@ def create_attention_layer(
             name=f'window_zigzag_adaptive_attn_{dim}_{index}'
         )
 
+    elif attention_type == 'window_zigzag_hierarchical':
+        return WindowZigZagAttention(
+            dim=dim,
+            window_size=window_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            attn_dropout_rate=dropout_rate,
+            proj_dropout_rate=dropout_rate,
+            use_hierarchical_routing=True,
+            use_adaptive_softmax=False,
+            name=f'window_zigzag_hierarchical_attn_{dim}_{index}'
+        )
+
     elif attention_type == 'window_kan':
         return WindowAttentionKAN(
             dim=dim,
@@ -457,6 +472,7 @@ def build_attention_model(
             config=config
         )
         x = attn_layer(x)
+        x = keras.layers.Dropout(config.dropout_rate, name=f'drop_attn_block{i}')(x)
         x = keras.layers.Add(name=f'add_attn_block{i}')([x_res, x])
 
         # --- MLP Sub-block ---
@@ -470,12 +486,13 @@ def build_attention_model(
             kernel_initializer='he_normal',
             name=f'mlp_dense1_block{i}'
         )(x)
+        x = keras.layers.Dropout(config.dropout_rate, name=f'drop_mlp_block{i}')(x)
         x = keras.layers.Dense(
             config.attention_dim,
             kernel_initializer='he_normal',
             name=f'mlp_dense2_block{i}'
         )(x)
-        x = keras.layers.Dropout(config.dropout_rate, name=f'drop_mlp_block{i}')(x)
+        #x = keras.layers.Dropout(config.dropout_rate, name=f'drop_mlp_block{i}')(x)
         x = keras.layers.Add(name=f'add_mlp_block{i}')([x_res, x])
 
     # 3. Final Layer Normalization
@@ -502,9 +519,10 @@ def get_model_name(attention_type: str) -> str:
     """Get a human-readable model name for the attention type."""
     name_mapping = {
         'window': 'WindowAttention',
+        'window_kan': 'WindowKAN',
         'window_zigzag': 'WindowZigZag',
         'window_zigzag_adaptive': 'WindowZigZag+Adaptive',
-        'window_kan': 'WindowKAN'
+        'window_zigzag_hierarchical': 'WindowZigZag+Hierarchical',
     }
     return name_mapping.get(attention_type, attention_type)
 

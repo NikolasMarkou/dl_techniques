@@ -1,13 +1,58 @@
 """
-xLSTM (Extended Long Short-Term Memory) Implementation.
+extended Long Short-Term Memory (xLSTM) architecture.
 
-This module provides a production-ready implementation of the xLSTM architecture
-from the paper "xLSTM: Extended Long Short-Term Memory" (arXiv:2405.04517v2).
+This model realizes the xLSTM architecture, a significant evolution of the
+traditional LSTM network designed to rival the performance and scalability of
+Transformers in sequence modeling tasks. It achieves this by introducing novel
+gating structures and memory mechanisms, resulting in two specialized recurrent
+blocks: sLSTM and mLSTM. This class constructs a deep sequence model by
+stacking these blocks.
 
+The core motivation behind xLSTM is to enhance the memory capabilities and
+parallelism of LSTMs. It deconstructs the LSTM's memory into two complementary
+forms: a scalar, recurrent memory (sLSTM) and a matrix, parallelizable
+memory (mLSTM).
+
+Architectural Overview:
+The model is a deep residual stack of xLSTM blocks. The composition of this
+stack is controlled by the `mlstm_ratio`, which determines the proportion of
+mLSTM blocks to sLSTM blocks. This allows the architecture to be tuned along
+a spectrum from fully recurrent (like a traditional LSTM) to highly
+parallelizable (closer in spirit to a Transformer). Typically, mLSTM blocks
+are placed in the lower layers to process sequences in parallel, followed by
+sLSTM blocks in the upper layers to refine the representation with stateful,
+recurrent processing.
+
+Foundational Concepts:
+The architecture is built upon two key innovations extending the classic LSTM:
+
+1.  **sLSTM (Scalar LSTM):** This block enhances the traditional LSTM cell
+    to improve long-range dependencies. It retains a scalar hidden state and
+    cell state but modifies the gating mechanism. A key change is the
+    introduction of an exponential forget gate, which normalizes the memory
+    state and allows for more flexible memory updates than the standard
+    sigmoid gate. This enables the model to multiplicatively update its memory,
+    offering a more powerful mechanism for retaining or discarding information
+    over long sequences.
+
+2.  **mLSTM (Matrix LSTM):** This block introduces a matrix memory, `C_t`,
+    and a matrix hidden state, `H_t`. This fundamentally changes the memory
+    from a scalar value to a structured matrix, allowing for parallel updates
+    and storage of multiple pieces of information simultaneously. The mLSTM
+    employs covariance-based gating, enabling parallel memory mixing that is
+    reminiscent of the query-key-value interactions in Transformer attention
+    heads. This design makes mLSTM highly parallelizable and efficient on
+    modern hardware, addressing a key limitation of traditional RNNs.
+
+By combining these two block types, the xLSTM model creates a hybrid
+architecture. It leverages the parallel processing power of mLSTM for efficient
+representation learning and the robust, stateful recurrence of sLSTM for
+capturing complex temporal dependencies, aiming to achieve a superior balance
+of performance, efficiency, and scalability.
 
 References:
-    Beck, M., et al. (2024). xLSTM: Extended Long Short-Term Memory.
-    arXiv:2405.04517v2
+    - Beck, M., et al. (2024). xLSTM: Extended Long Short-Term Memory.
+      arXiv:2405.04517v2
 """
 
 import keras

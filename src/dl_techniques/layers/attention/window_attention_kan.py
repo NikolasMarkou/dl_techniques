@@ -91,7 +91,7 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
             Defaults to 'swish'.
         qk_scale: Optional float, override for query-key scaling factor.
             If None, uses `head_dim ** -0.5`. Defaults to None.
-        attn_dropout_rate: Float between 0 and 1, dropout rate for attention
+        dropout_rate: Float between 0 and 1, dropout rate for attention
             weights. Defaults to 0.0.
         proj_dropout_rate: Float between 0 and 1, dropout rate for the final
             output projection. Defaults to 0.0.
@@ -124,8 +124,7 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         kan_spline_order: int = 3,
         kan_activation: str = "swish",
         qk_scale: Optional[float] = None,
-        attn_dropout_rate: float = 0.0,
-        proj_dropout_rate: float = 0.0,
+        dropout_rate: float = 0.0,
         proj_bias: bool = True,
         kernel_initializer: Union[
             str, keras.initializers.Initializer
@@ -154,16 +153,12 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads})"
             )
-        if not (0.0 <= attn_dropout_rate <= 1.0):
+        if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(
                 "attn_dropout_rate must be between 0.0 and 1.0, "
-                f"got {attn_dropout_rate}"
+                f"got {dropout_rate}"
             )
-        if not (0.0 <= proj_dropout_rate <= 1.0):
-            raise ValueError(
-                "proj_dropout_rate must be between 0.0 and 1.0, "
-                f"got {proj_dropout_rate}"
-            )
+
         if kan_grid_size <= 0:
             raise ValueError(
                 f"kan_grid_size must be positive, got {kan_grid_size}"
@@ -182,8 +177,7 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         self.scale = (
             qk_scale if qk_scale is not None else self.head_dim**-0.5
         )
-        self.attn_dropout_rate = attn_dropout_rate
-        self.proj_dropout_rate = proj_dropout_rate
+        self.dropout_rate = dropout_rate
         self.proj_bias = proj_bias
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
@@ -245,13 +239,8 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         )
 
         self.attn_dropout = (
-            keras.layers.Dropout(self.attn_dropout_rate, name="attn_dropout")
-            if self.attn_dropout_rate > 0.0
-            else None
-        )
-        self.proj_dropout = (
-            keras.layers.Dropout(self.proj_dropout_rate, name="proj_dropout")
-            if self.proj_dropout_rate > 0.0
+            keras.layers.Dropout(self.dropout_rate, name="attn_dropout")
+            if self.dropout_rate > 0.0
             else None
         )
 
@@ -275,8 +264,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
 
         if self.attn_dropout is not None:
             self.attn_dropout.build(None)
-        if self.proj_dropout is not None:
-            self.proj_dropout.build(padded_shape)
 
         super().build(input_shape)
 
@@ -374,8 +361,6 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
         x = keras.ops.transpose(x, (0, 2, 1, 3))
         x = keras.ops.reshape(x, (B, N, C))
         x = self.proj(x, training=training)
-        if self.proj_dropout is not None:
-            x = self.proj_dropout(x, training=training)
 
         # Remove padding
         output = x[:, :N_actual, :]
@@ -399,8 +384,7 @@ class SingleWindowAttentionKAN(keras.layers.Layer):
                 "kan_spline_order": self.kan_spline_order,
                 "kan_activation": self.kan_activation,
                 "qk_scale": self.qk_scale,
-                "attn_dropout_rate": self.attn_dropout_rate,
-                "proj_dropout_rate": self.proj_dropout_rate,
+                "dropout_rate": self.dropout_rate,
                 "proj_bias": self.proj_bias,
                 "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer

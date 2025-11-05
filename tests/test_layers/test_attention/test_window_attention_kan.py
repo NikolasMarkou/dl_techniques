@@ -77,8 +77,7 @@ class TestSingleWindowAttentionKAN:
         assert layer.head_dim == 32
         assert layer.qk_scale is None
         assert layer.scale == 32**-0.5
-        assert layer.attn_dropout_rate == 0.0
-        assert layer.proj_dropout_rate == 0.0
+        assert layer.dropout_rate == 0.0
         assert layer.kan_grid_size == 5
         assert layer.kan_spline_order == 3
         assert layer.kan_activation == "swish"
@@ -97,8 +96,7 @@ class TestSingleWindowAttentionKAN:
             kan_spline_order=4,
             kan_activation="gelu",
             qk_scale=0.1,
-            attn_dropout_rate=0.1,
-            proj_dropout_rate=0.2,
+            dropout_rate=0.1,
             kernel_initializer="he_normal",
             kernel_regularizer=custom_regularizer,
         )
@@ -108,8 +106,7 @@ class TestSingleWindowAttentionKAN:
         assert layer.head_dim == 8
         assert layer.qk_scale == 0.1
         assert layer.scale == 0.1
-        assert layer.attn_dropout_rate == 0.1
-        assert layer.proj_dropout_rate == 0.2
+        assert layer.dropout_rate == 0.1
         assert layer.kan_grid_size == 8
         assert layer.kan_spline_order == 4
         assert layer.kan_activation == "gelu"
@@ -129,13 +126,6 @@ class TestSingleWindowAttentionKAN:
 
         with pytest.raises(ValueError, match="dim .* must be divisible by num_heads"):
             SingleWindowAttentionKAN(dim=97, window_size=7, num_heads=3)
-
-        with pytest.raises(
-            ValueError, match="attn_dropout_rate must be between 0.0 and 1.0"
-        ):
-            SingleWindowAttentionKAN(
-                dim=96, window_size=7, num_heads=3, attn_dropout_rate=1.1
-            )
 
         with pytest.raises(
             ValueError, match="kan_grid_size must be positive"
@@ -228,8 +218,7 @@ class TestSingleWindowAttentionKAN:
             "kan_spline_order": 4,
             "kan_activation": "gelu",
             "qk_scale": 0.1,
-            "attn_dropout_rate": 0.1,
-            "proj_dropout_rate": 0.2,
+            "dropout_rate": 0.1,
         }
 
         original_layer = SingleWindowAttentionKAN(**config)
@@ -268,8 +257,7 @@ class TestWindowAttentionKAN:
         assert inner_attn.head_dim == 32
         assert inner_attn.qk_scale is None
         assert inner_attn.scale == 32**-0.5
-        assert inner_attn.attn_dropout_rate == 0.0
-        assert inner_attn.proj_dropout_rate == 0.0
+        assert inner_attn.dropout_rate == 0.0
         assert inner_attn.kan_grid_size == 5
         assert inner_attn.kan_spline_order == 3
         assert isinstance(
@@ -287,8 +275,7 @@ class TestWindowAttentionKAN:
             kan_spline_order=4,
             kan_activation="gelu",
             qk_scale=0.1,
-            attn_dropout_rate=0.1,
-            proj_dropout_rate=0.2,
+            dropout_rate=0.1,
             kernel_initializer="he_normal",
             kernel_regularizer=custom_regularizer,
         )
@@ -299,8 +286,7 @@ class TestWindowAttentionKAN:
         assert inner_attn.head_dim == 8
         assert inner_attn.qk_scale == 0.1
         assert inner_attn.scale == 0.1
-        assert inner_attn.attn_dropout_rate == 0.1
-        assert inner_attn.proj_dropout_rate == 0.2
+        assert inner_attn.dropout_rate == 0.1
         assert inner_attn.kan_grid_size == 8
         assert inner_attn.kan_spline_order == 4
         assert inner_attn.kan_activation == "gelu"
@@ -401,7 +387,7 @@ class TestWindowAttentionKAN:
                     "dim": 128,
                     "window_size": 8,
                     "num_heads": 16,
-                    "attn_dropout_rate": 0.1,
+                    "dropout_rate": 0.1,
                     "kan_spline_order": 4,
                 },
                 250,
@@ -411,7 +397,7 @@ class TestWindowAttentionKAN:
                     "dim": 48,
                     "window_size": 6,
                     "num_heads": 6,
-                    "proj_dropout_rate": 0.1,
+                    "dropout_rate": 0.1,
                     "proj_bias": False,
                     "kan_activation": "gelu",
                 },
@@ -467,8 +453,7 @@ class TestWindowAttentionKAN:
                 "num_heads": 4,
                 "kan_grid_size": 6,
                 "qk_scale": 0.1,
-                "attn_dropout_rate": 0.1,
-                "proj_dropout_rate": 0.2,
+                "dropout_rate": 0.1,
                 "kernel_initializer": "he_normal",
             },
             {
