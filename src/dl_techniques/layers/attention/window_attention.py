@@ -540,89 +540,110 @@ class WindowAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        attention_mask: Optional[keras.KerasTensor] = None,
-        training: Optional[bool] = None,
+            self,
+            inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass for the window attention layer.
+        """Forward pass for the single window attention.
 
         Args:
-            inputs: Input tensor of shape ``(B, N, C)``.
+            inputs: Input tensor of shape ``(B, N, C)``, where ``N`` must be
+                less than or equal to ``window_size**2``.
             attention_mask: An optional mask of shape ``(B, N)`` to prevent
-                attention to certain sequence elements.
+                attention to certain positions.
             training: Boolean indicating if the layer is in training mode.
 
         Returns:
-            The output tensor with the same shape as the input.
+            The output tensor after applying attention, with shape ``(B, N, C)``.
         """
         input_shape = keras.ops.shape(inputs)
-        B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
-        ws = self.window_size
-
-        # --- 1. Pad sequence to form a square grid ---
-        H = W = keras.ops.cast(
-            keras.ops.ceil(keras.ops.sqrt(keras.ops.cast(N_actual, "float32"))),
-            "int32",
+        B_actual, N_actual, C_actual = (
+            input_shape[0],
+            input_shape[1],
+            input_shape[2],
         )
-        N_grid = H * W
-        pad_len_seq = N_grid - N_actual
+        N_target = self.window_size * self.window_size
 
+        # --- PADDING & MASKING LOGIC ---
+        padding_amount = N_target - N_actual
         padded_inputs = keras.ops.pad(
-            inputs, [[0, 0], [0, pad_len_seq], [0, 0]]
+            inputs, [[0, 0], [0, padding_amount], [0, 0]]
         )
-        grid = keras.ops.reshape(padded_inputs, (B, H, W, C))
 
-        # Also pad the attention mask if it exists
-        padded_mask = None
+        internal_padding_mask = keras.ops.concatenate(
+            [
+                keras.ops.ones((B_actual, N_actual), dtype="int32"),
+                keras.ops.zeros((B_actual, padding_amount), dtype="int32"),
+            ],
+            axis=1,
+        )
+
+        final_attention_mask = internal_padding_mask
         if attention_mask is not None:
-            padded_mask = keras.ops.pad(
-                attention_mask, [[0, 0], [0, pad_len_seq]]
+            mask_padding = keras.ops.zeros(
+                (B_actual, padding_amount), dtype=attention_mask.dtype
+            )
+            padded_user_mask = keras.ops.concatenate(
+                [attention_mask, mask_padding], axis=1
+            )
+            final_attention_mask = (
+                    keras.ops.cast(padded_user_mask, "int32")
+                    * internal_padding_mask
             )
 
-        # --- 2. Pad grid so its dimensions are divisible by window_size ---
-        pad_h = (ws - H % ws) % ws
-        pad_w = (ws - W % ws) % ws
+        # --- ATTENTION LOGIC ---
+        B, N, C = keras.ops.shape(padded_inputs)
+        qkv = self.qkv(padded_inputs, training=training)
+        qkv = keras.ops.reshape(qkv, (B, N, 3, self.num_heads, self.head_dim))
+        qkv = keras.ops.transpose(qkv, (2, 0, 3, 1, 4))
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        q = q * self.scale
+        attn = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
 
-        padded_grid = keras.ops.pad(
-            grid, [[0, 0], [0, pad_h], [0, pad_w], [0, 0]]
+        relative_position_bias = keras.ops.take(
+            self.relative_position_bias_table,
+            keras.ops.reshape(self.relative_position_index, (-1,)),
+            axis=0,
         )
-        H_pad, W_pad = H + pad_h, W + pad_w
-
-        # --- 3. Partition into windows ---
-        windows = self._window_partition(padded_grid)
-        windows = keras.ops.reshape(windows, (-1, ws * ws, C))
-
-        # Partition the mask as well
-        attn_mask_for_windows = None
-        if padded_mask is not None:
-            mask_grid = keras.ops.reshape(padded_mask, (B, H, W, 1))
-            padded_mask_grid = keras.ops.pad(
-                mask_grid,
-                [[0, 0], [0, pad_h], [0, pad_w], [0, 0]],
-                constant_values=0,
-            )
-            mask_windows = self._window_partition(padded_mask_grid)
-            attn_mask_for_windows = keras.ops.reshape(
-                mask_windows, (-1, ws * ws)
-            )
-
-        # --- 4. Apply attention within windows ---
-        attn_windows = self.attention(
-            windows, attention_mask=attn_mask_for_windows, training=training
+        relative_position_bias = keras.ops.reshape(
+            relative_position_bias, (N_target, N_target, -1)
         )
+        relative_position_bias = keras.ops.transpose(
+            relative_position_bias, (2, 0, 1)
+        )
+        attn = attn + keras.ops.expand_dims(relative_position_bias, 0)
 
-        # --- 5. Reverse window partition ---
-        attn_windows = keras.ops.reshape(attn_windows, (-1, ws, ws, C))
-        reconstructed_grid = self._window_reverse(attn_windows, H_pad, W_pad)
+        broadcast_mask = keras.ops.reshape(final_attention_mask, (B, 1, 1, N))
 
-        # --- 6. Un-pad grid and flatten back to sequence ---
-        grid_unpadded = reconstructed_grid[:, :H, :W, :]
-        sequence_unpadded = keras.ops.reshape(grid_unpadded, (B, N_grid, C))
+        # --- CHANGE 1: Use a dtype-specific minimum value for masking ---
+        # This is more robust than a hardcoded large negative number, especially
+        # for float16.
+        inf_value = keras.ops.convert_to_tensor(
+            keras.backend.floatx_min(), dtype=attn.dtype
+        )
+        additive_mask = (
+                1.0 - keras.ops.cast(broadcast_mask, dtype=attn.dtype)
+        ) * inf_value
+        attn = attn + additive_mask
 
-        # --- 7. Un-pad sequence to original length ---
-        output = sequence_unpadded[:, :N_actual, :]
+        # --- CHANGE 2: Clip attention logits before softmax ---
+        # This is the most critical change to prevent exp() from overflowing to
+        # infinity, which is the primary cause of NaNs in attention.
+        # A value like 30.0 is safe for float32 and float16.
+        attn = keras.ops.clip(attn, -30.0, 30.0)
 
+        attn = keras.ops.softmax(attn, axis=-1)
+
+        if self.attn_dropout is not None:
+            attn = self.attn_dropout(attn, training=training)
+
+        x = keras.ops.matmul(attn, v)
+        x = keras.ops.transpose(x, (0, 2, 1, 3))
+        x = keras.ops.reshape(x, (B, N, C))
+        x = self.proj(x, training=training)
+
+        output = x[:, :N_actual, :]
         return output
 
     def compute_output_shape(
