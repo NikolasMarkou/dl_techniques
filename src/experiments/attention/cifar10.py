@@ -35,22 +35,24 @@ Experimental Design
 - 10,000 test images
 - Standard preprocessing with normalization
 
-**Model Architecture**: Lightweight CNN-Transformer hybrid architecture:
+**Model Architecture**: Lightweight Vision Transformer (ViT) architecture:
 
 ```
 Input (32×32×3)
       ↓
-Conv2D (32 filters, 3×3) + BN + ReLU
+Conv2D (5×5, stride=2) as Patch Embedding  → [16×16×dim] -> [256, dim]
       ↓
-Conv2D (64 filters, 3×3, stride=2) + BN + ReLU  → [16×16×64]
+Transformer Encoder Block x N:
+  - LayerNorm
+  - Attention Layer (window_size=4, num_heads=4)
+  - Residual
+  - LayerNorm
+  - MLP (4*dim hidden)
+  - Residual
       ↓
-Attention Layer (window_size=4, num_heads=4)  → [256, 64]
+Layer Normalization
       ↓
-Conv2D (128 filters, 3×3, stride=2) + BN + ReLU → [8×8×128]
-      ↓
-Attention Layer (window_size=4, num_heads=4)  → [64, 128]
-      ↓
-GlobalAveragePooling
+GlobalAveragePooling1D
       ↓
 Dense(256) + Dropout + ReLU
       ↓
@@ -184,8 +186,9 @@ class ExperimentConfig:
     Attributes:
         # Model configurations
         attention_types: List of attention types to compare
-        conv_filters: Filter progression for CNN backbone
         attention_dim: Embedding dimension for attention layers
+        num_attention_layers: Number of transformer encoder blocks
+        mlp_dim_multiplier: Multiplier for the MLP hidden layer size
         window_size: Window size for all attention mechanisms
         num_heads: Number of attention heads
         dropout_rate: Dropout rate for regularization
@@ -211,9 +214,10 @@ class ExperimentConfig:
         'window_kan',
         'window',
     ])
-    conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128])
     attention_dim: int = 64
-    window_size: int = 4  # For 16×16 and 8×8 feature maps
+    num_attention_layers: int = 2
+    mlp_dim_multiplier: int = 4
+    window_size: int = 4  # For 16×16 feature maps
     num_heads: int = 4
     dropout_rate: float = 0.3
 
@@ -404,12 +408,12 @@ def build_attention_model(
     num_classes: int = 10
 ) -> keras.Model:
     """
-    Build a CNN-Transformer hybrid model with specified attention mechanism.
+    Build a Transformer-style model with a CNN stem.
 
     Architecture:
-        Conv Block 1 (32×32 → 16×16) → Attention →
-        Conv Block 2 (16×16 → 8×8) → Attention →
-        Global Pool → Dense → Output
+        Conv Stem (32x32 -> 16x16) ->
+        [Transformer Block (Attention + MLP)] x N ->
+        Layer Norm -> Global Pool -> Dense -> Output
 
     Args:
         attention_type: Type of attention mechanism
@@ -418,95 +422,70 @@ def build_attention_model(
         num_classes: Number of output classes
 
     Returns:
-        Compiled Keras model
+        A Keras model.
     """
     inputs = keras.Input(shape=input_shape, name='input')
-    x = inputs
 
-    # Initial conv block (32×32 → 32×32)
+    # 1. Patch Embedding using a Conv layer
+    # 32x32 -> 16x16, with embedding dimension 'attention_dim'
     x = keras.layers.Conv2D(
-        config.conv_filters[0], 3, padding='same',
+        filters=config.attention_dim,
+        kernel_size=5,
+        strides=2,
+        padding='same',
         kernel_initializer='he_normal',
-        name='conv1'
-    )(x)
-    x = keras.layers.BatchNormalization(name='bn1')(x)
-    x = keras.layers.Activation('relu', name='relu1')(x)
+        name='patch_embed_conv'
+    )(inputs)
 
-    # Conv block with stride (32×32 → 16×16)
-    x = keras.layers.Conv2D(
-        config.conv_filters[1], 3, strides=2, padding='same',
-        kernel_initializer='he_normal',
-        name='conv2'
-    )(x)
-    x = keras.layers.BatchNormalization(name='bn2')(x)
-    x = keras.layers.Activation('relu', name='relu2')(x)
+    # Reshape to a sequence of tokens: (B, H, W, C) -> (B, H*W, C)
+    _, H, W, C = x.shape
+    x = keras.layers.Reshape((H * W, C), name='flatten_patches')(x)
 
-    # Project to attention dimension
-    x = keras.layers.Conv2D(
-        config.attention_dim, 1, padding='same',
-        kernel_initializer='he_normal',
-        name='proj1'
-    )(x)
-    x = keras.layers.BatchNormalization(name='bn_proj1')(x)
+    # 2. Transformer Blocks
+    for i in range(config.num_attention_layers):
+        # --- Attention Sub-block ---
+        x_res = x
+        x = keras.layers.LayerNormalization(name=f'ln1_block{i}')(x)
 
-    # First attention block (16×16 = 256 tokens)
-    B = keras.ops.shape(x)[0]
-    H, W, C = 16, 16, config.attention_dim
-    x_reshaped = keras.layers.Reshape((H * W, C), name='reshape1')(x)
+        attn_layer = create_attention_layer(
+            index=i,
+            attention_type=attention_type,
+            dim=config.attention_dim,
+            window_size=config.window_size,
+            num_heads=config.num_heads,
+            dropout_rate=config.dropout_rate,
+            config=config
+        )
+        x = attn_layer(x)
+        x = keras.layers.Dropout(config.dropout_rate, name=f'drop_attn_block{i}')(x)
+        x = keras.layers.Add(name=f'add_attn_block{i}')([x_res, x])
 
-    attn_layer_1 = create_attention_layer(
-        index=0,
-        attention_type=attention_type,
-        dim=config.attention_dim,
-        window_size=config.window_size,
-        num_heads=config.num_heads,
-        dropout_rate=config.dropout_rate,
-        config=config
-    )
-    x_attn = attn_layer_1(x_reshaped)
-    x_attn = keras.layers.Dropout(config.dropout_rate, name='drop1')(x_attn)
+        # --- MLP Sub-block ---
+        x_res = x
+        x = keras.layers.LayerNormalization(name=f'ln2_block{i}')(x)
 
-    # Reshape back to spatial
-    x = keras.layers.Reshape((H, W, C), name='reshape_back1')(x_attn)
+        mlp_dim = config.attention_dim * config.mlp_dim_multiplier
+        x = keras.layers.Dense(
+            mlp_dim,
+            activation='gelu',
+            kernel_initializer='he_normal',
+            name=f'mlp_dense1_block{i}'
+        )(x)
+        x = keras.layers.Dense(
+            config.attention_dim,
+            kernel_initializer='he_normal',
+            name=f'mlp_dense2_block{i}'
+        )(x)
+        x = keras.layers.Dropout(config.dropout_rate, name=f'drop_mlp_block{i}')(x)
+        x = keras.layers.Add(name=f'add_mlp_block{i}')([x_res, x])
 
-    # Conv block with stride (16×16 → 8×8)
-    x = keras.layers.Conv2D(
-        config.conv_filters[2], 3, strides=2, padding='same',
-        kernel_initializer='he_normal',
-        name='conv3'
-    )(x)
-    x = keras.layers.BatchNormalization(name='bn3')(x)
-    x = keras.layers.Activation('relu', name='relu3')(x)
+    # 3. Final Layer Normalization
+    x = keras.layers.LayerNormalization(name='final_ln')(x)
 
-    # Project to attention dimension
-    x = keras.layers.Conv2D(
-        config.attention_dim, 1, padding='same',
-        kernel_initializer='he_normal',
-        name='proj2'
-    )(x)
-    x = keras.layers.BatchNormalization(name='bn_proj2')(x)
+    # 4. Global Average Pooling over the sequence dimension
+    x = keras.layers.GlobalAveragePooling1D(name='gap')(x)
 
-    # Second attention block (8×8 = 64 tokens)
-    H2, W2 = 8, 8
-    x_reshaped = keras.layers.Reshape((H2 * W2, config.attention_dim), name='reshape2')(x)
-
-    attn_layer_2 = create_attention_layer(
-        index=1,
-        attention_type=attention_type,
-        dim=config.attention_dim,
-        window_size=config.window_size,
-        num_heads=config.num_heads,
-        dropout_rate=config.dropout_rate,
-        config=config
-    )
-    x_attn = attn_layer_2(x_reshaped)
-    x_attn = keras.layers.Dropout(config.dropout_rate, name='drop2')(x_attn)
-
-    # Reshape back to spatial
-    x = keras.layers.Reshape((H2, W2, config.attention_dim), name='reshape_back2')(x_attn)
-
-    # Global pooling and classification head
-    x = keras.layers.GlobalAveragePooling2D(name='gap')(x)
+    # 5. Classification Head
     x = keras.layers.Dense(
         256,
         kernel_initializer='he_normal',
@@ -826,10 +805,10 @@ def print_experiment_summary(
     logger.info("ARCHITECTURE OVERVIEW")
     logger.info("-" * 80)
     logger.info(f"Attention Dimension: {config.attention_dim}")
+    logger.info(f"Num Attention Layers: {config.num_attention_layers}")
     logger.info(f"Window Size: {config.window_size}")
     logger.info(f"Number of Heads: {config.num_heads}")
     logger.info(f"Dropout Rate: {config.dropout_rate}")
-    logger.info(f"CNN Filters: {config.conv_filters}")
     logger.info("")
 
     # ===== Performance Comparison =====
@@ -1052,6 +1031,7 @@ def main() -> None:
     logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"  Attention Types: {config.attention_types}")
     logger.info(f"  Attention Dim: {config.attention_dim}")
+    logger.info(f"  Num Attention Layers: {config.num_attention_layers}")
     logger.info(f"  Window Size: {config.window_size}")
     logger.info(f"  Num Heads: {config.num_heads}")
     logger.info(f"  Epochs: {config.epochs}, Batch Size: {config.batch_size}")
