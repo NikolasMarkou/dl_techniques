@@ -158,7 +158,6 @@ class TransformerLayer(keras.layers.Layer):
         attention: The attention layer instance (e.g., MultiHeadSelfAttention).
         ffn_layer: The FFN layer instance (e.g., MLPBlock or MixtureOfExperts).
         dropout: Dropout layer for the FFN output.
-        attention_dropout: Dropout layer for the attention output.
         attention_stochastic_depth: StochasticDepth for the attention block.
         ffn_stochastic_depth: StochasticDepth for the FFN block.
 
@@ -553,7 +552,6 @@ class TransformerLayer(keras.layers.Layer):
         self.attention.build(input_shape)
         self.ffn_layer.build(input_shape)
         self.dropout.build(input_shape)
-        self.attention_dropout.build(input_shape)
         if self.attention_stochastic_depth is not None:
             self.attention_stochastic_depth.build(input_shape)
         if self.ffn_stochastic_depth is not None:
