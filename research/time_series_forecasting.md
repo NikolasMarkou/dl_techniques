@@ -287,7 +287,7 @@ Expected Accuracy:  20-40%      50-70%        70-85%        85-95%+
                              ▼          ▼
                     ┌─────────────┐   STOP: Build data
                     │ How many    │   collection system
-                    │ observations?│   first
+                    │observations?│   first
                     └─────────────┘
                          │
           ┌──────────────┼──────────────┐
@@ -304,9 +304,9 @@ Expected Accuracy:  20-40%      50-70%        70-85%        85-95%+
                          │
                          ▼
                 ┌────────────────────┐
-                │ Is accuracy         │
-                │ critical for        │
-                │ business?           │
+                │ Is accuracy        │
+                │ critical for       │
+                │ business?          │
                 └────────────────────┘
                    YES │      │ NO
                        │      │
