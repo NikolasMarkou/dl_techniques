@@ -66,7 +66,6 @@ from typing import Optional, Union, Tuple, Dict, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
-# NOTE: Assuming necessary imports from dl_techniques structure exist
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer, FFNType
 from dl_techniques.layers.norms import (
@@ -230,17 +229,26 @@ class GroupAttention(keras.layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         context, mask, prior = inputs
-        seq_len = ops.shape(context)[1]
+        # Use ops.shape to handle both eager and symbolic tensors
+        current_seq_len = ops.shape(context)[1]
 
         # --- 1. Compute Neighbor Attention (between adjacent tokens) ---
         # Create adjacency matrix for immediate neighbors (super/sub-diagonal)
-        ones_short = ops.ones((seq_len - 1,), dtype="int32")
-        a = ops.diag(ones_short, k=1)
-        c = ops.diag(ones_short, k=-1)
-        adj_mask = ops.cast(a + c, "bool")
+        # This implementation is symbolic-friendly and avoids Python conditionals
+        # on tensor shapes, which fixes graph tracing issues.
+        i = ops.arange(current_seq_len)
+        # Super-diagonal mask (i == j - 1)
+        adj_mask_upper = ops.equal(
+            ops.expand_dims(i, 1), ops.expand_dims(i, 0) - 1
+        )
+        # Sub-diagonal mask (i == j + 1)
+        adj_mask_lower = ops.equal(
+            ops.expand_dims(i, 1), ops.expand_dims(i, 0) + 1
+        )
+        adj_mask = ops.logical_or(adj_mask_upper, adj_mask_lower)
 
         # Mask out padding positions
-        padding_mask = ops.squeeze(mask, axis=1)
+        padding_mask = ops.cast(ops.squeeze(mask, axis=1), "bool")
         padding_mask_2d = ops.logical_and(
             ops.expand_dims(padding_mask, axis=2),
             ops.expand_dims(padding_mask, axis=1),
@@ -251,14 +259,14 @@ class GroupAttention(keras.layers.Layer):
         context_norm = self.norm(context)
         key = self.linear_key(context_norm)
         query = self.linear_query(context_norm)
-        scores = ops.matmul(query, ops.transpose(key, (0, 2, 1)))
+        scores = ops.matmul(query, ops.transpose(key, axes=(0, 2, 1)))
         scores = scores / math.sqrt(self.hidden_size)
         scores = ops.where(final_adj_mask, scores, -1e9)
         neibor_attn = ops.softmax(scores, axis=-1)
 
         # Symmetrize and stabilize
         neibor_attn = ops.sqrt(
-            neibor_attn * ops.transpose(neibor_attn, (0, 2, 1)) + 1e-9
+            neibor_attn * ops.transpose(neibor_attn, axes=(0, 2, 1)) + 1e-9
         )
 
         # Combine with prior from previous layer. Prior is expected to be either
@@ -269,13 +277,16 @@ class GroupAttention(keras.layers.Layer):
         # This section efficiently computes attention over all possible spans
         # by building upon the neighbor attention scores.
         tri_matrix = ops.cast(
-            ops.triu(ops.ones((seq_len, seq_len))), self.compute_dtype
+            ops.triu(ops.ones((current_seq_len, current_seq_len))),
+            self.compute_dtype,
         )
-        b = ops.cast(ops.eye(seq_len, dtype="int32"), "bool")
+        b = ops.cast(ops.eye(current_seq_len, dtype="int32"), "bool")
 
         # Use log-space for numerical stability (avoids underflow)
         t = ops.log(neibor_attn + 1e-9)
-        t = ops.where(ops.cast(a, "bool"), t, 0.0)  # Mask non-super-diagonal
+        # Mask non-super-diagonal using the symbolic-friendly mask from above
+        t = ops.where(adj_mask_upper, t, 0.0)
+
         t = ops.matmul(t, tri_matrix)
         g_attn = ops.exp(ops.matmul(tri_matrix, t))
 
@@ -289,9 +300,22 @@ class GroupAttention(keras.layers.Layer):
         )
         neibor_attn_diag_filled = ops.where(b, 1e-9, neibor_attn)
         g_attn = (
-            g_attn + ops.transpose(g_attn, (0, 2, 1)) + neibor_attn_diag_filled
+            g_attn
+            + ops.transpose(g_attn, axes=(0, 2, 1))
+            + neibor_attn_diag_filled
         )
+
+        # Normalize g_attn to be a valid probability distribution (prior for next layer)
+        # and explicitly zero out padded token interactions to prevent information leak.
+        g_attn_sum = ops.sum(g_attn, axis=-1, keepdims=True)
+        g_attn = ops.divide(g_attn, g_attn_sum + 1e-9)
+
+        float_padding_mask_2d = ops.cast(padding_mask_2d, self.compute_dtype)
+        g_attn *= float_padding_mask_2d
+        neibor_attn *= float_padding_mask_2d
+
         return g_attn, neibor_attn
+
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""
@@ -347,7 +371,7 @@ class TreeMHA(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Splits the last dimension into (num_heads, depth)."""
         x = ops.reshape(x, (batch_size, -1, self.num_heads, self.depth))
-        return ops.transpose(x, perm=[0, 2, 1, 3])
+        return ops.transpose(x, axes=[0, 2, 1, 3])
 
     def call(
         self,
@@ -380,13 +404,17 @@ class TreeMHA(keras.layers.Layer):
         k = self._split_heads(k, batch_size)
         v = self._split_heads(v, batch_size)
 
-        matmul_qk = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
+        matmul_qk = ops.matmul(q, ops.transpose(k, axes=(0, 1, 3, 2)))
         dk = ops.cast(ops.shape(k)[-1], self.compute_dtype)
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
         if mask is not None:
-            broadcast_mask = ops.expand_dims(mask, axis=1)
-            scaled_attention_logits += broadcast_mask * -1e9
+            # The input mask is (B, 1, L) with 1s for valid tokens and 0s for padding.
+            # Convert to a float mask with 0.0 for valid and -1e9 for padding.
+            attention_mask = (1.0 - ops.cast(mask, self.compute_dtype)) * -1e9
+            # Expand to (B, 1, 1, L) for broadcasting over heads and query sequence length.
+            broadcast_mask = ops.expand_dims(attention_mask, axis=1)
+            scaled_attention_logits += broadcast_mask
 
         attention_weights = ops.softmax(scaled_attention_logits, axis=-1)
 
@@ -396,7 +424,7 @@ class TreeMHA(keras.layers.Layer):
 
         attention_weights = self.dropout(attention_weights, training=training)
         output = ops.matmul(attention_weights, v)
-        output = ops.transpose(output, perm=[0, 2, 1, 3])
+        output = ops.transpose(output, axes=[0, 2, 1, 3])
         output = ops.reshape(output, (batch_size, -1, self.hidden_size))
         return self.dense(output)
 
@@ -793,6 +821,19 @@ class TreeTransformer(keras.Model):
         self.lm_head = keras.layers.Dense(
             self.vocab_size, name="lm_head_projection"
         )
+
+    def compute_output_shape(self, input_shape):
+        """Computes the output shape of the layer."""
+        if isinstance(input_shape, dict):
+            input_shape = input_shape["input_ids"]
+
+        batch_size, seq_len = input_shape
+
+        return {
+            "last_hidden_state": (batch_size, seq_len, self.hidden_size),
+            "logits": (batch_size, seq_len, self.vocab_size),
+            "break_probs": (batch_size, self.num_layers, seq_len, seq_len),
+        }
 
     def call(
         self,

@@ -270,10 +270,12 @@ class TestTreeTransformerModelForwardPass:
             seq_length,
             built_model.hidden_size,
         )
-        # Check that break_probs for padding tokens are near zero (due to input mask)
+        # Check that break_probs for padding tokens are zero
         break_probs_last_layer = outputs["break_probs"][:, -1, :, :]
-        # Check the last column (padding tokens should have no attention breaks related to them)
-        assert keras.ops.max(break_probs_last_layer[:, :, -1]) < 0.1
+        # Check the last column/row (all values related to the last padded token)
+        assert keras.ops.max(break_probs_last_layer[:, :, -1]) == 0.0
+        assert keras.ops.max(break_probs_last_layer[:, -1, :]) == 0.0
+
 
     def test_invalid_dict_input(self, built_model):
         inputs = {"invalid_key": keras.ops.ones((2, 16), dtype="int32")}
@@ -318,26 +320,31 @@ class TestTreeTransformerModelSerialization:
         input_ids = keras.ops.cast(
             keras.random.uniform((2, 16), maxval=1000), dtype="int32"
         )
-        original_outputs = model(input_ids, training=False)
+
+        # Build the model before saving
+        if not model.built:
+             model(input_ids, training=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = os.path.join(tmpdir, "test_tree_transformer.keras")
-            # Need to build the model before saving complex custom layers
-            if not model.built:
-                model(input_ids, training=False)
-
             model.save(model_path)
+
+            # Load the model and get its output
             loaded_model = keras.models.load_model(model_path)
             loaded_outputs = loaded_model(input_ids, training=False)
 
-            for key in ["last_hidden_state", "logits", "break_probs"]:
-                np.testing.assert_allclose(
-                    keras.ops.convert_to_numpy(original_outputs[key]),
-                    keras.ops.convert_to_numpy(loaded_outputs[key]),
-                    rtol=1e-5,
-                    atol=1e-6,
-                    err_msg=f"Output '{key}' should match after loading",
-                )
+        # Get the output of the original model AGAIN after loading
+        # to ensure graph state is comparable
+        original_outputs = model(input_ids, training=False)
+
+        for key in ["last_hidden_state", "logits", "break_probs"]:
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_outputs[key]),
+                keras.ops.convert_to_numpy(loaded_outputs[key]),
+                rtol=1e-5,
+                atol=1e-6,
+                err_msg=f"Output '{key}' should match after loading",
+            )
 
 
 class TestTreeTransformerEdgeCases:
@@ -461,10 +468,14 @@ class TestTreeTransformerIntegration:
             loss, token_classification_model.trainable_weights
         )
         non_none_grads = [g for g in gradients if g is not None]
+
+        # The base model's lm_head is not used, so it won't have gradients.
+        # This is expected behavior.
+        num_expected_trainable_weights = len(token_classification_model.trainable_weights)
+        num_lm_head_weights = 2 # kernel and bias
+
         assert len(non_none_grads) > 0
-        assert len(non_none_grads) == len(
-            token_classification_model.trainable_weights
-        )
+        assert len(non_none_grads) == (num_expected_trainable_weights - num_lm_head_weights)
         grad_norms = [
             keras.ops.sqrt(keras.ops.sum(keras.ops.square(g)))
             for g in non_none_grads
