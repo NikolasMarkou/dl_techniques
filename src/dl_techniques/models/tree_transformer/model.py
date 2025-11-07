@@ -5,7 +5,8 @@ Tree Transformer: Grammar Induction with Hierarchical Attention
 A complete and refactored implementation of the Tree Transformer architecture
 with support for loading (hypothetical) pretrained weights. This version is
 designed as a pure foundation model, separating the core encoding logic from
-task-specific heads for maximum flexibility.
+task-specific heads for maximum flexibility, and follows modern Keras 3 best
+practices for robust serialization and production readiness.
 
 The Tree Transformer introduces a hierarchical group attention mechanism that learns
 soft constituency trees from raw text, without explicit syntactic supervision.
@@ -81,7 +82,54 @@ from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
 
 @keras.saving.register_keras_serializable()
 class PositionalEncoding(keras.layers.Layer):
-    """Injects sinusoidal positional encoding into input embeddings."""
+    """
+    Injects sinusoidal positional encoding into input embeddings.
+
+    This layer adds positional information to token embeddings, allowing the
+    model to understand the order of tokens in a sequence. It uses a fixed,
+    non-trainable sinusoidal function.
+
+    **Intent**: To provide a standard, non-learnable method for incorporating
+    sequence order into token representations, essential for self-attention
+    mechanisms which are otherwise permutation-invariant.
+
+    **Architecture**:
+    .. code-block:: text
+
+        Input(shape=[batch, seq_len, hidden_size])
+               │
+               ▼
+        Add Positional Encoding Matrix (precomputed)
+               │
+               ▼
+        Dropout(rate=dropout_prob)
+               │
+               ▼
+        Output(shape=[batch, seq_len, hidden_size])
+
+    **Mathematical Operation**:
+        :math:`PE(pos, 2i) = \\sin(pos / 10000^{2i/d_{model}})`
+        :math:`PE(pos, 2i+1) = \\cos(pos / 10000^{2i/d_{model}})`
+        :math:`output = dropout(input + PE_{slice})`
+
+    :param hidden_size: The dimensionality of the embeddings. Must be positive.
+    :type hidden_size: int
+    :param dropout_prob: Dropout probability after adding encodings. Must be in [0, 1].
+    :type dropout_prob: float
+    :param max_len: Maximum sequence length for pre-computation.
+    :type max_len: int
+    :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
+
+    **Input shape**:
+        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
+
+    **Output shape**:
+        3D tensor with the same shape as input: `(batch_size, sequence_length, hidden_size)`.
+
+    **Attributes**:
+        pe: Non-trainable weight matrix of shape `(1, max_len, hidden_size)`.
+        dropout: `keras.layers.Dropout` layer.
+    """
 
     def __init__(
         self,
@@ -90,16 +138,7 @@ class PositionalEncoding(keras.layers.Layer):
         max_len: int = 5000,
         **kwargs: Any,
     ) -> None:
-        """Initializes the PositionalEncoding layer.
-
-        :param hidden_size: The dimensionality of the embeddings.
-        :type hidden_size: int
-        :param dropout_prob: Dropout probability after adding encodings.
-        :type dropout_prob: float
-        :param max_len: Maximum sequence length for pre-computation.
-        :type max_len: int
-        :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
-        """
+        """Initializes the PositionalEncoding layer."""
         super().__init__(**kwargs)
         if hidden_size <= 0:
             raise ValueError(
@@ -112,17 +151,15 @@ class PositionalEncoding(keras.layers.Layer):
         self.hidden_size = hidden_size
         self.dropout_prob = dropout_prob
         self.max_len = max_len
+
+        # Create sub-layers in __init__
         self.dropout = keras.layers.Dropout(dropout_prob)
+        self.pe = None # Weight created in build()
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Creates the non-trainable positional encoding matrix.
-
-        :param input_shape: Shape of the input tensor.
-        :type input_shape: Tuple[Optional[int], ...]
-        """
+        """Creates the non-trainable positional encoding matrix."""
         pe = np.zeros((self.max_len, self.hidden_size), dtype=np.float32)
         position = np.arange(0, self.max_len, dtype=np.float32).reshape(-1, 1)
-        # The geometric progression of wavelengths for the sine/cosine functions.
         div_term = np.exp(
             np.arange(0, self.hidden_size, 2, dtype=np.float32)
             * -(math.log(10000.0) / self.hidden_size)
@@ -130,6 +167,7 @@ class PositionalEncoding(keras.layers.Layer):
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
         pe = pe[np.newaxis, :, :]  # Add batch dimension
+
         self.pe = self.add_weight(
             name="positional_encoding",
             shape=(1, self.max_len, self.hidden_size),
@@ -141,15 +179,7 @@ class PositionalEncoding(keras.layers.Layer):
     def call(
         self, x: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Adds positional encodings to the input tensor.
-
-        :param x: Input tensor of shape (batch, seq_len, hidden_size).
-        :type x: keras.KerasTensor
-        :param training: Boolean indicating training mode.
-        :type training: Optional[bool]
-        :return: Tensor with added positional encodings.
-        :rtype: keras.KerasTensor
-        """
+        """Adds positional encodings to the input tensor."""
         seq_len = ops.shape(x)[1]
         x = x + self.pe[:, :seq_len, :]
         return self.dropout(x, training=training)
@@ -169,7 +199,56 @@ class PositionalEncoding(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class GroupAttention(keras.layers.Layer):
-    """Hierarchical group attention for Tree Transformer."""
+    """
+    Hierarchical group attention for Tree Transformer.
+
+    This layer implements the core mechanism of the Tree Transformer. It computes
+    two attention distributions: `neibor_attn` (break probability between adjacent
+    tokens) and `g_attn` (probability of tokens belonging to the same syntactic group).
+
+    **Intent**: To learn soft, hierarchical constituency trees directly from text
+    without explicit syntactic supervision. The computed `g_attn` serves as a
+    structural prior for the subsequent multi-head attention layer.
+
+    **Architecture**:
+    .. code-block:: text
+
+        Input(context, mask, prior)
+               │
+               ▼
+        Normalization(context) -> Linear Projections (Q, K)
+               │
+               ▼
+        1. Compute Neighbor Attention (`neibor_attn`):
+           - Masked dot-product attention between adjacent tokens only.
+           - Symmetrize and combine with `prior` from previous layer.
+               │
+               ▼
+        2. Tree Induction (`g_attn`):
+           - Use dynamic programming (in log-space) on `neibor_attn`
+             to compute group probabilities for all token spans.
+           - Symmetrize and normalize.
+               │
+               ▼
+        Output(`g_attn`, `neibor_attn`)
+
+    :param hidden_size: The dimensionality of the model. Must be positive.
+    :type hidden_size: int
+    :param normalization_type: The type of normalization layer to use (e.g., "layer_norm").
+    :type normalization_type: str
+    :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
+
+    **Input shape**:
+        A tuple of three tensors:
+        - `context`: `(batch_size, sequence_length, hidden_size)`
+        - `mask`: `(batch_size, 1, sequence_length)`
+        - `prior`: Scalar tensor or `(batch_size, sequence_length, sequence_length)`
+
+    **Output shape**:
+        A tuple of two tensors, both with shape: `(batch_size, sequence_length, sequence_length)`
+        - `g_attn`: Group attention probabilities.
+        - `neibor_attn`: Neighbor attention probabilities (break probabilities).
+    """
 
     def __init__(
         self,
@@ -177,14 +256,7 @@ class GroupAttention(keras.layers.Layer):
         normalization_type: str = "layer_norm",
         **kwargs: Any,
     ) -> None:
-        """Initializes the GroupAttention layer.
-
-        :param hidden_size: The dimensionality of the model.
-        :type hidden_size: int
-        :param normalization_type: The type of normalization layer to use.
-        :type normalization_type: str
-        :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
-        """
+        """Initializes the GroupAttention layer."""
         super().__init__(**kwargs)
         if hidden_size <= 0:
             raise ValueError(
@@ -192,6 +264,8 @@ class GroupAttention(keras.layers.Layer):
             )
         self.hidden_size = hidden_size
         self.normalization_type = normalization_type
+
+        # Create sub-layers in __init__
         self.norm = create_normalization_layer(normalization_type)
         self.linear_key = keras.layers.Dense(
             hidden_size, name="key_projection"
@@ -201,11 +275,7 @@ class GroupAttention(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Builds the sub-layers.
-
-        :param input_shape: Tuple of shapes for (context, mask, prior).
-        :type input_shape: Tuple[Optional[int], ...]
-        """
+        """Builds the sub-layers, which is critical for serialization."""
         context_shape, _, _ = input_shape
         self.norm.build(context_shape)
         self.linear_key.build(context_shape)
@@ -219,35 +289,19 @@ class GroupAttention(keras.layers.Layer):
         ],
         training: Optional[bool] = None,
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Computes group attention probabilities.
-
-        :param inputs: Tuple of (context, mask, prior).
-        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
-        :param training: Boolean indicating training mode.
-        :type training: Optional[bool]
-        :return: A tuple containing (g_attn, neibor_attn).
-        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
-        """
+        """Computes group attention probabilities."""
         context, mask, prior = inputs
-        # Use ops.shape to handle both eager and symbolic tensors
         current_seq_len = ops.shape(context)[1]
 
         # --- 1. Compute Neighbor Attention (between adjacent tokens) ---
-        # Create adjacency matrix for immediate neighbors (super/sub-diagonal)
-        # This implementation is symbolic-friendly and avoids Python conditionals
-        # on tensor shapes, which fixes graph tracing issues.
+        # Create an adjacency matrix for immediate neighbors (super/sub-diagonal)
+        # using backend-agnostic ops for robust graph tracing.
         i = ops.arange(current_seq_len)
-        # Super-diagonal mask (i == j - 1)
-        adj_mask_upper = ops.equal(
-            ops.expand_dims(i, 1), ops.expand_dims(i, 0) - 1
-        )
-        # Sub-diagonal mask (i == j + 1)
-        adj_mask_lower = ops.equal(
-            ops.expand_dims(i, 1), ops.expand_dims(i, 0) + 1
-        )
+        adj_mask_upper = ops.equal(ops.expand_dims(i, 1), ops.expand_dims(i, 0) - 1)
+        adj_mask_lower = ops.equal(ops.expand_dims(i, 1), ops.expand_dims(i, 0) + 1)
         adj_mask = ops.logical_or(adj_mask_upper, adj_mask_lower)
 
-        # Mask out padding positions
+        # Mask out padding positions to prevent attention leakage.
         padding_mask = ops.cast(ops.squeeze(mask, axis=1), "bool")
         padding_mask_2d = ops.logical_and(
             ops.expand_dims(padding_mask, axis=2),
@@ -255,7 +309,7 @@ class GroupAttention(keras.layers.Layer):
         )
         final_adj_mask = ops.logical_and(adj_mask, padding_mask_2d)
 
-        # Scaled dot-product attention, masked to only neighbors
+        # Scaled dot-product attention, masked to only consider neighbors.
         context_norm = self.norm(context)
         key = self.linear_key(context_norm)
         query = self.linear_query(context_norm)
@@ -264,32 +318,30 @@ class GroupAttention(keras.layers.Layer):
         scores = ops.where(final_adj_mask, scores, -1e9)
         neibor_attn = ops.softmax(scores, axis=-1)
 
-        # Symmetrize and stabilize
+        # Symmetrize and stabilize.
         neibor_attn = ops.sqrt(
             neibor_attn * ops.transpose(neibor_attn, axes=(0, 2, 1)) + 1e-9
         )
 
-        # Combine with prior from previous layer. Prior is expected to be either
-        # a scalar tensor (initial) or a (B, L, L) tensor (from previous block).
+        # Combine with prior from the previous layer.
         neibor_attn = prior + (1.0 - prior) * neibor_attn
 
         # --- 2. Tree Induction (Dynamic Programming with Matrix Ops) ---
-        # Construct masks using fundamental ops for robust serialization
+        # This is a numerically stable, parallelized version of the CKY algorithm.
         row_indices = ops.expand_dims(ops.arange(current_seq_len), 1)
         col_indices = ops.expand_dims(ops.arange(current_seq_len), 0)
         triu_mask = ops.greater_equal(col_indices, row_indices)
         tri_matrix = ops.cast(triu_mask, self.compute_dtype)
         b = ops.cast(ops.eye(current_seq_len, dtype="int32"), "bool")
 
-        # Use log-space for numerical stability (avoids underflow)
+        # Use log-space for numerical stability to avoid underflow.
         t = ops.log(neibor_attn + 1e-9)
-        # Mask non-super-diagonal using the symbolic-friendly mask from above
-        t = ops.where(adj_mask_upper, t, 0.0)
+        t = ops.where(adj_mask_upper, t, 0.0) # Consider only super-diagonal.
 
         t = ops.matmul(t, tri_matrix)
         g_attn = ops.exp(ops.matmul(tri_matrix, t))
 
-        # Finalize group attention scores
+        # Finalize group attention scores.
         g_attn = ops.where(
             ops.logical_not(ops.logical_xor(triu_mask, b)), g_attn, 0.0
         )
@@ -300,8 +352,7 @@ class GroupAttention(keras.layers.Layer):
             + neibor_attn_diag_filled
         )
 
-        # Normalize g_attn to be a valid probability distribution (prior for next layer)
-        # and explicitly zero out padded token interactions to prevent information leak.
+        # Normalize g_attn and explicitly zero out padded token interactions.
         g_attn_sum = ops.sum(g_attn, axis=-1, keepdims=True)
         g_attn = ops.divide(g_attn, g_attn_sum + 1e-9)
 
@@ -325,7 +376,54 @@ class GroupAttention(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class TreeMHA(keras.layers.Layer):
-    """Multi-Head Attention modulated by Tree Transformer group probabilities."""
+    """
+    Multi-Head Attention modulated by Tree Transformer group probabilities.
+
+    This layer performs standard scaled dot-product multi-head attention, but
+    with a key modification: the final attention weights are element-wise
+    multiplied by the `group_prob` matrix from the `GroupAttention` layer.
+
+    **Intent**: To bias the self-attention mechanism to focus on tokens within
+    the same learned syntactic constituents, integrating the induced tree
+    structure directly into the representation learning process.
+
+    **Architecture**:
+    .. code-block:: text
+
+        Input(query, key, value, group_prob, mask)
+               │
+               ▼
+        Linear Projections -> Split Heads (Q, K, V)
+               │
+               ▼
+        Scaled Dot-Product Attention: softmax(Q @ Kᵀ / √dₖ)
+               │
+               ▼
+        Modulate with Structure: AttentionWeights * group_prob
+               │
+               ▼
+        Dropout -> Weighted Sum with V -> Concat Heads -> Output Projection
+               │
+               ▼
+        Output(shape=[batch, seq_len, hidden_size])
+
+    :param num_heads: The number of attention heads.
+    :type num_heads: int
+    :param hidden_size: The dimensionality of the model. Must be divisible by `num_heads`.
+    :type hidden_size: int
+    :param attention_dropout_prob: Dropout probability for attention scores.
+    :type attention_dropout_prob: float
+    :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
+
+    **Input shape**:
+        A tuple of tensors:
+        - `query`, `key`, `value`: `(batch_size, sequence_length, hidden_size)`
+        - `group_prob`: `(batch_size, sequence_length, sequence_length)`
+        - `mask`: `(batch_size, 1, sequence_length)`
+
+    **Output shape**:
+        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
+    """
 
     def __init__(
         self,
@@ -334,16 +432,7 @@ class TreeMHA(keras.layers.Layer):
         attention_dropout_prob: float = 0.1,
         **kwargs: Any,
     ) -> None:
-        """Initializes the TreeMHA layer.
-
-        :param num_heads: The number of attention heads.
-        :type num_heads: int
-        :param hidden_size: The dimensionality of the model.
-        :type hidden_size: int
-        :param attention_dropout_prob: Dropout probability for attention scores.
-        :type attention_dropout_prob: float
-        :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
-        """
+        """Initializes the TreeMHA layer."""
         super().__init__(**kwargs)
         if hidden_size <= 0 or num_heads <= 0 or hidden_size % num_heads != 0:
             raise ValueError("Invalid hidden_size or num_heads configuration.")
@@ -354,11 +443,22 @@ class TreeMHA(keras.layers.Layer):
         self.hidden_size = hidden_size
         self.attention_dropout_prob = attention_dropout_prob
         self.depth = hidden_size // num_heads
+
+        # Create sub-layers in __init__
         self.wq = keras.layers.Dense(hidden_size, name="query")
         self.wk = keras.layers.Dense(hidden_size, name="key")
         self.wv = keras.layers.Dense(hidden_size, name="value")
         self.dense = keras.layers.Dense(hidden_size, name="output_projection")
         self.dropout = keras.layers.Dropout(attention_dropout_prob)
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Builds all sub-layers for robust serialization."""
+        query_shape, _, _, _, _ = input_shape
+        self.wq.build(query_shape)
+        self.wk.build(query_shape)
+        self.wv.build(query_shape)
+        self.dense.build(query_shape)
+        super().build(input_shape)
 
     def _split_heads(
         self, x: keras.KerasTensor, batch_size: int
@@ -378,15 +478,7 @@ class TreeMHA(keras.layers.Layer):
         ],
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass for tree-modulated multi-head attention.
-
-        :param inputs: Tuple of (query, key, value, group_prob, mask).
-        :type inputs: Tuple[...]
-        :param training: Boolean indicating training mode.
-        :type training: Optional[bool]
-        :return: The output tensor of shape (batch, seq_len, hidden_size).
-        :rtype: keras.KerasTensor
-        """
+        """Forward pass for tree-modulated multi-head attention."""
         query, key, value, group_prob, mask = inputs
         batch_size = ops.shape(query)[0]
 
@@ -403,10 +495,7 @@ class TreeMHA(keras.layers.Layer):
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
         if mask is not None:
-            # The input mask is (B, 1, L) with 1s for valid tokens and 0s for padding.
-            # Convert to a float mask with 0.0 for valid and -1e9 for padding.
             attention_mask = (1.0 - ops.cast(mask, self.compute_dtype)) * -1e9
-            # Expand to (B, 1, 1, L) for broadcasting over heads and query sequence length.
             broadcast_mask = ops.expand_dims(attention_mask, axis=1)
             scaled_attention_logits += broadcast_mask
 
@@ -437,7 +526,60 @@ class TreeMHA(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class TreeTransformerBlock(keras.layers.Layer):
-    """Single block of the Tree Transformer encoder."""
+    """
+    Single block of the Tree Transformer encoder.
+
+    This composite layer encapsulates one full cycle of the Tree Transformer's
+    logic: computing syntactic structure, applying structure-aware attention,
+    and processing through a feed-forward network. It uses a Pre-LayerNorm
+    architecture for improved training stability.
+
+    **Intent**: To provide a modular, repeatable building block for constructing
+    the full Tree Transformer encoder stack.
+
+    **Architecture (Pre-LN)**:
+    .. code-block:: text
+
+        Input(x, mask, group_prob_prior)
+          │
+          ├─► GroupAttention(x, mask, group_prob_prior) ──► group_prob_out, break_prob
+          │
+          └─► LayerNorm₁ ──► TreeMHA(q, k, v, group_prob_out, mask) ─► Add & Dropout ─► x'
+                                 ▲
+                                 │
+              ───────────────────┘ (Residual Connection)
+
+        x' ─► LayerNorm₂ ──► FFN ────────────────────────────────────► Add & Dropout ─► Output(x_out)
+          ▲
+          │
+          └──────────────────────────────────────────────────────────────────────────┘ (Residual Connection)
+
+    :param hidden_size: Dimensionality of the model.
+    :type hidden_size: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param intermediate_size: Dimensionality of the FFN layer.
+    :type intermediate_size: int
+    :param hidden_dropout_prob: Dropout for hidden layers.
+    :type hidden_dropout_prob: float
+    :param attention_dropout_prob: Dropout for attention scores.
+    :type attention_dropout_prob: float
+    :param normalization_type: Type of normalization layer.
+    :type normalization_type: NormalizationType
+    :param ffn_type: Type of feed-forward network.
+    :type ffn_type: FFNType
+    :param hidden_act: Activation function for the FFN.
+    :type hidden_act: str
+    :param layer_norm_eps: Epsilon for normalization layers.
+    :type layer_norm_eps: float
+    :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
+
+    **Input shape**:
+        Tuple of `(x, mask, group_prob_prior)` as defined in `GroupAttention`.
+
+    **Output shape**:
+        Tuple of `(x_out, group_prob_out, break_prob)`.
+    """
 
     def __init__(
         self,
@@ -452,28 +594,7 @@ class TreeTransformerBlock(keras.layers.Layer):
         layer_norm_eps: float = 1e-12,
         **kwargs: Any,
     ) -> None:
-        """Initializes the TreeTransformerBlock.
-
-        :param hidden_size: Dimensionality of the model.
-        :type hidden_size: int
-        :param num_heads: Number of attention heads.
-        :type num_heads: int
-        :param intermediate_size: Dimensionality of the FFN layer.
-        :type intermediate_size: int
-        :param hidden_dropout_prob: Dropout for hidden layers.
-        :type hidden_dropout_prob: float
-        :param attention_dropout_prob: Dropout for attention scores.
-        :type attention_dropout_prob: float
-        :param normalization_type: Type of normalization layer.
-        :type normalization_type: NormalizationType
-        :param ffn_type: Type of feed-forward network.
-        :type ffn_type: FFNType
-        :param hidden_act: Activation function for the FFN.
-        :type hidden_act: str
-        :param layer_norm_eps: Epsilon for normalization layers.
-        :type layer_norm_eps: float
-        :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
-        """
+        """Initializes the TreeTransformerBlock."""
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -485,6 +606,7 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.hidden_act = hidden_act
         self.layer_norm_eps = layer_norm_eps
 
+        # Create all sub-layers in __init__
         self.group_attn = GroupAttention(
             hidden_size=hidden_size, normalization_type=normalization_type
         )
@@ -514,6 +636,23 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.dropout1 = keras.layers.Dropout(hidden_dropout_prob)
         self.dropout2 = keras.layers.Dropout(hidden_dropout_prob)
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Builds all sub-layers explicitly for robust serialization."""
+        x_shape, mask_shape, prior_shape = input_shape
+        group_attn_input_shape = (x_shape, mask_shape, prior_shape)
+
+        self.group_attn.build(group_attn_input_shape)
+        self.norm1.build(x_shape)
+
+        # The TreeMHA layer expects a tuple of inputs.
+        mha_input_shape = (x_shape, x_shape, x_shape, None, mask_shape)
+        self.self_attn.build(mha_input_shape)
+
+        self.norm2.build(x_shape)
+        self.ffn.build(x_shape)
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Tuple[
@@ -521,15 +660,7 @@ class TreeTransformerBlock(keras.layers.Layer):
         ],
         training: Optional[bool] = None,
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """Forward pass for the Tree Transformer block.
-
-        :param inputs: Tuple of (x, mask, group_prob_prior).
-        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
-        :param training: Boolean indicating training mode.
-        :type training: Optional[bool]
-        :return: Tuple of (x_out, group_prob_out, break_prob).
-        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
-        """
+        """Forward pass for the Tree Transformer block."""
         x, mask, group_prob = inputs
 
         # 1. Group Attention to compute constituency structure
@@ -589,32 +720,31 @@ class TreeTransformer(keras.Model):
     dictionary containing 'last_hidden_state', 'logits' (from LM head), and
     'break_probs' from all layers.
 
-    **Architecture Overview:**
-
+    **Architecture Overview**:
     .. code-block:: text
 
-        Input(input_ids)
+        Input({"input_ids": [B, L]})
                │
                ▼
-        Embedding -> PositionalEncoding
+        Embedding & PositionalEncoding
                │
                ▼
-        TreeTransformerBlock₁ (GroupAttention -> TreeMHA -> FFN)
+        TreeTransformerBlock₁ (passes `group_prob` forward)
                │
                ▼
               ...
                │
                ▼
-        TreeTransformerBlockₙ (GroupAttention -> TreeMHA -> FFN)
+        TreeTransformerBlockₙ
                │
                ▼
-        Final LayerNorm -> LM Head
+        Final LayerNorm ───► LM Head ───► "logits": [B, L, V]
                │
                ▼
         Output Dictionary {
-            "last_hidden_state": [batch, seq_len, hidden_size],
-            "logits": [batch, seq_len, vocab_size],
-            "break_probs": [batch, num_layers, seq_len, seq_len]
+            "last_hidden_state": [B, L, H],
+            "logits": [B, L, V],
+            "break_probs": [B, N, L, L]
         }
 
     :param vocab_size: Size of the vocabulary. Defaults to 30000.
@@ -737,6 +867,7 @@ class TreeTransformer(keras.Model):
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
 
+        # Create all sub-layers
         self._build_architecture()
         logger.info(
             f"Created Tree Transformer foundation model: {self.num_layers} layers, "
@@ -834,16 +965,7 @@ class TreeTransformer(keras.Model):
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass of the TreeTransformer model.
-
-        :param inputs: Input token IDs or a dictionary with 'input_ids'.
-        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
-        :param training: Indicates if the model is in training mode.
-        :type training: Optional[bool]
-        :return: A dictionary with 'last_hidden_state', 'logits', 'break_probs'.
-        :rtype: Dict[str, keras.KerasTensor]
-        :raises ValueError: If dictionary input does not contain 'input_ids'.
-        """
+        """Forward pass of the TreeTransformer model."""
         if isinstance(inputs, dict):
             input_ids = inputs.get("input_ids")
             if input_ids is None:
@@ -859,18 +981,16 @@ class TreeTransformer(keras.Model):
         mask = ops.expand_dims(mask, axis=1)
 
         x = self.embedding(input_ids)
-        # Standard transformer practice: scale embeddings by sqrt of model dimension.
         x *= ops.cast(self.hidden_size, x.dtype) ** 0.5
         x = self.pos_encoding(x, training=training)
 
-        # Initialize group probability for the first layer as a scalar tensor (0.0).
-        # FIX: Must be a tensor (not a Python float) for Keras tracing/building.
+        # Initialize group probability for the first layer as a scalar tensor.
+        # This must be a tensor, not a float, for Keras tracing to work correctly.
         group_prob: keras.KerasTensor = ops.convert_to_tensor(
             0.0, dtype=self.compute_dtype
         )
         all_break_probs = []
 
-        # Pass through the stack of transformer blocks.
         for block in self.blocks:
             x, group_prob, break_prob = block(
                 (x, mask, group_prob), training=training
@@ -893,17 +1013,7 @@ class TreeTransformer(keras.Model):
         skip_mismatch: bool = True,
         by_name: bool = True,
     ) -> None:
-        """Loads pretrained weights into the model.
-
-        :param weights_path: Path to the weights file (.keras format).
-        :type weights_path: str
-        :param skip_mismatch: Whether to skip layers with mismatched shapes.
-        :type skip_mismatch: bool
-        :param by_name: Whether to load weights by layer name.
-        :type by_name: bool
-        :raises FileNotFoundError: If weights_path doesn't exist.
-        :raises ValueError: If weights cannot be loaded.
-        """
+        """Loads pretrained weights into the model."""
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
         try:
@@ -934,18 +1044,7 @@ class TreeTransformer(keras.Model):
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
     ) -> str:
-        """Downloads pretrained weights from URL.
-
-        :param variant: Model variant name.
-        :type variant: str
-        :param dataset: Dataset version (e.g., "uncased").
-        :type dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
-        :type cache_dir: Optional[str]
-        :return: Path to the downloaded weights file.
-        :rtype: str
-        :raises ValueError: If variant or dataset is not available.
-        """
+        """Downloads pretrained weights from URL."""
         if (
             variant not in TreeTransformer.PRETRAINED_WEIGHTS
             or dataset not in TreeTransformer.PRETRAINED_WEIGHTS[variant]
@@ -976,22 +1075,7 @@ class TreeTransformer(keras.Model):
         cache_dir: Optional[str] = None,
         **kwargs: Any,
     ) -> "TreeTransformer":
-        """Creates a TreeTransformer model from a predefined variant.
-
-        :param variant: Name of the variant ("base", "large", etc.).
-        :type variant: str
-        :param pretrained: If True, loads pretrained weights. If str, path to local weights.
-        :type pretrained: Union[bool, str]
-        :param weights_dataset: Dataset for pretrained weights ("uncased").
-        :type weights_dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
-        :type cache_dir: Optional[str]
-        :param kwargs: Additional arguments to override variant defaults.
-        :type kwargs: Any
-        :return: A TreeTransformer model instance.
-        :rtype: TreeTransformer
-        :raises ValueError: If the variant is not recognized.
-        """
+        """Creates a TreeTransformer model from a predefined variant."""
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
@@ -1015,8 +1099,6 @@ class TreeTransformer(keras.Model):
                         f"Failed to download pretrained weights: {e}. "
                         "Continuing with random initialization."
                     )
-            # If a custom vocab size is passed, we must skip the embedding layer
-            # during weight loading as shapes will not match.
             if (
                 "vocab_size" in kwargs
                 and kwargs["vocab_size"] != cls.DEFAULT_VOCAB_SIZE
@@ -1149,8 +1231,6 @@ def create_tree_transformer_with_head(
     encoder_outputs = tree_encoder(inputs)
 
     # Pass encoder outputs to the task head.
-    # Note: Depending on the task, you might also want to use the 'break_probs'
-    # from encoder_outputs for syntax-aware tasks.
     head_inputs = {"hidden_states": encoder_outputs["last_hidden_state"]}
     task_outputs = task_head(head_inputs)
 
@@ -1162,3 +1242,5 @@ def create_tree_transformer_with_head(
         f"Successfully created model with {model.count_params():,} parameters."
     )
     return model
+
+# ---------------------------------------------------------------------
