@@ -1,5 +1,5 @@
 """
-Attention Layer Factory for the dl_techniques Framework
+Attention Layer Factory
 
 A comprehensive factory system for creating and managing various attention mechanisms
 with unified interfaces, type safety, parameter validation, and detailed documentation.
@@ -54,8 +54,10 @@ from .non_local_attention import NonLocalAttention
 from .perceiver_attention import PerceiverAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 from .spatial_attention import SpatialAttention
-from .window_attention import WindowAttention
-from .window_attention_zigzag import WindowZigZagAttention
+from .window_attention import (
+    create_zigzag_window_attention,
+    create_grid_window_attention
+)
 
 # ---------------------------------------------------------------------
 # Type Definitions
@@ -507,27 +509,30 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 
     'window': {
-        'class': WindowAttention,
+        'class': create_grid_window_attention,
         'description': (
-            'Windowed multi-head self-attention from Swin Transformer partitioning inputs '
-            'into non-overlapping windows for local attention computation. Incorporates '
-            'learnable relative position bias and achieves linear complexity while maintaining '
-            'spatial awareness through position encoding.'
+            'Windowed multi-head self-attention from Swin Transformer, partitioning inputs '
+            'into non-overlapping grids for local attention computation. Achieves linear '
+            'complexity while maintaining spatial awareness through an optional learnable '
+            'relative position bias.'
         ),
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
             'qkv_bias': True,
             'qk_scale': None,
-            'attn_dropout_rate': 0.0,
-            'proj_dropout_rate': 0.0,
+            'dropout_rate': 0.0,
             'proj_bias': True,
+            'attention_mode': 'linear',
+            'normalization': 'softmax',
+            'use_relative_position_bias': True,
+            'adaptive_softmax_config': None,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
             'bias_regularizer': None
         },
         'use_case': (
-            'High-resolution vision_heads transformers requiring scalable attention mechanisms. '
+            'High-resolution vision transformers requiring scalable attention mechanisms. '
             'Core component of Swin-style architectures for image classification, object '
             'detection, and semantic segmentation where input resolution scalability is crucial.'
         ),
@@ -535,22 +540,21 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'paper': 'Swin Transformer: Hierarchical Vision Transformer using Shifted Windows'
     },
     'window_zigzag': {
-        'class': WindowZigZagAttention,
+        'class': create_zigzag_window_attention,
         'description': (
-            'Advanced windowed multi-head attention with a zigzag-ordered relative position '
-            'bias to prioritize frequency-domain locality. Supports optional advanced '
-            'normalization via adaptive temperature softmax or hierarchical routing as '
-            'alternatives to standard softmax, improving calibration.'
+            'Windowed multi-head self-attention that first reorders the input sequence along '
+            'a 2D zigzag path to group frequency-proximate tokens. This induces a frequency-based '
+            'locality bias, useful for image data. Supports advanced normalization like adaptive softmax.'
         ),
         'required_params': ['dim', 'window_size', 'num_heads'],
         'optional_params': {
             'qkv_bias': True,
             'qk_scale': None,
-            'attn_dropout_rate': 0.0,
-            'proj_dropout_rate': 0.0,
+            'dropout_rate': 0.0,
             'proj_bias': True,
-            'use_hierarchical_routing': False,
-            'use_adaptive_softmax': False,
+            'attention_mode': 'linear',
+            'normalization': 'softmax',
+            'use_relative_position_bias': False,
             'adaptive_softmax_config': None,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
@@ -563,7 +567,7 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'better calibration or exploring alternatives to softmax.'
         ),
         'complexity': 'O(W²) per window, same as standard window attention',
-        'paper': "Extends 'Swin Transformer' with zigzag bias and advanced normalization"
+        'paper': "Extends 'Swin Transformer' with zigzag partitioning and advanced normalization"
     }
 }
 """
@@ -694,8 +698,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
 
     # Validate probability/rate parameters (0.0 to 1.0)
     rate_params = [
-        'dropout_rate', 'attention_dropout_rate', 'attn_dropout_rate',
-        'proj_dropout_rate', 'lambda_init', 'rope_percentage'
+        'dropout_rate', 'attention_dropout_rate', 'lambda_init', 'rope_percentage'
     ]
     for param in rate_params:
         if param in kwargs and not (0.0 <= kwargs[param] <= 1.0):
@@ -721,14 +724,6 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
             raise ValueError(
                 f"For group_query attention, num_heads ({kwargs['num_heads']}) "
                 f"must be divisible by num_kv_heads ({kwargs['num_kv_heads']})"
-            )
-    if attention_type == 'window_zigzag':
-        use_adaptive = kwargs.get('use_adaptive_softmax', False)
-        use_routing = kwargs.get('use_hierarchical_routing', False)
-        if use_adaptive and use_routing:
-            raise ValueError(
-                "For window_zigzag attention, 'use_adaptive_softmax' and "
-                "'use_hierarchical_routing' cannot both be True."
             )
 
     logger.debug(

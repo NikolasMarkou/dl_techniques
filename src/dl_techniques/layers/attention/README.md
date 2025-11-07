@@ -31,8 +31,8 @@ The following layers are supported by the factory system with automated paramete
 | `rpc` | `RPCAttention` | Robust attention via Principal Component Pursuit decomposition. | Models needing robustness to noise and adversarial attacks. | `(batch, seq_len, dim)` |
 | `shared_weights_cross` | `SharedWeightsCrossAttention`| Cross-attention between modalities with shared weights. | Efficient multi-modal learning where different data types exchange information. | `(batch, total_seq_len, dim)` |
 | `spatial` | `SpatialAttention` | Spatial attention module from CBAM. | CNNs to highlight spatially significant feature regions. | `(batch, H, W, channels)` |
-| `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, window_size², dim)` |
-| `window_zigzag` | `WindowZigZagAttention` | Windowed attention with zigzag relative position bias. | Vision models where frequency-domain relationships are important. | `(batch, window_size², dim)` |
+| `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
+| `window_zigzag` | `WindowAttention` | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
 
 ## Factory Interface
 
@@ -325,20 +325,20 @@ attn = create_attention_layer(
 
 ### `window`
 **Required:** `dim`, `window_size`, `num_heads`  
-**Optional:** `attn_dropout_rate` (default: 0.0), `qkv_bias` (default: True)
+**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True)
 ```python
 attn = create_attention_layer(
     'window',
     dim=96,
     window_size=7,
     num_heads=4,
-    attn_dropout_rate=0.05
+    dropout_rate=0.05
 )
 ```
 
 ### `window_zigzag`
 **Required:** `dim`, `window_size`, `num_heads`  
-**Optional:** `attn_dropout_rate` (default: 0.0), `qkv_bias` (default: True), `use_hierarchical_routing` (default: False), `use_adaptive_softmax` (default: False)
+**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True), `normalization` (default: 'softmax'), `use_relative_position_bias` (default: False)
 ```python
 # Create a zigzag window attention with adaptive softmax
 attn = create_attention_layer(
@@ -346,7 +346,7 @@ attn = create_attention_layer(
     dim=96,
     window_size=7,
     num_heads=4,
-    use_adaptive_softmax=True,
+    normalization='adaptive_softmax',
     adaptive_softmax_config={'min_temp': 0.1, 'max_temp': 2.0}
 )
 ```
