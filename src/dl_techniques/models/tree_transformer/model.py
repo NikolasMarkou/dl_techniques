@@ -274,12 +274,11 @@ class GroupAttention(keras.layers.Layer):
         neibor_attn = prior + (1.0 - prior) * neibor_attn
 
         # --- 2. Tree Induction (Dynamic Programming with Matrix Ops) ---
-        # This section efficiently computes attention over all possible spans
-        # by building upon the neighbor attention scores.
-        tri_matrix = ops.cast(
-            ops.triu(ops.ones((current_seq_len, current_seq_len))),
-            self.compute_dtype,
-        )
+        # Construct masks using fundamental ops for robust serialization
+        row_indices = ops.expand_dims(ops.arange(current_seq_len), 1)
+        col_indices = ops.expand_dims(ops.arange(current_seq_len), 0)
+        triu_mask = ops.greater_equal(col_indices, row_indices)
+        tri_matrix = ops.cast(triu_mask, self.compute_dtype)
         b = ops.cast(ops.eye(current_seq_len, dtype="int32"), "bool")
 
         # Use log-space for numerical stability (avoids underflow)
@@ -292,11 +291,7 @@ class GroupAttention(keras.layers.Layer):
 
         # Finalize group attention scores
         g_attn = ops.where(
-            ops.logical_not(
-                ops.logical_xor(ops.cast(tri_matrix, "bool"), b)
-            ),
-            g_attn,
-            0.0,
+            ops.logical_not(ops.logical_xor(triu_mask, b)), g_attn, 0.0
         )
         neibor_attn_diag_filled = ops.where(b, 1e-9, neibor_attn)
         g_attn = (
@@ -315,7 +310,6 @@ class GroupAttention(keras.layers.Layer):
         neibor_attn *= float_padding_mask_2d
 
         return g_attn, neibor_attn
-
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""
