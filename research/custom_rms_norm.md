@@ -1,4 +1,4 @@
-Below is a **side-by-side comparison** of the two approaches. Although both aim to keep feature vectors within a certain norm range (roughly \([1-\alpha, 1]\)), their **mechanics**, **parameterization**, and **training behavior** differ in important ways.
+# A **side-by-side comparison** of the two approaches. Although both aim to keep feature vectors within a certain norm range (roughly \([1-\alpha, 1]\)), their **mechanics**, **parameterization**, and **training behavior** differ in important ways.
 
 ---
 

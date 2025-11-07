@@ -182,7 +182,8 @@ class OrthogonalityAnalysisVisualization(VisualizationPlugin):
         ax.set_xlabel('Epoch', fontsize=self.config.label_fontsize)
         ax.set_ylabel('||W^T W - I||_F', fontsize=self.config.label_fontsize)
         ax.set_title('Orthogonality Measure Over Training', fontsize=self.config.title_fontsize)
-        ax.legend(loc='best')
+        if ax.get_legend_handles_labels()[1]:
+            ax.legend(loc='best')
         ax.grid(alpha=0.3)
 
     def _plot_scale_means(self, data: OrthogonalityData, ax: Any) -> None:
@@ -200,7 +201,8 @@ class OrthogonalityAnalysisVisualization(VisualizationPlugin):
         ax.set_xlabel('Epoch', fontsize=self.config.label_fontsize)
         ax.set_ylabel('Mean Scale Value', fontsize=self.config.label_fontsize)
         ax.set_title('Scale Parameter Mean Over Training', fontsize=self.config.title_fontsize)
-        ax.legend(loc='best')
+        if ax.get_legend_handles_labels()[1]:
+            ax.legend(loc='best')
         ax.grid(alpha=0.3)
 
     def _plot_scale_stds(self, data: OrthogonalityData, ax: Any) -> None:
@@ -218,7 +220,8 @@ class OrthogonalityAnalysisVisualization(VisualizationPlugin):
         ax.set_xlabel('Epoch', fontsize=self.config.label_fontsize)
         ax.set_ylabel('Scale Std', fontsize=self.config.label_fontsize)
         ax.set_title('Scale Parameter Std Over Training', fontsize=self.config.title_fontsize)
-        ax.legend(loc='best')
+        if ax.get_legend_handles_labels()[1]:
+            ax.legend(loc='best')
         ax.grid(alpha=0.3)
 
     def _plot_final_scales(self, data: OrthogonalityData, ax: Any) -> None:
@@ -239,7 +242,8 @@ class OrthogonalityAnalysisVisualization(VisualizationPlugin):
         ax.set_title('Final Scale Parameter Statistics', fontsize=self.config.title_fontsize)
         ax.set_xticks(x + width * (len(data.model_names) - 1) / 2)
         ax.set_xticklabels(stats_keys)
-        ax.legend(loc='best')
+        if ax.get_legend_handles_labels()[1]:
+            ax.legend(loc='best')
         ax.grid(alpha=0.3, axis='y')
 
 
@@ -286,9 +290,8 @@ class StatisticalComparisonVisualization(VisualizationPlugin):
             'Statistical Comparison Across Runs',
             fontsize=self.config.title_fontsize + 2,
             fontweight='bold',
-            y=1.02
         )
-        plt.tight_layout()
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
 
         return fig
 
@@ -369,13 +372,12 @@ class OrthoBlockExperimentConfig:
     conv_filters: List[int] = field(default_factory=lambda: [32, 64, 128, 256])
     dense_units: int = 256
     dropout_rates: List[float] = field(default_factory=lambda: [0.2, 0.3, 0.4, 0.5])
-    final_dropout: float = 0.5
     kernel_size: Tuple[int, int] = (3, 3)
     weight_decay: float = 1e-4
     kernel_initializer: str = 'he_normal'
     use_residual: bool = True
-    activation: str = 'relu'
-    output_activation: str = 'softmax'
+    activation: str = 'gelu'
+    output_activation: str = 'linear'
 
     # --- Training Parameters ---
     epochs: int = 100
@@ -398,14 +400,6 @@ class OrthoBlockExperimentConfig:
             'ortho_reg_factor': 0.01,
             'scale_initial_value': 0.5
         }),
-        'OrthoBlock_HighScale': lambda config: ('orthoblock', {
-            'ortho_reg_factor': 0.1,
-            'scale_initial_value': 0.8
-        }),
-        'OrthoBlock_LowScale': lambda config: ('orthoblock', {
-            'ortho_reg_factor': 0.1,
-            'scale_initial_value': 0.2
-        }),
         'Dense_Standard': lambda config: ('dense', {}),
         'Dense_L2': lambda config: ('dense', {
             'kernel_regularizer': keras.regularizers.L2(0.01)
@@ -422,7 +416,8 @@ class OrthoBlockExperimentConfig:
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
         analyze_weights=True,
         analyze_calibration=True,
-        analyze_information_flow=True,
+        # NOTE: Disabled as it relies on PyTorch-specific hooks ('register_forward_hook')
+        analyze_information_flow=False,
         calibration_bins=15,
         save_plots=True,
         plot_style='publication',
@@ -590,7 +585,15 @@ def build_model(
         layer_params=layer_params,
         units=config.dense_units,
         activation=config.activation,
-        name=f'{name}_dense'
+        name=f'{name}_dense_0'
+    )(x)
+
+    x = create_dense_layer(
+        layer_type=layer_type,
+        layer_params=layer_params,
+        units=config.dense_units,
+        activation=config.activation,
+        name=f'{name}_dense_1'
     )(x)
 
     # Output layer
@@ -598,7 +601,7 @@ def build_model(
         config.num_classes,
         activation=config.output_activation,
         kernel_initializer=config.kernel_initializer,
-        name='predictions'
+        name='logits'
     )(x)
 
     # Create and compile model
@@ -606,9 +609,10 @@ def build_model(
 
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
 
+
     model.compile(
         optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',  # Use sparse for integer labels
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=[
             keras.metrics.SparseCategoricalAccuracy(name='accuracy'),
             keras.metrics.SparseTopKCategoricalAccuracy(k=5, name='top_5_accuracy')
@@ -863,7 +867,7 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     test_data = dataset_builder.get_test_data()
     class_names = dataset_builder.get_class_names()
 
-    logger.info("✅ Dataset loaded successfully")
+    logger.info("Dataset loaded successfully")
     logger.info(f"Steps per epoch: {steps_per_epoch}, Validation steps: {val_steps}")
 
     # ===== MULTI-RUN TRAINING =====
@@ -913,11 +917,14 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
             # Evaluate model
             try:
                 predictions = model.predict(test_data.x_data, verbose=0)
-                y_pred_classes = np.argmax(predictions, axis=1)
-                y_true = test_data.y_data.astype(int)
+                probabilities = tf.nn.softmax(predictions).numpy()
+                y_pred_classes = np.argmax(probabilities, axis=1)
+                y_true = test_data.y_data.flatten().astype(int)
 
                 accuracy = np.mean(y_pred_classes == y_true)
-                loss = -np.mean(np.log(predictions[np.arange(len(y_true)), y_true] + 1e-7))
+
+                # Calculate cross-entropy loss from probabilities
+                loss = -np.mean(np.log(probabilities[np.arange(len(y_true)), y_true] + 1e-9))
 
                 results_per_run[variant_name].append({
                     'accuracy': accuracy,
@@ -949,7 +956,7 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
     run_statistics = calculate_run_statistics(results_per_run)
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼Generating visualizations using framework...")
+    logger.info("Generating visualizations using framework...")
 
     # 1. Statistical comparison
     stat_comparison_data = StatisticalComparisonData(
@@ -1037,7 +1044,7 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
             name: np.argmax(preds, axis=1)
             for name, preds in raw_predictions.items()
         }
-        y_true_labels = test_data.y_data.astype(int)
+        y_true_labels = test_data.y_data.flatten().astype(int)
 
         model_results = {
             name: ClassificationResults(
@@ -1051,9 +1058,7 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
         }
 
         multi_model_data = MultiModelClassification(
-            y_true=y_true_labels,
-            model_results=model_results,
-            class_names=class_names
+            results=model_results,
         )
 
         viz_manager.visualize(
@@ -1077,10 +1082,10 @@ def run_experiment(config: OrthoBlockExperimentConfig) -> Dict[str, Any]:
         )
 
         model_analysis_results = analyzer.analyze(data=test_data)
-        logger.info("✅ Model analysis completed successfully!")
+        logger.info("Model analysis completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
+        logger.error(f"Model analysis failed: {e}", exc_info=True)
 
     # ===== RESULTS COMPILATION =====
     results = {
@@ -1166,7 +1171,7 @@ def save_experiment_results(results: Dict[str, Any], experiment_dir: Path) -> No
         for name, model in results['trained_models'].items():
             model.save(models_dir / f"{name}.keras")
 
-        logger.info("💾 Experiment results saved successfully")
+        logger.info("Experiment results saved successfully")
 
     except Exception as e:
         logger.error(f"Failed to save experiment results: {e}", exc_info=True)
@@ -1185,7 +1190,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # Statistical results
     if 'run_statistics' in results and results['run_statistics']:
-        logger.info("\nSTATISTICAL RESULTS (Mean ± Std across runs):")
+        logger.info("STATISTICAL RESULTS (Mean ± Std across runs):")
         logger.info(f"{'Model':<24} {'Accuracy':<20} {'Loss':<20} {'Runs':<8}")
         logger.info("-" * 75)
 
@@ -1210,18 +1215,27 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # Calibration analysis
     analysis = results.get('model_analysis')
     if analysis and analysis.calibration_metrics:
-        logger.info("\nCALIBRATION ANALYSIS (from last run):")
-        logger.info(f"{'Model':<24} {'ECE':<12} {'Brier':<12} {'Mean Entropy':<15}")
+        logger.info("CALIBRATION ANALYSIS (from last run):")
+        logger.info(f"{'Model':<24} {'ECE':<12} {'Brier':<12}")
         logger.info("-" * 67)
         for name, cal_metrics in analysis.calibration_metrics.items():
             logger.info(
                 f"{name:<24} {cal_metrics.get('ece', 0.0):<12.4f} "
                 f"{cal_metrics.get('brier_score', 0.0):<12.4f} "
-                f"{cal_metrics.get('mean_entropy', 0.0):<15.4f}"
+            )
+
+    if analysis and analysis.confidence_metrics:
+        logger.info("CONFIDENCE ANALYSIS (from last run):")
+        logger.info(f"{'Model':<24} {'Mean Entropy':<12} {'STD Entropy':<12}")
+        logger.info("-" * 67)
+        for name, conf_metrics in analysis.confidence_metrics.items():
+            logger.info(
+                f"{name:<24} {conf_metrics.get('mean_entropy', 0.0):<12.4f} "
+                f"{conf_metrics.get('std_entropy', 0.0):<12.4f} "
             )
 
     # Key insights
-    logger.info("\nKEY INSIGHTS:")
+    logger.info("KEY INSIGHTS:")
     if 'run_statistics' in results:
         stats = results['run_statistics']
         best_acc_model = max(stats, key=lambda m: stats[m]['accuracy']['mean'])
@@ -1237,7 +1251,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         )
 
         if results.get('orthogonality_trackers'):
-            logger.info("\n   Orthogonality Dynamics (Initial → Final ||W^T W - I||_F):")
+            logger.info("   Orthogonality Dynamics (Initial → Final ||W^T W - I||_F):")
             for name, tracker in results['orthogonality_trackers'].items():
                 if tracker.orthogonality_history:
                     initial = tracker.orthogonality_history[0].get('layer_0', 0)

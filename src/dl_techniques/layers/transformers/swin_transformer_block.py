@@ -384,13 +384,15 @@ class SwinTransformerBlock(keras.layers.Layer):
             window_size=self.window_size,
             num_heads=self.num_heads,
             qkv_bias=self.qkv_bias,
-            attn_dropout_rate=self.attn_dropout_rate,
-            proj_dropout_rate=self.dropout_rate,
+            dropout_rate=self.attn_dropout_rate,
             proj_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
+            partition_mode="grid",
+            normalization="softmax",
+            attention_mode="linear",
             name="attn"
         )
 

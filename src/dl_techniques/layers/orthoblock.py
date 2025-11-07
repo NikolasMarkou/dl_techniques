@@ -14,7 +14,7 @@ Architecturally, the layer implements a four-stage pipeline:
     but its weight matrix `W` is heavily regularized to be orthogonal. This
     encourages the columns of `W` to form an orthonormal basis.
 2.  **Magnitude Stabilization:** The resulting activations are normalized using
-    Root Mean Square Normalization (RMSNorm). This step controls the
+    Root Mean Square Normalization (ZeroCenteredRMSNorm). This step controls the
     magnitude of the feature vectors without the centering operation of
     Layer Normalization, preserving the directional information from the
     orthogonal projection.
@@ -62,8 +62,8 @@ from typing import Optional, Union, Any, Tuple, Dict, Callable
 # Framework-specific imports
 # ---------------------------------------------------------------------
 
-from .norms.rms_norm import RMSNorm
 from .layer_scale import LearnableMultiplier
+from .norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
 from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.binary_preference import BinaryPreferenceRegularizer
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
@@ -92,7 +92,7 @@ class OrthoBlock(keras.layers.Layer):
            ↓
     Dense(units) + OrthonormalRegularizer
            ↓
-    RMSNorm(stabilize activations)
+    ZeroCenteredRMSNorm(stabilize activations)
            ↓
     Activation(user-specified)
            ↓
@@ -159,7 +159,7 @@ class OrthoBlock(keras.layers.Layer):
 
     Attributes:
         dense: Dense layer with orthonormal regularization for feature projection.
-        norm: RMSNorm layer for activation stabilization.
+        norm: ZeroCenteredRMSNorm layer for activation stabilization.
         constrained_scale: LearnableMultiplier with [0,1] constraints for feature gating.
         ortho_reg: SoftOrthonormalConstraintRegularizer for weight matrix regularization.
 
@@ -248,7 +248,7 @@ class OrthoBlock(keras.layers.Layer):
             units=self.units,
             activation=None,  # Activation applied separately at the end
             use_bias=self.use_bias,
-            kernel_initializer=OrthogonalHypersphereInitializer(),
+            kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.ortho_reg,  # Orthonormal regularization
             bias_initializer=self.bias_initializer,
             bias_regularizer=self.bias_regularizer,
@@ -257,10 +257,10 @@ class OrthoBlock(keras.layers.Layer):
 
 
         # RMS normalization for activation stabilization
-        self.norm = RMSNorm(
+        self.norm = ZeroCenteredRMSNorm(
             axis=-1,
             use_scale=False,  # We handle scaling separately with constraints
-            name="rms_norm"
+            name="zero_centered_rms_norm"
         )
 
         # Constrained learnable scaling for feature gating
@@ -324,14 +324,14 @@ class OrthoBlock(keras.layers.Layer):
         # Stage 2: RMS normalization for activation stabilization
         z_norm = self.norm(z, training=training)
 
-        # Stage 3: Apply activation function
-        if self.activation is not None:
-            z_norm = self.activation(z_norm)
-        else:
-            z_norm = z_norm
-
-        # Stage 4: Constrained scaling for learnable feature gating
+        # Stage 3: Constrained scaling for learnable feature gating
         outputs = self.constrained_scale(z_norm, training=training)
+
+        # Stage 4: Apply activation function
+        if self.activation is not None:
+            outputs = self.activation(outputs)
+        else:
+            outputs = outputs
 
         return outputs
 
