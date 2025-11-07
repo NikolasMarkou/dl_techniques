@@ -11,7 +11,7 @@ A comprehensive, authoritative guide for creating robust, serializable, and prod
 5. [Serialization Lifecycle](#5-serialization-lifecycle)
 6. [Documentation and Type Safety](#6-documentation-and-type-safety)
 7. [Comprehensive Testing](#7-comprehensive-testing)
-8. [Framework Integration](#8-framework-integration)
+8. [Integrating with the DL-Techniques Framework](#8-integrating-with-the-dl-techniques-framework)
 9. [Common Pitfalls and Solutions](#9-common-pitfalls-and-solutions)
 10. [Advanced Patterns](#10-advanced-patterns)
 11. [Troubleshooting Guide](#11-troubleshooting-guide)
@@ -488,7 +488,7 @@ class OrchestrationLayer(keras.layers.Layer):
     Output(shape=[..., hidden_dims[-1]])
     ```
     
-    **Example Flow** (hidden_dims=[128, 64, 32]):
+    **Example Flow** (hidden_dims=):
     ```
     Input([batch, 784]) → Dense(128) → Dense(64) → Dense(32) → Output([batch, 32])
     ```
@@ -498,7 +498,7 @@ class OrchestrationLayer(keras.layers.Layer):
     Args:
         hidden_dims: List of integers specifying the output dimension of each
             Dense layer in sequence. Must be non-empty with positive integers.
-            Example: [512, 256, 128] creates 3 layers with those output sizes.
+            Example: creates 3 layers with those output sizes.
         activation: String name of activation function to apply to all Dense layers.
             Common choices: 'relu', 'gelu', 'tanh', 'sigmoid'. Defaults to 'relu'.
         **kwargs: Additional arguments for Layer base class.
@@ -618,7 +618,7 @@ class CustomModel(keras.Model):
     Output(shape=[..., num_classes]) # Probability distribution
     ```
     
-    **Example Architecture** (hidden_dims=[512, 256], num_classes=10):
+    **Example Architecture** (hidden_dims=, num_classes=10):
     ```
     Input([batch, 784])
          ↓
@@ -640,7 +640,7 @@ class CustomModel(keras.Model):
             match the number of target classes in your dataset.
         hidden_dims: List of integers specifying hidden layer dimensions.
             Each integer creates a Dense layer with that many units.
-            Defaults to [512, 256].
+            Defaults to.
         dropout_rate: Float between 0 and 1, fraction of hidden layer outputs
             randomly set to 0 during training. Applied after each hidden layer
             but not after the final classifier. Defaults to 0.1.
@@ -689,7 +689,7 @@ class CustomModel(keras.Model):
     def __init__(
         self,
         num_classes: int,
-        hidden_dims: List[int] = [512, 256],
+        hidden_dims: List[int] =,
         dropout_rate: float = 0.1,
         activation: str = 'relu',
         **kwargs: Any
@@ -1087,7 +1087,7 @@ class TestCustomLayer:
         output = layer(sample_input)
         
         assert layer.built
-        assert output.shape[0] == sample_input.shape[0]  # Batch size preserved
+        assert output.shape == sample_input.shape  # Batch size preserved
     
     def test_serialization_cycle(self, layer_config, sample_input):
         """CRITICAL TEST: Full serialization cycle."""
@@ -1144,7 +1144,7 @@ class TestCustomLayer:
         layer = CompositeLayer(**layer_config)
         
         output = layer(sample_input, training=training)
-        assert output.shape[0] == sample_input.shape[0]
+        assert output.shape == sample_input.shape
     
     def test_edge_cases(self):
         """Test error conditions."""
@@ -1159,183 +1159,168 @@ class TestCustomLayer:
 
 ---
 
-## 8. Framework Integration
+## 8. Integrating with the DL-Techniques Framework
 
-### Using DL-Techniques Components
+The `dl-techniques` framework is built on a modular, factory-based design. Instead of re-implementing common components, you can leverage a rich ecosystem of pre-built, production-ready layers for attention, normalization, and feed-forward networks. This approach promotes code reuse, consistency, and rapid experimentation.
+
+### 8.1 The Factory Pattern: A Unified Interface
+
+The core of the framework's modularity lies in its factory functions, which provide a single, consistent way to create different types of layers:
+- `dl_techniques.layers.attention.create_attention_layer(...)`
+- `dl_techniques.layers.ffn.create_ffn_layer(...)`
+- `dl_techniques.layers.norms.create_normalization_layer(...)`
+
+These factories take a `type` string (e.g., `'swiglu'`, `'rms_norm'`) and layer-specific arguments, returning a fully configured, serializable Keras layer. This pattern eliminates boilerplate code and ensures that all created layers adhere to the framework's best practices.
+
+### 8.2 Building a Modern Transformer with `TransformerLayer`
+
+For most sequence modeling tasks, the most effective way to integrate is through the highly configurable `TransformerLayer`. This layer is a composite block that internally uses the factories to build its attention, FFN, and normalization sub-layers, allowing you to construct a wide variety of transformer architectures with minimal code.
 
 ```python
+# Import the high-level TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
+
+# Example 1: A modern, efficient Transformer Layer
+# This layer uses pre-normalization with RMSNorm, Grouped-Query Attention,
+# and a SwiGLU feed-forward network.
+modern_transformer_block = TransformerLayer(
+    hidden_size=512,
+    num_heads=8,
+    intermediate_size=2048,  # Used by SwiGLU for expansion
+    
+    # --- Configure sub-layers by type ---
+    attention_type='group_query',
+    normalization_type='rms_norm',
+    ffn_type='swiglu',
+    
+    # --- Configure layer behavior ---
+    normalization_position='pre', # Pre-LN for better stability
+    use_stochastic_depth=True,
+    stochastic_depth_rate=0.1,
+    
+    # --- Pass custom arguments to sub-layers ---
+    # Pass 'num_kv_heads' specifically to the GroupedQueryAttention layer
+    attention_args={'num_kv_heads': 2},
+    # Pass a custom epsilon to both normalization layers
+    attention_norm_args={'epsilon': 1e-7},
+    ffn_norm_args={'epsilon': 1e-7},
+    
+    name="modern_transformer_block"
+)
+
+# Example 2: A transformer with Differential Attention and a standard MLP
+differential_block = TransformerLayer(
+    hidden_size=768,
+    num_heads=12,
+    intermediate_size=3072,
+    attention_type='differential',
+    ffn_type='mlp',
+    normalization_type='layer_norm',
+    normalization_position='post',
+    name="differential_transformer_block"
+)
+```
+
+By changing a few string arguments, you can fundamentally alter the architecture of the block while the `TransformerLayer` handles all the necessary instantiation, building, and serialization logic.
+
+### 8.3 Using Factories in Custom Composite Layers
+
+If you are building a novel architecture that doesn't follow the standard `(Attention -> FFN)` pattern, you can call the factories directly within your custom layer's `__init__` method. This gives you full control over the data flow while still benefiting from the framework's pre-built components.
+
+```python
+# Import the component factories
+from dl_techniques.layers.attention import create_attention_layer
+from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.norms import create_normalization_layer
+
 @keras.saving.register_keras_serializable()
-class FrameworkIntegratedLayer(keras.layers.Layer):
+class CustomHybridLayer(keras.layers.Layer):
     """
-    Hybrid layer integrating dl-techniques framework components with standard Keras layers.
+    A custom layer that combines a convolutional block with a parallel
+    attention block, demonstrating direct factory usage.
     
-    This layer demonstrates how to properly integrate specialized components from the
-    dl-techniques framework (such as TransformerLayer and RMSNorm) with standard 
-    Keras layers, while maintaining proper serialization and configuration management.
-    
-    **Intent**: Show best practices for combining framework-specific components with
-    custom logic, enabling modular architecture development while preserving all
-    Keras functionality including serialization, compilation, and training.
-    
-    **Architecture**:
-    ```
-    Input(shape=[..., hidden_size])
-           ↓
-    TransformerLayer(hidden_size, num_heads) ← (if use_transformer=True)
-           ↓                                      
-    RMSNorm(normalized features)               ← (always applied)
-           ↓
-    Output(shape=[..., hidden_size])
-    ```
-    
-    **Component Details**:
-    - **TransformerLayer**: Advanced transformer block with configurable attention
-    - **RMSNorm**: Root Mean Square normalization for stable training
-    - **Conditional Architecture**: Can disable transformer for simpler processing
-    
-    This pattern enables sophisticated architectures while maintaining clean interfaces.
-    
-    Args:
-        hidden_size: Integer, feature dimension throughout the layer. Must be positive.
-            This size is maintained through all transformations.
-        num_heads: Integer, number of attention heads in transformer layer.
-            Must be positive and divide evenly into hidden_size. Defaults to 8.
-        use_transformer: Boolean, whether to include transformer processing.
-            When False, only applies normalization. Useful for ablation studies. 
-            Defaults to True.
-        **kwargs: Additional arguments for Layer base class.
-    
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
-        
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
-        Dimensions are preserved through processing.
-    
-    Attributes:
-        transformer: TransformerLayer instance if use_transformer=True, else None.
-        norm: RMSNorm layer for feature normalization.
-    
-    Example:
-        ```python
-        # Full transformer + normalization
-        layer = FrameworkIntegratedLayer(hidden_size=768, num_heads=12)
-        inputs = keras.Input(shape=(128, 768))  # seq_len=128
-        outputs = layer(inputs)
-        
-        # Normalization only (no transformer)
-        layer = FrameworkIntegratedLayer(
-            hidden_size=512, 
-            use_transformer=False
-        )
-        
-        # Custom head count
-        layer = FrameworkIntegratedLayer(
-            hidden_size=1024, 
-            num_heads=16
-        )
-        ```
-    
-    Note:
-        When integrating framework components, ensure they are properly imported
-        and available. This pattern allows for modular replacement of components
-        while maintaining consistent interfaces.
+    Architecture:
+    Input → ConvBlock → ‖ → Attention → ‖ → Concat → Output
+                      ‖ → FFN Block → ‖
     """
-    
     def __init__(
         self,
-        hidden_size: int,
-        num_heads: int = 8,
-        use_transformer: bool = True,
+        hidden_dim: int,
+        num_heads: int,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
-        
-        # Validate inputs
-        if hidden_size <= 0:
-            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
-        if num_heads <= 0:
-            raise ValueError(f"num_heads must be positive, got {num_heads}")
-        if hidden_size % num_heads != 0:
-            raise ValueError(f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})")
-        
-        self.hidden_size = hidden_size
+        self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.use_transformer = use_transformer
         
-        # Use framework components
-        if use_transformer:
-            from dl_techniques.layers.transformer import TransformerLayer
-            self.transformer = TransformerLayer(
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                intermediate_size=hidden_size * 4
-            )
-        else:
-            self.transformer = None
-            
-        # Framework normalization
-        from dl_techniques.layers.norms.rms_norm import RMSNorm
-        self.norm = RMSNorm()
+        # --- Create sub-layers using factories ---
+        self.conv_block = layers.Conv1D(
+            filters=hidden_dim // 2, kernel_size=3, padding='same'
+        )
+        # Use the factory to create a specific attention mechanism
+        self.attention = create_attention_layer(
+            'multi_head',
+            dim=hidden_dim // 2,
+            num_heads=num_heads,
+            name="attention_branch"
+        )
+        # Use the factory to create a specific FFN
+        self.ffn = create_ffn_layer(
+            'mlp',
+            hidden_dim=hidden_dim * 2,
+            output_dim=hidden_dim // 2,
+            name="ffn_branch"
+        )
+        self.norm = create_normalization_layer('layer_norm', name='output_norm')
+        self.output_projection = layers.Dense(hidden_dim)
 
-    def call(self, inputs, training=None):
-        """Forward pass using framework components."""
-        if self.transformer is not None:
-            x = self.transformer(inputs, training=training)
-        else:
-            x = inputs
-            
-        return self.norm(x, training=training)
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Per the Golden Rule, we must explicitly build sub-layers
+        # that have their own sub-layers or complex build logic.
+        # Keras standard layers like Conv1D and Dense can often be built
+        # implicitly by the first call, but explicit building is safer.
+        
+        # Here we know `attention` is a composite layer, so we build it.
+        # Factories return layers that follow Keras best practices, so we
+        # know they have a `build` method.
+        conv_output_shape = (input_shape, input_shape, self.hidden_dim // 2)
+        
+        self.conv_block.build(input_shape)
+        self.attention.build(conv_output_shape)
+        self.ffn.build(conv_output_shape)
+        self.norm.build(conv_output_shape) # Concat output shape is same as conv
+        self.output_projection.build((input_shape, input_shape, self.hidden_dim))
+        
+        super().build(input_shape)
 
-    def get_config(self):
+    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        # Main path
+        x = self.conv_block(inputs)
+        
+        # Parallel branches
+        attn_out = self.attention(x)
+        ffn_out = self.ffn(x)
+        
+        # Merge and project
+        combined = ops.concatenate([attn_out, ffn_out], axis=-1)
+        normalized = self.norm(combined)
+        return self.output_projection(normalized)
+
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
-            'hidden_size': self.hidden_size,
+            'hidden_dim': self.hidden_dim,
             'num_heads': self.num_heads,
-            'use_transformer': self.use_transformer,
         })
         return config
 ```
 
-### Model with Framework Optimization
+### 8.4 Best Practices for Integration
 
-```python
-def create_model_with_framework_optimization(config: Dict[str, Any]) -> keras.Model:
-    """
-    Create model using dl-techniques optimization components.
-    """
-    from dl_techniques.optimization import (
-        optimizer_builder,
-        learning_rate_schedule_builder
-    )
-    
-    # Create model
-    model = CustomModel(**config['model'])
-    
-    # Framework optimization
-    lr_config = config.get('learning_rate', {
-        "type": "cosine_decay",
-        "learning_rate": 0.001,
-        "decay_steps": 10000
-    })
-    
-    optimizer_config = config.get('optimizer', {
-        "type": "adamw",
-        "gradient_clipping_by_norm": 1.0
-    })
-    
-    # Build optimization
-    lr_schedule = learning_rate_schedule_builder(lr_config)
-    optimizer = optimizer_builder(optimizer_config, lr_schedule)
-    
-    model.compile(
-        optimizer=optimizer,
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    
-    return model
-```
+1.  **Prefer `TransformerLayer`**: For any standard transformer-based architecture (Encoders, Decoders), use `TransformerLayer`. It's robust, highly configurable, and tested.
+2.  **Use Factories for Custom Architectures**: When your design diverges from the standard transformer block, use the component factories (`create_attention_layer`, etc.) to build your custom composite layer.
+3.  **Leverage Configuration Dictionaries**: Build your models from configuration dictionaries. This makes it easy to pass arguments down to the `TransformerLayer` or individual factories, and simplifies experiment tracking and hyperparameter tuning.
+4.  **Discover Components**: Use the `get_attention_info()`, `get_ffn_info()`, and `get_normalization_info()` functions to explore available layer types and their required parameters.
 
 ---
 
@@ -1711,38 +1696,6 @@ When encountering issues, verify in this order:
 - **Cause**: Circular references in configuration
 - **Solution**: Store config parameters explicitly, not as `locals()`
 
-### Debug Helper
-
-```python
-def debug_layer_serialization(layer_class, layer_config, sample_input):
-    """Debug helper for layer serialization issues."""
-    from dl_techniques.utils.logger import logger
-    
-    try:
-        # Test basic functionality
-        layer = layer_class(**layer_config)
-        output = layer(sample_input)
-        logger.info(f"✅ Forward pass successful: {output.shape}")
-        
-        # Test configuration
-        config = layer.get_config()
-        logger.info(f"✅ Configuration keys: {list(config.keys())}")
-        
-        # Test serialization
-        inputs = keras.Input(shape=sample_input.shape[1:])
-        outputs = layer_class(**layer_config)(inputs)
-        model = keras.Model(inputs, outputs)
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model.save(os.path.join(tmpdir, 'test.keras'))
-            loaded = keras.models.load_model(os.path.join(tmpdir, 'test.keras'))
-            logger.info("✅ Serialization test passed")
-            
-    except Exception as e:
-        logger.error(f"❌ Error: {e}")
-        raise
-```
-
 ---
 
 ## Conclusion
@@ -1755,4 +1708,4 @@ This guide establishes the correct patterns for modern Keras 3 custom components
 4. **Complete configuration**: `get_config()` must include all constructor parameters
 5. **Test thoroughly**: The serialization cycle test is non-negotiable
 
-Following these patterns ensures robust, serializable components that integrate seamlessly with Keras and the dl-techniques framework. The modern approach is actually simpler than outdated patterns - let Keras handle the complexity while you focus on the layer logic.
+Following these patterns ensures robust, serializable components that integrate seamlessly with Keras. Leveraging the `dl-techniques` framework's high-level components like `TransformerLayer` and its underlying factories accelerates development and allows you to build sophisticated, state-of-the-art models efficiently.

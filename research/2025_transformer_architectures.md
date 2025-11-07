@@ -59,29 +59,29 @@ Input Tokens: [x₁, x₂, x₃, ..., xₙ]
     ┌──────────────────────────────────────┐
     │         ENCODER LAYER 1              │
     │                                      │
-    │  ┌────────────────────────────────┐ │
-    │  │   Multi-Head Self-Attention    │ │
-    │  │                                │ │
-    │  │   Q ← Linear(x)                │ │
-    │  │   K ← Linear(x)                │ │
-    │  │   V ← Linear(x)                │ │
-    │  │                                │ │
-    │  │   Attention(Q,K,V) =           │ │
-    │  │   softmax(QK^T/√d_k)V          │ │
-    │  │                                │ │
-    │  │   Full Attention Matrix:       │ │
-    │  │   Each token attends to ALL    │ │
-    │  │   other tokens                 │ │
-    │  └────────────────────────────────┘ │
+    │  ┌────────────────────────────────┐  │
+    │  │   Multi-Head Self-Attention    │  │
+    │  │                                │  │
+    │  │   Q ← Linear(x)                │  │
+    │  │   K ← Linear(x)                │  │
+    │  │   V ← Linear(x)                │  │
+    │  │                                │  │
+    │  │   Attention(Q,K,V) =           │  │
+    │  │   softmax(QK^T/√d_k)V          │  │
+    │  │                                │  │
+    │  │   Full Attention Matrix:       │  │
+    │  │   Each token attends to ALL    │  │
+    │  │   other tokens                 │  │
+    │  └────────────────────────────────┘  │
     │            ↓                         │
     │      [Add & Norm]                    │
     │            ↓                         │
-    │  ┌────────────────────────────────┐ │
-    │  │  Position-wise Feed-Forward    │ │
-    │  │                                │ │
-    │  │  FFN(x) = max(0, xW₁+b₁)W₂+b₂ │ │
-    │  │         (ReLU activation)      │ │
-    │  └────────────────────────────────┘ │
+    │  ┌────────────────────────────────┐  │
+    │  │  Position-wise Feed-Forward    │  │
+    │  │                                │  │
+    │  │  FFN(x) = max(0, xW₁+b₁)W₂+b₂  │  │
+    │  │         (ReLU activation)      │  │
+    │  └────────────────────────────────┘  │
     │            ↓                         │
     │      [Add & Norm]                    │
     └──────────────────────────────────────┘
@@ -90,7 +90,7 @@ Input Tokens: [x₁, x₂, x₃, ..., xₙ]
          ↓
     [Final Encoder Outputs]
 ```
-
+         
 **Attention Pattern Visualization** (Encoder Self-Attention):
 
 ```

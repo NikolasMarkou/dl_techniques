@@ -149,7 +149,7 @@ The Hopfield network consists of a **single layer** of fully interconnected neur
       │     ╲     │     ╲     │     ╲     │
       └──────╲────┴──────╲────┴──────╲────┘
               ╲           ╲           ╲
-               ╲_____W₂₃__╲_____W₃₄__╲
+               ╲_____W₂₃___╲_____W₃₄___╲
 
 Connection Matrix W:
       [  0   w₁₂  w₁₃  w₁₄ ]
@@ -288,7 +288,7 @@ Recall Algorithm:
                 
 2. Update Loop:
    ┌─────────────────────────────────────┐
-   │ For t = 0, 1, 2, ... until stable:│
+   │ For t = 0, 1, 2, ... until stable:  │
    │                                     │
    │  a) Pick random unit i              │
    │  b) Compute: h_i = Σⱼ W_ij s_j      │
@@ -740,31 +740,31 @@ CD-1 Algorithm (Most Common):
 1. POSITIVE PHASE (Data Statistics)
    ┌────────────────────────────────┐
    │ Data Sample: v⁽⁰⁾              │
-   │         ↓                       │
+   │         ↓                      │
    │ Sample h⁽⁰⁾ ~ P(h | v⁽⁰⁾)      │
-   │         ↓                       │
-   │ Positive gradient:              │
-   │   ⟨v⁽⁰⁾ h⁽⁰⁾ᵀ⟩                │
+   │         ↓                      │
+   │ Positive gradient:             │
+   │   ⟨v⁽⁰⁾ h⁽⁰⁾ᵀ⟩                 │
    └────────────────────────────────┘
 
 2. NEGATIVE PHASE (Model Statistics)
    ┌────────────────────────────────┐
    │ Reconstruct: v⁽¹⁾ ~ P(v | h⁽⁰⁾)│
-   │         ↓                       │
+   │         ↓                      │
    │ Sample h⁽¹⁾ ~ P(h | v⁽¹⁾)      │
-   │         ↓                       │
-   │ Negative gradient:              │
-   │   ⟨v⁽¹⁾ h⁽¹⁾ᵀ⟩                │
+   │         ↓                      │
+   │ Negative gradient:             │
+   │   ⟨v⁽¹⁾ h⁽¹⁾ᵀ⟩                 │
    └────────────────────────────────┘
 
 3. UPDATE WEIGHTS
-   ┌────────────────────────────────┐
+   ┌────────────────────────────────────┐
    │ ΔW = η (⟨v⁽⁰⁾h⁽⁰⁾ᵀ⟩ - ⟨v⁽¹⁾h⁽¹⁾ᵀ⟩) │
-   │                                 │
-   │ Δb = η (v⁽⁰⁾ - v⁽¹⁾)           │
-   │                                 │
-   │ Δc = η (h⁽⁰⁾ - h⁽¹⁾)           │
-   └────────────────────────────────┘
+   │                                    │
+   │ Δb = η (v⁽⁰⁾ - v⁽¹⁾)               │
+   │                                    │
+   │ Δc = η (h⁽⁰⁾ - h⁽¹⁾)               │
+   └────────────────────────────────────┘
 
 Where η is the learning rate.
 ```
@@ -949,7 +949,7 @@ MNIST Digit (784 dimensions):
 
 Original:        Hidden Repr:      Reconstructed:
 ╔══════╗         [01101011]        ╔══════╗
-║  ██  ║            ↑↓              ║  ██  ║
+║  ██  ║            ↑↓             ║  ██  ║
 ║ ██   ║    →   (50 bits)    →     ║ ██   ║
 ║██    ║                           ║██    ║
 ╚══════╝                           ╚══════╝
@@ -1185,14 +1185,14 @@ Single-layer RBMs have limited modeling capacity:
 
 ```ascii
 Hopfield Network Philosophy:
-┌────────────────────────────────────┐
-│ "I remember specific examples"    │
-│                                    │
+┌───────────────────────────────────────┐
+│ "I remember specific examples"        │
+│                                       │
 │  Input → Find nearest memory → Output │
-│                                    │
-│  Like a lookup table with         │
-│  approximate matching              │
-└────────────────────────────────────┘
+│                                       │
+│  Like a lookup table with             │
+│  approximate matching                 │
+└───────────────────────────────────────┘
 
 RBM Philosophy:
 ┌────────────────────────────────────┐
@@ -1225,7 +1225,7 @@ RBM Philosophy:
 ```ascii
 Hopfield Energy:
 ╔══════════════════════════════════════╗
-║  E(s) = -½ sᵀWs - bᵀs               ║
+║  E(s) = -½ sᵀWs - bᵀs                ║
 ║                                      ║
 ║  • Quadratic form                    ║
 ║  • Single state vector               ║
@@ -1235,7 +1235,7 @@ Hopfield Energy:
 
 RBM Energy:
 ╔══════════════════════════════════════╗
-║  E(v,h) = -bᵀv - cᵀh - vᵀWh         ║
+║  E(v,h) = -bᵀv - cᵀh - vᵀWh          ║
 ║                                      ║
 ║  • Bilinear form                     ║
 ║  • Joint over two variables          ║
@@ -1249,7 +1249,7 @@ RBM Energy:
 ```ascii
 Hopfield Network:
 ┌────────┐
-│ State  │ ←──┐
+│ State  │ ←───┐
 │   s    │     │
 └────────┘     │
      │         │
