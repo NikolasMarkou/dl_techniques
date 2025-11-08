@@ -41,7 +41,7 @@ class TestPositionalEmbedding:
         layer = PositionalEmbedding(
             max_seq_len=256,
             dim=512,
-            dropout=0.1,
+            dropout_rate=0.1,
             pos_initializer=custom_initializer,
             scale=0.01
         )
@@ -83,7 +83,7 @@ class TestPositionalEmbedding:
             PositionalEmbedding(max_seq_len=128, dim=-1)
 
         with pytest.raises(ValueError, match="dropout must be in"):
-            PositionalEmbedding(max_seq_len=128, dim=64, dropout=1.5)
+            PositionalEmbedding(max_seq_len=128, dim=64, dropout_rate=1.5)
 
         with pytest.raises(ValueError, match="scale must be positive"):
             PositionalEmbedding(max_seq_len=128, dim=64, scale=-0.1)
@@ -137,7 +137,7 @@ class TestPositionalEmbedding:
 
     def test_forward_pass_basic(self, input_tensor: tf.Tensor):
         """Test basic forward pass functionality."""
-        layer = PositionalEmbedding(max_seq_len=64, dim=128, dropout=0.0)
+        layer = PositionalEmbedding(max_seq_len=64, dim=128, dropout_rate=0.0)
         output = layer(input_tensor, training=False)
 
         # Basic sanity checks
@@ -150,7 +150,7 @@ class TestPositionalEmbedding:
         layer = PositionalEmbedding(
             max_seq_len=8,
             dim=4,
-            dropout=0.0,
+            dropout_rate=0.0,
             pos_initializer="zeros"
         )
 
@@ -166,7 +166,7 @@ class TestPositionalEmbedding:
         layer = PositionalEmbedding(
             max_seq_len=4,
             dim=3,
-            dropout=0.0,
+            dropout_rate=0.0,
             pos_initializer="ones"
         )
 
@@ -183,7 +183,7 @@ class TestPositionalEmbedding:
 
     def test_sequence_length_variation(self):
         """Test with different sequence lengths."""
-        layer = PositionalEmbedding(max_seq_len=32, dim=64, dropout=0.0)
+        layer = PositionalEmbedding(max_seq_len=32, dim=64, dropout_rate=0.0)
 
         # Test with different sequence lengths
         for seq_len in [8, 16, 24, 32]:
@@ -195,7 +195,7 @@ class TestPositionalEmbedding:
 
     def test_dropout_behavior(self):
         """Test dropout behavior during training and inference."""
-        layer = PositionalEmbedding(max_seq_len=16, dim=32, dropout=0.5)
+        layer = PositionalEmbedding(max_seq_len=16, dim=32, dropout_rate=0.5)
         test_input = tf.random.normal([4, 8, 32])
 
         # Training mode - dropout should be applied
@@ -215,7 +215,7 @@ class TestPositionalEmbedding:
         original_layer = PositionalEmbedding(
             max_seq_len=128,
             dim=64,
-            dropout=0.1,
+            dropout_rate=0.1,
             pos_initializer="glorot_uniform",
             scale=0.05
         )
@@ -328,7 +328,7 @@ class TestPositionalEmbedding:
 
     def test_training_mode_differences(self):
         """Test differences between training and inference modes."""
-        layer = PositionalEmbedding(max_seq_len=32, dim=64, dropout=0.3)
+        layer = PositionalEmbedding(max_seq_len=32, dim=64, dropout_rate=0.3)
         test_input = tf.random.normal([4, 16, 64])
 
         # Multiple calls in training mode should give different results due to dropout
@@ -412,7 +412,7 @@ class TestPositionalEmbedding:
 
     def test_multiple_calls_consistency(self):
         """Test that multiple calls with same input give consistent results."""
-        layer = PositionalEmbedding(max_seq_len=32, dim=64, dropout=0.0)
+        layer = PositionalEmbedding(max_seq_len=32, dim=64, dropout_rate=0.0)
         test_input = tf.random.normal([2, 16, 64])
 
         # Multiple calls should give identical results (no dropout)
@@ -423,7 +423,7 @@ class TestPositionalEmbedding:
 
     def test_weight_sharing(self):
         """Test that positional embeddings are shared across batch dimension."""
-        layer = PositionalEmbedding(max_seq_len=8, dim=4, dropout=0.0)
+        layer = PositionalEmbedding(max_seq_len=8, dim=4, dropout_rate=0.0)
 
         # Create inputs with different values for each batch item
         test_input = tf.stack([

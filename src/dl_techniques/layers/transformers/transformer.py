@@ -401,8 +401,8 @@ class TransformerLayer(keras.layers.Layer):
         elif self.attention_type == 'window':
             default_params = {
                 'dim': self.hidden_size,
-                'window_size': self.window_size,
                 'num_heads': self.num_heads,
+                'window_size': self.window_size,
                 'dropout_rate': self.attention_dropout_rate,
                 'name': name
             }

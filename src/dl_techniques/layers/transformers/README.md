@@ -340,7 +340,7 @@ block = SwinTransformerBlock(
     dim=96,
     num_heads=3,
     window_size=7,
-    shift_size=0, # No shift
+    shift_size=0,  # No shift
 )
 x = block(inputs)
 
@@ -349,8 +349,8 @@ shifted_block = SwinTransformerBlock(
     dim=96,
     num_heads=3,
     window_size=7,
-    shift_size=7 // 2, # Shift by half window size
-    drop_path=0.1
+    shift_size=7 // 2,  # Shift by half window size
+    stochastic_depth_rate=0.1
 )
 x_shifted = shifted_block(x)
 ```
@@ -395,9 +395,9 @@ block = SwinConvBlock(
     head_dim=32,
     window_size=7,
     block_type="SW",  # Use shifted windows
-    drop_path=0.1
+    drop_path_rate=0.1
 )
-outputs = block(inputs) # Shape: (None, 56, 56, 128)
+outputs = block(inputs)  # Shape: (None, 56, 56, 128)
 ```
 
 ### Arguments

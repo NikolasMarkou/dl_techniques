@@ -43,7 +43,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
             initializer used for embedding weights.
         layer_norm_eps: Float, a small epsilon value for numerical stability in
             the layer normalization.
-        hidden_dropout_prob: Float, dropout rate applied to the final embeddings.
+        dropout_rate: Float, dropout rate applied to the final embeddings.
         use_bias: Boolean, whether the layer normalization sub-layer should use
             a bias term.
         **kwargs: Additional arguments for the `keras.layers.Layer` base class.
@@ -70,7 +70,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
         type_vocab_size: int,
         initializer_range: float,
         layer_norm_eps: float,
-        hidden_dropout_prob: float,
+        dropout_rate: float,
         use_bias: bool,
         **kwargs: Any,
     ) -> None:
@@ -81,7 +81,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
-        self.hidden_dropout_prob = hidden_dropout_prob
+        self.dropout_rate = dropout_rate
         self.use_bias = use_bias
 
         # CREATE all sub-layers in __init__ (they remain unbuilt)
@@ -104,7 +104,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
         self.layer_norm = layers.LayerNormalization(
             epsilon=self.layer_norm_eps, center=self.use_bias, name="layer_norm"
         )
-        self.dropout = layers.Dropout(self.hidden_dropout_prob, name="dropout")
+        self.dropout = layers.Dropout(self.dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Creates the weights for the embedding, norm, and dropout layers."""
@@ -161,7 +161,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
                 "type_vocab_size": self.type_vocab_size,
                 "initializer_range": self.initializer_range,
                 "layer_norm_eps": self.layer_norm_eps,
-                "hidden_dropout_prob": self.hidden_dropout_prob,
+                "dropout_rate": self.dropout_rate,
                 "use_bias": self.use_bias,
             }
         )

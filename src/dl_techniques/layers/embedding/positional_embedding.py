@@ -88,7 +88,7 @@ class PositionalEmbedding(keras.layers.Layer):
             Must be positive.
         dim: Integer, embedding dimension. Must match the last dimension of input
             and be positive.
-        dropout: Float, dropout rate applied after adding positional embeddings.
+        dropout_rate: Float, dropout rate applied after adding positional embeddings.
             Must be in [0, 1]. Default is 0.0 (no dropout).
         pos_initializer: String or Initializer, initializer for positional embeddings.
             Default is "truncated_normal".
@@ -104,7 +104,7 @@ class PositionalEmbedding(keras.layers.Layer):
 
     Raises:
         ValueError: If max_seq_len, dim, or scale are not positive.
-        ValueError: If dropout is not in [0, 1].
+        ValueError: If dropout_rate is not in [0, 1].
         ValueError: If input dimension doesn't match expected dim during build.
 
     Example:
@@ -136,7 +136,7 @@ class PositionalEmbedding(keras.layers.Layer):
             self,
             max_seq_len: int,
             dim: int,
-            dropout: float = 0.0,
+            dropout_rate: float = 0.0,
             pos_initializer: Union[str, keras.initializers.Initializer] = "truncated_normal",
             scale: float = 0.02,
             **kwargs: Any
@@ -148,15 +148,15 @@ class PositionalEmbedding(keras.layers.Layer):
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
-        if not (0.0 <= dropout <= 1.0):
-            raise ValueError(f"dropout must be in [0, 1], got {dropout}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout must be in [0, 1], got {dropout_rate}")
         if scale <= 0:
             raise ValueError(f"scale must be positive, got {scale}")
 
         # Store ALL configuration parameters
         self.max_seq_len = max_seq_len
         self.dim = dim
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.scale = scale
         self.pos_initializer = keras.initializers.get(pos_initializer)
 
@@ -266,7 +266,7 @@ class PositionalEmbedding(keras.layers.Layer):
         config.update({
             "max_seq_len": self.max_seq_len,
             "dim": self.dim,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "pos_initializer": keras.initializers.serialize(self.pos_initializer),
             "scale": self.scale,
         })

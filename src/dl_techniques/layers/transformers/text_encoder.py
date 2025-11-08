@@ -219,11 +219,11 @@ class TextEncoder(keras.layers.Layer):
             - 'last': Return last token features
             - 'none': Return full sequence features
             Defaults to 'none'.
-        dropout: Float, general dropout rate between 0 and 1. Applied to embeddings
+        dropout_rate: Float, general dropout rate between 0 and 1. Applied to embeddings
             and in transformer layers. Defaults to 0.1.
-        attention_dropout: Float, attention-specific dropout rate. Applied to
+        attention_dropout_rate: Float, attention-specific dropout rate. Applied to
             attention weights. Defaults to 0.1.
-        embed_dropout: Float, embedding dropout rate. Applied after embedding layers.
+        embed_dropout_rate: Float, embedding dropout rate. Applied after embedding layers.
             Defaults to 0.1.
         stochastic_depth_rate: Float, stochastic depth drop path rate for regularization.
             When > 0, applies stochastic depth to transformer layers. Defaults to 0.0.
@@ -276,7 +276,7 @@ class TextEncoder(keras.layers.Layer):
         token_type_embeddings: Optional token type embedding layer.
         positional_embeddings: Positional encoding layer.
         embed_norm: Embedding normalization layer.
-        embed_dropout: Embedding dropout layer.
+        embed_dropout_rate: Embedding dropout layer.
         transformer_layers: List of TransformerLayer instances.
         final_norm: Optional final normalization layer.
         cls_token: Optional learnable CLS token weight.
@@ -311,7 +311,6 @@ class TextEncoder(keras.layers.Layer):
             normalization_type='rms_norm',
             normalization_position='pre',
             ffn_type='swiglu',
-            dropout=0.1,
             rope_percentage=0.5
         )
 
@@ -366,9 +365,9 @@ class TextEncoder(keras.layers.Layer):
             type_vocab_size: int = 2,
             use_cls_token: bool = False,
             output_mode: PoolingStrategy = 'none',
-            dropout: float = 0.1,
-            attention_dropout: float = 0.1,
-            embed_dropout: float = 0.1,
+            dropout_rate: float = 0.1,
+            attention_dropout_rate: float = 0.1,
+            embed_dropout_rate: float = 0.1,
             stochastic_depth_rate: float = 0.0,
             activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
@@ -407,12 +406,12 @@ class TextEncoder(keras.layers.Layer):
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if type_vocab_size <= 0:
             raise ValueError(f"type_vocab_size must be positive, got {type_vocab_size}")
-        if not (0.0 <= dropout <= 1.0):
-            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
-        if not (0.0 <= attention_dropout <= 1.0):
-            raise ValueError(f"attention_dropout must be between 0 and 1, got {attention_dropout}")
-        if not (0.0 <= embed_dropout <= 1.0):
-            raise ValueError(f"embed_dropout must be between 0 and 1, got {embed_dropout}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if not (0.0 <= attention_dropout_rate <= 1.0):
+            raise ValueError(f"attention_dropout_rate must be between 0 and 1, got {attention_dropout_rate}")
+        if not (0.0 <= embed_dropout_rate <= 1.0):
+            raise ValueError(f"embed_dropout_rate must be between 0 and 1, got {embed_dropout_rate}")
         if initializer_range <= 0:
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
         if layer_norm_eps <= 0:
@@ -441,9 +440,9 @@ class TextEncoder(keras.layers.Layer):
         self.type_vocab_size = type_vocab_size
         self.use_cls_token = use_cls_token
         self.output_mode = output_mode
-        self.dropout = dropout
-        self.attention_dropout = attention_dropout
-        self.embed_dropout = embed_dropout
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+        self.embed_dropout_rate = embed_dropout_rate
         self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = activation
         self.use_bias = use_bias
@@ -493,9 +492,9 @@ class TextEncoder(keras.layers.Layer):
         )
 
         self.embed_dropout_layer = layers.Dropout(
-            embed_dropout,
+            embed_dropout_rate,
             name='embed_dropout'
-        ) if embed_dropout > 0.0 else None
+        ) if embed_dropout_rate > 0.0 else None
 
         # Create transformer layers using factory components
         self.transformer_layers = []
@@ -515,8 +514,8 @@ class TextEncoder(keras.layers.Layer):
                 ffn_norm_args=self.norm_args,
                 ffn_type=ffn_type,
                 ffn_args=self.ffn_args,
-                dropout_rate=dropout,
-                attention_dropout_rate=attention_dropout,
+                dropout_rate=dropout_rate,
+                attention_dropout_rate=attention_dropout_rate,
                 use_stochastic_depth=stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=layer_drop_rate,
                 activation=activation,
@@ -606,7 +605,7 @@ class TextEncoder(keras.layers.Layer):
                 'positional_learned',
                 max_seq_len=self.seq_len,
                 dim=self.embed_dim,
-                dropout=0.0,  # We handle dropout separately
+                dropout_rate=0.0,  # We handle dropout separately
                 scale=self.initializer_range,
                 name="positional_embeddings"
             )
@@ -952,9 +951,9 @@ class TextEncoder(keras.layers.Layer):
             'type_vocab_size': self.type_vocab_size,
             'use_cls_token': self.use_cls_token,
             'output_mode': self.output_mode,
-            'dropout': self.dropout,
-            'attention_dropout': self.attention_dropout,
-            'embed_dropout': self.embed_dropout,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
+            'embed_dropout_rate': self.embed_dropout_rate,
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'activation': self.activation,
             'use_bias': self.use_bias,
@@ -991,7 +990,6 @@ def create_text_encoder(
         normalization_type: NormalizationType = 'layer_norm',
         normalization_position: NormalizationPositionType = 'post',
         ffn_type: FFNType = 'mlp',
-        dropout: float = 0.1,
         **kwargs: Any
 ) -> TextEncoder:
     """
@@ -1013,7 +1011,6 @@ def create_text_encoder(
         normalization_type: Type of normalization.
         normalization_position: Position of normalization layers.
         ffn_type: Type of feed-forward network.
-        dropout: General dropout rate.
         **kwargs: Additional arguments for TextEncoder constructor.
 
     Returns:
@@ -1073,7 +1070,6 @@ def create_text_encoder(
         normalization_type=normalization_type,
         normalization_position=normalization_position,
         ffn_type=ffn_type,
-        dropout=dropout,
         **kwargs
     )
 
@@ -1188,7 +1184,6 @@ def create_efficient_encoder(
         normalization_position='pre',
         ffn_type='swiglu',
         stochastic_depth_rate=0.1,
-        dropout=0.1,
         embedding_args={'factorized_dim': 64},
         **kwargs
     )

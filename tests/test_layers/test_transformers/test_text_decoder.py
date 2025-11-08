@@ -33,7 +33,7 @@ class TestTextDecoder:
             'num_heads': 4,
             'max_seq_len': 16,
             'dropout_rate': 0.1,
-            'attention_dropout': 0.1,
+            'attention_dropout_rate': 0.1,
             'initializer_range': 0.02,
         }
 
@@ -53,7 +53,7 @@ class TestTextDecoder:
             'ffn_type': 'swiglu',
             'stochastic_depth_rate': 0.1,
             'dropout_rate': 0.2,
-            'attention_dropout': 0.15,
+            'attention_dropout_rate': 0.15,
         }
 
     @pytest.fixture
@@ -204,8 +204,8 @@ class TestTextDecoder:
     @pytest.mark.parametrize("param_name,invalid_value", [
         ('dropout_rate', -0.1),
         ('dropout_rate', 1.1),
-        ('attention_dropout', -0.5),
-        ('attention_dropout', 2.0),
+        ('attention_dropout_rate', -0.5),
+        ('attention_dropout_rate', 2.0),
         ('stochastic_depth_rate', -0.1),
         ('stochastic_depth_rate', 1.5),
     ])
@@ -424,7 +424,7 @@ class TestTextDecoder:
             'vocab_size', 'embed_dim', 'depth', 'num_heads', 'max_seq_len',
             'embedding_type', 'positional_type', 'attention_type',
             'normalization_type', 'normalization_position', 'ffn_type',
-            'stochastic_depth_rate', 'dropout_rate', 'attention_dropout',
+            'stochastic_depth_rate', 'dropout_rate', 'attention_dropout_rate',
             'initializer_range', 'layer_norm_eps'
         ]
 
@@ -442,7 +442,7 @@ class TestTextDecoder:
                                   'max_seq_len', 'embedding_type', 'positional_type',
                                   'attention_type', 'normalization_type',
                                   'normalization_position', 'ffn_type',
-                                  'stochastic_depth_rate', 'dropout_rate', 'attention_dropout',
+                                  'stochastic_depth_rate', 'dropout_rate', 'attention_dropout_rate',
                                   'initializer_range', 'layer_norm_eps']}
 
         reconstructed_decoder = TextDecoder(**custom_config)
@@ -597,7 +597,7 @@ class TestTextDecoder:
 
     def test_zero_dropout_configuration(self, basic_config):
         """Test with zero dropout rates."""
-        config = {**basic_config, 'dropout_rate': 0.0, 'attention_dropout': 0.0, 'stochastic_depth_rate': 0.0}
+        config = {**basic_config, 'dropout_rate': 0.0, 'attention_dropout_rate': 0.0, 'stochastic_depth_rate': 0.0}
         decoder = TextDecoder(**config)
 
         sample_input = ops.convert_to_tensor(

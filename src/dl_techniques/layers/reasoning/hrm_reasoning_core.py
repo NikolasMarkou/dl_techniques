@@ -384,7 +384,7 @@ class HierarchicalReasoningCore(keras.layers.Layer):
             self.position_embedding = PositionalEmbedding(
                 max_seq_len=self.total_seq_len,
                 dim=embed_dim,
-                dropout=0.0,  # No dropout in original
+                dropout_rate=0.0,  # No dropout in original
                 name="position_embedding"
             )
             self.rope = None

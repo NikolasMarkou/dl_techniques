@@ -276,7 +276,7 @@ class TestTextEncoder:
 
     def test_training_vs_inference_modes(self, basic_config, sample_input_ids):
         """Tests behavior difference between training and inference modes."""
-        config = {**basic_config, 'dropout': 0.5, 'embed_dropout': 0.3}
+        config = {**basic_config, 'dropout_rate': 0.5, 'embed_dropout_rate': 0.3}
         encoder = TextEncoder(**config)
 
         # Both should run without errors
@@ -691,7 +691,7 @@ class TestTextEncoder:
             **basic_config,
             'depth': 4,  # Deeper for testing
             'stochastic_depth_rate': 0.1,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
         }
         encoder = TextEncoder(**config)
 

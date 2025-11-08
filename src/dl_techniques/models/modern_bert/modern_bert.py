@@ -338,7 +338,7 @@ class ModernBERT(keras.Model):
             type_vocab_size=self.type_vocab_size,
             initializer_range=self.initializer_range,
             layer_norm_eps=self.layer_norm_eps,
-            hidden_dropout_prob=self.hidden_dropout_prob,
+            dropout_rate=self.hidden_dropout_prob,
             use_bias=self.use_bias,
             name="embeddings",
         )

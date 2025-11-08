@@ -503,7 +503,7 @@ class TestSCUNetSerialization:
             assert loaded_model.dim == original_model.dim
             assert loaded_model.head_dim == original_model.head_dim
             assert loaded_model.window_size == original_model.window_size
-            assert loaded_model.drop_path_rate == original_model.drop_path_rate
+            assert loaded_model.stochastic_depth_rate == original_model.drop_path_rate
             assert loaded_model.input_resolution == original_model.input_resolution
 
             # Check that outputs are numerically identical
@@ -543,7 +543,7 @@ class TestSCUNetSerialization:
             assert loaded_model.dim == 32
             assert loaded_model.head_dim == 16
             assert loaded_model.window_size == 4
-            assert loaded_model.drop_path_rate == 0.1
+            assert loaded_model.stochastic_depth_rate == 0.1
             assert loaded_model.input_resolution == 128
 
             # Check output shapes and numerical accuracy

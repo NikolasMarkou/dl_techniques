@@ -167,7 +167,7 @@ class TextDecoder(keras.layers.Layer):
         ffn_type: Feed-forward network architecture for transformer layers.
         stochastic_depth_rate: Rate for stochastic depth regularization.
         dropout_rate: Dropout rate for FFN and final embedding dropout.
-        attention_dropout: Dropout rate for attention weights.
+        attention_dropout_rate: Dropout rate for attention weights.
         initializer_range: Standard deviation for the TruncatedNormal initializer.
         layer_norm_eps: Epsilon for normalization layers.
         **kwargs: Additional keyword arguments for base Layer class.
@@ -241,7 +241,7 @@ class TextDecoder(keras.layers.Layer):
             ffn_type: FFNType = 'mlp',
             stochastic_depth_rate: float = 0.0,
             dropout_rate: float = 0.1,
-            attention_dropout: float = 0.1,
+            attention_dropout_rate: float = 0.1,
             initializer_range: float = 0.02,
             layer_norm_eps: float = 1e-12,
             **kwargs: Any
@@ -255,8 +255,8 @@ class TextDecoder(keras.layers.Layer):
             raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads}).")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout must be between 0.0 and 1.0, got {dropout_rate}")
-        if not 0.0 <= attention_dropout <= 1.0:
-            raise ValueError(f"attention_dropout must be between 0.0 and 1.0, got {attention_dropout}")
+        if not 0.0 <= attention_dropout_rate <= 1.0:
+            raise ValueError(f"attention_dropout must be between 0.0 and 1.0, got {attention_dropout_rate}")
         if not 0.0 <= stochastic_depth_rate <= 1.0:
             raise ValueError(f"stochastic_depth_rate must be between 0.0 and 1.0, got {stochastic_depth_rate}")
 
@@ -274,7 +274,7 @@ class TextDecoder(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
-        self.attention_dropout = attention_dropout
+        self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
 
@@ -302,7 +302,7 @@ class TextDecoder(keras.layers.Layer):
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
                 dropout_rate=self.dropout_rate,
-                attention_dropout_rate=self.attention_dropout,
+                attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=layer_drop_rate,
                 name=f'decoder_layer_{i}'
@@ -505,7 +505,7 @@ class TextDecoder(keras.layers.Layer):
             'ffn_type': self.ffn_type,
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'dropout_rate': self.dropout_rate,
-            'attention_dropout': self.attention_dropout,
+            'attention_dropout_rate': self.attention_dropout_rate,
             'initializer_range': self.initializer_range,
             'layer_norm_eps': self.layer_norm_eps,
         })

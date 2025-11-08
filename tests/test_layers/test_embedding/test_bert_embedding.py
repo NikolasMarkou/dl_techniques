@@ -36,7 +36,7 @@ class TestEmbeddingsLayer:
             'type_vocab_size': 2,
             'initializer_range': 0.02,
             'layer_norm_eps': 1e-12,
-            'hidden_dropout_prob': 0.1,
+            'dropout_rate': 0.1,
             'normalization_type': 'layer_norm'
         }
 
@@ -83,10 +83,10 @@ class TestEmbeddingsLayer:
             BertEmbeddings(**{**basic_params, 'initializer_range': 0})
 
         # Test invalid dropout probability
-        with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
-            BertEmbeddings(**{**basic_params, 'hidden_dropout_prob': 1.1})
-        with pytest.raises(ValueError, match="hidden_dropout_prob must be between 0 and 1"):
-            BertEmbeddings(**{**basic_params, 'hidden_dropout_prob': -0.1})
+        with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
+            BertEmbeddings(**{**basic_params, 'dropout_rate': 1.1})
+        with pytest.raises(ValueError, match="dropout_rate must be between 0 and 1"):
+            BertEmbeddings(**{**basic_params, 'dropout_rate': -0.1})
 
         # Test invalid normalization type
         with pytest.raises(ValueError, match="normalization_type must be one of"):
@@ -154,7 +154,7 @@ class TestEmbeddingsLayer:
         )
 
         # With dropout disabled
-        params_no_dropout = {**basic_params, 'hidden_dropout_prob': 0.0}
+        params_no_dropout = {**basic_params, 'dropout_rate': 0.0}
         layer_no_dropout = BertEmbeddings(**params_no_dropout)
         output_train_no_dropout = layer_no_dropout(sample_input, training=True)
         output_eval_no_dropout = layer_no_dropout(sample_input, training=False)

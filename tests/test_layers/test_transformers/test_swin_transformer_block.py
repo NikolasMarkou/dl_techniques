@@ -37,8 +37,8 @@ class TestSwinTransformerBlock:
         assert layer.mlp_ratio == 4.0
         assert layer.qkv_bias is True
         assert layer.dropout_rate == 0.0
-        assert layer.attn_dropout_rate == 0.0
-        assert layer.drop_path_rate == 0.0
+        assert layer.attention_dropout_rate == 0.0
+        assert layer.stochastic_depth_rate == 0.0
         assert layer.activation == "gelu"
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
@@ -58,8 +58,8 @@ class TestSwinTransformerBlock:
             mlp_ratio=3.0,
             qkv_bias=False,
             dropout_rate=0.1,
-            attn_dropout_rate=0.1,
-            drop_path=0.1,
+            attention_dropout_rate=0.1,
+            stochastic_depth_rate=0.1,
             activation="relu",
             use_bias=False,
             kernel_initializer="he_normal",
@@ -75,8 +75,8 @@ class TestSwinTransformerBlock:
         assert layer.mlp_ratio == 3.0
         assert layer.qkv_bias is False
         assert layer.dropout_rate == 0.1
-        assert layer.attn_dropout_rate == 0.1
-        assert layer.drop_path_rate == 0.1
+        assert layer.attention_dropout_rate == 0.1
+        assert layer.stochastic_depth_rate == 0.1
         assert layer.activation == "relu"
         assert layer.use_bias is False
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
@@ -122,9 +122,9 @@ class TestSwinTransformerBlock:
         assert isinstance(layer_instance.norm2, keras.layers.LayerNormalization)
 
         # Check that stochastic depth is created when drop_path > 0
-        layer_with_drop_path = SwinTransformerBlock(dim=96, num_heads=3, drop_path=0.1)
+        layer_with_drop_path = SwinTransformerBlock(dim=96, num_heads=3, stochastic_depth_rate=0.1)
         layer_with_drop_path(input_tensor)
-        assert layer_with_drop_path.drop_path_rate is not None
+        assert layer_with_drop_path.stochastic_depth_rate is not None
 
     def test_output_shapes(self, input_tensor):
         """Test that output shapes are computed correctly."""
@@ -173,7 +173,7 @@ class TestSwinTransformerBlock:
         configurations = [
             {"dim": 32, "num_heads": 4, "window_size": 8, "shift_size": 0},
             {"dim": 64, "num_heads": 8, "window_size": 8, "shift_size": 4, "mlp_ratio": 2.0},
-            {"dim": 96, "num_heads": 3, "window_size": 7, "shift_size": 3, "dropout_rate": 0.1, "drop_path": 0.1},
+            {"dim": 96, "num_heads": 3, "window_size": 7, "shift_size": 3, "dropout_rate": 0.1, "stochastic_depth_rate": 0.1},
             {"dim": 128, "num_heads": 8, "window_size": 14, "shift_size": 0, "qkv_bias": False},
         ]
 
@@ -224,8 +224,8 @@ class TestSwinTransformerBlock:
             mlp_ratio=3.0,
             qkv_bias=False,
             dropout_rate=0.1,
-            attn_dropout_rate=0.05,
-            drop_path=0.1,
+            attention_dropout_rate=0.05,
+            stochastic_depth_rate=0.1,
             activation="relu",
             use_bias=False,
             kernel_initializer="he_normal",
@@ -369,7 +369,7 @@ class TestSwinTransformerBlock:
 
     def test_training_behavior(self, input_tensor):
         """Test different behavior in training vs inference mode."""
-        layer = SwinTransformerBlock(dim=96, num_heads=3, drop_path=0.1, dropout_rate=0.1)
+        layer = SwinTransformerBlock(dim=96, num_heads=3, stochastic_depth_rate=0.1, dropout_rate=0.1)
 
         # Test training mode
         training_output = layer(input_tensor, training=True)
@@ -386,11 +386,11 @@ class TestSwinTransformerBlock:
     def test_stochastic_depth_behavior(self):
         """Test that stochastic depth works correctly."""
         # Layer without stochastic depth
-        layer_no_drop = SwinTransformerBlock(dim=64, num_heads=8, window_size=8, drop_path=0.0)
+        layer_no_drop = SwinTransformerBlock(dim=64, num_heads=8, window_size=8, stochastic_depth_rate=0.0)
         test_input = keras.random.normal([2, 56, 56, 64])  # 56 is divisible by 8
 
         # Layer with stochastic depth
-        layer_with_drop = SwinTransformerBlock(dim=64, num_heads=8, window_size=8, drop_path=0.5)
+        layer_with_drop = SwinTransformerBlock(dim=64, num_heads=8, window_size=8, stochastic_depth_rate=0.5)
 
         # Test in training mode multiple times to see stochastic behavior
         outputs_with_drop = []

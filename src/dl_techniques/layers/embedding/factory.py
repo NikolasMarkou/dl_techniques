@@ -76,7 +76,7 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Adds learned, trainable positional embeddings to a sequence.',
         'required_params': ['max_seq_len', 'dim'],
         'optional_params': {
-            'dropout': 0.0,
+            'dropout_rate': 0.0,
             'pos_initializer': 'truncated_normal',
             'scale': 0.02
         },
@@ -129,7 +129,7 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'optional_params': {
             'initializer_range': 0.02,
             'layer_norm_eps': 1e-8,
-            'hidden_dropout_prob': 0.0,
+            'dropout_rate': 0.0,
             'normalization_type': 'layer_norm'
         },
         'use_case': 'BERT-style language models combining word, positional, and segment embeddings with sum aggregation and normalization.'
@@ -229,7 +229,7 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
             raise ValueError(f"{param} must be positive, got {kwargs[param]}")
 
     # Common dropout rate checks
-    dropout_params = ['dropout', 'hidden_dropout_prob']
+    dropout_params = ['dropout_rate']
     for param in dropout_params:
         if param in kwargs and not (0.0 <= kwargs[param] <= 1.0):
             raise ValueError(f"{param} must be in [0, 1], got {kwargs[param]}")

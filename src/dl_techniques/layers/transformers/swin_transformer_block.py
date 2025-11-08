@@ -189,9 +189,9 @@ class SwinTransformerBlock(keras.layers.Layer):
             projections in attention. Defaults to True.
         dropout_rate: Float, dropout rate for MLP and attention projection.
             Must be in [0, 1). Defaults to 0.0.
-        attn_dropout_rate: Float, dropout rate for attention weights.
+        attention_dropout_rate: Float, dropout rate for attention weights.
             Must be in [0, 1). Defaults to 0.0.
-        drop_path: Float, stochastic depth rate for DropPath regularization.
+        stochastic_depth_rate: Float, stochastic depth rate for DropPath regularization.
             Must be in [0, 1). Higher values increase regularization. Defaults to 0.0.
         activation: String name or callable, activation function for MLP.
             Common choices: 'gelu', 'relu', 'swish'. Defaults to "gelu".
@@ -289,8 +289,8 @@ class SwinTransformerBlock(keras.layers.Layer):
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
         dropout_rate: float = 0.0,
-        attn_dropout_rate: float = 0.0,
-        drop_path: float = 0.0,
+        attention_dropout_rate: float = 0.0,
+        stochastic_depth_rate: float = 0.0,
         activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = "gelu",
         use_bias: bool = True,
         kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
@@ -327,10 +327,10 @@ class SwinTransformerBlock(keras.layers.Layer):
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
         if not (0 <= dropout_rate < 1):
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
-        if not (0 <= attn_dropout_rate < 1):
-            raise ValueError(f"attn_dropout_rate must be in [0, 1), got {attn_dropout_rate}")
-        if not (0 <= drop_path < 1):
-            raise ValueError(f"drop_path must be in [0, 1), got {drop_path}")
+        if not (0 <= attention_dropout_rate < 1):
+            raise ValueError(f"attn_dropout_rate must be in [0, 1), got {attention_dropout_rate}")
+        if not (0 <= stochastic_depth_rate < 1):
+            raise ValueError(f"drop_path must be in [0, 1), got {stochastic_depth_rate}")
 
         # Store ALL configuration parameters for serialization
         self.dim = dim
@@ -340,8 +340,8 @@ class SwinTransformerBlock(keras.layers.Layer):
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
         self.dropout_rate = dropout_rate
-        self.attn_dropout_rate = attn_dropout_rate
-        self.drop_path_rate = drop_path
+        self.attention_dropout_rate = attention_dropout_rate
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = activation
         self.use_bias = use_bias
 
@@ -384,7 +384,7 @@ class SwinTransformerBlock(keras.layers.Layer):
             window_size=self.window_size,
             num_heads=self.num_heads,
             qkv_bias=self.qkv_bias,
-            dropout_rate=self.attn_dropout_rate,
+            dropout_rate=self.attention_dropout_rate,
             proj_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -397,9 +397,9 @@ class SwinTransformerBlock(keras.layers.Layer):
         )
 
         # Stochastic depth layer (optional)
-        if self.drop_path_rate > 0.0:
+        if self.stochastic_depth_rate > 0.0:
             self.drop_path_layer = StochasticDepth(
-                drop_path_rate=self.drop_path_rate,
+                drop_path_rate=self.stochastic_depth_rate,
                 name="drop_path"
             )
         else:
@@ -423,7 +423,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         logger.debug(
             f"Initialized SwinTransformerBlock: dim={dim}, num_heads={num_heads}, "
             f"window_size={window_size}, shift_size={shift_size}, "
-            f"mlp_ratio={mlp_ratio}, drop_path={drop_path}"
+            f"mlp_ratio={mlp_ratio}, drop_path={stochastic_depth_rate}"
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -622,8 +622,8 @@ class SwinTransformerBlock(keras.layers.Layer):
             "mlp_ratio": self.mlp_ratio,
             "qkv_bias": self.qkv_bias,
             "dropout_rate": self.dropout_rate,
-            "attn_dropout_rate": self.attn_dropout_rate,
-            "drop_path": self.drop_path_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
             "activation": self.activation,
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),

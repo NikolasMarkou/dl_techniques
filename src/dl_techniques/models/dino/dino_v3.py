@@ -262,7 +262,7 @@ class DINOv3(keras.Model):
         self.pos_embed = PositionalEmbedding(
             max_seq_len=self.sequence_length,
             dim=self.embed_dim,
-            dropout=self.dropout_rate,
+            dropout_rate=self.dropout_rate,
             name="positional_embedding"
         )
         return self.pos_embed(x)

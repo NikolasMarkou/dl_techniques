@@ -66,7 +66,7 @@ config = {
     'hidden_size': 768,
     'max_position_embeddings': 512,
     'type_vocab_size': 2,
-    'hidden_dropout_prob': 0.1,
+    'dropout_rate': 0.1,
     'normalization_type': 'layer_norm',
     'name': 'bert_embeddings'
 }
@@ -87,7 +87,7 @@ bert_info = info['bert_embeddings']
 print(f"Required: {bert_info['required_params']}")
 print(f"Optional: {list(bert_info['optional_params'].keys())}")
 # Required: ['vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
-# Optional: ['initializer_range', 'layer_norm_eps', 'hidden_dropout_prob', 'normalization_type']
+# Optional: ['initializer_range', 'layer_norm_eps', 'dropout_rate', 'normalization_type']
 ```
 
 ### Validation
@@ -138,14 +138,14 @@ img_embed = create_embedding_layer(
 
 ### PositionalEmbedding (`positional_learned`)
 - **Required**: `max_seq_len`, `dim`
-- **Optional**: `dropout` (default: `0.0`), `scale` (default: `0.02`)
+- **Optional**: `dropout_rate` (default: `0.0`), `scale` (default: `0.02`)
 
 ```python
 pos_embed = create_embedding_layer(
     'positional_learned',
     max_seq_len=512,
     dim=768,
-    dropout=0.1
+    dropout_rate=0.1
 )
 ```
 
@@ -223,7 +223,7 @@ bert_rms_embed = create_embedding_layer(
     max_position_embeddings=1024,
     type_vocab_size=1,  # Only one segment type
     normalization_type='rms_norm',
-    hidden_dropout_prob=0.1
+    dropout_rate=0.1
 )
 
 # BERT embeddings with Band RMS for improved stability
@@ -353,9 +353,9 @@ create_embedding_layer('rope', head_dim=64, max_seq_len=512, rope_percentage=1.5
 create_embedding_layer('bert_embeddings', vocab_size=-30522, hidden_size=768, 
                       max_position_embeddings=512, type_vocab_size=2)
 
-# Raises ValueError: "hidden_dropout_prob must be in [0, 1], got 1.5"
+# Raises ValueError: "dropout_rate must be in [0, 1], got 1.5"
 create_embedding_layer('bert_embeddings', vocab_size=30522, hidden_size=768,
-                      max_position_embeddings=512, type_vocab_size=2, hidden_dropout_prob=1.5)
+                      max_position_embeddings=512, type_vocab_size=2, dropout_rate=1.5)
 ```
 
 #### Invalid String Value Validation
@@ -375,7 +375,7 @@ The factory provides detailed logging to aid in debugging model configurations.
 Shows all parameters passed to each layer, including resolved defaults.
 ```
 INFO Creating 'bert_embeddings' embedding layer with parameters:
-INFO   'hidden_dropout_prob': 0.1
+INFO   'dropout_rate': 0.1
 INFO   'hidden_size': 768
 INFO   'initializer_range': 0.02
 INFO   'layer_norm_eps': 1e-08
@@ -425,7 +425,7 @@ configs = {
         'max_position_embeddings': 512,
         'type_vocab_size': 2,
         'normalization_type': 'rms_norm',  # Faster training
-        'hidden_dropout_prob': 0.1
+        'dropout_rate': 0.1
     },
     'stable_bert': {
         'type': 'bert_embeddings',
@@ -454,7 +454,7 @@ gpt_embed = create_embedding_layer(
     max_position_embeddings=1024,
     type_vocab_size=1,  # Only one segment type
     normalization_type='layer_norm',
-    hidden_dropout_prob=0.1
+    dropout_rate=0.1
 )
 ```
 
@@ -471,7 +471,7 @@ large_bert_embed = create_embedding_layer(
     normalization_type='rms_norm',  # Efficient normalization
     initializer_range=0.01,  # Smaller init for stability
     layer_norm_eps=1e-6,
-    hidden_dropout_prob=0.05  # Lower dropout for large models
+    dropout_rate=0.05  # Lower dropout for large models
 )
 ```
 

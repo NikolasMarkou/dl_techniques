@@ -1,5 +1,5 @@
 """
-Generates continuous, multi-dimensional rotary position embeddings (RoPE).
+Continuous, multi-dimensional rotary position embeddings (RoPE).
 
 This layer extends the concept of Rotary Position Embedding (RoPE),
 originally designed for 1D discrete sequences, to handle continuous,

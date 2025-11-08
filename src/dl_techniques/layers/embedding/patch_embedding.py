@@ -1,4 +1,5 @@
-"""Convert a 2D image into a sequence of flattened patch embeddings.
+"""
+Convert a 2D image into a sequence of flattened patch embeddings.
 
 This layer implements the input "tokenization" strategy for Vision
 Transformers (ViT), bridging the gap between the grid-like structure of

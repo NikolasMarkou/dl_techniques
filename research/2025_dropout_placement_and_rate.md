@@ -241,14 +241,14 @@ Modern implementations from Hugging Face Transformers show the pattern explicitl
 # Llama 3 Attention Implementation (Simplified)
 class LlamaAttention(nn.Module):
     def __init__(self, config):
-        self.attention_dropout = config.attention_dropout  # 0.0 default
-        
+        self.attention_dropout = config.attention_dropout_rate  # 0.0 default
+
     def forward(self, hidden_states, attention_mask):
         # Project to Q, K, V
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
         value = self.v_proj(hidden_states)
-        
+
         # Compute attention with Flash Attention
         attn_output = F.scaled_dot_product_attention(
             query, key, value,
@@ -256,18 +256,18 @@ class LlamaAttention(nn.Module):
             dropout_p=0.0 if not self.training else self.attention_dropout,
             # ↑ Key line: uses 0.0 by default
         )
-        
+
         # Project output
         attn_output = self.o_proj(attn_output)
-        
+
         # Position 2 dropout (also 0.0 in practice)
         if self.training and self.attention_dropout > 0:
-            attn_output = F.dropout(
-                attn_output, 
+            attn_output = F.dropout_rate(
+                attn_output,
                 p=self.attention_dropout,
                 training=True
             )
-            
+
         return attn_output
 ```
 
@@ -1280,59 +1280,61 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class ModernAttention(nn.Module):
     """
     Zero-dropout attention with Flash Attention support
     Used in: Llama 3, Mistral, Qwen 2.5, DeepSeek-V3
     """
+
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        
+
         # GQA: Separate num_heads for Q and KV
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        
+
         # Projections (no bias in modern designs)
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.k_proj = nn.Linear(
-            self.hidden_size, 
-            self.num_key_value_heads * self.head_dim, 
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
             bias=False
         )
         self.v_proj = nn.Linear(
-            self.hidden_size, 
-            self.num_key_value_heads * self.head_dim, 
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
             bias=False
         )
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        
+
         # ★ KEY POINT: Dropout is 0.0 by default
-        self.attention_dropout = config.attention_dropout  # 0.0
-        
+        self.attention_dropout = config.attention_dropout_rate  # 0.0
+
     def forward(self, hidden_states, attention_mask=None):
         batch_size, seq_len, _ = hidden_states.shape
-        
+
         # Project to Q, K, V
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-        
+
         # Reshape for multi-head attention
         query_states = query_states.view(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
-        
+
         key_states = key_states.view(
             batch_size, seq_len, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
-        
+
         value_states = value_states.view(
             batch_size, seq_len, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
-        
+
         # Repeat K,V for GQA (if needed)
         if self.num_key_value_groups > 1:
             key_states = key_states.repeat_interleave(
@@ -1341,7 +1343,7 @@ class ModernAttention(nn.Module):
             value_states = value_states.repeat_interleave(
                 self.num_key_value_groups, dim=1
             )
-        
+
         # ★ Flash Attention with zero dropout by default
         attn_output = F.scaled_dot_product_attention(
             query_states,
@@ -1352,14 +1354,14 @@ class ModernAttention(nn.Module):
             # ↑ Key line: explicitly uses 0.0 during inference
             is_causal=True
         )
-        
+
         # Reshape back
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_len, self.hidden_size)
-        
+
         # Output projection (no dropout here in modern designs)
         attn_output = self.o_proj(attn_output)
-        
+
         return attn_output
 
 
@@ -1372,15 +1374,16 @@ class SwiGLU_FFN(nn.Module):
     SwiGLU feed-forward network with zero dropout
     Gated activation provides implicit regularization
     """
+
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size
-        
+
         # 8/3 scaling for SwiGLU (vs 4× for standard FFN)
         self.intermediate_size = int(2 * config.hidden_size * 2 / 3)
         # Round to nearest multiple of 256 for efficiency
         self.intermediate_size = 256 * ((self.intermediate_size + 255) // 256)
-        
+
         # Three linear layers for gating
         self.gate_proj = nn.Linear(
             self.hidden_size, self.intermediate_size, bias=False
@@ -1391,16 +1394,16 @@ class SwiGLU_FFN(nn.Module):
         self.down_proj = nn.Linear(
             self.intermediate_size, self.hidden_size, bias=False
         )
-        
+
         # ★ No dropout layer defined!
-        
+
     def forward(self, x):
         # SwiGLU: down(silu(gate(x)) ⊗ up(x))
         gate = F.silu(self.gate_proj(x))  # Swish activation
         up = self.up_proj(x)
         intermediate = gate * up  # Element-wise gating
         output = self.down_proj(intermediate)
-        
+
         # ★ No dropout applied anywhere!
         return output
 
@@ -1414,22 +1417,23 @@ class EarlyDropoutScheduler:
     Linear decay from initial_rate to 0.0 over decay_steps
     Optimal for small models (<100M params)
     """
+
     def __init__(self, initial_rate=0.1, decay_steps=10000):
         self.initial_rate = initial_rate
         self.decay_steps = decay_steps
-        
+
     def get_dropout_rate(self, current_step):
         if current_step >= self.decay_steps:
             return 0.0
-        
+
         # Linear decay
         rate = self.initial_rate * (1.0 - current_step / self.decay_steps)
         return max(0.0, rate)
-    
+
     def update_model_dropout(self, model, current_step):
         """Update all dropout layers in model"""
         new_rate = self.get_dropout_rate(current_step)
-        
+
         for module in model.modules():
             if isinstance(module, nn.Dropout):
                 module.p = new_rate
@@ -1441,7 +1445,7 @@ scheduler = EarlyDropoutScheduler(initial_rate=0.1, decay_steps=10000)
 for step in range(50000):
     # Update dropout rate
     scheduler.update_model_dropout(model, step)
-    
+
     # Training step
     loss = train_step(model, batch)
     loss.backward()
@@ -1457,16 +1461,17 @@ class TransformerBlockWithResidualDropout(nn.Module):
     Add dropout specifically to residual connections
     Useful for low-resource fine-tuning
     """
+
     def __init__(self, config, residual_dropout=0.1):
         super().__init__()
         self.attention = ModernAttention(config)
         self.ffn = SwiGLU_FFN(config)
         self.norm1 = nn.RMSNorm(config.hidden_size)
         self.norm2 = nn.RMSNorm(config.hidden_size)
-        
+
         # ★ Residual dropout (only here!)
         self.residual_dropout = nn.Dropout(residual_dropout)
-        
+
     def forward(self, x):
         # Attention block with residual dropout
         residual = x
@@ -1474,14 +1479,14 @@ class TransformerBlockWithResidualDropout(nn.Module):
         x = self.attention(x)
         x = self.residual_dropout(x)  # ★ Applied to residual
         x = residual + x
-        
+
         # FFN block with residual dropout
         residual = x
         x = self.norm2(x)
         x = self.ffn(x)
         x = self.residual_dropout(x)  # ★ Applied to residual
         x = residual + x
-        
+
         return x
 
 
@@ -1494,43 +1499,44 @@ class LoRALayer(nn.Module):
     Low-Rank Adaptation with dropout on adapter matrices
     Base model stays frozen with zero dropout
     """
+
     def __init__(
-        self, 
-        in_features, 
-        out_features, 
-        rank=8, 
-        alpha=16,
-        dropout=0.1
+            self,
+            in_features,
+            out_features,
+            rank=8,
+            alpha=16,
+            dropout=0.1
     ):
         super().__init__()
         self.rank = rank
         self.alpha = alpha
-        
+
         # Frozen base weight (no dropout)
         self.base_weight = nn.Parameter(
             torch.randn(out_features, in_features),
             requires_grad=False
         )
-        
+
         # Trainable low-rank matrices
         self.lora_A = nn.Parameter(torch.randn(rank, in_features))
         self.lora_B = nn.Parameter(torch.randn(out_features, rank))
-        
+
         # ★ Dropout only on adapter!
         self.dropout = nn.Dropout(dropout)
-        
+
         # Scaling factor
         self.scaling = alpha / rank
-        
+
     def forward(self, x):
         # Base model computation (frozen)
         base_output = F.linear(x, self.base_weight)
-        
+
         # LoRA adapter computation with dropout
         lora_output = F.linear(x, self.lora_A)
         lora_output = self.dropout(lora_output)  # ★ Dropout here
         lora_output = F.linear(lora_output, self.lora_B)
-        
+
         # Combine with scaling
         return base_output + self.scaling * lora_output
 
@@ -1540,10 +1546,10 @@ class LoRALayer(nn.Module):
 # ============================================================
 
 def compute_rdrop_loss(
-    model, 
-    input_ids, 
-    labels, 
-    alpha=1.0
+        model,
+        input_ids,
+        labels,
+        alpha=1.0
 ):
     """
     R-Drop: Consistency regularization via KL divergence
@@ -1561,14 +1567,14 @@ def compute_rdrop_loss(
         logits1.view(-1, logits1.size(-1)),
         labels.view(-1)
     )
-    
+
     # Second forward pass (different dropout mask)
     logits2 = model(input_ids)
     loss2 = F.cross_entropy(
         logits2.view(-1, logits2.size(-1)),
         labels.view(-1)
     )
-    
+
     # KL divergence between two predictions
     kl_loss = F.kl_div(
         F.log_softmax(logits1, dim=-1),
@@ -1579,28 +1585,28 @@ def compute_rdrop_loss(
         F.softmax(logits1, dim=-1),
         reduction='batchmean'
     )
-    
+
     # Symmetric KL
     kl_loss = kl_loss / 2.0
-    
+
     # Combined loss
     total_loss = (loss1 + loss2) / 2.0 + alpha * kl_loss
-    
+
     return total_loss
 
 
 # Example training loop with R-Drop:
 for batch in dataloader:
     input_ids, labels = batch
-    
+
     # Standard loss
     loss = compute_rdrop_loss(
-        model, 
-        input_ids, 
-        labels, 
+        model,
+        input_ids,
+        labels,
         alpha=1.0  # Tune based on task
     )
-    
+
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()

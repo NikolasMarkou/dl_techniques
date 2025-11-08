@@ -185,7 +185,7 @@ class TestVisionEncoder:
 
     def test_training_vs_inference_modes(self, basic_config, sample_images):
         """Tests behavior difference between training and inference modes."""
-        config = {**basic_config, 'dropout': 0.5, 'pos_dropout': 0.3}
+        config = {**basic_config, 'dropout_rate': 0.5, 'pos_dropout_rate': 0.3}
         encoder = VisionEncoder(**config)
         output_train = encoder(sample_images, training=True)
         output_infer = encoder(sample_images, training=False)

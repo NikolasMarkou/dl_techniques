@@ -187,9 +187,9 @@ class VisionEncoder(keras.layers.Layer):
             - 'max': Global max pooling over sequence
             - 'none': Return full sequence features
             Defaults to 'cls'.
-        dropout: Float, general dropout rate between 0 and 1. Defaults to 0.0.
-        attention_dropout: Float, attention-specific dropout rate. Defaults to 0.0.
-        pos_dropout: Float, positional embedding dropout rate. Defaults to 0.0.
+        dropout_rate: Float, general dropout rate between 0 and 1. Defaults to 0.0.
+        attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.0.
+        pos_dropout_rate: Float, positional embedding dropout rate. Defaults to 0.0.
         stochastic_depth_rate: Float, stochastic depth drop path rate. Defaults to 0.0.
         activation: Union[str, Callable], activation function for FFN. Defaults to 'gelu'.
         use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
@@ -312,9 +312,9 @@ class VisionEncoder(keras.layers.Layer):
             ffn_type: FFNType = 'mlp',
             use_cls_token: bool = True,
             output_mode: PoolingStrategy = 'cls',
-            dropout: float = 0.0,
-            attention_dropout: float = 0.0,
-            pos_dropout: float = 0.0,
+            dropout_rate: float = 0.0,
+            attention_dropout_rate: float = 0.0,
+            pos_dropout_rate: float = 0.0,
             stochastic_depth_rate: float = 0.0,
             activation: Union[str, Callable] = 'gelu',
             use_bias: bool = True,
@@ -351,12 +351,12 @@ class VisionEncoder(keras.layers.Layer):
             )
         if mlp_ratio <= 0.0:
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
-        if not (0.0 <= dropout <= 1.0):
-            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
-        if not (0.0 <= attention_dropout <= 1.0):
-            raise ValueError(f"attention_dropout must be between 0 and 1, got {attention_dropout}")
-        if not (0.0 <= pos_dropout <= 1.0):
-            raise ValueError(f"pos_dropout must be between 0 and 1, got {pos_dropout}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout must be between 0 and 1, got {dropout_rate}")
+        if not (0.0 <= attention_dropout_rate <= 1.0):
+            raise ValueError(f"attention_dropout must be between 0 and 1, got {attention_dropout_rate}")
+        if not (0.0 <= pos_dropout_rate <= 1.0):
+            raise ValueError(f"pos_dropout must be between 0 and 1, got {pos_dropout_rate}")
         if not use_cls_token and output_mode == 'cls':
             raise ValueError("output_mode='cls' requires use_cls_token=True")
 
@@ -374,9 +374,9 @@ class VisionEncoder(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.use_cls_token = use_cls_token
         self.output_mode = output_mode
-        self.dropout = dropout
-        self.attention_dropout = attention_dropout
-        self.pos_dropout = pos_dropout
+        self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
+        self.pos_dropout_rate = pos_dropout_rate
         self.stochastic_depth_rate = stochastic_depth_rate
         self.activation = activation
         self.use_bias = use_bias
@@ -404,7 +404,7 @@ class VisionEncoder(keras.layers.Layer):
             'positional_learned',
             max_seq_len=self.seq_len,
             dim=self.embed_dim,
-            dropout=self.pos_dropout,
+            dropout=self.pos_dropout_rate,
             name="pos_embed"
         )
 
@@ -426,8 +426,8 @@ class VisionEncoder(keras.layers.Layer):
                 ffn_norm_args=self.norm_args,
                 ffn_type=self.ffn_type,
                 ffn_args=self.ffn_args,
-                dropout_rate=self.dropout,
-                attention_dropout_rate=self.attention_dropout,
+                dropout_rate=self.dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
                 use_stochastic_depth=self.stochastic_depth_rate > 0.0,
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
@@ -793,9 +793,9 @@ class VisionEncoder(keras.layers.Layer):
             'ffn_type': self.ffn_type,
             'use_cls_token': self.use_cls_token,
             'output_mode': self.output_mode,
-            'dropout': self.dropout,
-            'attention_dropout': self.attention_dropout,
-            'pos_dropout': self.pos_dropout,
+            'dropout_rate': self.dropout_rate,
+            'attention_dropout_rate': self.attention_dropout_rate,
+            'pos_dropout_rate': self.pos_dropout_rate,
             'stochastic_depth_rate': self.stochastic_depth_rate,
             'activation': self.activation,
             'use_bias': self.use_bias,
@@ -913,7 +913,7 @@ def create_vision_encoder(
         ffn_type=ffn_type,
         use_cls_token=use_cls_token,
         output_mode=output_mode,
-        dropout=dropout,
+        dropout_rate=dropout,
         **kwargs
     )
 

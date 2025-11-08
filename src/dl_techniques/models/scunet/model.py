@@ -282,7 +282,7 @@ class SCUNet(keras.Model):
                     trans_dim=trans_dim,
                     head_dim=self.head_dim,
                     window_size=self.window_size,
-                    drop_path=dpr[i],
+                    drop_path_rate=dpr[i],
                     block_type=block_type,
                     input_resolution=input_res,
                     name=f"{stage_name}_block_{i}"

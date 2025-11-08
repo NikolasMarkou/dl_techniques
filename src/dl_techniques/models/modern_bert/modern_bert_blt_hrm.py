@@ -394,7 +394,7 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
             self.position_embeddings = PositionalEmbedding(
                 max_seq_len=self.total_seq_len,
                 dim=self.config.embed_dim,
-                dropout=0.0,
+                dropout_rate=0.0,
                 name="position_embeddings"
             )
 

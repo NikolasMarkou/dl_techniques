@@ -419,7 +419,7 @@ class EntropyModel(keras.layers.Layer):
         self.positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_seq_len,
             dim=self.hidden_dim,
-            dropout=self.dropout_rate,
+            dropout_rate=self.dropout_rate,
             name='positional_embedding'
         )
 
@@ -1049,7 +1049,7 @@ class LocalEncoder(keras.layers.Layer):
         self.positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_sequence_length,
             dim=self.local_dim,
-            dropout=self.dropout_rate,
+            dropout_rate=self.dropout_rate,
             name='positional_embedding'
         )
 
@@ -1212,7 +1212,7 @@ class GlobalTransformer(keras.layers.Layer):
         self.patch_positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_patches,
             dim=self.global_dim,
-            dropout=self.dropout_rate,
+            dropout_rate=self.dropout_rate,
             name='patch_positional_embedding'
         )
 
@@ -1361,7 +1361,7 @@ class LocalDecoder(keras.layers.Layer):
         self.positional_embedding = PositionalEmbedding(
             max_seq_len=self.max_sequence_length,
             dim=self.local_dim,
-            dropout=self.dropout_rate,
+            dropout_rate=self.dropout_rate,
             name='decoder_positional_embedding'
         )
 

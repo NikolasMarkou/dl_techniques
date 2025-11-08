@@ -92,7 +92,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             Defaults to 8.
         mlp_ratio: Float, ratio of MLP hidden dimension to input dimension.
             Must be positive. Defaults to 4.0 (standard transformer ratio).
-        dropout: Float, dropout rate for attention and MLP. Must be between 0 and 1.
+        dropout_rate: Float, dropout rate for attention and MLP. Must be between 0 and 1.
             Defaults to 0.0.
         activation: String or callable, activation function for MLP. Defaults to "gelu".
         use_bias: Boolean, whether to use bias in projections. Defaults to True.
@@ -154,7 +154,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             dim: int,
             num_heads: int = 8,
             mlp_ratio: float = 4.0,
-            dropout: float = 0.0,
+            dropout_rate: float = 0.0,
             activation: Union[str, callable] = "gelu",
             use_bias: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
@@ -174,14 +174,14 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
         if mlp_ratio <= 0:
             raise ValueError(f"mlp_ratio must be positive, got {mlp_ratio}")
-        if not (0.0 <= dropout <= 1.0):
-            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout must be between 0 and 1, got {dropout_rate}")
 
         # Store ALL configuration
         self.dim = dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
-        self.dropout_rate = dropout
+        self.dropout_rate = dropout_rate
         self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -206,7 +206,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         self.attention = PerceiverAttention(
             dim=self.dim,
             num_heads=self.num_heads,
-            dropout=self.dropout_rate,
+            dropout_rate=self.dropout_rate,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -240,9 +240,9 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         )
 
         if self.dropout_rate > 0.0:
-            self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
+            self.dropout = keras.layers.Dropout(self.dropout_rate, name="dropout")
         else:
-            self.dropout_layer = None
+            self.dropout = None
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> None:
         """Build the layer and all its sub-layers.
@@ -290,8 +290,8 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         mlp_intermediate_shape[-1] = self.mlp_hidden_dim
         mlp_intermediate_shape = tuple(mlp_intermediate_shape)
 
-        if self.dropout_layer is not None:
-            self.dropout_layer.build(mlp_intermediate_shape)
+        if self.dropout is not None:
+            self.dropout.build(mlp_intermediate_shape)
 
         self.mlp_dense2.build(mlp_intermediate_shape)
 
@@ -337,8 +337,8 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         # MLP forward pass
         mlp_output = self.mlp_dense1(normed_x, training=training)
 
-        if self.dropout_layer is not None:
-            mlp_output = self.dropout_layer(mlp_output, training=training)
+        if self.dropout is not None:
+            mlp_output = self.dropout(mlp_output, training=training)
 
         mlp_output = self.mlp_dense2(mlp_output, training=training)
 
@@ -364,7 +364,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             "dim": self.dim,
             "num_heads": self.num_heads,
             "mlp_ratio": self.mlp_ratio,
-            "dropout": self.dropout_rate,
+            "dropout_rate": self.dropout_rate,
             "activation": keras.activations.serialize(self.activation),
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),

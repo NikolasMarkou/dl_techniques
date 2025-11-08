@@ -97,7 +97,7 @@ class BertEmbeddings(keras.layers.Layer):
         type_vocab_size: Size of the token type vocabulary. Must be positive.
         initializer_range: Standard deviation for weight initialization. Must be positive.
         layer_norm_eps: Epsilon value for normalization layers. Must be positive.
-        hidden_dropout_prob: Dropout probability for embeddings. Must be between 0 and 1.
+        dropout_rate: Dropout probability for embeddings. Must be between 0 and 1.
         normalization_type: Type of normalization layer to use.
             Supported: 'layer_norm', 'rms_norm', 'band_rms', 'batch_norm'.
         **kwargs: Additional keyword arguments for the Layer base class.
@@ -122,7 +122,7 @@ class BertEmbeddings(keras.layers.Layer):
             type_vocab_size=2,
             initializer_range=0.02,
             layer_norm_eps=1e-12,
-            hidden_dropout_prob=0.1,
+            dropout_rate=0.1,
             normalization_type='layer_norm'
         )
 
@@ -139,7 +139,7 @@ class BertEmbeddings(keras.layers.Layer):
             type_vocab_size: int,
             initializer_range: float = 0.02,
             layer_norm_eps: float = 1e-8,
-            hidden_dropout_prob: float = 0.0,
+            dropout_rate: float = 0.0,
             normalization_type: str = "layer_norm",
             **kwargs: Any
     ) -> None:
@@ -158,8 +158,8 @@ class BertEmbeddings(keras.layers.Layer):
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
         if layer_norm_eps <= 0:
             raise ValueError(f"layer_norm_eps must be positive, got {layer_norm_eps}")
-        if not (0.0 <= hidden_dropout_prob <= 1.0):
-            raise ValueError(f"hidden_dropout_prob must be between 0 and 1, got {hidden_dropout_prob}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
         valid_norm_types = ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm']
         if normalization_type not in valid_norm_types:
@@ -172,7 +172,7 @@ class BertEmbeddings(keras.layers.Layer):
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
-        self.hidden_dropout_prob = hidden_dropout_prob
+        self.dropout_rate = dropout_rate
         self.normalization_type = normalization_type
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
@@ -208,7 +208,7 @@ class BertEmbeddings(keras.layers.Layer):
         self.layer_norm = self._create_normalization_layer("layer_norm")
 
         self.dropout = keras.layers.Dropout(
-            rate=hidden_dropout_prob,
+            rate=dropout_rate,
             name="dropout"
         )
 
@@ -354,7 +354,7 @@ class BertEmbeddings(keras.layers.Layer):
             'type_vocab_size': self.type_vocab_size,
             'initializer_range': self.initializer_range,
             'layer_norm_eps': self.layer_norm_eps,
-            'hidden_dropout_prob': self.hidden_dropout_prob,
+            'dropout_rate': self.dropout_rate,
             'normalization_type': self.normalization_type,
         })
         return config

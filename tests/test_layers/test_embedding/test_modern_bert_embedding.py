@@ -27,7 +27,7 @@ class TestModernBertEmbeddings:
             "type_vocab_size": 2,
             "initializer_range": 0.02,
             "layer_norm_eps": 1e-12,
-            "hidden_dropout_prob": 0.1,
+            "dropout_rate": 0.1,
             "use_bias": True,
         }
 
