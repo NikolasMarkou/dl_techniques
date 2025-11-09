@@ -10,11 +10,6 @@ tasks such as deraining, deblurring, and dehazing.
 - PW_FNet_Block: Core building block with token mixer and FFN
 - Downsample & Upsample: Spatial resolution scaling layers
 - PW_FNet: Complete model with multi-scale supervision
-
-**Reference**: Based on PW-FNet architecture for efficient image restoration.
-
-**Author**: Deep Learning Techniques Framework
-**Version**: 1.0.0
 """
 
 import keras
@@ -26,66 +21,50 @@ from typing import Optional, Tuple, List, Dict, Any
 # 1. Utility FFT Layers
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="pw_fnet")
+@keras.saving.register_keras_serializable()
 class FFTLayer(keras.layers.Layer):
     """
-    Applies 2D Fast Fourier Transform to spatial domain features.
+    Applies 2D Fast Fourier Transform and outputs concatenated real/imag parts.
 
-    This layer transforms real-valued spatial domain features into the frequency 
-    domain by applying a 2D FFT along the spatial dimensions (height and width). 
-    The transformation enables efficient global context modeling without explicit 
-    attention mechanisms.
+    This layer transforms real-valued spatial domain features into the frequency
+    domain. To interface with standard real-valued Keras layers (like Conv2D),
+    it outputs a single real-valued tensor where the real and imaginary components
+    of the FFT are concatenated along the channel axis.
 
-    **Intent**: To provide a modular, serializable Keras layer for frequency domain 
-    analysis, forming the core component of the Fourier-based token mixer in PW-FNet. 
-    This approach achieves O(N log N) complexity compared to O(N²) for self-attention.
+    **Intent**: To provide a modular, serializable Keras layer for frequency domain
+    analysis that is compatible with standard convolutional pipelines. This is a
+    core component of the Fourier-based token mixer in PW-FNet.
 
     **Architecture**:
     ```
-    Input(shape=[batch, height, width, channels])
+    Input(shape=[batch, H, W, C])
            ↓
-    Transpose: [batch, channels, height, width]
+    Transpose: [batch, C, H, W]
            ↓
-    Cast to complex64
+    Create (real, imag) tuple where imag is zeros
            ↓
-    FFT2D along spatial dims
+    FFT2D along spatial dims → (fft_real, fft_imag)
            ↓
-    Transpose: [batch, height, width, channels]
+    Transpose both back: [batch, H, W, C]
            ↓
-    Output(complex64, same shape)
+    Concatenate: [fft_real, fft_imag] along channels
+           ↓
+    Output(float32, shape=[batch, H, W, 2*C])
     ```
-
-    **Mathematical Operation**:
-    - For input x ∈ ℝ^(H×W×C), computes F(x) ∈ ℂ^(H×W×C)
-    - F(x)[k,l,c] = Σ_m Σ_n x[m,n,c] * exp(-2πi(km/H + ln/W))
-
-    **Use Cases**:
-    - Global context modeling in vision transformers
-    - Frequency domain feature extraction
-    - Efficient spatial mixing operations
-    - Image restoration and enhancement
 
     **Input shape**:
         4D tensor: `(batch_size, height, width, channels)`.
-        All dimensions except batch can be None (dynamic).
 
     **Output shape**:
-        4D tensor: `(batch_size, height, width, channels)` with `complex64` dtype.
+        4D tensor: `(batch_size, height, width, 2 * channels)` with `float32`
+        dtype, representing concatenated real and imaginary parts.
 
     **Example**:
-        >>> # Create layer
         >>> fft_layer = FFTLayer()
-        >>> 
-        >>> # Apply to image features
         >>> spatial_features = ops.random.normal((2, 32, 32, 64))
         >>> freq_features = fft_layer(spatial_features)
         >>> print(freq_features.shape, freq_features.dtype)
-        (2, 32, 32, 64) complex64
-
-    **Performance Notes**:
-    - FFT computation is O(HW log(HW)) per channel
-    - Most efficient when H and W are powers of 2
-    - GPU acceleration available through backend FFT implementations
+        (2, 32, 32, 128) float32
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -105,35 +84,48 @@ class FFTLayer(keras.layers.Layer):
             inputs: Input tensor of shape (batch, height, width, channels).
 
         Returns:
-            Complex tensor of shape (batch, height, width, channels) in frequency domain.
+            Real tensor of shape (batch, height, width, 2*channels)
+            representing concatenated real and imaginary frequency components.
         """
-        # Keras ops FFT operates on the last two dims
         # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
-        x_permuted = ops.transpose(inputs, [0, 3, 1, 2])
+        x_permuted = keras.ops.transpose(inputs, [0, 3, 1, 2])
 
-        # Cast to complex for FFT computation
-        x_complex = ops.cast(x_permuted, 'complex64')
+        # Keras FFT requires a tuple of (real, imag)
+        # Input is real, so imag part is zero
+        real_part = x_permuted
+        imag_part = keras.ops.zeros_like(real_part)
 
         # Apply 2D FFT along spatial dimensions (last two)
-        fft = ops.fft2d(x_complex)
+        fft_real, fft_imag = keras.ops.fft2((real_part, imag_part))
 
         # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
-        return ops.transpose(fft, [0, 2, 3, 1])
+        fft_real_permuted = keras.ops.transpose(fft_real, [0, 2, 3, 1])
+        fft_imag_permuted = keras.ops.transpose(fft_imag, [0, 2, 3, 1])
+
+        # Concatenate real and imaginary parts along the channel axis
+        return keras.ops.concatenate(
+            [fft_real_permuted, fft_imag_permuted], axis=-1
+        )
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape (same as input shape, different dtype).
+        Compute output shape (channels are doubled).
 
         Args:
             input_shape: Shape tuple of input tensor.
 
         Returns:
-            Output shape tuple (same as input).
+            Output shape tuple.
         """
-        return input_shape
+        batch, height, width, channels = input_shape
+        if channels is not None:
+            output_channels = channels * 2
+        else:
+            output_channels = None
+        return batch, height, width, output_channels
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -146,48 +138,36 @@ class FFTLayer(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="pw_fnet")
+@keras.saving.register_keras_serializable()
 class IFFTLayer(keras.layers.Layer):
     """
-    Applies 2D Inverse Fast Fourier Transform to frequency domain features.
+    Applies 2D Inverse FFT to concatenated real/imag parts.
 
-    This layer transforms complex-valued frequency domain features back into the 
-    spatial domain by applying a 2D IFFT. It completes the round-trip transformation 
-    from spatial → frequency → spatial domains, extracting the real component of 
-    the result.
+    This layer transforms frequency domain features (represented as a real tensor
+    with concatenated real and imaginary parts) back into the spatial domain.
+    It performs the inverse operation of `FFTLayer`.
 
-    **Intent**: To reconstruct spatial features from the frequency domain after 
-    frequency-domain processing, completing the Fourier-based token mixer block 
-    in PW-FNet. This enables efficient global feature mixing with linear complexity.
+    **Intent**: To reconstruct spatial features from the frequency domain after
+    processing, completing the Fourier-based token mixer block in PW-FNet.
 
     **Architecture**:
     ```
-    Input(complex64, shape=[batch, height, width, channels])
+    Input(float32, shape=[batch, H, W, 2*C])
            ↓
-    Transpose: [batch, channels, height, width]
+    Split into (real, imag) parts along channels
            ↓
-    IFFT2D along spatial dims
+    Transpose both: [batch, C, H, W]
            ↓
-    Transpose: [batch, height, width, channels]
+    IFFT2D on (real, imag) tuple → (ifft_real, ifft_imag)
            ↓
-    Extract real part
+    Take ifft_real and transpose back: [batch, H, W, C]
            ↓
-    Output(float32, same shape)
+    Output(float32, shape=[batch, H, W, C])
     ```
 
-    **Mathematical Operation**:
-    - For frequency domain F(x) ∈ ℂ^(H×W×C), computes real(F⁻¹(F(x))) ∈ ℝ^(H×W×C)
-    - F⁻¹(X)[m,n,c] = (1/HW) * Σ_k Σ_l X[k,l,c] * exp(2πi(km/H + ln/W))
-
-    **Use Cases**:
-    - Spatial feature reconstruction after frequency processing
-    - Inverse transformation in Fourier-based architectures
-    - Signal recovery from frequency representations
-    - Image restoration pipelines
-
     **Input shape**:
-        4D tensor: `(batch_size, height, width, channels)` with `complex64` or 
-        `complex128` dtype. All dimensions except batch can be None (dynamic).
+        4D tensor: `(batch_size, height, width, 2 * channels)` with `float32`
+        dtype. Channel dimension must be even.
 
     **Output shape**:
         4D tensor: `(batch_size, height, width, channels)` with `float32` dtype.
@@ -196,20 +176,10 @@ class IFFTLayer(keras.layers.Layer):
         >>> # Create layers
         >>> fft_layer = FFTLayer()
         >>> ifft_layer = IFFTLayer()
-        >>> 
         >>> # Round-trip transformation
         >>> spatial_features = ops.random.normal((2, 32, 32, 64))
-        >>> freq_features = fft_layer(spatial_features)
-        >>> reconstructed = ifft_layer(freq_features)
-        >>> 
-        >>> # Should be close to original (within numerical precision)
-        >>> difference = ops.mean(ops.abs(spatial_features - reconstructed))
-        >>> print(f"Reconstruction error: {difference:.6f}")
-
-    **Performance Notes**:
-    - IFFT computation is O(HW log(HW)) per channel
-    - Matches FFT efficiency characteristics
-    - Real part extraction adds minimal overhead
+        >>> freq_features = fft_layer(spatial_features) # shape (2,32,32,128)
+        >>> reconstructed = ifft_layer(freq_features)   # shape (2,32,32,64)
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -226,38 +196,50 @@ class IFFTLayer(keras.layers.Layer):
         Apply 2D IFFT to input tensor and extract real part.
 
         Args:
-            inputs: Complex input tensor of shape (batch, height, width, channels).
+            inputs: Real tensor with concatenated real/imag parts, shape
+                    (batch, height, width, 2*channels).
 
         Returns:
             Real tensor of shape (batch, height, width, channels) in spatial domain.
         """
-        # Keras ops IFFT operates on the last two dims
+        # Input is a concatenation of real and imaginary parts
+        real_part, imag_part = keras.ops.split(inputs, 2, axis=-1)
+
         # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
-        x_permuted = ops.transpose(inputs, [0, 3, 1, 2])
+        real_permuted = keras.ops.transpose(real_part, [0, 3, 1, 2])
+        imag_permuted = keras.ops.transpose(imag_part, [0, 3, 1, 2])
 
         # Apply 2D IFFT along spatial dimensions (last two)
-        ifft = ops.ifft2d(x_permuted)
+        ifft_real, _ = keras.ops.ifft2((real_permuted, imag_permuted))
 
         # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
-        ifft_permuted = ops.transpose(ifft, [0, 2, 3, 1])
+        ifft_permuted = keras.ops.transpose(ifft_real, [0, 2, 3, 1])
 
-        # Extract real part and return to spatial domain
-        return ops.real(ifft_permuted)
+        return ifft_permuted
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape (same as input shape, different dtype).
+        Compute output shape (channels are halved).
 
         Args:
             input_shape: Shape tuple of input tensor.
 
         Returns:
-            Output shape tuple (same as input).
+            Output shape tuple.
         """
-        return input_shape
+        batch, height, width, channels = input_shape
+        if channels is not None:
+            if channels % 2 != 0:
+                raise ValueError(
+                    f"Input channels for IFFTLayer must be even, got {channels}"
+                )
+            output_channels = channels // 2
+        else:
+            output_channels = None
+        return batch, height, width, output_channels
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -274,7 +256,7 @@ class IFFTLayer(keras.layers.Layer):
 # 2. Core PW-FNet Block
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="pw_fnet")
+@keras.saving.register_keras_serializable()
 class PW_FNet_Block(keras.layers.Layer):
     """
     Pyramid Wavelet-Fourier Network (PW-FNet) building block.
@@ -292,15 +274,15 @@ class PW_FNet_Block(keras.layers.Layer):
     **Architecture**:
     ```
     Input(shape=[batch, H, W, C])
-       ↓
+           ↓
     LayerNorm ──────────────┐
        ↓                    │
     Token Mixer             │ (Residual)
        ├─ PointwiseConv(→hidden_dim)
-       ├─ FFT2D
-       ├─ PointwiseConv
+       ├─ FFT2D (→ 2*hidden_dim channels)
+       ├─ PointwiseConv (on real+imag parts)
        ├─ GELU
-       ├─ IFFT2D
+       ├─ IFFT2D (→ hidden_dim channels)
        └─ PointwiseConv(→C)
        ↓                    │
     Add ←───────────────────┘
@@ -318,24 +300,6 @@ class PW_FNet_Block(keras.layers.Layer):
     Output(shape=[batch, H, W, C])
     ```
 
-    **Design Rationale**:
-    - **Token Mixer**: Global context via FFT (O(N log N)) vs attention (O(N²))
-    - **Frequency Processing**: Learns spatial patterns in frequency domain
-    - **FFN**: Local feature refinement with depthwise separable convolution
-    - **Residual Connections**: Stabilize training and enable deep networks
-    - **LayerNorm**: Normalize features before each major transformation
-
-    **Use Cases**:
-    - Image restoration (deraining, deblurring, dehazing)
-    - Low-level vision tasks requiring global context
-    - Efficient alternatives to vision transformer blocks
-    - High-resolution image processing
-
-    **Complexity Analysis**:
-    - Token Mixer: O(HWC log(HW)) for FFT operations
-    - FFN: O(HWC²) for pointwise + O(9HWC) for depthwise
-    - Total: O(HWC(log(HW) + C)) vs O(H²W²C) for attention
-
     Args:
         dim: Number of input and output channels. Must be positive.
         ffn_expansion_factor: Expansion factor for the hidden dimension
@@ -345,33 +309,6 @@ class PW_FNet_Block(keras.layers.Layer):
 
     Raises:
         ValueError: If dim is not positive.
-
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, dim)`.
-
-    **Output shape**:
-        4D tensor: `(batch_size, height, width, dim)` (same as input).
-
-    **Example**:
-        >>> # Create block for 64-channel features
-        >>> block = PW_FNet_Block(dim=64, ffn_expansion_factor=2.0)
-        >>> 
-        >>> # Process feature maps
-        >>> features = ops.random.normal((4, 32, 32, 64))
-        >>> output = block(features)
-        >>> print(output.shape)
-        (4, 32, 32, 64)
-        >>>
-        >>> # Can be stacked for deeper networks
-        >>> block1 = PW_FNet_Block(dim=64)
-        >>> block2 = PW_FNet_Block(dim=64)
-        >>> x = block2(block1(features))
-
-    **Performance Notes**:
-    - Efficient for large spatial resolutions due to FFT
-    - Memory usage: O(HWC) for activations
-    - Well-suited for GPU acceleration
-    - Consider smaller expansion factors for memory-constrained settings
     """
 
     def __init__(
@@ -426,7 +363,7 @@ class PW_FNet_Block(keras.layers.Layer):
         )
         self.fft = FFTLayer(name="fft")
         self.freq_conv = keras.layers.Conv2D(
-            hidden_dim,
+            hidden_dim * 2,  # Operates on concatenated real/imag parts
             kernel_size=1,
             use_bias=True,
             name="freq_conv"
@@ -469,28 +406,33 @@ class PW_FNet_Block(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        # Build sub-layers in computational order
-        # Each build() call creates the layer's weight variables
-
         # Token Mixer Path
         self.norm1.build(input_shape)
         self.token_mixer_expand.build(input_shape)
-
-        # Compute expanded shape for subsequent layers
         expanded_shape = self.token_mixer_expand.compute_output_shape(input_shape)
 
         self.fft.build(expanded_shape)
-        self.freq_conv.build(expanded_shape)
-        self.ifft.build(expanded_shape)
-        self.token_mixer_project.build(expanded_shape)
+        fft_output_shape = self.fft.compute_output_shape(expanded_shape)
+
+        self.freq_conv.build(fft_output_shape)
+        freq_conv_output_shape = self.freq_conv.compute_output_shape(
+            fft_output_shape
+        )
+
+        self.ifft.build(freq_conv_output_shape)
+        ifft_output_shape = self.ifft.compute_output_shape(
+            freq_conv_output_shape
+        )
+
+        self.token_mixer_project.build(ifft_output_shape)
 
         # FFN Path
         self.norm2.build(input_shape)
         self.ffn_expand.build(input_shape)
-        self.ffn_depthwise.build(expanded_shape)
-        self.ffn_project.build(expanded_shape)
+        ffn_expanded_shape = self.ffn_expand.compute_output_shape(input_shape)
+        self.ffn_depthwise.build(ffn_expanded_shape)
+        self.ffn_project.build(ffn_expanded_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -574,7 +516,7 @@ class PW_FNet_Block(keras.layers.Layer):
 # 3. Scaling Layers
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="pw_fnet")
+@keras.saving.register_keras_serializable()
 class Downsample(keras.layers.Layer):
     """
     Trainable downsampling layer using strided convolution.
@@ -583,58 +525,9 @@ class Downsample(keras.layers.Layer):
     while increasing the channel dimension. It uses a strided convolution with
     a 4×4 kernel to learn optimal downsampling patterns for the specific task.
 
-    **Intent**: To reduce spatial resolution and increase receptive field within
-    the PW-FNet encoder, enabling hierarchical feature extraction at multiple
-    scales. Learnable parameters allow task-specific downsampling strategies.
-
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C_in])
-           ↓
-    Conv2D(4×4, stride=2, padding='same')
-           ↓
-    Output(shape=[batch, H/2, W/2, C_out])
-    ```
-
-    **Design Rationale**:
-    - **Strided Convolution**: Learnable downsampling vs fixed pooling
-    - **4×4 Kernel**: Larger receptive field for smoother transitions
-    - **Stride 2**: Standard 2× downsampling for pyramid architectures
-    - **Same Padding**: Ensures output is exactly H/2 × W/2
-
-    **Use Cases**:
-    - Encoder downsampling in U-Net architectures
-    - Multi-scale feature pyramid construction
-    - Hierarchical representation learning
-    - Alternative to max/average pooling
-
     Args:
         dim: Number of output channels. Must be positive.
         **kwargs: Additional arguments for the Layer base class.
-
-    Raises:
-        ValueError: If dim is not positive.
-
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, channels)`.
-
-    **Output shape**:
-        4D tensor: `(batch_size, height//2, width//2, dim)`.
-
-    **Example**:
-        >>> # Downsample from 64 to 128 channels
-        >>> downsample = Downsample(dim=128)
-        >>> 
-        >>> # Apply to features
-        >>> features = ops.random.normal((4, 64, 64, 64))
-        >>> downsampled = downsample(features)
-        >>> print(downsampled.shape)
-        (4, 32, 32, 128)
-
-    **Performance Notes**:
-    - Computation: O(16 * H/2 * W/2 * C_in * C_out)
-    - More expensive than pooling but learns task-specific features
-    - Efficient GPU implementation via cuDNN
     """
 
     def __init__(self, dim: int, **kwargs: Any) -> None:
@@ -664,6 +557,12 @@ class Downsample(keras.layers.Layer):
             use_bias=True,
             name="down_conv"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the internal convolution layer."""
+        super().build(input_shape)
+        if not self.conv.built:
+            self.conv.build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -704,7 +603,7 @@ class Downsample(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable(package="pw_fnet")
+@keras.saving.register_keras_serializable()
 class Upsample(keras.layers.Layer):
     """
     Trainable upsampling layer using transposed convolution.
@@ -713,58 +612,9 @@ class Upsample(keras.layers.Layer):
     while reducing the channel dimension. It uses a transposed convolution (also
     known as deconvolution) to learn optimal upsampling patterns for the specific task.
 
-    **Intent**: To increase spatial resolution and enable fine-grained reconstruction
-    within the PW-FNet decoder, recovering spatial detail from coarse feature maps.
-    Learnable parameters allow task-specific upsampling strategies.
-
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C_in])
-           ↓
-    Conv2DTranspose(2×2, stride=2, padding='same')
-           ↓
-    Output(shape=[batch, 2H, 2W, C_out])
-    ```
-
-    **Design Rationale**:
-    - **Transposed Convolution**: Learnable upsampling vs fixed interpolation
-    - **2×2 Kernel**: Minimal receptive field for precise upsampling
-    - **Stride 2**: Standard 2× upsampling for pyramid architectures
-    - **Same Padding**: Ensures output is exactly 2H × 2W
-
-    **Use Cases**:
-    - Decoder upsampling in U-Net architectures
-    - Multi-scale feature reconstruction
-    - Super-resolution and image restoration
-    - Alternative to bilinear/nearest interpolation
-
     Args:
         dim: Number of output channels. Must be positive.
         **kwargs: Additional arguments for the Layer base class.
-
-    Raises:
-        ValueError: If dim is not positive.
-
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, channels)`.
-
-    **Output shape**:
-        4D tensor: `(batch_size, height*2, width*2, dim)`.
-
-    **Example**:
-        >>> # Upsample from 128 to 64 channels
-        >>> upsample = Upsample(dim=64)
-        >>> 
-        >>> # Apply to features
-        >>> features = ops.random.normal((4, 16, 16, 128))
-        >>> upsampled = upsample(features)
-        >>> print(upsampled.shape)
-        (4, 32, 32, 64)
-
-    **Performance Notes**:
-    - Computation: O(4 * 2H * 2W * C_in * C_out)
-    - More expensive than interpolation but learns task-specific features
-    - May introduce checkerboard artifacts (consider resize-convolution alternative)
     """
 
     def __init__(self, dim: int, **kwargs: Any) -> None:
@@ -795,6 +645,12 @@ class Upsample(keras.layers.Layer):
             name="up_conv_transpose"
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the internal transposed convolution layer."""
+        super().build(input_shape)
+        if not self.conv_transpose.built:
+            self.conv_transpose.build(input_shape)
+
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """
         Apply upsampling to input tensor.
@@ -820,7 +676,8 @@ class Upsample(keras.layers.Layer):
         Returns:
             Output shape tuple with doubled spatial dimensions.
         """
-        return self.conv_transpose.compute_output_shape(input_shape)
+        # Ensure the output is a tuple to satisfy strict tests
+        return tuple(self.conv_transpose.compute_output_shape(input_shape))
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -838,7 +695,7 @@ class Upsample(keras.layers.Layer):
 # 4. PW-FNet Main Model
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="pw_fnet")
+@keras.saving.register_keras_serializable()
 class PW_FNet(keras.Model):
     """
     Complete Pyramid Wavelet-Fourier Network (PW-FNet) model for image restoration.
@@ -847,73 +704,6 @@ class PW_FNet(keras.Model):
     for efficient and effective image restoration. It supports multi-scale
     outputs to enable hierarchical supervision during training, improving
     convergence and final performance.
-
-    **Intent**: To provide a full, production-ready implementation of the PW-FNet
-    model, suitable for tasks like deraining, deblurring, and dehazing. The
-    architecture balances efficiency (via FFT-based mixing) with effectiveness
-    (via hierarchical features and multi-scale supervision).
-
-    **Architecture**:
-    ```
-    Input(shape=[B, H, W, C])
-       ↓
-    Intro Conv(3×3) → [B, H, W, width]
-       ↓
-    ┌─────────────────────────────────┐
-    │ Encoder Level 1 (width)         │ ─┐
-    │  - enc_blk_nums[0] × PW-FNet    │  │
-    └─────────────────────────────────┘  │ Skip 1
-       ↓ Downsample(→width*2)            │
-    ┌─────────────────────────────────┐  │
-    │ Encoder Level 2 (width*2)       │ ─┼─┐
-    │  - enc_blk_nums[1] × PW-FNet    │  │ │ Skip 2
-    └─────────────────────────────────┘  │ │
-       ↓ Downsample(→width*4)            │ │
-    ┌─────────────────────────────────┐  │ │
-    │ Bottleneck (width*4)            │  │ │
-    │  - middle_blk_num × PW-FNet     │  │ │
-    └─────────────────────────────────┘  │ │
-       ↓ Upsample(→width*2)              │ │
-    ┌─────────────────────────────────┐  │ │
-    │ Concat ←────────────────────────┼──┘ │
-    │ Reduce Conv(1×1) → width*2      │    │
-    │ Decoder Level 2 (width*2)       │    │
-    │  - dec_blk_nums[0] × PW-FNet    │    │
-    │ Output Conv L2 → [B, H/4, W/4, C] (quarter res)
-    └─────────────────────────────────┘    │
-       ↓ Upsample(→width)                  │
-    ┌─────────────────────────────────┐    │
-    │ Concat ←────────────────────────┼────┘
-    │ Reduce Conv(1×1) → width        │
-    │ Decoder Level 1 (width)         │
-    │  - dec_blk_nums[1] × PW-FNet    │
-    │ Output Conv L1 → [B, H/2, W/2, C] (half res)
-    │ Output Conv L0 → [B, H, W, C]   │ (full res)
-    └─────────────────────────────────┘
-
-    Returns: [Full Resolution, Half Resolution, Quarter Resolution]
-    ```
-
-    **Design Rationale**:
-    - **U-Net Structure**: Encoder-decoder with skip connections for detail preservation
-    - **Multi-Scale Outputs**: Supervise at multiple resolutions for better training
-    - **Hierarchical Features**: Process at multiple scales (1×, 1/2×, 1/4×)
-    - **Residual Outputs**: Predict residual images (easier optimization)
-    - **Efficient Blocks**: FFT-based token mixing vs expensive attention
-
-    **Multi-Scale Supervision**:
-    The model outputs three reconstructions at different scales:
-    1. Full resolution (H×W): Primary output for inference
-    2. Half resolution (H/2×W/2): Guides mid-level features
-    3. Quarter resolution (H/4×W/4): Guides coarse features
-
-    During training, losses are computed at all scales and weighted appropriately.
-
-    **Use Cases**:
-    - Image deraining: Remove rain streaks from images
-    - Image deblurring: Remove motion blur or defocus
-    - Image dehazing: Remove atmospheric haze/fog
-    - General image restoration and enhancement
 
     Args:
         img_channels: Number of channels in input/output images (e.g., 3 for RGB).
@@ -927,53 +717,6 @@ class PW_FNet(keras.Model):
         dec_blk_nums: List of block counts for each decoder level. Should match
             enc_blk_nums length. Typical: [2, 2]. Must be non-empty.
         **kwargs: Additional arguments for the Model base class.
-
-    Raises:
-        ValueError: If any parameter is invalid (non-positive, empty, mismatched).
-
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, img_channels)`.
-
-    **Output shape**:
-        List of three 4D tensors:
-        - `[0]`: Full resolution `(batch_size, height, width, img_channels)`
-        - `[1]`: Half resolution `(batch_size, height//2, width//2, img_channels)`
-        - `[2]`: Quarter resolution `(batch_size, height//4, width//4, img_channels)`
-
-    **Example**:
-        >>> # Create model for RGB image restoration
-        >>> model = PW_FNet(
-        ...     img_channels=3,
-        ...     width=32,
-        ...     middle_blk_num=4,
-        ...     enc_blk_nums=[2, 2],
-        ...     dec_blk_nums=[2, 2]
-        ... )
-        >>> 
-        >>> # Process batch of images
-        >>> images = ops.random.normal((4, 256, 256, 3))
-        >>> outputs = model(images)
-        >>> 
-        >>> # Multi-scale outputs
-        >>> print(f"Full res: {outputs[0].shape}")
-        >>> print(f"Half res: {outputs[1].shape}")
-        >>> print(f"Quarter res: {outputs[2].shape}")
-        Full res: (4, 256, 256, 3)
-        Half res: (4, 128, 128, 3)
-        Quarter res: (4, 64, 64, 3)
-
-    **Training Notes**:
-    - Use multi-scale loss: L = λ₀*L₀ + λ₁*L₁ + λ₂*L₂
-    - Typical weights: λ₀=1.0, λ₁=0.5, λ₂=0.25
-    - Batch size: Limited by GPU memory, typical 4-16
-    - Learning rate: Start with 1e-4, use cosine decay
-    - Data augmentation: Random crops, flips (preserve degradation)
-
-    **Performance Notes**:
-    - Parameters: ~4-8M for default config (width=32)
-    - FLOPs: O(H*W*width²) dominant operations
-    - Memory: Peak at bottleneck level (width*4 channels)
-    - Inference speed: ~30-60 FPS for 256×256 on modern GPU
     """
 
     def __init__(
@@ -1138,7 +881,7 @@ class PW_FNet(keras.Model):
             List of three restored images at different scales:
             [full_resolution, half_resolution, quarter_resolution].
         """
-        # Downsample original input for multi-scale supervision
+        # Downsample original input for multi-scale supervision targets
         input_l1 = keras.layers.AveragePooling2D(pool_size=2)(inputs)
         input_l2 = keras.layers.AveragePooling2D(pool_size=2)(input_l1)
 
@@ -1147,50 +890,53 @@ class PW_FNet(keras.Model):
         feat = self.intro(inputs)
 
         # Level 1: Full resolution processing
+        feat_l1 = feat
         for blk in self.encoder_level1:
-            feat = blk(feat, training=training)
-        skip1 = feat
+            feat_l1 = blk(feat_l1, training=training)
+        skip1 = feat_l1
 
         # Level 2: Half resolution processing
-        feat = self.down1(feat)
+        feat_l2 = self.down1(skip1)
         for blk in self.encoder_level2:
-            feat = blk(feat, training=training)
-        skip2 = feat
+            feat_l2 = blk(feat_l2, training=training)
+        skip2 = feat_l2
 
         # Bottleneck: Quarter resolution processing
-        feat = self.down2(feat)
+        bottleneck_feat = self.down2(skip2)
         for blk in self.bottleneck:
-            feat = blk(feat, training=training)
+            bottleneck_feat = blk(bottleneck_feat, training=training)
 
-        # -- Decoder Path --
-        # Level 2: Reconstruct half resolution
-        feat = self.up2(feat)
-        feat = ops.concatenate([feat, skip2], axis=-1)
-        feat = self.reduce_conv2(feat)
-        for blk in self.decoder_level2:
-            feat = blk(feat, training=training)
+        # -- Decoder Path & Multi-scale Outputs --
 
-        # Quarter-resolution output (residual learning)
-        res_l2 = self.output_l2(feat)
+        # Quarter-resolution output (from bottleneck features)
+        res_l2 = self.output_l2(bottleneck_feat)
         out_l2 = input_l2 + res_l2
 
-        # Level 1: Reconstruct full resolution
-        feat = self.up1(feat)
-        feat = ops.concatenate([feat, skip1], axis=-1)
-        feat = self.reduce_conv1(feat)
-        for blk in self.decoder_level1:
-            feat = blk(feat, training=training)
+        # Level 2 Decoder: Reconstruct half resolution
+        dec_feat_l2 = self.up2(bottleneck_feat)
+        dec_feat_l2 = ops.concatenate([dec_feat_l2, skip2], axis=-1)
+        dec_feat_l2 = self.reduce_conv2(dec_feat_l2)
+        for blk in self.decoder_level2:
+            dec_feat_l2 = blk(dec_feat_l2, training=training)
 
-        # Half-resolution output (residual learning)
-        res_l1 = self.output_l1(feat)
+        # Half-resolution output (from first decoder stage)
+        res_l1 = self.output_l1(dec_feat_l2)
         out_l1 = input_l1 + res_l1
 
-        # Full-resolution output (residual learning)
-        res_l0 = self.output_l0(feat)
+        # Level 1 Decoder: Reconstruct full resolution
+        dec_feat_l1 = self.up1(dec_feat_l2)
+        dec_feat_l1 = ops.concatenate([dec_feat_l1, skip1], axis=-1)
+        dec_feat_l1 = self.reduce_conv1(dec_feat_l1)
+        for blk in self.decoder_level1:
+            dec_feat_l1 = blk(dec_feat_l1, training=training)
+
+        # Full-resolution output (from final decoder stage)
+        res_l0 = self.output_l0(dec_feat_l1)
         out_l0 = inputs + res_l0
 
         # Return multi-scale outputs: [full, half, quarter]
         return [out_l0, out_l1, out_l2]
+
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -1207,5 +953,3 @@ class PW_FNet(keras.Model):
             "dec_blk_nums": self.dec_blk_nums,
         }
         return config
-
-# ---------------------------------------------------------------------
