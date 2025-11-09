@@ -39,11 +39,11 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.dpt_decoder import DPTDecoder
 from dl_techniques.layers.strong_augmentation import StrongAugmentation
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
 
+from .components import DPTDecoder
 
 # ---------------------------------------------------------------------
 
@@ -168,11 +168,6 @@ class DepthAnything(keras.Model):
         Args:
             input_shape: Shape of input tensor(s).
         """
-        # Handle both single input and multiple input shapes
-        if isinstance(input_shape, list):
-            build_shape = input_shape[0]  # Use first shape for building
-        else:
-            build_shape = input_shape
 
         # Create main encoder
         self.encoder = self._create_encoder(trainable=True)
