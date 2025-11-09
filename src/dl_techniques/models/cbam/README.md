@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of **CBAMNet**, a convolutional neural network enhanced with the **Convolutional Block Attention Module (CBAM)**. This lightweight and effective attention mechanism refines features at each stage of the network, allowing the model to learn *what* and *where* to focus in the feature maps.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture consists of standard convolutional blocks, each followed by a `CBAM` layer that sequentially applies channel and spatial attention.
+The architecture consists of standard convolutional blocks, each followed by a `CBAM` layer that sequentially applies channel and spatial attention.
 
 ---
 

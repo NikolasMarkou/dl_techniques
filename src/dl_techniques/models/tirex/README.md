@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of a **TiRex-inspired** time series forecasting model in **Keras 3**. This implementation is based on recent advancements in time series modeling that leverage hybrid architectures to capture both local and global dependencies.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key feature is its use of **Mixed Sequential Blocks**, allowing for a flexible combination of LSTM and Transformer layers. It is designed for **probabilistic forecasting**, outputting a range of quantiles to provide a comprehensive view of prediction uncertainty.
+The architecture's key feature is its use of **Mixed Sequential Blocks**, allowing for a flexible combination of LSTM and Transformer layers. It is designed for **probabilistic forecasting**, outputting a range of quantiles to provide a comprehensive view of prediction uncertainty.
 
 ---
 

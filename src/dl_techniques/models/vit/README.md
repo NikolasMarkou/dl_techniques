@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **Vision Transformer (ViT)** in **Keras 3**, based on the paper ["An Image Is Worth 16x16 Words: Transformers for Image Recognition at Scale"](https://arxiv.org/abs/2010.11929) by Dosovitskiy et al. (2020).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture supports multiple standard scales (`Tiny`, `Small`, `Base`, `Large`, `Huge`) and is highly configurable, allowing for easy experimentation with different normalization techniques, feed-forward networks, and attention mechanisms.
+The architecture supports multiple standard scales (`Tiny`, `Small`, `Base`, `Large`, `Huge`) and is highly configurable, allowing for easy experimentation with different normalization techniques, feed-forward networks, and attention mechanisms.
 
 ---
 

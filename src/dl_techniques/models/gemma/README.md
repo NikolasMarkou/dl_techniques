@@ -6,8 +6,6 @@
 
 A production-ready, fully-featured Keras 3 implementation of **Gemma 3**, Google's next-generation open-source language model. This architecture introduces a sophisticated **dual normalization** pattern and a strategic **mixed attention** mechanism to deliver a state-of-the-art balance of performance and computational efficiency.
 
-This implementation provides a modular, fully serializable `keras.Model` that works seamlessly across TensorFlow, PyTorch, and JAX backends. It is built from `Gemma3TransformerBlock` components and includes pre-configured model variants, making it easy to deploy for tasks ranging from text generation to classification.
-
 ---
 
 ## Table of Contents

@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of **ACC-UNet**, based on the paper ["ACC-UNet: A Completely Convolutional UNet model for the 2020s"](https://arxiv.org/abs/2308.13680) by Ibtehaz & Kihara (MICCAI 2023).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture integrates several key innovations, including **HANC Blocks** for transformer-like context modeling, **MLFC Layers** for advanced feature fusion in skip connections, and **ResPath** for bridging the semantic gap, all within a purely convolutional framework.
+The architecture integrates several key innovations, including **HANC Blocks** for transformer-like context modeling, **MLFC Layers** for advanced feature fusion in skip connections, and **ResPath** for bridging the semantic gap, all within a purely convolutional framework.
 
 ---
 

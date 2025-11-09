@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **FNet** architecture in **Keras 3**, based on the paper ["FNet: Mixing Tokens with Fourier Transforms"](https://arxiv.org/abs/2105.03824) by Lee-Thorp et al. (2021).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable foundation model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture is designed as a pure encoder, separating the core logic from task-specific heads, making it ideal for pre-training, fine-tuning, and multi-task learning.
+The architecture is designed as a pure encoder, separating the core logic from task-specific heads, making it ideal for pre-training, fine-tuning, and multi-task learning.
 
 ---
 

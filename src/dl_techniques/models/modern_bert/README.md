@@ -6,8 +6,6 @@
 
 An advanced, production-ready Keras 3 implementation of **ModernBERT**, a successor to the classic BERT architecture. This model is based on the paper "[Smarter, Better, Faster, Longer: A Modern Bidirectional Encoder for Fast, Memory Efficient, and Long Context Finetuning and Inference](https://arxiv.org/abs/2412.13663)". ModernBERT integrates a suite of contemporary deep learning techniques to deliver superior performance, faster processing for long contexts, and enhanced training stability.
 
-This implementation is designed as a pure foundation model, separating the core encoding logic from task-specific heads. It follows the `dl_techniques` framework standards and modern Keras 3 best practices, providing a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends.
-
 ---
 
 ## Table of Contents

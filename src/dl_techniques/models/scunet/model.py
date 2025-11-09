@@ -26,7 +26,7 @@ class SCUNet(keras.Model):
         dim: Base dimension for feature channels. Defaults to 64.
         head_dim: Dimension of each attention head. Defaults to 32.
         window_size: Size of attention window. Defaults to 8.
-        drop_path_rate: Maximum stochastic depth rate. Defaults to 0.0.
+        stochastic_depth_rate: Maximum stochastic depth rate. Defaults to 0.0.
         input_resolution: Expected input resolution for optimization. Defaults to 256.
         **kwargs: Additional keyword arguments for Model base class.
     """
@@ -38,7 +38,7 @@ class SCUNet(keras.Model):
             dim: int = 64,
             head_dim: int = 32,
             window_size: int = 8,
-            drop_path_rate: float = 0.0,
+            stochastic_depth_rate: float = 0.0,
             input_resolution: int = 256,
             **kwargs: Any
     ) -> None:
@@ -52,14 +52,14 @@ class SCUNet(keras.Model):
         self.dim = dim
         self.head_dim = head_dim
         self.window_size = window_size
-        self.drop_path_rate = drop_path_rate
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.input_resolution = input_resolution
 
         logger.info(f"Initializing SCUNet with config: {config}, dim: {dim}, "
                     f"window_size: {window_size}, input_resolution: {input_resolution}")
 
         # Calculate drop path rates for each layer
-        dpr = [float(x) for x in np.linspace(0, drop_path_rate, sum(config))]
+        dpr = [float(x) for x in np.linspace(0, stochastic_depth_rate, sum(config))]
 
         # Build network components
         self._build_network(dpr)
@@ -348,8 +348,8 @@ class SCUNet(keras.Model):
             "dim": self.dim,
             "head_dim": self.head_dim,
             "window_size": self.window_size,
-            "drop_path_rate": self.drop_path_rate,
             "input_resolution": self.input_resolution,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
         })
         return config
 

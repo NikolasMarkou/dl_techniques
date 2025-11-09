@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of the entire **MobileNet** family of models, from **V1 to V4**. These models represent a lineage of highly efficient convolutional neural networks designed specifically for on-device and mobile vision applications where computational resources are limited.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides modular, well-documented, and fully serializable models that work seamlessly across TensorFlow, PyTorch, and JAX backends. The implementations for V2, V3, and V4 leverage a flexible `UniversalInvertedBottleneck` layer, showcasing how a unified building block can be configured to create a wide range of modern architectures.
+The implementations for V2, V3, and V4 leverage a flexible `UniversalInvertedBottleneck` layer, showcasing how a unified building block can be configured to create a wide range of modern architectures.
 
 ---
 

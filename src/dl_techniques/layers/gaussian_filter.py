@@ -1,4 +1,5 @@
-"""Apply a 2D Gaussian blur using a depthwise convolution.
+"""
+2D Gaussian blur using a depthwise convolution.
 
 This layer implements a Gaussian filter, a fundamental low-pass filter used
 for smoothing images and reducing high-frequency noise. The filtering is

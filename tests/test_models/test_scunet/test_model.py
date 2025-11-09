@@ -42,7 +42,7 @@ class TestSCUNetConfigurations:
         assert model.dim == 64
         assert model.head_dim == 32
         assert model.window_size == 8
-        assert model.drop_path_rate == 0.0
+        assert model.stochastic_depth_rate == 0.0
         assert model.input_resolution == 256
 
         # Check default config (7 stages)
@@ -58,7 +58,7 @@ class TestSCUNetConfigurations:
             dim=128,
             head_dim=64,
             window_size=16,
-            drop_path_rate=0.1,
+            stochastic_depth_rate=0.1,
             input_resolution=512
         )
 
@@ -67,7 +67,7 @@ class TestSCUNetConfigurations:
         assert model.dim == 128
         assert model.head_dim == 64
         assert model.window_size == 16
-        assert model.drop_path_rate == 0.1
+        assert model.stochastic_depth_rate == 0.1
         assert model.input_resolution == 512
 
     def test_config_length_variations(self) -> None:
@@ -96,8 +96,8 @@ class TestSCUNetConfigurations:
     def test_drop_path_rate_range(self) -> None:
         """Test SCUNet with different drop path rates."""
         for drop_rate in [0.0, 0.1, 0.2, 0.5]:
-            model = SCUNet(in_nc=3, drop_path_rate=drop_rate)
-            assert model.drop_path_rate == drop_rate
+            model = SCUNet(in_nc=3, stochastic_depth_rate=drop_rate)
+            assert model.stochastic_depth_rate == drop_rate
 
 
 class TestSCUNetInitialization:
@@ -284,7 +284,7 @@ class TestSCUNetForwardPass:
 
     def test_forward_pass_training_vs_inference(self, sample_inputs: dict) -> None:
         """Test forward pass behavior in training vs inference modes."""
-        model = SCUNet(in_nc=3, drop_path_rate=0.1)
+        model = SCUNet(in_nc=3, stochastic_depth_rate=0.1)
 
         # Test training mode
         output_train = model(sample_inputs['rgb'], training=True)
@@ -317,7 +317,7 @@ class TestSCUNetForwardPass:
             dim=32,  # Smaller dimension
             head_dim=16,
             window_size=4,
-            drop_path_rate=0.05,
+            stochastic_depth_rate=0.05,
             input_resolution=128
         )
 
@@ -469,7 +469,7 @@ class TestSCUNetArchitecture:
         """Test that drop path rates are correctly distributed."""
         config = [2, 2, 2, 2, 2, 2, 2]
         drop_path_rate = 0.2
-        model = SCUNet(in_nc=3, config=config, drop_path_rate=drop_path_rate)
+        model = SCUNet(in_nc=3, config=config, stochastic_depth_rate=drop_path_rate)
 
         # Total blocks
         total_blocks = sum(config)
@@ -503,7 +503,7 @@ class TestSCUNetSerialization:
             assert loaded_model.dim == original_model.dim
             assert loaded_model.head_dim == original_model.head_dim
             assert loaded_model.window_size == original_model.window_size
-            assert loaded_model.stochastic_depth_rate == original_model.drop_path_rate
+            assert loaded_model.stochastic_depth_rate == original_model.stochastic_depth_rate
             assert loaded_model.input_resolution == original_model.input_resolution
 
             # Check that outputs are numerically identical
@@ -522,7 +522,7 @@ class TestSCUNetSerialization:
             dim=32,
             head_dim=16,
             window_size=4,
-            drop_path_rate=0.1,
+            stochastic_depth_rate=0.1,
             input_resolution=128
         )
         test_input = keras.random.normal((1, 128, 128, 1))
@@ -561,7 +561,7 @@ class TestSCUNetSerialization:
             in_nc=3,
             dim=32,
             head_dim=16,
-            drop_path_rate=0.2
+            stochastic_depth_rate=0.2
         )
         test_input = keras.random.normal((1, 128, 128, 3))
 
@@ -625,7 +625,7 @@ class TestSCUNetSerialization:
             dim=48,
             head_dim=24,
             window_size=6,
-            drop_path_rate=0.15,
+            stochastic_depth_rate=0.15,
             input_resolution=192
         )
 
@@ -637,7 +637,7 @@ class TestSCUNetSerialization:
         assert 'dim' in config
         assert 'head_dim' in config
         assert 'window_size' in config
-        assert 'drop_path_rate' in config
+        assert 'stochastic_depth_rate' in config
         assert 'input_resolution' in config
 
         # Check values match
@@ -646,7 +646,7 @@ class TestSCUNetSerialization:
         assert config['dim'] == 48
         assert config['head_dim'] == 24
         assert config['window_size'] == 6
-        assert config['drop_path_rate'] == 0.15
+        assert config['stochastic_depth_rate'] == 0.15
         assert config['input_resolution'] == 192
 
 
@@ -734,7 +734,7 @@ class TestSCUNetTrainingBehavior:
 
     def test_training_mode_forward_pass(self) -> None:
         """Test forward pass in training mode."""
-        model = SCUNet(in_nc=3, dim=32, head_dim=16, drop_path_rate=0.1)
+        model = SCUNet(in_nc=3, dim=32, head_dim=16, stochastic_depth_rate=0.1)
 
         test_input = keras.random.normal((2, 128, 128, 3))
         output = model(test_input, training=True)

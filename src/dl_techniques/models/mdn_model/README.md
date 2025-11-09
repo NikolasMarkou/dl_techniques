@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of a **Mixture Density Network (MDN)** in **Keras 3**, based on the foundational paper ["Mixture Density Networks"](http://publications.aston.ac.uk/id/eprint/373/1/NCRG_94_004.pdf) by Christopher Bishop (1994).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The `MDNLayer` includes several practical improvements for training stability, such as independent processing paths, diversity regularization, and sigma constraints.
+The `MDNLayer` includes several practical improvements for training stability, such as independent processing paths, diversity regularization, and sigma constraints.
 
 ---
 

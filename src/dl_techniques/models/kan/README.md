@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **Kolmogorov-Arnold Network (KAN)** architecture in **Keras 3**. This implementation is based on the recent paper by Liu et al. and provides a powerful alternative to traditional Multi-Layer Perceptrons (MLPs).
 
-This implementation follows modern Keras 3 best practices, providing a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key feature is its use of **learnable activation functions** on the edges of the network, parameterized by B-splines. This allows KANs to learn complex, non-linear relationships with potentially greater accuracy and parameter efficiency than MLPs.
+The architecture's key feature is its use of **learnable activation functions** on the edges of the network, parameterized by B-splines. This allows KANs to learn complex, non-linear relationships with potentially greater accuracy and parameter efficiency than MLPs.
 
 ---
 

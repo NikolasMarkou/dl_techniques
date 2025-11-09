@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **Tree Transformer** in **Keras 3**. This implementation is based on the paper "Tree Transformer: Integrating Tree Structures into Self-Attention," which introduces a novel attention mechanism capable of learning soft constituency trees from raw text without explicit syntactic supervision.
 
-This implementation follows modern Keras 3 best practices, providing a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key innovation is its **Hierarchical Group Attention** mechanism, which enables the model to infer syntactic structure as a byproduct of standard language modeling.
+The architecture's key innovation is its **Hierarchical Group Attention** mechanism, which enables the model to infer syntactic structure as a byproduct of standard language modeling.
 
 ### Key Features
 -   **Pure Foundation Model:** The `TreeTransformer` class is a pure encoder, separate from any task-specific heads.

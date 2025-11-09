@@ -1,4 +1,5 @@
-"""Implements a 2D convolution with input-dependent dynamic kernel aggregation.
+"""
+2D convolution with input-dependent dynamic kernel aggregation.
 
 This layer enhances the representational power of a standard convolution by
 dynamically adapting its behavior to each input instance. Instead of employing a

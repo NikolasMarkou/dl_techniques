@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks (ConvNets) that were modernized to compete with and often outperform Vision Transformers (ViTs) by progressively incorporating architectural decisions from ViTs into a standard ResNet.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides modular, well-documented, and fully serializable models that work seamlessly across TensorFlow, PyTorch, and JAX backends. The implementation includes both ConvNeXt V1 and the improved ConvNeXt V2, which introduces Global Response Normalization (GRN).
+The implementation includes both ConvNeXt V1 and the improved ConvNeXt V2, which introduces Global Response Normalization (GRN).
 
 ---
 

@@ -1,4 +1,5 @@
-"""Pool features globally by summing over spatial dimensions.
+"""
+Pool features globally by summing over spatial dimensions.
 
 This layer performs a global reduction operation on spatial feature maps,
 transforming a 4D tensor `(batch, height, width, channels)` into a 2D

@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **Mamba** architecture in **Keras 3**. This implementation is based on the original paper by Gu and Dao, providing a pure foundation model that separates the core sequence modeling logic from task-specific heads for maximum flexibility.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key feature is its **Selective State Space Model (SSM)** core, designed to capture long-range dependencies with **linear-time complexity** and **constant-time inference**, offering a powerful and efficient alternative to Transformers.
+The architecture's key feature is its **Selective State Space Model (SSM)** core, designed to capture long-range dependencies with **linear-time complexity** and **constant-time inference**, offering a powerful and efficient alternative to Transformers.
 
 ---
 

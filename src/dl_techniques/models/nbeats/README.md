@@ -6,8 +6,6 @@
 
 A production-ready, fully-featured Keras 3 implementation of **N-BEATS (Neural Basis Expansion Analysis for Time Series)**, a deep learning architecture for time series forecasting that is often competitive with or superior to statistical and recurrent models. This implementation is designed for interpretability and performance, featuring specialized blocks for trend and seasonality decomposition.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. It also includes an integrated **Reversible Instance Normalization (RevIN)** layer, a critical component for handling distribution shifts and improving forecasting accuracy on real-world data.
-
 ---
 
 ## Table of Contents

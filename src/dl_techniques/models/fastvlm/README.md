@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of **FastVLM**, a hybrid vision architecture that combines the strengths of efficient convolutions and Transformers. This implementation is inspired by recent research on models like FastViT and RepMixer, designed to achieve a state-of-the-art balance between accuracy, latency, and model size.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture features a `ConvolutionalStem` using MobileOne blocks, `RepMixer` stages for efficient feature mixing, and `Attention` stages for capturing global context.
+The architecture features a `ConvolutionalStem` using MobileOne blocks, `RepMixer` stages for efficient feature mixing, and `Attention` stages for capturing global context.
 
 ---
 

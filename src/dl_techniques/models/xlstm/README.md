@@ -2,8 +2,6 @@
 
 A production-ready, fully-featured implementation of the **xLSTM** architecture in **Keras 3**, based on the paper ["xLSTM: Extended Long Short-Term Memory"](https://arxiv.org/abs/2405.04517) by Beck et al. (2024).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices, providing a modular, well-documented, and fully serializable codebase that works seamlessly across TensorFlow, PyTorch, and JAX backends.
-
 ---
 
 ## Table of Contents

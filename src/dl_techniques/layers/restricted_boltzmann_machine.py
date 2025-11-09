@@ -99,7 +99,6 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
     - Gibbs sampling for generating samples
     - Contrastive Divergence (CD-k) training
     - Binary and Gaussian visible units support
-    - Proper Keras 3 serialization and integration
 
     **Training Process**:
     The RBM is trained using Contrastive Divergence:

@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of a **Variational Autoencoder (VAE)** in **Keras 3**, based on the foundational paper ["Auto-Encoding Variational Bayes"](https://arxiv.org/abs/1312.6114) by Kingma & Welling (2013).
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture uses robust **ResNet-based** encoder and decoder networks and incorporates a custom training loop to correctly handle the two-part VAE loss (reconstruction and KL divergence).
+The architecture uses robust **ResNet-based** encoder and decoder networks and incorporates a custom training loop to correctly handle the two-part VAE loss (reconstruction and KL divergence).
 
 ---
 

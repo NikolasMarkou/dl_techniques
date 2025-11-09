@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **BERT (Bidirectional Encoder Representations from Transformers)** architecture in **Keras 3**. This implementation is based on the original paper by Devlin et al., providing a pure foundation model that separates the core encoding logic from task-specific heads for maximum flexibility.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture's key feature is its stack of **Transformer Encoder Layers**, designed to produce rich, contextualized token embeddings. It includes built-in support for loading standard model variants (`base`, `large`, etc.) with or without pretrained weights.
+The architecture's key feature is its stack of **Transformer Encoder Layers**, designed to produce rich, contextualized token embeddings. It includes built-in support for loading standard model variants (`base`, `large`, etc.) with or without pretrained weights.
 
 ---
 

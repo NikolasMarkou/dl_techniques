@@ -6,8 +6,6 @@
 
 A production-ready, fully-featured Keras 3 implementation of **Capsule Networks (CapsNet)**, as proposed by Sabour, Frosst, and Hinton. This architecture introduces a novel approach to feature representation that preserves hierarchical spatial relationships, making it inherently more robust to rotation, translation, and other affine transformations compared to traditional Convolutional Neural Networks (CNNs).
 
-This implementation provides a modular, fully serializable `keras.Model` that integrates custom training logic directly into its `train_step`, enabling seamless use with the standard Keras `compile`/`fit` workflow. It works across TensorFlow, PyTorch, and JAX backends and includes all core components: primary capsules, dynamic routing, a custom margin loss, and an optional reconstruction decoder for regularization.
-
 ---
 
 ## Table of Contents

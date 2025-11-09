@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of Apple's **MobileCLIP**, an efficient vision-language model designed for high performance on resource-constrained devices. MobileCLIP adapts the powerful zero-shot capabilities of CLIP (Contrastive Language-Image Pre-training) to an architecture optimized for the latency, memory, and power limitations of mobile and edge computing.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture is composed of a mobile-friendly image encoder and a configurable Transformer-based text encoder, trained jointly with a contrastive objective.
+The architecture is composed of a mobile-friendly image encoder and a configurable Transformer-based text encoder, trained jointly with a contrastive objective.
 
 ---
 

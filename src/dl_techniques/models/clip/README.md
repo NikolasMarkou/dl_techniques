@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of the **CLIP (Contrastive Language-Image Pre-training)** model. CLIP learns rich visual representations from natural language supervision by training a vision and text encoder in parallel to predict which images were paired with which texts in a large dataset. This enables powerful zero-shot transfer capabilities for a wide range of vision tasks.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable CLIP model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The implementation is based on a highly configurable and modern `TransformerLayer` that uses state-of-the-art components like RMS Normalization, SwiGLU activations, and Grouped-Query Attention.
+The implementation is based on a highly configurable and modern `TransformerLayer` that uses state-of-the-art components like RMS Normalization, SwiGLU activations, and Grouped-Query Attention.
 
 ---
 

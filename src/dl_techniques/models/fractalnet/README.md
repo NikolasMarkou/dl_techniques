@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured Keras 3 implementation of **FractalNet**, a self-similar deep neural network that achieves great depths without using residual connections. Instead, it relies on a recursive fractal expansion rule that creates an exponential number of paths through the network, regularized by a "drop-path" training scheme.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices. It provides a modular, well-documented, and fully serializable model that works seamlessly across TensorFlow, PyTorch, and JAX backends. The architecture is constructed from recursive `FractalBlock` layers, providing a powerful alternative to standard ResNet-like designs.
+The architecture is constructed from recursive `FractalBlock` layers, providing a powerful alternative to standard ResNet-like designs.
 
 ---
 
