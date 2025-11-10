@@ -5,7 +5,7 @@ from typing import Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from .components_v2 import Mamba2ResidualBlock, Mamba2Layer
+from .components_v2 import Mamba2ResidualBlock
 
 
 # ---------------------------------------------------------------------
@@ -151,3 +151,5 @@ class Mamba2(keras.Model):
             "d_ssm": self.d_ssm,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -21,8 +21,8 @@ import tempfile
 import os
 from typing import Dict, Any
 
-from dl_techniques.models.mamba.mamba_v2 import Mamba2, Mamba2Layer
-
+from dl_techniques.models.mamba.mamba_v2 import Mamba2
+from dl_techniques.models.mamba.components_v2 import Mamba2Layer
 
 class TestMamba2ModelInitialization:
     """Test Mamba v2 model initialization and parameter validation."""
