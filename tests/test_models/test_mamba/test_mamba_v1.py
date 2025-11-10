@@ -23,7 +23,6 @@ import os
 from typing import Dict, Any
 
 from dl_techniques.models.mamba import Mamba
-from dl_techniques.utils.logger import logger
 
 
 class TestMambaModelInitialization:
