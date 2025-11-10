@@ -25,35 +25,35 @@ Input: {Numerical Features, Categorical Features}
    │               TabM Architecture                 │
    │                                                 │
    │  Preprocessing Pipeline                         │
-   │  ┌─────────────────┐  ┌─────────────────┐      │
-   │  │ Numerical       │  │ Categorical     │      │
-   │  │ Features        │  │ One-Hot         │      │
-   │  │ (passthrough)   │  │ Encoding        │      │
-   │  └─────────────────┘  └─────────────────┘      │
+   │  ┌─────────────────┐  ┌─────────────────┐       │
+   │  │ Numerical       │  │ Categorical     │       │
+   │  │ Features        │  │ One-Hot         │       │
+   │  │ (passthrough)   │  │ Encoding        │       │
+   │  └─────────────────┘  └─────────────────┘       │
    │           ↓                     ↓               │
    │  ┌─────────────────────────────────────────────┐│
-   │  │          Feature Concatenation             ││
+   │  │          Feature Concatenation              ││
    │  └─────────────────────────────────────────────┘│
    │                      ↓                          │
    │  ┌─────────────────────────────────────────────┐│
-   │  │         Ensemble Diversity Layer           ││ ← Architecture Dependent
-   │  │  • plain: No ensemble (baseline)          ││
-   │  │  • tabm: LinearEfficientEnsemble           ││
-   │  │  • tabm-mini: ScaleEnsemble (input only)  ││
-   │  │  • tabm-packed: Packed ensemble variants  ││
+   │  │         Ensemble Diversity Layer            ││ ← Architecture Dependent
+   │  │  • plain: No ensemble (baseline)            ││
+   │  │  • tabm: LinearEfficientEnsemble            ││
+   │  │  • tabm-mini: ScaleEnsemble (input only)    ││
+   │  │  • tabm-packed: Packed ensemble variants    ││
    │  └─────────────────────────────────────────────┘│
    │                      ↓                          │
    │  ┌─────────────────────────────────────────────┐│
-   │  │            TabM Backbone MLP               ││
-   │  │  • Multiple hidden layers                  ││
-   │  │  • Configurable activation & dropout      ││
-   │  │  • Ensemble-aware or shared weights       ││
+   │  │            TabM Backbone MLP                ││
+   │  │  • Multiple hidden layers                   ││
+   │  │  • Configurable activation & dropout        ││
+   │  │  • Ensemble-aware or shared weights         ││
    │  └─────────────────────────────────────────────┘│
    │                      ↓                          │
    │  ┌─────────────────────────────────────────────┐│
-   │  │           Output Layer                     ││
-   │  │  • plain: Standard Dense layer            ││
-   │  │  • ensemble: NLinear (k independent heads)││
+   │  │           Output Layer                      ││
+   │  │  • plain: Standard Dense layer              ││
+   │  │  • ensemble: NLinear (k independent heads)  ││
    │  └─────────────────────────────────────────────┘│
    └─────────────────────────────────────────────────┘
        ↓
@@ -896,6 +896,8 @@ def create_tabm_model(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
+
 def create_tabm_plain(
         n_num_features: int,
         cat_cardinalities: List[int],
@@ -924,6 +926,8 @@ def create_tabm_plain(
         k=None,
         **kwargs
     )
+
+# ---------------------------------------------------------------------
 
 def create_tabm_ensemble(
         n_num_features: int,
@@ -956,6 +960,8 @@ def create_tabm_ensemble(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
+
 def create_tabm_mini(
         n_num_features: int,
         cat_cardinalities: List[int],
@@ -986,6 +992,8 @@ def create_tabm_mini(
         k=k,
         **kwargs
     )
+
+# ---------------------------------------------------------------------
 
 def ensemble_predict(
         model: TabMModel,
@@ -1034,6 +1042,8 @@ def ensemble_predict(
 
     else:
         raise ValueError(f"Unknown aggregation method: {method}")
+
+# ---------------------------------------------------------------------
 
 def create_tabm_for_dataset(
         X_train: np.ndarray,
