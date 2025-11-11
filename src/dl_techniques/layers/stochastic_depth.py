@@ -132,13 +132,6 @@ class StochasticDepth(keras.layers.Layer):
 
         self.drop_path_rate = float(drop_path_rate)
 
-        # CREATE sub-layer in __init__ following modern Keras 3 pattern
-        # We don't specify noise_shape here as it will be calculated dynamically
-        self.dropout = keras.layers.Dropout(
-            rate=self.drop_path_rate,
-            name=f"{self.name}_dropout"
-        )
-
         logger.info(
             f"Created StochasticDepth layer '{self.name}' with "
             f"drop_path_rate={self.drop_path_rate}"
