@@ -53,31 +53,31 @@ class PW_FNet_Block(keras.layers.Layer):
     ```
     Input(shape=[batch, H, W, C])
            ↓
-    Norm1 (configurable) ───────────┐
-       ↓                            │
-    Token Mixer                     │ (Residual)
-       ├─ PointwiseConv(→hidden_dim)
-       ├─ FFT2D (→ 2*hidden_dim channels)
-       ├─ PointwiseConv (on real+imag parts)
-       ├─ GELU
-       ├─ IFFT2D (→ hidden_dim channels)
-       └─ PointwiseConv(→C)
-       ↓                            │
-    Add ←───────────────────────────┘
+    Norm1 (configurable) ────────────────────┐
+       ↓                                     │
+    Token Mixer                              │ (Residual)
+       ├─ PointwiseConv(→hidden_dim)         │
+       ├─ FFT2D (→ 2*hidden_dim channels)    │
+       ├─ PointwiseConv (on real+imag parts) │
+       ├─ GELU                               │
+       ├─ IFFT2D (→ hidden_dim channels)     │
+       └─ PointwiseConv(→C)                  │
+       ↓                                     │
+    Add ←────────────────────────────────────┘
        ↓
-    Norm2 (configurable) ───────────┐
-       ↓                            │
-    FFN (configurable)              │ (Residual)
-       ├─ Spatial FFN (default):    │
-       │  ├─ PointwiseConv(→hidden_dim)
-       │  ├─ DepthwiseConv(3×3)
-       │  ├─ GELU
-       │  └─ PointwiseConv(→C)
-       │                            │
-       └─ Factory FFN (optional):   │
-          └─ Dense-based FFN layers
-       ↓                            │
-    Add ←───────────────────────────┘
+    Norm2 (configurable) ──────────────┐
+       ↓                               │
+    FFN (configurable)                 │ (Residual)
+       ├─ Spatial FFN (default):       │
+       │  ├─ PointwiseConv(→hidden_dim)│
+       │  ├─ DepthwiseConv(3×3)        │
+       │  ├─ GELU                      │
+       │  └─ PointwiseConv(→C)         │
+       │                               │
+       └─ Factory FFN (optional):      │
+          └─ Dense-based FFN layers    │
+       ↓                               │
+    Add ←──────────────────────────────┘
        ↓
     Output(shape=[batch, H, W, C])
     ```
