@@ -150,7 +150,7 @@ def test_serialization():
     config = original_layer.get_config()
     recreated_layer = StochasticDepth.from_config(config)
 
-    assert original_layer.drop_path_rate == recreated_layer.stochastic_depth_rate
+    assert original_layer.drop_path_rate == recreated_layer.drop_path_rate
 
 
 def test_model_serialization(tmp_path, test_model):

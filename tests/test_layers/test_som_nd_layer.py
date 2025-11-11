@@ -113,17 +113,17 @@ class TestSOMLayer:
         som_random = SOMLayer(
             grid_shape=(5, 5),
             input_dim=10,
-            weights_initializer='random'
+            weights_initializer='random_uniform'
         )
 
         som_sample = SOMLayer(
             grid_shape=(5, 5),
             input_dim=10,
-            weights_initializer='sample'
+            weights_initializer='he_normal'
         )
 
-        assert som_random.weights_initializer is None
-        assert som_sample.weights_initializer is None
+        assert som_random.weights_initializer is not None
+        assert som_sample.weights_initializer is not None
 
     def test_invalid_parameters(self):
         """Test that invalid parameters raise appropriate errors."""
