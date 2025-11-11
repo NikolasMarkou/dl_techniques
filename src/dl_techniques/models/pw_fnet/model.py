@@ -1,15 +1,17 @@
 """
 PW-FNet: Pyramid Wavelet-Fourier Network for Image Restoration.
 
-This module implements the complete PW-FNet architecture, an efficient U-Net variant
-that replaces self-attention with Fourier-based token mixing for image restoration
-tasks such as deraining, deblurring, and dehazing.
+This module implements the complete PW-FNet architecture with configurable
+normalization and feed-forward network components. It replaces self-attention
+with Fourier-based token mixing for efficient image restoration tasks such as
+deraining, deblurring, and dehazing.
 
 **Key Components**:
 - FFTLayer & IFFTLayer: Frequency domain transformations
-- PW_FNet_Block: Core building block with token mixer and FFN
+- PW_FNet_Block: Core building block with configurable norm and FFN
 - Downsample & Upsample: Spatial resolution scaling layers
 - PW_FNet: Complete model with multi-scale supervision
+
 """
 
 import keras
@@ -18,284 +20,64 @@ from typing import Optional, Tuple, List, Dict, Any
 
 
 # ---------------------------------------------------------------------
-# 1. Utility FFT Layers
+# Local imports
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
-class FFTLayer(keras.layers.Layer):
-    """
-    Applies 2D Fast Fourier Transform and outputs concatenated real/imag parts.
-
-    This layer transforms real-valued spatial domain features into the frequency
-    domain. To interface with standard real-valued Keras layers (like Conv2D),
-    it outputs a single real-valued tensor where the real and imaginary components
-    of the FFT are concatenated along the channel axis.
-
-    **Intent**: To provide a modular, serializable Keras layer for frequency domain
-    analysis that is compatible with standard convolutional pipelines. This is a
-    core component of the Fourier-based token mixer in PW-FNet.
-
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C])
-           ↓
-    Transpose: [batch, C, H, W]
-           ↓
-    Create (real, imag) tuple where imag is zeros
-           ↓
-    FFT2D along spatial dims → (fft_real, fft_imag)
-           ↓
-    Transpose both back: [batch, H, W, C]
-           ↓
-    Concatenate: [fft_real, fft_imag] along channels
-           ↓
-    Output(float32, shape=[batch, H, W, 2*C])
-    ```
-
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, channels)`.
-
-    **Output shape**:
-        4D tensor: `(batch_size, height, width, 2 * channels)` with `float32`
-        dtype, representing concatenated real and imaginary parts.
-
-    **Example**:
-        >>> fft_layer = FFTLayer()
-        >>> spatial_features = ops.random.normal((2, 32, 32, 64))
-        >>> freq_features = fft_layer(spatial_features)
-        >>> print(freq_features.shape, freq_features.dtype)
-        (2, 32, 32, 128) float32
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        """
-        Initialize the FFT layer.
-
-        Args:
-            **kwargs: Additional keyword arguments for the Layer base class.
-        """
-        super().__init__(**kwargs)
-
-    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply 2D FFT to input tensor.
-
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
-
-        Returns:
-            Real tensor of shape (batch, height, width, 2*channels)
-            representing concatenated real and imaginary frequency components.
-        """
-        # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
-        x_permuted = keras.ops.transpose(inputs, [0, 3, 1, 2])
-
-        # Keras FFT requires a tuple of (real, imag)
-        # Input is real, so imag part is zero
-        real_part = x_permuted
-        imag_part = keras.ops.zeros_like(real_part)
-
-        # Apply 2D FFT along spatial dimensions (last two)
-        fft_real, fft_imag = keras.ops.fft2((real_part, imag_part))
-
-        # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
-        fft_real_permuted = keras.ops.transpose(fft_real, [0, 2, 3, 1])
-        fft_imag_permuted = keras.ops.transpose(fft_imag, [0, 2, 3, 1])
-
-        # Concatenate real and imaginary parts along the channel axis
-        return keras.ops.concatenate(
-            [fft_real_permuted, fft_imag_permuted], axis=-1
-        )
-
-    def compute_output_shape(
-            self,
-            input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (channels are doubled).
-
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple.
-        """
-        batch, height, width, channels = input_shape
-        if channels is not None:
-            output_channels = channels * 2
-        else:
-            output_channels = None
-        return batch, height, width, output_channels
-
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
-        config = super().get_config()
-        return config
-
-
-@keras.saving.register_keras_serializable()
-class IFFTLayer(keras.layers.Layer):
-    """
-    Applies 2D Inverse FFT to concatenated real/imag parts.
-
-    This layer transforms frequency domain features (represented as a real tensor
-    with concatenated real and imaginary parts) back into the spatial domain.
-    It performs the inverse operation of `FFTLayer`.
-
-    **Intent**: To reconstruct spatial features from the frequency domain after
-    processing, completing the Fourier-based token mixer block in PW-FNet.
-
-    **Architecture**:
-    ```
-    Input(float32, shape=[batch, H, W, 2*C])
-           ↓
-    Split into (real, imag) parts along channels
-           ↓
-    Transpose both: [batch, C, H, W]
-           ↓
-    IFFT2D on (real, imag) tuple → (ifft_real, ifft_imag)
-           ↓
-    Take ifft_real and transpose back: [batch, H, W, C]
-           ↓
-    Output(float32, shape=[batch, H, W, C])
-    ```
-
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, 2 * channels)` with `float32`
-        dtype. Channel dimension must be even.
-
-    **Output shape**:
-        4D tensor: `(batch_size, height, width, channels)` with `float32` dtype.
-
-    **Example**:
-        >>> # Create layers
-        >>> fft_layer = FFTLayer()
-        >>> ifft_layer = IFFTLayer()
-        >>> # Round-trip transformation
-        >>> spatial_features = ops.random.normal((2, 32, 32, 64))
-        >>> freq_features = fft_layer(spatial_features) # shape (2,32,32,128)
-        >>> reconstructed = ifft_layer(freq_features)   # shape (2,32,32,64)
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        """
-        Initialize the IFFT layer.
-
-        Args:
-            **kwargs: Additional keyword arguments for the Layer base class.
-        """
-        super().__init__(**kwargs)
-
-    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply 2D IFFT to input tensor and extract real part.
-
-        Args:
-            inputs: Real tensor with concatenated real/imag parts, shape
-                    (batch, height, width, 2*channels).
-
-        Returns:
-            Real tensor of shape (batch, height, width, channels) in spatial domain.
-        """
-        # Input is a concatenation of real and imaginary parts
-        real_part, imag_part = keras.ops.split(inputs, 2, axis=-1)
-
-        # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
-        real_permuted = keras.ops.transpose(real_part, [0, 3, 1, 2])
-        imag_permuted = keras.ops.transpose(imag_part, [0, 3, 1, 2])
-
-        # Apply 2D IFFT along spatial dimensions (last two)
-        ifft_real, _ = keras.ops.ifft2((real_permuted, imag_permuted))
-
-        # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
-        ifft_permuted = keras.ops.transpose(ifft_real, [0, 2, 3, 1])
-
-        return ifft_permuted
-
-    def compute_output_shape(
-            self,
-            input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (channels are halved).
-
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple.
-        """
-        batch, height, width, channels = input_shape
-        if channels is not None:
-            if channels % 2 != 0:
-                raise ValueError(
-                    f"Input channels for IFFTLayer must be even, got {channels}"
-                )
-            output_channels = channels // 2
-        else:
-            output_channels = None
-        return batch, height, width, output_channels
-
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
-
-        Returns:
-            Dictionary containing the layer configuration.
-        """
-        config = super().get_config()
-        return config
+from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.fft_layers import FFTLayer, IFFTLayer
+from dl_techniques.layers.norms import create_normalization_layer
 
 
 # ---------------------------------------------------------------------
-# 2. Core PW-FNet Block
+# Core PW-FNet Block
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PW_FNet_Block(keras.layers.Layer):
     """
-    Pyramid Wavelet-Fourier Network (PW-FNet) building block.
+    Pyramid Wavelet-Fourier Network (PW-FNet) building block with configurable components.
 
     This layer is the core component of the PW-FNet architecture, replacing
     computationally expensive self-attention with an efficient frequency-domain
-    token mixer and a feed-forward network. It follows modern Keras best
-    practices for composite layers, ensuring robust serialization.
+    token mixer and a feed-forward network. It supports configurable normalization
+    and FFN types through factory patterns while maintaining the original spatial
+    FFN as the default for optimal performance.
 
     **Intent**: To provide an efficient and effective feature processing block
     that captures global context through Fourier transforms while maintaining
     low computational overhead. Achieves O(N log N) complexity compared to O(N²)
-    for standard attention.
+    for standard attention. Now supports experimentation with different
+    normalization and FFN architectures.
 
     **Architecture**:
     ```
     Input(shape=[batch, H, W, C])
            ↓
-    LayerNorm ──────────────┐
-       ↓                    │
-    Token Mixer             │ (Residual)
+    Norm1 (configurable) ───────────┐
+       ↓                            │
+    Token Mixer                     │ (Residual)
        ├─ PointwiseConv(→hidden_dim)
        ├─ FFT2D (→ 2*hidden_dim channels)
        ├─ PointwiseConv (on real+imag parts)
        ├─ GELU
        ├─ IFFT2D (→ hidden_dim channels)
        └─ PointwiseConv(→C)
-       ↓                    │
-    Add ←───────────────────┘
+       ↓                            │
+    Add ←───────────────────────────┘
        ↓
-    LayerNorm ──────────────┐
-       ↓                    │
-    Feed-Forward Network    │ (Residual)
-       ├─ PointwiseConv(→hidden_dim)
-       ├─ DepthwiseConv(3×3)
-       ├─ GELU
-       └─ PointwiseConv(→C)
-       ↓                    │
-    Add ←───────────────────┘
+    Norm2 (configurable) ───────────┐
+       ↓                            │
+    FFN (configurable)              │ (Residual)
+       ├─ Spatial FFN (default):    │
+       │  ├─ PointwiseConv(→hidden_dim)
+       │  ├─ DepthwiseConv(3×3)
+       │  ├─ GELU
+       │  └─ PointwiseConv(→C)
+       │                            │
+       └─ Factory FFN (optional):   │
+          └─ Dense-based FFN layers
+       ↓                            │
+    Add ←───────────────────────────┘
        ↓
     Output(shape=[batch, H, W, C])
     ```
@@ -305,28 +87,78 @@ class PW_FNet_Block(keras.layers.Layer):
         ffn_expansion_factor: Expansion factor for the hidden dimension
             in the FFN and token mixer. Determines computational cost and
             capacity. Defaults to 2.0 (2x expansion).
+        normalization_type: Type of normalization to use. Supports all types
+            from the normalization factory: 'layer_norm', 'rms_norm',
+            'zero_centered_rms_norm', 'band_rms', etc. Defaults to 'layer_norm'.
+        norm1_kwargs: Optional dictionary of custom arguments for the first
+            normalization layer (after token mixer). These will be passed to
+            the normalization factory.
+        norm2_kwargs: Optional dictionary of custom arguments for the second
+            normalization layer (after FFN). These will be passed to the
+            normalization factory.
+        use_spatial_ffn: If True, uses the spatial FFN with depthwise convolution
+            (original architecture, recommended for image restoration). If False,
+            uses a factory-based FFN. Defaults to True.
+        ffn_type: Type of FFN to use when use_spatial_ffn=False. Options include:
+            'mlp', 'swiglu', 'geglu', 'glu', 'differential', 'residual', etc.
+            Ignored when use_spatial_ffn=True. Must be specified if use_spatial_ffn=False.
+        ffn_kwargs: Optional dictionary of custom arguments for the factory FFN.
+            Only used when use_spatial_ffn=False. These will be passed to the
+            FFN factory.
         **kwargs: Additional arguments for the Layer base class.
 
     Raises:
-        ValueError: If dim is not positive.
+        ValueError: If dim is not positive, or if use_spatial_ffn=False but
+            ffn_type is not specified.
+
+    Example:
+        >>> # Default configuration (original architecture)
+        >>> block = PW_FNet_Block(dim=64)
+        >>>
+        >>> # With RMS normalization
+        >>> block = PW_FNet_Block(
+        ...     dim=64,
+        ...     normalization_type='rms_norm',
+        ...     norm1_kwargs={'epsilon': 1e-6, 'use_scale': True}
+        ... )
+        >>>
+        >>> # With factory FFN
+        >>> block = PW_FNet_Block(
+        ...     dim=64,
+        ...     use_spatial_ffn=False,
+        ...     ffn_type='swiglu',
+        ...     ffn_kwargs={'dropout_rate': 0.1}
+        ... )
     """
 
     def __init__(
             self,
             dim: int,
             ffn_expansion_factor: float = 2.0,
+            normalization_type: str = 'layer_norm',
+            norm1_kwargs: Optional[Dict[str, Any]] = None,
+            norm2_kwargs: Optional[Dict[str, Any]] = None,
+            use_spatial_ffn: bool = True,
+            ffn_type: Optional[str] = None,
+            ffn_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         """
-        Initialize the PW-FNet block.
+        Initialize the PW-FNet block with configurable components.
 
         Args:
             dim: Number of input/output channels.
             ffn_expansion_factor: Expansion factor for hidden dimensions.
+            normalization_type: Type of normalization layer to use.
+            norm1_kwargs: Custom arguments for first normalization layer.
+            norm2_kwargs: Custom arguments for second normalization layer.
+            use_spatial_ffn: Whether to use spatial FFN (True) or factory FFN (False).
+            ffn_type: Type of factory FFN to use (required if use_spatial_ffn=False).
+            ffn_kwargs: Custom arguments for factory FFN.
             **kwargs: Additional Layer arguments.
 
         Raises:
-            ValueError: If dim is not positive.
+            ValueError: If parameters are invalid.
         """
         super().__init__(**kwargs)
 
@@ -337,24 +169,38 @@ class PW_FNet_Block(keras.layers.Layer):
             raise ValueError(
                 f"ffn_expansion_factor must be positive, got {ffn_expansion_factor}"
             )
+        if not use_spatial_ffn and ffn_type is None:
+            raise ValueError(
+                "ffn_type must be specified when use_spatial_ffn=False"
+            )
 
         self.dim = dim
         self.ffn_expansion_factor = ffn_expansion_factor
+        self.normalization_type = normalization_type
+        self.norm1_kwargs = norm1_kwargs or {}
+        self.norm2_kwargs = norm2_kwargs or {}
+        self.use_spatial_ffn = use_spatial_ffn
+        self.ffn_type = ffn_type
+        self.ffn_kwargs = ffn_kwargs or {}
+
         hidden_dim = int(dim * ffn_expansion_factor)
         self._hidden_dim = hidden_dim  # Store for introspection
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
-        # Normalization layers
-        self.norm1 = keras.layers.LayerNormalization(
-            epsilon=1e-6,
-            name="norm1"
+
+        # Normalization layers using factory
+        self.norm1 = create_normalization_layer(
+            normalization_type=self.normalization_type,
+            name="norm1",
+            **self.norm1_kwargs
         )
-        self.norm2 = keras.layers.LayerNormalization(
-            epsilon=1e-6,
-            name="norm2"
+        self.norm2 = create_normalization_layer(
+            normalization_type=self.normalization_type,
+            name="norm2",
+            **self.norm2_kwargs
         )
 
-        # Token Mixer sub-layers
+        # Token Mixer sub-layers (unchanged)
         self.token_mixer_expand = keras.layers.Conv2D(
             hidden_dim,
             kernel_size=1,
@@ -376,7 +222,22 @@ class PW_FNet_Block(keras.layers.Layer):
             name="token_mixer_project"
         )
 
-        # Feed-Forward Network sub-layers
+        # Feed-Forward Network sub-layers (configurable)
+        if self.use_spatial_ffn:
+            self._setup_spatial_ffn(hidden_dim)
+        else:
+            self._setup_factory_ffn(hidden_dim)
+
+    def _setup_spatial_ffn(self, hidden_dim: int) -> None:
+        """
+        Setup the spatial FFN with depthwise convolution (original architecture).
+
+        This is the default FFN configuration that uses spatial operations
+        optimized for image restoration tasks.
+
+        Args:
+            hidden_dim: Hidden dimension for FFN expansion.
+        """
         self.ffn_expand = keras.layers.Conv2D(
             hidden_dim,
             kernel_size=1,
@@ -390,10 +251,29 @@ class PW_FNet_Block(keras.layers.Layer):
             name="ffn_depthwise"
         )
         self.ffn_project = keras.layers.Conv2D(
-            dim,
+            self.dim,
             kernel_size=1,
             use_bias=True,
             name="ffn_project"
+        )
+
+    def _setup_factory_ffn(self, hidden_dim: int) -> None:
+        """
+        Setup a factory-based FFN (experimental).
+
+        Uses the FFN factory to create a configurable feed-forward network.
+        Note: Factory FFNs are Dense-based and may not preserve spatial structure
+        as well as the spatial FFN for image tasks.
+
+        Args:
+            hidden_dim: Hidden dimension for FFN expansion.
+        """
+        self.ffn = create_ffn_layer(
+            ffn_type=self.ffn_type,
+            hidden_dim=hidden_dim,
+            output_dim=self.dim,
+            name="ffn",
+            **self.ffn_kwargs
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -428,12 +308,64 @@ class PW_FNet_Block(keras.layers.Layer):
 
         # FFN Path
         self.norm2.build(input_shape)
-        self.ffn_expand.build(input_shape)
-        ffn_expanded_shape = self.ffn_expand.compute_output_shape(input_shape)
-        self.ffn_depthwise.build(ffn_expanded_shape)
-        self.ffn_project.build(ffn_expanded_shape)
+
+        if self.use_spatial_ffn:
+            self.ffn_expand.build(input_shape)
+            ffn_expanded_shape = self.ffn_expand.compute_output_shape(input_shape)
+            self.ffn_depthwise.build(ffn_expanded_shape)
+            self.ffn_project.build(ffn_expanded_shape)
+        else:
+            self.ffn.build(input_shape)
 
         super().build(input_shape)
+
+    def _token_mixer_forward(
+            self,
+            x: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Forward pass through the token mixer (frequency domain processing).
+
+        Args:
+            x: Input tensor of shape (batch, height, width, dim).
+
+        Returns:
+            Token-mixed features of shape (batch, height, width, dim).
+        """
+        # Expand channels for frequency domain processing
+        x_expanded = self.token_mixer_expand(x)
+
+        # Frequency domain token mixing: FFT -> Conv -> GELU -> IFFT
+        x_fft = self.fft(x_expanded)
+        x_freq = self.freq_conv(x_fft)
+        x_freq = keras.activations.gelu(x_freq, approximate=False)
+        x_ifft = self.ifft(x_freq)
+
+        # Project back to original dimension
+        x_token_mixed = self.token_mixer_project(x_ifft)
+
+        return x_token_mixed
+
+    def _spatial_ffn_forward(
+            self,
+            x: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Forward pass through the spatial FFN.
+
+        Args:
+            x: Input tensor of shape (batch, height, width, dim).
+
+        Returns:
+            FFN output of shape (batch, height, width, dim).
+        """
+        # FFN: Expand -> Depthwise Conv -> GELU -> Project
+        x_ffn_expanded = self.ffn_expand(x)
+        x_ffn_depthwise = self.ffn_depthwise(x_ffn_expanded)
+        x_ffn_depthwise = keras.activations.gelu(x_ffn_depthwise, approximate=False)
+        x_ffn_projected = self.ffn_project(x_ffn_depthwise)
+
+        return x_ffn_projected
 
     def call(
             self,
@@ -445,7 +377,7 @@ class PW_FNet_Block(keras.layers.Layer):
 
         Args:
             inputs: Input tensor of shape (batch, height, width, dim).
-            training: Boolean indicating training mode (unused, for API consistency).
+            training: Boolean indicating training mode (for potential dropout).
 
         Returns:
             Output tensor of shape (batch, height, width, dim).
@@ -454,17 +386,8 @@ class PW_FNet_Block(keras.layers.Layer):
         # Normalize input
         x_norm1 = self.norm1(inputs)
 
-        # Expand channels for frequency domain processing
-        x_expanded = self.token_mixer_expand(x_norm1)
-
-        # Frequency domain token mixing: FFT -> Conv -> GELU -> IFFT
-        x_fft = self.fft(x_expanded)
-        x_freq = self.freq_conv(x_fft)
-        x_freq = keras.activations.gelu(x_freq, approximate=False)
-        x_ifft = self.ifft(x_freq)
-
-        # Project back to original dimension
-        x_token_mixed = self.token_mixer_project(x_ifft)
+        # Apply token mixer
+        x_token_mixed = self._token_mixer_forward(x_norm1)
 
         # First residual connection
         x = inputs + x_token_mixed
@@ -473,14 +396,14 @@ class PW_FNet_Block(keras.layers.Layer):
         # Normalize features
         x_norm2 = self.norm2(x)
 
-        # FFN: Expand -> Depthwise Conv -> GELU -> Project
-        x_ffn_expanded = self.ffn_expand(x_norm2)
-        x_ffn_depthwise = self.ffn_depthwise(x_ffn_expanded)
-        x_ffn_depthwise = keras.activations.gelu(x_ffn_depthwise, approximate=False)
-        x_ffn_projected = self.ffn_project(x_ffn_depthwise)
+        # Apply FFN (spatial or factory-based)
+        if self.use_spatial_ffn:
+            x_ffn = self._spatial_ffn_forward(x_norm2)
+        else:
+            x_ffn = self.ffn(x_norm2, training=training)
 
         # Second residual connection
-        return x + x_ffn_projected
+        return x + x_ffn
 
     def compute_output_shape(
             self,
@@ -508,12 +431,18 @@ class PW_FNet_Block(keras.layers.Layer):
         config.update({
             "dim": self.dim,
             "ffn_expansion_factor": self.ffn_expansion_factor,
+            "normalization_type": self.normalization_type,
+            "norm1_kwargs": self.norm1_kwargs,
+            "norm2_kwargs": self.norm2_kwargs,
+            "use_spatial_ffn": self.use_spatial_ffn,
+            "ffn_type": self.ffn_type,
+            "ffn_kwargs": self.ffn_kwargs,
         })
         return config
 
 
 # ---------------------------------------------------------------------
-# 3. Scaling Layers
+# Scaling Layers
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -692,7 +621,7 @@ class Upsample(keras.layers.Layer):
 
 
 # ---------------------------------------------------------------------
-# 4. PW-FNet Main Model
+# PW-FNet Main Model
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -700,10 +629,14 @@ class PW_FNet(keras.Model):
     """
     Complete Pyramid Wavelet-Fourier Network (PW-FNet) model for image restoration.
 
-    This model implements a 3-level U-Net architecture with PW-FNet blocks
-    for efficient and effective image restoration. It supports multi-scale
+    This model implements a 3-level U-Net architecture with configurable PW-FNet
+    blocks for efficient and effective image restoration. It supports multi-scale
     outputs to enable hierarchical supervision during training, improving
     convergence and final performance.
+
+    **Configurability**: This implementation supports configurable normalization
+    and FFN components through factory patterns, enabling experimentation with
+    different architectural choices while maintaining backward compatibility.
 
     Args:
         img_channels: Number of channels in input/output images (e.g., 3 for RGB).
@@ -716,7 +649,42 @@ class PW_FNet(keras.Model):
             number of scales. Typical: [2, 2] for 2 levels. Must be non-empty.
         dec_blk_nums: List of block counts for each decoder level. Should match
             enc_blk_nums length. Typical: [2, 2]. Must be non-empty.
+        normalization_type: Type of normalization to use throughout the model.
+            Supports all types from the normalization factory: 'layer_norm',
+            'rms_norm', 'zero_centered_rms_norm', 'band_rms', 'dynamic_tanh', etc.
+            Defaults to 'layer_norm' (original behavior).
+        norm_kwargs: Optional dictionary of custom arguments to pass to all
+            normalization layers. Applied globally unless overridden.
+        use_spatial_ffn: If True, uses spatial FFN with depthwise convolution
+            in all blocks (original architecture, recommended). If False, uses
+            factory-based FFN. Defaults to True.
+        ffn_type: Type of factory FFN to use when use_spatial_ffn=False. Options
+            include: 'mlp', 'swiglu', 'geglu', 'glu', 'differential', etc.
+            Ignored when use_spatial_ffn=True.
+        ffn_kwargs: Optional dictionary of custom arguments for factory FFN.
+            Only used when use_spatial_ffn=False.
         **kwargs: Additional arguments for the Model base class.
+
+    Example:
+        >>> # Default configuration (original architecture)
+        >>> model = PW_FNet(img_channels=3, width=32)
+        >>>
+        >>> # With RMS normalization
+        >>> model = PW_FNet(
+        ...     img_channels=3,
+        ...     width=32,
+        ...     normalization_type='rms_norm',
+        ...     norm_kwargs={'epsilon': 1e-6, 'use_scale': True}
+        ... )
+        >>>
+        >>> # With factory FFN
+        >>> model = PW_FNet(
+        ...     img_channels=3,
+        ...     width=32,
+        ...     use_spatial_ffn=False,
+        ...     ffn_type='swiglu',
+        ...     ffn_kwargs={'dropout_rate': 0.1}
+        ... )
     """
 
     def __init__(
@@ -726,6 +694,11 @@ class PW_FNet(keras.Model):
             middle_blk_num: int = 4,
             enc_blk_nums: Optional[List[int]] = None,
             dec_blk_nums: Optional[List[int]] = None,
+            normalization_type: str = 'layer_norm',
+            norm_kwargs: Optional[Dict[str, Any]] = None,
+            use_spatial_ffn: bool = True,
+            ffn_type: Optional[str] = None,
+            ffn_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -737,6 +710,11 @@ class PW_FNet(keras.Model):
             middle_blk_num: Number of bottleneck blocks.
             enc_blk_nums: Block counts for encoder levels.
             dec_blk_nums: Block counts for decoder levels.
+            normalization_type: Type of normalization to use.
+            norm_kwargs: Custom arguments for normalization layers.
+            use_spatial_ffn: Whether to use spatial FFN or factory FFN.
+            ffn_type: Type of factory FFN (required if use_spatial_ffn=False).
+            ffn_kwargs: Custom arguments for factory FFN.
             **kwargs: Additional Model arguments.
 
         Raises:
@@ -749,6 +727,10 @@ class PW_FNet(keras.Model):
             enc_blk_nums = [2, 2]
         if dec_blk_nums is None:
             dec_blk_nums = [2, 2]
+        if norm_kwargs is None:
+            norm_kwargs = {}
+        if ffn_kwargs is None:
+            ffn_kwargs = {}
 
         # Validate parameters
         if img_channels <= 0:
@@ -772,6 +754,10 @@ class PW_FNet(keras.Model):
             raise ValueError("All values in enc_blk_nums must be non-negative")
         if any(n < 0 for n in dec_blk_nums):
             raise ValueError("All values in dec_blk_nums must be non-negative")
+        if not use_spatial_ffn and ffn_type is None:
+            raise ValueError(
+                "ffn_type must be specified when use_spatial_ffn=False"
+            )
 
         # Store configuration
         self.img_channels = img_channels
@@ -779,6 +765,11 @@ class PW_FNet(keras.Model):
         self.middle_blk_num = middle_blk_num
         self.enc_blk_nums = enc_blk_nums
         self.dec_blk_nums = dec_blk_nums
+        self.normalization_type = normalization_type
+        self.norm_kwargs = norm_kwargs
+        self.use_spatial_ffn = use_spatial_ffn
+        self.ffn_type = ffn_type
+        self.ffn_kwargs = ffn_kwargs
 
         # CREATE all sub-layers in __init__ (unbuilt)
         # Introduction convolution
@@ -793,20 +784,20 @@ class PW_FNet(keras.Model):
 
         # -- Encoder --
         self.encoder_level1 = [
-            PW_FNet_Block(width, name=f"enc_l1_blk_{i}")
+            self._create_block(width, f"enc_l1_blk_{i}")
             for i in range(enc_blk_nums[0])
         ]
         self.down1 = Downsample(width * 2, name="down1")
 
         self.encoder_level2 = [
-            PW_FNet_Block(width * 2, name=f"enc_l2_blk_{i}")
+            self._create_block(width * 2, f"enc_l2_blk_{i}")
             for i in range(enc_blk_nums[1])
         ]
         self.down2 = Downsample(width * 4, name="down2")
 
         # -- Bottleneck --
         self.bottleneck = [
-            PW_FNet_Block(width * 4, name=f"middle_blk_{i}")
+            self._create_block(width * 4, f"middle_blk_{i}")
             for i in range(middle_blk_num)
         ]
 
@@ -821,7 +812,7 @@ class PW_FNet(keras.Model):
             name="reduce2"
         )
         self.decoder_level2 = [
-            PW_FNet_Block(width * 2, name=f"dec_l2_blk_{i}")
+            self._create_block(width * 2, f"dec_l2_blk_{i}")
             for i in range(dec_blk_nums[0])
         ]
 
@@ -835,7 +826,7 @@ class PW_FNet(keras.Model):
             name="reduce1"
         )
         self.decoder_level1 = [
-            PW_FNet_Block(width, name=f"dec_l1_blk_{i}")
+            self._create_block(width, f"dec_l1_blk_{i}")
             for i in range(dec_blk_nums[1])
         ]
 
@@ -863,6 +854,28 @@ class PW_FNet(keras.Model):
             padding="same",
             use_bias=True,
             name="output_l0"
+        )
+
+    def _create_block(self, dim: int, name: str) -> PW_FNet_Block:
+        """
+        Create a PW-FNet block with the model's configuration.
+
+        Args:
+            dim: Number of channels for the block.
+            name: Name for the block.
+
+        Returns:
+            Configured PW_FNet_Block instance.
+        """
+        return PW_FNet_Block(
+            dim=dim,
+            normalization_type=self.normalization_type,
+            norm1_kwargs=self.norm_kwargs,
+            norm2_kwargs=self.norm_kwargs,
+            use_spatial_ffn=self.use_spatial_ffn,
+            ffn_type=self.ffn_type,
+            ffn_kwargs=self.ffn_kwargs,
+            name=name
         )
 
     def call(
@@ -937,7 +950,6 @@ class PW_FNet(keras.Model):
         # Return multi-scale outputs: [full, half, quarter]
         return [out_l0, out_l1, out_l2]
 
-
     def get_config(self) -> Dict[str, Any]:
         """
         Return configuration for serialization.
@@ -951,5 +963,12 @@ class PW_FNet(keras.Model):
             "middle_blk_num": self.middle_blk_num,
             "enc_blk_nums": self.enc_blk_nums,
             "dec_blk_nums": self.dec_blk_nums,
+            "normalization_type": self.normalization_type,
+            "norm_kwargs": self.norm_kwargs,
+            "use_spatial_ffn": self.use_spatial_ffn,
+            "ffn_type": self.ffn_type,
+            "ffn_kwargs": self.ffn_kwargs,
         }
         return config
+
+# ---------------------------------------------------------------------
