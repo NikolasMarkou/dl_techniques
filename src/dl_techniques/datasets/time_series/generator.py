@@ -1507,7 +1507,7 @@ class TimeSeriesGenerator:
             for i in np.where(outlier_locations)[0]:
                 for j in range(min(5, n - i)):  # Affect next 5 points
                     if i + j < n:
-                        y[i + j:] += outlier_magnitudes[i] * (0.5 ** j)
+                        y[i + j] += outlier_magnitudes[i] * (0.5 ** j)
         elif outlier_type == "level":
             # Level outliers create temporary level shifts
             for i in np.where(outlier_locations)[0]:
@@ -1858,10 +1858,11 @@ class TimeSeriesGenerator:
         if signal_type == "ecg":
             heart_rate = kwargs.get("heart_rate", 72)
             noise_level = kwargs.get("noise_level", 0.1)
+            sampling_rate = kwargs.get("sampling_rate", 100) # samples per second
 
             # ECG waveform approximation
             rr_interval = 60 / heart_rate  # seconds between beats
-            beat_times = np.arange(0, len(t), rr_interval * 100)  # Assume 100 samples per second
+            beat_times = np.arange(0, len(t), rr_interval * sampling_rate)
 
             ecg = np.zeros(len(t))
             for beat_time in beat_times:
@@ -2016,5 +2017,3 @@ class TimeSeriesGenerator:
             y += noise
 
         return y.reshape(-1, 1)
-
-# ---------------------------------------------------------------------

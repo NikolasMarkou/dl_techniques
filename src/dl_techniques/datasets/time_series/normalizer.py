@@ -495,7 +495,7 @@ class TimeSeriesNormalizer:
             if self.first_val == 0:
                 logger.warning("First value is zero, cannot compute percent change")
                 return np.zeros_like(data)
-            return (data - self.first_val) / (np.abs(self.first_val) + self.epsilon)
+            return (data - self.first_val) / (self.first_val + self.epsilon)
 
     def transform_quantile_uniform(self, data: np.ndarray) -> np.ndarray:
         """Helper method for quantile uniform transformation."""
@@ -625,7 +625,7 @@ class TimeSeriesNormalizer:
             return data * self.decimal_factor
 
         elif self.method == NormalizationMethod.PERCENT_CHANGE:
-            return data * (np.abs(self.first_val) + self.epsilon) + self.first_val
+            return data * (self.first_val + self.epsilon) + self.first_val
 
     def inverse_transform_quantile_uniform(self, data: np.ndarray) -> np.ndarray:
         """Helper method for inverse quantile uniform transformation."""
