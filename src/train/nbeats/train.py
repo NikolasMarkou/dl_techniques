@@ -54,9 +54,16 @@ from typing import Dict, List, Tuple, Any, Optional
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.nbeats.model import create_nbeats_model, NBeatsNet
 from dl_techniques.datasets.time_series import TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
+
+# ---------------------------------------------------------------------
 
 
 plt.style.use('default')
@@ -80,6 +87,7 @@ def set_random_seeds(seed: int = 42) -> None:
 
 set_random_seeds(42)
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class NBeatsTrainingConfig:
@@ -100,9 +108,9 @@ class NBeatsTrainingConfig:
     target_categories: Optional[List[str]] = None
 
     # Data configuration
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
 
     # N-BEATS specific configuration
     backcast_length: int = 168
@@ -133,7 +141,7 @@ class NBeatsTrainingConfig:
     max_patterns_per_category: int = 10
     min_data_length: int = 2000
     balance_patterns: bool = True
-    samples_per_pattern: int = 15000
+    samples_per_pattern: int = 25000
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -1397,19 +1405,19 @@ def main() -> None:
     config = NBeatsTrainingConfig(
         experiment_name="nbeats",
 
-        backcast_length=168,
-        forecast_length=12,
-        forecast_horizons=[12],
+        backcast_length=56,
+        forecast_length=4,
+        forecast_horizons=[4, 8,  12],
 
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=3,
         hidden_layer_units=256,
         use_revin=True,
 
-        max_patterns_per_category=8,
+        max_patterns_per_category=15,
         min_data_length=2000,
         balance_patterns=True,
-        samples_per_pattern=12000,
+        samples_per_pattern=25000,
 
         epochs=200,
         batch_size=128,
@@ -1434,7 +1442,7 @@ def main() -> None:
     )
 
     ts_config = TimeSeriesConfig(
-        n_samples=5000,
+        n_samples=20000,
         random_seed=42,
         default_noise_level=0.01
     )
