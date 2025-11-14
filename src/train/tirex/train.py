@@ -16,8 +16,8 @@ TiRexTrainingConfig
 
 TiRexDataProcessor
     Advanced data processing pipeline handling multi-pattern data preparation,
-    sequence generation, balanced sampling, and proper train/validation/test
-    splitting with temporal integrity. The model now handles normalization internally.
+    sequence generation, normalization, balanced sampling, and proper
+    train/validation/test splitting with temporal integrity.
 
 TiRexPerformanceCallback
     Context-aware monitoring callback that creates detailed visualizations of
@@ -31,10 +31,11 @@ TiRexTrainer
 Training Approach
 -----------------
 The framework trains a single TiRex model on mixed patterns from multiple
-time series categories. The model uses an internal RevIN layer for normalization,
-so the data pipeline works with raw, unscaled data. The training objective can be:
-1.  **Minimize MASE:** Trains the model to produce a point forecast (the median).
-2.  **Minimize Quantile Loss:** Trains the model for probabilistic forecasts.
+time series categories. The training objective can be configured to:
+1.  **Minimize MASE:** Trains the model to produce a point forecast (the median)
+    that outperforms a naive baseline.
+2.  **Minimize Quantile Loss:** Trains the model to produce probabilistic
+    forecasts to quantify uncertainty using a correctly vectorized loss function.
 """
 
 import os
@@ -61,7 +62,7 @@ from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.losses.mase_loss import MASELoss, mase_metric
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
 from dl_techniques.datasets.time_series import (
-    TimeSeriesGenerator, TimeSeriesConfig
+    TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
 )
 
 # ---------------------------------------------------------------------
@@ -206,20 +207,22 @@ class TiRexDataProcessor:
 
     def __init__(self, config: TiRexTrainingConfig) -> None:
         self.config = config
+        self.scalers: Dict[str, TimeSeriesNormalizer] = {}
         self.pattern_to_id: Dict[str, int] = {}
         self.id_to_pattern: Dict[int, str] = {}
 
     def prepare_multi_pattern_data(
             self, raw_pattern_data: Dict[str, np.ndarray]
     ) -> Dict[str, Any]:
-        """Prepare multi-pattern data for training. Normalization is handled by the model."""
-        logger.info("Preparing data for multi-pattern training (model handles normalization)...")
+        """Prepare multi-pattern data for training."""
+        logger.info("Preparing data for multi-pattern training...")
         self.pattern_to_id = {
             pattern: idx for idx, pattern in enumerate(raw_pattern_data.keys())
         }
         self.id_to_pattern = {
             idx: pattern for pattern, idx in self.pattern_to_id.items()
         }
+        self._fit_scalers(raw_pattern_data)
         prepared_data = {}
         for horizon in self.config.prediction_horizons:
             logger.info(f"Preparing data for horizon {horizon}")
@@ -231,7 +234,7 @@ class TiRexDataProcessor:
     def _prepare_mixed_pattern_data(
             self, raw_pattern_data: Dict[str, np.ndarray], horizon: int
     ) -> Dict[str, Any]:
-        """Prepare data by mixing multiple patterns without external normalization."""
+        """Prepare data by mixing multiple patterns."""
         all_train_X, all_train_y = [], []
         all_val_X, all_val_y = [], []
         all_test_X, all_test_y = [], []
@@ -248,10 +251,13 @@ class TiRexDataProcessor:
                 val_data = data[train_size:train_size + val_size]
                 test_data = data[train_size + val_size:]
 
-                # Create sequences directly from raw data
-                train_X, train_y = self._create_sequences(train_data, horizon, stride=1)
-                val_X, val_y = self._create_sequences(val_data, horizon, stride=horizon // 2)
-                test_X, test_y = self._create_sequences(test_data, horizon, stride=horizon // 2)
+                train_scaled = self.scalers[pattern_name].transform(train_data)
+                val_scaled = self.scalers[pattern_name].transform(val_data)
+                test_scaled = self.scalers[pattern_name].transform(test_data)
+
+                train_X, train_y = self._create_sequences(train_scaled, horizon, stride=1)
+                val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon // 2)
+                test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon // 2)
 
                 if self.config.balance_patterns and len(train_X) > self.config.samples_per_pattern:
                     step = max(1, len(train_X) // self.config.samples_per_pattern)
@@ -296,6 +302,15 @@ class TiRexDataProcessor:
                 'test_arrays': (combined_test_X, combined_test_y)
             }
         }
+
+    def _fit_scalers(self, pattern_data: Dict[str, np.ndarray]) -> None:
+        """Fit scalers for each pattern."""
+        for pattern_name, data in pattern_data.items():
+            if len(data) >= self.config.min_data_length:
+                scaler = TimeSeriesNormalizer(method='standard')
+                train_end = int(self.config.train_ratio * len(data))
+                scaler.fit(data[:train_end])
+                self.scalers[pattern_name] = scaler
 
     def _create_sequences(
             self, data: np.ndarray, prediction_length: int, stride: int = 1
@@ -437,12 +452,20 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
             sample_X = test_X[sample_idx:sample_idx + 1]
             sample_y_true = test_y[sample_idx]
 
-            # --- REPLACEMENT BLOCK ---
-            # The model now expects raw (unscaled) data and returns denormalized predictions directly.
-            # The internal RevIN layer handles both normalization of input and denormalization of output.
-            preds_tensor = self.model(sample_X, training=False)
-            preds = preds_tensor[0]  # Remove the batch dimension for plotting
-            # --- END OF REPLACEMENT ---
+            # --- With this block of code ---
+            # The model call normalizes the input internally and produces normalized predictions.
+            preds_norm = self.model(sample_X, training=False)
+
+            # Retrieve statistics from the model's internal scaler to reverse the instance normalization.
+            # This is crucial for visualizing predictions on the same scale as the input data.
+            scaler = self.model.scaler
+            last_mean = scaler._last_mean
+            last_std = scaler._last_std
+
+            # Denormalize the predictions. Broadcasting handles the shape alignment.
+            preds = (preds_norm * last_std) + last_mean
+            preds = preds[0]  # Remove the batch dimension for plotting
+            # --- End of replacement ---
 
             context_x = np.arange(-self.config.input_length, 0)
             horizon_x = np.arange(0, horizon)

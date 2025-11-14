@@ -24,7 +24,7 @@ from typing import Optional, Union, List, Any, Tuple, Dict, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.time_series.revin import RevIN
+from dl_techniques.layers.standard_scaler import StandardScaler
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.time_series.quantile_head import QuantileHead
@@ -53,11 +53,10 @@ class TiRexCore(keras.Model):
     modern Keras 3 patterns and utilizes factory systems for component creation.
 
     The architecture consists of:
-    1. Input scaling and preprocessing using RevIN
+    1. Input scaling and preprocessing
     2. Patch embedding for time series tokenization
     3. Sequential processing blocks (configurable LSTM/Transformer mix)
     4. Quantile prediction head for probabilistic outputs
-    5. Denormalization of outputs using RevIN
 
     Args:
         patch_size: Integer, size of input patches for tokenization.
@@ -71,8 +70,6 @@ class TiRexCore(keras.Model):
         prediction_length: Integer, length of prediction horizon.
         dropout_rate: Float, dropout rate for regularization.
         use_layer_norm: Boolean, whether to use layer normalization.
-        use_revin: Boolean, whether to use RevIN normalization.
-        input_dim: Integer, dimensionality of input features.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
@@ -149,8 +146,6 @@ class TiRexCore(keras.Model):
         prediction_length: int = 32,
         dropout_rate: float = 0.1,
         use_layer_norm: bool = True,
-        use_revin: bool = True,
-        input_dim: int = 1,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -164,8 +159,6 @@ class TiRexCore(keras.Model):
             raise ValueError(f"num_blocks must be positive, got {num_blocks}")
         if prediction_length <= 0:
             raise ValueError(f"prediction_length must be positive, got {prediction_length}")
-        if input_dim <= 0:
-            raise ValueError(f"input_dim must be positive, got {input_dim}")
 
         # Store configuration
         self.patch_size = patch_size
@@ -179,8 +172,6 @@ class TiRexCore(keras.Model):
         self.prediction_length = prediction_length
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
-        self.use_revin = use_revin
-        self.input_dim = input_dim
 
         if len(self.block_types) != num_blocks:
             raise ValueError(
@@ -188,10 +179,7 @@ class TiRexCore(keras.Model):
             )
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
-        if self.use_revin:
-            self.revin = RevIN(num_features=self.input_dim, name="revin")
-        else:
-            self.revin = None
+        self.scaler = StandardScaler(name="scaler", axis=1)
 
         self.patch_embedding = PatchEmbedding1D(
             patch_size=self.patch_size,
@@ -258,13 +246,10 @@ class TiRexCore(keras.Model):
         elif len(inputs.shape) != 3:
             raise ValueError(f"Input must be 2D or 3D tensor, got shape {inputs.shape}")
 
-        # Input normalization
-        if self.use_revin and self.revin is not None:
-            x = self.revin(inputs, training=training)
-        else:
-            x = inputs
+        # Input scaling
+        x = self.scaler(inputs, training=training)
 
-        # Handle NaN values by creating a mask from original inputs
+        # Handle NaN values by creating a mask
         nan_mask = ops.logical_not(ops.isnan(inputs))
         nan_mask = ops.cast(nan_mask, dtype=x.dtype)
 
@@ -290,10 +275,6 @@ class TiRexCore(keras.Model):
 
         # Quantile predictions
         quantile_predictions = self.quantile_head(pooled, training=training)
-
-        # Denormalize predictions
-        if self.use_revin and self.revin is not None:
-            quantile_predictions = self.revin.denormalize(quantile_predictions)
 
         return quantile_predictions
 
@@ -404,8 +385,6 @@ class TiRexCore(keras.Model):
             "prediction_length": self.prediction_length,
             "dropout_rate": self.dropout_rate,
             "use_layer_norm": self.use_layer_norm,
-            "use_revin": self.use_revin,
-            "input_dim": self.input_dim,
         })
         return config
 
@@ -428,7 +407,6 @@ def create_tirex_model(
     num_heads: int = 8,
     quantile_levels: List[float] = DEFAULT_QUANTILES,
     block_types: Optional[List[str]] = None,
-    input_dim: int = 1,
     **kwargs
 ) -> TiRexCore:
     """
@@ -443,7 +421,6 @@ def create_tirex_model(
         num_heads: Integer, number of attention heads.
         quantile_levels: List of quantile levels to predict.
         block_types: List of block types for each layer.
-        input_dim: Integer, dimensionality of input features.
         **kwargs: Additional arguments for TiRexCore.
 
     Returns:
@@ -457,12 +434,11 @@ def create_tirex_model(
         block_types=block_types,
         quantile_levels=quantile_levels,
         prediction_length=prediction_length,
-        input_dim=input_dim,
         **kwargs
     )
 
     # Build the model with a dummy input to initialize weights and shapes
-    dummy_input = np.zeros((1, input_length, input_dim), dtype='float32')
+    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
     _ = model(dummy_input)
 
     logger.info(
@@ -478,7 +454,6 @@ def create_tirex_by_variant(
     input_length: int = 128,
     prediction_length: int = 32,
     quantile_levels: List[float] = DEFAULT_QUANTILES,
-    input_dim: int = 1,
     **kwargs
 ) -> TiRexCore:
     """
@@ -489,7 +464,6 @@ def create_tirex_by_variant(
         input_length: Integer, length of input sequences
         prediction_length: Integer, length of prediction horizon
         quantile_levels: List of quantile levels to predict
-        input_dim: Integer, dimensionality of input features.
         **kwargs: Additional arguments passed to the model constructor
 
     Returns:
@@ -506,12 +480,11 @@ def create_tirex_by_variant(
         variant,
         prediction_length=prediction_length,
         quantile_levels=quantile_levels,
-        input_dim=input_dim,
         **kwargs
     )
 
     # Build the model with a dummy input
-    dummy_input = np.zeros((1, input_length, input_dim), dtype='float32')
+    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
     _ = model(dummy_input)
 
     logger.info(
@@ -520,3 +493,5 @@ def create_tirex_by_variant(
     )
 
     return model
+
+# ---------------------------------------------------------------------
