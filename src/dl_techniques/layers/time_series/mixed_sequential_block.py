@@ -295,8 +295,8 @@ class MixedSequentialBlock(keras.layers.Layer):
             self.lstm_layer = keras.layers.LSTM(
                 units=self.lstm_units,
                 return_sequences=True,
-                dropout=self.dropout_rate,
-                recurrent_dropout=self.dropout_rate,
+                #dropout=self.dropout_rate,
+                #recurrent_dropout=self.dropout_rate,
                 name="lstm"
             )
 

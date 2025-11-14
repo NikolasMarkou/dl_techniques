@@ -781,9 +781,22 @@ def main() -> None:
         epochs=200,
         batch_size=256,
         learning_rate=5e-4,
+        # --- Pattern Selection for Expense Data ---
+        # Select categories that mimic financial expenses
+        target_categories=[
+            'composite',  # Essential for trend + seasonality
+            'seasonal',  # Captures weekly/monthly spending cycles
+            'trend',  # Models inflation or business growth
+            'stochastic',  # Represents day-to-day randomness
+            'outliers',  # Simulates unexpected large purchases
+            'structural',  # Models changes like new recurring bills
+            'financial'  # Adds realistic financial volatility
+        ],
+        # Use a smaller number of samples per pattern to increase variety
+        samples_per_pattern=5000,
     )
 
-    ts_config = TimeSeriesConfig(n_samples=20000, random_seed=42)
+    ts_config = TimeSeriesConfig(n_samples=50000, random_seed=42)
 
     try:
         logger.info(
