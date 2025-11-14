@@ -796,17 +796,17 @@ def main() -> None:
     # Example 2: Training for a probabilistic forecast using Quantile loss
     config = TiRexTrainingConfig(
         experiment_name="tirex_small",
-        input_length=112,
-        patch_size=12,
-        prediction_horizons=[12],
+        input_length=104,
+        patch_size=4,
+        prediction_horizons=[4],
         loss_function='quantile',
         variant="small",
         epochs=200,
-        batch_size=128,
+        batch_size=256,
         learning_rate=5e-4,
     )
 
-    ts_config = TimeSeriesConfig(n_samples=2000, random_seed=42)
+    ts_config = TimeSeriesConfig(n_samples=20000, random_seed=42)
 
     try:
         logger.info(
