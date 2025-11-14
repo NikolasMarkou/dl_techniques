@@ -60,6 +60,7 @@ import matplotlib.pyplot as plt
 
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.losses.mase_loss import MASELoss, mase_metric
 from dl_techniques.models.nbeats.model import create_nbeats_model, NBeatsNet
 from dl_techniques.datasets.time_series import TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
 

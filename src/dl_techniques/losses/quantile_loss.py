@@ -51,7 +51,7 @@ The foundational work on quantile regression was introduced by:
 
 import keras
 from keras import ops
-
+from typing import List
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -107,3 +107,71 @@ class MQLoss(keras.losses.Loss):
         return config
 
 # ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class QuantileLoss(keras.losses.Loss):
+    """
+    Vectorized Mean Quantile Loss for probabilistic forecasting.
+
+    This loss function correctly handles multi-quantile predictions. It computes
+    the pinball loss for each predicted quantile in a broadcasted, vectorized
+    manner, which is highly efficient.
+
+    Args:
+        quantiles: A list of floats, the quantiles to be predicted.
+        name: Name for the loss function.
+        **kwargs: Additional keyword arguments.
+    """
+
+    def __init__(self, quantiles: List[float], name: str = "quantile_loss", **kwargs):
+        super().__init__(name=name, **kwargs)
+        if not all(0 < q < 1 for q in quantiles):
+            raise ValueError("All quantiles must be strictly between 0 and 1.")
+        # Store quantiles as a tensor shaped for broadcasting
+        self.quantiles_tensor = ops.convert_to_tensor(quantiles, dtype=keras.backend.floatx())
+        self.quantiles_tensor = ops.reshape(self.quantiles_tensor, (1, len(quantiles), 1))
+
+    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Compute vectorized quantile loss.
+
+        Args:
+            y_true: Ground truth values. Shape: (batch_size, horizon).
+            y_pred: The predicted quantile values. Shape: (batch_size, num_quantiles, horizon).
+
+        Returns:
+            A single scalar loss value, the mean of the pinball loss across all
+            quantiles, time steps, and batch items.
+        """
+        y_true = ops.cast(y_true, y_pred.dtype)
+
+        # Expand y_true to be broadcastable with y_pred's shape
+        # Shape becomes: (batch_size, 1, horizon)
+        y_true_expanded = ops.expand_dims(y_true, axis=1)
+
+        # Calculate error. Broadcasting handles the shape difference.
+        # error shape: (batch_size, num_quantiles, horizon)
+        error = y_true_expanded - y_pred
+
+        # Calculate pinball loss using vectorized operations.
+        # Broadcasting self.quantiles_tensor against error.
+        # self.quantiles_tensor shape: (1, num_quantiles, 1)
+        loss = ops.maximum(
+            self.quantiles_tensor * error,
+            (self.quantiles_tensor - 1) * error
+        )
+
+        # Return the mean over all dimensions to get a single scalar loss
+        return ops.mean(loss)
+
+    def get_config(self) -> dict:
+        """Get loss configuration for serialization."""
+        config = super().get_config()
+        # Convert tensor back to a standard list for JSON serialization
+        config.update({
+            'quantiles': ops.convert_to_numpy(self.quantiles_tensor).flatten().tolist()
+        })
+        return config
+
+# ---------------------------------------------------------------------
+

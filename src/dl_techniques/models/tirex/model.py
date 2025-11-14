@@ -179,7 +179,7 @@ class TiRexCore(keras.Model):
             )
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
-        self.scaler = StandardScaler(name="scaler")
+        self.scaler = StandardScaler(name="scaler", axis=1)
 
         self.patch_embedding = PatchEmbedding1D(
             patch_size=self.patch_size,

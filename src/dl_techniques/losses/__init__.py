@@ -104,7 +104,7 @@ from .huber_loss import HuberLoss
 
 from .mase_loss import MASELoss, mase_metric
 
-from .mean_quantile_loss import MQLoss
+from .quantile_loss import MQLoss, QuantileLoss
 
 from .nano_vlm_loss import NanoVLMLoss
 
@@ -203,8 +203,9 @@ __all__ = [
     # mase_loss
     "MASELoss",
     "mase_metric",
-    # mean_quantile_loss
+    # Quantile loss
     "MQLoss",
+    "QuantileLoss",
     # nano_vlm_loss
     "NanoVLMLoss",
     # segmentation_loss
