@@ -189,7 +189,7 @@ class TiRexCore(keras.Model):
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         if self.use_revin:
-            self.revin = RevIN(num_features=self.input_dim, name="revin")
+            self.revin = RevIN(num_features=self.input_dim, name="revin", affine=False)
         else:
             self.revin = None
 
