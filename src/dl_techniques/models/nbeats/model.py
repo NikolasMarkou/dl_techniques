@@ -212,7 +212,7 @@ class NBeatsNet(keras.Model):
         if self.use_revin:
             self.global_revin = RevIN(
                 num_features=self.input_dim,
-                affine=True,
+                affine=False,
                 name='global_revin'
             )
         else:
@@ -292,10 +292,10 @@ class NBeatsNet(keras.Model):
         """Create all N-BEATS block stacks."""
         dropout_counter = 0
 
-        # FIX: The core logic for multivariate is to have all blocks operate on the flattened vector.
+        # The core logic for multivariate is to have all blocks operate on the flattened vector.
         # This means they all need the flattened lengths.
         block_backcast_len = self.backcast_length * self.input_dim
-        # FIX: Forecast is generated in input_dim space to allow for RevIN denormalization,
+        # Forecast is generated in input_dim space to allow for RevIN denormalization,
         # before being projected to output_dim.
         block_forecast_len = self.forecast_length * self.input_dim
 
@@ -390,14 +390,14 @@ class NBeatsNet(keras.Model):
                 block.build(block_input_shape)
 
         # Build dropout layers
-        # FIX: Dropout is applied on the flattened forecast vector in input_dim space
+        # Dropout is applied on the flattened forecast vector in input_dim space
         forecast_shape = (input_shape[0], self.forecast_length * self.input_dim)
         for dropout_layer in self.dropout_layers:
             dropout_layer.build(forecast_shape)
 
         # Build output projection if needed
         if self.output_projection is not None:
-            # FIX: Projection is applied on the 3D forecast in input_dim space
+            # Projection is applied on the 3D forecast in input_dim space
             projection_input_shape = (input_shape[0], self.forecast_length, self.input_dim)
             self.output_projection.build(projection_input_shape)
 
@@ -432,7 +432,7 @@ class NBeatsNet(keras.Model):
 
         # Initialize residual and forecast accumulator
         residual = processed_input
-        # FIX: Forecast sum is accumulated in the flattened input_dim space
+        # Forecast sum is accumulated in the flattened input_dim space
         forecast_sum = ops.zeros((batch_size, self.forecast_length * self.input_dim))
 
         # Process through all blocks with proper residual connections
@@ -442,13 +442,13 @@ class NBeatsNet(keras.Model):
                 # Forward pass through block
                 backcast, forecast = block(residual, training=training)
 
-                # Apply dropout to forecast if configured
-                if (self.dropout_rate > 0.0 and
-                        dropout_idx < len(self.dropout_layers)):
-                    forecast = self.dropout_layers[dropout_idx](
-                        forecast, training=training
-                    )
-                    dropout_idx += 1
+                # # Apply dropout to forecast if configured
+                # if (self.dropout_rate > 0.0 and
+                #         dropout_idx < len(self.dropout_layers)):
+                #     forecast = self.dropout_layers[dropout_idx](
+                #         forecast, training=training
+                #     )
+                #     dropout_idx += 1
 
                 # Update residual (subtract backcast) and accumulate forecast
                 residual = residual - backcast

@@ -15,8 +15,8 @@ NBeatsTrainingConfig
 
 MultiPatternDataProcessor
     Advanced data processing pipeline handling multi-pattern data preparation,
-    sequence generation, normalization, balanced sampling, and proper
-    train/validation/test splitting with temporal integrity.
+    sequence generation, balanced sampling, and proper train/validation/test
+    splitting with temporal integrity. RevIN handles normalization.
 
 PatternPerformanceCallback
     Comprehensive monitoring callback tracking performance across all patterns,
@@ -62,7 +62,8 @@ import matplotlib.pyplot as plt
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss, mase_metric
 from dl_techniques.models.nbeats.model import create_nbeats_model, NBeatsNet
-from dl_techniques.datasets.time_series import TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
+# NOTE: TimeSeriesNormalizer is no longer needed as RevIN handles normalization
+from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesConfig
 
 # ---------------------------------------------------------------------
 
@@ -198,6 +199,9 @@ class NBeatsTrainingConfig:
         if self.backcast_length <= 0 or self.forecast_length <= 0:
             raise ValueError("backcast_length and forecast_length must be positive")
 
+        if not self.use_revin:
+            logger.warning("RevIN is disabled. Consider enabling it for better performance. If disabled, external normalization is required.")
+
         if self.val_ratio < 0.1:
             logger.warning(f"Validation ratio {self.val_ratio} might be too small for reliable validation")
 
@@ -217,8 +221,8 @@ class MultiPatternDataProcessor:
     Advanced data processor for multiple pattern training.
 
     This class handles the preparation of time series data from multiple patterns,
-    including normalization, sequence generation, and proper train/validation/test
-    splitting while maintaining temporal integrity.
+    including sequence generation, and proper train/validation/test
+    splitting while maintaining temporal integrity. Normalization is handled by RevIN.
 
     Parameters
     ----------
@@ -229,8 +233,6 @@ class MultiPatternDataProcessor:
     ----------
     config : NBeatsTrainingConfig
         Configuration object
-    scalers : Dict[str, TimeSeriesNormalizer]
-        Fitted scalers for each pattern
     pattern_to_id : Dict[str, int]
         Mapping from pattern names to integer IDs
     id_to_pattern : Dict[int, str]
@@ -239,7 +241,6 @@ class MultiPatternDataProcessor:
 
     def __init__(self, config: NBeatsTrainingConfig) -> None:
         self.config = config
-        self.scalers: Dict[str, TimeSeriesNormalizer] = {}
         self.pattern_to_id: Dict[str, int] = {}
         self.id_to_pattern: Dict[int, str] = {}
 
@@ -270,8 +271,7 @@ class MultiPatternDataProcessor:
         self.pattern_to_id = {pattern: idx for idx, pattern in enumerate(raw_pattern_data.keys())}
         self.id_to_pattern = {idx: pattern for pattern, idx in self.pattern_to_id.items()}
 
-        # Fit scalers for each pattern
-        self._fit_scalers(raw_pattern_data)
+        # NOTE: Scaler fitting is removed because RevIN handles normalization.
 
         prepared_data = {}
 
@@ -319,15 +319,11 @@ class MultiPatternDataProcessor:
                 val_data = data[train_size:train_size + val_size]
                 test_data = data[train_size + val_size:]
 
-                # Transform data
-                train_scaled = self.scalers[pattern_name].transform(train_data)
-                val_scaled = self.scalers[pattern_name].transform(val_data)
-                test_scaled = self.scalers[pattern_name].transform(test_data)
-
-                # Create sequences
-                train_X, train_y = self._create_sequences(train_scaled, horizon, stride=1)
-                val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon // 2)
-                test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon // 2)
+                # NOTE: Transformation is removed. Create sequences from raw data.
+                # RevIN will handle instance normalization inside the model.
+                train_X, train_y = self._create_sequences(train_data, horizon, stride=1)
+                val_X, val_y = self._create_sequences(val_data, horizon, stride=horizon // 2)
+                test_X, test_y = self._create_sequences(test_data, horizon, stride=horizon // 2)
 
                 # Balance data if needed
                 if self.config.balance_patterns and len(train_X) > self.config.samples_per_pattern:
@@ -389,26 +385,6 @@ class MultiPatternDataProcessor:
                 'test_arrays': (combined_test_X, combined_test_y)
             }
         }
-
-    def _fit_scalers(self, pattern_data: Dict[str, np.ndarray]) -> None:
-        """
-        Fit scalers for each pattern.
-
-        Parameters
-        ----------
-        pattern_data : Dict[str, np.ndarray]
-            Dictionary mapping pattern names to time series data
-        """
-        for pattern_name, data in pattern_data.items():
-            if len(data) < self.config.min_data_length:
-                continue
-
-            scaler = TimeSeriesNormalizer(method='standard')
-            train_size = int(self.config.train_ratio * len(data))
-            train_data = data[:train_size]
-
-            scaler.fit(train_data)
-            self.scalers[pattern_name] = scaler
 
     def _create_sequences(
             self,
@@ -1406,9 +1382,9 @@ def main() -> None:
     config = NBeatsTrainingConfig(
         experiment_name="nbeats",
 
-        backcast_length=56,
+        backcast_length=104,
         forecast_length=4,
-        forecast_horizons=[4, 8,  12],
+        forecast_horizons=[4],
 
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=3,
