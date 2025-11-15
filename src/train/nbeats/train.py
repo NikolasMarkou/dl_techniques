@@ -287,7 +287,12 @@ class MultiPatternDataProcessor:
             horizon: int
     ) -> Dict[str, tf.data.Dataset]:
         """
-        Prepare data by mixing multiple patterns.
+        Prepare data by mixing multiple patterns with a proper shuffle.
+
+        This version includes a full shuffle of the training data at the NumPy
+        level before creating the TensorFlow dataset. This prevents the loss
+        artifact where each epoch starts with "easy" patterns from the shuffle
+        buffer.
 
         Parameters
         ----------
@@ -319,8 +324,7 @@ class MultiPatternDataProcessor:
                 val_data = data[train_size:train_size + val_size]
                 test_data = data[train_size + val_size:]
 
-                # NOTE: Transformation is removed. Create sequences from raw data.
-                # RevIN will handle instance normalization inside the model.
+                # Create sequences from raw data splits
                 train_X, train_y = self._create_sequences(train_data, horizon, stride=1)
                 val_X, val_y = self._create_sequences(val_data, horizon, stride=horizon // 2)
                 test_X, test_y = self._create_sequences(test_data, horizon, stride=horizon // 2)
@@ -354,25 +358,40 @@ class MultiPatternDataProcessor:
         combined_test_X = np.concatenate(all_test_X, axis=0)
         combined_test_y = np.concatenate(all_test_y, axis=0)
 
+        # --------------------------------------------------------------------
+        # --- FIX: SHUFFLE THE TRAINING DATASET AT THE NUMPY LEVEL ---
+        # This is the crucial step to ensure the tf.data.Dataset shuffle buffer
+        # is filled with a representative sample of the data at the start of
+        # each epoch, preventing the observed loss-reset behavior.
+        logger.info(f"Shuffling {len(combined_train_X)} training samples before creating dataset.")
+
+        # Create a single random permutation of indices
+        p = np.random.permutation(len(combined_train_X))
+
+        # Apply the same permutation to both X and y to maintain alignment
+        combined_train_X = combined_train_X[p]
+        combined_train_y = combined_train_y[p]
+        # --------------------------------------------------------------------
+
         # Create TensorFlow datasets
         train_dataset = self._create_tf_dataset(
             combined_train_X, combined_train_y,
             batch_size=self.config.batch_size,
-            shuffle=True,
+            shuffle=True,  # Still recommended to keep tf.data shuffle for extra randomness
             apply_augmentation=True
         )
 
         val_dataset = self._create_tf_dataset(
             combined_val_X, combined_val_y,
             batch_size=self.config.batch_size,
-            shuffle=False,
+            shuffle=False,  # Validation data should not be shuffled
             apply_augmentation=False
         )
 
         test_dataset = self._create_tf_dataset(
             combined_test_X, combined_test_y,
             batch_size=self.config.batch_size,
-            shuffle=False,
+            shuffle=False,  # Test data should not be shuffled
             apply_augmentation=False
         )
 
