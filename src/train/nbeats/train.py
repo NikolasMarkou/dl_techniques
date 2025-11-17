@@ -506,8 +506,12 @@ class MultiPatternDataProcessor:
                                   num_parallel_calls=tf.data.AUTOTUNE)
 
         # Shuffle, batch, and apply augmentations to the training set
-        train_ds = train_ds.shuffle(self.config.batch_size * 100).batch(
-            self.config.batch_size)
+        train_ds = (
+            train_ds
+            .shuffle(self.config.batch_size * 100)
+            .batch(self.config.batch_size)
+            .shuffle(128)
+        )
 
         if (self.config.enable_additive_noise or
                 self.config.enable_multiplicative_noise):

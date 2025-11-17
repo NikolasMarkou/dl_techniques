@@ -195,7 +195,7 @@ class NBeatsBlock(keras.layers.Layer):
             share_weights: bool = False,
             activation: Union[str, callable] = 'relu',
             use_bias: bool = True,
-            use_normalization: bool = False,
+            use_normalization: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             theta_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
