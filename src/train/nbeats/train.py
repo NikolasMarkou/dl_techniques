@@ -326,11 +326,10 @@ class MultiPatternDataProcessor:
                 start_idx + self.config.backcast_length + forecast_length
             ]
 
-            if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                yield (
-                    backcast.astype(np.float32),
-                    (forecast.astype(np.float32), zeros_for_residual)
-                )
+            yield (
+                backcast.astype(np.float32),
+                (forecast.astype(np.float32), zeros_for_residual)
+            )
 
     def _evaluation_generator(
             self, forecast_length: int, split: str
