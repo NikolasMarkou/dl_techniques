@@ -134,27 +134,6 @@ Augmentation Usage:
     ... ]
     >>> augmented_series = generator.augment_series(base_series, augmentations)
 
-Integration with Deep Learning:
-    >>> import keras
-    >>> from dl_techniques.models.nbeats.model import create_nbeats_model
-    >>>
-    >>> # Generate training data
-    >>> config = TimeSeriesConfig(n_samples=1000)
-    >>> generator = TimeSeriesGenerator(config)
-    >>> training_patterns = generator.generate_all_patterns()
-    >>>
-    >>> # Prepare data for N-BEATS model
-    >>> model = create_nbeats_model(
-    ...     backcast_length=100,
-    ...     forecast_length=20,
-    ...     stack_types=['trend', 'seasonality', 'generic']
-    ... )
-    >>>
-    >>> # Train on synthetic patterns
-    >>> for pattern_name, series in training_patterns.items():
-    ...     # Create input-output pairs and train model
-    ...     pass
-
 Available Patterns
 ------------------
 The generator includes the following predefined patterns:
@@ -221,13 +200,6 @@ Notes
 * Patterns are designed to be challenging for different types of forecasting models
 * Domain-specific patterns include realistic parameter ranges and behaviors
 * Custom patterns can be created by directly calling generator methods with parameters
-
-Dependencies
-------------
-* numpy: Numerical computing and array operations
-* scipy: Scientific computing (used in some pattern generators)
-* dataclasses: Configuration class definition
-* typing: Type hints for better code documentation
 
 References
 ----------

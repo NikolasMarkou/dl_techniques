@@ -51,13 +51,12 @@ import tensorflow as tf
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
-from dl_techniques.datasets.time_series import (TimeSeriesConfig,
-                                                  TimeSeriesGenerator)
-# Import the new MASE loss function
-from dl_techniques.losses.mase_loss import MASELoss
-from dl_techniques.models.nbeats.model import NBeatsNet, create_nbeats_model
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+
 from dl_techniques.utils.logger import logger
+from dl_techniques.losses.mase_loss import MASELoss
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.models.nbeats.model import NBeatsNet, create_nbeats_model
+from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
 
 # ---------------------------------------------------------------------
 
@@ -120,6 +119,7 @@ class NBeatsTrainingConfig:
     :ivar warmup_steps: Number of steps for the linear warmup.
     :ivar warmup_start_lr: The initial learning rate at the start of the warmup.
     :ivar kernel_regularizer_l2: L2 regularization factor for kernel weights.
+    :ivar reconstruction_loss_weight: Weight for the reconstruction loss on the final residual.
     :ivar dropout_rate: Dropout rate for regularization.
     :ivar max_patterns: The absolute maximum number of patterns to use. If None, uses all available.
     :ivar max_patterns_per_category: Maximum patterns to select from each category.
@@ -139,7 +139,7 @@ class NBeatsTrainingConfig:
     # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
-    experiment_name: str = "nbeats_multi_pattern"
+    experiment_name: str = "nbeats"
 
     # Pattern selection configuration
     target_categories: Optional[List[str]] = None
@@ -158,10 +158,10 @@ class NBeatsTrainingConfig:
     stack_types: List[str] = field(
         default_factory=lambda: ["trend", "seasonality", "generic"]
     )
-    nb_blocks_per_stack: int = 3
-    hidden_layer_units: int = 256
-    use_normalization: bool = True
-    use_bias: bool = True
+    nb_blocks_per_stack: int = 2
+    hidden_layer_units: int = 128
+    use_normalization: bool = False
+    use_bias: bool = False
 
     # Training configuration
     epochs: int = 150
@@ -181,6 +181,7 @@ class NBeatsTrainingConfig:
 
     # Regularization
     kernel_regularizer_l2: float = 1e-5
+    reconstruction_loss_weight: float = 0.0
     dropout_rate: float = 0.15
 
     # Pattern selection
@@ -191,10 +192,10 @@ class NBeatsTrainingConfig:
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2, "stochastic": 1.0,
-        "financial": 1.5, "weather": 1.3, "network": 1.4, "biomedical": 1.2,
+        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
+        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
         "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1, "outliers": 1.0, "chaotic": 1.1
+        "regime": 1.2, "structural": 1.1, "outliers": 1.0,
     })
 
     # Visualization configuration
@@ -285,75 +286,62 @@ class MultiPatternDataProcessor:
         return patterns, normalized_weights
 
     def _training_generator(
-            self, forecast_length: int
-    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Create an infinite generator for training data.
+        self, forecast_length: int
+    ) -> Generator[Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]], None, None]:
+        """
+        Create an infinite generator for training data with weighted sampling.
 
-        This generator is the core of the memory-efficient pipeline. It infinitely
-        yields individual training samples (backcast, forecast).
-
-        **Tricky Point**: Instead of pre-generating all possible sequences,
-        this generator:
-        1. Selects a single time series pattern on-the-fly based on the pre-computed weights.
-        2. Generates the full time series data for just that pattern.
-        3. Extracts all possible (backcast, forecast) pairs from its training split.
-        4. Shuffles the order of these pairs and yields them one by one.
-        This ensures diverse batches and avoids memory overload.
+        This generator continuously samples patterns based on category weights,
+        generates a fresh time series, and yields a randomly selected pair of
+        (backcast, (forecast, zeros_for_residual)).
 
         :param forecast_length: The length of the forecast horizon.
-        :type forecast_length: int
-        :yield: A tuple containing a single backcast and forecast pair.
-        :rtype: Generator[Tuple[np.ndarray, np.ndarray], None, None]
+        :yield: A tuple containing the backcast and a tuple of (forecast, zero_target).
         """
         while True:
-            # 1. Select a pattern based on weights for balanced sampling.
             pattern_name = random.choices(
-                self.weighted_patterns, self.weights, k=1)[0]
-
-            # 2. Generate the full time series data for this pattern.
+                self.weighted_patterns, self.weights, k=1
+            )[0]
             data = self.ts_generator.generate_task_data(pattern_name)
             train_size = int(self.config.train_ratio * len(data))
             train_data = data[:train_size]
 
-            # 3. Create all possible sequences from this time series.
-            max_start_idx = (len(train_data) - self.config.backcast_length -
-                             forecast_length)
-            if max_start_idx <= 0:
-                continue  # Skip if the series is too short.
-
-            # Create a list of all possible start indices and shuffle them
-            # to ensure random sequence extraction within a single pattern.
-            possible_start_indices = list(range(max_start_idx + 1))
-            random.shuffle(possible_start_indices)
-
-            # 4. Yield all sequences from this shuffled list.
-            for start_idx in possible_start_indices:
-                backcast = train_data[start_idx: start_idx +
-                                      self.config.backcast_length]
+            max_start_idx = (
+                len(train_data) -
+                self.config.backcast_length - forecast_length
+            )
+            if max_start_idx > 0:
+                start_idx = random.randint(0, max_start_idx)
+                backcast = train_data[
+                    start_idx: start_idx + self.config.backcast_length
+                ]
                 forecast = train_data[
-                           start_idx + self.config.backcast_length:
-                           start_idx + self.config.backcast_length + forecast_length
-                           ]
+                    start_idx + self.config.backcast_length:
+                    start_idx + self.config.backcast_length + forecast_length
+                ]
 
                 if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    yield backcast.astype(np.float32), forecast.astype(
-                        np.float32)
+                    # Target for the residual is a zero vector matching residual shape.
+                    zeros_for_residual = np.zeros(
+                        (self.config.backcast_length,), dtype=np.float32
+                    )
+                    yield (
+                        backcast.astype(np.float32),
+                        (forecast.astype(np.float32), zeros_for_residual)
+                    )
 
     def _evaluation_generator(
             self, forecast_length: int, split: str
-    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+    ) -> Generator[Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]], None, None]:
         """Create a finite generator for validation or test data.
 
         This generator iterates through every selected pattern and yields all
-        possible sequences from the specified data split ('val' or 'test').
-        It does not sample, ensuring a full and consistent evaluation.
+        possible sequences from the specified data split ('val' or 'test'),
+        formatted as (backcast, (forecast, zeros_for_residual)).
 
         :param forecast_length: The length of the forecast horizon.
-        :type forecast_length: int
         :param split: The data split to use, either 'val' or 'test'.
-        :type split: str
-        :yield: A tuple containing a single backcast and forecast pair.
-        :rtype: Generator[Tuple[np.ndarray, np.ndarray], None, None]
+        :yield: A tuple containing the backcast and a tuple of (forecast, zero_target).
         :raises ValueError: If `split` is not 'val' or 'test'.
         """
         if split == 'val':
@@ -378,8 +366,13 @@ class MultiPatternDataProcessor:
                            i + self.config.backcast_length: i + seq_len
                            ]
                 if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    yield backcast.astype(np.float32), forecast.astype(
-                        np.float32)
+                    zeros_for_residual = np.zeros(
+                        (self.config.backcast_length,), dtype=np.float32
+                    )
+                    yield (
+                        backcast.astype(np.float32),
+                        (forecast.astype(np.float32), zeros_for_residual)
+                    )
 
     def get_evaluation_steps(self, forecast_length: int, split: str) -> int:
         """Calculate the number of steps for a full evaluation pass.
@@ -413,8 +406,8 @@ class MultiPatternDataProcessor:
         return math.ceil(total_samples / self.config.batch_size)
 
     def _normalize_instance(
-            self, backcast: tf.Tensor, forecast: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
+            self, backcast: tf.Tensor, targets: Tuple[tf.Tensor, tf.Tensor]
+    ) -> Tuple[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]:
         """Standardize an individual time series instance (z-score normalization).
 
         **Tricky Point**: This normalization is applied per-instance, meaning
@@ -425,30 +418,25 @@ class MultiPatternDataProcessor:
         standard deviation to prevent division by zero for flat (constant) inputs.
 
         :param backcast: The input tensor.
-        :type backcast: tf.Tensor
-        :param forecast: The target tensor.
-        :type forecast: tf.Tensor
-        :return: The normalized backcast and forecast.
-        :rtype: Tuple[tf.Tensor, tf.Tensor]
+        :param targets: A tuple containing the (forecast, zero_target) tensors.
+        :return: The normalized backcast and forecast, with the zero_target passed through.
         """
+        forecast, zero_target = targets
         mean = tf.math.reduce_mean(backcast)
         std = tf.math.reduce_std(backcast)
         epsilon = 1e-6  # Add epsilon for numerical stability
         normalized_backcast = (backcast - mean) / (std + epsilon)
         normalized_forecast = (forecast - mean) / (std + epsilon)
-        return normalized_backcast, normalized_forecast
+        return normalized_backcast, (normalized_forecast, zero_target)
 
     def _apply_noise_augmentation(
-            self, x: tf.Tensor, y: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
+            self, x: tf.Tensor, y: Tuple[tf.Tensor, tf.Tensor]
+    ) -> Tuple[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]:
         """Apply additive and/or multiplicative noise augmentation to the input.
 
         :param x: The input backcast tensor.
-        :type x: tf.Tensor
-        :param y: The target forecast tensor.
-        :type y: tf.Tensor
-        :return: The augmented input `x` and original target `y`.
-        :rtype: Tuple[tf.Tensor, tf.Tensor]
+        :param y: The tuple of target tensors.
+        :return: The augmented input `x` and original targets `y`.
         """
         augmented_x = x
         if (self.config.enable_multiplicative_noise and
@@ -479,16 +467,18 @@ class MultiPatternDataProcessor:
         for optimal performance.
 
         :param forecast_length: The forecast horizon length.
-        :type forecast_length: int
         :return: A dictionary containing the train, validation, and test datasets,
                  along with the number of steps for validation and testing.
-        :rtype: Dict[str, Any]
         """
+        # The output signature now reflects the nested structure for the labels.
         output_signature = (
-            tf.TensorSpec(shape=(self.config.backcast_length, 1),
-                          dtype=tf.float32),
-            tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32)
+            tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
+            (
+                tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(self.config.backcast_length,), dtype=tf.float32)
+            )
         )
+
 
         # Create datasets from generators
         train_ds = tf.data.Dataset.from_generator(
@@ -517,6 +507,7 @@ class MultiPatternDataProcessor:
         # Shuffle, batch, and apply augmentations to the training set
         train_ds = train_ds.shuffle(self.config.batch_size * 100).batch(
             self.config.batch_size)
+
         if (self.config.enable_additive_noise or
                 self.config.enable_multiplicative_noise):
             train_ds = train_ds.map(self._apply_noise_augmentation,
@@ -667,9 +658,9 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         epochs = self.training_history['epoch']
 
         axes[0].plot(epochs, self.training_history['loss'],
-                     label='Training Loss (MASE)')
+                     label='Training Loss')
         axes[0].plot(epochs, self.training_history['val_loss'],
-                     label='Validation Loss (MASE)')
+                     label='Validation Loss')
         axes[0].set_title(f'Loss Curves (Epoch {epoch + 1})')
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
@@ -692,7 +683,8 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             return
 
         test_x, test_y = self.viz_test_data
-        predictions = self.model(test_x, training=False)
+        # The model returns a tuple (forecast, residual). We only need the forecast.
+        predictions, _ = self.model(test_x, training=False)
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
         n_cols = 3
         n_rows = math.ceil(num_plots / n_cols)
@@ -842,7 +834,8 @@ class NBeatsTrainer:
             optimizer=self.config.optimizer,
             loss=loss_instance,  # Pass the instantiated loss object
             learning_rate=lr_schedule,
-            gradient_clip_norm=self.config.gradient_clip_norm
+            gradient_clip_norm=self.config.gradient_clip_norm,
+            reconstruction_weight=self.config.reconstruction_loss_weight
         )
 
     def run_experiment(self) -> Dict[str, Any]:
@@ -894,7 +887,7 @@ class NBeatsTrainer:
             keras.callbacks.EarlyStopping(
                 monitor='val_loss', patience=20, restore_best_weights=True),
             keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss', factor=0.5, patience=30, min_lr=1e-7),
+                monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7),
             keras.callbacks.ModelCheckpoint(
                 filepath=model_path, save_best_only=True),
             performance_cb
@@ -915,15 +908,22 @@ class NBeatsTrainer:
         )
 
         logger.info("Evaluating on test set...")
-        # The first metric is always the loss (MASE in this case).
-        # The second is the first compiled metric ('mae').
         test_results = model.evaluate(
             data_pipeline['test_ds'],
             steps=data_pipeline['test_steps'],
             verbose=0
         )
-        test_loss = test_results[0]
-        test_mae = test_results[1] if len(test_results) > 1 else None
+
+        if self.config.reconstruction_loss_weight > 0.0:
+            # Keras returns: [total_loss, forecast_loss, recon_loss, mae, mse, ...]
+            # We report the forecast-specific loss and mae.
+            test_loss = test_results[1]
+            test_mae = test_results[3] if len(test_results) > 3 else None
+        else:
+            # Keras returns: [loss, mae, mse, ...]
+            test_loss = test_results[0]
+            test_mae = test_results[1] if len(test_results) > 1 else None
+
         final_epoch = len(history.history['loss'])
 
         return {
@@ -961,11 +961,11 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        experiment_name="nbeats_with_mase_loss",
+        experiment_name="nbeats_with_recon",
         backcast_length=104,
         forecast_horizons=[12],
         stack_types=["trend", "seasonality", "generic"],
-        nb_blocks_per_stack=3,
+        nb_blocks_per_stack=2,
         hidden_layer_units=256,
         use_normalization=False,
         max_patterns_per_category=100,
@@ -975,15 +975,16 @@ def main() -> None:
         learning_rate=1e-4,
         dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
-        # Use MASE loss with a simple naive-1 forecast (seasonal_periods=1)
-        primary_loss="mase_loss",
+        # Enable reconstruction loss to force the model to explain the backcast.
+        reconstruction_loss_weight=0.5,
+        primary_loss="mae",
         mase_seasonal_periods=1,
         # Enable and configure the warmup schedule
         use_warmup=True,
-        warmup_steps=2000,
+        warmup_steps=1000,
         warmup_start_lr=1e-6,
     )
-    ts_config = TimeSeriesConfig(n_samples=10000, random_seed=42)
+    ts_config = TimeSeriesConfig(n_samples=2000, random_seed=42)
 
     try:
         trainer = NBeatsTrainer(config, ts_config)
