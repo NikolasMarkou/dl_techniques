@@ -425,10 +425,9 @@ class MultiPatternDataProcessor:
         """
         forecast, zero_target = targets
         mean = tf.math.reduce_mean(backcast)
-        std = tf.math.reduce_std(backcast)
-        epsilon = 1e-6  # Add epsilon for numerical stability
-        normalized_backcast = (backcast - mean) / (std + epsilon)
-        normalized_forecast = (forecast - mean) / (std + epsilon)
+        std = tf.math.maximum(tf.math.reduce_std(backcast + 1e-5), 1e-7)
+        normalized_backcast = (backcast - mean) / std
+        normalized_forecast = (forecast - mean) / std
         return normalized_backcast, (normalized_forecast, zero_target)
 
     def _apply_noise_augmentation(

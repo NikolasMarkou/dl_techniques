@@ -235,9 +235,8 @@ class NBeatsNet(keras.Model):
 
         if self.use_normalization:
             mean = keras.ops.mean(inputs_3d, axis=1, keepdims=True)
-            variance = keras.ops.var(inputs_3d, axis=1, keepdims=True)
-            stdev = keras.ops.sqrt(variance + 1e-5)
-            normalized_input = (inputs_3d - mean) / (stdev + 1e-7)
+            std = keras.ops.maximum(keras.ops.std(inputs_3d + 1e-5, axis=1, keepdims=True), 1e-7)
+            normalized_input = (inputs_3d - mean) / std
         else:
             normalized_input = inputs_3d
 
@@ -264,7 +263,7 @@ class NBeatsNet(keras.Model):
         )
 
         if self.use_normalization:
-            forecast_3d = forecast_3d * stdev + mean
+            forecast_3d = (forecast_3d * std) + mean
 
         final_residual = residual
         return forecast_3d, final_residual
