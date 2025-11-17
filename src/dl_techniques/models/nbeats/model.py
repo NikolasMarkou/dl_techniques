@@ -93,8 +93,6 @@ class NBeatsNet(keras.Model):
             dropout_rate: float = 0.0,
             activation: Union[str, Callable] = 'relu',
             kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            input_dim: int = 1,
-            output_dim: int = 1,
             use_bias: bool = True,
             reconstruction_weight: float = 0.0,
             **kwargs: Any
@@ -104,7 +102,7 @@ class NBeatsNet(keras.Model):
         # Validate configuration
         self._validate_configuration(
             backcast_length, forecast_length, stack_types, nb_blocks_per_stack,
-            thetas_dim, hidden_layer_units, dropout_rate, input_dim, output_dim
+            thetas_dim, hidden_layer_units, dropout_rate
         )
 
         # Store ALL configuration parameters for serialization
@@ -121,8 +119,8 @@ class NBeatsNet(keras.Model):
         self.dropout_rate = dropout_rate
         self.activation = activation
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.input_dim = input_dim
-        self.output_dim = output_dim
+        self.input_dim = 1
+        self.output_dim = 1
         self.use_bias = use_bias
         self.reconstruction_weight = reconstruction_weight
 
@@ -132,17 +130,7 @@ class NBeatsNet(keras.Model):
         else:
             self.normalize = False
 
-        if self.input_dim != self.output_dim:
-            self.output_projection = layers.Dense(
-                self.output_dim,
-                activation='linear',
-                use_bias=self.use_bias,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name='output_projection'
-            )
-        else:
-            self.output_projection = None
+        self.output_projection = None
 
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
         self.dropout_layers: List[layers.Dropout] = []
@@ -151,8 +139,7 @@ class NBeatsNet(keras.Model):
     def _validate_configuration(
             self, backcast_length: int, forecast_length: int, stack_types: List[str],
             nb_blocks_per_stack: int, thetas_dim: List[int],
-            hidden_layer_units: int, dropout_rate: float, input_dim: int,
-            output_dim: int
+            hidden_layer_units: int, dropout_rate: float
     ) -> None:
         """Validate model configuration parameters."""
         if backcast_length <= 0:
@@ -167,10 +154,6 @@ class NBeatsNet(keras.Model):
                 f"hidden_layer_units must be positive, got {hidden_layer_units}")
         if not 0.0 <= dropout_rate < 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
-        if input_dim <= 0:
-            raise ValueError(f"input_dim must be positive, got {input_dim}")
-        if output_dim <= 0:
-            raise ValueError(f"output_dim must be positive, got {output_dim}")
 
         if len(stack_types) != len(thetas_dim):
             raise ValueError(
@@ -277,7 +260,7 @@ class NBeatsNet(keras.Model):
 
         for stack_blocks in self.blocks:
             for block in stack_blocks:
-                backcast, forecast = block(keras.ops.stop_gradient(residual), training=training)
+                backcast, forecast = block(residual, training=training)
                 residual = residual - backcast
                 forecast_sum = forecast_sum + forecast
 
@@ -324,8 +307,6 @@ class NBeatsNet(keras.Model):
             'dropout_rate': self.dropout_rate,
             'activation': self.activation,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'input_dim': self.input_dim,
-            'output_dim': self.output_dim,
             'use_bias': self.use_bias,
             'reconstruction_weight': self.reconstruction_weight,
         })
