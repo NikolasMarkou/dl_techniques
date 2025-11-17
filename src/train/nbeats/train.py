@@ -332,7 +332,9 @@ class MultiPatternDataProcessor:
             )
 
     def _evaluation_generator(
-            self, forecast_length: int, split: str
+            self,
+            forecast_length: int,
+            split: str
     ) -> Generator[Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray]], None, None]:
         """Create a finite generator for validation or test data.
 
@@ -354,6 +356,10 @@ class MultiPatternDataProcessor:
         else:
             raise ValueError("Split must be 'val' or 'test'")
 
+        zeros_for_residual = np.zeros(
+            (self.config.backcast_length,), dtype=np.float32
+        )
+
         for pattern_name in self.selected_patterns:
             data = self.ts_generator.generate_task_data(pattern_name)
             start_idx = int(start_ratio * len(data))
@@ -365,15 +371,11 @@ class MultiPatternDataProcessor:
                 backcast = split_data[i: i + self.config.backcast_length]
                 forecast = split_data[
                            i + self.config.backcast_length: i + seq_len
-                           ]
-                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    zeros_for_residual = np.zeros(
-                        (self.config.backcast_length,), dtype=np.float32
-                    )
-                    yield (
-                        backcast.astype(np.float32),
-                        (forecast.astype(np.float32), zeros_for_residual)
-                    )
+                ]
+                yield (
+                    backcast.astype(np.float32),
+                    (forecast.astype(np.float32), zeros_for_residual)
+                )
 
     def get_evaluation_steps(self, forecast_length: int, split: str) -> int:
         """Calculate the number of steps for a full evaluation pass.
@@ -510,11 +512,6 @@ class MultiPatternDataProcessor:
             train_ds
             .batch(self.config.batch_size)
         )
-
-        if (self.config.enable_additive_noise or
-                self.config.enable_multiplicative_noise):
-            train_ds = train_ds.map(self._apply_noise_augmentation,
-                                    num_parallel_calls=tf.data.AUTOTUNE)
 
         # Prefetch for performance
         train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
@@ -971,7 +968,7 @@ def main() -> None:
         stack_types=["trend", "seasonality"],
         nb_blocks_per_stack=1,
         hidden_layer_units=64,
-        use_normalization=True,
+        use_normalization=False,
         normalize_per_instance=True,
         max_patterns_per_category=100,
         epochs=100,
