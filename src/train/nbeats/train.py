@@ -30,14 +30,13 @@ NBeatsTrainer
     comprehensive experiment management and performance analysis.
 """
 
+import os
 import json
 import math
-import os
 import random
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import (Any, Dict, Generator, List, Optional, Tuple,
-                    Union)
+from dataclasses import dataclass, field
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
