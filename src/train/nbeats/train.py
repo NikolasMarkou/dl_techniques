@@ -986,7 +986,7 @@ def main() -> None:
         warmup_start_lr=1e-6,
     )
     ts_config = TimeSeriesConfig(
-        n_samples=1000,
+        n_samples=500,
         random_seed=42
     )
 
