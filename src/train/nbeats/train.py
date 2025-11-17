@@ -2,55 +2,43 @@
 Comprehensive N-BEATS Training Framework for Multiple Time Series Patterns
 
 This module provides a sophisticated, production-ready training framework for
-N-BEATS models trained on multiple time series patterns. It enables training
-N-BEATS models across diverse time series patterns with comprehensive monitoring,
-visualization, and performance analysis.
+N-BEATS models. It leverages a streaming data pipeline with tf.data.Dataset
+to train a single model on an arbitrary number of dynamically generated time
+series patterns, ensuring memory efficiency and scalability.
 
 Classes
 -------
 NBeatsTrainingConfig
-    Comprehensive configuration dataclass containing all training parameters,
-    including model architecture, training parameters, data management,
-    regularization, and visualization settings.
+    Comprehensive configuration dataclass for all training parameters.
 
 MultiPatternDataProcessor
-    Advanced data processing pipeline handling multi-pattern data preparation,
-    sequence generation, balanced sampling, and proper train/validation/test
-    splitting with temporal integrity. RevIN handles normalization.
+    Advanced data processing pipeline that uses Python generators to stream
+    sequences for training and evaluation, handling on-the-fly sampling and
+    balancing.
 
 PatternPerformanceCallback
-    Comprehensive monitoring callback tracking performance across all patterns,
-    creating detailed visualizations of training progress, pattern-specific
-    performance, and learning dynamics.
+    Callback for monitoring performance and visualizing prediction samples on a
+    fixed test set.
 
 NBeatsTrainer
     Main training orchestrator for multi-pattern N-BEATS training with
     comprehensive experiment management and performance analysis.
-
-Training Approach
------------------
-The framework trains a single N-BEATS model on mixed patterns from multiple
-time series categories. This approach:
-* Learns general forecasting representations across diverse patterns
-* Provides efficient deployment with a single model
-* Achieves good generalization across unseen patterns
-* Optimizes computational resources
-* Applies configurable noise augmentation for improved robustness
-* Shuffles data at every epoch for enhanced training stability
 """
 
 import os
 import json
 import keras
 import random
+import math
 import matplotlib
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Generator, Union
 
+# Use a non-interactive backend for matplotlib to prevent issues on servers
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -58,12 +46,11 @@ import matplotlib.pyplot as plt
 # local imports
 # ---------------------------------------------------------------------
 
-
 from dl_techniques.utils.logger import logger
-from dl_techniques.losses.mase_loss import MASELoss, mase_metric
 from dl_techniques.models.nbeats.model import create_nbeats_model, NBeatsNet
-# NOTE: TimeSeriesNormalizer is no longer needed as RevIN handles normalization
-from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesConfig
+from dl_techniques.datasets.time_series import (
+    TimeSeriesGenerator, TimeSeriesConfig
+)
 
 # ---------------------------------------------------------------------
 
@@ -74,12 +61,10 @@ sns.set_palette("husl")
 
 def set_random_seeds(seed: int = 42) -> None:
     """
-    Set random seeds for reproducibility.
+    Set random seeds for major libraries to ensure reproducibility.
 
-    Parameters
-    ----------
-    seed : int, optional
-        Random seed value, by default 42
+    :param seed: The integer seed value to use.
+    :type seed: int
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -91,16 +76,54 @@ set_random_seeds(42)
 
 # ---------------------------------------------------------------------
 
+
 @dataclass
 class NBeatsTrainingConfig:
     """
-    Configuration for N-BEATS training with multiple patterns.
+    Configuration dataclass for N-BEATS training on multiple patterns.
 
-    This dataclass contains comprehensive configuration options for training
-    N-BEATS models on diverse time series patterns with various regularization,
-    optimization, and visualization settings.
+    This class centralizes all hyperparameters and settings for the experiment,
+    from data generation and splitting to model architecture and training
+    procedures.
+
+    :ivar result_dir: Directory to save experiment results.
+    :ivar save_results: If True, saves results and artifacts.
+    :ivar experiment_name: A unique name for the experiment.
+    :ivar target_categories: Optional list of pattern categories to train on.
+    :ivar train_ratio: Fraction of data for training (e.g., 0.8).
+    :ivar val_ratio: Fraction of data for validation (e.g., 0.1).
+    :ivar test_ratio: Fraction of data for testing (e.g., 0.1).
+    :ivar backcast_length: Length of the input sequence (lookback window).
+    :ivar forecast_length: Length of the output sequence to predict.
+    :ivar forecast_horizons: List of forecast horizons to train models for.
+    :ivar stack_types: N-BEATS stack architecture (e.g., trend, seasonality).
+    :ivar nb_blocks_per_stack: Number of blocks within each N-BEATS stack.
+    :ivar hidden_layer_units: Number of units in N-BEATS block hidden layers.
+    :ivar use_revin: Whether to use Reversible Instance Normalization.
+    :ivar use_bias: Whether to use bias in the N-BEATS block layers.
+    :ivar epochs: Maximum number of training epochs.
+    :ivar batch_size: Number of samples per training batch.
+    :ivar steps_per_epoch: Number of batches per epoch for generator training.
+    :ivar learning_rate: Initial learning rate for the optimizer.
+    :ivar gradient_clip_norm: Maximum norm for gradient clipping.
+    :ivar optimizer: Name of the Keras optimizer (e.g., 'adamw').
+    :ivar primary_loss: Primary loss function (e.g., 'mae').
+    :ivar kernel_regularizer_l2: L2 regularization factor for kernel weights.
+    :ivar dropout_rate: Dropout rate for regularization.
+    :ivar max_patterns: Optional cap on the total number of patterns to use.
+    :ivar max_patterns_per_category: Max patterns to select from each category.
+    :ivar min_data_length: Minimum length required for a generated time series.
+    :ivar category_weights: Dictionary mapping categories to sampling weights.
+    :ivar visualize_every_n_epochs: Frequency of generating visualization plots.
+    :ivar save_interim_plots: If True, saves plots during training.
+    :ivar plot_top_k_patterns: Number of prediction samples to plot.
+    :ivar create_learning_curves: If True, generates learning curve plots.
+    :ivar create_prediction_plots: If True, generates prediction sample plots.
+    :ivar multiplicative_noise_std: Std dev for multiplicative noise augment.
+    :ivar additive_noise_std: Std dev for additive noise augmentation.
+    :ivar enable_multiplicative_noise: If True, enables multiplicative noise.
+    :ivar enable_additive_noise: If True, enables additive noise.
     """
-
     # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
@@ -120,7 +143,9 @@ class NBeatsTrainingConfig:
     forecast_horizons: List[int] = field(default_factory=lambda: [24])
 
     # Model architecture
-    stack_types: List[str] = field(default_factory=lambda: ["trend", "seasonality", "generic"])
+    stack_types: List[str] = field(
+        default_factory=lambda: ["trend", "seasonality", "generic"]
+    )
     nb_blocks_per_stack: int = 3
     hidden_layer_units: int = 256
     use_revin: bool = True
@@ -129,21 +154,21 @@ class NBeatsTrainingConfig:
     # Training configuration
     epochs: int = 150
     batch_size: int = 128
+    steps_per_epoch: int = 500  # Required for generator-based training
     learning_rate: float = 1e-4
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adamw'
-    primary_loss: str = "mae"
+    primary_loss: Union[str, keras.losses.Loss] = keras.losses.MeanAbsoluteError(reduction="mean")
 
     # Regularization
     kernel_regularizer_l2: float = 1e-5
     dropout_rate: float = 0.15
 
-    # Pattern selection and balancing
+    # Pattern selection
     max_patterns: Optional[int] = None
     max_patterns_per_category: int = 10
     min_data_length: int = 2000
-    balance_patterns: bool = True
-    samples_per_pattern: int = 25000
+    normalize_per_instance: bool = True  # If True, standardizes each sample (x-mean)/std
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -171,10 +196,6 @@ class NBeatsTrainingConfig:
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
 
-    # Evaluation configuration
-    eval_during_training: bool = True
-    eval_every_n_epochs: int = 10
-
     # Data augmentation configuration
     multiplicative_noise_std: float = 0.01
     additive_noise_std: float = 0.01
@@ -185,757 +206,613 @@ class NBeatsTrainingConfig:
         """
         Validate configuration parameters after initialization.
 
-        Raises
-        ------
-        ValueError
-            If configuration parameters are invalid
+        :raises ValueError: If data ratios do not sum to 1, or if
+                            backcast/forecast lengths are not positive.
         """
-        # Validate data ratios
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
-
-        # Validate basic parameters
+            raise ValueError(
+                f"Data ratios must sum to 1.0, got {total_ratio}"
+            )
         if self.backcast_length <= 0 or self.forecast_length <= 0:
-            raise ValueError("backcast_length and forecast_length must be positive")
-
+            raise ValueError(
+                "backcast_length and forecast_length must be positive"
+            )
         if not self.use_revin:
-            logger.warning("RevIN is disabled. Consider enabling it for better performance. If disabled, external normalization is required.")
-
-        if self.val_ratio < 0.1:
-            logger.warning(f"Validation ratio {self.val_ratio} might be too small for reliable validation")
-
-        logger.info(f"N-BEATS Training Configuration:")
-        logger.info(f"  ✅ Data split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/{self.test_ratio:.1f}")
-        logger.info(f"  ✅ Model: {self.nb_blocks_per_stack} blocks, {self.hidden_layer_units} units")
-        logger.info(f"  ✅ Training: {self.epochs} epochs, batch {self.batch_size}, lr {self.learning_rate}")
-        logger.info(f"  ✅ Regularization: dropout {self.dropout_rate}, L2 {self.kernel_regularizer_l2}")
-        logger.info(f"  ✅ Augmentation: mult_noise {self.multiplicative_noise_std if self.enable_multiplicative_noise else 'disabled'}, add_noise {self.additive_noise_std if self.enable_additive_noise else 'disabled'}")
-
-        if self.target_categories:
-            logger.info(f"  ✅ Target categories: {self.target_categories}")
+            logger.warning("RevIN is disabled. External normalization is required.")
 
 
 class MultiPatternDataProcessor:
     """
-    Advanced data processor for multiple pattern training.
+    Streams multi-pattern time series data using Python generators.
 
-    This class handles the preparation of time series data from multiple patterns,
-    including sequence generation, and proper train/validation/test
-    splitting while maintaining temporal integrity. Normalization is handled by RevIN.
+    This class handles the creation of `tf.data.Dataset` objects for
+    training, validation, and testing. It uses an on-the-fly data generation
+    approach to handle large numbers of time series patterns without loading
+    everything into memory. It now supports optional per-instance
+    standardization to ensure all time series, regardless of their original
+    scale, contribute equally to the loss function.
 
-    Parameters
-    ----------
-    config : NBeatsTrainingConfig
-        Configuration object containing data processing parameters
-
-    Attributes
-    ----------
-    config : NBeatsTrainingConfig
-        Configuration object
-    pattern_to_id : Dict[str, int]
-        Mapping from pattern names to integer IDs
-    id_to_pattern : Dict[int, str]
-        Mapping from integer IDs to pattern names
+    :param config: The training configuration object.
+    :type config: NBeatsTrainingConfig
+    :param generator: An instance of `TimeSeriesGenerator` to produce data.
+    :type generator: TimeSeriesGenerator
+    :param selected_patterns: A list of pattern names to be used.
+    :type selected_patterns: List[str]
+    :param pattern_to_category: Mapping from pattern name to its category.
+    :type pattern_to_category: Dict[str, str]
     """
-
-    def __init__(self, config: NBeatsTrainingConfig) -> None:
+    def __init__(
+        self,
+        config: NBeatsTrainingConfig,
+        generator: TimeSeriesGenerator,
+        selected_patterns: List[str],
+        pattern_to_category: Dict[str, str]
+    ):
         self.config = config
-        self.pattern_to_id: Dict[str, int] = {}
-        self.id_to_pattern: Dict[int, str] = {}
+        self.ts_generator = generator
+        self.selected_patterns = selected_patterns
+        self.pattern_to_category = pattern_to_category
+        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
 
-    def prepare_multi_pattern_data(
-            self,
-            raw_pattern_data: Dict[str, np.ndarray]
-    ) -> Dict[str, Any]:
+    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
         """
-        Prepare multi-pattern data for training.
+        Prepare lists for weighted random pattern selection during training.
 
-        This method combines data from multiple time series patterns into
-        a single training dataset while maintaining pattern diversity and
-        temporal structure.
-
-        Parameters
-        ----------
-        raw_pattern_data : Dict[str, np.ndarray]
-            Dictionary mapping pattern names to time series data arrays
-
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary containing prepared training data for each forecast horizon
+        :return: A tuple containing the list of pattern names and their
+                 corresponding normalized weights.
+        :rtype: Tuple[List[str], List[float]]
         """
-        logger.info(f"Preparing data for multi-pattern training...")
+        patterns = []
+        weights = []
+        for pattern_name in self.selected_patterns:
+            category = self.pattern_to_category.get(pattern_name, "unknown")
+            weight = self.config.category_weights.get(category, 1.0)
+            patterns.append(pattern_name)
+            weights.append(weight)
 
-        # Create pattern ID mapping
-        self.pattern_to_id = {pattern: idx for idx, pattern in enumerate(raw_pattern_data.keys())}
-        self.id_to_pattern = {idx: pattern for pattern, idx in self.pattern_to_id.items()}
+        # Normalize weights
+        total_weight = sum(weights)
+        if total_weight > 0:
+            normalized_weights = [w / total_weight for w in weights]
+        else:
+            normalized_weights = [1.0 / len(patterns)] * len(patterns)
+        return patterns, normalized_weights
 
-        # NOTE: Scaler fitting is removed because RevIN handles normalization.
-
-        prepared_data = {}
-
-        for horizon in self.config.forecast_horizons:
-            logger.info(f"Preparing data for horizon {horizon}")
-            prepared_data[horizon] = self._prepare_mixed_pattern_data(raw_pattern_data, horizon)
-
-        return prepared_data
-
-    def _prepare_mixed_pattern_data(
-            self,
-            raw_pattern_data: Dict[str, np.ndarray],
-            horizon: int
-    ) -> Dict[str, tf.data.Dataset]:
+    def _training_generator(
+        self, forecast_length: int
+    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
         """
-        Prepare data by mixing multiple patterns with a proper shuffle.
+        Create an infinite generator for training data with weighted sampling.
 
-        This version includes a full shuffle of the training data at the NumPy
-        level before creating the TensorFlow dataset. This prevents the loss
-        artifact where each epoch starts with "easy" patterns from the shuffle
-        buffer.
+        This generator continuously samples patterns based on category weights,
+        generates a fresh time series for that pattern, and yields a single
+        randomly selected (backcast, forecast) pair from its training split.
 
-        Parameters
-        ----------
-        raw_pattern_data : Dict[str, np.ndarray]
-            Dictionary of pattern data
-        horizon : int
-            Forecast horizon length
-
-        Returns
-        -------
-        Dict[str, tf.data.Dataset]
-            Dictionary containing combined training datasets
+        :param forecast_length: The length of the forecast horizon.
+        :type forecast_length: int
+        :yield: A tuple containing a backcast and a forecast sequence.
+        :rtype: Tuple[np.ndarray, np.ndarray]
         """
-        all_train_X, all_train_y = [], []
-        all_val_X, all_val_y = [], []
-        all_test_X, all_test_y = [], []
+        while True:
+            pattern_name = random.choices(
+                self.weighted_patterns, self.weights, k=1
+            )[0]
+            data = self.ts_generator.generate_task_data(pattern_name)
+            train_size = int(self.config.train_ratio * len(data))
+            train_data = data[:train_size]
 
-        for pattern_name, data in raw_pattern_data.items():
-            try:
-                min_length = self.config.backcast_length + horizon + 100
-                if len(data) < min_length:
-                    continue
+            max_start_idx = (
+                len(train_data) -
+                self.config.backcast_length - forecast_length
+            )
+            if max_start_idx > 0:
+                start_idx = random.randint(0, max_start_idx)
+                backcast = train_data[
+                    start_idx: start_idx + self.config.backcast_length
+                ]
+                forecast = train_data[
+                    start_idx + self.config.backcast_length:
+                    start_idx + self.config.backcast_length + forecast_length
+                ]
 
-                # Split data temporally
-                train_size = int(self.config.train_ratio * len(data))
-                val_size = int(self.config.val_ratio * len(data))
+                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
+                    yield (
+                        backcast.astype(np.float32),
+                        forecast.astype(np.float32)
+                    )
 
-                train_data = data[:train_size]
-                val_data = data[train_size:train_size + val_size]
-                test_data = data[train_size + val_size:]
-
-                # Create sequences from raw data splits
-                train_X, train_y = self._create_sequences(train_data, horizon, stride=1)
-                val_X, val_y = self._create_sequences(val_data, horizon, stride=horizon // 2)
-                test_X, test_y = self._create_sequences(test_data, horizon, stride=horizon // 2)
-
-                # Balance data if needed
-                if self.config.balance_patterns and len(train_X) > self.config.samples_per_pattern:
-                    step = max(1, len(train_X) // self.config.samples_per_pattern)
-                    indices = np.arange(0, len(train_X), step)[:self.config.samples_per_pattern]
-                    train_X = train_X[indices]
-                    train_y = train_y[indices]
-
-                all_train_X.append(train_X)
-                all_train_y.append(train_y)
-                all_val_X.append(val_X)
-                all_val_y.append(val_y)
-                all_test_X.append(test_X)
-                all_test_y.append(test_y)
-
-            except Exception as e:
-                logger.warning(f"Failed to prepare {pattern_name} H={horizon}: {e}")
-                continue
-
-        if not all_train_X:
-            raise ValueError(f"No data prepared for horizon {horizon}")
-
-        # Combine all patterns
-        combined_train_X = np.concatenate(all_train_X, axis=0)
-        combined_train_y = np.concatenate(all_train_y, axis=0)
-        combined_val_X = np.concatenate(all_val_X, axis=0)
-        combined_val_y = np.concatenate(all_val_y, axis=0)
-        combined_test_X = np.concatenate(all_test_X, axis=0)
-        combined_test_y = np.concatenate(all_test_y, axis=0)
-
-        # --------------------------------------------------------------------
-        # --- FIX: SHUFFLE THE TRAINING DATASET AT THE NUMPY LEVEL ---
-        # This is the crucial step to ensure the tf.data.Dataset shuffle buffer
-        # is filled with a representative sample of the data at the start of
-        # each epoch, preventing the observed loss-reset behavior.
-        logger.info(f"Shuffling {len(combined_train_X)} training samples before creating dataset.")
-
-        # Create a single random permutation of indices
-        p = np.random.permutation(len(combined_train_X))
-
-        # Apply the same permutation to both X and y to maintain alignment
-        combined_train_X = combined_train_X[p]
-        combined_train_y = combined_train_y[p]
-        # --------------------------------------------------------------------
-
-        # Create TensorFlow datasets
-        train_dataset = self._create_tf_dataset(
-            combined_train_X, combined_train_y,
-            batch_size=self.config.batch_size,
-            shuffle=True,  # Still recommended to keep tf.data shuffle for extra randomness
-            apply_augmentation=True
-        )
-
-        val_dataset = self._create_tf_dataset(
-            combined_val_X, combined_val_y,
-            batch_size=self.config.batch_size,
-            shuffle=False,  # Validation data should not be shuffled
-            apply_augmentation=False
-        )
-
-        test_dataset = self._create_tf_dataset(
-            combined_test_X, combined_test_y,
-            batch_size=self.config.batch_size,
-            shuffle=False,  # Test data should not be shuffled
-            apply_augmentation=False
-        )
-
-        return {
-            'mixed_patterns': {
-                'train': train_dataset,
-                'val': val_dataset,
-                'test': test_dataset,
-                # Keep raw arrays for callback visualization
-                'test_arrays': (combined_test_X, combined_test_y)
-            }
-        }
-
-    def _create_sequences(
-            self,
-            data: np.ndarray,
-            forecast_length: int,
-            stride: int = 1
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _evaluation_generator(
+        self, forecast_length: int, split: str
+    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
         """
-        Create sequences with specified stride.
+        Create a finite generator for validation or test data.
 
-        Parameters
-        ----------
-        data : np.ndarray
-            Time series data
-        forecast_length : int
-            Length of forecast horizon
-        stride : int, optional
-            Stride for sequence creation, by default 1
+        This generator iterates through every selected pattern once, generates
+        the time series, and yields all possible (backcast, forecast) pairs
+        from the specified data split ('val' or 'test').
 
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            Input sequences and target sequences
+        :param forecast_length: The length of the forecast horizon.
+        :type forecast_length: int
+        :param split: The data split to generate from ('val' or 'test').
+        :type split: str
+        :raises ValueError: If the split is not 'val' or 'test'.
+        :yield: A tuple containing a backcast and a forecast sequence.
+        :rtype: Tuple[np.ndarray, np.ndarray]
         """
-        X, y = [], []
+        if split == 'val':
+            start_ratio = self.config.train_ratio
+            end_ratio = self.config.train_ratio + self.config.val_ratio
+        elif split == 'test':
+            start_ratio = self.config.train_ratio + self.config.val_ratio
+            end_ratio = 1.0
+        else:
+            raise ValueError("Split must be 'val' or 'test'")
 
-        for i in range(0, len(data) - self.config.backcast_length - forecast_length + 1, stride):
-            backcast = data[i: i + self.config.backcast_length]
-            forecast = data[i + self.config.backcast_length: i + self.config.backcast_length + forecast_length]
+        for pattern_name in self.selected_patterns:
+            data = self.ts_generator.generate_task_data(pattern_name)
+            start_idx = int(start_ratio * len(data))
+            end_idx = int(end_ratio * len(data))
+            split_data = data[start_idx:end_idx]
 
-            if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                X.append(backcast)
-                y.append(forecast)
+            for i in range(
+                len(split_data) -
+                self.config.backcast_length - forecast_length + 1
+            ):
+                backcast = split_data[i: i + self.config.backcast_length]
+                forecast = split_data[
+                    i + self.config.backcast_length:
+                    i + self.config.backcast_length + forecast_length
+                ]
+                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
+                    yield (
+                        backcast.astype(np.float32),
+                        forecast.astype(np.float32)
+                    )
 
-        return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
-
-    def _apply_noise_augmentation(self, x: tf.Tensor, y: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    def get_evaluation_steps(self, forecast_length: int, split: str) -> int:
         """
-        Apply multiplicative and additive noise augmentation to input data.
+        Calculate the number of steps for a full evaluation pass.
 
-        Parameters
-        ----------
-        x : tf.Tensor
-            Input sequences
-        y : tf.Tensor
-            Target sequences
-
-        Returns
-        -------
-        Tuple[tf.Tensor, tf.Tensor]
-            Augmented input and target sequences
+        :param forecast_length: The length of the forecast horizon.
+        :type forecast_length: int
+        :param split: The data split ('val' or 'test').
+        :type split: str
+        :return: The total number of batches for the evaluation dataset.
+        :rtype: int
         """
-        # Apply noise only to input sequences (x), not targets (y)
+        total_samples = 0
+        if split == 'val':
+            start_ratio = self.config.train_ratio
+            end_ratio = self.config.train_ratio + self.config.val_ratio
+        elif split == 'test':
+            start_ratio = self.config.train_ratio + self.config.val_ratio
+            end_ratio = 1.0
+        else:
+            return 0
+
+        for _ in self.selected_patterns:
+            data_len = self.ts_generator.config.n_samples
+            start_idx = int(start_ratio * data_len)
+            end_idx = int(end_ratio * data_len)
+            split_len = end_idx - start_idx
+            num_sequences = (
+                split_len - self.config.backcast_length - forecast_length + 1
+            )
+            if num_sequences > 0:
+                total_samples += num_sequences
+
+        return math.ceil(total_samples / self.config.batch_size)
+
+    def _normalize_instance(
+        self, backcast: tf.Tensor, forecast: tf.Tensor
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Standardizes an individual time series instance (z-score normalization).
+
+        The mean and standard deviation are calculated from the `backcast`
+        only and then applied to both the `backcast` and `forecast`. This
+        prevents data leakage from the future (forecast) and simulates the
+        real-world scenario where we only have past data for normalization.
+        This ensures that series with different scales contribute equally to
+        the loss function.
+
+        :param backcast: The input tensor (lookback window).
+        :type backcast: tf.Tensor
+        :param forecast: The target tensor (horizon).
+        :type forecast: tf.Tensor
+        :return: A tuple of the normalized (backcast, forecast).
+        :rtype: Tuple[tf.Tensor, tf.Tensor]
+        """
+        # Calculate statistics from the backcast
+        mean = tf.math.reduce_mean(backcast)
+        std = tf.math.reduce_std(backcast)
+
+        # Add a small epsilon to prevent division by zero for flat series
+        epsilon = 1e-6
+
+        # Normalize both backcast and forecast with backcast stats
+        normalized_backcast = (backcast - mean) / (std + epsilon)
+        normalized_forecast = (forecast - mean) / (std + epsilon)
+
+        return normalized_backcast, normalized_forecast
+
+    def _apply_noise_augmentation(
+        self, x: tf.Tensor, y: tf.Tensor
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Apply additive and/or multiplicative noise augmentation to the input.
+
+        :param x: The input tensor (backcast).
+        :type x: tf.Tensor
+        :param y: The target tensor (forecast).
+        :type y: tf.Tensor
+        :return: A tuple of the augmented input and original target.
+        :rtype: Tuple[tf.Tensor, tf.Tensor]
+        """
         augmented_x = x
-
-        if self.config.enable_multiplicative_noise and self.config.multiplicative_noise_std > 0:
-            # Multiplicative noise: x * (1 + noise)
+        if (
+            self.config.enable_multiplicative_noise and
+            self.config.multiplicative_noise_std > 0
+        ):
             mult_noise = tf.random.normal(
-                tf.shape(x),
-                mean=1.0,
-                stddev=self.config.multiplicative_noise_std,
-                dtype=x.dtype
+                tf.shape(x), mean=1.0,
+                stddev=self.config.multiplicative_noise_std, dtype=x.dtype
             )
             augmented_x = augmented_x * mult_noise
-
-        if self.config.enable_additive_noise and self.config.additive_noise_std > 0:
-            # Additive noise: x + noise
+        if (
+            self.config.enable_additive_noise and
+            self.config.additive_noise_std > 0
+        ):
             add_noise = tf.random.normal(
-                tf.shape(augmented_x),
-                mean=0.0,
+                tf.shape(augmented_x), mean=0.0,
                 stddev=self.config.additive_noise_std,
                 dtype=augmented_x.dtype
             )
             augmented_x = augmented_x + add_noise
-
         return augmented_x, y
 
-    def _create_tf_dataset(
-            self,
-            X: np.ndarray,
-            y: np.ndarray,
-            batch_size: int,
-            shuffle: bool = True,
-            apply_augmentation: bool = False
-    ) -> tf.data.Dataset:
+    def prepare_datasets(self, forecast_length: int) -> Dict[str, Any]:
         """
-        Create TensorFlow dataset with optional augmentation.
+        Create the complete tf.data pipeline for a given forecast horizon.
 
-        Parameters
-        ----------
-        X : np.ndarray
-            Input sequences
-        y : np.ndarray
-            Target sequences
-        batch_size : int
-            Batch size
-        shuffle : bool, optional
-            Whether to shuffle data, by default True
-        apply_augmentation : bool, optional
-            Whether to apply noise augmentation, by default False
+        This method constructs and returns the training, validation, and test
+        `tf.data.Dataset` objects, along with the calculated steps for
+        validation and testing. It incorporates optional per-instance
+        standardization and data augmentation into the pipeline.
 
-        Returns
-        -------
-        tf.data.Dataset
-            Configured TensorFlow dataset
+        :param forecast_length: The forecast horizon for the datasets.
+        :type forecast_length: int
+        :return: A dictionary containing the datasets and step counts.
+        :rtype: Dict[str, Any]
         """
-        dataset = tf.data.Dataset.from_tensor_slices((X, y))
+        output_signature = (
+            tf.TensorSpec(
+                shape=(self.config.backcast_length, 1), dtype=tf.float32
+            ),
+            tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32)
+        )
 
-        if shuffle:
-            # Use large buffer size for thorough shuffling
-            buffer_size = min(10000, len(X))
-            dataset = dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
+        # --- Create base datasets from generators ---
+        train_ds = tf.data.Dataset.from_generator(
+            lambda: self._training_generator(forecast_length),
+            output_signature=output_signature
+        )
+        val_ds = tf.data.Dataset.from_generator(
+            lambda: self._evaluation_generator(forecast_length, 'val'),
+            output_signature=output_signature
+        )
+        test_ds = tf.data.Dataset.from_generator(
+            lambda: self._evaluation_generator(forecast_length, 'test'),
+            output_signature=output_signature
+        )
 
-        dataset = dataset.batch(batch_size, drop_remainder=False)
+        # --- Conditionally apply per-instance normalization ---
+        # This is applied BEFORE batching to normalize each sample individually.
+        if self.config.normalize_per_instance:
+            logger.info("Applying per-instance standardization to all datasets.")
+            train_ds = train_ds.map(
+                self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            val_ds = val_ds.map(
+                self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            test_ds = test_ds.map(
+                self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE
+            )
 
-        if apply_augmentation:
-            dataset = dataset.map(
+        # --- Configure training dataset pipeline ---
+        train_ds = train_ds.prefetch(10000).shuffle(
+            self.config.batch_size * 100
+        ).batch(self.config.batch_size)
+        if (
+            self.config.enable_additive_noise or
+            self.config.enable_multiplicative_noise
+        ):
+            train_ds = train_ds.map(
                 self._apply_noise_augmentation,
                 num_parallel_calls=tf.data.AUTOTUNE
             )
+        train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
 
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+        # --- Configure evaluation dataset pipelines ---
+        val_steps = self.get_evaluation_steps(forecast_length, 'val')
+        val_ds = val_ds.batch(
+            self.config.batch_size
+        ).prefetch(tf.data.AUTOTUNE)
 
-        return dataset
+        test_steps = self.get_evaluation_steps(forecast_length, 'test')
+        test_ds = test_ds.batch(
+            self.config.batch_size
+        ).prefetch(tf.data.AUTOTUNE)
 
+        return {
+            'train_ds': train_ds,
+            'val_ds': val_ds,
+            'test_ds': test_ds,
+            'validation_steps': val_steps,
+            'test_steps': test_steps
+        }
 
 class PatternPerformanceCallback(keras.callbacks.Callback):
     """
-    Comprehensive callback for monitoring pattern-specific performance.
+    Callback for monitoring and visualizing performance.
 
-    This callback tracks training progress across multiple patterns and creates
-    detailed visualizations of learning dynamics, prediction quality, and
-    performance metrics.
+    This callback logs training history and, at specified epoch intervals,
+    generates and saves plots for learning curves and prediction samples.
 
-    Parameters
-    ----------
-    config : NBeatsTrainingConfig
-        Configuration object containing visualization settings
-    data_processor : MultiPatternDataProcessor
-        Data processor containing pattern information
-    test_data : Dict[int, Any]
-        Test data for visualization
-    save_dir : str
-        Directory to save visualization plots
-    model_name : str, optional
-        Name of the model for identification, by default "model"
+    A key feature is the creation of a fixed, diverse set of visualization
+    samples during initialization. This ensures that the prediction plots
+    at each interval show the model's improving performance on the exact
+    same inputs, providing a consistent and comparable view of learning progress.
 
-    Attributes
-    ----------
-    config : NBeatsTrainingConfig
-        Configuration object
-    data_processor : MultiPatternDataProcessor
-        Data processor instance
-    test_data : Dict[int, Any]
-        Test data dictionary
-    save_dir : str
-        Directory for saving plots
-    model_name : str
-        Model identifier
-    training_history : Dict[str, List]
-        Training history tracking
+    :param config: The training configuration object.
+    :type config: NBeatsTrainingConfig
+    :param data_processor: The data processor instance.
+    :type data_processor: MultiPatternDataProcessor
+    :param forecast_length: The forecast horizon length.
+    :type forecast_length: int
+    :param save_dir: Directory to save visualization plots.
+    :type save_dir: str
+    :param model_name: Name of the model, used for logging.
+    :type model_name: str
     """
 
     def __init__(
             self,
             config: NBeatsTrainingConfig,
             data_processor: MultiPatternDataProcessor,
-            test_data: Dict[int, Any],
+            forecast_length: int,
             save_dir: str,
             model_name: str = "model"
-    ) -> None:
+    ):
         super().__init__()
         self.config = config
         self.data_processor = data_processor
-        self.test_data = test_data
+        self.forecast_length = forecast_length
         self.save_dir = save_dir
         self.model_name = model_name
-
-        self.training_history = {
-            'epoch': [],
-            'loss': [],
-            'val_loss': [],
-            'mae': [],
-            'val_mae': []
-        }
-
+        self.training_history = {'epoch': [], 'loss': [], 'val_loss': [], 'mae': [], 'val_mae': []}
         os.makedirs(save_dir, exist_ok=True)
+        # Create a fixed, diverse test set for consistent visualization
+        self.viz_test_data = self._create_viz_test_set()
+
+    def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generates a small, fixed, and diverse test set for visualizations.
+
+        To ensure a representative and varied set of examples, this method
+        explicitly samples one sequence from N different time series patterns,
+        where N is defined by `config.plot_top_k_patterns`. The selected
+        patterns are shuffled to provide a random sample for each experiment run.
+        This set is cached upon initialization and reused for all subsequent
+        plotting, allowing for consistent comparison of model performance over
+        epochs.
+
+        :return: A tuple of NumPy arrays (X, y) for visualization.
+        :rtype: Tuple[np.ndarray, np.ndarray]
+        """
+        logger.info("Creating a diverse, fixed visualization test set...")
+        num_samples_to_plot = self.config.plot_top_k_patterns
+        patterns_to_sample_from = self.data_processor.selected_patterns.copy()
+        random.shuffle(patterns_to_sample_from)
+
+        X, y = [], []
+        patterns_sampled = 0
+
+        # Define the test split range
+        start_ratio = self.config.train_ratio + self.config.val_ratio
+        end_ratio = 1.0
+
+        # Iterate through shuffled patterns to gather one sample from each
+        for pattern_name in patterns_to_sample_from:
+            if patterns_sampled >= num_samples_to_plot:
+                break
+
+            # 1. Generate the full time series for the current pattern
+            data = self.data_processor.ts_generator.generate_task_data(pattern_name)
+
+            # 2. Isolate the test portion
+            start_idx = int(start_ratio * len(data))
+            end_idx = int(end_ratio * len(data))
+            test_data = data[start_idx:end_idx]
+
+            # 3. Check if we can extract at least one sequence
+            sequence_length = self.config.backcast_length + self.forecast_length
+            if len(test_data) >= sequence_length:
+                # 4. Pick a random valid start index within the test data
+                max_start = len(test_data) - sequence_length
+                sample_start_idx = random.randint(0, max_start)
+
+                backcast = test_data[sample_start_idx: sample_start_idx + self.config.backcast_length]
+                forecast = test_data[sample_start_idx + self.config.backcast_length: sample_start_idx + sequence_length]
+
+                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
+                    X.append(backcast.astype(np.float32))
+                    y.append(forecast.astype(np.float32))
+                    patterns_sampled += 1
+
+        if not X:
+            logger.warning("Could not generate any visualization samples.")
+            return np.array([]), np.array([])
+
+        logger.info(f"Successfully created visualization set with {len(X)} diverse samples.")
+        return np.array(X), np.array(y)
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:
-        """
-        Track training progress and create visualizations.
-
-        Parameters
-        ----------
-        epoch : int
-            Current epoch number
-        logs : Optional[Dict[str, float]], optional
-            Training logs, by default None
-        """
         if logs is None:
             logs = {}
-
+        for key in self.training_history.keys():
+            if key != 'epoch':
+                self.training_history[key].append(logs.get(key, 0.0))
         self.training_history['epoch'].append(epoch)
-        self.training_history['loss'].append(logs.get('loss', 0.0))
-        self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
-        self.training_history['mae'].append(logs.get('mae', 0.0))
-        self.training_history['val_mae'].append(logs.get('val_mae', 0.0))
 
-        # Create visualizations at specified intervals
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
             logger.info(f"Creating visualizations for {self.model_name} at epoch {epoch + 1}")
             self._create_interim_plots(epoch)
 
     def _create_interim_plots(self, epoch: int) -> None:
-        """
-        Create comprehensive interim plots.
-
-        Parameters
-        ----------
-        epoch : int
-            Current epoch number
-        """
         try:
-            if self.config.create_learning_curves:
-                self._plot_learning_curves(epoch)
-
-            if self.config.create_prediction_plots:
-                self._plot_prediction_samples(epoch)
-
+            if self.config.create_learning_curves: self._plot_learning_curves(epoch)
+            if self.config.create_prediction_plots: self._plot_prediction_samples(epoch)
         except Exception as e:
             logger.warning(f"Failed to create interim plots for {self.model_name}: {e}")
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        """
-        Plot training and validation curves.
-
-        Parameters
-        ----------
-        epoch : int
-            Current epoch number
-        """
         fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-
         epochs = self.training_history['epoch']
-
-        # Loss curves
-        axes[0].plot(epochs, self.training_history['loss'], label='Training Loss', color='blue', linewidth=2)
-        axes[0].plot(epochs, self.training_history['val_loss'], label='Validation Loss', color='red', linewidth=2)
-        axes[0].set_title(f'{self.model_name} - Loss Curves (Epoch {epoch + 1})')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].legend()
+        axes[0].plot(epochs, self.training_history['loss'], label='Training Loss')
+        axes[0].plot(epochs, self.training_history['val_loss'], label='Validation Loss')
+        axes[0].set_title(f'Loss Curves (Epoch {epoch + 1})');
+        axes[0].legend();
         axes[0].grid(True, alpha=0.3)
-
-        # MAE curves
-        axes[1].plot(epochs, self.training_history['mae'], label='Training MAE', color='green', linewidth=2)
-        axes[1].plot(epochs, self.training_history['val_mae'], label='Validation MAE', color='orange', linewidth=2)
-        axes[1].set_title(f'{self.model_name} - MAE Curves (Epoch {epoch + 1})')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('MAE')
-        axes[1].legend()
+        axes[1].plot(epochs, self.training_history['mae'], label='Training MAE')
+        axes[1].plot(epochs, self.training_history['val_mae'], label='Validation MAE')
+        axes[1].set_title(f'MAE Curves (Epoch {epoch + 1})');
+        axes[1].legend();
         axes[1].grid(True, alpha=0.3)
-
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'),
-                    dpi=150, bbox_inches='tight')
+        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'))
         plt.close()
 
     def _plot_prediction_samples(self, epoch: int) -> None:
-        """
-        Plot sample predictions.
-
-        Parameters
-        ----------
-        epoch : int
-            Current epoch number
-        """
-        horizon = self.config.forecast_horizons[0]
-
-        if horizon not in self.test_data:
+        if self.viz_test_data[0].shape[0] == 0:
             return
 
-        test_data = self.test_data[horizon]
-        mixed_data = test_data['mixed_patterns']
+        test_X, test_y = self.viz_test_data
+        predictions = self.model(test_X, training=False)
 
-        # Use test arrays for visualization
-        if 'test_arrays' not in mixed_data:
-            return
-
-        test_X, test_y = mixed_data['test_arrays']
-
-        if len(test_X) == 0:
-            return
-
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        num_plots = min(len(test_X), self.config.plot_top_k_patterns)
+        # Dynamic grid size based on number of plots
+        n_cols = 3
+        n_rows = math.ceil(num_plots / n_cols)
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows))
         axes = axes.flatten()
 
-        # Sample different parts of the test set
-        sample_indices = np.linspace(0, len(test_X) - 1, 6, dtype=int)
-
-        for i, sample_idx in enumerate(sample_indices):
-            sample_X = test_X[sample_idx:sample_idx + 1]
-            sample_y = test_y[sample_idx:sample_idx + 1]
-
-            # Get prediction
-            pred_y = self.model(sample_X, training=False)
-
-            # Plot
+        for i in range(num_plots):
+            ax = axes[i]
             backcast_x = np.arange(-self.config.backcast_length, 0)
-            forecast_x = np.arange(0, self.config.forecast_length)
+            forecast_x = np.arange(0, self.forecast_length)
+            ax.plot(backcast_x, test_X[i], label='Input', color='blue')
+            ax.plot(forecast_x, test_y[i], label='True', color='green')
+            ax.plot(forecast_x, predictions[i], label='Predicted', color='red', linestyle='--')
+            ax.set_title(f'Sample {i + 1}');
+            ax.legend();
+            ax.grid(True, alpha=0.3)
 
-            axes[i].plot(backcast_x, sample_X[0], label='Input', color='blue', alpha=0.7)
-            axes[i].plot(forecast_x, sample_y[0].flatten(), label='True', color='green', linewidth=2)
-            axes[i].plot(forecast_x, pred_y[0].numpy().flatten(), label='Predicted', color='red', linewidth=2)
-
-            axes[i].set_title(f'Sample {i + 1}')
-            axes[i].legend()
-            axes[i].grid(True, alpha=0.3)
-            axes[i].axvline(x=0, color='black', linestyle='-', alpha=0.5)
+        # Turn off any unused subplots
+        for j in range(num_plots, len(axes)):
+            axes[j].axis('off')
 
         plt.suptitle(f'Prediction Samples (Epoch {epoch + 1})', fontsize=16)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'),
-                    dpi=150, bbox_inches='tight')
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
         plt.close()
 
 
 class NBeatsTrainer:
     """
-    Comprehensive trainer for N-BEATS with multiple pattern support.
+    Orchestrates the training, evaluation, and reporting of N-BEATS models.
 
-    This class orchestrates the complete training process for N-BEATS models
-    on multiple time series patterns, including data preparation, model training,
-    evaluation, and result visualization.
+    This class encapsulates the entire experiment lifecycle, including
+    pattern selection, model creation, training loop execution for multiple
+    horizons, and final result aggregation and saving.
 
-    Parameters
-    ----------
-    config : NBeatsTrainingConfig
-        Configuration object containing all training parameters
-    ts_config : TimeSeriesConfig
-        Time series generation configuration
-
-    Attributes
-    ----------
-    config : NBeatsTrainingConfig
-        Training configuration
-    ts_config : TimeSeriesConfig
-        Time series configuration
-    generator : TimeSeriesGenerator
-        Time series pattern generator
-    processor : MultiPatternDataProcessor
-        Data processing pipeline
-    all_patterns : List[str]
-        All available pattern names
-    pattern_categories : List[str]
-        All available pattern categories
-    selected_patterns : List[str]
-        Selected patterns for training
+    :param config: The main training configuration object.
+    :type config: NBeatsTrainingConfig
+    :param ts_config: Configuration for the time series generator.
+    :type ts_config: TimeSeriesConfig
     """
-
     def __init__(self, config: NBeatsTrainingConfig, ts_config: TimeSeriesConfig) -> None:
         self.config = config
         self.ts_config = ts_config
         self.generator = TimeSeriesGenerator(ts_config)
-        self.processor = MultiPatternDataProcessor(config)
-
-        # Get patterns
         self.all_patterns = self.generator.get_task_names()
         self.pattern_categories = self.generator.get_task_categories()
+        # Create a pattern-to-category mapping for efficient lookup
+        self.pattern_to_category = {
+            task: category
+            for category in self.pattern_categories
+            for task in self.generator.get_tasks_by_category(category)
+        }
         self.selected_patterns = self._select_patterns()
-
-        logger.info(f"N-BEATS Trainer initialized:")
-        logger.info(f"  - Available categories: {len(self.pattern_categories)}")
-        logger.info(f"  - Total patterns available: {len(self.all_patterns)}")
-        logger.info(f"  - Selected {len(self.selected_patterns)} patterns")
-        logger.info(f"  - Category distribution: {self._get_category_distribution()}")
+        self.processor = MultiPatternDataProcessor(
+            config, self.generator, self.selected_patterns, self.pattern_to_category
+        )
 
     def _select_patterns(self) -> List[str]:
         """
-        Select patterns based on configuration.
+        Select time series patterns based on the configuration.
 
-        Returns
-        -------
-        List[str]
-            List of selected pattern names
+        This method filters patterns by target categories and applies limits
+        per category and overall, ensuring a reproducible selection.
+
+        :return: A list of selected pattern names for the experiment.
+        :rtype: List[str]
         """
         selected = []
-
-        # Handle target categories
         if self.config.target_categories:
-            for category in self.config.target_categories:
-                category_patterns = self.generator.get_tasks_by_category(category)
-                max_patterns = self.config.max_patterns_per_category
-
-                if len(category_patterns) <= max_patterns:
-                    selected.extend(category_patterns)
-                else:
-                    weight = self.config.category_weights.get(category, 1.0)
-                    adjusted_max = min(int(max_patterns * weight), len(category_patterns))
-                    selected_from_category = np.random.choice(
-                        category_patterns, size=adjusted_max, replace=False
-                    ).tolist()
-                    selected.extend(selected_from_category)
+            patterns_to_consider = {
+                p for c in self.config.target_categories
+                for p in self.generator.get_tasks_by_category(c)
+            }
         else:
-            # General pattern selection
-            for category in self.pattern_categories:
-                category_patterns = self.generator.get_tasks_by_category(category)
-                weight = self.config.category_weights.get(category, 1.0)
-                max_patterns = min(int(self.config.max_patterns_per_category * weight), len(category_patterns))
+            patterns_to_consider = self.all_patterns
 
-                if len(category_patterns) <= max_patterns:
-                    selected.extend(category_patterns)
-                else:
-                    selected_from_category = np.random.choice(
-                        category_patterns, size=max_patterns, replace=False
-                    ).tolist()
-                    selected.extend(selected_from_category)
+        category_counts = {}
+        for pattern in sorted(patterns_to_consider):  # Sort for reproducibility
+            category = self.pattern_to_category.get(pattern)
+            if category:
+                if category_counts.get(category, 0) < self.config.max_patterns_per_category:
+                    selected.append(pattern)
+                    category_counts[category] = category_counts.get(category, 0) + 1
 
-        # Apply global pattern limit if specified
         if self.config.max_patterns and len(selected) > self.config.max_patterns:
-            selected = np.random.choice(selected, size=self.config.max_patterns, replace=False).tolist()
+            selected = random.sample(selected, self.config.max_patterns)
 
+        logger.info(f"Selected {len(selected)} patterns for training.")
         return selected
-
-    def _get_category_distribution(self) -> Dict[str, int]:
-        """
-        Get distribution of selected patterns by category.
-
-        Returns
-        -------
-        Dict[str, int]
-            Dictionary mapping categories to pattern counts
-        """
-        distribution = {}
-        for pattern in self.selected_patterns:
-            category = None
-            for cat in self.pattern_categories:
-                if pattern in self.generator.get_tasks_by_category(cat):
-                    category = cat
-                    break
-            if category:
-                distribution[category] = distribution.get(category, 0) + 1
-        return distribution
-
-    def prepare_data(self) -> Dict[str, Any]:
-        """
-        Prepare training data for the model.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary containing prepared data and metadata
-        """
-        logger.info("Generating data for selected patterns...")
-
-        raw_pattern_data = {}
-        generation_failures = []
-
-        for pattern_name in self.selected_patterns:
-            try:
-                data = self.generator.generate_task_data(pattern_name)
-                if len(data) >= self.config.min_data_length:
-                    raw_pattern_data[pattern_name] = data
-                else:
-                    logger.warning(
-                        f"Generated data for {pattern_name} too short: {len(data)} < {self.config.min_data_length}")
-                    generation_failures.append(pattern_name)
-            except Exception as e:
-                logger.warning(f"Failed to generate {pattern_name}: {e}")
-                generation_failures.append(pattern_name)
-
-        logger.info(f"Successfully generated data for {len(raw_pattern_data)} patterns")
-        if generation_failures:
-            logger.info(f"Failed to generate {len(generation_failures)} patterns: {generation_failures[:5]}...")
-
-        prepared_data = self.processor.prepare_multi_pattern_data(raw_pattern_data)
-
-        return {
-            'prepared_data': prepared_data,
-            'raw_pattern_data': raw_pattern_data,
-            'num_patterns': len(raw_pattern_data),
-            'pattern_to_id': self.processor.pattern_to_id,
-            'generation_failures': generation_failures,
-            'category_distribution': self._get_final_category_distribution(raw_pattern_data)
-        }
-
-    def _get_final_category_distribution(self, raw_pattern_data: Dict[str, np.ndarray]) -> Dict[str, int]:
-        """
-        Get final category distribution after data generation.
-
-        Parameters
-        ----------
-        raw_pattern_data : Dict[str, np.ndarray]
-            Generated pattern data
-
-        Returns
-        -------
-        Dict[str, int]
-            Final category distribution
-        """
-        distribution = {}
-        for pattern in raw_pattern_data.keys():
-            category = None
-            for cat in self.pattern_categories:
-                if pattern in self.generator.get_tasks_by_category(cat):
-                    category = cat
-                    break
-            if category:
-                distribution[category] = distribution.get(category, 0) + 1
-        return distribution
 
     def create_model(self, forecast_length: int) -> NBeatsNet:
         """
-        Create N-BEATS model with enhanced configuration.
+        Create and compile an N-BEATS Keras model.
 
-        Parameters
-        ----------
-        forecast_length : int
-            Length of forecast horizon
-
-        Returns
-        -------
-        NBeatsNet
-            Configured N-BEATS model instance
+        :param forecast_length: The forecast horizon for the model.
+        :type forecast_length: int
+        :return: A compiled NBeatsNet Keras model.
+        :rtype: NBeatsNet
         """
-        kernel_regularizer = keras.regularizers.L2(
-            self.config.kernel_regularizer_l2) if self.config.kernel_regularizer_l2 > 0 else None
+        if self.config.kernel_regularizer_l2 > 0:
+            kernel_regularizer = keras.regularizers.L2(
+                self.config.kernel_regularizer_l2
+            )
+        else:
+            kernel_regularizer = None
 
         return create_nbeats_model(
             backcast_length=self.config.backcast_length,
             forecast_length=forecast_length,
-            stack_types=self.config.stack_types.copy(),
+            stack_types=self.config.stack_types,
             nb_blocks_per_stack=self.config.nb_blocks_per_stack,
             hidden_layer_units=self.config.hidden_layer_units,
             use_revin=self.config.use_revin,
@@ -949,507 +826,156 @@ class NBeatsTrainer:
 
     def run_experiment(self) -> Dict[str, Any]:
         """
-        Run the multi-pattern experiment.
+        Execute the full training and evaluation experiment.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Comprehensive experiment results
+        This method iterates through all specified forecast horizons, training
+        a separate model for each. It manages result directories and saves
+        all artifacts.
 
-        Raises
-        ------
-        ValueError
-            If no data is prepared for training
+        :return: A dictionary containing the results directory and a nested
+                 dictionary of results per horizon.
+        :rtype: Dict[str, Any]
         """
-        try:
-            exp_dir = os.path.join(
-                self.config.result_dir,
-                f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            os.makedirs(exp_dir, exist_ok=True)
+        exp_dir = os.path.join(
+            self.config.result_dir,
+            f"{self.config.experiment_name}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        os.makedirs(exp_dir, exist_ok=True)
+        logger.info(f"Starting N-BEATS Experiment: {exp_dir}")
 
-            logger.info(f"🚀 Starting N-BEATS Experiment: {exp_dir}")
+        results = {}
+        for horizon in self.config.forecast_horizons:
+            logger.info(f"{'=' * 50}\nTraining Model for Horizon={horizon}\n{'=' * 50}")
+            data_pipeline = self.processor.prepare_datasets(horizon)
+            horizon_results = self._train_model(data_pipeline, horizon, exp_dir)
+            results[horizon] = horizon_results
 
-            # Prepare data
-            data_info = self.prepare_data()
-            prepared_data = data_info['prepared_data']
+        self._save_results(results, exp_dir)
+        logger.info("N-BEATS Experiment completed successfully.")
+        return {"results_dir": exp_dir, "results": results}
 
-            if not prepared_data:
-                raise ValueError("No data prepared for training")
-
-            results = {}
-
-            for horizon in self.config.forecast_horizons:
-                if horizon not in prepared_data:
-                    continue
-
-                logger.info(f"{'=' * 50}")
-                logger.info(f"🎯 Training Model H={horizon}")
-                logger.info(f"{'=' * 50}")
-
-                horizon_results = self._train_model(prepared_data[horizon], horizon, exp_dir)
-                results[horizon] = horizon_results
-
-            # Save comprehensive results
-            self._save_results(results, exp_dir, data_info)
-
-            logger.info("🎉 N-BEATS Experiment completed successfully!")
-            return {
-                "results_dir": exp_dir,
-                "results": results,
-                "num_patterns": data_info['num_patterns'],
-                "pattern_mapping": data_info['pattern_to_id'],
-                "category_distribution": data_info['category_distribution']
-            }
-
-        except Exception as e:
-            logger.error(f"💥 experiment failed: {e}", exc_info=True)
-            raise
-
-    def _train_model(self, pattern_data: Dict, horizon: int, exp_dir: str) -> Dict[str, Any]:
+    def _train_model(
+        self, data_pipeline: Dict, horizon: int, exp_dir: str
+    ) -> Dict[str, Any]:
         """
-        Train model on mixed patterns.
+        Train and evaluate a single model for a specific horizon.
 
-        Parameters
-        ----------
-        pattern_data : Dict
-            Prepared pattern data
-        horizon : int
-            Forecast horizon
-        exp_dir : str
-            Experiment directory
-
-        Returns
-        -------
-        Dict[str, Any]
-            Training results
+        :param data_pipeline: Dictionary of datasets and step counts.
+        :type data_pipeline: Dict
+        :param horizon: The forecast horizon for this model.
+        :type horizon: int
+        :param exp_dir: The main experiment directory for saving artifacts.
+        :type exp_dir: str
+        :return: A dictionary containing training history and test metrics.
+        :rtype: Dict[str, Any]
         """
-        logger.info("Training model on mixed patterns")
-
-        data = pattern_data['mixed_patterns']
-
-        # Create model
         model = self.create_model(horizon)
+        model.build((None, self.config.backcast_length, 1))
 
-        # Build model with sample data from test arrays
-        test_X, _ = data['test_arrays']
-        model(test_X[:1])  # Build with sample data
-
-        # Create callbacks
         viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
-        callback = PatternPerformanceCallback(
-            config=self.config,
-            data_processor=self.processor,
-            test_data={horizon: pattern_data},
-            save_dir=viz_dir,
-            model_name="nbeats_model"
+        performance_cb = PatternPerformanceCallback(
+            self.config, self.processor, horizon, viz_dir, "nbeats_model"
         )
 
         callbacks = [
             keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=50,
-                restore_best_weights=True,
-                verbose=1
+                monitor='val_loss', patience=20, restore_best_weights=True
             ),
             keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=30,
-                min_lr=1e-6,
-                verbose=1
+                monitor='val_loss', factor=0.5, patience=30, min_lr=1e-6
             ),
-            callback,
             keras.callbacks.ModelCheckpoint(
                 filepath=os.path.join(exp_dir, f'best_model_h{horizon}.keras'),
-                monitor='val_loss',
-                save_best_only=True,
-                verbose=1
-            )
+                save_best_only=True
+            ),
+            performance_cb
         ]
 
-        # Train model using tf.data.Dataset
-        start_time = datetime.now()
-
-        train_dataset = data['train']
-        val_dataset = data['val']
-
+        logger.info(
+            f"Training with {self.config.steps_per_epoch} steps/epoch and "
+            f"validating with {data_pipeline['validation_steps']} steps."
+        )
         history = model.fit(
-            train_dataset,
-            validation_data=val_dataset,
+            data_pipeline['train_ds'],
+            validation_data=data_pipeline['val_ds'],
             epochs=self.config.epochs,
+            steps_per_epoch=self.config.steps_per_epoch,
+            validation_steps=data_pipeline['validation_steps'],
             callbacks=callbacks,
             verbose=1
         )
 
-        training_time = (datetime.now() - start_time).total_seconds()
-
-        # Evaluate using test dataset
-        test_dataset = data['test']
-        test_results = model.evaluate(test_dataset, verbose=0)
-        test_loss = test_results[0] if isinstance(test_results, list) else test_results
+        logger.info("Evaluating on test set...")
+        test_results = model.evaluate(
+            data_pipeline['test_ds'],
+            steps=data_pipeline['test_steps'],
+            verbose=0
+        )
+        test_loss = test_results[0]
         test_mae = test_results[1] if len(test_results) > 1 else None
 
-        logger.info(f"✅ Model: Test Loss = {test_loss:.4f}, Time = {training_time:.1f}s")
-
         return {
-            'model_results': {
-                'history': history.history,
-                'training_time': training_time,
-                'test_loss': test_loss,
-                'test_mae': test_mae,
-                'final_epoch': len(history.history['loss'])
-            }
+            'history': history.history,
+            'test_loss': test_loss,
+            'test_mae': test_mae,
+            'final_epoch': len(history.history['loss'])
         }
 
-    def _save_results(self, results: Dict, exp_dir: str, data_info: Dict) -> None:
+    def _save_results(self, results: Dict, exp_dir: str) -> None:
         """
-        Save comprehensive experiment results.
+        Save the final experiment results to a JSON file.
 
-        Parameters
-        ----------
-        results : Dict
-            Experiment results
-        exp_dir : str
-            Experiment directory
-        data_info : Dict
-            Data information
+        :param results: A dictionary containing results for each horizon.
+        :type results: Dict
+        :param exp_dir: The directory to save the results file in.
+        :type exp_dir: str
         """
-        try:
-            # Save JSON results
-            with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-                json_results = {}
-                for horizon, result in results.items():
-                    json_results[str(horizon)] = self._serialize_results(result)
-                json.dump(json_results, f, indent=2)
+        logger.info(f"Saving results to {exp_dir}")
+        serializable_results = {}
+        for h, r in results.items():
+            # Convert numpy types to native python types for JSON
+            history_serializable = {
+                k: [float(v) for v in val] for k, val in r['history'].items()
+            }
+            serializable_results[h] = {
+                'history': history_serializable,
+                'test_loss': float(r['test_loss']),
+                'test_mae': float(r['test_mae']) if r['test_mae'] else None,
+                'final_epoch': r['final_epoch']
+            }
 
-            # Save experiment information
-            with open(os.path.join(exp_dir, 'experiment_info.json'), 'w') as f:
-                json.dump({
-                    'num_patterns': data_info['num_patterns'],
-                    'pattern_to_id': data_info['pattern_to_id'],
-                    'selected_patterns': self.selected_patterns,
-                    'category_distribution': data_info['category_distribution'],
-                    'category_weights': self.config.category_weights,
-                    'generation_failures': data_info.get('generation_failures', []),
-                    'config': {
-                        'backcast_length': self.config.backcast_length,
-                        'forecast_horizons': self.config.forecast_horizons,
-                        'stack_types': self.config.stack_types,
-                        'nb_blocks_per_stack': self.config.nb_blocks_per_stack,
-                        'hidden_layer_units': self.config.hidden_layer_units,
-                        'epochs': self.config.epochs,
-                        'batch_size': self.config.batch_size,
-                        'learning_rate': self.config.learning_rate,
-                        'optimizer': self.config.optimizer,
-                        'primary_loss': self.config.primary_loss
-                    }
-                }, f, indent=2)
-
-            # Create comprehensive summary plots
-            self._create_comprehensive_summary_plots(results, exp_dir)
-
-            # Create detailed experiment report
-            self._create_detailed_experiment_report(results, exp_dir, data_info)
-
-            logger.info(f"Results saved to {exp_dir}")
-        except Exception as e:
-            logger.error(f"Failed to save results: {e}")
-
-    def _serialize_results(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Serialize results for JSON storage.
-
-        Parameters
-        ----------
-        result : Dict[str, Any]
-            Results to serialize
-
-        Returns
-        -------
-        Dict[str, Any]
-            Serialized results
-        """
-        serialized = {}
-
-        for key, value in result.items():
-            if key == 'model_results':
-                serialized[key] = {}
-                for metric_key, metric_value in value.items():
-                    if metric_key == 'history':
-                        serialized[key][metric_key] = {
-                            hist_key: [float(v) for v in hist_value] if isinstance(hist_value,
-                                                                                   (list, np.ndarray)) else hist_value
-                            for hist_key, hist_value in metric_value.items()
-                        }
-                    else:
-                        serialized[key][metric_key] = float(metric_value) if isinstance(metric_value, (np.floating,
-                                                                                                       np.integer)) else metric_value
-            else:
-                serialized[key] = value
-
-        return serialized
-
-    def _create_comprehensive_summary_plots(self, results: Dict, exp_dir: str) -> None:
-        """
-        Create comprehensive summary visualization.
-
-        Parameters
-        ----------
-        results : Dict
-            Experiment results
-        exp_dir : str
-            Experiment directory
-        """
-        try:
-            for horizon, result in results.items():
-                self._plot_model_summary(result, horizon, exp_dir)
-        except Exception as e:
-            logger.warning(f"Failed to create summary plots: {e}")
-
-    def _plot_model_summary(self, results: Dict, horizon: int, exp_dir: str) -> None:
-        """
-        Plot summary for model.
-
-        Parameters
-        ----------
-        results : Dict
-            Model results
-        horizon : int
-            Forecast horizon
-        exp_dir : str
-            Experiment directory
-        """
-        model_results = results.get('model_results', {})
-
-        if not model_results:
-            return
-
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-        history = model_results.get('history', {})
-
-        # Training curves
-        if 'loss' in history and 'val_loss' in history:
-            epochs = range(1, len(history['loss']) + 1)
-            axes[0, 0].plot(epochs, history['loss'], label='Training Loss', linewidth=2)
-            axes[0, 0].plot(epochs, history['val_loss'], label='Validation Loss', linewidth=2)
-            axes[0, 0].set_title(f'Training Curves (H={horizon})')
-            axes[0, 0].set_xlabel('Epoch')
-            axes[0, 0].set_ylabel('Loss')
-            axes[0, 0].legend()
-            axes[0, 0].grid(True, alpha=0.3)
-
-        # MAE curves
-        if 'mae' in history and 'val_mae' in history:
-            axes[0, 1].plot(epochs, history['mae'], label='Training MAE', linewidth=2)
-            axes[0, 1].plot(epochs, history['val_mae'], label='Validation MAE', linewidth=2)
-            axes[0, 1].set_title(f'MAE Curves (H={horizon})')
-            axes[0, 1].set_xlabel('Epoch')
-            axes[0, 1].set_ylabel('MAE')
-            axes[0, 1].legend()
-            axes[0, 1].grid(True, alpha=0.3)
-
-        # Performance metrics
-        test_loss = model_results.get('test_loss', 0)
-        test_mae = model_results.get('test_mae', 0)
-        training_time = model_results.get('training_time', 0)
-        final_epoch = model_results.get('final_epoch', 0)
-
-        metrics = ['Test Loss', 'Test MAE', 'Training Time (s)', 'Final Epoch']
-        values = [test_loss, test_mae, training_time, final_epoch]
-
-        axes[1, 0].bar(metrics, values, color=['skyblue', 'lightcoral', 'lightgreen', 'gold'], alpha=0.7,
-                       edgecolor='black')
-        axes[1, 0].set_title(f'Performance Metrics (H={horizon})')
-        axes[1, 0].set_ylabel('Value')
-        axes[1, 0].grid(True, alpha=0.3)
-
-        # Add value labels on bars
-        for i, v in enumerate(values):
-            axes[1, 0].text(i, v, f'{v:.3f}' if v < 100 else f'{v:.0f}', ha='center', va='bottom')
-
-        # Summary text
-        axes[1, 1].text(0.1, 0.8, f'Model Summary (H={horizon})', fontsize=14, fontweight='bold',
-                        transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.7, f'Test Loss: {test_loss:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.6, f'Test MAE: {test_mae:.4f}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.5, f'Training Time: {training_time:.1f}s', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.4, f'Final Epoch: {final_epoch}', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].text(0.1, 0.3, f'Multi-Pattern Training', fontsize=12, transform=axes[1, 1].transAxes)
-        axes[1, 1].axis('off')
-
-        plt.suptitle(f'Model Summary (H={horizon})', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(exp_dir, f'model_summary_h{horizon}.png'), dpi=150, bbox_inches='tight')
-        plt.close()
-
-    def _create_detailed_experiment_report(self, results: Dict, exp_dir: str, data_info: Dict) -> None:
-        """
-        Create detailed text report of experiment results.
-
-        Parameters
-        ----------
-        results : Dict
-            Experiment results
-        exp_dir : str
-            Experiment directory
-        data_info : Dict
-            Data information
-        """
-        try:
-            report_path = os.path.join(exp_dir, 'detailed_experiment_report.txt')
-
-            with open(report_path, 'w') as f:
-                f.write("=" * 80 + "\n")
-                f.write("N-BEATS MULTI-PATTERN EXPERIMENT REPORT\n")
-                f.write("=" * 80 + "\n\n")
-
-                # Experiment overview
-                f.write("EXPERIMENT OVERVIEW\n")
-                f.write("-" * 20 + "\n")
-                f.write(f"Experiment Name: {self.config.experiment_name}\n")
-                f.write(f"Number of Patterns: {data_info['num_patterns']}\n")
-                f.write(f"Available Pattern Categories: {len(self.pattern_categories)}\n")
-                f.write(f"Time Series Length: {self.ts_config.n_samples}\n")
-                f.write(f"Forecast Horizons: {self.config.forecast_horizons}\n")
-                f.write(f"Experiment Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-
-                if self.config.target_categories:
-                    f.write("TARGET CATEGORIES\n")
-                    f.write("-" * 17 + "\n")
-                    f.write(f"Target Categories: {self.config.target_categories}\n\n")
-
-                # Pattern distribution
-                f.write("PATTERN DISTRIBUTION BY CATEGORY\n")
-                f.write("-" * 33 + "\n")
-                for category, count in data_info['category_distribution'].items():
-                    weight = self.config.category_weights.get(category, 1.0)
-                    f.write(f"{category:15s}: {count:2d} patterns (weight: {weight:.1f})\n")
-                f.write(f"Total Categories Used: {len(data_info['category_distribution'])}\n")
-                f.write(f"Total Patterns Generated: {sum(data_info['category_distribution'].values())}\n\n")
-
-                # Model configuration
-                f.write("MODEL CONFIGURATION\n")
-                f.write("-" * 19 + "\n")
-                f.write(f"Backcast Length: {self.config.backcast_length}\n")
-                f.write(f"Stack Types: {self.config.stack_types}\n")
-                f.write(f"Blocks per Stack: {self.config.nb_blocks_per_stack}\n")
-                f.write(f"Hidden Layer Units: {self.config.hidden_layer_units}\n")
-                f.write(f"RevIN Normalization: {'Enabled' if self.config.use_revin else 'Disabled'}\n")
-                f.write(f"Dropout Rate: {self.config.dropout_rate}\n")
-                f.write(f"L2 Regularization: {self.config.kernel_regularizer_l2}\n\n")
-
-                # Training configuration
-                f.write("TRAINING CONFIGURATION\n")
-                f.write("-" * 21 + "\n")
-                f.write(
-                    f"Data Split: {self.config.train_ratio:.2f}/{self.config.val_ratio:.2f}/{self.config.test_ratio:.2f}\n")
-                f.write(f"Epochs: {self.config.epochs}\n")
-                f.write(f"Batch Size: {self.config.batch_size}\n")
-                f.write(f"Learning Rate: {self.config.learning_rate}\n")
-                f.write(f"Optimizer: {self.config.optimizer}\n")
-                f.write(f"Primary Loss: {self.config.primary_loss}\n")
-                f.write(f"Gradient Clipping: {self.config.gradient_clip_norm}\n\n")
-
-                # Results for each horizon
-                for horizon, result in results.items():
-                    f.write(f"RESULTS FOR HORIZON {horizon}\n")
-                    f.write("-" * 25 + "\n")
-
-                    model_results = result.get('model_results', {})
-                    if model_results:
-                        f.write(f"Test Loss: {model_results['test_loss']:.6f}\n")
-                        f.write(f"Test MAE: {model_results.get('test_mae', 'N/A')}\n")
-                        f.write(f"Training Time: {model_results['training_time']:.1f} seconds\n")
-                        f.write(f"Final Epoch: {model_results['final_epoch']}\n")
-
-                    f.write("\n")
-
-                # Pattern mapping (sample)
-                f.write("PATTERN MAPPING (Sample)\n")
-                f.write("-" * 22 + "\n")
-                sample_patterns = list(data_info['pattern_to_id'].items())[:20]
-                for pattern_name, pattern_id in sample_patterns:
-                    f.write(f"Pattern {pattern_id:2d}: {pattern_name}\n")
-                if len(data_info['pattern_to_id']) > 20:
-                    f.write(f"... and {len(data_info['pattern_to_id']) - 20} more patterns\n")
-                f.write("\n")
-
-                # Recommendations
-                f.write("RECOMMENDATIONS\n")
-                f.write("-" * 15 + "\n")
-                f.write("✅ N-BEATS training completed successfully\n")
-                f.write(f"✅ Successfully processed {len(data_info['category_distribution'])} pattern categories\n")
-                f.write(
-                    f"✅ Generated {sum(data_info['category_distribution'].values())} diverse time series patterns\n")
-                f.write("✅ Model provides efficient deployment with good generalization\n")
-
-                f.write("\n" + "=" * 80 + "\n")
-                f.write("End of Report\n")
-                f.write("=" * 80 + "\n")
-
-            logger.info(f"Detailed experiment report saved to {report_path}")
-
-        except Exception as e:
-            logger.warning(f"Failed to create detailed experiment report: {e}")
+        with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
+            json.dump(serializable_results, f, indent=4)
 
 
 def main() -> None:
-    """Run the N-BEATS experiment."""
-
+    """
+    Main function to configure and run the N-BEATS training experiment.
+    """
     config = NBeatsTrainingConfig(
-        experiment_name="nbeats",
-
+        experiment_name="nbeats_streaming",
         backcast_length=104,
-        forecast_length=4,
         forecast_horizons=[4],
-
-        stack_types=["trend", "seasonality", "generic"],
-        nb_blocks_per_stack=3,
+        stack_types=["trend", "seasonality"],
+        nb_blocks_per_stack=2,
         hidden_layer_units=256,
-        use_revin=True,
-
-        max_patterns_per_category=15,
-        min_data_length=2000,
-        balance_patterns=True,
-        samples_per_pattern=25000,
-
-        epochs=200,
-        batch_size=128,
-        learning_rate=1e-3,
-        dropout_rate=0.15,
+        use_revin=False,
+        max_patterns_per_category=100,
+        epochs=100,
+        batch_size=64,
+        steps_per_epoch=5000,
+        learning_rate=1e-5,
+        dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
-        gradient_clip_norm=1.0,
-        optimizer='adamw',
-        primary_loss="mae",
-
-        visualize_every_n_epochs=10,
-        save_interim_plots=True,
-        plot_top_k_patterns=6,
-        create_learning_curves=True,
-        create_prediction_plots=True,
-
-        # Data augmentation
-        multiplicative_noise_std=0.01,
-        additive_noise_std=0.001,
-        enable_multiplicative_noise=True,
-        enable_additive_noise=True
     )
-
-    ts_config = TimeSeriesConfig(
-        n_samples=20000,
-        random_seed=42,
-        default_noise_level=0.01
-    )
+    ts_config = TimeSeriesConfig(n_samples=10000, random_seed=42)
 
     try:
-        logger.info("🚀 Running N-BEATS Multi-Pattern Experiment")
         trainer = NBeatsTrainer(config, ts_config)
-        results = trainer.run_experiment()
-        logger.info(f"✅ Experiment completed: {results['results_dir']}")
+        trainer.run_experiment()
     except Exception as e:
-        logger.error(f"💥 Experiment failed: {e}", exc_info=True)
+        logger.error(f"Experiment failed: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

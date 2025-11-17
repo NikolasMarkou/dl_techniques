@@ -442,13 +442,13 @@ class NBeatsNet(keras.Model):
                 # Forward pass through block
                 backcast, forecast = block(residual, training=training)
 
-                # # Apply dropout to forecast if configured
-                # if (self.dropout_rate > 0.0 and
-                #         dropout_idx < len(self.dropout_layers)):
-                #     forecast = self.dropout_layers[dropout_idx](
-                #         forecast, training=training
-                #     )
-                #     dropout_idx += 1
+                # Apply dropout to forecast if configured
+                if (self.dropout_rate > 0.0 and
+                        dropout_idx < len(self.dropout_layers)):
+                    forecast = self.dropout_layers[dropout_idx](
+                        forecast, training=training
+                    )
+                    dropout_idx += 1
 
                 # Update residual (subtract backcast) and accumulate forecast
                 residual = residual - backcast
@@ -651,12 +651,10 @@ def create_nbeats_model(
                 # 3rd order polynomial (4 theta dimensions)
                 thetas_dim.append(4)
             elif stack_type == 'seasonality':
-                # FIX: Remove the restrictive upper limit (min(8,...))
                 # A reasonable number of harmonics can be half the forecast length, but capped for stability.
                 harmonics = min(forecast_length // 2, max(4, forecast_length // 3))
                 thetas_dim.append(harmonics * 2)
             elif stack_type == 'generic':
-                # FIX: Remove the restrictive upper limit (min(32,...))
                 theta_size = max(16, forecast_length * 2)
                 thetas_dim.append(theta_size)
             else:
@@ -690,7 +688,7 @@ def create_nbeats_model(
 
     # Setup default metrics if not provided
     if metrics is None:
-        metrics = ['mae', 'mse']
+        metrics = ['mae', 'mse', "mape"]
 
     # Setup optimizer with gradient clipping for training stability
     if isinstance(optimizer, str):
