@@ -483,15 +483,15 @@ class MultiPatternDataProcessor:
 
         # Create datasets from generators
         train_ds = tf.data.Dataset.from_generator(
-            lambda: self._training_generator(forecast_length),
+            generator=lambda: self._training_generator(forecast_length),
             output_signature=output_signature
         )
         val_ds = tf.data.Dataset.from_generator(
-            lambda: self._evaluation_generator(forecast_length, 'val'),
+            generator=lambda: self._evaluation_generator(forecast_length, 'val'),
             output_signature=output_signature
         )
         test_ds = tf.data.Dataset.from_generator(
-            lambda: self._evaluation_generator(forecast_length, 'test'),
+            generator=lambda: self._evaluation_generator(forecast_length, 'test'),
             output_signature=output_signature
         )
 
@@ -508,9 +508,7 @@ class MultiPatternDataProcessor:
         # Shuffle, batch, and apply augmentations to the training set
         train_ds = (
             train_ds
-            .shuffle(self.config.batch_size * 100)
             .batch(self.config.batch_size)
-            .shuffle(128)
         )
 
         if (self.config.enable_additive_noise or
@@ -991,7 +989,10 @@ def main() -> None:
         warmup_steps=1000,
         warmup_start_lr=1e-6,
     )
-    ts_config = TimeSeriesConfig(n_samples=1000, random_seed=42)
+    ts_config = TimeSeriesConfig(
+        n_samples=1000,
+        random_seed=42
+    )
 
     try:
         trainer = NBeatsTrainer(config, ts_config)
