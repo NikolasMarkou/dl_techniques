@@ -299,17 +299,10 @@ class MultiPatternDataProcessor:
         :param forecast_length: The length of the forecast horizon.
         :yield: A tuple containing the backcast and a tuple of (forecast, zero_target).
         """
-
-        # Target for the residual is a zero vector matching residual shape.
-        zeros_for_residual = np.zeros(
-            (self.config.backcast_length,), dtype=np.float32
-        )
-
         while True:
             pattern_name = random.choices(
                 self.weighted_patterns, self.weights, k=1
             )[0]
-            pattern_name = self.weighted_patterns[pattern_name]
             data = self.ts_generator.generate_task_data(pattern_name)
             train_size = int(self.config.train_ratio * len(data))
             train_data = data[:train_size]
@@ -328,10 +321,15 @@ class MultiPatternDataProcessor:
                     start_idx + self.config.backcast_length + forecast_length
                 ]
 
-                yield (
-                    backcast.astype(np.float32),
-                    (forecast.astype(np.float32), zeros_for_residual)
-                )
+                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
+                    # Target for the residual is a zero vector matching residual shape.
+                    zeros_for_residual = np.zeros(
+                        (self.config.backcast_length,), dtype=np.float32
+                    )
+                    yield (
+                        backcast.astype(np.float32),
+                        (forecast.astype(np.float32), zeros_for_residual)
+                    )
 
     def _evaluation_generator(
             self, forecast_length: int, split: str
