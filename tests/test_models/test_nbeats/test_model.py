@@ -71,7 +71,7 @@ class TestNBeatsNet:
         assert model.nb_blocks_per_stack == basic_config['nb_blocks_per_stack']
         assert model.thetas_dim == basic_config['thetas_dim']
         assert model.hidden_layer_units == basic_config['hidden_layer_units']
-        assert model.use_revin == basic_config['use_revin']
+        assert model.use_normalization == basic_config['use_revin']
         assert model.dropout_rate == basic_config['dropout_rate']
         assert model.input_dim == basic_config['input_dim']
         assert model.output_dim == basic_config['output_dim']
@@ -220,7 +220,7 @@ class TestNBeatsNet:
         assert reconstructed_model.forecast_length == original_model.forecast_length
         assert reconstructed_model.stack_types == original_model.stack_types
         assert reconstructed_model.thetas_dim == original_model.thetas_dim
-        assert reconstructed_model.use_revin == original_model.use_revin
+        assert reconstructed_model.use_normalization == original_model.use_normalization
 
     def test_gradients_flow(self, basic_config, sample_univariate_input):
         """Test gradient computation through the model."""
@@ -333,14 +333,14 @@ class TestNBeatsNet:
         """Test RevIN normalization functionality."""
         # Model with RevIN
         model_with_revin = NBeatsNet(**basic_config)
-        assert model_with_revin.use_revin is True
+        assert model_with_revin.use_normalization is True
         assert model_with_revin.global_revin is not None
 
         # Model without RevIN
         config_no_revin = basic_config.copy()
         config_no_revin['use_revin'] = False
         model_without_revin = NBeatsNet(**config_no_revin)
-        assert model_without_revin.use_revin is False
+        assert model_without_revin.use_normalization is False
         assert model_without_revin.global_revin is None
 
         # Both should produce valid outputs
@@ -406,7 +406,7 @@ class TestNBeatsFactory:
         assert model.forecast_length == 24
         assert model.stack_types == ['trend', 'seasonality']
         assert model.nb_blocks_per_stack == 3
-        assert model.use_revin is True
+        assert model.use_normalization is True
         assert model.hidden_layer_units == 256
 
         # Check model is compiled
@@ -440,7 +440,7 @@ class TestNBeatsFactory:
             nb_blocks_per_stack=4,
             thetas_dim=[32, 6],
             hidden_layer_units=512,
-            use_revin=False,
+            use_normalization=False,
             dropout_rate=0.2,
             learning_rate=1e-3,
             gradient_clip_norm=0.5
@@ -452,7 +452,7 @@ class TestNBeatsFactory:
         assert model.stack_types == ['generic', 'trend']
         assert model.thetas_dim == [32, 6]
         assert model.hidden_layer_units == 512
-        assert model.use_revin is False
+        assert model.use_normalization is False
         assert model.dropout_rate == 0.2
 
         # Check optimizer configuration

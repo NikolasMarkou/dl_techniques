@@ -17,6 +17,7 @@ models and time series analysis techniques.
 Key Features
 ------------
 * **Comprehensive Pattern Library**: 80+ predefined time series patterns
+* **Data Augmentation**: Includes time warping to increase data diversity.
 * **Domain-Specific Patterns**: Specialized generators for finance, weather,
   industrial, biomedical, and network domains
 * **Configurable Parameters**: Fully customizable generation parameters
@@ -122,6 +123,16 @@ Multi-Task Dataset Creation:
     ...         series = gen.generate_task_data(task_name)
     ...         task_data.append(series)
     ...     dataset[task_name] = np.array(task_data)
+
+Augmentation Usage:
+    >>> # Generate a base series
+    >>> base_series = generator.generate_task_data("trend_daily_seasonal")
+    >>>
+    >>> # Define and apply augmentations
+    >>> augmentations = [
+    ...     {"name": "time_warp", "n_knots": 4, "strength": 0.05},
+    ... ]
+    >>> augmented_series = generator.augment_series(base_series, augmentations)
 
 Integration with Deep Learning:
     >>> import keras
@@ -236,6 +247,7 @@ The chaotic systems implementations follow standard formulations:
 
 import numpy as np
 from dataclasses import dataclass, field
+from scipy.ndimage import gaussian_filter1d
 from typing import Dict, List, Tuple, Any, Optional
 
 # ---------------------------------------------------------------------
@@ -1123,6 +1135,89 @@ class TimeSeriesGenerator:
         return generator_map[pattern_type](**kwargs)
 
     # ========================================================================
+    # AUGMENTATION METHODS
+    # ========================================================================
+
+    def augment_series(
+            self,
+            series: np.ndarray,
+            augmentations: List[Dict[str, Any]]
+    ) -> np.ndarray:
+        """Apply a sequence of augmentations to a time series.
+
+        Args:
+            series: The input time series data of shape (n_samples, 1).
+            augmentations: A list of augmentation dictionaries. Each dictionary
+                           should have a "name" key and optional parameter keys.
+                           Example: [{"name": "time_warp", "n_knots": 4, "strength": 0.1}]
+
+        Returns:
+            The augmented time series.
+        """
+        augmented_series = series.copy()
+        dispatcher = {
+            "time_warp": self._augment_time_warp,
+            # Other augmentation methods can be registered here
+        }
+
+        for aug in augmentations:
+            aug_name = aug.pop("name", None)
+            if not aug_name or aug_name not in dispatcher:
+                raise ValueError(f"Unknown or unspecified augmentation: {aug_name}")
+
+            augmented_series = dispatcher[aug_name](augmented_series, **aug)
+
+        return augmented_series
+
+    def _augment_time_warp(
+            self,
+            series: np.ndarray,
+            n_knots: int = 4,
+            strength: float = 0.1
+    ) -> np.ndarray:
+        """Apply time warping to a time series using a smooth cubic spline.
+
+        Args:
+            series: The input time series data of shape (n_samples, 1).
+            n_knots: The number of knots for the cubic spline.
+            strength: The strength of the warping. Represents the standard
+                      deviation of the noise added to knots, relative to the
+                      average interval length.
+
+        Returns:
+            The time-warped series.
+        """
+        try:
+            from scipy.interpolate import CubicSpline
+        except ImportError:
+            raise ImportError("scipy is required for time warping. Please install it with 'pip install scipy'")
+
+        n_samples = len(series)
+        x_original = np.arange(n_samples)
+
+        # Define knots for the spline
+        x_knots = np.linspace(0, n_samples - 1, num=n_knots)
+
+        # Generate random perturbations for the knots
+        interval_length = (n_samples - 1) / (n_knots - 1) if n_knots > 1 else n_samples -1
+        noise = self.random_state.normal(loc=0, scale=interval_length * strength, size=n_knots)
+        y_knots = x_knots + noise
+
+        # Fix endpoints and ensure monotonicity
+        y_knots[0] = 0
+        y_knots[-1] = n_samples - 1
+        y_knots = np.sort(y_knots)
+
+        # Create the warping function (spline)
+        spline = CubicSpline(x_knots, y_knots)
+        warped_indices = spline(x_original)
+
+        # Resample the original series at the warped time indices
+        y_warped = np.interp(warped_indices, x_original, series.flatten())
+
+        return y_warped.reshape(-1, 1)
+
+    # ========================================================================
     # GENERATOR METHODS
     # ========================================================================
 
@@ -1876,9 +1971,7 @@ class TimeSeriesGenerator:
                             ecg[peak_idx - 20] = 0.2
                         if peak_idx + 40 < len(t):
                             ecg[peak_idx + 40] = 0.3
-
             # Smooth and add noise
-            from scipy.ndimage import gaussian_filter1d
             ecg = gaussian_filter1d(ecg, sigma=2)
             noise = self.random_state.normal(0, noise_level, len(t))
             y = ecg + noise

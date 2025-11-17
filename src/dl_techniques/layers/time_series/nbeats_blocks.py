@@ -68,7 +68,7 @@ from typing import Optional, Any, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
+from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
 
 # ---------------------------------------------------------------------
 
@@ -93,11 +93,19 @@ class NBeatsBlock(keras.layers.Layer):
            ↓
     Dense₁(units, activation)
            ↓
+    (Optional) ZeroCenteredRMSNorm
+           ↓
     Dense₂(units, activation)
+           ↓
+    (Optional) ZeroCenteredRMSNorm
            ↓
     Dense₃(units, activation)
            ↓
+    (Optional) ZeroCenteredRMSNorm
+           ↓
     Dense₄(units, activation)
+           ↓
+    (Optional) ZeroCenteredRMSNorm
            ↓
     ┌─────────────────┬─────────────────┐
     ↓                 ↓                 ↓
@@ -130,6 +138,8 @@ class NBeatsBlock(keras.layers.Layer):
         activation: String or callable, activation function for hidden layers.
             Defaults to 'silu' for better gradient flow than ReLU.
         use_bias: Boolean, whether to add bias to the dense layers. Defaults to True.
+        use_normalization: Boolean, whether to apply ZeroCenteredRMSNorm
+            after each dense layer in the stack. Defaults to True.
         kernel_initializer: String or Initializer, initializer for FC layer weights.
             Defaults to 'he_normal' for better gradient flow with SiLU.
         theta_initializer: String or Initializer, initializer for theta layers.
@@ -157,7 +167,8 @@ class NBeatsBlock(keras.layers.Layer):
             units=512,
             thetas_dim=32,
             backcast_length=168,  # 1 week hourly
-            forecast_length=24    # 1 day hourly
+            forecast_length=24,   # 1 day hourly
+            use_normalization=False # Disable normalization
         )
 
         inputs = keras.Input(shape=(168,))
@@ -182,8 +193,9 @@ class NBeatsBlock(keras.layers.Layer):
             backcast_length: int,
             forecast_length: int,
             share_weights: bool = False,
-            activation: Union[str, callable] = 'silu',
+            activation: Union[str, callable] = 'gelu',
             use_bias: bool = True,
+            use_normalization: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             theta_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -217,10 +229,20 @@ class NBeatsBlock(keras.layers.Layer):
         self.share_weights = share_weights
         self.activation = activation
         self.use_bias = use_bias
+        self.use_normalization = use_normalization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.theta_initializer = keras.initializers.get(theta_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.theta_regularizer = keras.regularizers.get(theta_regularizer)
+
+        # Conditionally create normalization layers
+        if self.use_normalization:
+            self.norm1 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
+            self.norm2 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
+            self.norm3 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
+            self.norm4 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
+        else:
+            self.norm1 = self.norm2 = self.norm3 = self.norm4 = None
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         self.dense1 = keras.layers.Dense(
@@ -314,9 +336,17 @@ class NBeatsBlock(keras.layers.Layer):
 
         # Pass through four fully connected layers
         x = self.dense1(inputs, training=training)
+        if self.use_normalization:
+            x = self.norm1(x)
         x = self.dense2(x, training=training)
+        if self.use_normalization:
+            x = self.norm2(x)
         x = self.dense3(x, training=training)
+        if self.use_normalization:
+            x = self.norm3(x)
         x = self.dense4(x, training=training)
+        if self.use_normalization:
+            x = self.norm4(x)
 
         # Generate theta parameters
         theta_b = self.theta_backcast(x, training=training)
@@ -391,6 +421,7 @@ class NBeatsBlock(keras.layers.Layer):
             'share_weights': self.share_weights,
             'activation': self.activation,
             'use_bias': self.use_bias,
+            'use_normalization': self.use_normalization,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'theta_initializer': keras.initializers.serialize(self.theta_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),

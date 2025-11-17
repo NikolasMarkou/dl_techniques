@@ -61,7 +61,6 @@ from typing import Dict, Optional, Union, Any
 
 from dl_techniques.utils.logger import logger
 
-
 # ---------------------------------------------------------------------
 # main classes
 # ---------------------------------------------------------------------
@@ -159,7 +158,7 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
         step_float = tf.cast(step, tf.float32)
         warmup_steps_float = tf.cast(self.warmup_steps, tf.float32)
 
-        # --- KEY FIX 1: Determine a FIXED target learning rate ---
+        # Determine a FIXED target learning rate
         # This is the learning rate the warmup should ramp up to.
         # It's the initial_learning_rate of the primary schedule (i.e., its value at step 0).
         target_learning_rate = self.primary_schedule(0)
@@ -172,7 +171,7 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
 
         # Logic for the post-warmup phase
         def primary_fn():
-            # --- KEY FIX 2: Adjust the step for the primary schedule ---
+            # Adjust the step for the primary schedule
             # The primary schedule should start its decay *after* the warmup is complete.
             # So, we pass it a step count that starts from 0 at the end of warmup.
             return self.primary_schedule(step - self.warmup_steps)
@@ -250,3 +249,5 @@ class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
             f"warmup_start_lr={self.warmup_start_lr}, "
             f"primary_schedule={self.primary_schedule.__class__.__name__})"
         )
+
+# ---------------------------------------------------------------------

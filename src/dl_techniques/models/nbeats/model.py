@@ -1,6 +1,6 @@
 import keras
 from keras import ops, layers, initializers, regularizers
-from typing import List, Tuple, Optional, Union, Any, Dict, Callable
+from typing import List, Tuple, Optional, Union, Any, Dict, Callable, final
 
 # ---------------------------------------------------------------------
 # local imports
@@ -10,8 +10,6 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.nbeats_blocks import (
     GenericBlock, TrendBlock, SeasonalityBlock
 )
-from dl_techniques.layers.time_series.revin import RevIN
-
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -19,7 +17,7 @@ class NBeatsNet(keras.Model):
     """
     Neural Basis Expansion Analysis for Time Series (N-BEATS) forecasting model.
 
-    This implementation follows modern Keras 3 patterns and includes proper RevIN
+    This implementation follows modern Keras 3 patterns and includes proper
     normalization that stores statistics internally for improved forecasting performance.
     The model uses specialized blocks (Generic, Trend, Seasonality) that implement
     the mathematical formulations specific to the N-BEATS architecture.
@@ -32,7 +30,7 @@ class NBeatsNet(keras.Model):
     ```
     Input(shape=[batch, backcast_length, features])
            ↓
-    RevIN Normalization (optional)
+    Normalization (optional)
            ↓
     Stack 1: [Block₁, Block₂, ..., Blockₙ] → (backcast₁, forecast₁)
            ↓ (residual = input - backcast₁)
@@ -42,9 +40,9 @@ class NBeatsNet(keras.Model):
            ↓
     Forecast Sum = Σ(forecasts)
            ↓
-    RevIN Denormalization (optional)
-           ↓
     Output Projection (if input_dim != output_dim)
+           ↓
+    Denormalization (optional)
            ↓
     Output(shape=[batch, forecast_length, output_features])
     ```
@@ -78,8 +76,7 @@ class NBeatsNet(keras.Model):
         share_weights_in_stack: Boolean, whether to share weights within each stack.
             Weight sharing reduces parameters but may limit expressiveness.
             Defaults to False.
-        use_revin: Boolean, whether to use RevIN normalization.
-            RevIN typically improves performance by 10-20% on real datasets.
+        use_normalization: Boolean, whether to use  normalization.
             Defaults to True.
         normalization_type: String, type of normalization for internal layers.
             Uses the normalization factory for consistency. Defaults to 'layer_norm'.
@@ -111,7 +108,6 @@ class NBeatsNet(keras.Model):
     Attributes:
         All constructor parameters are stored as instance attributes.
         blocks: List of lists containing the created N-BEATS blocks.
-        global_revin: RevIN normalization layer (if use_revin=True).
         output_projection: Dense layer for dimension projection (if needed).
         dropout_layers: List of dropout layers for regularization.
 
@@ -124,7 +120,7 @@ class NBeatsNet(keras.Model):
             stack_types=['trend', 'seasonality'],
             nb_blocks_per_stack=3,
             thetas_dim=[4, 8],  # 3rd order polynomial, 4 harmonics
-            use_revin=True
+            use_normalization=True
         )
 
         # Multivariate model with custom configuration
@@ -148,7 +144,7 @@ class NBeatsNet(keras.Model):
           Forecasting against Distribution Shift" ICLR 2022.
 
     Note:
-        This implementation uses stateful RevIN that stores normalization statistics
+        This implementation uses stateful normalization statistics
         internally, ensuring consistent normalization across training and inference
         without requiring external state management.
     """
@@ -163,13 +159,12 @@ class NBeatsNet(keras.Model):
             self,
             backcast_length: int,
             forecast_length: int,
-            stack_types: List[str] = ['trend', 'seasonality'],
+            stack_types: List[str] = ['trend', 'seasonality', 'generic'],
             nb_blocks_per_stack: int = 3,
             thetas_dim: List[int] = [4, 8],
             hidden_layer_units: int = 256,
             share_weights_in_stack: bool = False,
-            use_revin: bool = True,
-            normalization_type: str = 'layer_norm',
+            use_normalization: bool = True,
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             theta_regularizer: Optional[regularizers.Regularizer] = None,
             dropout_rate: float = 0.0,
@@ -196,8 +191,7 @@ class NBeatsNet(keras.Model):
         self.thetas_dim = list(thetas_dim)  # Create copy
         self.hidden_layer_units = hidden_layer_units
         self.share_weights_in_stack = share_weights_in_stack
-        self.use_revin = use_revin
-        self.normalization_type = normalization_type
+        self.use_normalization = use_normalization
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.theta_regularizer = regularizers.get(theta_regularizer)
         self.dropout_rate = dropout_rate
@@ -208,15 +202,11 @@ class NBeatsNet(keras.Model):
         self.use_bias = use_bias
 
         # CREATE sub-layers in __init__ (unbuilt)
-        # RevIN layer for normalization
-        if self.use_revin:
-            self.global_revin = RevIN(
-                num_features=self.input_dim,
-                affine=False,
-                name='global_revin'
-            )
+        # layer for normalization
+        if self.use_normalization:
+            self.normalize = True
         else:
-            self.global_revin = None
+            self.normalize = False
 
         # Output projection layer if input/output dims differ
         if self.input_dim != self.output_dim:
@@ -372,15 +362,6 @@ class NBeatsNet(keras.Model):
                 f"Input must be 2D or 3D, got {len(input_shape)}D: {input_shape}"
             )
 
-        # Build RevIN layer if used
-        if self.global_revin is not None:
-            # RevIN expects 3D input
-            if len(input_shape) == 2:
-                revin_input_shape = (input_shape[0], input_shape[1], 1)
-            else:
-                revin_input_shape = input_shape
-            self.global_revin.build(revin_input_shape)
-
         # Determine shape for block processing
         block_input_shape = (input_shape[0], self.backcast_length * self.input_dim)
 
@@ -410,7 +391,7 @@ class NBeatsNet(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass through the N-BEATS network."""
 
-        # Ensure input is 3D for RevIN processing
+        # Ensure input is 3D for processing
         if len(inputs.shape) == 2:
             inputs_3d = ops.expand_dims(inputs, axis=-1)
         else:
@@ -418,9 +399,11 @@ class NBeatsNet(keras.Model):
 
         batch_size = ops.shape(inputs_3d)[0]
 
-        # Apply RevIN normalization
-        if self.global_revin is not None:
-            normalized_input = self.global_revin(inputs_3d, training=training)
+        if self.normalize:
+            mean = keras.ops.mean(inputs_3d, axis=1, keepdims=True)
+            variance = keras.ops.var(inputs_3d, axis=1, keepdims=True)
+            stdev = keras.ops.sqrt(variance + 1e-5) + 1e-7
+            normalized_input = (inputs_3d - mean) / stdev
         else:
             normalized_input = inputs_3d
 
@@ -460,21 +443,18 @@ class NBeatsNet(keras.Model):
             (batch_size, self.forecast_length, self.input_dim)
         )
 
-        # Apply RevIN denormalization
-        if self.global_revin is not None:
-            denormalized_forecast = self.global_revin.denormalize(forecast_3d)
-        else:
-            denormalized_forecast = forecast_3d
-
         # Apply output projection if needed (maps from input_dim to output_dim)
         if self.output_projection is not None:
-            final_forecast = self.output_projection(
-                denormalized_forecast, training=training
+            forecast = self.output_projection(
+                forecast_3d, training=training
             )
         else:
-            final_forecast = denormalized_forecast
+            forecast = forecast_3d
 
-        return final_forecast
+        if self.normalize:
+            forecast = forecast * stdev + mean
+
+        return forecast
 
     def compute_output_shape(
             self,
@@ -495,8 +475,7 @@ class NBeatsNet(keras.Model):
             'thetas_dim': self.thetas_dim,
             'hidden_layer_units': self.hidden_layer_units,
             'share_weights_in_stack': self.share_weights_in_stack,
-            'use_revin': self.use_revin,
-            'normalization_type': self.normalization_type,
+            'use_normalization': self.use_normalization,
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'theta_regularizer': regularizers.serialize(self.theta_regularizer),
             'dropout_rate': self.dropout_rate,
@@ -538,7 +517,7 @@ def create_nbeats_model(
         nb_blocks_per_stack: int = 3,
         thetas_dim: Optional[List[int]] = None,
         hidden_layer_units: int = 256,
-        use_revin: bool = True,
+        use_normalization: bool = True,
         optimizer: Union[str, keras.optimizers.Optimizer] = 'adam',
         loss: Union[str, keras.losses.Loss] = 'mae',
         metrics: Optional[List[Union[str, keras.metrics.Metric]]] = None,
@@ -564,7 +543,7 @@ def create_nbeats_model(
     - Gradient clipping for training stability (essential for N-BEATS)
     - Performance warnings and recommendations
     - Sensible defaults optimized for time series forecasting
-    - RevIN normalization enabled by default for improved performance
+    - Normalization enabled by default for improved performance
 
     Args:
         backcast_length: Length of input sequence. Default: 96 (4x forecast).
@@ -581,8 +560,7 @@ def create_nbeats_model(
             - Generic: Moderate complexity based on forecast_length
         hidden_layer_units: Hidden units in each layer. Default: 256.
             Controls model capacity and computational cost.
-        use_revin: Whether to use RevIN normalization. Default: True.
-            RevIN typically improves performance by 10-20% on real datasets.
+        use_normalization: Whether to use normalization. Default: True.
         optimizer: Optimizer for training. Default: 'adam'.
             Can be string name or optimizer instance. Gradient clipping will be added.
         loss: Loss function. Default: 'mae'.
@@ -680,7 +658,7 @@ def create_nbeats_model(
         nb_blocks_per_stack=nb_blocks_per_stack,
         thetas_dim=thetas_dim,
         hidden_layer_units=hidden_layer_units,
-        use_revin=use_revin,
+        use_normalization=use_normalization,
         kernel_regularizer=kernel_regularizer,
         dropout_rate=dropout_rate,
         **kwargs
@@ -690,6 +668,7 @@ def create_nbeats_model(
     if metrics is None:
         metrics = ['mae', 'mse', "mape"]
 
+    keras.metrics.MeanAbsoluteError()
     # Setup optimizer with gradient clipping for training stability
     if isinstance(optimizer, str):
         optimizer_map = {
@@ -732,7 +711,7 @@ def create_nbeats_model(
     logger.info(f"  - Architecture: {len(stack_types)} stacks, {nb_blocks_per_stack} blocks each")
     logger.info(f"  - Sequence: {backcast_length} → {forecast_length} (ratio: {ratio:.1f})")
     logger.info(f"  - Theta dimensions: {thetas_dim}")
-    logger.info(f"  - RevIN normalization: {'✓' if use_revin else '✗'}")
+    logger.info(f"  - Normalization: {'✓' if use_normalization else '✗'}")
     logger.info(f"  - Hidden units: {hidden_layer_units}")
     if dropout_rate > 0.0:
         logger.info(f"  - Dropout: {dropout_rate}")
