@@ -277,7 +277,7 @@ class NBeatsNet(keras.Model):
 
         for stack_blocks in self.blocks:
             for block in stack_blocks:
-                backcast, forecast = block(residual, training=training)
+                backcast, forecast = block(keras.ops.stop_gradient(residual), training=training)
                 residual = residual - backcast
                 forecast_sum = forecast_sum + forecast
 
