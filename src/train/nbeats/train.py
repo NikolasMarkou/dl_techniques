@@ -182,7 +182,7 @@ class NBeatsTrainingConfig:
     # Regularization
     kernel_regularizer_l2: float = 1e-5
     reconstruction_loss_weight: float = 0.0
-    dropout_rate: float = 0.15
+    dropout_rate: float = 0.1
 
     # Pattern selection
     max_patterns: Optional[int] = None
@@ -961,7 +961,7 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        activation="gelu",
+        activation="relu",
         experiment_name="nbeats",
         backcast_length=104,
         forecast_horizons=[4],
@@ -969,7 +969,7 @@ def main() -> None:
         nb_blocks_per_stack=2,
         hidden_layer_units=128,
         use_normalization=True,
-        normalize_per_instance=False,
+        normalize_per_instance=True,
         max_patterns_per_category=100,
         epochs=100,
         batch_size=256,
