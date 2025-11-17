@@ -192,7 +192,10 @@ class NBeatsTrainingConfig:
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0
+        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
+        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
+        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
+        "regime": 1.2, "structural": 1.1
     })
 
     # Visualization configuration
@@ -957,10 +960,10 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        activation="relu",
+        activation="gelu",
         experiment_name="nbeats",
         backcast_length=104,
-        forecast_horizons=[12],
+        forecast_horizons=[4],
         stack_types=["trend", "seasonality"],
         nb_blocks_per_stack=1,
         hidden_layer_units=64,
