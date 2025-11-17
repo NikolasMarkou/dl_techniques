@@ -192,10 +192,7 @@ class NBeatsTrainingConfig:
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
-        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
-        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1
+        "trend": 1.0, "seasonal": 1.0, "composite": 1.2
     })
 
     # Visualization configuration
