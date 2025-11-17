@@ -964,7 +964,7 @@ def main() -> None:
         experiment_name="nbeats",
         backcast_length=104,
         forecast_horizons=[4],
-        stack_types=["trend", "seasonality"],
+        stack_types=["generic"],
         nb_blocks_per_stack=1,
         hidden_layer_units=64,
         use_normalization=True,
