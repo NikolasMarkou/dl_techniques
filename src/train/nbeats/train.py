@@ -299,37 +299,39 @@ class MultiPatternDataProcessor:
         :param forecast_length: The length of the forecast horizon.
         :yield: A tuple containing the backcast and a tuple of (forecast, zero_target).
         """
-        k = 0
+
         # Target for the residual is a zero vector matching residual shape.
         zeros_for_residual = np.zeros(
             (self.config.backcast_length,), dtype=np.float32
         )
 
         while True:
-            k = (k + 1) % len(self.weighted_patterns)
+            pattern_name = random.choices(
+                self.weighted_patterns, self.weights, k=1
+            )[0]
             pattern_name = self.weighted_patterns[pattern_name]
             data = self.ts_generator.generate_task_data(pattern_name)
             train_size = int(self.config.train_ratio * len(data))
             train_data = data[:train_size]
 
-            max_start_idx = abs(
+            max_start_idx = (
                 len(train_data) -
                 self.config.backcast_length - forecast_length
             )
+            if max_start_idx > 0:
+                start_idx = random.randint(0, max_start_idx)
+                backcast = train_data[
+                    start_idx: start_idx + self.config.backcast_length
+                ]
+                forecast = train_data[
+                    start_idx + self.config.backcast_length:
+                    start_idx + self.config.backcast_length + forecast_length
+                ]
 
-            start_idx = random.randint(0, max_start_idx)
-            backcast = train_data[
-                start_idx: start_idx + self.config.backcast_length
-            ]
-            forecast = train_data[
-                start_idx + self.config.backcast_length:
-                start_idx + self.config.backcast_length + forecast_length
-            ]
-
-            yield (
-                backcast.astype(np.float32),
-                (forecast.astype(np.float32), zeros_for_residual)
-            )
+                yield (
+                    backcast.astype(np.float32),
+                    (forecast.astype(np.float32), zeros_for_residual)
+                )
 
     def _evaluation_generator(
             self, forecast_length: int, split: str
