@@ -773,19 +773,34 @@ class NBeatsTrainer:
         return selected
 
     def create_model(self, forecast_length: int) -> NBeatsNet:
-        """Create and compile an N-BEATS Keras model with learning rate schedule.
+        """Create and compile an N-BEATS Keras model.
+
+        This method encapsulates model instantiation and compilation, separating
+        the architectural definition from the training configuration.
 
         :param forecast_length: The forecast horizon for the model.
         :type forecast_length: int
         :return: A compiled Keras model.
         :rtype: NBeatsNet
         """
+        # --- Step 1: Create the model architecture ---
         kernel_regularizer = (
             keras.regularizers.L2(self.config.kernel_regularizer_l2)
             if self.config.kernel_regularizer_l2 > 0 else None
         )
+        model = create_nbeats_model(
+            backcast_length=self.config.backcast_length,
+            forecast_length=forecast_length,
+            stack_types=self.config.stack_types,
+            nb_blocks_per_stack=self.config.nb_blocks_per_stack,
+            hidden_layer_units=self.config.hidden_layer_units,
+            use_normalization=self.config.use_normalization,
+            kernel_regularizer=kernel_regularizer,
+            dropout_rate=self.config.dropout_rate,
+            reconstruction_weight=self.config.reconstruction_loss_weight
+        )
 
-        # --- Learning Rate Schedule Setup ---
+        # --- Step 2: Set up the learning rate schedule ---
         if self.config.use_warmup:
             logger.info(
                 f"Using learning rate schedule with warmup. "
@@ -795,8 +810,7 @@ class NBeatsTrainer:
             )
             primary_schedule = keras.optimizers.schedules.ExponentialDecay(
                 initial_learning_rate=self.config.learning_rate,
-                decay_steps=100000,
-                decay_rate=1.0
+                decay_steps=100000, decay_rate=1.0, staircase=False
             )
             lr_schedule = WarmupSchedule(
                 warmup_steps=self.config.warmup_steps,
@@ -807,35 +821,48 @@ class NBeatsTrainer:
             logger.info(f"Using fixed learning rate: {self.config.learning_rate}")
             lr_schedule = self.config.learning_rate
 
-        # --- Loss Function Setup ---
-        # This is a tricky point. We dynamically instantiate the loss function
-        # based on the configuration. This allows us to easily switch between
-        # 'mase_loss' and other standard Keras losses without changing the code.
+        # --- Step 3: Instantiate the optimizer ---
+        optimizer_cls = keras.optimizers.get(self.config.optimizer).__class__
+        optimizer = optimizer_cls(
+            learning_rate=lr_schedule,
+            clipnorm=self.config.gradient_clip_norm
+        )
+        logger.info(f"Using optimizer: {optimizer.__class__.__name__}")
+
+        # --- Step 4: Set up loss functions and weights ---
         if self.config.primary_loss == 'mase_loss':
-            loss_instance = MASELoss(
+            primary_loss = MASELoss(
                 seasonal_periods=self.config.mase_seasonal_periods)
             logger.info(
                 "Using MASELoss with seasonal_periods="
                 f"{self.config.mase_seasonal_periods}")
         else:
-            loss_instance = self.config.primary_loss
-            logger.info(f"Using standard loss: {loss_instance}")
+            primary_loss = self.config.primary_loss
+            logger.info(f"Using standard loss: {primary_loss}")
 
-        return create_nbeats_model(
-            backcast_length=self.config.backcast_length,
-            forecast_length=forecast_length,
-            stack_types=self.config.stack_types,
-            nb_blocks_per_stack=self.config.nb_blocks_per_stack,
-            hidden_layer_units=self.config.hidden_layer_units,
-            use_normalization=self.config.use_normalization,
-            kernel_regularizer=kernel_regularizer,
-            dropout_rate=self.config.dropout_rate,
-            optimizer=self.config.optimizer,
-            loss=loss_instance,  # Pass the instantiated loss object
-            learning_rate=lr_schedule,
-            gradient_clip_norm=self.config.gradient_clip_norm,
-            reconstruction_weight=self.config.reconstruction_loss_weight
+        losses = [primary_loss]
+        loss_weights = [1.0]
+        if self.config.reconstruction_loss_weight > 0.0:
+            losses.append(keras.losses.MeanAbsoluteError(name="reconstruction_loss"))
+            loss_weights.append(self.config.reconstruction_loss_weight)
+        else:
+            # If no reconstruction, ignore the second model output.
+            losses.append(None)
+            loss_weights.append(0.0)
+
+        # --- Step 5: Compile the model ---
+        # Metrics for the two outputs: [forecast_metrics, residual_metrics]
+        # We only care about metrics on the forecast output.
+        metrics = [['mae', 'mse', 'mape'], []]
+
+        model.compile(
+            optimizer=optimizer,
+            loss=losses,
+            loss_weights=loss_weights,
+            metrics=metrics
         )
+
+        return model
 
     def run_experiment(self) -> Dict[str, Any]:
         """Execute the full training and evaluation experiment.
@@ -960,12 +987,12 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        activation="gelu",
+        activation="relu",
         experiment_name="nbeats",
         backcast_length=104,
         forecast_horizons=[4],
         stack_types=["generic"],
-        nb_blocks_per_stack=1,
+        nb_blocks_per_stack=3,
         hidden_layer_units=64,
         use_normalization=True,
         normalize_per_instance=True,
@@ -982,7 +1009,7 @@ def main() -> None:
         mase_seasonal_periods=1,
         # Enable and configure the warmup schedule
         use_warmup=True,
-        warmup_steps=1000,
+        warmup_steps=2000,
         warmup_start_lr=1e-6,
     )
     ts_config = TimeSeriesConfig(

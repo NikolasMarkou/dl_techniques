@@ -124,12 +124,6 @@ class NBeatsNet(keras.Model):
         self.use_bias = use_bias
         self.reconstruction_weight = reconstruction_weight
 
-        # Create sub-layers
-        if self.use_normalization:
-            self.normalize = True
-        else:
-            self.normalize = False
-
         self.output_projection = None
 
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
@@ -239,7 +233,7 @@ class NBeatsNet(keras.Model):
 
         batch_size = ops.shape(inputs_3d)[0]
 
-        if self.normalize:
+        if self.use_normalization:
             mean = keras.ops.mean(inputs_3d, axis=1, keepdims=True)
             variance = keras.ops.var(inputs_3d, axis=1, keepdims=True)
             stdev = keras.ops.sqrt(variance + 1e-5)
@@ -269,12 +263,7 @@ class NBeatsNet(keras.Model):
             (batch_size, self.forecast_length, self.input_dim)
         )
 
-        if self.output_projection is not None:
-            forecast = self.output_projection(forecast_3d, training=training)
-        else:
-            forecast = forecast_3d
-
-        if self.normalize:
+        if self.use_normalization:
             forecast = forecast * stdev + mean
 
         final_residual = residual
@@ -344,19 +333,14 @@ def create_nbeats_model(
         hidden_layer_units: int = 256,
         activation: str = "relu",
         use_normalization: bool = True,
-        optimizer: Union[str, keras.optimizers.Optimizer] = 'adam',
-        loss: Union[str, keras.losses.Loss] = 'mae',
-        metrics: Optional[List[Union[str, keras.metrics.Metric]]] = None,
-        learning_rate: float = 1e-4,
-        gradient_clip_norm: float = 1.0,
         reconstruction_weight: float = 0.0,
         **kwargs: Any
 ) -> NBeatsNet:
     """
-    Create and compile an N-BEATS model with optimal defaults.
+    Create an N-BEATS model instance with optimal defaults.
 
-    This factory simplifies model creation with sensible defaults, automatic
-    theta dimension calculation, and proper compilation with gradient clipping.
+    This factory simplifies model creation with sensible defaults and automatic
+    theta dimension calculation. It returns an un-compiled model instance.
 
     Args:
         backcast_length: Length of input sequence.
@@ -365,17 +349,13 @@ def create_nbeats_model(
         nb_blocks_per_stack: Number of blocks per stack.
         thetas_dim: Theta dimensions for each stack. Auto-calculated if None.
         hidden_layer_units: Hidden units in each layer.
+        activation: Activation function for hidden layers.
         use_normalization: Whether to use instance normalization.
-        optimizer: Optimizer for training.
-        loss: Loss function for the forecast.
-        metrics: List of metrics to track for the forecast.
-        learning_rate: Learning rate for optimizer.
-        gradient_clip_norm: Gradient clipping norm for stability.
         reconstruction_weight: Weight for reconstruction loss.
         **kwargs: Additional arguments passed to NBeatsNet constructor.
 
     Returns:
-        A compiled N-BEATS model ready for training.
+        An un-compiled N-BEATS model instance.
     """
     if thetas_dim is None:
         thetas_dim = []
@@ -401,47 +381,6 @@ def create_nbeats_model(
         **kwargs
     )
 
-    if metrics is None:
-        metrics = ['mae', 'mse', "mape"]
-
-    if isinstance(optimizer, str):
-        optimizer_cls = keras.optimizers.get(optimizer).__class__
-        opt_kwargs = {'learning_rate': learning_rate}
-        if gradient_clip_norm is not None:
-            opt_kwargs['clipnorm'] = gradient_clip_norm
-        optimizer = optimizer_cls(**opt_kwargs)
-    elif isinstance(optimizer, keras.optimizers.Optimizer):
-        if (gradient_clip_norm is not None and
-                hasattr(optimizer, 'clipnorm') and
-                optimizer.clipnorm is None):
-            optimizer.clipnorm = gradient_clip_norm
-
-    # Metrics for the two outputs: [forecast_metrics, residual_metrics]
-    # We only care about metrics on the forecast output.
-    metrics_for_outputs = [metrics, []]
-
-    if reconstruction_weight > 0.0:
-        # The model's call() returns (forecast, final_residual). We set up two
-        # losses: one for the forecast and one for the residual (to drive it to zero).
-        # The data pipeline must yield `y` as a tuple: (y_true, y_residual_target),
-        # where y_residual_target is a tensor of zeros.
-        model.compile(
-            optimizer=optimizer,
-            loss=[loss, keras.losses.MeanAbsoluteError(name="reconstruction_loss", reduction="mean")],
-            loss_weights=[1.0, reconstruction_weight],
-            metrics=metrics_for_outputs
-        )
-    else:
-        # For standard forecast-only training, we only care about the first output.
-        # We provide `None` as the loss for the second output (final_residual)
-        # so Keras ignores it.
-        model.compile(
-            optimizer=optimizer,
-            loss=[loss, None],
-            metrics=metrics_for_outputs
-        )
-
-
     ratio = backcast_length / forecast_length
     logger.info("Created N-BEATS model with configuration:")
     logger.info(
@@ -451,7 +390,5 @@ def create_nbeats_model(
     logger.info(f"  - Theta dimensions: {thetas_dim}")
     if reconstruction_weight > 0.0:
         logger.info(f"  - Reconstruction Loss Weight: {reconstruction_weight}")
-    logger.info(f"  - Optimizer: {optimizer.__class__.__name__}")
-    logger.info(f"  - Forecast Loss: {loss}")
 
     return model
