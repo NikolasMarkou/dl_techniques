@@ -974,7 +974,7 @@ def main() -> None:
         nb_blocks_per_stack=2,
         hidden_layer_units=64,
         use_normalization=False,
-        normalize_per_instance=True,
+        normalize_per_instance=False,
         max_patterns_per_category=100,
         epochs=100,
         batch_size=256,
