@@ -967,7 +967,7 @@ def main() -> None:
         stack_types=["trend", "seasonality"],
         nb_blocks_per_stack=1,
         hidden_layer_units=64,
-        use_normalization=False,
+        use_normalization=True,
         normalize_per_instance=True,
         max_patterns_per_category=100,
         epochs=100,
