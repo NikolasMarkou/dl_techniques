@@ -188,7 +188,7 @@ class NBeatsTrainingConfig:
     max_patterns: Optional[int] = None
     max_patterns_per_category: int = 10
     min_data_length: int = 2000
-    normalize_per_instance: bool = True
+    normalize_per_instance: bool = False
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -967,7 +967,8 @@ def main() -> None:
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=2,
         hidden_layer_units=128,
-        use_normalization=False,
+        use_normalization=True,
+        normalize_per_instance=False,
         max_patterns_per_category=100,
         epochs=100,
         batch_size=256,
