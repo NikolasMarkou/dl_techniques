@@ -167,7 +167,7 @@ class NBeatsTrainingConfig:
     epochs: int = 150
     batch_size: int = 128
     steps_per_epoch: int = 500
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adamw'
     # Default loss is now MASE. Can be overridden with another loss object or string.
@@ -966,23 +966,23 @@ def main() -> None:
         forecast_horizons=[12],
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=2,
-        hidden_layer_units=256,
+        hidden_layer_units=128,
         use_normalization=False,
         max_patterns_per_category=100,
         epochs=100,
         batch_size=256,
         steps_per_epoch=4000,
-        learning_rate=1e-4,
+        learning_rate=1e-5,
         dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
         # Enable reconstruction loss to force the model to explain the backcast.
-        reconstruction_loss_weight=0.5,
+        reconstruction_loss_weight=0.9,
         primary_loss="mae",
         mase_seasonal_periods=1,
         # Enable and configure the warmup schedule
         use_warmup=True,
         warmup_steps=1000,
-        warmup_start_lr=1e-6,
+        warmup_start_lr=1e-7,
     )
     ts_config = TimeSeriesConfig(n_samples=2000, random_seed=42)
 
