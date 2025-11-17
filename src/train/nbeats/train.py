@@ -195,11 +195,11 @@ class NBeatsTrainingConfig:
         "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
         "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
         "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1, "outliers": 1.0,
+        "regime": 1.2, "structural": 1.1
     })
 
     # Visualization configuration
-    visualize_every_n_epochs: int = 5
+    visualize_every_n_epochs: int = 1
     save_interim_plots: bool = True
     plot_top_k_patterns: int = 8
     create_learning_curves: bool = True
@@ -967,22 +967,22 @@ def main() -> None:
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=2,
         hidden_layer_units=128,
-        use_normalization=False,
+        use_normalization=True,
         max_patterns_per_category=100,
         epochs=100,
         batch_size=256,
         steps_per_epoch=4000,
-        learning_rate=1e-5,
+        learning_rate=1e-4,
         dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
         # Enable reconstruction loss to force the model to explain the backcast.
-        reconstruction_loss_weight=0.9,
-        primary_loss="mase_loss",
+        reconstruction_loss_weight=0.1,
+        primary_loss=keras.losses.MeanAbsoluteError(reduction="mean"),
         mase_seasonal_periods=1,
         # Enable and configure the warmup schedule
         use_warmup=True,
         warmup_steps=1000,
-        warmup_start_lr=1e-7,
+        warmup_start_lr=1e-6,
     )
     ts_config = TimeSeriesConfig(n_samples=1000, random_seed=42)
 
