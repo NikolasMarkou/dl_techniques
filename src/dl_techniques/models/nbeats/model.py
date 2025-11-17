@@ -91,7 +91,7 @@ class NBeatsNet(keras.Model):
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             theta_regularizer: Optional[regularizers.Regularizer] = None,
             dropout_rate: float = 0.0,
-            activation: Union[str, Callable] = 'silu',
+            activation: Union[str, Callable] = 'relu',
             kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
             input_dim: int = 1,
             output_dim: int = 1,
@@ -446,7 +446,7 @@ def create_nbeats_model(
             optimizer=optimizer,
             loss=[loss, keras.losses.MeanAbsoluteError(name="reconstruction_loss", reduction="mean")],
             loss_weights=[1.0, reconstruction_weight],
-            metrics=metrics_for_outputs # FIX: Use structured metrics
+            metrics=metrics_for_outputs
         )
     else:
         # For standard forecast-only training, we only care about the first output.
@@ -455,7 +455,7 @@ def create_nbeats_model(
         model.compile(
             optimizer=optimizer,
             loss=[loss, None],
-            metrics=metrics_for_outputs # FIX: Use structured metrics
+            metrics=metrics_for_outputs
         )
 
 

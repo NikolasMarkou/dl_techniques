@@ -961,7 +961,8 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        experiment_name="nbeats_with_recon",
+        activation="gelu",
+        experiment_name="nbeats",
         backcast_length=104,
         forecast_horizons=[4],
         stack_types=["trend", "seasonality", "generic"],

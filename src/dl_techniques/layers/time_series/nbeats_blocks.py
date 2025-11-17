@@ -68,7 +68,7 @@ from typing import Optional, Any, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
+from dl_techniques.layers.norms.rms_norm import RMSNorm
 
 # ---------------------------------------------------------------------
 
@@ -93,19 +93,19 @@ class NBeatsBlock(keras.layers.Layer):
            ↓
     Dense₁(units, activation)
            ↓
-    (Optional) ZeroCenteredRMSNorm
+    (Optional) RMSNorm
            ↓
     Dense₂(units, activation)
            ↓
-    (Optional) ZeroCenteredRMSNorm
+    (Optional) RMSNorm
            ↓
     Dense₃(units, activation)
            ↓
-    (Optional) ZeroCenteredRMSNorm
+    (Optional) RMSNorm
            ↓
     Dense₄(units, activation)
            ↓
-    (Optional) ZeroCenteredRMSNorm
+    (Optional) RMSNorm
            ↓
     ┌─────────────────┬─────────────────┐
     ↓                 ↓                 ↓
@@ -138,7 +138,7 @@ class NBeatsBlock(keras.layers.Layer):
         activation: String or callable, activation function for hidden layers.
             Defaults to 'silu' for better gradient flow than ReLU.
         use_bias: Boolean, whether to add bias to the dense layers. Defaults to True.
-        use_normalization: Boolean, whether to apply ZeroCenteredRMSNorm
+        use_normalization: Boolean, whether to apply RMSNorm
             after each dense layer in the stack. Defaults to True.
         kernel_initializer: String or Initializer, initializer for FC layer weights.
             Defaults to 'he_normal' for better gradient flow with SiLU.
@@ -193,7 +193,7 @@ class NBeatsBlock(keras.layers.Layer):
             backcast_length: int,
             forecast_length: int,
             share_weights: bool = False,
-            activation: Union[str, callable] = 'gelu',
+            activation: Union[str, callable] = 'relu',
             use_bias: bool = True,
             use_normalization: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
@@ -237,10 +237,10 @@ class NBeatsBlock(keras.layers.Layer):
 
         # Conditionally create normalization layers
         if self.use_normalization:
-            self.norm1 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
-            self.norm2 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
-            self.norm3 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
-            self.norm4 = ZeroCenteredRMSNorm(axis=-1, use_scale=False)
+            self.norm1 = RMSNorm(axis=-1, use_scale=False)
+            self.norm2 = RMSNorm(axis=-1, use_scale=False)
+            self.norm3 = RMSNorm(axis=-1, use_scale=False)
+            self.norm4 = RMSNorm(axis=-1, use_scale=False)
         else:
             self.norm1 = self.norm2 = self.norm3 = self.norm4 = None
 
