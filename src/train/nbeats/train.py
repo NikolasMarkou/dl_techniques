@@ -977,7 +977,7 @@ def main() -> None:
         kernel_regularizer_l2=1e-5,
         # Enable reconstruction loss to force the model to explain the backcast.
         reconstruction_loss_weight=0.9,
-        primary_loss="mae",
+        primary_loss="mase_loss",
         mase_seasonal_periods=1,
         # Enable and configure the warmup schedule
         use_warmup=True,
