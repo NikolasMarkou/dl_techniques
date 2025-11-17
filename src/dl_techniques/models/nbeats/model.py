@@ -264,10 +264,10 @@ class NBeatsNet(keras.Model):
         )
 
         if self.use_normalization:
-            forecast = forecast * stdev + mean
+            forecast_3d = forecast_3d * stdev + mean
 
         final_residual = residual
-        return forecast, final_residual
+        return forecast_3d, final_residual
 
     def compute_output_shape(
             self,
