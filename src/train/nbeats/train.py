@@ -963,7 +963,7 @@ def main() -> None:
     config = NBeatsTrainingConfig(
         experiment_name="nbeats_with_recon",
         backcast_length=104,
-        forecast_horizons=[12],
+        forecast_horizons=[4],
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=2,
         hidden_layer_units=128,
@@ -984,7 +984,7 @@ def main() -> None:
         warmup_steps=1000,
         warmup_start_lr=1e-7,
     )
-    ts_config = TimeSeriesConfig(n_samples=2000, random_seed=42)
+    ts_config = TimeSeriesConfig(n_samples=1000, random_seed=42)
 
     try:
         trainer = NBeatsTrainer(config, ts_config)
