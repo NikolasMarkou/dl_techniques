@@ -312,25 +312,25 @@ class MultiPatternDataProcessor:
             train_size = int(self.config.train_ratio * len(data))
             train_data = data[:train_size]
 
-            max_start_idx = (
+            max_start_idx = max(
                 len(train_data) -
                 self.config.backcast_length - forecast_length
-            )
-            if max_start_idx > 0:
-                start_idx = random.randint(0, max_start_idx)
-                backcast = train_data[
-                    start_idx: start_idx + self.config.backcast_length
-                ]
-                forecast = train_data[
-                    start_idx + self.config.backcast_length:
-                    start_idx + self.config.backcast_length + forecast_length
-                ]
+            , 0)
 
-                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    yield (
-                        backcast.astype(np.float32),
-                        (forecast.astype(np.float32), zeros_for_residual)
-                    )
+            start_idx = random.randint(0, max_start_idx)
+            backcast = train_data[
+                start_idx: start_idx + self.config.backcast_length
+            ]
+            forecast = train_data[
+                start_idx + self.config.backcast_length:
+                start_idx + self.config.backcast_length + forecast_length
+            ]
+
+            if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
+                yield (
+                    backcast.astype(np.float32),
+                    (forecast.astype(np.float32), zeros_for_residual)
+                )
 
     def _evaluation_generator(
             self, forecast_length: int, split: str
