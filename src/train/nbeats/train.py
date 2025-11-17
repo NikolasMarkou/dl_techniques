@@ -209,8 +209,8 @@ class NBeatsTrainingConfig:
     # Data augmentation configuration
     multiplicative_noise_std: float = 0.01
     additive_noise_std: float = 0.01
-    enable_multiplicative_noise: bool = True
-    enable_additive_noise: bool = True
+    enable_multiplicative_noise: bool = False
+    enable_additive_noise: bool = False
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
@@ -299,37 +299,37 @@ class MultiPatternDataProcessor:
         :param forecast_length: The length of the forecast horizon.
         :yield: A tuple containing the backcast and a tuple of (forecast, zero_target).
         """
+        k = 0
+        # Target for the residual is a zero vector matching residual shape.
+        zeros_for_residual = np.zeros(
+            (self.config.backcast_length,), dtype=np.float32
+        )
+
         while True:
-            pattern_name = random.choices(
-                self.weighted_patterns, self.weights, k=1
-            )[0]
+            k = (k + 1) % len(self.weighted_patterns)
+            pattern_name = self.weighted_patterns[pattern_name]
             data = self.ts_generator.generate_task_data(pattern_name)
             train_size = int(self.config.train_ratio * len(data))
             train_data = data[:train_size]
 
-            max_start_idx = (
+            max_start_idx = abs(
                 len(train_data) -
                 self.config.backcast_length - forecast_length
             )
-            if max_start_idx > 0:
-                start_idx = random.randint(0, max_start_idx)
-                backcast = train_data[
-                    start_idx: start_idx + self.config.backcast_length
-                ]
-                forecast = train_data[
-                    start_idx + self.config.backcast_length:
-                    start_idx + self.config.backcast_length + forecast_length
-                ]
 
-                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    # Target for the residual is a zero vector matching residual shape.
-                    zeros_for_residual = np.zeros(
-                        (self.config.backcast_length,), dtype=np.float32
-                    )
-                    yield (
-                        backcast.astype(np.float32),
-                        (forecast.astype(np.float32), zeros_for_residual)
-                    )
+            start_idx = random.randint(0, max_start_idx)
+            backcast = train_data[
+                start_idx: start_idx + self.config.backcast_length
+            ]
+            forecast = train_data[
+                start_idx + self.config.backcast_length:
+                start_idx + self.config.backcast_length + forecast_length
+            ]
+
+            yield (
+                backcast.astype(np.float32),
+                (forecast.astype(np.float32), zeros_for_residual)
+            )
 
     def _evaluation_generator(
             self, forecast_length: int, split: str
@@ -971,7 +971,7 @@ def main() -> None:
         stack_types=["trend", "seasonality"],
         nb_blocks_per_stack=1,
         hidden_layer_units=64,
-        use_normalization=False,
+        use_normalization=True,
         normalize_per_instance=True,
         max_patterns_per_category=100,
         epochs=100,
