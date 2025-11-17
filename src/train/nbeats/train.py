@@ -991,8 +991,8 @@ def main() -> None:
         backcast_length=104,
         forecast_horizons=[4],
         stack_types=["generic"],
-        nb_blocks_per_stack=3,
-        hidden_layer_units=64,
+        nb_blocks_per_stack=2,
+        hidden_layer_units=128,
         use_normalization=True,
         normalize_per_instance=True,
         max_patterns_per_category=100,
@@ -1008,7 +1008,7 @@ def main() -> None:
         mase_seasonal_periods=1,
         # Enable and configure the warmup schedule
         use_warmup=True,
-        warmup_steps=2000,
+        warmup_steps=10000,
         warmup_start_lr=1e-6,
     )
     ts_config = TimeSeriesConfig(
