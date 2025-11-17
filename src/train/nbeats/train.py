@@ -299,6 +299,11 @@ class MultiPatternDataProcessor:
         :param forecast_length: The length of the forecast horizon.
         :yield: A tuple containing the backcast and a tuple of (forecast, zero_target).
         """
+        # Target for the residual is a zero vector matching residual shape.
+        zeros_for_residual = np.zeros(
+            (self.config.backcast_length,), dtype=np.float32
+        )
+
         while True:
             pattern_name = random.choices(
                 self.weighted_patterns, self.weights, k=1
@@ -322,10 +327,6 @@ class MultiPatternDataProcessor:
                 ]
 
                 if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    # Target for the residual is a zero vector matching residual shape.
-                    zeros_for_residual = np.zeros(
-                        (self.config.backcast_length,), dtype=np.float32
-                    )
                     yield (
                         backcast.astype(np.float32),
                         (forecast.astype(np.float32), zeros_for_residual)
