@@ -361,6 +361,7 @@ def create_nbeats_model(
         nb_blocks_per_stack: int = 3,
         thetas_dim: Optional[List[int]] = None,
         hidden_layer_units: int = 256,
+        activation: str = "relu",
         use_normalization: bool = True,
         optimizer: Union[str, keras.optimizers.Optimizer] = 'adam',
         loss: Union[str, keras.losses.Loss] = 'mae',
@@ -407,6 +408,7 @@ def create_nbeats_model(
                 thetas_dim.append(max(16, forecast_length * 2))
 
     model = NBeatsNet(
+        activation=activation,
         backcast_length=backcast_length,
         forecast_length=forecast_length,
         stack_types=stack_types,

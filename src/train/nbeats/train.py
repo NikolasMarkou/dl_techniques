@@ -162,6 +162,7 @@ class NBeatsTrainingConfig:
     hidden_layer_units: int = 128
     use_normalization: bool = False
     use_bias: bool = False
+    activation: str = "relu"
 
     # Training configuration
     epochs: int = 150
