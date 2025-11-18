@@ -357,7 +357,14 @@ class MultiPatternDataProcessor:
                 num_parallel_calls=tf.data.AUTOTUNE
             )
 
-        train_ds = train_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        train_ds = (
+            train_ds.shuffle(
+                self.config.batch_size * 1000
+            )
+            .batch(self.config.batch_size)
+            .shuffle(128)
+            .prefetch(tf.data.AUTOTUNE)
+        )
         val_ds = val_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
         test_ds = test_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
@@ -390,9 +397,14 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         self.forecast_length = forecast_length
         self.save_dir = save_dir
         self.model_name = model_name
+        ## FIX START: Initialize history with explicit, named metrics
         self.training_history = {
-            'epoch': [], 'loss': [], 'val_loss': [], 'mae': [], 'val_mae': []
+            'epoch': [], 'lr': [],
+            'loss': [], 'val_loss': [],
+            'forecast_mae': [], 'val_forecast_mae': [],
+            'residual_mae': [], 'val_residual_mae': [],
         }
+        ## FIX END
         os.makedirs(save_dir, exist_ok=True)
         self.viz_test_data = self._create_viz_test_set()
 
@@ -450,17 +462,18 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         """Actions to perform at the end of each epoch."""
         logs = logs or {}
 
+        ## FIX START: Update history with new, clearly named metrics
         self.training_history['epoch'].append(epoch)
+        self.training_history['lr'].append(self.model.optimizer.learning_rate)
         self.training_history['loss'].append(logs.get('loss', 0.0))
         self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
-
-        mae_key = next((k for k in logs.keys() if 'mae' in k.lower() and 'val' not in k), None)
-        val_mae_key = next((k for k in logs.keys() if 'mae' in k.lower() and 'val' in k), None)
-
-        self.training_history['mae'].append(logs.get(mae_key, 0.0) if mae_key else 0.0)
-        self.training_history['val_mae'].append(
-            logs.get(val_mae_key, 0.0) if val_mae_key else 0.0
-        )
+        self.training_history['forecast_mae'].append(logs.get('forecast_mae', 0.0))
+        self.training_history['val_forecast_mae'].append(logs.get('val_forecast_mae', 0.0))
+        # Only append residual mae if it's being tracked (reconstruction is on)
+        if 'residual_mae' in logs:
+            self.training_history['residual_mae'].append(logs.get('residual_mae', 0.0))
+            self.training_history['val_residual_mae'].append(logs.get('val_residual_mae', 0.0))
+        ## FIX END
 
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
             logger.info(
@@ -482,36 +495,58 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
                 f"Failed to create interim plots for {self.model_name}: {e}"
             )
 
+    ## FIX START: Updated plotting for clearer, more comprehensive metrics
     def _plot_learning_curves(self, epoch: int) -> None:
-        """Plot and save the training and validation learning curves."""
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-        epochs = self.training_history['epoch']
+        """Plot and save comprehensive training and validation learning curves."""
+        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+        axes = axes.flatten()
+        epochs_range = self.training_history['epoch']
 
-        axes[0].plot(epochs, self.training_history['loss'], label='Training Loss')
-        axes[0].plot(
-            epochs, self.training_history['val_loss'], label='Validation Loss'
-        )
-        axes[0].set_title(f'Loss Curves (Epoch {epoch + 1})')
+        # Plot 1: Total Loss
+        axes[0].plot(epochs_range, self.training_history['loss'], label='Training Loss')
+        axes[0].plot(epochs_range, self.training_history['val_loss'], label='Validation Loss')
+        axes[0].set_title(f'Total Loss (Epoch {epoch + 1})')
         axes[0].set_xlabel('Epoch')
         axes[0].set_ylabel('Loss')
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
 
-        axes[1].plot(epochs, self.training_history['mae'], label='Training MAE')
-        axes[1].plot(
-            epochs, self.training_history['val_mae'], label='Validation MAE'
-        )
-        axes[1].set_title(f'MAE Curves (Epoch {epoch + 1})')
+        # Plot 2: Forecast MAE
+        axes[1].plot(epochs_range, self.training_history['forecast_mae'], label='Training Forecast MAE')
+        axes[1].plot(epochs_range, self.training_history['val_forecast_mae'], label='Validation Forecast MAE')
+        axes[1].set_title(f'Forecast MAE (Epoch {epoch + 1})')
         axes[1].set_xlabel('Epoch')
         axes[1].set_ylabel('MAE')
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
+
+        # Plot 3: Residual MAE (only if reconstruction is enabled)
+        if self.training_history['residual_mae']:
+            axes[2].plot(epochs_range, self.training_history['residual_mae'], label='Training Residual MAE')
+            axes[2].plot(epochs_range, self.training_history['val_residual_mae'], label='Validation Residual MAE')
+            axes[2].set_title(f'Residual MAE (Epoch {epoch + 1})')
+            axes[2].set_xlabel('Epoch')
+            axes[2].set_ylabel('MAE')
+        else:
+            axes[2].text(0.5, 0.5, 'Reconstruction Loss Disabled', ha='center', va='center')
+            axes[2].set_title('Residual MAE')
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+
+        # Plot 4: Learning Rate
+        axes[3].plot(epochs_range, self.training_history['lr'], label='Learning Rate')
+        axes[3].set_title(f'Learning Rate Schedule (Epoch {epoch + 1})')
+        axes[3].set_xlabel('Epoch')
+        axes[3].set_ylabel('LR')
+        axes[3].legend()
+        axes[3].grid(True, alpha=0.3)
 
         plt.tight_layout()
         plt.savefig(
             os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png')
         )
         plt.close()
+    ## FIX END
 
     def _plot_prediction_samples(self, epoch: int) -> None:
         """Plot and save prediction samples against true values."""
@@ -668,13 +703,22 @@ class NBeatsTrainer:
         else:
             forecast_loss = self.config.primary_loss
 
+        ## FIX START: Use explicitly named metrics for clear reporting
+        forecast_metrics = [
+            keras.metrics.MeanAbsoluteError(name="forecast_mae"),
+            keras.metrics.MeanSquaredError(name="forecast_mse"),
+        ]
+
         if self.config.reconstruction_loss_weight > 0.0:
             losses = [
                 forecast_loss,
-                keras.losses.MeanAbsoluteError(reduction="mean")
+                keras.losses.MeanAbsoluteError(reduction="mean", name="residual_loss")
             ]
             loss_weights = [1.0, self.config.reconstruction_loss_weight]
-            metrics = [['mae', 'mse'], []]
+            metrics = [
+                forecast_metrics,
+                [keras.metrics.MeanAbsoluteError(name="residual_mae")]
+            ]
             logger.info(
                 f"Using forecast loss + reconstruction loss "
                 f"(weight={self.config.reconstruction_loss_weight})"
@@ -682,8 +726,9 @@ class NBeatsTrainer:
         else:
             losses = [forecast_loss, None]
             loss_weights = None
-            metrics = [['mae', 'mse'], []]
+            metrics = [forecast_metrics, []]
             logger.info("Using forecast loss only (no reconstruction loss)")
+        ## FIX END
 
         model.compile(
             optimizer=optimizer,
@@ -731,7 +776,6 @@ class NBeatsTrainer:
 
         model_path = os.path.join(exp_dir, f'best_model_h{horizon}.keras')
 
-        ## FIX START ##: Removed ReduceLROnPlateau due to conflict with LearningRateSchedule
         callbacks = [
             keras.callbacks.EarlyStopping(
                 monitor='val_loss',
@@ -748,7 +792,6 @@ class NBeatsTrainer:
             performance_cb,
             keras.callbacks.TerminateOnNaN()
         ]
-        ## FIX END ##
 
         logger.info(
             f"Training with {self.config.steps_per_epoch} steps/epoch and "
@@ -766,23 +809,28 @@ class NBeatsTrainer:
         )
 
         logger.info("Evaluating on test set...")
-        test_results = model.evaluate(
+        test_results_list = model.evaluate(
             data_pipeline['test_ds'],
             steps=data_pipeline['test_steps'],
-            verbose=1
+            verbose=1,
+            return_dict=False # Ensure list output for zipping
         )
 
-        test_loss = test_results[1] if len(test_results) > 1 else test_results[0]
-        test_mae = test_results[3] if len(test_results) > 3 else None
+        ## FIX START: Robustly parse test results into a dictionary
+        test_metrics = dict(zip(model.metrics_names, test_results_list))
+        logger.info(f"Test Set Metrics: {test_metrics}")
 
         final_epoch = len(history.history['loss'])
 
-        return {
+        # Prepare final results dictionary
+        final_results = {
             'history': history.history,
-            'test_loss': float(test_loss),
-            'test_mae': float(test_mae) if test_mae is not None else None,
-            'final_epoch': final_epoch
+            'final_epoch': final_epoch,
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()}
         }
+        ## FIX END
+
+        return final_results
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
         """Save the final experiment results to a JSON file."""
@@ -796,9 +844,8 @@ class NBeatsTrainer:
             }
             serializable_results[h] = {
                 'history': history_serializable,
-                'test_loss': r['test_loss'],
-                'test_mae': r['test_mae'],
-                'final_epoch': r['final_epoch']
+                'final_epoch': r['final_epoch'],
+                'test_metrics': r['test_metrics']
             }
 
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
@@ -808,19 +855,19 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        experiment_name="nbeats_stable",
+        experiment_name="nbeats_stable_clear_metrics",
         activation="relu",
-        backcast_length=96,
-        forecast_horizons=[24],
-        stack_types=["trend", "seasonality"],
-        nb_blocks_per_stack=2,
-        hidden_layer_units=128,
+        backcast_length=104,
+        forecast_horizons=[12],
+        stack_types=["trend", "seasonality", "generic"],
+        nb_blocks_per_stack=3,
+        hidden_layer_units=256,
         use_normalization=True,
         normalize_per_instance=False,
         use_bias=True,
-        max_patterns_per_category=20,
-        epochs=100,
-        batch_size=64,
+        max_patterns_per_category=50,
+        epochs=200,
+        batch_size=128,
         steps_per_epoch=1000,
         learning_rate=1e-4,
         use_warmup=True,
@@ -833,7 +880,7 @@ def main() -> None:
         ),
         dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
-        reconstruction_loss_weight=0.5,
+        reconstruction_loss_weight=0.5, # Set > 0.0 to see residual metrics
         visualize_every_n_epochs=5,
         plot_top_k_patterns=6,
     )
