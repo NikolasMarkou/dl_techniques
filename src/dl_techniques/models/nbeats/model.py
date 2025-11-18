@@ -1,9 +1,16 @@
+"""
+N-BEATS: Neural Basis Expansion Analysis for Time Series Forecasting.
+
+This module implements the N-BEATS architecture following modern Keras 3 patterns
+with proper sub-layer building, serialization, and normalization support.
+"""
+
 import keras
 from keras import ops, layers, initializers, regularizers
 from typing import List, Tuple, Optional, Union, Any, Dict, Callable
 
 # ---------------------------------------------------------------------
-# local imports
+# Local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -20,63 +27,116 @@ class NBeatsNet(keras.Model):
     """
     Neural Basis Expansion Analysis for Time Series (N-BEATS) forecasting model.
 
-    This implementation follows modern Keras 3 patterns and includes proper
-    normalization, serialization, and an optional reconstruction loss for
-    regularization, forcing the model to fully explain the input signal.
+    This implementation follows modern Keras 3 patterns with proper normalization,
+    serialization, and optional reconstruction loss for regularization.
 
     **Intent**: Provide a production-ready N-BEATS implementation for time series
     forecasting with proper residual connections, normalization, and serialization
     support following modern Keras 3 best practices.
 
     **Architecture**:
-    The model processes the input through a series of stacks. Each block in a
-    stack produces a backcast and a forecast. The backcast is subtracted from
-    the input to form a residual, which is passed to the next block. Forecasts
-    from all blocks are summed to produce the final prediction.
+    The model processes input through stacks of blocks. Each block produces a
+    backcast (explanation of input) and forecast (prediction). The backcast is
+    subtracted from the input to form a residual for the next block. All forecasts
+    are summed to produce the final prediction.
+
+    **Stack Types**:
+    - Generic: Learned basis functions (fully flexible)
+    - Trend: Polynomial basis functions for trend patterns
+    - Seasonality: Fourier basis functions for periodic patterns
+
+    **Training Flow**:
+    Input → [Stack 1] → Residual → [Stack 2] → Residual → ... → Final Residual
+              ↓                      ↓
+           Forecast 1            Forecast 2  ...  → Sum → Final Forecast
 
     Args:
         backcast_length: Integer, length of the input time series window.
+            Recommended to be 3-5x larger than forecast_length.
         forecast_length: Integer, length of the forecast horizon.
-        stack_types: List of strings, types of stacks to use ('generic', 'trend',
-            'seasonality'). Default: ['trend', 'seasonality'].
-        nb_blocks_per_stack: Integer, number of blocks per stack. Defaults to 3.
-        thetas_dim: List of integers, dimensionality of theta for each stack.
-        hidden_layer_units: Integer, number of hidden units in each block.
-        share_weights_in_stack: Boolean, whether to share weights within stacks.
-        use_normalization: Boolean, whether to use instance normalization.
-        kernel_regularizer: Optional regularizer for block weights.
-        theta_regularizer: Optional regularizer for theta parameters.
-        dropout_rate: Float, dropout rate. Must be in [0, 1).
+        stack_types: List of strings, types of stacks to use. Valid options:
+            'generic', 'trend', 'seasonality'. Order matters - typically trend
+            before seasonality for interpretability. Defaults to
+            ['trend', 'seasonality', 'generic'].
+        nb_blocks_per_stack: Integer, number of blocks per stack. Each block
+            adds capacity and allows finer residual decomposition. Defaults to 3.
+        thetas_dim: List of integers, dimensionality of theta parameters for each
+            stack. Controls the complexity of basis functions. Must match length
+            of stack_types. Auto-calculated by factory if not provided.
+        hidden_layer_units: Integer, number of hidden units in each block's MLP.
+            Larger values increase capacity but also memory/compute. Defaults to 256.
+        share_weights_in_stack: Boolean, whether blocks in same stack share weights.
+            Weight sharing reduces parameters but may limit expressiveness.
+            Defaults to False.
+        use_normalization: Boolean, whether to use instance normalization on input.
+            Recommended for series with varying scales. Defaults to True.
+        kernel_regularizer: Optional regularizer for block weights. Use for
+            preventing overfitting on small datasets.
+        theta_regularizer: Optional regularizer for theta parameters. Controls
+            smoothness of learned basis functions.
+        dropout_rate: Float in [0, 1), dropout rate between blocks. Use 0.1-0.3
+            for regularization on small datasets. Defaults to 0.0.
         activation: String or callable, activation function for hidden layers.
+            'relu' or 'gelu' recommended. Defaults to 'relu'.
         kernel_initializer: String or Initializer, initializer for layer weights.
-        input_dim: Integer, dimensionality of input features. Defaults to 1.
-        output_dim: Integer, dimensionality of output features. Defaults to 1.
-        use_bias: Boolean, whether to use bias terms in linear layers.
-        reconstruction_weight: Float, weight for the reconstruction loss. If > 0,
-            a loss term is added to penalize the final residual, forcing the
-            model to explain the entire input signal. Defaults to 0.0 for
-            backward compatibility.
+            'he_normal' works well with ReLU. Defaults to 'he_normal'.
+        input_dim: Integer, dimensionality of input features. Use 1 for univariate
+            time series. Defaults to 1.
+        output_dim: Integer, dimensionality of output features. Use 1 for univariate
+            forecasting. Defaults to 1.
+        use_bias: Boolean, whether to use bias terms in linear layers. Defaults to True.
+        reconstruction_weight: Float, weight for reconstruction loss. If > 0, adds
+            penalty on final residual, forcing model to fully explain input signal.
+            Use 0.001-0.01 for interpretable decomposition. Defaults to 0.0.
         **kwargs: Additional keyword arguments for the Model base class.
 
     Input shape:
-        3D tensor: `(batch_size, backcast_length, input_dim)`.
-        2D tensor for univariate: `(batch_size, backcast_length)`.
+        - 3D tensor: ``(batch_size, backcast_length, input_dim)``
+        - 2D tensor for univariate: ``(batch_size, backcast_length)`` - automatically
+          expanded to 3D
 
     Output shape:
-        When calling the model (e.g., in `train_step` or `test_step`):
-            A tuple of two tensors:
-            - Forecast: `(batch_size, forecast_length, output_dim)`
-            - Final Residual: `(batch_size, backcast_length * input_dim)`
-        When calling `model.predict()`:
-            A single tensor (Keras automatically returns the first output):
-            - Forecast: `(batch_size, forecast_length, output_dim)`
+        When calling the model (e.g., in ``train_step`` or ``test_step``):
+            Tuple of two tensors:
+
+            - Forecast: ``(batch_size, forecast_length, output_dim)``
+            - Final Residual: ``(batch_size, backcast_length * input_dim)``
+
+        When calling ``model.predict()``:
+            Single tensor (Keras automatically returns first output):
+
+            - Forecast: ``(batch_size, forecast_length, output_dim)``
+
+    Example:
+        >>> # Create model
+        >>> model = NBeatsNet(
+        ...     backcast_length=96,
+        ...     forecast_length=24,
+        ...     stack_types=['trend', 'seasonality'],
+        ...     nb_blocks_per_stack=3,
+        ...     hidden_layer_units=256
+        ... )
+        >>>
+        >>> # Compile and train
+        >>> model.compile(optimizer='adam', loss='mse')
+        >>> model.fit(train_data, epochs=100)
+        >>>
+        >>> # Predict
+        >>> predictions = model.predict(test_data)
+
+    Note:
+        - For optimal performance, use backcast_length >= 3 × forecast_length
+        - The model returns (forecast, residual) during training but only forecast
+          during inference via predict()
+        - Use reconstruction_weight > 0 for interpretable signal decomposition
+        - Stack order matters: trend → seasonality → generic is recommended
     """
 
     # Valid stack type constants
-    GENERIC_BLOCK = 'generic'
-    TREND_BLOCK = 'trend'
-    SEASONALITY_BLOCK = 'seasonality'
-    VALID_STACK_TYPES = {GENERIC_BLOCK, TREND_BLOCK, SEASONALITY_BLOCK}
+    GENERIC_BLOCK: str = 'generic'
+    TREND_BLOCK: str = 'trend'
+    SEASONALITY_BLOCK: str = 'seasonality'
+    VALID_STACK_TYPES: set = {GENERIC_BLOCK, TREND_BLOCK, SEASONALITY_BLOCK}
 
     def __init__(
             self,
@@ -84,7 +144,7 @@ class NBeatsNet(keras.Model):
             forecast_length: int,
             stack_types: List[str] = ['trend', 'seasonality', 'generic'],
             nb_blocks_per_stack: int = 3,
-            thetas_dim: List[int] = [4, 8],
+            thetas_dim: List[int] = [4, 8, 16],
             hidden_layer_units: int = 256,
             share_weights_in_stack: bool = False,
             use_normalization: bool = True,
@@ -93,19 +153,28 @@ class NBeatsNet(keras.Model):
             dropout_rate: float = 0.0,
             activation: Union[str, Callable] = 'relu',
             kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
+            input_dim: int = 1,
+            output_dim: int = 1,
             use_bias: bool = True,
             reconstruction_weight: float = 0.0,
             **kwargs: Any
     ) -> None:
+        """
+        Initialize the N-BEATS model.
+
+        Creates all sub-layers in __init__ following modern Keras 3 patterns.
+        Sub-layers are built explicitly in build() for robust serialization.
+        """
         super().__init__(**kwargs)
 
         # Validate configuration
         self._validate_configuration(
             backcast_length, forecast_length, stack_types, nb_blocks_per_stack,
-            thetas_dim, hidden_layer_units, dropout_rate
+            thetas_dim, hidden_layer_units, dropout_rate, input_dim, output_dim
         )
 
         # Store ALL configuration parameters for serialization
+        # This is critical for get_config() / from_config() to work correctly
         self.backcast_length = backcast_length
         self.forecast_length = forecast_length
         self.stack_types = list(stack_types)
@@ -119,35 +188,52 @@ class NBeatsNet(keras.Model):
         self.dropout_rate = dropout_rate
         self.activation = activation
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.input_dim = 1
-        self.output_dim = 1
+        self.input_dim = input_dim
+        self.output_dim = output_dim
         self.use_bias = use_bias
         self.reconstruction_weight = reconstruction_weight
 
-        self.output_projection = None
-
+        # CREATE all sub-layers in __init__ (Golden Rule #1)
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
         self.dropout_layers: List[layers.Dropout] = []
         self._create_block_stacks()
 
     def _validate_configuration(
-            self, backcast_length: int, forecast_length: int, stack_types: List[str],
-            nb_blocks_per_stack: int, thetas_dim: List[int],
-            hidden_layer_units: int, dropout_rate: float
+            self,
+            backcast_length: int,
+            forecast_length: int,
+            stack_types: List[str],
+            nb_blocks_per_stack: int,
+            thetas_dim: List[int],
+            hidden_layer_units: int,
+            dropout_rate: float,
+            input_dim: int,
+            output_dim: int
     ) -> None:
-        """Validate model configuration parameters."""
+        """
+        Validate model configuration parameters.
+
+        Raises:
+            ValueError: If any parameter is invalid or inconsistent.
+        """
         if backcast_length <= 0:
             raise ValueError(f"backcast_length must be positive, got {backcast_length}")
         if forecast_length <= 0:
             raise ValueError(f"forecast_length must be positive, got {forecast_length}")
         if nb_blocks_per_stack <= 0:
             raise ValueError(
-                f"nb_blocks_per_stack must be positive, got {nb_blocks_per_stack}")
+                f"nb_blocks_per_stack must be positive, got {nb_blocks_per_stack}"
+            )
         if hidden_layer_units <= 0:
             raise ValueError(
-                f"hidden_layer_units must be positive, got {hidden_layer_units}")
+                f"hidden_layer_units must be positive, got {hidden_layer_units}"
+            )
         if not 0.0 <= dropout_rate < 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
 
         if len(stack_types) != len(thetas_dim):
             raise ValueError(
@@ -164,24 +250,35 @@ class NBeatsNet(keras.Model):
             if theta_dim <= 0:
                 raise ValueError(f"thetas_dim[{i}] must be positive, got {theta_dim}")
 
+        # Warn if backcast/forecast ratio is suboptimal
         ratio = backcast_length / forecast_length
         if ratio < 3.0:
             logger.warning(
-                f"backcast_length ({backcast_length}) / forecast_length ({forecast_length}) "
-                f"= {ratio:.1f}. For optimal performance, use ratio >= 3.0"
+                f"backcast_length ({backcast_length}) / forecast_length "
+                f"({forecast_length}) = {ratio:.1f}. For optimal performance, "
+                f"use ratio >= 3.0"
             )
 
     def _create_block_stacks(self) -> None:
-        """Create all N-BEATS block stacks."""
+        """
+        Create all N-BEATS block stacks.
+
+        Creates blocks and dropout layers in __init__ as required by modern
+        Keras 3 patterns. Blocks will be built later in build() method.
+        """
         dropout_counter = 0
         block_backcast_len = self.backcast_length * self.input_dim
-        block_forecast_len = self.forecast_length * self.input_dim
+        block_forecast_len = self.forecast_length * self.output_dim
 
         for stack_id, (stack_type, theta_dim) in enumerate(
-                zip(self.stack_types, self.thetas_dim)):
+                zip(self.stack_types, self.thetas_dim)
+        ):
             stack_blocks = []
+
             for block_id in range(self.nb_blocks_per_stack):
                 block_name = f"stack_{stack_id}_block_{block_id}_{stack_type}"
+
+                # Common block configuration
                 block_kwargs = {
                     'units': self.hidden_layer_units,
                     'thetas_dim': theta_dim,
@@ -196,23 +293,66 @@ class NBeatsNet(keras.Model):
                     'name': block_name
                 }
 
+                # Create appropriate block type
                 if stack_type == self.GENERIC_BLOCK:
                     block = GenericBlock(**block_kwargs)
                 elif stack_type == self.TREND_BLOCK:
                     block = TrendBlock(**block_kwargs)
-                else:  # Seasonality
+                else:  # SEASONALITY_BLOCK
                     block = SeasonalityBlock(**block_kwargs)
+
                 stack_blocks.append(block)
 
+                # Create dropout layer if needed
                 if self.dropout_rate > 0.0:
                     self.dropout_layers.append(
-                        layers.Dropout(self.dropout_rate, name=f"dropout_{dropout_counter}")
+                        layers.Dropout(
+                            self.dropout_rate,
+                            name=f"dropout_{dropout_counter}"
+                        )
                     )
                     dropout_counter += 1
+
             self.blocks.append(stack_blocks)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the model and all its sub-layers."""
+        """
+        Build the model and all its sub-layers.
+
+        This method is CRITICAL for proper serialization. It explicitly builds
+        all sub-layers (blocks) so that their weight variables exist before
+        weight restoration during model loading.
+
+        Following modern Keras 3 patterns from the complete guide:
+        - Sub-layers created in __init__ (already done)
+        - Sub-layers built in build() (this method)
+        - This ensures robust save/load cycles
+
+        Args:
+            input_shape: Shape of the input tensor.
+        """
+        # Expand 2D to 3D if needed to get consistent shape
+        if len(input_shape) == 2:
+            batch_size, seq_len = input_shape
+            build_shape = (batch_size, seq_len, self.input_dim)
+        else:
+            build_shape = input_shape
+
+        # Compute the shape that blocks will receive
+        batch_size = build_shape[0]
+        block_input_shape = (batch_size, self.backcast_length * self.input_dim)
+
+        # CRITICAL: Explicitly build all blocks
+        # This ensures weight variables exist before loading saved weights
+        for stack_blocks in self.blocks:
+            for block in stack_blocks:
+                block.build(block_input_shape)
+
+        # Build dropout layers
+        for dropout_layer in self.dropout_layers:
+            dropout_layer.build(block_input_shape)
+
+        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -223,9 +363,29 @@ class NBeatsNet(keras.Model):
         """
         Forward pass through the N-BEATS network.
 
-        Always returns a tuple of (forecast, final_residual). During inference,
-        `model.predict()` will automatically return only the first element.
+        Processes input through stacks of blocks, accumulating forecasts and
+        passing residuals forward. Applies normalization if enabled.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, backcast_length) or
+                (batch_size, backcast_length, input_dim).
+            training: Boolean flag indicating training vs inference mode.
+                Affects dropout behavior.
+
+        Returns:
+            Tuple of (forecast, final_residual):
+
+            - forecast: Predicted values of shape
+              (batch_size, forecast_length, output_dim)
+            - final_residual: Unexplained signal of shape
+              (batch_size, backcast_length * input_dim)
+
+        Note:
+            During inference with model.predict(), Keras automatically returns
+            only the first output (forecast). During training/validation, both
+            outputs are returned for potential reconstruction loss computation.
         """
+        # Expand 2D inputs to 3D for consistent processing
         if len(inputs.shape) == 2:
             inputs_3d = ops.expand_dims(inputs, axis=-1)
         else:
@@ -233,53 +393,97 @@ class NBeatsNet(keras.Model):
 
         batch_size = ops.shape(inputs_3d)[0]
 
+        # Apply instance normalization if enabled
         if self.use_normalization:
-            mean = keras.ops.mean(inputs_3d, axis=1, keepdims=True)
-            std = keras.ops.maximum(keras.ops.std(inputs_3d + 1e-5, axis=1, keepdims=True), 1e-7)
+            mean = ops.mean(inputs_3d, axis=1, keepdims=True)
+            std = ops.std(inputs_3d, axis=1, keepdims=True)
+            # Prevent division by zero
+            std = ops.maximum(std, 1e-7)
             normalized_input = (inputs_3d - mean) / std
         else:
             normalized_input = inputs_3d
+            mean = None
+            std = None
 
+        # Flatten for block processing
         processed_input = ops.reshape(
             normalized_input,
             (batch_size, self.backcast_length * self.input_dim)
         )
 
+        # Initialize residual and forecast accumulator
         residual = processed_input
         forecast_sum = ops.zeros(
-            (batch_size, self.forecast_length * self.input_dim),
+            (batch_size, self.forecast_length * self.output_dim),
             dtype=self.compute_dtype
         )
 
+        # Process through all stacks and blocks
+        dropout_idx = 0
         for stack_blocks in self.blocks:
             for block in stack_blocks:
+                # Block produces backcast (explanation) and forecast (prediction)
                 backcast, forecast = block(residual, training=training)
+
+                # Update residual: remove explained component
                 residual = residual - backcast
+
+                # Accumulate forecast
                 forecast_sum = forecast_sum + forecast
 
+                # Apply dropout if enabled
+                if self.dropout_rate > 0.0 and training:
+                    residual = self.dropout_layers[dropout_idx](
+                        residual,
+                        training=training
+                    )
+                    dropout_idx += 1
+
+        # Reshape forecast to 3D
         forecast_3d = ops.reshape(
             forecast_sum,
-            (batch_size, self.forecast_length, self.input_dim)
+            (batch_size, self.forecast_length, self.output_dim)
         )
 
+        # Denormalize forecast if normalization was applied
         if self.use_normalization:
             forecast_3d = (forecast_3d * std) + mean
 
-        final_residual = residual
-        return forecast_3d, final_residual
+        # Return both forecast and residual
+        # Keras predict() will return only forecast automatically
+        return forecast_3d, residual
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Compute output shape of the model (forecast, residual)."""
+        """
+        Compute output shapes for forecast and residual.
+
+        Args:
+            input_shape: Shape of input tensor.
+
+        Returns:
+            Tuple of (forecast_shape, residual_shape):
+
+            - forecast_shape: (batch_size, forecast_length, output_dim)
+            - residual_shape: (batch_size, backcast_length * input_dim)
+        """
         batch_size = input_shape[0]
         forecast_shape = (batch_size, self.forecast_length, self.output_dim)
         residual_shape = (batch_size, self.backcast_length * self.input_dim)
         return forecast_shape, residual_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return complete configuration for serialization."""
+        """
+        Return complete configuration for serialization.
+
+        Returns ALL __init__ parameters as required by modern Keras 3 patterns.
+        This enables proper save/load cycles via from_config().
+
+        Returns:
+            Dictionary containing all configuration parameters.
+        """
         config = super().get_config()
         config.update({
             'backcast_length': self.backcast_length,
@@ -295,6 +499,8 @@ class NBeatsNet(keras.Model):
             'dropout_rate': self.dropout_rate,
             'activation': self.activation,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'input_dim': self.input_dim,
+            'output_dim': self.output_dim,
             'use_bias': self.use_bias,
             'reconstruction_weight': self.reconstruction_weight,
         })
@@ -302,7 +508,18 @@ class NBeatsNet(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'NBeatsNet':
-        """Create model instance from configuration."""
+        """
+        Create model instance from configuration.
+
+        Deserializes complex objects (regularizers, initializers) before
+        passing to constructor.
+
+        Args:
+            config: Configuration dictionary from get_config().
+
+        Returns:
+            New NBeatsNet instance with same configuration.
+        """
         # Deserialize complex objects
         if config.get('kernel_regularizer') is not None:
             config['kernel_regularizer'] = regularizers.deserialize(
@@ -316,22 +533,25 @@ class NBeatsNet(keras.Model):
             config['kernel_initializer'] = initializers.deserialize(
                 config['kernel_initializer']
             )
+
         return cls(**config)
 
 
 # ---------------------------------------------------------------------
-# factory method
+# Factory method
 # ---------------------------------------------------------------------
+
 
 def create_nbeats_model(
         backcast_length: int = 96,
         forecast_length: int = 24,
-        stack_types: List[str] = ['trend', 'seasonality'],
+        stack_types: List[str] = ['trend', 'seasonality', 'generic'],
         nb_blocks_per_stack: int = 3,
         thetas_dim: Optional[List[int]] = None,
         hidden_layer_units: int = 256,
         activation: str = "relu",
         use_normalization: bool = True,
+        dropout_rate: float = 0.0,
         reconstruction_weight: float = 0.0,
         **kwargs: Any
 ) -> NBeatsNet:
@@ -341,53 +561,140 @@ def create_nbeats_model(
     This factory simplifies model creation with sensible defaults and automatic
     theta dimension calculation. It returns an un-compiled model instance.
 
+    **Usage Recommendations**:
+
+    - **Backcast/Forecast Ratio**: Use backcast_length >= 3 × forecast_length
+      for optimal performance. Larger ratios give more context but increase
+      memory usage.
+
+    - **Stack Selection**:
+
+      - Use ['trend'] for data with clear trends
+      - Use ['seasonality'] for periodic data
+      - Use ['trend', 'seasonality'] for both (recommended)
+      - Add 'generic' as catch-all for complex patterns
+
+    - **Hidden Units**: Scale with data complexity:
+
+      - 128-256 for simple univariate series
+      - 256-512 for complex multivariate series
+      - Larger values increase capacity but require more data
+
+    - **Regularization**: For small datasets, use:
+
+      - dropout_rate: 0.1-0.3
+      - reconstruction_weight: 0.001-0.01
+
     Args:
-        backcast_length: Length of input sequence.
-        forecast_length: Length of forecast sequence.
-        stack_types: Types of stacks to use.
-        nb_blocks_per_stack: Number of blocks per stack.
-        thetas_dim: Theta dimensions for each stack. Auto-calculated if None.
-        hidden_layer_units: Hidden units in each layer.
-        activation: Activation function for hidden layers.
+        backcast_length: Length of input sequence. Defaults to 96.
+        forecast_length: Length of forecast sequence. Defaults to 24.
+        stack_types: Types of stacks to use. Defaults to
+            ['trend', 'seasonality', 'generic'].
+        nb_blocks_per_stack: Number of blocks per stack. More blocks increase
+            capacity but also training time. Defaults to 3.
+        thetas_dim: Theta dimensions for each stack. Auto-calculated if None:
+
+            - Trend: 4 (cubic polynomial)
+            - Seasonality: 2 × min(forecast_length // 2, 16) (Fourier harmonics)
+            - Generic: max(16, forecast_length × 2)
+        hidden_layer_units: Hidden units in each layer. Defaults to 256.
+        activation: Activation function. 'relu' or 'gelu' recommended.
+            Defaults to 'relu'.
         use_normalization: Whether to use instance normalization.
-        reconstruction_weight: Weight for reconstruction loss.
+            Recommended for series with varying scales. Defaults to True.
+        dropout_rate: Dropout rate for regularization. Use 0.1-0.3 for small
+            datasets. Defaults to 0.0.
+        reconstruction_weight: Weight for reconstruction loss. Use 0.001-0.01
+            for interpretable decomposition. Defaults to 0.0.
         **kwargs: Additional arguments passed to NBeatsNet constructor.
 
     Returns:
-        An un-compiled N-BEATS model instance.
+        Un-compiled N-BEATS model instance ready for compilation and training.
+
+    Example:
+        >>> # Create model with defaults
+        >>> model = create_nbeats_model(
+        ...     backcast_length=96,
+        ...     forecast_length=24
+        ... )
+        >>>
+        >>> # Compile and train
+        >>> model.compile(
+        ...     optimizer='adam',
+        ...     loss='mse',
+        ...     metrics=['mae']
+        ... )
+        >>> model.fit(train_data, epochs=100)
+        >>>
+        >>> # Custom configuration for complex series
+        >>> model = create_nbeats_model(
+        ...     backcast_length=168,  # 1 week
+        ...     forecast_length=24,    # 1 day
+        ...     stack_types=['trend', 'seasonality', 'generic'],
+        ...     hidden_layer_units=512,
+        ...     dropout_rate=0.2,
+        ...     reconstruction_weight=0.01
+        ... )
+
+    Note:
+        The function logs the created configuration for verification. Check
+        console output to ensure proper setup, especially the backcast/forecast
+        ratio and theta dimensions.
     """
+    # Auto-calculate theta dimensions if not provided
     if thetas_dim is None:
         thetas_dim = []
         for stack_type in stack_types:
             if stack_type == 'trend':
-                thetas_dim.append(4)  # 3rd order polynomial
+                # 4 parameters = cubic polynomial (degree 3)
+                thetas_dim.append(4)
             elif stack_type == 'seasonality':
+                # Fourier harmonics: limited by forecast length and max harmonics
                 harmonics = min(forecast_length // 2, 16)
-                thetas_dim.append(harmonics * 2)
+                thetas_dim.append(harmonics * 2)  # sin + cos for each harmonic
             else:  # 'generic'
+                # Generic needs enough parameters for flexible basis
                 thetas_dim.append(max(16, forecast_length * 2))
 
+    # Create model instance
     model = NBeatsNet(
-        activation=activation,
         backcast_length=backcast_length,
         forecast_length=forecast_length,
         stack_types=stack_types,
         nb_blocks_per_stack=nb_blocks_per_stack,
         thetas_dim=thetas_dim,
         hidden_layer_units=hidden_layer_units,
+        activation=activation,
         use_normalization=use_normalization,
+        dropout_rate=dropout_rate,
         reconstruction_weight=reconstruction_weight,
         **kwargs
     )
 
+    # Log configuration
     ratio = backcast_length / forecast_length
     logger.info("Created N-BEATS model with configuration:")
     logger.info(
-        f"  - Architecture: {len(stack_types)} stacks, {nb_blocks_per_stack} blocks each"
+        f"  - Architecture: {len(stack_types)} stacks, "
+        f"{nb_blocks_per_stack} blocks each"
     )
-    logger.info(f"  - Sequence: {backcast_length} -> {forecast_length} (ratio: {ratio:.1f})")
+    logger.info(
+        f"  - Sequence: {backcast_length} → {forecast_length} "
+        f"(ratio: {ratio:.1f})"
+    )
+    logger.info(f"  - Stack types: {stack_types}")
     logger.info(f"  - Theta dimensions: {thetas_dim}")
+    logger.info(f"  - Hidden units: {hidden_layer_units}")
+
+    if dropout_rate > 0.0:
+        logger.info(f"  - Dropout: {dropout_rate}")
     if reconstruction_weight > 0.0:
-        logger.info(f"  - Reconstruction Loss Weight: {reconstruction_weight}")
+        logger.info(f"  - Reconstruction weight: {reconstruction_weight}")
+
+    if ratio < 3.0:
+        logger.warning(
+            f"  ⚠ Backcast/forecast ratio is {ratio:.1f}. "
+            f"Consider increasing to >= 3.0 for better performance."
+        )
 
     return model
