@@ -448,9 +448,9 @@ class NBeatsNet(keras.Model):
         # Denormalize forecast if normalization was applied
         if self.use_normalization:
             forecast_3d = (forecast_3d * std) + mean
+            residual = residual * std
 
         # Return both forecast and residual
-        # Keras predict() will return only forecast automatically
         return forecast_3d, residual
 
     def compute_output_shape(

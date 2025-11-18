@@ -177,7 +177,7 @@ class MultiPatternDataProcessor:
 
     def _training_generator(
         self, forecast_length: int
-    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+    ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
         """Create an infinite generator for training data."""
         while True:
             pattern_name = random.choices(
@@ -203,16 +203,22 @@ class MultiPatternDataProcessor:
                 start_idx + self.config.backcast_length + forecast_length
             ]
 
-            yield (
-                backcast.astype(np.float32).reshape(-1, 1),
-                forecast.astype(np.float32).reshape(-1, 1)
-            )
+            backcast_out = backcast.astype(np.float32).reshape(-1, 1)
+            forecast_out = forecast.astype(np.float32).reshape(-1, 1)
+
+            if self.config.reconstruction_loss_weight > 0.0:
+                residual_target = np.zeros(
+                    (self.config.backcast_length,), dtype=np.float32
+                )
+                yield backcast_out, (forecast_out, residual_target)
+            else:
+                yield backcast_out, forecast_out
 
     def _evaluation_generator(
             self,
             forecast_length: int,
             split: str
-    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+    ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
         """Create an infinite repeating generator for validation or test data."""
         if split == 'val':
             start_ratio = self.config.train_ratio
@@ -223,7 +229,6 @@ class MultiPatternDataProcessor:
         else:
             raise ValueError("Split must be 'val' or 'test'")
 
-        # Collect all sequences once
         all_sequences = []
         for pattern_name in self.selected_patterns:
             data = self.ts_generator.generate_task_data(pattern_name)
@@ -237,21 +242,33 @@ class MultiPatternDataProcessor:
                 forecast = split_data[
                     i + self.config.backcast_length: i + seq_len
                 ]
-                all_sequences.append((
-                    backcast.astype(np.float32).reshape(-1, 1),
-                    forecast.astype(np.float32).reshape(-1, 1)
-                ))
+                backcast_out = backcast.astype(np.float32).reshape(-1, 1)
+                forecast_out = forecast.astype(np.float32).reshape(-1, 1)
+
+                if self.config.reconstruction_loss_weight > 0.0:
+                    residual_target = np.zeros(
+                        (self.config.backcast_length,), dtype=np.float32
+                    )
+                    all_sequences.append(
+                        (backcast_out, (forecast_out, residual_target))
+                    )
+                else:
+                    all_sequences.append((backcast_out, forecast_out))
 
         if not all_sequences:
             logger.warning(f"No sequences found for {split} split!")
-            # Return dummy data to avoid errors
             dummy_backcast = np.zeros((self.config.backcast_length, 1), dtype=np.float32)
             dummy_forecast = np.zeros((forecast_length, 1), dtype=np.float32)
             while True:
-                yield (dummy_backcast, dummy_forecast)
+                if self.config.reconstruction_loss_weight > 0.0:
+                    dummy_residual = np.zeros(
+                        (self.config.backcast_length,), dtype=np.float32
+                    )
+                    yield dummy_backcast, (dummy_forecast, dummy_residual)
+                else:
+                    yield dummy_backcast, dummy_forecast
         else:
             logger.info(f"Created {len(all_sequences)} sequences for {split} split")
-            # Infinite loop through sequences
             idx = 0
             while True:
                 yield all_sequences[idx]
@@ -296,18 +313,26 @@ class MultiPatternDataProcessor:
 
     def prepare_datasets(self, forecast_length: int) -> Dict[str, Any]:
         """Create the complete tf.data pipeline for a given forecast horizon."""
-        output_signature = (
-            tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
-            tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32)
-        )
+        if self.config.reconstruction_loss_weight > 0.0:
+            logger.info("Adapting data pipeline for reconstruction loss.")
+            output_signature = (
+                tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
+                (
+                    tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32),
+                    tf.TensorSpec(shape=(self.config.backcast_length,), dtype=tf.float32)
+                )
+            )
+        else:
+            output_signature = (
+                tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32)
+            )
 
-        # Create datasets from generators
         train_ds = tf.data.Dataset.from_generator(
             generator=lambda: self._training_generator(forecast_length),
             output_signature=output_signature
         )
 
-        # CRITICAL FIX: Evaluation generators are now infinite
         val_ds = tf.data.Dataset.from_generator(
             generator=lambda: self._evaluation_generator(forecast_length, 'val'),
             output_signature=output_signature
@@ -317,7 +342,6 @@ class MultiPatternDataProcessor:
             output_signature=output_signature
         )
 
-        # Apply per-instance normalization if configured
         if self.config.normalize_per_instance:
             logger.info("Applying per-instance standardization to all datasets.")
             train_ds = train_ds.map(
@@ -333,7 +357,6 @@ class MultiPatternDataProcessor:
                 num_parallel_calls=tf.data.AUTOTUNE
             )
 
-        # Batch and prefetch
         train_ds = train_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
         val_ds = val_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
         test_ds = test_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
@@ -431,7 +454,6 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         self.training_history['loss'].append(logs.get('loss', 0.0))
         self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
 
-        # Handle different metric naming conventions
         mae_key = next((k for k in logs.keys() if 'mae' in k.lower() and 'val' not in k), None)
         val_mae_key = next((k for k in logs.keys() if 'mae' in k.lower() and 'val' in k), None)
 
@@ -498,12 +520,11 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
         test_x, test_y = self.viz_test_data
 
-        # Handle tuple output from model
         predictions_tuple = self.model(test_x, training=False)
         if isinstance(predictions_tuple, tuple):
-            predictions = predictions_tuple[0]
+            predictions = predictions_tuple[0].numpy()
         else:
-            predictions = predictions_tuple
+            predictions = predictions_tuple.numpy()
 
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
         n_cols = 3
@@ -531,7 +552,6 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             ax.legend()
             ax.grid(True, alpha=0.3)
 
-        # Turn off empty subplots
         for j in range(num_plots, len(axes)):
             axes[j].axis('off')
 
@@ -591,14 +611,12 @@ class NBeatsTrainer:
 
     def create_model(self, forecast_length: int) -> NBeatsNet:
         """Create and compile an N-BEATS Keras model."""
-        # Create kernel regularizer if needed
         kernel_regularizer = None
         if self.config.kernel_regularizer_l2 > 0:
             kernel_regularizer = keras.regularizers.L2(
                 self.config.kernel_regularizer_l2
             )
 
-        # Create model
         model = create_nbeats_model(
             backcast_length=self.config.backcast_length,
             forecast_length=forecast_length,
@@ -612,7 +630,6 @@ class NBeatsTrainer:
             reconstruction_weight=self.config.reconstruction_loss_weight
         )
 
-        # Set up learning rate schedule
         if self.config.use_warmup:
             logger.info(
                 f"Using learning rate schedule with warmup. "
@@ -634,7 +651,6 @@ class NBeatsTrainer:
             logger.info(f"Using fixed learning rate: {self.config.learning_rate}")
             lr_schedule = self.config.learning_rate
 
-        # Create optimizer
         optimizer_cls = keras.optimizers.get(self.config.optimizer).__class__
         optimizer = optimizer_cls(
             learning_rate=lr_schedule,
@@ -642,7 +658,6 @@ class NBeatsTrainer:
         )
         logger.info(f"Using optimizer: {optimizer.__class__.__name__}")
 
-        # Configure loss
         if isinstance(self.config.primary_loss, str):
             if self.config.primary_loss == 'mase_loss':
                 forecast_loss = MASELoss(
@@ -653,28 +668,28 @@ class NBeatsTrainer:
         else:
             forecast_loss = self.config.primary_loss
 
-        # Configure losses for two outputs
         if self.config.reconstruction_loss_weight > 0.0:
             losses = [
                 forecast_loss,
-                keras.losses.MeanSquaredError()
+                keras.losses.MeanAbsoluteError(reduction="mean")
             ]
             loss_weights = [1.0, self.config.reconstruction_loss_weight]
+            metrics = [['mae', 'mse'], []]
             logger.info(
                 f"Using forecast loss + reconstruction loss "
                 f"(weight={self.config.reconstruction_loss_weight})"
             )
         else:
             losses = [forecast_loss, None]
-            loss_weights = [1.0, 0.0]
+            loss_weights = None
+            metrics = [['mae', 'mse'], []]
             logger.info("Using forecast loss only (no reconstruction loss)")
 
-        # Compile model
         model.compile(
             optimizer=optimizer,
             loss=losses,
             loss_weights=loss_weights,
-            metrics=[['mae', 'mse'], []]
+            metrics=metrics
         )
 
         return model
@@ -705,7 +720,6 @@ class NBeatsTrainer:
         """Train and evaluate a single model for a specific horizon."""
         model = self.create_model(horizon)
 
-        # Build model to initialize weights
         model.build((None, self.config.backcast_length, 1))
 
         logger.info(f"Model created with {model.count_params():,} parameters")
@@ -717,18 +731,12 @@ class NBeatsTrainer:
 
         model_path = os.path.join(exp_dir, f'best_model_h{horizon}.keras')
 
+        ## FIX START ##: Removed ReduceLROnPlateau due to conflict with LearningRateSchedule
         callbacks = [
             keras.callbacks.EarlyStopping(
                 monitor='val_loss',
                 patience=30,
                 restore_best_weights=True,
-                verbose=1
-            ),
-            keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=10,
-                min_lr=1e-7,
                 verbose=1
             ),
             keras.callbacks.ModelCheckpoint(
@@ -740,6 +748,7 @@ class NBeatsTrainer:
             performance_cb,
             keras.callbacks.TerminateOnNaN()
         ]
+        ## FIX END ##
 
         logger.info(
             f"Training with {self.config.steps_per_epoch} steps/epoch and "
@@ -763,7 +772,6 @@ class NBeatsTrainer:
             verbose=1
         )
 
-        # Extract metrics from results
         test_loss = test_results[1] if len(test_results) > 1 else test_results[0]
         test_mae = test_results[3] if len(test_results) > 3 else None
 
@@ -802,46 +810,30 @@ def main() -> None:
     config = NBeatsTrainingConfig(
         experiment_name="nbeats_stable",
         activation="relu",
-
-        # Sequence lengths
         backcast_length=96,
         forecast_horizons=[24],
-
-        # Architecture
         stack_types=["trend", "seasonality"],
         nb_blocks_per_stack=2,
         hidden_layer_units=128,
-
-        # Normalization
         use_normalization=True,
         normalize_per_instance=False,
         use_bias=True,
-
-        # Training config
         max_patterns_per_category=20,
         epochs=100,
         batch_size=64,
-        steps_per_epoch=500,
-
-        # Learning rate
+        steps_per_epoch=1000,
         learning_rate=1e-4,
         use_warmup=True,
-        warmup_steps=500,
+        warmup_steps=5000,
         warmup_start_lr=1e-6,
         gradient_clip_norm=1.0,
         optimizer='adam',
-
-        # Loss
         primary_loss=keras.losses.MeanAbsoluteError(
-            reduction="sum_over_batch_size"
+            reduction="mean"
         ),
-
-        # Regularization
-        dropout_rate=0.0,
-        kernel_regularizer_l2=0.0,
-        reconstruction_loss_weight=0.0,
-
-        # Visualization
+        dropout_rate=0.1,
+        kernel_regularizer_l2=1e-5,
+        reconstruction_loss_weight=0.5,
         visualize_every_n_epochs=5,
         plot_top_k_patterns=6,
     )
