@@ -703,7 +703,7 @@ class NBeatsTrainer:
         else:
             forecast_loss = self.config.primary_loss
 
-        ## FIX START: Use explicitly named metrics for clear reporting
+        # Use explicitly named metrics for clear reporting
         forecast_metrics = [
             keras.metrics.MeanAbsoluteError(name="forecast_mae"),
             keras.metrics.MeanSquaredError(name="forecast_mse"),
@@ -728,7 +728,6 @@ class NBeatsTrainer:
             loss_weights = None
             metrics = [forecast_metrics, []]
             logger.info("Using forecast loss only (no reconstruction loss)")
-        ## FIX END
 
         model.compile(
             optimizer=optimizer,
