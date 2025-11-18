@@ -1,6 +1,5 @@
 """
 Comprehensive N-BEATS Training Framework for Multiple Time Series Patterns
-
 """
 
 import os
@@ -68,7 +67,6 @@ class NBeatsTrainingConfig:
     # N-BEATS specific configuration
     backcast_length: int = 168
     forecast_length: int = 24
-    forecast_horizons: List[int] = field(default_factory=lambda: [24])
 
     # Model architecture
     stack_types: List[str] = field(
@@ -88,7 +86,7 @@ class NBeatsTrainingConfig:
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adam'
     primary_loss: Union[str, keras.losses.Loss] = keras.losses.MeanAbsoluteError(
-        reduction="sum_over_batch_size"
+        reduction="mean"
     )
     mase_seasonal_periods: int = 1
 
@@ -119,7 +117,7 @@ class NBeatsTrainingConfig:
     # Visualization configuration
     visualize_every_n_epochs: int = 5
     save_interim_plots: bool = True
-    plot_top_k_patterns: int = 8
+    plot_top_k_patterns: int = 12
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
 
@@ -421,14 +419,13 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         self.forecast_length = forecast_length
         self.save_dir = save_dir
         self.model_name = model_name
-        ## FIX START: Initialize history with explicit, named metrics
+        # Initialize history with explicit, named metrics
         self.training_history = {
             'epoch': [], 'lr': [],
             'loss': [], 'val_loss': [],
             'forecast_mae': [], 'val_forecast_mae': [],
             'residual_mae': [], 'val_residual_mae': [],
         }
-        ## FIX END
         os.makedirs(save_dir, exist_ok=True)
         self.viz_test_data = self._create_viz_test_set()
 
@@ -486,7 +483,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         """Actions to perform at the end of each epoch."""
         logs = logs or {}
 
-        ## FIX START: Update history with new, clearly named metrics
+        # Update history with new, clearly named metrics
         self.training_history['epoch'].append(epoch)
         self.training_history['lr'].append(self.model.optimizer.learning_rate)
         self.training_history['loss'].append(logs.get('loss', 0.0))
@@ -497,7 +494,6 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         if 'residual_mae' in logs:
             self.training_history['residual_mae'].append(logs.get('residual_mae', 0.0))
             self.training_history['val_residual_mae'].append(logs.get('val_residual_mae', 0.0))
-        ## FIX END
 
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
             logger.info(
@@ -519,7 +515,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
                 f"Failed to create interim plots for {self.model_name}: {e}"
             )
 
-    ## FIX START: Updated plotting for clearer, more comprehensive metrics
+    # Updated plotting for clearer, more comprehensive metrics
     def _plot_learning_curves(self, epoch: int) -> None:
         """Plot and save comprehensive training and validation learning curves."""
         fig, axes = plt.subplots(2, 2, figsize=(18, 10))
@@ -570,7 +566,6 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png')
         )
         plt.close()
-    ## FIX END
 
     def _plot_prediction_samples(self, epoch: int) -> None:
         """Plot and save prediction samples against true values."""
@@ -588,14 +583,12 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
         n_cols = 3
         n_rows = math.ceil(num_plots / n_cols)
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows))
-
-        if n_rows == 1 and n_cols == 1:
-            axes = np.array([axes])
-        elif n_rows == 1 or n_cols == 1:
-            axes = axes.flatten()
-        else:
-            axes = axes.flatten()
+        # Use squeeze=False to ensure axes is always a 2D array for consistency
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(18, 4 * n_rows), squeeze=False
+        )
+        # Flatten the axes array to easily iterate over it, regardless of grid size
+        axes = axes.flatten()
 
         for i in range(num_plots):
             ax = axes[i]
@@ -611,6 +604,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             ax.legend()
             ax.grid(True, alpha=0.3)
 
+        # Turn off any unused subplots
         for j in range(num_plots, len(axes)):
             axes[j].axis('off')
 
@@ -773,10 +767,10 @@ class NBeatsTrainer:
         logger.info(f"Starting N-BEATS Experiment: {exp_dir}")
 
         results = {}
-        for horizon in self.config.forecast_horizons:
-            logger.info(f"Training Model for Horizon={horizon}")
-            data_pipeline = self.processor.prepare_datasets(horizon)
-            results[horizon] = self._train_model(data_pipeline, horizon, exp_dir)
+        horizon = self.config.forecast_length
+        logger.info(f"Training Model for Horizon={horizon}")
+        data_pipeline = self.processor.prepare_datasets(horizon)
+        results[horizon] = self._train_model(data_pipeline, horizon, exp_dir)
 
         self._save_results(results, exp_dir)
         logger.info("N-BEATS Experiment completed successfully.")
@@ -880,7 +874,7 @@ def main() -> None:
         experiment_name="nbeats",
         activation="relu",
         backcast_length=104,
-        forecast_horizons=[12],
+        forecast_length=12,
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=3,
         hidden_layer_units=256,
@@ -904,7 +898,7 @@ def main() -> None:
         kernel_regularizer_l2=1e-5,
         reconstruction_loss_weight=0.5, # Set > 0.0 to see residual metrics
         visualize_every_n_epochs=5,
-        plot_top_k_patterns=6,
+        plot_top_k_patterns=12,
     )
 
     ts_config = TimeSeriesConfig(
