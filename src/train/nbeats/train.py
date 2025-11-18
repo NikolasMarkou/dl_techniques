@@ -1,3 +1,5 @@
+--- START OF FILE train.py ---
+
 """
 Comprehensive N-BEATS Training Framework for Multiple Time Series Patterns
 
@@ -302,14 +304,42 @@ class MultiPatternDataProcessor:
         return steps
 
     def _normalize_instance(
-            self, backcast: tf.Tensor, forecast: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Standardize an individual time series instance (z-score normalization)."""
+            self,
+            backcast: tf.Tensor,
+            targets: Union[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]
+    ) -> Tuple[tf.Tensor, Union[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]]:
+        """
+        Standardize an individual time series instance (z-score normalization).
+
+        This function is designed to be used with `tf.data.Dataset.map`. It
+        calculates the mean and standard deviation from the `backcast` ONLY
+        and applies this normalization to both the `backcast` and the `forecast`
+        part of the `targets`.
+
+        It correctly handles two different structures for `targets`:
+        1. A single tensor (the forecast) when reconstruction loss is disabled.
+        2. A tuple of tensors (forecast, residual_target) when reconstruction
+           loss is enabled. The residual_target is passed through unmodified.
+        """
+        # Calculate normalization statistics from the backcast only.
         mean = tf.reduce_mean(backcast)
         std = tf.maximum(tf.math.reduce_std(backcast), 1e-7)
+
+        # Normalize the backcast.
         normalized_backcast = (backcast - mean) / std
-        normalized_forecast = (forecast - mean) / std
-        return normalized_backcast, normalized_forecast
+
+        # Normalize the forecast component of the targets, preserving structure.
+        if self.config.reconstruction_loss_weight > 0.0:
+            # Handle the (forecast, residual_target) tuple structure.
+            forecast, residual_target = targets
+            normalized_forecast = (forecast - mean) / std
+            # Return the data in the same nested structure.
+            return normalized_backcast, (normalized_forecast, residual_target)
+        else:
+            # Handle the single forecast tensor structure.
+            forecast = targets
+            normalized_forecast = (forecast - mean) / std
+            return normalized_backcast, normalized_forecast
 
     def prepare_datasets(self, forecast_length: int) -> Dict[str, Any]:
         """Create the complete tf.data pipeline for a given forecast horizon."""
@@ -853,7 +883,7 @@ class NBeatsTrainer:
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
-        experiment_name="nbeats_stable_clear_metrics",
+        experiment_name="nbeats",
         activation="relu",
         backcast_length=104,
         forecast_horizons=[12],
