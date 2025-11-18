@@ -1,12 +1,6 @@
---- START OF FILE train.py ---
-
 """
 Comprehensive N-BEATS Training Framework for Multiple Time Series Patterns
 
-COMPLETE FIX: All training stability issues resolved.
-- Fixed validation dataset exhaustion
-- Corrected callback monitoring
-- Improved data pipeline
 """
 
 import os
