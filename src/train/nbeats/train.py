@@ -815,7 +815,7 @@ class NBeatsTrainer:
             return_dict=False # Ensure list output for zipping
         )
 
-        ## FIX START: Robustly parse test results into a dictionary
+        # Robustly parse test results into a dictionary
         test_metrics = dict(zip(model.metrics_names, test_results_list))
         logger.info(f"Test Set Metrics: {test_metrics}")
 
@@ -827,7 +827,6 @@ class NBeatsTrainer:
             'final_epoch': final_epoch,
             'test_metrics': {k: float(v) for k, v in test_metrics.items()}
         }
-        ## FIX END
 
         return final_results
 
