@@ -39,8 +39,6 @@ A **Vector Quantized Variational Autoencoder (VQ-VAE)** is a type of autoencoder
 
 This discrete nature makes VQ-VAEs exceptionally well-suited for modalities that have an inherently discrete structure, such as language, and allows them to produce sharper, higher-fidelity images and audio compared to their continuous counterparts.
 
-![image](vq_vae.jpeg)
-
 ### Key Innovations
 
 1.  **Discrete Latent Space**: By using a finite codebook, VQ-VAEs avoid the continuous latent space of VAEs, which can lead to issues like "posterior collapse". The discrete representation is often more powerful and interpretable.
@@ -59,7 +57,7 @@ Standard VAE Approach:
   3. Limitation: The probabilistic nature of the decoder and the continuous space
      often leads to averaging, resulting in blurry reconstructions. Additionally,
      with powerful decoders, the model can learn to ignore the latent code, a
-     problem known as "posterior collapse". [4, 10, 26]
+     problem known as "posterior collapse".
 ```
 
 **VQ-VAE's Solution**:
@@ -71,7 +69,7 @@ VQ-VAE Approach:
   4. Benefit: Since the decoder always receives a precise vector from the codebook,
      it doesn't need to average over a noisy latent space, enabling it to produce
      much sharper and more detailed outputs. The discrete bottleneck also
-     prevents posterior collapse. [4, 17]
+     prevents posterior collapse.
 ```
 
 ### Real-World Impact
@@ -81,7 +79,6 @@ VQ-VAEs are a foundational component in many state-of-the-art generative models:
 -   **High-Fidelity Image Generation**: Used in models like DALL-E and VQ-GAN to generate realistic images.
 -   **Speech Synthesis and Voice Conversion**: Learning discrete representations of audio for high-quality text-to-speech.
 -   **Data Compression**: The discrete codes provide a highly efficient way to compress data.
--   **Music Generation**: Models like Jukebox use VQ-VAEs to learn a vocabulary of audio codes for synthesizing music.
 
 ---
 
@@ -93,7 +90,7 @@ While powerful, standard VAEs have two primary weaknesses that VQ-VAEs address d
 
 1.  **Posterior Collapse**: A common failure mode where the decoder becomes powerful enough to model the data distribution without using the information from the latent variable `z`. The KL divergence term in the VAE loss encourages the encoder to match the prior (e.g., a standard Gaussian), and if the decoder is strong enough, the encoder simply ignores the input and the latent codes become uninformative.
 
-2.  **Blurry Reconstructions**: The continuous nature of the latent space and the VAE objective function (which maximizes log-likelihood) often results in the model averaging over many possible reconstructions, leading to blurry outputs, especially for complex, multi-modal data like images.
+2.  **Blurry Reconstructions**: The continuous nature of the latent space and the VAE objective function (which maximizes log-likelihood) often results in the model averaging over many possible reconstructions, leading to blurry outputs.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -122,7 +119,7 @@ VQ-VAEs introduce a discrete bottleneck that forces the model to commit to a spe
 │     vector `z_e(x)`, but the decoder receives a quantized   │
 │     vector `z_q(x)` from a finite codebook. This hard       │
 │     bottleneck prevents the model from ignoring the latent  │
-│     code, thus avoiding posterior collapse. [4]             │
+│     code, thus avoiding posterior collapse.                 │
 │                                                             │
 │  2. The VQ-VAE Loss Function (3 parts):                     │
 │     - Reconstruction Loss: Pushes the model to accurately   │
@@ -130,11 +127,9 @@ VQ-VAEs introduce a discrete bottleneck that forces the model to commit to a spe
 │     - Codebook Loss: Moves the codebook vectors towards the │
 │       encoder outputs (trains the codebook).                │
 │     - Commitment Loss: Pushes the encoder to "commit" to a  │
-│       codebook vector and not grow unbounded. [3]           │
+│       codebook vector and not grow unbounded.               │
 └─────────────────────────────────────────────────────────────┘
 ```
-
-This tripartite loss function, combined with the discrete bottleneck, allows VQ-VAEs to learn powerful, compressed representations while producing significantly sharper outputs than standard VAEs.
 
 ---
 
@@ -226,7 +221,7 @@ STEP 4: LOSS CALCULATION (During Training)
 Input Image, Reconstructed Image, `z_e`, `z_q`
     │
     ├──► Reconstruction Loss:
-    │    └─► e.g., MSE(Input, Reconstructed)
+    │    └─► e.g., MSE(Input, Reconstructed) * reconstruction_loss_weight
     │
     ├──► Codebook Loss:
     │    └─► ||sg[z_e] - z_q||²  (pulls codebook vectors toward encoder outputs)
@@ -249,10 +244,10 @@ The encoder is a standard neural network (typically a CNN for images) that maps 
 
 This custom layer contains the core VQ logic:
 -   **Codebook**: A learnable embedding table of shape `(num_embeddings, embedding_dim)`.
--   **Nearest Neighbor Lookup**: Finds the closest codebook vector for each encoder output vector.
+-   **Nearest Neighbor Lookup**: Finds the closest codebook vector for each encoder output vector using L2 distance.
 -   **Loss Calculation**: It computes and adds the codebook and commitment losses to the model's total loss.
 -   **Straight-Through Gradient**: Implements the gradient bypass for the encoder.
--   **EMA Updates (Optional)**: Can use Exponential Moving Average updates for the codebook, which can be more stable than using an Adam optimizer.
+-   **EMA Updates (Optional)**: Can use Exponential Moving Average updates for the codebook, which can be more stable than using an Adam optimizer. It uses an `epsilon` parameter for numerical stability during normalization.
 
 ### 4.3 Decoder
 
@@ -266,21 +261,20 @@ The decoder mirrors the encoder's architecture, taking the quantized latent vect
 
 ```bash
 # Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy matplotlib
+pip install keras>=3.0 tensorflow>=2.18 numpy matplotlib
 ```
 
 ### Your First Generative Model (30 seconds)
 
-Let's train a VQ-VAE on the MNIST dataset to generate new handwritten digits.
+Let's train a VQ-VAE on the MNIST dataset.
 
 ```python
 import keras
-from keras.datasets import mnist
+from keras.api.datasets import mnist
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Local imports from your project structure
-# from model import VQVAEModel # Assuming model.py is in the same directory
+from dl_techniques.models.vq_vae.model import VQVAEModel, VectorQuantizer
 
 # 1. Load and preprocess data
 (X_train, _), (X_test, _) = mnist.load_data()
@@ -304,15 +298,18 @@ decoder = keras.Sequential([
 ])
 
 # 3. Create a VQ-VAE model
+# Note: VQVAEModel handles the creation of the VectorQuantizer layer internally.
 model = VQVAEModel(
     encoder=encoder,
     decoder=decoder,
     num_embeddings=128,
     embedding_dim=embedding_dim,
-    commitment_cost=0.25
+    commitment_cost=0.25,
+    reconstruction_loss_weight=1.0
 )
 
 # 4. Compile the model
+# The loss is computed internally in train_step, so we only need an optimizer.
 model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
 print("✅ VQ-VAE model created and compiled successfully!")
 model.summary()
@@ -345,7 +342,6 @@ for i in range(num_reconstructions):
     plt.axis('off')
 plt.suptitle('Original vs. Reconstructed Digits')
 plt.show()
-
 ```
 
 ---
@@ -357,39 +353,47 @@ plt.show()
 **Purpose**: The main Keras `Model` subclass that assembles the encoder, quantizer, and decoder, and includes the custom `train_step`.
 
 ```python
-# from model import VQVAEModel
-
 vqvae = VQVAEModel(
     encoder=my_encoder,
     decoder=my_decoder,
     num_embeddings=512,
     embedding_dim=64,
     commitment_cost=0.25,
-    use_ema=True # Use EMA updates for the codebook
+    use_ema=True,
+    reconstruction_loss_weight=1.0
 )
 ```
 
 **Key Parameters**:
 
-| Parameter | Description |
-| :--- | :--- |
-| `encoder` | A Keras `Model` that outputs a continuous latent tensor. |
-| `decoder` | A Keras `Model` that reconstructs from a quantized latent tensor. |
-| `num_embeddings` | The size of the discrete codebook (K). |
-| `embedding_dim` | The dimensionality of each embedding vector (D). |
-| `commitment_cost`| The β parameter balancing the commitment loss. |
-| `use_ema` | If `True`, uses Exponential Moving Average updates for the codebook. |
+| Parameter | Description | Default |
+| :--- | :--- | :--- |
+| `encoder` | A Keras `Model` that outputs a continuous latent tensor. | (Required) |
+| `decoder` | A Keras `Model` that reconstructs from a quantized latent tensor. | (Required) |
+| `num_embeddings` | The size of the discrete codebook (K). | (Required) |
+| `embedding_dim` | The dimensionality of each embedding vector (D). | (Required) |
+| `commitment_cost`| The β parameter balancing the commitment loss. | `0.25` |
+| `use_ema` | If `True`, uses Exponential Moving Average updates for the codebook. | `False` |
+| `reconstruction_loss_weight` | Weight scaling the reconstruction loss term. | `1.0` |
 
 **Key Methods**:
 -   `train_step()` / `test_step()`: Custom logic to compute and track the three-part VQ-VAE loss.
--   `encode(images)`: Returns the continuous latent vectors `z_e`.
--   `decode(z_q)`: Decodes a batch of quantized latent vectors `z_q`.
--   `encode_to_indices(images)`: Encodes images directly to their discrete codebook indices.
--   `decode_from_indices(indices)`: Decodes a grid of indices back into images.
+-   `encode(inputs)`: Returns the continuous latent vectors `z_e`.
+-   `quantize_latents(latents)`: Quantizes continuous latents `z_e` to `z_q`.
+-   `decode(latents)`: Decodes a batch of quantized latent vectors `z_q`.
+-   `encode_to_indices(inputs)`: Encodes inputs directly to their discrete codebook indices.
+-   `decode_from_indices(indices)`: Decodes a grid of indices back into reconstructed inputs.
 
 ### 6.2 `VectorQuantizer` (Layer)
 
 **Purpose**: A Keras `Layer` that performs the vector quantization, calculates losses, and handles the straight-through gradient.
+
+**Key Parameters**:
+-   `num_embeddings`: Size of codebook.
+-   `embedding_dim`: Dimension of embeddings.
+-   `use_ema`: Boolean to enable EMA updates.
+-   `ema_decay`: Decay rate for EMA (e.g., 0.99).
+-   `epsilon`: Small constant for numerical stability in EMA (default 1e-5).
 
 ---
 
@@ -402,6 +406,7 @@ The VQ-VAE architecture is highly configurable. The key parameters to tune are:
 | `num_embeddings` (K) | Controls the size of the discrete "vocabulary". A larger K can represent more complex data but is harder to train. | 128, 256, 512, 1024+ |
 | `embedding_dim` (D) | The dimensionality of each code vector. Affects the capacity of the encoder/decoder and the richness of the codes. | 32, 64, 128, 256 |
 | `commitment_cost` (β) | Controls the encoder's incentive to match the codebook. Higher values can prevent the encoder's outputs from growing too large. | 0.1 - 2.0 (often 0.25) |
+| `reconstruction_loss_weight` | Balances reconstruction quality vs. quantization strictness. | 1.0 (default) |
 | `use_ema` | Determines the codebook update mechanism. EMA is often more stable than using a standard optimizer. | `False` or `True` |
 
 ---
@@ -461,15 +466,23 @@ model_ema = VQVAEModel(
     num_embeddings=512,
     embedding_dim=64,
     use_ema=True,
-    ema_decay=0.99 # A key hyperparameter to tune
+    ema_decay=0.99, # A key hyperparameter to tune
+    quantizer_initializer="uniform"
 )
 model_ema.compile(optimizer="adam")
 # model_ema.fit(...)
 ```
 
-### Pattern 2: Codebook Resetting for Dead Codes
+### Pattern 2: Custom Initializers
 
-Sometimes, a large portion of the codebook goes unused during training ("codebook collapse"). A common strategy is to periodically check for unused codes and reset them to be near the encoder outputs of high-variance regions. This is an advanced technique not implemented in this base model but is a common extension.
+You can pass any Keras initializer to the model to determine how the codebook is initialized.
+
+```python
+model = VQVAEModel(
+    ...,
+    quantizer_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.1)
+)
+```
 
 ---
 
@@ -496,7 +509,7 @@ model.compile(...)
 
 During training, it's crucial to monitor all three loss components:
 -   **`reconstruction_loss`**: Should steadily decrease. This is the primary indicator of visual quality.
--   **`vq_loss`**: This is the sum of the codebook and commitment losses. Its absolute value is less important than its stability. If it fluctuates wildly, it can indicate training instability.
+-   **`vq_loss`**: This metric tracks the sum of the **codebook loss** and **commitment loss**. Its absolute value is less important than its stability. If it fluctuates wildly, it can indicate training instability.
 -   **Codebook Usage**: Monitor how many of the `num_embeddings` are actively being used. If a large fraction is unused, this indicates "codebook collapse", and you may need a smaller codebook or a different initialization strategy.
 
 ---
@@ -517,7 +530,9 @@ model.compile(optimizer="adam")
 model.save('my_vqvae_model.keras')
 print("Model saved to my_vqvae_model.keras")
 
-# Load the model in a new session, with custom objects
+# Load the model in a new session.
+# While @keras.saving.register_keras_serializable() handles most cases, 
+# explicitly providing custom objects is a robust practice.
 loaded_model = keras.models.load_model(
     'my_vqvae_model.keras',
     custom_objects={"VQVAEModel": VQVAEModel, "VectorQuantizer": VectorQuantizer}
@@ -538,36 +553,51 @@ print(f"Reconstructed image shape: {reconstruction.shape}")
 ```python
 import keras
 import numpy as np
-# from model import VQVAEModel, VectorQuantizer
+import keras
+from dl_techniques.models.vq_vae.model import VQVAEModel, VectorQuantizer
+
 
 def test_model_creation():
     """Test model creation."""
-    model = VQVAEModel(encoder, decoder, 128, 16)
+    encoder = keras.Sequential([keras.layers.Dense(16)])
+    decoder = keras.Sequential([keras.layers.Dense(784)])
+    model = VQVAEModel(encoder, decoder, num_embeddings=128, embedding_dim=16)
     assert model is not None
     print("✓ VQ-VAE created successfully")
 
 def test_forward_pass_shape():
     """Test the output shapes of a forward pass."""
-    model = VQVAEModel(encoder, decoder, 128, 16)
-    dummy_input = np.random.rand(4, 28, 28, 1).astype("float32")
+    # Simple dummy networks
+    embedding_dim = 4
+    encoder = keras.Sequential([keras.layers.Dense(embedding_dim)])
+    decoder = keras.Sequential([keras.layers.Dense(10)])
+    
+    model = VQVAEModel(encoder, decoder, num_embeddings=10, embedding_dim=embedding_dim)
+    
+    dummy_input = np.random.rand(2, 10, embedding_dim).astype("float32")
     output = model.predict(dummy_input)
-    assert output.shape == (4, 28, 28, 1)
+    assert output.shape == (2, 10, 10)
     print("✓ Forward pass has correct shapes")
 
 def test_generative_methods():
     """Test the encode/decode indices methods."""
-    model = VQVAEModel(encoder, decoder, 128, 16)
-    dummy_input = np.random.rand(4, 28, 28, 1).astype("float32")
+    embedding_dim = 4
+    encoder = keras.Sequential([keras.layers.Dense(embedding_dim)])
+    decoder = keras.Sequential([keras.layers.Dense(10)])
+    
+    model = VQVAEModel(encoder, decoder, num_embeddings=10, embedding_dim=embedding_dim)
+    
+    dummy_input = np.random.rand(2, 10, embedding_dim).astype("float32")
     indices = model.encode_to_indices(dummy_input)
-    assert indices.shape == (4, 7, 7)
+    # Shape depends on input spatial dims, here (2, 10)
+    assert indices.shape == (2, 10)
 
     reconstruction = model.decode_from_indices(indices)
-    assert reconstruction.shape == (4, 28, 28, 1)
+    assert reconstruction.shape == (2, 10, 10)
     print("✓ Generative methods work correctly")
 
 # Run tests
 if __name__ == '__main__':
-    # Assuming encoder and decoder are defined as in the Quick Start
     test_model_creation()
     test_forward_pass_shape()
     test_generative_methods()
@@ -596,9 +626,8 @@ if __name__ == '__main__':
 **Issue 3: Most of the codebook is not being used ("Codebook Collapse").**
 
 -   **Cause**: The model finds a small subset of codes that are "good enough" and never explores the rest of the codebook. This limits the model's expressive power.
--   **Solution 1**: Try a different initialization for the embeddings.
+-   **Solution 1**: Try a different initialization for the embeddings via `quantizer_initializer`.
 -   **Solution 2**: Decrease `num_embeddings`.
--   **Solution 3 (Advanced)**: Implement a codebook resetting mechanism.
 
 ### Frequently Asked Questions
 
@@ -623,7 +652,8 @@ The VQ-VAE loss function consists of three components that train the encoder, de
 **Loss = L_reconstruction + L_codebook + L_commitment**
 
 1.  **Reconstruction Loss (L_reconstruction)**:
-    -   `log p(x | z_q(x))` which is typically an MSE loss: `||x - Decoder(z_q(x))||²`
+    -   `log p(x | z_q(x))` which is implemented as MSE: `||x - Decoder(z_q(x))||²`
+    -   Weighted by `reconstruction_loss_weight`.
     -   This term trains both the **encoder** and the **decoder**.
 
 2.  **Codebook Loss (L_codebook)**:
