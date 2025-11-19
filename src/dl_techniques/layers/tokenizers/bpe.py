@@ -12,8 +12,13 @@ import keras
 import collections
 from typing import Dict, List, Tuple, Optional, Any, Set
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 def train_bpe(
         texts: List[str],
@@ -112,6 +117,7 @@ def train_bpe(
     logger.info(f"BPE training completed. Final vocab size: {len(vocab_dict)}")
     return vocab_dict, merges
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class BPETokenizer(keras.layers.Layer):
@@ -509,51 +515,4 @@ def create_bpe_pipeline(
     logger.info("BPE pipeline created successfully")
     return tokenizer, embedding
 
-
-# Example usage demonstrating correct workflow
-if __name__ == "__main__":
-    # Example training texts
-    training_texts = [
-        "hello world how are you today",
-        "this is a test sentence for tokenization",
-        "byte pair encoding is very useful for nlp",
-        "neural networks are powerful machine learning tools",
-        "transformers use attention mechanisms effectively"
-    ]
-
-    # Create BPE pipeline with performance optimizations
-    tokenizer, embedding = create_bpe_pipeline(
-        texts=training_texts,
-        vocab_size=1000,
-        embedding_dim=256,
-        max_length=128,
-        do_lower_case=True
-    )
-
-    # CORRECT USAGE: Preprocessing step
-    test_texts = ["hello world", "this is new text for testing"]
-    token_sequences = tokenizer.tokenize_texts(test_texts)
-    print("Tokenized sequences:", token_sequences)
-
-    # Example decoding
-    decoded_text = tokenizer.decode_tokens(token_sequences[0])
-    print("Decoded text:", decoded_text)
-
-    # Example model usage with pre-tokenized data
-    import numpy as np
-
-    # Create simple model for demonstration
-    inputs = keras.Input(shape=(128,), dtype='int32')  # Pre-tokenized input
-    embeddings = embedding(inputs)
-    # Could add more layers here...
-    model = keras.Model(inputs=inputs, outputs=embeddings)
-
-    # Use model with preprocessed tokens
-    token_array = np.array(token_sequences)
-    embeddings_output = model.predict(token_array)
-    print("Embeddings shape:", embeddings_output.shape)
-
-    # Demonstrate serialization
-    print("\nTesting serialization...")
-    tokenizer_config = tokenizer.get_config()
-    print(f"Tokenizer serialized config keys: {list(tokenizer_config.keys())}")
+# ---------------------------------------------------------------------
