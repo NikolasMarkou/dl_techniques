@@ -48,7 +48,7 @@ References:
 """
 
 import keras
-from typing import Tuple, Optional, Dict, Any, Union
+from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 # ---------------------------------------------------------------------
 
@@ -151,70 +151,6 @@ class KANLinear(keras.layers.Layer):
     Output shape:
         N-D tensor with shape: `(batch_size, ..., features)`.
         Only the final dimension changes from input_features to features.
-
-    Attributes:
-        features: Number of output features (from constructor).
-        grid_size: Number of B-spline grid intervals (from constructor).
-        spline_order: Order of B-spline basis functions (from constructor).
-        grid_range: Current (min, max) range of the B-spline grid.
-        base_activation_name: String name of the base activation function.
-        base_trainable: Whether base scalers are trainable (from constructor).
-        spline_trainable: Whether spline scalers are trainable (from constructor).
-        kernel_initializer: Initializer instance for spline weights.
-        epsilon: Numerical stability constant (from constructor).
-        base_activation_fn: Callable activation function instance.
-        input_features: Integer, number of input features (set during build).
-        grid: KerasTensor, extended B-spline knot sequence including boundary knots.
-        spline_weight: KerasTensor, learnable coefficients for B-spline basis,
-            shape (input_features, features, grid_size + spline_order).
-        spline_scaler: KerasTensor, learnable scaling weights for spline path,
-            shape (input_features, features).
-        base_scaler: KerasTensor, learnable scaling weights for base activation path,
-            shape (input_features, features).
-
-    Methods:
-        update_grid_from_samples(x): Update B-spline grid based on input data quantiles.
-
-    Example:
-        ```python
-        # Basic usage: replace Dense layer
-        layer = KANLinear(features=64)
-        inputs = keras.Input(shape=(32,))
-        outputs = layer(inputs)  # Shape: (batch, 64)
-
-        # Custom configuration with finer grid
-        layer = KANLinear(
-            features=128,
-            grid_size=10,  # More fine-grained grid
-            spline_order=2,  # Quadratic splines
-            grid_range=(-3.0, 3.0),
-            activation='gelu'
-        )
-
-        # Build a simple KAN network
-        inputs = keras.Input(shape=(784,))
-        x = KANLinear(128)(inputs)
-        x = KANLinear(64)(x)
-        outputs = KANLinear(10)(x)
-        model = keras.Model(inputs, outputs)
-
-        # Training with grid updates (recommended)
-        model.compile(optimizer='adam', loss='mse')
-        for epoch in range(num_epochs):
-            model.fit(x_train, y_train)
-            # Update grids periodically (e.g., every 5 epochs)
-            if epoch % 5 == 0:
-                for layer in model.layers:
-                    if isinstance(layer, KANLinear):
-                        layer.update_grid_from_samples(x_train[:100])
-        ```
-
-    Note:
-        The layer's expressivity comes from learning both the shape (spline coefficients)
-        and importance (scalers) of activation functions for each input-output connection.
-        This is more flexible than traditional layers but requires more parameters:
-        O(input_features * features * grid_size) vs O(input_features * features) for Dense.
-        The trade-off often favors KAN layers in terms of model depth and total parameters.
     """
 
     def __init__(
@@ -223,12 +159,10 @@ class KANLinear(keras.layers.Layer):
             grid_size: int = 5,
             spline_order: int = 3,
             grid_range: Tuple[float, float] = (-2.0, 2.0),
-            activation: str = 'swish',
+            activation: Union[str, Callable] = 'swish',
             base_trainable: bool = True,
             spline_trainable: bool = True,
-            kernel_initializer: Union[
-                str, keras.initializers.Initializer
-            ] = 'glorot_uniform',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
@@ -244,7 +178,7 @@ class KANLinear(keras.layers.Layer):
         if grid_range[0] >= grid_range[1]:
             raise ValueError("Invalid grid range: min must be less than max.")
 
-        # Store configuration for serialization and reference
+        # Store configuration
         self.features = features
         self.grid_size = grid_size
         self.spline_order = spline_order
@@ -256,27 +190,19 @@ class KANLinear(keras.layers.Layer):
         self.epsilon = epsilon
         self.base_activation_fn = keras.activations.get(activation)
 
-        # Attributes to be created in build() - initialized as None
-        self.input_features = None
-        self.grid = None
-        self.spline_weight = None
-        self.spline_scaler = None
-        self.base_scaler = None
+        # Attributes initialized in build()
+        self.input_features: Optional[int] = None
+        self.grid: Optional[keras.Variable] = None
+        self.spline_weight: Optional[keras.Variable] = None
+        self.spline_scaler: Optional[keras.Variable] = None
+        self.base_scaler: Optional[keras.Variable] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Create layer weights and B-spline grid based on input shape.
 
-        This method is called automatically when the layer is first used with a specific
-        input shape. It creates all trainable weights (spline coefficients and scalers)
-        and initializes the B-spline knot sequence.
-
         Args:
             input_shape: Shape tuple of the input tensor. Must be at least 2D.
-                The last dimension is used as input_features.
-
-        Raises:
-            ValueError: If input shape is less than 2D or input_features is None.
         """
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
@@ -286,10 +212,10 @@ class KANLinear(keras.layers.Layer):
             raise ValueError("Input features dimension cannot be None.")
 
         # Number of B-spline basis functions = grid_size + spline_order
-        # This follows from the Cox-de Boor formula for B-splines
         num_basis_fns = self.grid_size + self.spline_order
 
-        # Create spline coefficient weight: one set per (input, output, basis) triple
+        # 1. Spline Coefficients (Control Points)
+        # Shape: (input_features, output_features, num_basis_fns)
         self.spline_weight = self.add_weight(
             name="spline_weight",
             shape=(self.input_features, self.features, num_basis_fns),
@@ -297,7 +223,8 @@ class KANLinear(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create scaling weights for the spline path
+        # 2. Spline Scaler
+        # Shape: (input_features, output_features)
         self.spline_scaler = self.add_weight(
             name="spline_scaler",
             shape=(self.input_features, self.features),
@@ -305,7 +232,8 @@ class KANLinear(keras.layers.Layer):
             trainable=self.spline_trainable,
         )
 
-        # Create scaling weights for the base activation path
+        # 3. Base Scaler
+        # Shape: (input_features, output_features)
         self.base_scaler = self.add_weight(
             name="base_scaler",
             shape=(self.input_features, self.features),
@@ -313,94 +241,115 @@ class KANLinear(keras.layers.Layer):
             trainable=self.base_trainable,
         )
 
-        # Initialize the B-spline grid (knot sequence)
-        self._build_grid()
+        # 4. Grid (Knot Sequence)
+        # The grid determines the shape of the basis functions. It is a non-trainable
+        # weight so it persists during saving/loading but isn't updated by gradient descent.
+        # Size: grid_size + 1 (intervals) + 2 * spline_order (padding)
+        grid_length = self.grid_size + 2 * self.spline_order + 1
+        self.grid = self.add_weight(
+            name="grid",
+            shape=(grid_length,),
+            initializer="zeros",  # Initialized properly immediately below
+            trainable=False,
+            dtype=self.dtype,
+        )
+
+        # Initialize the grid based on the configured range
+        self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
+
         super().build(input_shape)
 
-    def _build_grid(self) -> None:
+    def _compute_grid_values(self, start: float, stop: float) -> keras.KerasTensor:
         """
-        Build the extended B-spline knot sequence from the grid range.
+        Compute the extended B-spline knot sequence values.
 
-        Creates a uniform grid over [grid_range[0], grid_range[1]] and extends it
-        with additional knots on both ends to support B-spline basis functions of
-        the specified order. The extended knots ensure basis functions are properly
-        defined at the boundaries.
+        Generates a uniform grid between [start, stop] and extends it on both
+        ends to satisfy B-spline boundary conditions.
 
-        The knot sequence structure:
-        [extended_left ... grid_points ... extended_right]
-        where extended regions have spline_order knots each.
+        Args:
+            start: Range minimum.
+            stop: Range maximum.
+
+        Returns:
+            Tensor containing the complete knot sequence.
         """
         # Create uniform grid points within the specified range
+        # Shape: (grid_size + 1,)
         grid_points = keras.ops.linspace(
-            self.grid_range[0], self.grid_range[1], self.grid_size + 1
+            start, stop, self.grid_size + 1, dtype=self.dtype
         )
 
-        # Calculate grid spacing for uniform extension
+        # Calculate grid spacing step size
         h = (grid_points[1] - grid_points[0])
 
-        # Extend grid on the left: create spline_order knots before grid_points[0]
-        # Cast integer range to float before multiplication for type consistency
-        extended_knots_start = (
-                keras.ops.cast(keras.ops.arange(-self.spline_order, 0), dtype=self.dtype)
-                * h + grid_points[0]
-        )
+        # Generate index ranges for extensions
+        start_indices = keras.ops.arange(-self.spline_order, 0, dtype=self.dtype)
+        end_indices = keras.ops.arange(1, self.spline_order + 1, dtype=self.dtype)
 
-        # Extend grid on the right: create spline_order knots after grid_points[-1]
-        extended_knots_end = (
-                keras.ops.cast(keras.ops.arange(1, self.spline_order + 1), dtype=self.dtype)
-                * h + grid_points[-1]
-        )
+        # Extend grid on the left
+        extended_knots_start = start_indices * h + grid_points[0]
+
+        # Extend grid on the right
+        extended_knots_end = end_indices * h + grid_points[-1]
 
         # Concatenate to form complete knot sequence
-        self.grid = keras.ops.concatenate(
+        return keras.ops.concatenate(
             [extended_knots_start, grid_points, extended_knots_end], axis=0
         )
+
+    def _set_grid_from_range(self, start: float, stop: float) -> None:
+        """Helper to calculate and assign grid values to the state variable."""
+        grid_values = self._compute_grid_values(start, stop)
+        self.grid.assign(grid_values)
 
     def _compute_bspline_basis(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """
         Compute B-spline basis functions using Cox-de Boor recursion formula.
 
-        Evaluates all B-spline basis functions at input points x using the iterative
-        Cox-de Boor formula. Starts with piecewise constant basis (order 0) and
-        recursively builds up to the desired spline order.
-
-        Cox-de Boor formula:
-        B_{i,0}(x) = 1 if t_i <= x < t_{i+1}, else 0
-        B_{i,k}(x) = ((x - t_i) / (t_{i+k} - t_i)) * B_{i,k-1}(x) +
-                     ((t_{i+k+1} - x) / (t_{i+k+1} - t_{i+1})) * B_{i+1,k-1}(x)
-
         Args:
-            x: Input tensor, shape (..., input_features). Values to evaluate basis at.
+            x: Input tensor, shape (..., input_features).
 
         Returns:
-            Basis function values, shape (..., input_features, num_basis_functions).
-            Each slice [..., i, :] contains evaluations of all basis functions for
-            the i-th input feature.
+            Basis function values, shape (..., input_features, num_basis_fns).
         """
-        # Add dimension for broadcasting with grid
+        # Add dimension for broadcasting with grid: (..., input_features, 1)
         x = keras.ops.expand_dims(x, axis=-1)
+
+        # Access the grid weight
         grid = self.grid
 
         # Base case k=0: piecewise constant basis functions
         # B_{i,0}(x) = 1 if grid[i] <= x < grid[i+1], else 0
+        # Grid slice logic: we compare against all intervals simultaneously
+        grid_left = grid[:-1]
+        grid_right = grid[1:]
+
         basis = keras.ops.cast(
-            keras.ops.logical_and(x >= grid[:-1], x < grid[1:]),
+            keras.ops.logical_and(x >= grid_left, x < grid_right),
             dtype=self.dtype,
         )
 
         # Iteratively compute higher-order B-splines via Cox-de Boor recursion
         for k in range(1, self.spline_order + 1):
-            # First term: (x - t_i) / (t_{i+k} - t_i) * B_{i,k-1}(x)
-            term1_num = x - grid[:-(k + 1)]
-            term1_den = grid[k:-1] - grid[:-(k + 1)]
-            term1 = keras.ops.divide(term1_num, term1_den + self.epsilon) * basis[..., :-1]
+            # Grid indices for term 1: t_i to t_{i+k}
+            # Denominator: t_{i+k} - t_i
+            d1 = grid[k:-1] - grid[:-(k + 1)]
+            # Numerator: x - t_i
+            n1 = x - grid[:-(k + 1)]
 
-            # Second term: (t_{i+k+1} - x) / (t_{i+k+1} - t_{i+1}) * B_{i+1,k-1}(x)
-            term2_num = grid[k + 1:] - x
-            term2_den = grid[k + 1:] - grid[1:-k]
-            term2 = keras.ops.divide(term2_num, term2_den + self.epsilon) * basis[..., 1:]
+            # Term 1 calculation with stability epsilon
+            term1 = keras.ops.divide(n1, d1 + self.epsilon) * basis[..., :-1]
 
-            # Combine terms for next order
+            # Grid indices for term 2: t_{i+1} to t_{i+k+1}
+            # Denominator: t_{i+k+1} - t_{i+1}
+            d2 = grid[k + 1:] - grid[1:-k]
+            # Numerator: t_{i+k+1} - x
+            n2 = grid[k + 1:] - x
+
+            # Term 2 calculation
+            term2 = keras.ops.divide(n2, d2 + self.epsilon) * basis[..., 1:]
+
+            # Combine terms
             basis = term1 + term2
 
         return basis
@@ -411,116 +360,104 @@ class KANLinear(keras.layers.Layer):
         """
         Forward pass: compute output using learned activation functions.
 
-        Processes inputs through two parallel paths (base activation and B-spline),
-        combines them with learned scaling weights, and aggregates across input features.
-
         Args:
             inputs: Input tensor, shape (batch_size, ..., input_features).
-            training: Optional boolean, whether the call is in training mode.
-                Not used in this layer but kept for API consistency.
+            training: Unused.
 
         Returns:
             Output tensor, shape (batch_size, ..., features).
         """
-        # Path 1: Apply base activation function to all inputs
+        # Path 1: Base Activation
         # Shape: (..., input_features)
         base_val = self.base_activation_fn(inputs)
 
-        # Path 2: Compute B-spline activation functions
-        # Evaluate B-spline basis functions at input values
-        # Shape: (..., input_features, num_basis_fns)
+        # Path 2: B-spline Activation
+        # Evaluate basis functions: (..., input_features, num_basis_fns)
         spline_basis = self._compute_bspline_basis(inputs)
 
-        # Linear combination of basis functions using learned coefficients
-        # Einsum performs: for each input feature i and output feature o,
-        # spline_val[..., i, o] = sum_k spline_basis[..., i, k] * spline_weight[i, o, k]
-        # Shape: (..., input_features, features)
+        # Linear combination of basis functions with learned weights
+        # Tensor contraction:
+        # spline_basis:  [..., i, k]
+        # spline_weight: [i, o, k]
+        # Result:        [..., i, o]
         spline_val = keras.ops.einsum(
             '...ik,iok->...io', spline_basis, self.spline_weight
         )
 
-        # Combine base and spline paths to form phi_ij(x_i)
-        # Expand base_val to match scaler dimensions and apply learned scaling
-        # Shape: (..., input_features, features)
+        # Combine Paths
+        # Expand base_val to (..., input_features, 1) for broadcasting over output features
+        # Then scale by base_scaler (input_features, features)
         phi_base = keras.ops.expand_dims(base_val, axis=-1) * self.base_scaler
+
+        # Scale spline path
         phi_spline = spline_val * self.spline_scaler
+
+        # Sum components to get activation function output per connection
         phi = phi_base + phi_spline
 
-        # Aggregate over input features: sum_i phi_ij(x_i)
-        # This produces the final output for each output feature j
-        # Shape: (..., features)
+        # Aggregate inputs: y_j = sum_i(phi_{ij}(x_i))
+        # Sum over input_features dimension (axis -2)
         output = keras.ops.sum(phi, axis=-2)
 
         return output
 
-    def update_grid_from_samples(self, x: keras.KerasTensor) -> None:
+    def update_grid_from_samples(self, x: Union[keras.KerasTensor, Any]) -> None:
         """
-        Update B-spline grid based on quantiles of input data.
+        Update B-spline grid based on input data statistics.
 
-        Adapts the B-spline knot positions to match the actual distribution of input
-        values, potentially improving the layer's expressivity. This should be called
-        periodically during training (e.g., every few epochs) with representative
-        input data.
+        This method updates the `grid` weight to cover the range of the input data `x`.
+        It maintains a uniform grid distribution but adapts the min/max boundaries.
 
         Args:
-            x: Input data tensor, shape (batch_size, input_features). Should be
-                representative of the training distribution.
+            x: Input data tensor, shape (batch_size, input_features).
 
         Raises:
             ValueError: If input is not 2D.
         """
-        if not isinstance(x, keras.KerasTensor):
-            x = keras.ops.convert_to_tensor(x, dtype=self.dtype)
+        # Ensure input is a tensor
+        x = keras.ops.convert_to_tensor(x, dtype=self.dtype)
 
-        if len(x.shape) != 2:
-            raise ValueError("Input 'x' for grid update must be 2D.")
+        if len(keras.ops.shape(x)) != 2:
+            raise ValueError("Input 'x' for grid update must be 2D (batch, features).")
 
-        # Sort each feature column to compute quantiles
-        batch_size, num_features = keras.ops.shape(x)
+        # Sort each feature column to find distribution boundaries
+        # Shape: (batch_size, input_features)
         x_sorted = keras.ops.sort(x, axis=0)
+        batch_size = keras.ops.shape(x)[0]
 
-        # Select grid_size+1 evenly spaced samples from sorted data
-        # These samples become the new grid points
+        # Determine indices for uniform quantile selection
+        # We select grid_size + 1 points to estimate the range
         indices = keras.ops.cast(
             keras.ops.linspace(0, batch_size - 1, self.grid_size + 1),
-            dtype='int32'
+            dtype="int32"
         )
+
+        # Gather values at these indices
+        # Shape: (grid_size + 1, input_features)
         grid_points_per_feature = keras.ops.take(x_sorted, indices, axis=0)
 
-        # Average grid points across features to create unified grid
-        # (Alternative: maintain per-feature grids for more flexibility)
+        # Average across features to find a unified range for the layer
+        # Shape: (grid_size + 1,)
         new_grid_points = keras.ops.mean(grid_points_per_feature, axis=1)
 
-        # Update grid range and rebuild knot sequence
-        self.grid_range = (new_grid_points[0], new_grid_points[-1])
-        self._build_grid()
+        # Update the grid range configuration
+        new_min = float(keras.ops.convert_to_numpy(new_grid_points[0]))
+        new_max = float(keras.ops.convert_to_numpy(new_grid_points[-1]))
+        self.grid_range = (new_min, new_max)
+
+        # Re-calculate and assign the grid weight values
+        self._set_grid_from_range(new_min, new_max)
 
     def compute_output_shape(
-            self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape from input shape.
-
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Shape tuple of output tensor, with last dimension changed to features.
-        """
+            self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape from input shape."""
         output_shape = list(input_shape)
         output_shape[-1] = self.features
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration dictionary for serialization.
-
-        Returns serialization-compatible configuration containing all constructor
-        arguments needed to recreate the layer. This enables saving and loading
-        models containing this layer.
-
-        Returns:
-            Dictionary mapping constructor argument names to their values.
-        """
+        """Return configuration dictionary for serialization."""
         config = super().get_config()
         config.update({
             "features": self.features,

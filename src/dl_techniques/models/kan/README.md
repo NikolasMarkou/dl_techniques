@@ -44,7 +44,7 @@ Each of these learnable activations is parameterized as a B-spline, allowing the
 1.  **Faithful Architecture**: The core `KANLinear` layer accurately implements the `y_j = Σ_i φ_ij(x_i)` structure from the paper, where `φ_ij` is a learnable activation on the edge connecting input `i` to output `j`.
 2.  **Keras 3 Native & Serializable**: The entire architecture is built using modern Keras 3 functional patterns, ensuring it is fully serializable to the `.keras` format and compatible with TensorFlow, PyTorch, and JAX.
 3.  **Model Variants & Factories**: Includes predefined variants (`micro`, `small`, `medium`, etc.) and easy-to-use factory functions (`from_variant`, `from_layer_sizes`) for rapid model creation.
-4.  **Adaptive Grids**: Includes a `update_grid_from_samples` method to allow the B-spline grids to adapt to the data distribution, a key feature for performance.
+4.  **Adaptive Grids**: Includes a dedicated `update_kan_grids(x)` method on the model. This automatically performs a forward pass to capture hidden layer distributions and updates the B-spline grids for optimal expressivity.
 
 ### Why KAN Matters
 
@@ -187,18 +187,18 @@ Output y (B, F_out)
 ### 4.1 `KANLinear` Layer
 
 The fundamental building block of a KAN. It learns a unique activation `φ_ij` for each connection.
--   **`spline_weight`**: A tensor of coefficients for the B-spline basis functions. These are the learnable parameters that define the shape of the spline component for each `(input_feature, output_feature)` pair.
--   **`spline_scaler` & `base_scaler`**: Learnable scalars that control the magnitude of the spline and base components respectively, allowing the model to balance the two paths.
--   **`base_activation`**: A fixed activation function (e.g., `'swish'`) that provides a well-behaved, residual-like component to each learnable activation, aiding optimization.
--   **`grid_size`**: Controls the number of pieces in the piecewise polynomial spline. A larger grid allows for more complex functions but increases parameters and the risk of overfitting.
--   **`spline_order`**: The degree of the polynomial pieces (e.g., 3 for cubic splines). This determines the smoothness of the learned functions.
+-   **`spline_weight`**: A tensor of coefficients for the B-spline basis functions. These are the learnable parameters that define the shape of the spline component.
+-   **`spline_scaler` & `base_scaler`**: Learnable scalars that control the magnitude of the spline and base components respectively.
+-   **`grid`**: A non-trainable weight that stores the B-spline knot vectors. This persists during saving/loading and is updated via `update_grid_from_samples`.
+-   **`base_activation`**: A fixed activation function (e.g., `'swish'`) applied alongside the spline.
+-   **No Bias Vector**: Unlike Dense layers, `KANLinear` does not typically use a separate bias vector, as the spline and base paths handle the mapping expressively.
 
 ### 4.2 `KAN` Model
 
 A Keras `Model` subclass that stacks `KANLinear` layers.
--   It is constructed using the Keras functional API within the `__init__` method, a modern best practice that ensures robust serialization.
--   It handles the application of a final activation function (like `softmax`) after the last `KANLinear` layer, which produces raw logits.
--   It provides convenient factory methods like `from_variant` and `from_layer_sizes` to simplify model creation.
+-   **Functional Graph**: Constructed via the Keras Functional API for robustness.
+-   **`update_kan_grids(x)`**: A critical utility that performs a forward pass to extract inputs for hidden layers and updates their grids to match the actual activation distribution.
+-   **Factory Methods**: Provides `create_kan_model`, `from_variant`, and `from_layer_sizes` for rapid prototyping.
 
 ---
 
@@ -211,10 +211,7 @@ Let's build a KAN to learn a simple non-linear function: `y = sin(π*x1) + x2^2`
 ```python
 import keras
 import numpy as np
-import matplotlib.pyplot as plt
-
-# Local imports from your project structure
-from dl_techniques.models.kan.model import create_compiled_kan
+from dl_techniques.models.kan.model import create_kan_model
 
 # 1. Generate synthetic data
 def generate_data(num_samples):
@@ -225,39 +222,33 @@ def generate_data(num_samples):
 X_train, y_train = generate_data(2000)
 X_val, y_val = generate_data(400)
 
-# 2. Create a tiny, compiled KAN model for regression
-# input_features=2, num_classes=1 (for regression)
-model = create_compiled_kan(
+# 2. Create KAN model for regression
+# input_features=2, output_features=1 (for regression)
+model = create_kan_model(
     variant="micro",
     input_features=2,
-    num_classes=1,
+    output_features=1
+)
+
+# 3. IMPORTANT: Initialize grids with data distribution
+# This adapts the B-splines to the input range [-1, 1]
+model.update_kan_grids(X_train[:100])
+
+# 4. Compile and Train
+model.compile(
+    optimizer=keras.optimizers.Adam(1e-3),
     loss="mean_squared_error",
-    learning_rate=1e-3,
     metrics=["mean_absolute_error"]
 )
 
-# 3. Train the model
 print("✅ KAN model created and compiled successfully!")
 history = model.fit(
     X_train, y_train,
     validation_data=(X_val, y_val),
-    epochs=10,
+    epochs=20,
     batch_size=64,
     verbose=1
 )
-print("✅ Training Complete!")
-
-# 4. Evaluate and visualize a prediction
-print("\nEvaluating on validation set:")
-model.evaluate(X_val, y_val)
-
-test_input = X_val[:1]
-prediction = model.predict(test_input)[0]
-ground_truth = y_val[0]
-
-print(f"\nTest Input: {test_input[0]}")
-print(f"Prediction: {prediction[0]:.4f}")
-print(f"Ground Truth: {ground_truth:.4f}")
 ```
 
 ---
@@ -274,22 +265,22 @@ from dl_techniques.models.kan.model import KAN
 # Create a custom KAN model
 layer_configs = [
     {"features": 32, "grid_size": 8, "base_activation": "gelu"},
-    {"features": 16, "grid_size": 5, "base_activation": "gelu"},
-    {"features": 1, "activation": "linear"} # Final activation for regression
+    {"features": 1, "activation": "linear"} 
 ]
 model = KAN(layer_configs=layer_configs, input_features=10)
+model.update_kan_grids(training_data) # Don't forget this!
 ```
 
 ### 6.2 Factory Functions
 
-#### `create_compiled_kan(...)`
-The recommended high-level factory for creating a compiled, ready-to-train KAN model from a variant.
+#### `create_kan_model(...)`
+The recommended high-level factory for creating a standard KAN configuration.
 
 #### `KAN.from_variant(...)`
 Class method to create a KAN model from standard configurations (`micro`, `small`, etc.).
 
 #### `KAN.from_layer_sizes(...)`
-Class method to create a KAN with a uniform configuration for all layers, defined only by their sizes.
+Class method to create a KAN with a uniform configuration for all layers, defined only by their node counts.
 
 ---
 
@@ -311,10 +302,10 @@ You can easily override the default settings of a variant.
 
 ```python
 # Create a 'medium' KAN but use a smaller grid and a different base activation
-model = KAN.from_variant(
-    "medium",
+model = create_kan_model(
+    variant="medium",
     input_features=256,
-    num_classes=10,
+    output_features=10,
     override_config={"grid_size": 5, "base_activation": "silu"}
 )
 ```
@@ -327,27 +318,31 @@ model = KAN.from_variant(
 
 ```python
 import keras
-from dl_techniques.models.kan.model import create_compiled_kan
+from dl_techniques.models.kan.model import create_kan_model
 
 # 1. Load data
 (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
 x_train = x_train.reshape(-1, 784).astype("float32") / 255.0
 x_test = x_test.reshape(-1, 784).astype("float32") / 255.0
 
-# 2. Create and compile a 'small' KAN for classification
-# The factory automatically adds a softmax activation for num_classes > 1
-model = create_compiled_kan(
+# 2. Create model
+model = create_kan_model(
     variant="small",
     input_features=784,
-    num_classes=10,
-    loss="sparse_categorical_crossentropy",
-    learning_rate=1e-3,
+    output_features=10,
+    output_activation="softmax"
+)
+
+# 3. Adapt grids to training data
+model.update_kan_grids(x_train[:1000])
+
+# 4. Compile and Train
+model.compile(
+    optimizer="adam", 
+    loss="sparse_categorical_crossentropy", 
     metrics=["accuracy"]
 )
-model.summary()
-
-# 3. Train the model
-# model.fit(x_train, y_train, validation_data=(x_test, y_test), epochs=5)
+model.fit(x_train, y_train, validation_data=(x_test, y_test), epochs=5)
 ```
 
 ### Example 2: Custom Architecture from Scratch
@@ -366,6 +361,7 @@ layer_configs = [
 ]
 
 custom_model = KAN(layer_configs=layer_configs, input_features=784)
+custom_model.update_kan_grids(x_train[:500])
 custom_model.compile(optimizer="adamw", loss="sparse_categorical_crossentropy")
 ```
 
@@ -389,10 +385,11 @@ first_kan_layer = model.get_layer("kan_layer_0")
 input_feature_idx = 0
 output_feature_idx = 0
 
-# Extract weights for the specific connection (i, j)
+# Extract weights
 spline_w = first_kan_layer.spline_weight[input_feature_idx, output_feature_idx, :]
 spline_s = first_kan_layer.spline_scaler[input_feature_idx, output_feature_idx]
 base_s = first_kan_layer.base_scaler[input_feature_idx, output_feature_idx]
+grid = first_kan_layer.grid # Access the grid variable
 
 # Generate a range of input values to plot
 x_plot = np.linspace(first_kan_layer.grid_range[0], first_kan_layer.grid_range[1], 200)
@@ -447,7 +444,7 @@ For larger variants, mixed precision can significantly speed up training on comp
 
 ```python
 keras.mixed_precision.set_global_policy('mixed_float16')
-model = create_compiled_kan(variant="large", ...) # Model will use mixed precision
+model = create_kan_model(variant="large", ...)
 ```
 
 ### XLA Compilation
@@ -455,7 +452,6 @@ model = create_compiled_kan(variant="large", ...) # Model will use mixed precisi
 Use `jit_compile=True` for graph compilation, which can provide a speed boost.
 
 ```python
-model = create_compiled_kan(...)
 model.compile(optimizer="adam", loss="...", jit_compile=True)
 ```
 
@@ -470,7 +466,7 @@ model.compile(optimizer="adam", loss="...", jit_compile=True)
 
 ### Adaptive Grids
 
-For best performance, periodically update the B-spline grids to match the distribution of activations. This can be done with a Keras Callback.
+For best performance, the B-spline grids should adapt to the evolving distribution of activations in hidden layers. The `KAN` model class provides a dedicated method for this.
 
 ```python
 class KANGridUpdateCallback(keras.callbacks.Callback):
@@ -481,13 +477,12 @@ class KANGridUpdateCallback(keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         if (epoch + 1) % self.update_freq == 0:
-            for layer in self.model.layers:
-                if isinstance(layer, KANLinear):
-                    layer.update_grid_from_samples(self.data)
+            # Updates all layers in the model by running a forward pass
+            self.model.update_kan_grids(self.data)
             print(f"\nUpdated KAN grids at epoch {epoch + 1}")
 
 # Usage:
-# grid_updater = KANGridUpdateCallback(X_train[:1000])
+# grid_updater = KANGridUpdateCallback(X_train[:500])
 # model.fit(..., callbacks=[grid_updater])
 ```
 
@@ -495,13 +490,13 @@ class KANGridUpdateCallback(keras.callbacks.Callback):
 
 ## 12. Serialization & Deployment
 
-The `KAN` model and `KANLinear` layer are fully serializable using Keras 3's modern `.keras` format.
+The `KAN` model and `KANLinear` layer are fully serializable using Keras 3's modern `.keras` format. The B-spline grids are saved as part of the model weights.
 
 ### Saving and Loading
 
 ```python
 # Create and train model
-model = create_compiled_kan(variant="small", ...)
+model = create_kan_model(variant="small", ...)
 # model.fit(...)
 
 # Save the entire model
@@ -518,11 +513,11 @@ loaded_model = keras.models.load_model('my_kan_model.keras')
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.kan.model import KAN
+from dl_techniques.models.kan.model import create_kan_model
 
 def test_forward_pass_shape():
     """Test the output shape of a forward pass."""
-    model = KAN.from_variant("micro", input_features=32, num_classes=5)
+    model = create_kan_model("micro", input_features=32, output_features=5)
     dummy_input = np.random.rand(4, 32)
     output = model.predict(dummy_input)
     assert output.shape == (4, 5)
@@ -544,7 +539,7 @@ test_forward_pass_shape()
 **Issue 2: The model is overfitting.**
 
 -   **Cause**: `grid_size` is too large, allowing splines to fit noise.
--   **Solution**: 1) Reduce `grid_size`. 2) Add L2 regularization via the `kernel_regularizer` argument in `KANLinear`. 3) Add dropout layers between `KANLinear` layers.
+-   **Solution**: 1) Reduce `grid_size`. 2) Add L2 regularization via the `kernel_regularizer` argument (supported in `kwargs`). 3) Add dropout layers between `KANLinear` layers.
 
 ### Frequently Asked Questions
 

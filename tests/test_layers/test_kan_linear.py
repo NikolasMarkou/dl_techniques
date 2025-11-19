@@ -304,7 +304,7 @@ class TestKANLinear:
         layer_all_trainable = KANLinear(**basic_config)
         _ = layer_all_trainable(sample_input_2d)
         assert len(layer_all_trainable.trainable_variables) == 3
-        assert len(layer_all_trainable.non_trainable_variables) == 0
+        assert len(layer_all_trainable.non_trainable_variables) == 1
 
         # Case 2: Scalers not trainable
         # FIX 2: Create a modified config instead of overriding kwargs
@@ -315,7 +315,7 @@ class TestKANLinear:
         layer_some_not_trainable = KANLinear(**config_not_trainable)
         _ = layer_some_not_trainable(sample_input_2d)
         assert len(layer_some_not_trainable.trainable_variables) == 1 # spline_weight only
-        assert len(layer_some_not_trainable.non_trainable_variables) == 2 # the two scalers
+        assert len(layer_some_not_trainable.non_trainable_variables) == 3
 
     # ========================================================================
     # 5. Different Training Modes

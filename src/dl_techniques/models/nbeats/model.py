@@ -431,14 +431,6 @@ class NBeatsNet(keras.Model):
                 # Accumulate forecast
                 forecast_sum = forecast_sum + forecast
 
-                # Apply dropout if enabled
-                if self.dropout_rate > 0.0 and training:
-                    residual = self.dropout_layers[dropout_idx](
-                        residual,
-                        training=training
-                    )
-                    dropout_idx += 1
-
         # Reshape forecast to 3D
         forecast_3d = ops.reshape(
             forecast_sum,

@@ -872,7 +872,7 @@ def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
         experiment_name="nbeats",
-        activation="gelu",
+        activation="relu",
         backcast_length=104,
         forecast_length=12,
         stack_types=["trend", "seasonality", "generic"],
@@ -890,13 +890,13 @@ def main() -> None:
         warmup_steps=5000,
         warmup_start_lr=1e-6,
         gradient_clip_norm=1.0,
-        optimizer='adam',
+        optimizer='adamw',
         primary_loss=keras.losses.MeanAbsoluteError(
             reduction="mean"
         ),
         dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
-        reconstruction_loss_weight=0.5, # Set > 0.0 to see residual metrics
+        reconstruction_loss_weight=0.5,
         visualize_every_n_epochs=5,
         plot_top_k_patterns=12,
     )
