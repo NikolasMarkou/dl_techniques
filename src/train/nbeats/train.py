@@ -67,6 +67,7 @@ class NBeatsTrainingConfig:
     # N-BEATS specific configuration
     backcast_length: int = 168
     forecast_length: int = 24
+    input_dim: int = 1  # Explicitly define input dimension
 
     # Model architecture
     stack_types: List[str] = field(
@@ -172,48 +173,97 @@ class MultiPatternDataProcessor:
     def _training_generator(
         self, forecast_length: int
     ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
-        """Create an infinite generator for training data."""
+        """
+        Create an infinite generator for training data with high diversity.
+
+        Strategy:
+        1. Select a large mix of different patterns (e.g., 50).
+        2. Extract a small number of windows from each (e.g., 5).
+        3. Shuffle this pool thoroughly.
+        4. Yield.
+
+        This ensures that within the generator's buffer, there is no blocking.
+        """
+        # Tuning for diversity:
+        # 50 patterns * 5 windows = 250 samples per refill.
+        # This ensures we don't dwell on one pattern for too long.
+        patterns_to_mix = 50
+        windows_per_pattern = 5
+
+        buffer = []
+
         while True:
-            pattern_name = random.choices(
-                self.weighted_patterns, self.weights, k=1
-            )[0]
-            data = self.ts_generator.generate_task_data(pattern_name)
-            train_size = int(self.config.train_ratio * len(data))
-            train_data = data[:train_size]
-
-            max_start_idx = max(
-                len(train_data) - self.config.backcast_length - forecast_length, 0
-            )
-
-            if max_start_idx <= 0:
-                continue
-
-            start_idx = random.randint(0, max_start_idx)
-            backcast = train_data[
-                start_idx: start_idx + self.config.backcast_length
-            ]
-            forecast = train_data[
-                start_idx + self.config.backcast_length:
-                start_idx + self.config.backcast_length + forecast_length
-            ]
-
-            backcast_out = backcast.astype(np.float32).reshape(-1, 1)
-            forecast_out = forecast.astype(np.float32).reshape(-1, 1)
-
-            if self.config.reconstruction_loss_weight > 0.0:
-                residual_target = np.zeros(
-                    (self.config.backcast_length,), dtype=np.float32
+            # If buffer is empty, refill it with a highly diverse mix
+            if not buffer:
+                # 1. Select a large mix of patterns based on weights
+                selected_patterns = random.choices(
+                    self.weighted_patterns, self.weights, k=patterns_to_mix
                 )
-                yield backcast_out, (forecast_out, residual_target)
-            else:
-                yield backcast_out, forecast_out
+
+                new_samples = []
+
+                for pattern_name in selected_patterns:
+                    # Generate fresh data
+                    data = self.ts_generator.generate_task_data(pattern_name)
+                    train_size = int(self.config.train_ratio * len(data))
+                    train_data = data[:train_size]
+
+                    max_start_idx = max(
+                        len(train_data) - self.config.backcast_length - forecast_length, 0
+                    )
+
+                    if max_start_idx <= 0:
+                        continue
+
+                    # 2. Extract limited random windows to maximize variety
+                    for _ in range(windows_per_pattern):
+                        start_idx = random.randint(0, max_start_idx)
+
+                        backcast = train_data[
+                            start_idx: start_idx + self.config.backcast_length
+                        ]
+                        forecast = train_data[
+                            start_idx + self.config.backcast_length:
+                            start_idx + self.config.backcast_length + forecast_length
+                        ]
+
+                        backcast_out = backcast.astype(np.float32).reshape(-1, 1)
+                        forecast_out = forecast.astype(np.float32).reshape(-1, 1)
+
+                        if self.config.reconstruction_loss_weight > 0.0:
+                            # Residual target is strictly zero.
+                            # Shape: (backcast_len * input_dim, ) to match model output
+                            residual_target = np.zeros(
+                                (self.config.backcast_length * self.config.input_dim,),
+                                dtype=np.float32
+                            )
+                            new_samples.append(
+                                (backcast_out, (forecast_out, residual_target))
+                            )
+                        else:
+                            new_samples.append((backcast_out, forecast_out))
+
+                # 3. Shuffle the refill batch to ensure local diversity
+                random.shuffle(new_samples)
+                buffer.extend(new_samples)
+
+                if not buffer:
+                    continue
+
+            # Yield one sample from the mixed buffer
+            yield buffer.pop(0)
 
     def _evaluation_generator(
             self,
             forecast_length: int,
             split: str
     ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
-        """Create an infinite repeating generator for validation or test data."""
+        """
+        Create an infinite repeating generator for validation or test data.
+
+        Shuffles the complete evaluation set to ensure validation batches
+        are statistically representative of the whole dataset.
+        """
         if split == 'val':
             start_ratio = self.config.train_ratio
             end_ratio = self.config.train_ratio + self.config.val_ratio
@@ -231,6 +281,7 @@ class MultiPatternDataProcessor:
             split_data = data[start_idx:end_idx]
 
             seq_len = self.config.backcast_length + forecast_length
+            # Extract all possible sequences from the split
             for i in range(len(split_data) - seq_len + 1):
                 backcast = split_data[i: i + self.config.backcast_length]
                 forecast = split_data[
@@ -241,7 +292,8 @@ class MultiPatternDataProcessor:
 
                 if self.config.reconstruction_loss_weight > 0.0:
                     residual_target = np.zeros(
-                        (self.config.backcast_length,), dtype=np.float32
+                        (self.config.backcast_length * self.config.input_dim,),
+                        dtype=np.float32
                     )
                     all_sequences.append(
                         (backcast_out, (forecast_out, residual_target))
@@ -256,17 +308,25 @@ class MultiPatternDataProcessor:
             while True:
                 if self.config.reconstruction_loss_weight > 0.0:
                     dummy_residual = np.zeros(
-                        (self.config.backcast_length,), dtype=np.float32
+                        (self.config.backcast_length * self.config.input_dim,),
+                        dtype=np.float32
                     )
                     yield dummy_backcast, (dummy_forecast, dummy_residual)
                 else:
                     yield dummy_backcast, dummy_forecast
         else:
             logger.info(f"Created {len(all_sequences)} sequences for {split} split")
+
+            # Shuffle to prevent blocking by pattern type during validation
+            random.shuffle(all_sequences)
+
             idx = 0
             while True:
                 yield all_sequences[idx]
                 idx = (idx + 1) % len(all_sequences)
+                # Reshuffle at the end of every full pass
+                if idx == 0:
+                    random.shuffle(all_sequences)
 
     def get_evaluation_steps(self, forecast_length: int, split: str) -> int:
         """Calculate the number of steps for a full evaluation pass."""
@@ -326,6 +386,7 @@ class MultiPatternDataProcessor:
             forecast, residual_target = targets
             normalized_forecast = (forecast - mean) / std
             # Return the data in the same nested structure.
+            # residual_target is already zero, so we don't normalize it.
             return normalized_backcast, (normalized_forecast, residual_target)
         else:
             # Handle the single forecast tensor structure.
@@ -341,7 +402,10 @@ class MultiPatternDataProcessor:
                 tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
                 (
                     tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(self.config.backcast_length,), dtype=tf.float32)
+                    tf.TensorSpec(
+                        shape=(self.config.backcast_length * self.config.input_dim,),
+                        dtype=tf.float32
+                    )
                 )
             )
         else:
@@ -379,14 +443,19 @@ class MultiPatternDataProcessor:
                 num_parallel_calls=tf.data.AUTOTUNE
             )
 
+        # PIPELINE SHUFFLING:
+        # 1. The generator yields a shuffled mix of diverse patterns.
+        # 2. We add a tf.data.shuffle buffer here to mix samples ACROSS generator refill cycles.
+        # This guarantees that no "blocks" of similar data ever reach the batching stage.
         train_ds = (
             train_ds.shuffle(
-                self.config.batch_size * 1000
+                self.config.batch_size * 20, # Large buffer for global mixing
+                reshuffle_each_iteration=True
             )
             .batch(self.config.batch_size)
-            .shuffle(128)
             .prefetch(tf.data.AUTOTUNE)
         )
+
         val_ds = val_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
         test_ds = test_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
@@ -515,7 +584,6 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
                 f"Failed to create interim plots for {self.model_name}: {e}"
             )
 
-    # Updated plotting for clearer, more comprehensive metrics
     def _plot_learning_curves(self, epoch: int) -> None:
         """Plot and save comprehensive training and validation learning curves."""
         fig, axes = plt.subplots(2, 2, figsize=(18, 10))
@@ -680,7 +748,9 @@ class NBeatsTrainer:
             use_normalization=self.config.use_normalization,
             kernel_regularizer=kernel_regularizer,
             dropout_rate=self.config.dropout_rate,
-            reconstruction_weight=self.config.reconstruction_loss_weight
+            reconstruction_weight=self.config.reconstruction_loss_weight,
+            input_dim=self.config.input_dim,
+            output_dim=1 # NBeats output dim usually 1 for univariate
         )
 
         if self.config.use_warmup:
@@ -782,7 +852,8 @@ class NBeatsTrainer:
         """Train and evaluate a single model for a specific horizon."""
         model = self.create_model(horizon)
 
-        model.build((None, self.config.backcast_length, 1))
+        # Build shape explicitly: (batch, backcast, input_dim)
+        model.build((None, self.config.backcast_length, self.config.input_dim))
 
         logger.info(f"Model created with {model.count_params():,} parameters")
 
@@ -875,6 +946,7 @@ def main() -> None:
         activation="relu",
         backcast_length=104,
         forecast_length=12,
+        input_dim=1,
         stack_types=["trend", "seasonality", "generic"],
         nb_blocks_per_stack=3,
         hidden_layer_units=256,
@@ -891,9 +963,7 @@ def main() -> None:
         warmup_start_lr=1e-6,
         gradient_clip_norm=1.0,
         optimizer='adamw',
-        primary_loss=keras.losses.MeanAbsoluteError(
-            reduction="mean"
-        ),
+        primary_loss="mase_loss",
         dropout_rate=0.1,
         kernel_regularizer_l2=1e-5,
         reconstruction_loss_weight=0.5,
