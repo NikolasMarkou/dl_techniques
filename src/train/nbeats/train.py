@@ -881,7 +881,7 @@ def main() -> None:
         use_normalization=True,
         normalize_per_instance=False,
         use_bias=True,
-        max_patterns_per_category=50,
+        max_patterns_per_category=100,
         epochs=200,
         batch_size=128,
         steps_per_epoch=1000,
