@@ -146,6 +146,7 @@ class TiRexCore(keras.Model):
         prediction_length: int = 32,
         dropout_rate: float = 0.1,
         use_layer_norm: bool = True,
+        use_normalization: bool = True,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -172,6 +173,7 @@ class TiRexCore(keras.Model):
         self.prediction_length = prediction_length
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
+        self.use_normalization = use_normalization
 
         if len(self.block_types) != num_blocks:
             raise ValueError(
@@ -179,8 +181,6 @@ class TiRexCore(keras.Model):
             )
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
-        self.scaler = StandardScaler(name="scaler", axis=1)
-
         self.patch_embedding = PatchEmbedding1D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim * 2,  # Include mask information
@@ -243,39 +243,46 @@ class TiRexCore(keras.Model):
         # Ensure 3D input
         if len(inputs.shape) == 2:
             inputs = ops.expand_dims(inputs, axis=-1)
-        elif len(inputs.shape) != 3:
-            raise ValueError(f"Input must be 2D or 3D tensor, got shape {inputs.shape}")
 
-        # Input scaling
-        x = self.scaler(inputs, training=training)
+        # 1. CALCULATE STATISTICS & NORMALIZE
+        if self.use_normalization:
+            # Calculate stats across the time dimension (axis 1)
+            mean = ops.mean(inputs, axis=1, keepdims=True)
+            std = ops.std(inputs, axis=1, keepdims=True)
+            std = ops.maximum(std, 1e-7)  # Prevent division by zero
+            x = (inputs - mean) / std
+        else:
+            x = inputs
+            mean = None
+            std = None
 
-        # Handle NaN values by creating a mask
+        # 2. HANDLE MASKING
         nan_mask = ops.logical_not(ops.isnan(inputs))
         nan_mask = ops.cast(nan_mask, dtype=x.dtype)
-
-        # Concatenate data with mask information
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
-        # Patch embedding
+        # 3. ENCODE
         x_patches = self.patch_embedding(x_with_mask, training=training)
-
-        # Input projection
         x_embedded = self.input_projection(x_patches, training=training)
 
-        # Sequential processing through blocks
+        # 4. PROCESS
         hidden_states = x_embedded
         for block in self.blocks:
             hidden_states = block(hidden_states, training=training)
 
-        # Output normalization
         hidden_states = self.output_norm(hidden_states, training=training)
+        pooled = ops.mean(hidden_states, axis=1)
 
-        # Global average pooling across sequence dimension
-        pooled = ops.mean(hidden_states, axis=1)  # [batch_size, embed_dim]
-
-        # Quantile predictions
-        # Output shape: [batch_size, prediction_length, num_quantiles]
+        # 5. PREDICT (Normalized Space)
+        # Shape: [batch, prediction_length, num_quantiles]
         quantile_predictions = self.quantile_head(pooled, training=training)
+
+        # 6. DENORMALIZE OUTPUT (Reversible Instance Normalization)
+        if self.use_normalization:
+            # mean/std shape: (Batch, 1, 1) via keepdims=True in step 1
+            # predictions shape: (Batch, Time, Quantiles)
+            # Broadcasting will apply scale/shift to all time steps and all quantiles
+            quantile_predictions = (quantile_predictions * std) + mean
 
         return quantile_predictions
 
@@ -391,6 +398,7 @@ class TiRexCore(keras.Model):
             "prediction_length": self.prediction_length,
             "dropout_rate": self.dropout_rate,
             "use_layer_norm": self.use_layer_norm,
+            "use_normalization": self.use_normalization,
         })
         return config
 
