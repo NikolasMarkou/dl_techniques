@@ -18,50 +18,33 @@ Architecture and Mathematical Foundation:
     - `x` is the input vector.
     - `cᵢ` is the center vector of the i-th RBF unit.
     - `γᵢ` is the trainable width (or precision) parameter for the i-th unit.
-      It controls the radius of influence, or the "receptiveness," of the
-      neuron. A larger gamma results in a more localized, narrower response.
+      It controls the radius of influence. A larger gamma results in a more
+      localized, narrower response.
     - `||·||²` denotes the squared Euclidean distance.
 
     The output of the layer is a vector where each element is the activation
     `φᵢ(x)` from the corresponding RBF unit.
 
 Enhanced Center Repulsion:
-    A common issue when training RBF networks with gradient descent is
-    "center collapse," where multiple centers converge to the same location,
-    leading to redundant units and poor coverage of the input space. This
-    implementation mitigates this with an adaptive repulsion mechanism.
+    To mitigate "center collapse" (where multiple centers converge to the
+    same location), this implementation includes an adaptive repulsion
+    mechanism.
 
-    During training, a penalty term is added to the model's loss, which
-    activates only when two centers `cᵢ` and `cⱼ` become too close. The
-    repulsion potential `V_rep` is defined as:
+    During training, a penalty term is added to the model's loss:
 
     V_rep(cᵢ, cⱼ) = α · D · max(0, d_min·(1 + μ) - ||cᵢ - cⱼ||)²
 
-    - The force is proportional to the `repulsion_strength` (α) and is only
-      applied when the distance `||cᵢ - cⱼ||` falls below a threshold defined
-      by the `min_center_distance` (d_min) and a `safety_margin` (μ).
-    - Crucially, the penalty is scaled by the input dimensionality (D). This
-      makes the `repulsion_strength` hyperparameter more stable and less
-      dependent on the number of features in the input data.
+    This force ensures centers maintain a minimum separation, maximizing
+    the coverage of the input space.
 
 References:
     - Moody, J., & Darken, C. J. (1989). "Fast learning in networks of
-      locally-tuned processing units." This is a foundational paper that
-      established RBF networks as a competitive architecture, often trained
-      with a hybrid approach of unsupervised center selection followed by
-      supervised weight training.
-    - Bishop, C. M. (1995). "Neural Networks for Pattern Recognition." This
-      textbook provides a comprehensive theoretical treatment of RBF
-      networks, detailing their properties as universal approximators and
-      their connection to techniques like kernel density estimation.
-    - Schwenker, F., Kestler, H. A., & Palm, G. (2001). "Three learning
-      phases for radial-basis-function networks." This work reviews and
-      analyzes different strategies for training RBF networks, including
-      fully supervised methods where centers are adapted via gradient
-      descent, which is the approach this layer facilitates.
+      locally-tuned processing units."
+    - Bishop, C. M. (1995). "Neural Networks for Pattern Recognition."
 """
 
 import keras
+import numpy as np
 from keras import ops
 from typing import Optional, Union, Tuple, Dict, Any
 
@@ -73,123 +56,40 @@ class RBFLayer(keras.layers.Layer):
     Radial Basis Function layer with stable center repulsion mechanism.
 
     This layer implements RBF units with an improved repulsive force mechanism
-    between centers to ensure better coverage of the input space and prevent
-    center collapse. The implementation includes numerical stability improvements,
-    adaptive repulsion strength, and robust parameter initialization.
+    between centers to ensure better coverage of the input space. It utilizes
+    broadcasting for distance calculations to support inputs of arbitrary rank
+    (e.g., (batch, dim) or (batch, time, dim)) numerically stably.
 
-    Mathematical Foundation:
-        For an input x, each RBF unit computes:
-            φᵢ(x) = exp(-γᵢ ||x - cᵢ||²)
-
-        Where:
-        - cᵢ is the center vector for unit i
-        - γᵢ is the width parameter (precision = 1/2σ²)
-        - ||·||² denotes squared Euclidean distance
-
-    Enhanced Center Repulsion:
-        To prevent center collapse, we use an adaptive repulsion mechanism:
-            Vᵣₑₚ(cᵢ, cⱼ) = α * D * max(0, d_min * (1 + μ) - ||cᵢ - cⱼ||)²
-
-        Where:
-        - α is the base repulsion strength
-        - D is the input dimensionality (for scaling)
-        - μ is a safety margin
-        - d_min is the minimum desired distance between centers
-
-    Key Features:
-    - Stable numerical implementation with bounded exponentials
-    - Dimensionality-adaptive repulsion strength scaling
-    - Robust parameter initialization and constraints
-    - Full serialization support for production deployment
-    - Comprehensive error handling and validation
+    Attributes:
+        units (int): Number of RBF units.
+        gamma_init (float): Initial value for width parameter (1/2σ²).
+        repulsion_strength (float): Strength of the repulsion penalty.
+        min_center_distance (float): Minimum desired distance between centers.
+        safety_margin (float): Margin added to minimum distance for repulsion.
+        centers (keras.Variable): Weight matrix of center positions.
+        gamma_raw (keras.Variable): Raw width parameters (pre-softplus).
 
     Args:
         units: Integer, number of RBF units in the layer. Must be positive.
-        gamma_init: Float, initial value for the width parameter (1/2σ²).
-            Controls the initial spread of RBF functions. Must be positive.
+        gamma_init: Float, initial value for the width parameter.
             Defaults to 1.0.
-        repulsion_strength: Float, base weight of the repulsion term (α).
-            Controls how strongly centers repel each other. Must be non-negative.
-            Higher values encourage more spread-out centers. Defaults to 0.1.
-        min_center_distance: Float, minimum desired distance between centers.
-            Must be positive. Defaults to 1.0.
-        center_initializer: String or Initializer, initializer for RBF centers.
-            Accepts standard Keras initializer names ('uniform', 'normal', etc.)
-            or Initializer instances. Defaults to 'uniform'.
-        center_constraint: Optional constraint for center positions.
-            Can be used to bound centers within specific regions.
+        repulsion_strength: Float, strength of center repulsion.
+            Defaults to 0.1.
+        min_center_distance: Float, minimum distance threshold for centers.
+            Defaults to 1.0.
+        center_initializer: Initializer for RBF centers.
+            Defaults to 'uniform'.
+        center_constraint: Constraint for center positions.
             Defaults to None.
         trainable_gamma: Boolean, whether width parameters are trainable.
-            If False, gamma values remain fixed at initialization.
             Defaults to True.
-        safety_margin: Float, additional margin for minimum distance calculation.
-            Must be non-negative. Defaults to 0.2.
-        kernel_regularizer: Optional regularizer for centers.
-            Applied to center positions during training. Defaults to None.
-        gamma_regularizer: Optional regularizer for width parameters.
-            Applied to gamma values during training. Defaults to None.
-        **kwargs: Additional Layer base class arguments.
-
-    Input shape:
-        2D tensor with shape: `(batch_size, input_dim)` or
-        3D tensor with shape: `(batch_size, timesteps, input_dim)`
-
-    Output shape:
-        2D tensor with shape: `(batch_size, units)` or
-        3D tensor with shape: `(batch_size, timesteps, units)`
-
-    Attributes:
-        centers: Weight matrix of shape `(units, input_dim)` containing center positions.
-        gamma_raw: Raw width parameters of shape `(units,)` before softplus transformation.
-        gamma: Effective positive width parameters computed via softplus.
-
-    Example:
-        ```python
-        # Basic usage
-        layer = RBFLayer(units=32)
-        inputs = keras.Input(shape=(784,))
-        outputs = layer(inputs)
-
-        # Advanced configuration
-        layer = RBFLayer(
-            units=64,
-            gamma_init=2.0,
-            repulsion_strength=0.2,
-            min_center_distance=1.5,
-            center_initializer='normal',
-            center_constraint=keras.constraints.UnitNorm(),
-            trainable_gamma=True,
-            safety_margin=0.3,
-            gamma_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a complete model
-        inputs = keras.Input(shape=(100,))
-        x = RBFLayer(128, repulsion_strength=0.15)(inputs)
-        x = keras.layers.Dense(64, activation='relu')(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - Moody, J., & Darken, C. J. (1989). Fast learning in networks of
-          locally-tuned processing units.
-        - Schwenker, F., Kestler, H. A., & Palm, G. (2001). Three learning phases
-          for radial-basis-function networks.
-        - Bishop, C. M. (1995). Neural Networks for Pattern Recognition.
-
-    Raises:
-        ValueError: If units is not positive.
-        ValueError: If gamma_init is not positive.
-        ValueError: If repulsion_strength is negative.
-        ValueError: If min_center_distance is not positive.
-        ValueError: If safety_margin is negative.
-        ValueError: If input has less than 2 dimensions.
-
-    Note:
-        The layer automatically adds repulsion loss during training to prevent
-        center collapse. This loss is scaled by input dimensionality for
-        hyperparameter stability across different datasets.
+        safety_margin: Float, margin for repulsion calculation.
+            Defaults to 0.2.
+        kernel_regularizer: Regularizer for center weights.
+            Defaults to None.
+        gamma_regularizer: Regularizer for width parameters.
+            Defaults to None.
+        **kwargs: Standard Layer keyword arguments.
     """
 
     def __init__(
@@ -206,10 +106,8 @@ class RBFLayer(keras.layers.Layer):
         gamma_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the RBF layer with enhanced parameters."""
         super().__init__(**kwargs)
 
-        # Comprehensive input validation
         if units <= 0:
             raise ValueError(f"units must be positive, got {units}")
         if gamma_init <= 0:
@@ -221,7 +119,6 @@ class RBFLayer(keras.layers.Layer):
         if safety_margin < 0:
             raise ValueError(f"safety_margin must be non-negative, got {safety_margin}")
 
-        # Store ALL configuration parameters for serialization
         self.units = units
         self.gamma_init = gamma_init
         self.repulsion_strength = repulsion_strength
@@ -229,39 +126,34 @@ class RBFLayer(keras.layers.Layer):
         self.safety_margin = safety_margin
         self.trainable_gamma = trainable_gamma
 
-        # Process initializers, constraints, and regularizers using standard Keras `get`
         self.center_initializer = keras.initializers.get(center_initializer)
         self.center_constraint = keras.constraints.get(center_constraint)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.gamma_regularizer = keras.regularizers.get(gamma_regularizer)
 
-        # Initialize weight attributes - created in build()
-        self.centers = None
-        self.gamma_raw = None
-        self._feature_dim = None  # Store for repulsion scaling
+        # State definitions
+        self.centers: Optional[keras.Variable] = None
+        self.gamma_raw: Optional[keras.Variable] = None
+        self._feature_dim: int = 0
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Create the layer's weights with robust initialization.
+        Create layer weights.
 
         Args:
-            input_shape: Shape tuple indicating the input shape.
-
-        Raises:
-            ValueError: If input_shape has less than 2 dimensions or
-                       if last dimension is None.
+            input_shape: Shape of the input tensor.
         """
         if len(input_shape) < 2:
             raise ValueError(
                 f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
             )
 
-        # Extract and validate feature dimension
-        self._feature_dim = input_shape[-1]
-        if self._feature_dim is None:
-            raise ValueError("Last dimension of input must be defined")
+        feature_dim = input_shape[-1]
+        if feature_dim is None:
+            raise ValueError("The last dimension of the input must be defined.")
 
-        # Create center positions with shape (units, feature_dim)
+        self._feature_dim = feature_dim
+
         self.centers = self.add_weight(
             name='centers',
             shape=(self.units, self._feature_dim),
@@ -271,92 +163,24 @@ class RBFLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create width parameters using raw values transformed via softplus
-        # Initialize raw values such that softplus(raw) = gamma_init
-        # Since softplus(x) = log(1 + exp(x)), we need x = log(exp(gamma_init) - 1)
-        gamma_raw_init_value = ops.log(
-            ops.exp(ops.cast(self.gamma_init, self.compute_dtype)) - 1.0
-        )
+        # Calculate inverse softplus for initialization
+        # softplus(x) = log(1 + exp(x)) -> x = log(exp(y) - 1)
+        # We use numpy for stable constant calculation
+        if self.gamma_init > 20.0:
+            # For large values, softplus is approximately linear
+            init_val = self.gamma_init
+        else:
+            init_val = np.log(np.exp(self.gamma_init) - 1.0)
 
         self.gamma_raw = self.add_weight(
             name='gamma_raw',
             shape=(self.units,),
-            initializer=keras.initializers.Constant(gamma_raw_init_value),
+            initializer=keras.initializers.Constant(init_val),
             regularizer=self.gamma_regularizer,
             trainable=self.trainable_gamma,
         )
 
-        # Call parent build
         super().build(input_shape)
-
-    def _compute_pairwise_distances(
-        self,
-        x: keras.KerasTensor,
-        y: keras.KerasTensor,
-        epsilon: float = 1e-12
-    ) -> keras.KerasTensor:
-        """
-        Compute pairwise squared Euclidean distances with numerical stability.
-
-        Uses the identity ||x-y||² = ||x||² - 2⟨x,y⟩ + ||y||² for efficiency.
-
-        Args:
-            x: Tensor of shape `(n, d)`
-            y: Tensor of shape `(m, d)`
-            epsilon: Small constant for numerical stability
-
-        Returns:
-            Tensor of shape `(n, m)` containing squared distances
-        """
-        # Compute squared norms
-        x_norm = ops.sum(ops.square(x), axis=-1, keepdims=True)  # (n, 1)
-        y_norm = ops.sum(ops.square(y), axis=-1, keepdims=True)  # (m, 1)
-
-        # Compute cross term: -2 * x @ y^T
-        cross_term = -2.0 * ops.matmul(x, ops.transpose(y))
-
-        # Combine: ||x||² - 2⟨x,y⟩ + ||y||²
-        distances_squared = x_norm + cross_term + ops.transpose(y_norm) + epsilon
-
-        # Ensure non-negative (handles numerical errors)
-        return ops.maximum(distances_squared, 0.0)
-
-    def _compute_repulsion(self, centers: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Compute enhanced repulsion regularization term.
-
-        Encourages centers to maintain minimum distance apart, scaled by
-        input dimensionality for hyperparameter stability.
-
-        Args:
-            centers: Tensor of shape `(units, feature_dim)` representing centers
-
-        Returns:
-            Scalar tensor representing repulsion loss to be added
-        """
-        # Effective minimum distance with safety margin
-        effective_min_dist = self.min_center_distance * (1.0 + self.safety_margin)
-
-        # Compute pairwise distances between centers
-        squared_distances = self._compute_pairwise_distances(centers, centers)
-        distances = ops.sqrt(squared_distances)
-
-        # Compute repulsion potential: max(0, d_min_eff - ||c_i - c_j||)²
-        repulsion_potential = ops.square(
-            ops.maximum(0.0, effective_min_dist - distances)
-        )
-
-        # Mask diagonal elements (self-repulsion)
-        mask = 1.0 - ops.eye(self.units, dtype=self.compute_dtype)
-
-        # Mean repulsion over all pairs (excluding self)
-        mean_repulsion = ops.mean(repulsion_potential * mask)
-
-        # Scale by dimensionality and strength
-        dim_scale = ops.cast(self._feature_dim, self.compute_dtype)
-        repulsion_loss = self.repulsion_strength * dim_scale * mean_repulsion
-
-        return repulsion_loss
 
     @property
     def gamma(self) -> keras.KerasTensor:
@@ -364,59 +188,114 @@ class RBFLayer(keras.layers.Layer):
         Effective positive gamma values via softplus transformation.
 
         Returns:
-            Tensor of shape `(units,)` with positive width parameters
+            A tensor containing the strictly positive width parameters.
         """
         return keras.activations.softplus(self.gamma_raw)
+
+    def _compute_repulsion_loss(self) -> keras.KerasTensor:
+        """
+        Compute the center repulsion loss.
+
+        Calculates pairwise distances between centers and applies a penalty
+        if they are closer than `min_center_distance * (1 + safety_margin)`.
+
+        Returns:
+            A scalar tensor representing the regularization loss.
+        """
+        # centers shape: (units, feature_dim)
+        # Expand for broadcasting:
+        # c1: (units, 1, feature_dim)
+        # c2: (1, units, feature_dim)
+        c1 = ops.expand_dims(self.centers, axis=1)
+        c2 = ops.expand_dims(self.centers, axis=0)
+
+        # Squared Euclidean distance between all pairs
+        diff = c1 - c2
+        # shape: (units, units)
+        dist_sq = ops.sum(ops.square(diff), axis=-1)
+
+        # Safe sqrt for gradient stability (avoid sqrt(0))
+        dist = ops.sqrt(dist_sq + 1e-7)
+
+        # Effective threshold
+        threshold = self.min_center_distance * (1.0 + self.safety_margin)
+
+        # Penalty: max(0, threshold - distance)^2
+        penalty = ops.square(ops.maximum(0.0, threshold - dist))
+
+        # Mask the diagonal (distance to self is 0, which would cause max penalty)
+        eye_mask = ops.eye(self.units, dtype=self.compute_dtype)
+        # Invert mask: 1.0 for off-diagonal, 0.0 for diagonal
+        off_diag_mask = 1.0 - eye_mask
+
+        masked_penalty = penalty * off_diag_mask
+
+        # Average penalty over all pairs
+        # We normalize by units^2 - units (number of off-diagonal elements)
+        # or just mean over all and let the weight handle scaling.
+        # Following original logic: scale by dim and strength.
+        mean_penalty = ops.mean(masked_penalty)
+
+        dim_scale = ops.cast(self._feature_dim, dtype=self.compute_dtype)
+
+        return self.repulsion_strength * dim_scale * mean_penalty
 
     def call(
         self,
         inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+        training: bool = False
     ) -> keras.KerasTensor:
         """
-        Forward pass with numerical stability and repulsion loss.
+        Forward pass of the RBF Layer.
 
         Args:
-            inputs: Input tensor of shape `(batch_size, input_dim)` or
-                   `(batch_size, timesteps, input_dim)`
-            training: Boolean indicating training mode
+            inputs: Input tensor of shape `(batch_size, ... , dim)`.
+            training: Boolean indicating whether the layer is in training mode.
 
         Returns:
-            Output tensor with RBF activations of shape `(batch_size, units)` or
-            `(batch_size, timesteps, units)`
+            Output tensor of shape `(batch_size, ..., units)`.
         """
-        # Compute squared distances from inputs to centers
-        distances_squared = self._compute_pairwise_distances(inputs, self.centers)
+        # Inputs shape: (batch, ..., dim)
+        # Centers shape: (units, dim)
 
-        # Expand gamma for broadcasting: (1, units)
-        gamma_expanded = ops.expand_dims(self.gamma, 0)
+        # We broaden inputs to (batch, ..., 1, dim) to broadcast against centers
+        # This works for 2D inputs (batch, dim) -> (batch, 1, dim)
+        # And 3D inputs (batch, time, dim) -> (batch, time, 1, dim)
+        inputs_expanded = ops.expand_dims(inputs, axis=-2)
 
-        # Compute bounded exponent to prevent overflow
-        # Cap at 50.0 to prevent numerical issues with exp()
-        bounded_exponent = ops.minimum(gamma_expanded * distances_squared, 50.0)
+        # Squared difference: (batch, ..., units, dim)
+        diff = inputs_expanded - self.centers
 
-        # Compute RBF activations: exp(-γ||x-c||²)
-        activations_output = ops.exp(-bounded_exponent)
+        # Squared Euclidean distance: (batch, ..., units)
+        dist_sq = ops.sum(ops.square(diff), axis=-1)
 
-        # Add repulsion loss during training, only if there are multiple centers
-        if training and self.units > 1:
-            repulsion_loss = self._compute_repulsion(self.centers)
+        # Gamma broadcasting: (units,)
+        # dist_sq is (batch, ..., units), gamma broadcasts automatically to last dim
+
+        # Bounded exponent to prevent numerical underflow/overflow
+        # exp(-50) is effectively 0
+        exponent = ops.minimum(dist_sq * self.gamma, 50.0)
+
+        output = ops.exp(-exponent)
+
+        if training and self.units > 1 and self.repulsion_strength > 0:
+            repulsion_loss = self._compute_repulsion_loss()
             self.add_loss(repulsion_loss)
 
-        return activations_output
+        return output
 
     def compute_output_shape(
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape based on input shape.
+        Compute the output shape of the layer.
 
         Args:
-            input_shape: Shape of the input tensor
+            input_shape: Shape tuple (tuple of integers) or list of shape tuples.
 
         Returns:
-            Output shape with last dimension replaced by units
+            Output shape tuple.
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
@@ -424,10 +303,10 @@ class RBFLayer(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return complete layer configuration for serialization.
+        Returns the config of the layer.
 
         Returns:
-            Dictionary containing all configuration parameters
+            A Python dictionary containing the configuration of the layer.
         """
         config = super().get_config()
         config.update({
@@ -435,14 +314,15 @@ class RBFLayer(keras.layers.Layer):
             'gamma_init': self.gamma_init,
             'repulsion_strength': self.repulsion_strength,
             'min_center_distance': self.min_center_distance,
-            'safety_margin': self.safety_margin,
-            'trainable_gamma': self.trainable_gamma,
             'center_initializer': keras.initializers.serialize(self.center_initializer),
             'center_constraint': keras.constraints.serialize(self.center_constraint),
+            'trainable_gamma': self.trainable_gamma,
+            'safety_margin': self.safety_margin,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'gamma_regularizer': keras.regularizers.serialize(self.gamma_regularizer),
         })
         return config
+
 
     # Convenience properties for inspection
     @property
