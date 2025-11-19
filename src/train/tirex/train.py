@@ -1,57 +1,22 @@
 """
-Comprehensive TiRex Training Framework for Multiple Time Series Patterns
-
-This module provides a sophisticated, production-ready training framework for
-TiRex models trained on multiple time series patterns. It enables training
-TiRex models across diverse time series patterns with comprehensive monitoring,
-visualization, and performance analysis, supporting both point and probabilistic
-forecasting objectives via configurable loss functions.
-
-Classes
--------
-TiRexTrainingConfig
-    Comprehensive configuration dataclass containing all training parameters,
-    including model architecture, training objective (loss function), data
-    management, and visualization settings.
-
-TiRexDataProcessor
-    Advanced data processing pipeline handling multi-pattern data preparation,
-    sequence generation, normalization, balanced sampling, and proper
-    train/validation/test splitting with temporal integrity.
-
-TiRexPerformanceCallback
-    Context-aware monitoring callback that creates detailed visualizations of
-    training progress and prediction samples, adapting its plots for either
-    point forecasts (MASE) or probabilistic forecasts (Quantile Loss).
-
-TiRexTrainer
-    Main training orchestrator for multi-pattern TiRex training with
-    comprehensive experiment management and performance analysis.
-
-Training Approach
------------------
-The framework trains a single TiRex model on mixed patterns from multiple
-time series categories. The training objective can be configured to:
-1.  **Minimize MASE:** Trains the model to produce a point forecast (the median)
-    that outperforms a naive baseline.
-2.  **Minimize Quantile Loss:** Trains the model to produce probabilistic
-    forecasts to quantify uncertainty using a correctly vectorized loss function.
+Comprehensive TiRex Training Framework using N-BEATS Style Infrastructure.
 """
 
 import os
 import json
-import keras
+import math
 import random
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Any, Dict, Generator, List, Optional, Tuple
+
+import keras
 import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import tensorflow as tf
-from datetime import datetime
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Any, Optional
-
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------
 # local imports
@@ -59,11 +24,9 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
-from dl_techniques.losses.mase_loss import MASELoss, mase_metric
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
-from dl_techniques.datasets.time_series import (
-    TimeSeriesNormalizer, TimeSeriesGenerator, TimeSeriesConfig
-)
+from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
 
 # ---------------------------------------------------------------------
 
@@ -72,7 +35,7 @@ sns.set_palette("husl")
 
 
 def set_random_seeds(seed: int = 42) -> None:
-    """Set random seeds for reproducibility."""
+    """Set random seeds for major libraries to ensure reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     keras.utils.set_random_seed(seed)
@@ -84,441 +47,514 @@ set_random_seeds(42)
 
 # ---------------------------------------------------------------------
 
+
 @dataclass
 class TiRexTrainingConfig:
-    """
-    Configuration for TiRex training with multiple patterns.
-
-    This dataclass contains comprehensive configuration options for training
-    TiRex models on diverse time series patterns with various optimization
-    and visualization settings.
-    """
-
+    """Configuration dataclass for TiRex training on multiple patterns."""
     # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
-    experiment_name: str = "tirex_multi_pattern"
+    experiment_name: str = "tirex_probabilistic"
 
     # Pattern selection configuration
     target_categories: Optional[List[str]] = None
 
     # Data configuration
-    train_ratio: float = 0.8
-    val_ratio: float = 0.1
-    test_ratio: float = 0.1
+    train_ratio: float = 0.7
+    val_ratio: float = 0.15
+    test_ratio: float = 0.15
 
     # TiRex specific configuration
-    input_length: int = 56
+    input_length: int = 168
     prediction_length: int = 24
-    prediction_horizons: List[int] = field(default_factory=lambda: [24])
 
-    # Model architecture
+    # Model Architecture
     variant: str = "small"  # 'tiny', 'small', 'medium', 'large'
     patch_size: int = 12
     embed_dim: int = 128
     num_blocks: int = 6
     num_heads: int = 8
-    block_types: List[str] = field(default_factory=lambda: ["mixed"])
+    dropout_rate: float = 0.1
     quantile_levels: List[float] = field(
         default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     )
 
     # Training configuration
-    epochs: int = 10
+    epochs: int = 150
     batch_size: int = 128
+    steps_per_epoch: int = 500
     learning_rate: float = 1e-4
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adamw'
-    loss_function: str = "quantile"  # 'mase' or 'quantile'
-    mase_seasonal_periods: int = 1
 
-    # Regularization
-    dropout_rate: float = 0.15
+    # Learning rate schedule with warmup
+    use_warmup: bool = True
+    warmup_steps: int = 1000
+    warmup_start_lr: float = 1e-6
 
-    # Pattern selection and balancing
+    # Pattern selection and Normalization
     max_patterns: Optional[int] = None
     max_patterns_per_category: int = 10
     min_data_length: int = 2000
-    balance_patterns: bool = True
-    samples_per_pattern: int = 25000
+    normalize_per_instance: bool = False
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2, "stochastic": 1.0,
-        "financial": 1.5, "weather": 1.3, "network": 1.4, "biomedical": 1.2,
+        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
+        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
         "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1, "outliers": 1.0, "chaotic": 1.1
+        "regime": 1.2, "structural": 1.1
     })
 
-    # Visualization and evaluation
-    visualize_every_n_epochs: int = 1
+    # Visualization configuration
+    visualize_every_n_epochs: int = 5
+    save_interim_plots: bool = True
+    plot_top_k_patterns: int = 12
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
-
-    # Data augmentation
-    multiplicative_noise_std: float = 0.01
-    additive_noise_std: float = 0.01
-    enable_multiplicative_noise: bool = True
-    enable_additive_noise: bool = True
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(
-                f"Data ratios must sum to 1.0, got {total_ratio}"
-            )
-
-        if self.loss_function not in ['mase', 'quantile']:
-            raise ValueError(
-                f"loss_function must be 'mase' or 'quantile', "
-                f"got {self.loss_function}"
-            )
-
-        if self.loss_function == 'quantile' and 0.5 not in self.quantile_levels:
-            logger.warning(
-                "For best results with quantile loss, it's recommended to "
-                "include 0.5 (the median) in quantile_levels."
-            )
-
-        logger.info("TiRex Training Configuration:")
-        logger.info(
-            f"  - Data split: {self.train_ratio:.1f}/{self.val_ratio:.1f}/"
-            f"{self.test_ratio:.1f}"
-        )
-        logger.info(
-            f"  - Model: variant='{self.variant}', {self.num_blocks} blocks, "
-            f"embed_dim={self.embed_dim}"
-        )
-        logger.info(
-            f"  - Training: {self.epochs} epochs, batch {self.batch_size}, "
-            f"lr {self.learning_rate}, loss={self.loss_function}"
-        )
-        mult_noise = self.multiplicative_noise_std if self.enable_multiplicative_noise else 'disabled'
-        add_noise = self.additive_noise_std if self.enable_additive_noise else 'disabled'
-        logger.info(
-            f"  - Augmentation: mult_noise {mult_noise}, "
-            f"add_noise {add_noise}"
-        )
+            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+        if self.input_length <= 0 or self.prediction_length <= 0:
+            raise ValueError("input_length and prediction_length must be positive")
+        if 0.5 not in self.quantile_levels:
+            logger.warning("Recommended to include 0.5 (median) in quantile_levels.")
 
 
 class TiRexDataProcessor:
-    """Advanced data processor for multiple pattern training for TiRex."""
+    """Streams multi-pattern time series data using Python generators."""
 
-    def __init__(self, config: TiRexTrainingConfig) -> None:
+    def __init__(
+            self,
+            config: TiRexTrainingConfig,
+            generator: TimeSeriesGenerator,
+            selected_patterns: List[str],
+            pattern_to_category: Dict[str, str]
+    ):
         self.config = config
-        self.scalers: Dict[str, TimeSeriesNormalizer] = {}
-        self.pattern_to_id: Dict[str, int] = {}
-        self.id_to_pattern: Dict[int, str] = {}
+        self.ts_generator = generator
+        self.selected_patterns = selected_patterns
+        self.pattern_to_category = pattern_to_category
+        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
 
-    def prepare_multi_pattern_data(
-            self, raw_pattern_data: Dict[str, np.ndarray]
-    ) -> Dict[str, Any]:
-        """Prepare multi-pattern data for training."""
-        logger.info("Preparing data for multi-pattern training...")
-        self.pattern_to_id = {
-            pattern: idx for idx, pattern in enumerate(raw_pattern_data.keys())
-        }
-        self.id_to_pattern = {
-            idx: pattern for pattern, idx in self.pattern_to_id.items()
-        }
-        self._fit_scalers(raw_pattern_data)
-        prepared_data = {}
-        for horizon in self.config.prediction_horizons:
-            logger.info(f"Preparing data for horizon {horizon}")
-            prepared_data[horizon] = self._prepare_mixed_pattern_data(
-                raw_pattern_data, horizon
-            )
-        return prepared_data
+    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
+        """Prepare lists for weighted random pattern selection."""
+        patterns, weights = [], []
+        for pattern_name in self.selected_patterns:
+            category = self.pattern_to_category.get(pattern_name, "unknown")
+            weight = self.config.category_weights.get(category, 1.0)
+            patterns.append(pattern_name)
+            weights.append(weight)
 
-    def _prepare_mixed_pattern_data(
-            self, raw_pattern_data: Dict[str, np.ndarray], horizon: int
-    ) -> Dict[str, Any]:
-        """Prepare data by mixing multiple patterns."""
-        all_train_X, all_train_y = [], []
-        all_val_X, all_val_y = [], []
-        all_test_X, all_test_y = [], []
+        total_weight = sum(weights)
+        if total_weight > 0:
+            normalized_weights = [w / total_weight for w in weights]
+        else:
+            num_patterns = len(patterns)
+            normalized_weights = [1.0 / num_patterns] * num_patterns
+        return patterns, normalized_weights
 
-        for pattern_name, data in raw_pattern_data.items():
-            try:
-                min_len = self.config.input_length + horizon + 100
-                if len(data) < min_len:
+    def _training_generator(
+        self
+    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """
+        Create an infinite generator for training data with high diversity.
+        Strategy: Select patterns -> Extract windows -> Shuffle -> Yield.
+        """
+        patterns_to_mix = 50
+        windows_per_pattern = 5
+        buffer = []
+
+        while True:
+            if not buffer:
+                # Select a large mix of patterns based on weights
+                selected_patterns = random.choices(
+                    self.weighted_patterns, self.weights, k=patterns_to_mix
+                )
+                new_samples = []
+
+                for pattern_name in selected_patterns:
+                    data = self.ts_generator.generate_task_data(pattern_name)
+                    train_size = int(self.config.train_ratio * len(data))
+                    train_data = data[:train_size]
+
+                    max_start_idx = max(
+                        len(train_data) - self.config.input_length - self.config.prediction_length, 0
+                    )
+
+                    if max_start_idx <= 0:
+                        continue
+
+                    for _ in range(windows_per_pattern):
+                        start_idx = random.randint(0, max_start_idx)
+
+                        # Inputs: (input_length, 1)
+                        inputs = train_data[
+                            start_idx: start_idx + self.config.input_length
+                        ].astype(np.float32).reshape(-1, 1)
+
+                        # Targets: (prediction_length,) -> Flat vector for QuantileLoss
+                        targets = train_data[
+                            start_idx + self.config.input_length:
+                            start_idx + self.config.input_length + self.config.prediction_length
+                        ].astype(np.float32).flatten()
+
+                        new_samples.append((inputs, targets))
+
+                random.shuffle(new_samples)
+                buffer.extend(new_samples)
+
+                if not buffer:
                     continue
 
-                train_size = int(self.config.train_ratio * len(data))
-                val_size = int(self.config.val_ratio * len(data))
-                train_data = data[:train_size]
-                val_data = data[train_size:train_size + val_size]
-                test_data = data[train_size + val_size:]
+            yield buffer.pop(0)
 
-                train_scaled = self.scalers[pattern_name].transform(train_data)
-                val_scaled = self.scalers[pattern_name].transform(val_data)
-                test_scaled = self.scalers[pattern_name].transform(test_data)
+    def _evaluation_generator(
+            self,
+            split: str
+    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """
+        Create an infinite repeating generator for validation or test data.
+        """
+        if split == 'val':
+            start_ratio = self.config.train_ratio
+            end_ratio = self.config.train_ratio + self.config.val_ratio
+        elif split == 'test':
+            start_ratio = self.config.train_ratio + self.config.val_ratio
+            end_ratio = 1.0
+        else:
+            raise ValueError("Split must be 'val' or 'test'")
 
-                train_X, train_y = self._create_sequences(train_scaled, horizon, stride=1)
-                val_X, val_y = self._create_sequences(val_scaled, horizon, stride=horizon // 2)
-                test_X, test_y = self._create_sequences(test_scaled, horizon, stride=horizon // 2)
+        all_sequences = []
+        for pattern_name in self.selected_patterns:
+            data = self.ts_generator.generate_task_data(pattern_name)
+            start_idx = int(start_ratio * len(data))
+            end_idx = int(end_ratio * len(data))
+            split_data = data[start_idx:end_idx]
 
-                if self.config.balance_patterns and len(train_X) > self.config.samples_per_pattern:
-                    step = max(1, len(train_X) // self.config.samples_per_pattern)
-                    indices = np.arange(0, len(train_X), step)[:self.config.samples_per_pattern]
-                    train_X, train_y = train_X[indices], train_y[indices]
+            seq_len = self.config.input_length + self.config.prediction_length
 
-                all_train_X.append(train_X)
-                all_train_y.append(train_y)
-                all_val_X.append(val_X)
-                all_val_y.append(val_y)
-                all_test_X.append(test_X)
-                all_test_y.append(test_y)
+            # Extract all possible sequences
+            for i in range(len(split_data) - seq_len + 1):
+                inputs = split_data[
+                    i: i + self.config.input_length
+                ].astype(np.float32).reshape(-1, 1)
 
-            except Exception as e:
-                logger.warning(f"Failed to prepare {pattern_name} H={horizon}: {e}")
-                continue
+                targets = split_data[
+                    i + self.config.input_length: i + seq_len
+                ].astype(np.float32).flatten()
 
-        if not all_train_X:
-            raise ValueError(f"No data prepared for horizon {horizon}")
+                all_sequences.append((inputs, targets))
 
-        combined_train_X = np.concatenate(all_train_X)
-        combined_train_y = np.concatenate(all_train_y)
-        combined_val_X = np.concatenate(all_val_X)
-        combined_val_y = np.concatenate(all_val_y)
-        combined_test_X = np.concatenate(all_test_X)
-        combined_test_y = np.concatenate(all_test_y)
+        if not all_sequences:
+            logger.warning(f"No sequences found for {split} split!")
+            dummy_in = np.zeros((self.config.input_length, 1), dtype=np.float32)
+            dummy_out = np.zeros((self.config.prediction_length,), dtype=np.float32)
+            while True:
+                yield dummy_in, dummy_out
+        else:
+            logger.info(f"Created {len(all_sequences)} sequences for {split} split")
+            random.shuffle(all_sequences)
+            idx = 0
+            while True:
+                yield all_sequences[idx]
+                idx = (idx + 1) % len(all_sequences)
+                if idx == 0:
+                    random.shuffle(all_sequences)
+
+    def get_evaluation_steps(self, split: str) -> int:
+        """Calculate the number of steps for a full evaluation pass."""
+        total_samples = 0
+        if split == 'val':
+            start_ratio = self.config.train_ratio
+            end_ratio = self.config.train_ratio + self.config.val_ratio
+        elif split == 'test':
+            start_ratio = self.config.train_ratio + self.config.val_ratio
+            end_ratio = 1.0
+        else:
+            return 1
+
+        for _ in self.selected_patterns:
+            data_len = self.ts_generator.config.n_samples
+            start_idx = int(start_ratio * data_len)
+            end_idx = int(end_ratio * data_len)
+            split_len = end_idx - start_idx
+            num_sequences = (
+                split_len - self.config.input_length - self.config.prediction_length + 1
+            )
+            if num_sequences > 0:
+                total_samples += num_sequences
+
+        steps = max(1, math.ceil(total_samples / self.config.batch_size))
+        return steps
+
+    def _normalize_instance(
+            self,
+            inputs: tf.Tensor,
+            targets: tf.Tensor
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Standardize an individual time series instance (z-score normalization).
+        Calculates stats from inputs ONLY, applies to inputs and targets.
+        """
+        # inputs: (input_length, 1)
+        # targets: (prediction_length,)
+
+        mean = tf.reduce_mean(inputs)
+        std = tf.maximum(tf.math.reduce_std(inputs), 1e-7)
+
+        normalized_inputs = (inputs - mean) / std
+        normalized_targets = (targets - mean) / std
+
+        return normalized_inputs, normalized_targets
+
+    def prepare_datasets(self) -> Dict[str, Any]:
+        """Create the complete tf.data pipeline."""
+        output_signature = (
+            tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
+            tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
+        )
+
+        train_ds = tf.data.Dataset.from_generator(
+            generator=self._training_generator,
+            output_signature=output_signature
+        )
+        val_ds = tf.data.Dataset.from_generator(
+            generator=lambda: self._evaluation_generator('val'),
+            output_signature=output_signature
+        )
+        test_ds = tf.data.Dataset.from_generator(
+            generator=lambda: self._evaluation_generator('test'),
+            output_signature=output_signature
+        )
+
+        if self.config.normalize_per_instance:
+            logger.info("Applying per-instance standardization.")
+            train_ds = train_ds.map(self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE)
+            val_ds = val_ds.map(self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE)
+            test_ds = test_ds.map(self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE)
+
+        # Deep shuffling pipeline
+        train_ds = (
+            train_ds.shuffle(buffer_size=6343, reshuffle_each_iteration=True)
+            .batch(self.config.batch_size)
+            .shuffle(buffer_size=163, reshuffle_each_iteration=True)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+        val_ds = val_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        test_ds = test_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
         return {
-            'mixed_patterns': {
-                'train': self._create_tf_dataset(
-                    combined_train_X, combined_train_y, self.config.batch_size,
-                    shuffle=True, augment=True
-                ),
-                'val': self._create_tf_dataset(
-                    combined_val_X, combined_val_y, self.config.batch_size,
-                    shuffle=False, augment=False
-                ),
-                'test': self._create_tf_dataset(
-                    combined_test_X, combined_test_y, self.config.batch_size,
-                    shuffle=False, augment=False
-                ),
-                'test_arrays': (combined_test_X, combined_test_y)
-            }
+            'train_ds': train_ds,
+            'val_ds': val_ds,
+            'test_ds': test_ds,
+            'validation_steps': self.get_evaluation_steps('val'),
+            'test_steps': self.get_evaluation_steps('test')
         }
-
-    def _fit_scalers(self, pattern_data: Dict[str, np.ndarray]) -> None:
-        """Fit scalers for each pattern."""
-        for pattern_name, data in pattern_data.items():
-            if len(data) >= self.config.min_data_length:
-                scaler = TimeSeriesNormalizer(method='standard')
-                train_end = int(self.config.train_ratio * len(data))
-                scaler.fit(data[:train_end])
-                self.scalers[pattern_name] = scaler
-
-    def _create_sequences(
-            self, data: np.ndarray, prediction_length: int, stride: int = 1
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Create input/output sequences."""
-        X, y = [], []
-        total_len = self.config.input_length + prediction_length
-        for i in range(0, len(data) - total_len + 1, stride):
-            context = data[i: i + self.config.input_length]
-            target_start = i + self.config.input_length
-            target_end = target_start + prediction_length
-            target = data[target_start:target_end].flatten()
-
-            if not (np.isnan(context).any() or np.isnan(target).any()):
-                X.append(context)  # Context shape: (input_length, 1)
-                y.append(target)  # Target shape: (prediction_length,)
-
-        # Final y shape: (num_samples, prediction_length)
-        return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
-
-    def _apply_noise_augmentation(
-            self, x: tf.Tensor, y: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Apply multiplicative and additive noise augmentation."""
-        augmented_x = x
-        if self.config.enable_multiplicative_noise and self.config.multiplicative_noise_std > 0:
-            mult_noise = tf.random.normal(
-                tf.shape(x), mean=1.0,
-                stddev=self.config.multiplicative_noise_std, dtype=x.dtype
-            )
-            augmented_x *= mult_noise
-        if self.config.enable_additive_noise and self.config.additive_noise_std > 0:
-            add_noise = tf.random.normal(
-                tf.shape(augmented_x), mean=0.0,
-                stddev=self.config.additive_noise_std, dtype=augmented_x.dtype
-            )
-            augmented_x += add_noise
-        return augmented_x, y
-
-    def _create_tf_dataset(
-            self, X: np.ndarray, y: np.ndarray, batch_size: int,
-            shuffle: bool, augment: bool
-    ) -> tf.data.Dataset:
-        """Create a TensorFlow dataset."""
-        dataset = tf.data.Dataset.from_tensor_slices((X, y))
-        if shuffle:
-            buffer_size = min(10000, len(X))
-            dataset = dataset.shuffle(buffer_size, reshuffle_each_iteration=True)
-        dataset = dataset.batch(batch_size, drop_remainder=False)
-        if augment:
-            dataset = dataset.map(
-                self._apply_noise_augmentation,
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-        return dataset.prefetch(tf.data.AUTOTUNE)
 
 
 class TiRexPerformanceCallback(keras.callbacks.Callback):
-    """Context-aware callback for monitoring TiRex performance."""
+    """Callback for monitoring and visualizing performance on a fixed test set."""
 
     def __init__(
-            self, config: TiRexTrainingConfig, test_data: Dict[int, Any],
-            save_dir: str, model_name: str = "model"
-    ) -> None:
+            self,
+            config: TiRexTrainingConfig,
+            data_processor: TiRexDataProcessor,
+            save_dir: str,
+            model_name: str = "model"
+    ):
         super().__init__()
         self.config = config
-        self.test_data = test_data
+        self.data_processor = data_processor
         self.save_dir = save_dir
         self.model_name = model_name
-        self.history = {'epoch': [], 'loss': [], 'val_loss': []}
+        self.training_history = {
+            'epoch': [], 'lr': [],
+            'loss': [], 'val_loss': [],
+            'mae_median': [], 'val_mae_median': []
+        }
         os.makedirs(save_dir, exist_ok=True)
+        self.viz_test_data = self._create_viz_test_set()
+
+    def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Generates a diverse, fixed test set for visualizations."""
+        logger.info("Creating a diverse, fixed visualization test set...")
+        num_samples = self.config.plot_top_k_patterns
+        patterns_to_sample = self.data_processor.selected_patterns.copy()
+        random.shuffle(patterns_to_sample)
+
+        x_list, y_list, patterns_sampled = [], [], 0
+        start_ratio = self.config.train_ratio + self.config.val_ratio
+        end_ratio = 1.0
+
+        for pattern_name in patterns_to_sample:
+            if patterns_sampled >= num_samples:
+                break
+            data = self.data_processor.ts_generator.generate_task_data(pattern_name)
+            start_idx = int(start_ratio * len(data))
+            end_idx = int(end_ratio * len(data))
+            test_data = data[start_idx:end_idx]
+
+            total_len = self.config.input_length + self.config.prediction_length
+            if len(test_data) >= total_len:
+                max_start = len(test_data) - total_len
+                sample_start_idx = random.randint(0, max_start)
+
+                inputs = test_data[
+                    sample_start_idx: sample_start_idx + self.config.input_length
+                ].astype(np.float32).reshape(-1, 1)
+
+                targets = test_data[
+                    sample_start_idx + self.config.input_length:
+                    sample_start_idx + total_len
+                ].astype(np.float32).flatten()
+
+                # Apply normalization if config enabled, to match model expectation
+                if self.config.normalize_per_instance:
+                    mean = np.mean(inputs)
+                    std = max(np.std(inputs), 1e-7)
+                    inputs = (inputs - mean) / std
+                    targets = (targets - mean) / std
+
+                x_list.append(inputs)
+                y_list.append(targets)
+                patterns_sampled += 1
+
+        if not x_list:
+            return (
+                np.array([]).reshape(0, self.config.input_length, 1),
+                np.array([]).reshape(0, self.config.prediction_length)
+            )
+
+        return np.array(x_list), np.array(y_list)
 
     def on_epoch_end(
             self, epoch: int, logs: Optional[Dict[str, float]] = None
     ) -> None:
-        """Track progress and create visualizations."""
+        """Actions to perform at the end of each epoch."""
         logs = logs or {}
-        self.history['epoch'].append(epoch)
-        self.history['loss'].append(logs.get('loss', 0.0))
-        self.history['val_loss'].append(logs.get('val_loss', 0.0))
+        self.training_history['epoch'].append(epoch)
+        self.training_history['lr'].append(self.model.optimizer.learning_rate)
+        self.training_history['loss'].append(logs.get('loss', 0.0))
+        self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
+
+        # Track MAE of median if available
+        mae_key = next((k for k in logs.keys() if 'mae_of_median' in k and 'val' not in k), None)
+        val_mae_key = next((k for k in logs.keys() if 'mae_of_median' in k and 'val' in k), None)
+
+        if mae_key:
+            self.training_history['mae_median'].append(logs.get(mae_key, 0.0))
+            self.training_history['val_mae_median'].append(logs.get(val_mae_key, 0.0))
 
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            logger.info(
-                f"Creating visualizations for {self.model_name} at "
-                f"epoch {epoch + 1}"
-            )
             self._create_interim_plots(epoch)
 
     def _create_interim_plots(self, epoch: int) -> None:
-        """Create comprehensive interim plots."""
         try:
             if self.config.create_learning_curves:
                 self._plot_learning_curves(epoch)
-            if self.config.create_prediction_plots:
+            if self.config.create_prediction_plots and self.viz_test_data[0].shape[0] > 0:
                 self._plot_prediction_samples(epoch)
         except Exception as e:
-            logger.warning(
-                f"Failed to create interim plots for {self.model_name}: {e}"
-            )
+            logger.warning(f"Failed to create interim plots: {e}")
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        """Plot training and validation loss curves."""
-        plt.figure(figsize=(10, 5))
-        plt.plot(self.history['epoch'], self.history['loss'],
-                 label='Training Loss', color='blue', linewidth=2)
-        plt.plot(self.history['epoch'], self.history['val_loss'],
-                 label='Validation Loss', color='red', linewidth=2)
-        title = (
-            f'{self.model_name} - Loss Curves ({self.config.loss_function}, '
-            f'Epoch {epoch + 1})'
-        )
-        plt.title(title)
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        epochs_range = self.training_history['epoch']
+
+        # Loss
+        axes[0].plot(epochs_range, self.training_history['loss'], label='Train')
+        axes[0].plot(epochs_range, self.training_history['val_loss'], label='Val')
+        axes[0].set_title('Quantile Loss')
+        axes[0].set_ylabel('Loss')
+        axes[0].legend()
+
+        # MAE Median
+        if self.training_history['mae_median']:
+            axes[1].plot(epochs_range, self.training_history['mae_median'], label='Train')
+            axes[1].plot(epochs_range, self.training_history['val_mae_median'], label='Val')
+            axes[1].set_title('MAE (Median Forecast)')
+        axes[1].set_ylabel('MAE')
+        axes[1].legend()
+
+        # Learning Rate
+        axes[2].plot(epochs_range, self.training_history['lr'])
+        axes[2].set_title('Learning Rate')
+        axes[2].set_yscale('log')
+
         plt.tight_layout()
-        save_path = os.path.join(
-            self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'
-        )
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'))
         plt.close()
 
     def _plot_prediction_samples(self, epoch: int) -> None:
-        """Plot prediction samples, adapting to the loss function."""
-        horizon = self.config.prediction_horizons[0]
-        if horizon not in self.test_data:
-            return
+        test_x, test_y = self.viz_test_data
+        # Predictions shape: (batch, num_quantiles, prediction_length)
+        preds = self.model(test_x, training=False)
+        if not isinstance(preds, np.ndarray):
+            preds = preds.numpy()
 
-        test_X, test_y = self.test_data[horizon]['mixed_patterns']['test_arrays']
-        if len(test_X) == 0:
-            return
+        quantiles = self.config.quantile_levels
+        try:
+            median_idx = quantiles.index(0.5)
+        except ValueError:
+            median_idx = len(quantiles) // 2
 
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        # Get bounds for 80% confidence interval (0.1 to 0.9 typically)
+        low_idx = 0
+        high_idx = -1
+        if len(quantiles) >= 3:
+             # Assuming sorted quantiles like [0.1, ... 0.9]
+            low_idx = 0
+            high_idx = len(quantiles) - 1
+
+        num_plots = min(len(test_x), self.config.plot_top_k_patterns)
+        n_cols = 3
+        n_rows = math.ceil(num_plots / n_cols)
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows), squeeze=False)
         axes = axes.flatten()
-        sample_indices = np.linspace(0, len(test_X) - 1, 6, dtype=int)
 
-        for i, sample_idx in enumerate(sample_indices):
-            sample_X = test_X[sample_idx:sample_idx + 1]
-            sample_y_true = test_y[sample_idx]
+        for i in range(num_plots):
+            ax = axes[i]
+            input_x = np.arange(-self.config.input_length, 0)
+            pred_x = np.arange(0, self.config.prediction_length)
 
-            # --- With this block of code ---
-            # The model call normalizes the input internally and produces normalized predictions.
-            preds_norm = self.model(sample_X, training=False)
+            # Input history
+            ax.plot(input_x, test_x[i].flatten(), label='Input', color='blue', alpha=0.7)
 
-            # Retrieve statistics from the model's internal scaler to reverse the instance normalization.
-            # This is crucial for visualizing predictions on the same scale as the input data.
-            scaler = self.model.scaler
-            last_mean = scaler._last_mean
-            last_std = scaler._last_std
+            # True Future
+            ax.plot(pred_x, test_y[i].flatten(), label='True', color='green', linewidth=2)
 
-            # Denormalize the predictions. Broadcasting handles the shape alignment.
-            preds = (preds_norm * last_std) + last_mean
-            preds = preds[0]  # Remove the batch dimension for plotting
-            # --- End of replacement ---
+            # Median Prediction
+            ax.plot(pred_x, preds[i, median_idx, :], label='Median', color='red', linestyle='--')
 
-            context_x = np.arange(-self.config.input_length, 0)
-            horizon_x = np.arange(0, horizon)
+            # Uncertainty Interval
+            ax.fill_between(
+                pred_x,
+                preds[i, low_idx, :],
+                preds[i, high_idx, :],
+                color='red', alpha=0.2,
+                label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q'
+            )
 
-            axes[i].plot(context_x, sample_X[0], label='Input',
-                         color='blue', alpha=0.7)
-            axes[i].plot(horizon_x, sample_y_true, label='True Future',
-                         color='green', linewidth=2)
+            ax.set_title(f'Sample {i + 1}')
+            ax.legend(loc='upper left', fontsize='small')
+            ax.grid(True, alpha=0.3)
 
-            if self.config.loss_function == 'quantile':
-                quantiles = self.model.quantile_levels
-                try:
-                    median_idx = quantiles.index(0.5)
-                except ValueError:
-                    median_idx = len(quantiles) // 2  # Fallback
+        for j in range(num_plots, len(axes)):
+            axes[j].axis('off')
 
-                lower_q, upper_q = (0.1, 0.9)
-                lower_idx = min(range(len(quantiles)), key=lambda j: abs(quantiles[j] - lower_q))
-                upper_idx = min(range(len(quantiles)), key=lambda j: abs(quantiles[j] - upper_q))
-
-                axes[i].plot(horizon_x, preds[median_idx],
-                             label='Median Prediction', color='red',
-                             linewidth=2, linestyle='--')
-                fill_label = f'{quantiles[lower_idx]*100:.0f}-{quantiles[upper_idx]*100:.0f}% Range'
-                axes[i].fill_between(
-                    horizon_x, preds[lower_idx], preds[upper_idx],
-                    color='red', alpha=0.2, label=fill_label
-                )
-                plot_title = f'Probabilistic Sample {i + 1}'
-            else:  # 'mase'
-                axes[i].plot(horizon_x, preds[0], label='Median Prediction',
-                             color='red', linewidth=2, linestyle='--')
-                plot_title = f'Point Forecast Sample {i + 1}'
-
-            axes[i].set_title(plot_title)
-            axes[i].legend()
-            axes[i].grid(True, alpha=0.3)
-            axes[i].axvline(x=0, color='black', linestyle='--', alpha=0.5)
-
-        plt.suptitle(
-            f'Prediction Samples (Epoch {epoch + 1}, '
-            f'Loss: {self.config.loss_function})', fontsize=16
-        )
+        plt.suptitle(f'Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
         plt.tight_layout()
-        save_path = os.path.join(
-            self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'
-        )
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
         plt.close()
 
 
 class TiRexTrainer:
-    """Comprehensive trainer for TiRex with multiple pattern support."""
+    """Orchestrates TiRex training with Quantile Loss."""
 
     def __init__(
             self, config: TiRexTrainingConfig, ts_config: TimeSeriesConfig
@@ -526,101 +562,91 @@ class TiRexTrainer:
         self.config = config
         self.ts_config = ts_config
         self.generator = TimeSeriesGenerator(ts_config)
-        self.processor = TiRexDataProcessor(config)
         self.all_patterns = self.generator.get_task_names()
         self.pattern_categories = self.generator.get_task_categories()
+        self.pattern_to_category = {
+            task: cat
+            for cat in self.pattern_categories
+            for task in self.generator.get_tasks_by_category(cat)
+        }
         self.selected_patterns = self._select_patterns()
-        logger.info(
-            f"TiRex Trainer initialized: {len(self.selected_patterns)} "
-            "patterns selected."
+        self.processor = TiRexDataProcessor(
+            config, self.generator, self.selected_patterns, self.pattern_to_category
         )
 
     def _select_patterns(self) -> List[str]:
-        """Select patterns based on configuration."""
-        selected = []
-        categories = self.config.target_categories or self.pattern_categories
-        for category in categories:
-            patterns = self.generator.get_tasks_by_category(category)
-            weight = self.config.category_weights.get(category, 1.0)
-            max_p = min(int(self.config.max_patterns_per_category * weight),
-                        len(patterns))
-            if len(patterns) > max_p:
-                selected.extend(
-                    np.random.choice(patterns, size=max_p, replace=False)
-                )
-            else:
-                selected.extend(patterns)
+        if self.config.target_categories:
+            patterns_to_consider = {
+                p for c in self.config.target_categories
+                for p in self.generator.get_tasks_by_category(c)
+            }
+        else:
+            patterns_to_consider = self.all_patterns
+
+        selected, category_counts = [], {}
+        for pattern in sorted(patterns_to_consider):
+            category = self.pattern_to_category.get(pattern)
+            if (category and
+                    category_counts.get(category, 0) <
+                    self.config.max_patterns_per_category):
+                selected.append(pattern)
+                category_counts[category] = category_counts.get(category, 0) + 1
 
         if self.config.max_patterns and len(selected) > self.config.max_patterns:
-            selected = np.random.choice(
-                selected, size=self.config.max_patterns, replace=False
-            ).tolist()
+            selected = random.sample(selected, self.config.max_patterns)
+
+        logger.info(f"Selected {len(selected)} patterns for training.")
         return selected
 
-    def prepare_data(self) -> Dict[str, Any]:
-        """Prepare training data for the model."""
-        logger.info("Generating data for selected patterns...")
-        raw_data = {
-            name: self.generator.generate_task_data(name)
-            for name in self.selected_patterns
-            if len(self.generator.generate_task_data(name)) >= self.config.min_data_length
-        }
-        prepared_data = self.processor.prepare_multi_pattern_data(raw_data)
-        return {'prepared_data': prepared_data, 'num_patterns': len(raw_data)}
-
-    def create_model(
-            self, prediction_length: int
-    ) -> Tuple[TiRexCore, List[Any]]:
-        """Create and compile the TiRex model based on configuration."""
-        loss, metrics, quantiles_for_model = None, [], []
-
-        if self.config.loss_function == 'mase':
-            logger.info("Configuring model for MASE loss (median point forecast).")
-            loss = MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
-            metrics = [
-                mase_metric(seasonal_periods=self.config.mase_seasonal_periods),
-                'mae', 'mse'
-            ]
-            quantiles_for_model = [0.5]
-        elif self.config.loss_function == 'quantile':
-            logger.info("Configuring model for Quantile loss (probabilistic forecast).")
-            loss = QuantileLoss(quantiles=self.config.quantile_levels)
-            try:
-                median_idx = self.config.quantile_levels.index(0.5)
-
-                def mae_of_median(y_true, y_pred):
-                    return keras.metrics.mean_absolute_error(
-                        y_true, y_pred[:, median_idx, :]
-                    )
-                mae_of_median.__name__ = 'mae_of_median'
-                metrics.append(mae_of_median)
-            except ValueError:
-                logger.warning(
-                    "0.5 not in quantile_levels, cannot compute MAE of "
-                    "median metric."
-                )
-            quantiles_for_model = self.config.quantile_levels
-        else:
-            raise ValueError(
-                f"Unsupported loss function: {self.config.loss_function}"
-            )
-
+    def create_model(self) -> TiRexCore:
+        """Create and compile the TiRex model."""
         model = create_tirex_by_variant(
             variant=self.config.variant,
             input_length=self.config.input_length,
-            prediction_length=prediction_length,
+            prediction_length=self.config.prediction_length,
             patch_size=self.config.patch_size,
             embed_dim=self.config.embed_dim,
             num_blocks=self.config.num_blocks,
             num_heads=self.config.num_heads,
-            quantile_levels=quantiles_for_model,
+            quantile_levels=self.config.quantile_levels,
             dropout_rate=self.config.dropout_rate
         )
 
+        # Learning Rate Schedule
+        if self.config.use_warmup:
+            primary_schedule = keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=self.config.learning_rate,
+                decay_steps=self.config.steps_per_epoch * self.config.epochs,
+                alpha=0.1
+            )
+            lr_schedule = WarmupSchedule(
+                warmup_steps=self.config.warmup_steps,
+                warmup_start_lr=self.config.warmup_start_lr,
+                primary_schedule=primary_schedule
+            )
+            logger.info("Using Warmup + CosineDecay schedule.")
+        else:
+            lr_schedule = self.config.learning_rate
+
         optimizer = keras.optimizers.get(self.config.optimizer)
-        optimizer.learning_rate = self.config.learning_rate
+        optimizer.learning_rate = lr_schedule
         if self.config.gradient_clip_norm:
             optimizer.clipnorm = self.config.gradient_clip_norm
+
+        # Loss and Metrics
+        loss = QuantileLoss(quantiles=self.config.quantile_levels)
+
+        metrics = []
+        if 0.5 in self.config.quantile_levels:
+            median_idx = self.config.quantile_levels.index(0.5)
+            def mae_of_median(y_true, y_pred):
+                # y_true: (batch, horizon)
+                # y_pred: (batch, quantiles, horizon)
+                return keras.metrics.mean_absolute_error(
+                    y_true, y_pred[:, median_idx, :]
+                )
+            mae_of_median.__name__ = 'mae_of_median'
+            metrics.append(mae_of_median)
 
         model.compile(
             optimizer=optimizer,
@@ -628,210 +654,114 @@ class TiRexTrainer:
             metrics=metrics,
             jit_compile=True
         )
-        return model, metrics
+        return model
 
     def run_experiment(self) -> Dict[str, Any]:
-        """Run the multi-pattern experiment."""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         exp_dir = os.path.join(
             self.config.result_dir,
-            f"{self.config.experiment_name}_{timestamp}"
+            f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         os.makedirs(exp_dir, exist_ok=True)
         logger.info(f"Starting TiRex Experiment: {exp_dir}")
-        data_info = self.prepare_data()
-        prepared_data = data_info['prepared_data']
-        if not prepared_data:
-            raise ValueError("No data prepared for training")
 
-        results = {}
-        for horizon in self.config.prediction_horizons:
-            if horizon in prepared_data:
-                logger.info(f"{'='*50}\nTraining Model H={horizon}\n{'='*50}")
-                results[horizon] = self._train_model(
-                    prepared_data[horizon], horizon, exp_dir
-                )
-
-        self._save_results(results, exp_dir, data_info)
-        logger.info("TiRex Experiment completed successfully!")
+        results = self._train_model(exp_dir)
+        self._save_results(results, exp_dir)
         return {"results_dir": exp_dir, "results": results}
 
-    def _train_model(
-            self, pattern_data: Dict, horizon: int, exp_dir: str
-    ) -> Dict[str, Any]:
-        """Train model on mixed patterns."""
-        data = pattern_data['mixed_patterns']
-        model, metrics = self.create_model(horizon)
+    def _train_model(self, exp_dir: str) -> Dict[str, Any]:
+        data_pipeline = self.processor.prepare_datasets()
+        model = self.create_model()
+
+        # Build explicitly
+        dummy_in = np.zeros((1, self.config.input_length, 1), dtype='float32')
+        model(dummy_in)
         model.summary(print_fn=logger.info)
 
-        viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
-        log_dir = os.path.join(exp_dir, 'logs', f'h{horizon}')
-        checkpoint_path = os.path.join(exp_dir, f'best_model_h{horizon}.keras')
-
+        viz_dir = os.path.join(exp_dir, 'visualizations')
         callbacks = [
-            TiRexPerformanceCallback(
-                self.config, {horizon: pattern_data}, viz_dir, "tirex_model"
-            ),
+            TiRexPerformanceCallback(self.config, self.processor, viz_dir, "tirex"),
             keras.callbacks.EarlyStopping(
-                monitor='val_loss', patience=50,
-                restore_best_weights=True, verbose=1
-            ),
-            keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss', factor=0.5, patience=30,
-                min_lr=1e-6, verbose=1
+                monitor='val_loss', patience=30, restore_best_weights=True, verbose=1
             ),
             keras.callbacks.ModelCheckpoint(
-                checkpoint_path, save_best_only=True, verbose=1
+                os.path.join(exp_dir, 'best_model.keras'),
+                monitor='val_loss', save_best_only=True, verbose=1
             ),
-            keras.callbacks.TensorBoard(log_dir=log_dir)
+            keras.callbacks.TerminateOnNaN()
         ]
 
-        start_time = datetime.now()
         history = model.fit(
-            data['train'],
-            validation_data=data['val'],
+            data_pipeline['train_ds'],
+            validation_data=data_pipeline['val_ds'],
             epochs=self.config.epochs,
+            steps_per_epoch=self.config.steps_per_epoch,
+            validation_steps=data_pipeline['validation_steps'],
             callbacks=callbacks,
             verbose=1
         )
-        training_time = (datetime.now() - start_time).total_seconds()
 
-        test_results = model.evaluate(data['test'], verbose=0, return_dict=True)
-
-        logger.info(
-            f"Model H={horizon}: Test Loss = {test_results['loss']:.4f}, "
-            f"Time = {training_time:.1f}s"
+        logger.info("Evaluating on test set...")
+        test_metrics = model.evaluate(
+            data_pipeline['test_ds'],
+            steps=data_pipeline['test_steps'],
+            verbose=1,
+            return_dict=True
         )
 
         return {
             'history': history.history,
-            'training_time': training_time,
-            'test_metrics': test_results,
+            'test_metrics': test_metrics,
             'final_epoch': len(history.history['loss'])
         }
 
-    def _save_results(
-            self, results: Dict, exp_dir: str, data_info: Dict
-    ) -> None:
-        """Save comprehensive experiment results and report."""
-        try:
-            def default_serializer(o):
-                if isinstance(o, (np.floating, np.integer)):
-                    return str(o)
-                return '<not_serializable>'
+    def _save_results(self, results: Dict, exp_dir: str) -> None:
+        serializable = {
+            'history': results['history'],
+            'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
+            'final_epoch': results['final_epoch'],
+            'config': self.config.__dict__
+        }
 
-            with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-                json.dump(results, f, indent=2, default=default_serializer)
+        # Helper for JSON serialization
+        def json_convert(o):
+            if isinstance(o, (np.floating, np.integer)): return str(o)
+            return str(o)
 
-            exp_info = {
-                'num_patterns': data_info['num_patterns'],
-                'config': self.config.__dict__
-            }
-            with open(os.path.join(exp_dir, 'experiment_info.json'), 'w') as f:
-                json.dump(exp_info, f, indent=2, default=str)
-
-            self._create_detailed_experiment_report(results, exp_dir, data_info)
-            logger.info(f"Results saved to {exp_dir}")
-        except Exception as e:
-            logger.error(f"Failed to save results: {e}")
-
-    def _create_detailed_experiment_report(
-            self, results: Dict, exp_dir: str, data_info: Dict
-    ) -> None:
-        """Create a detailed text report of the experiment."""
-        report_path = os.path.join(exp_dir, 'detailed_experiment_report.txt')
-        with open(report_path, 'w') as f:
-            f.write("=" * 80 + "\nTIREX MULTI-PATTERN EXPERIMENT REPORT\n" +
-                    "=" * 80 + "\n\n")
-            f.write("EXPERIMENT OVERVIEW\n" + "-" * 20 + "\n")
-            f.write(f"Experiment Name: {self.config.experiment_name}\n")
-            f.write(f"Number of Patterns: {data_info['num_patterns']}\n\n")
-
-            f.write("MODEL CONFIGURATION\n" + "-" * 19 + "\n")
-            f.write(f"Variant: {self.config.variant}\n")
-            f.write(f"Input Length: {self.config.input_length}\n\n")
-
-            f.write("TRAINING CONFIGURATION\n" + "-" * 21 + "\n")
-            f.write(f"Loss Function: {self.config.loss_function}\n")
-            if self.config.loss_function == 'mase':
-                f.write(
-                    f"MASE Seasonal Periods: {self.config.mase_seasonal_periods}\n"
-                )
-            else:
-                f.write(f"Quantile Levels: {self.config.quantile_levels}\n")
-            f.write(f"Optimizer: {self.config.optimizer} "
-                    f"(LR: {self.config.learning_rate})\n\n")
-
-            for horizon, result in results.items():
-                f.write(f"RESULTS FOR HORIZON {horizon}\n" + "-" * 25 + "\n")
-                metrics = result['test_metrics']
-                f.write(f"Test Loss ({self.config.loss_function}): "
-                        f"{metrics['loss']:.6f}\n")
-                for name, value in metrics.items():
-                    if name != 'loss':
-                        f.write(f"Test Metric ({name}): {value:.6f}\n")
-                f.write(f"Training Time: {result['training_time']:.1f} seconds\n")
-                f.write(f"Final Epoch: {result['final_epoch']}\n\n")
-
-            f.write("=" * 80 + "\nEnd of Report\n" + "=" * 80 + "\n")
-        logger.info(f"Detailed experiment report saved to {report_path}")
+        with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
+            json.dump(serializable, f, indent=4, default=json_convert)
 
 
 def main() -> None:
-    """Run the TiRex experiment."""
-    # Example 1: Training for a point forecast using MASE loss
-    # config = TiRexTrainingConfig(
-    #     experiment_name="tirex_small_mase_h4",
-    #     input_length=112,
-    #     patch_size=12,
-    #     prediction_horizons=[12],
-    #     loss_function='mase',
-    #     mase_seasonal_periods=1,
-    #     variant="small",
-    #     epochs=200,
-    #     batch_size=128,
-    #     learning_rate=5e-4,
-    # )
-
-    # Example 2: Training for a probabilistic forecast using Quantile loss
     config = TiRexTrainingConfig(
-        experiment_name="tirex_small",
-        input_length=104,
-        patch_size=4,
-        prediction_horizons=[4],
-        loss_function='quantile',
+        experiment_name="tirex",
         variant="small",
+        input_length=104,
+        prediction_length=12,
+        patch_size=4,
+        quantile_levels=[0.1, 0.25, 0.5, 0.75, 0.9],
         epochs=200,
-        batch_size=256,
-        learning_rate=5e-4,
-        # --- Pattern Selection for Expense Data ---
-        # Select categories that mimic financial expenses
-        target_categories=[
-            'composite',  # Essential for trend + seasonality
-            'seasonal',  # Captures weekly/monthly spending cycles
-            'trend',  # Models inflation or business growth
-            'stochastic',  # Represents day-to-day randomness
-            'outliers',  # Simulates unexpected large purchases
-            'structural',  # Models changes like new recurring bills
-            'financial'  # Adds realistic financial volatility
-        ],
-        # Use a smaller number of samples per pattern to increase variety
-        samples_per_pattern=5000,
+        batch_size=128,
+        steps_per_epoch=1000,
+        learning_rate=1e-4,
+        use_warmup=True,
+        warmup_steps=2000,
+        warmup_start_lr=1e-6,
+        gradient_clip_norm=1.0,
+        optimizer='adamw',
+        normalize_per_instance=False,
+        max_patterns_per_category=100,
+        visualize_every_n_epochs=5,
+        plot_top_k_patterns=12,
     )
 
-    ts_config = TimeSeriesConfig(n_samples=50000, random_seed=42)
+    ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)
 
     try:
-        logger.info(
-            f"Running TiRex Multi-Pattern Experiment with loss: "
-            f"{config.loss_function}"
-        )
         trainer = TiRexTrainer(config, ts_config)
         results = trainer.run_experiment()
-        logger.info(f"Experiment completed. Results in: {results['results_dir']}")
+        logger.info(f"Completed. Results: {results['results_dir']}")
     except Exception as e:
-        logger.error(f"Experiment failed: {e}", exc_info=True)
-
+        logger.error(f"Failed: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()

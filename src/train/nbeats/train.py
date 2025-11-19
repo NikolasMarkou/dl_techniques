@@ -449,10 +449,13 @@ class MultiPatternDataProcessor:
         # This guarantees that no "blocks" of similar data ever reach the batching stage.
         train_ds = (
             train_ds.shuffle(
-                self.config.batch_size * 20, # Large buffer for global mixing
+                buffer_size=6343, # global mixing, prime number
                 reshuffle_each_iteration=True
             )
             .batch(self.config.batch_size)
+            .shuffle(
+                buffer_size=163, # batch mixing, prime number
+                reshuffle_each_iteration=True)
             .prefetch(tf.data.AUTOTUNE)
         )
 
