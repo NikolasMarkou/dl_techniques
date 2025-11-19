@@ -50,8 +50,8 @@ The foundational work on quantile regression was introduced by:
 """
 
 import keras
-from keras import ops
 from typing import List
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -88,15 +88,15 @@ class MQLoss(keras.losses.Loss):
         Returns:
             Quantile loss value.
         """
-        y_true = ops.cast(y_true, y_pred.dtype)
+        y_true = keras.ops.cast(y_true, y_pred.dtype)
 
         # Calculate the error
         error = y_true - y_pred
 
         # Calculate the quantile loss
-        loss = ops.maximum(self.quantile * error, (self.quantile - 1) * error)
+        loss = keras.ops.maximum(self.quantile * error, (self.quantile - 1) * error)
 
-        return ops.mean(loss)
+        return keras.ops.mean(loss)
 
     def get_config(self) -> dict:
         """Get loss configuration."""
@@ -127,9 +127,11 @@ class QuantileLoss(keras.losses.Loss):
         super().__init__(name=name, **kwargs)
         if not all(0 < q < 1 for q in quantiles):
             raise ValueError("All quantiles must be strictly between 0 and 1.")
-        # Store quantiles as a tensor shaped for broadcasting
-        self.quantiles_tensor = ops.convert_to_tensor(quantiles, dtype=keras.backend.floatx())
-        self.quantiles_tensor = ops.reshape(self.quantiles_tensor, (1, len(quantiles), 1))
+        
+        # Store quantiles as a tensor shaped for broadcasting against (batch, time, quantiles)
+        # Shape: (1, 1, num_quantiles)
+        self.quantiles_tensor = keras.ops.convert_to_tensor(quantiles, dtype=keras.backend.floatx())
+        self.quantiles_tensor = keras.ops.reshape(self.quantiles_tensor, (1, 1, len(quantiles)))
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -137,41 +139,41 @@ class QuantileLoss(keras.losses.Loss):
 
         Args:
             y_true: Ground truth values. Shape: (batch_size, horizon).
-            y_pred: The predicted quantile values. Shape: (batch_size, num_quantiles, horizon).
+            y_pred: The predicted quantile values. Shape: (batch_size, horizon, num_quantiles).
 
         Returns:
             A single scalar loss value, the mean of the pinball loss across all
             quantiles, time steps, and batch items.
         """
-        y_true = ops.cast(y_true, y_pred.dtype)
+        y_true = keras.ops.cast(y_true, y_pred.dtype)
 
-        # Expand y_true to be broadcastable with y_pred's shape
-        # Shape becomes: (batch_size, 1, horizon)
-        y_true_expanded = ops.expand_dims(y_true, axis=1)
+        # Expand y_true to be broadcastable with y_pred's shape (batch, horizon, quantiles)
+        # y_true is (batch, horizon) -> y_true_expanded becomes (batch, horizon, 1)
+        y_true_expanded = keras.ops.expand_dims(y_true, axis=-1)
 
         # Calculate error. Broadcasting handles the shape difference.
-        # error shape: (batch_size, num_quantiles, horizon)
+        # (batch, horizon, 1) - (batch, horizon, num_quantiles)
+        # error shape: (batch, horizon, num_quantiles)
         error = y_true_expanded - y_pred
 
         # Calculate pinball loss using vectorized operations.
         # Broadcasting self.quantiles_tensor against error.
-        # self.quantiles_tensor shape: (1, num_quantiles, 1)
-        loss = ops.maximum(
+        # self.quantiles_tensor shape: (1, 1, num_quantiles)
+        loss = keras.ops.maximum(
             self.quantiles_tensor * error,
             (self.quantiles_tensor - 1) * error
         )
 
         # Return the mean over all dimensions to get a single scalar loss
-        return ops.mean(loss)
+        return keras.ops.mean(loss)
 
     def get_config(self) -> dict:
         """Get loss configuration for serialization."""
         config = super().get_config()
         # Convert tensor back to a standard list for JSON serialization
         config.update({
-            'quantiles': ops.convert_to_numpy(self.quantiles_tensor).flatten().tolist()
+            'quantiles': keras.ops.convert_to_numpy(self.quantiles_tensor).flatten().tolist()
         })
         return config
 
 # ---------------------------------------------------------------------
-
