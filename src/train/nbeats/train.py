@@ -872,7 +872,7 @@ def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
     config = NBeatsTrainingConfig(
         experiment_name="nbeats",
-        activation="relu",
+        activation="gelu",
         backcast_length=104,
         forecast_length=12,
         stack_types=["trend", "seasonality", "generic"],
