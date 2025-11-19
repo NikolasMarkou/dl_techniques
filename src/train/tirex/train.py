@@ -492,7 +492,7 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
 
     def _plot_prediction_samples(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data
-        # Predictions shape: (batch, num_quantiles, prediction_length)
+        # Predictions shape: (batch, prediction_length, num_quantiles)
         preds = self.model(test_x, training=False)
         if not isinstance(preds, np.ndarray):
             preds = preds.numpy()
@@ -528,14 +528,14 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
             # True Future
             ax.plot(pred_x, test_y[i].flatten(), label='True', color='green', linewidth=2)
 
-            # Median Prediction
-            ax.plot(pred_x, preds[i, median_idx, :], label='Median', color='red', linestyle='--')
+            # Median Prediction - Shape: [batch, time, quantiles]
+            ax.plot(pred_x, preds[i, :, median_idx], label='Median', color='red', linestyle='--')
 
             # Uncertainty Interval
             ax.fill_between(
                 pred_x,
-                preds[i, low_idx, :],
-                preds[i, high_idx, :],
+                preds[i, :, low_idx],
+                preds[i, :, high_idx],
                 color='red', alpha=0.2,
                 label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q'
             )
@@ -641,9 +641,9 @@ class TiRexTrainer:
             median_idx = self.config.quantile_levels.index(0.5)
             def mae_of_median(y_true, y_pred):
                 # y_true: (batch, horizon)
-                # y_pred: (batch, quantiles, horizon)
+                # y_pred: (batch, horizon, quantiles) - Adjusted for new shape
                 return keras.metrics.mean_absolute_error(
-                    y_true, y_pred[:, median_idx, :]
+                    y_true, y_pred[:, :, median_idx]
                 )
             mae_of_median.__name__ = 'mae_of_median'
             metrics.append(mae_of_median)
@@ -748,7 +748,7 @@ def main() -> None:
         warmup_start_lr=1e-6,
         gradient_clip_norm=1.0,
         optimizer='adamw',
-        normalize_per_instance=False,
+        normalize_per_instance=True,
         max_patterns_per_category=100,
         visualize_every_n_epochs=5,
         plot_top_k_patterns=12,

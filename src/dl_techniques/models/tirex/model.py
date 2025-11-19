@@ -77,7 +77,7 @@ class TiRexCore(keras.Model):
         Can also accept 2D tensor which will be expanded to 3D.
 
     Output shape:
-        3D tensor with shape: `(batch_size, num_quantiles, prediction_length)`.
+        3D tensor with shape: `(batch_size, prediction_length, num_quantiles)`.
 
     Example:
         ```python
@@ -238,7 +238,7 @@ class TiRexCore(keras.Model):
             training: Boolean, whether in training mode.
 
         Returns:
-            Quantile predictions of shape [batch_size, num_quantiles, prediction_length].
+            Quantile predictions of shape [batch_size, prediction_length, num_quantiles].
         """
         # Ensure 3D input
         if len(inputs.shape) == 2:
@@ -274,6 +274,7 @@ class TiRexCore(keras.Model):
         pooled = ops.mean(hidden_states, axis=1)  # [batch_size, embed_dim]
 
         # Quantile predictions
+        # Output shape: [batch_size, prediction_length, num_quantiles]
         quantile_predictions = self.quantile_head(pooled, training=training)
 
         return quantile_predictions
@@ -296,10 +297,13 @@ class TiRexCore(keras.Model):
 
         Returns:
             Tuple of (quantile_predictions, mean_predictions) as numpy arrays.
+            quantile_predictions: [batch, prediction_length, selected_quantiles]
+            mean_predictions: [batch, prediction_length]
         """
         if quantile_levels is None:
             quantile_levels = self.quantile_levels
 
+        # Predictions shape: [batch, prediction_length, num_quantiles]
         predictions = self.predict(context, batch_size=batch_size, **kwargs)
 
         # Select requested quantiles
@@ -314,11 +318,13 @@ class TiRexCore(keras.Model):
                     f"Quantile {q} not in training quantiles, using closest: {self.quantile_levels[closest_idx]}"
                 )
 
-        quantile_preds = predictions[:, quantile_indices, :]
+        # Slicing the last dimension (quantiles)
+        quantile_preds = predictions[:, :, quantile_indices]
 
         # Use median as mean prediction
         median_idx = self.quantile_levels.index(0.5) if 0.5 in self.quantile_levels else len(self.quantile_levels) // 2
-        mean_preds = predictions[:, median_idx, :]
+        # Shape becomes [batch, prediction_length]
+        mean_preds = predictions[:, :, median_idx]
 
         return quantile_preds, mean_preds
 

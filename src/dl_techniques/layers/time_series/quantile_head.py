@@ -11,7 +11,7 @@ Architecture and Design Philosophy:
 The architecture is intentionally simple: a linear projection from the encoder's
 feature space to the target space defined by the quantiles and the forecast
 horizon. It consists of a single `Dense` layer that maps the input features
-to a flat vector of size `num_quantiles * output_length`, followed by a
+to a flat vector of size `output_length * num_quantiles`, followed by a
 reshape operation to structure the output.
 
 This design assumes that the upstream encoder network is responsible for
@@ -81,11 +81,11 @@ class QuantileHead(keras.layers.Layer):
            ↓
     Dropout(rate=dropout_rate) ← (optional, if dropout_rate > 0)
            ↓
-    Dense(num_quantiles × output_length, activation=None)
+    Dense(output_length × num_quantiles, activation=None)
            ↓
-    Reshape(shape=[batch, num_quantiles, output_length])
+    Reshape(shape=[batch, output_length, num_quantiles])
            ↓
-    Output(shape=[batch, num_quantiles, output_length])
+    Output(shape=[batch, output_length, num_quantiles])
     ```
 
     **Mathematical Operation**:
@@ -125,8 +125,8 @@ class QuantileHead(keras.layers.Layer):
         Most common: 2D tensor `(batch_size, feature_dim)` from encoder output.
 
     Output shape:
-        3D tensor with shape: `(batch_size, num_quantiles, output_length)`.
-        Each [i, j, k] represents the j-th quantile prediction for the k-th future
+        3D tensor with shape: `(batch_size, output_length, num_quantiles)`.
+        Each [i, j, k] represents the k-th quantile prediction for the j-th future
         time step for the i-th sample in the batch.
 
     Attributes:
@@ -138,7 +138,7 @@ class QuantileHead(keras.layers.Layer):
         # Basic quantile head for 3 quantiles, 24-hour forecast
         head = QuantileHead(num_quantiles=3, output_length=24)
         features = keras.Input(shape=(256,))  # From encoder
-        quantiles = head(features)  # Shape: (batch, 3, 24)
+        quantiles = head(features)  # Shape: (batch, 24, 3)
 
         # With higher dropout for regularization
         head = QuantileHead(
@@ -155,7 +155,8 @@ class QuantileHead(keras.layers.Layer):
         )(encoder_output)
 
         # Extract median (50th percentile) predictions
-        median_forecast = quantile_predictions[:, num_quantiles//2, :]
+        # Shape is (batch, time, quantiles)
+        median_forecast = quantile_predictions[:, :, num_quantiles//2]
         ```
 
     Note:
@@ -200,7 +201,7 @@ class QuantileHead(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         self.projection = keras.layers.Dense(
-            units=self.num_quantiles * self.output_length,
+            units=self.output_length * self.num_quantiles,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -243,7 +244,7 @@ class QuantileHead(keras.layers.Layer):
             training: Boolean indicating training mode for dropout.
 
         Returns:
-            Quantile predictions tensor of shape (batch_size, num_quantiles, output_length).
+            Quantile predictions tensor of shape (batch_size, output_length, num_quantiles).
         """
         x = inputs
 
@@ -254,11 +255,11 @@ class QuantileHead(keras.layers.Layer):
         # Project features to flattened quantile predictions
         quantile_preds = self.projection(x, training=training)
 
-        # Reshape to [batch_size, num_quantiles, output_length]
+        # Reshape to [batch_size, output_length, num_quantiles]
         # Using -1 for batch dimension handles dynamic batch sizes
         quantiles = ops.reshape(
             quantile_preds,
-            (-1, self.num_quantiles, self.output_length)
+            (-1, self.output_length, self.num_quantiles)
         )
 
         return quantiles
@@ -266,7 +267,7 @@ class QuantileHead(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         batch_size = input_shape[0]
-        return (batch_size, self.num_quantiles, self.output_length)
+        return (batch_size, self.output_length, self.num_quantiles)
 
     def get_config(self) -> dict[str, Any]:
         """Return configuration for serialization."""
