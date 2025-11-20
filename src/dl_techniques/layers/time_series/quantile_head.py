@@ -17,41 +17,22 @@ reshape operation to structure the output.
 This design assumes that the upstream encoder network is responsible for
 extracting all necessary complex, non-linear patterns from the input time
 series. This head then acts as a simple, learnable mapping from that rich
-representation to the parameters of the forecast distribution, where the
-quantiles serve as a non-parametric description of that distribution's shape.
+representation to the parameters of the forecast distribution.
+
+Enhanced Configurations:
+1. Flatten Input: Optionally flattens the input sequence (Batch, Seq, Dim) into
+   (Batch, Seq*Dim) before projection. This allows the dense layer to utilize
+   the specific temporal order of features rather than pooling them.
+2. Enforce Monotonicity: Optionally enforces non-crossing quantiles (Q1 <= Q2 <= Q3)
+   by predicting the first quantile and positive deltas for subsequent levels.
 
 Foundational Mathematics:
-This layer is designed to be trained with a quantile loss function, commonly
-known as the "pinball loss." Unlike Mean Squared Error, which trains a model
-to predict the conditional mean, the pinball loss trains a model to predict a
-specific conditional quantile. The loss for a given quantile `τ ∈ (0, 1)` is
-defined as:
-
-L_τ(y, ŷ) =
-    | (y - ŷ) * τ,         if y ≥ ŷ  (under-prediction)
-    | (y - ŷ) * (τ - 1),   if y < ŷ  (over-prediction)
-
-The intuition behind this asymmetric loss is that it penalizes over- and
-under-predictions differently. For a low quantile like τ=0.1, the penalty for
-under-prediction is small (scaled by 0.1) while the penalty for
-over-prediction is large (scaled by 0.9). To minimize this loss, the network
-learns to output a value `ŷ` that is expected to be lower than the true value
-`y` approximately 90% of the time. Conversely, for τ=0.9, the network is
-incentivized to predict a high value. For the median (τ=0.5), the penalties
-are symmetric, and the loss becomes equivalent to the Mean Absolute Error.
-
-By training the model to simultaneously minimize this loss for multiple
-quantiles (e.g., 0.1, 0.5, 0.9), the `QuantileHead` learns to output a range
-of values that collectively form a prediction interval, quantifying the
-model's uncertainty about the future.
+This layer is designed to be trained with a quantile loss function ("pinball loss").
+L_τ(y, ŷ) = max((y - ŷ) * τ, (y - ŷ) * (τ - 1))
 
 References:
     - [Koenker, R., & Bassett Jr, G. (1978). Regression Quantiles.
       Econometrica.](https://www.jstor.org/stable/1913643)
-    - [Taylor, J. W. (2000). A Quantile Regression Neural Network Approach to
-      Estimating the Conditional Density of Multi-period Returns. Journal
-      of Forecasting.](
-      https://onlinelibrary.wiley.com/doi/abs/10.1002/1099-131X(200009)19:5%3C299::AID-FOR779%3E3.0.CO;2-4)
 """
 
 import keras
@@ -66,109 +47,55 @@ class QuantileHead(keras.layers.Layer):
     Quantile prediction head for probabilistic time series forecasting.
 
     This layer implements a neural network head for predicting multiple quantiles
-    of a time series distribution, enabling probabilistic forecasting with uncertainty
-    quantification. It takes encoded features and projects them to quantile predictions
-    across a specified forecast horizon.
+    of a time series distribution. It takes encoded features and projects them 
+    to quantile predictions across a specified forecast horizon.
 
     **Intent**: Enable probabilistic time series forecasting by predicting multiple
-    quantiles (e.g., 10th, 50th, 90th percentiles) simultaneously, providing both
-    point predictions and uncertainty estimates essential for robust forecasting
-    applications.
+    quantiles (e.g., 10th, 50th, 90th percentiles) simultaneously.
 
     **Architecture**:
     ```
-    Input(shape=[..., feature_dim])
+    Input(shape=[batch, seq, feature_dim])
            ↓
-    Dropout(rate=dropout_rate) ← (optional, if dropout_rate > 0)
+    Reshape(shape=[batch, -1]) ← (if flatten_input=True)
            ↓
-    Dense(output_length × num_quantiles, activation=None)
+    Dropout(rate=dropout_rate)
+           ↓
+    Dense(output_length × num_quantiles)
            ↓
     Reshape(shape=[batch, output_length, num_quantiles])
            ↓
-    Output(shape=[batch, output_length, num_quantiles])
+    Monotonicity Constraint ← (if enforce_monotonicity=True)
     ```
 
-    **Mathematical Operation**:
-        For each quantile τ ∈ {τ₁, τ₂, ..., τₖ}:
-        quantile_τ = W_τ @ features + b_τ
-
-    Where:
-    - W_τ, b_τ are learnable parameters for quantile τ
-    - Output represents predicted values at different probability levels
-    - Common quantiles: [0.1, 0.5, 0.9] for 80% prediction intervals
-
-    **Use Cases**:
-    - Financial forecasting with risk assessment
-    - Weather prediction with confidence intervals
-    - Demand forecasting with supply planning margins
-    - Any scenario requiring uncertainty quantification
+    **Monotonicity Logic**:
+    If enabled, the network outputs raw values [r_0, r_1, r_2...].
+    The final quantiles are calculated as:
+    Q_0 = r_0
+    Q_i = Q_{i-1} + Softplus(r_i)  (for i > 0)
+    This guarantees Q_0 <= Q_1 <= Q_2, preventing "crossing quantiles".
 
     Args:
         num_quantiles: Integer, number of quantiles to predict simultaneously.
-            Common choices: 3 for [0.1, 0.5, 0.9], 5 for [0.05, 0.25, 0.5, 0.75, 0.95].
-            Must be positive.
-        output_length: Integer, length of the forecast horizon (number of future steps).
-            Must be positive. This determines how many time steps ahead to predict.
-        dropout_rate: Float between 0 and 1, fraction of features randomly set to 0
-            during training for regularization. When 0, no dropout is applied.
-            Defaults to 0.1.
-        use_bias: Boolean, whether to include learnable bias terms in the projection.
-            Defaults to True.
-        kernel_initializer: String or Initializer instance for projection layer weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer instance for projection layer biases.
-            Only used when use_bias=True. Defaults to 'zeros'.
+        output_length: Integer, length of the forecast horizon.
+        dropout_rate: Float between 0 and 1. Defaults to 0.1.
+        use_bias: Boolean, whether to include learnable bias terms. Defaults to True.
+        flatten_input: Boolean. If True, the input tensor is flattened (preserving batch)
+            before the dense projection. This allows the head to learn from the full
+            sequence history rather than a pooled representation. Defaults to False.
+        enforce_monotonicity: Boolean. If True, enforces that quantile predictions
+            are strictly non-decreasing (Q_i <= Q_{i+1}). Requires input quantile_levels
+            to be sorted. Defaults to False.
+        kernel_initializer: Initializer for projection weights. Defaults to 'glorot_uniform'.
+        bias_initializer: Initializer for projection biases. Defaults to 'zeros'.
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
-        N-D tensor with shape: `(batch_size, ..., feature_dim)`.
-        Most common: 2D tensor `(batch_size, feature_dim)` from encoder output.
+        If flatten_input=True: 3D tensor `(batch_size, seq_len, features)`.
+        If flatten_input=False: 2D tensor `(batch_size, features)`.
 
     Output shape:
         3D tensor with shape: `(batch_size, output_length, num_quantiles)`.
-        Each [i, j, k] represents the k-th quantile prediction for the j-th future
-        time step for the i-th sample in the batch.
-
-    Attributes:
-        projection: Dense layer that projects features to flattened quantile predictions.
-        dropout: Dropout layer for regularization (None if dropout_rate=0).
-
-    Example:
-        ```python
-        # Basic quantile head for 3 quantiles, 24-hour forecast
-        head = QuantileHead(num_quantiles=3, output_length=24)
-        features = keras.Input(shape=(256,))  # From encoder
-        quantiles = head(features)  # Shape: (batch, 24, 3)
-
-        # With higher dropout for regularization
-        head = QuantileHead(
-            num_quantiles=5,
-            output_length=48,
-            dropout_rate=0.2
-        )
-
-        # In a complete forecasting model
-        encoder_output = encoder(time_series_input)
-        quantile_predictions = QuantileHead(
-            num_quantiles=9,  # Deciles
-            output_length=forecast_horizon
-        )(encoder_output)
-
-        # Extract median (50th percentile) predictions
-        # Shape is (batch, time, quantiles)
-        median_forecast = quantile_predictions[:, :, num_quantiles//2]
-        ```
-
-    Note:
-        This layer outputs raw quantile predictions. During training, these should
-        be used with quantile loss functions (e.g., pinball loss) that enforce
-        the proper ordering of quantiles. The layer itself does not enforce
-        quantile ordering constraints.
-
-    References:
-        - Quantile Regression: Koenker, R. & Bassett Jr, G. (1978)
-        - Neural Network Quantile Regression: Taylor, J. W. (2000)
-        - TiRex Architecture: Time series forecasting with quantile predictions
     """
 
     def __init__(
@@ -177,6 +104,8 @@ class QuantileHead(keras.layers.Layer):
         output_length: int,
         dropout_rate: float = 0.1,
         use_bias: bool = True,
+        flatten_input: bool = False,
+        enforce_monotonicity: bool = False,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         **kwargs: Any
@@ -196,6 +125,8 @@ class QuantileHead(keras.layers.Layer):
         self.output_length = output_length
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
+        self.flatten_input = flatten_input
+        self.enforce_monotonicity = enforce_monotonicity
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
 
@@ -219,16 +150,27 @@ class QuantileHead(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the layer and all its sub-layers.
-
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
         """
-        # Build sub-layers in computational order
+        # Handle logical reshaping for the build process
+        # If flattening is enabled, the Dense layer needs to see the flattened dimension
+        dense_input_shape = input_shape
+        
+        if self.flatten_input and len(input_shape) == 3:
+            # (Batch, Seq, Feat) -> (Batch, Seq*Feat)
+            # Note: Seq must be known (not None) for the Dense layer to be built properly
+            # in a static graph context, though Keras 3 handles dynamic shapes well.
+            features = input_shape[-1]
+            seq_len = input_shape[-2]
+            if features is not None and seq_len is not None:
+                flat_dim = features * seq_len
+                dense_input_shape = (input_shape[0], flat_dim)
+
+        # Build sub-layers
         if self.dropout is not None:
-            self.dropout.build(input_shape)
+            self.dropout.build(dense_input_shape)
 
-        self.projection.build(input_shape)
+        self.projection.build(dense_input_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -240,7 +182,7 @@ class QuantileHead(keras.layers.Layer):
         Predict quantiles from the input feature vector.
 
         Args:
-            inputs: Input tensor with encoded features.
+            inputs: Input tensor.
             training: Boolean indicating training mode for dropout.
 
         Returns:
@@ -248,19 +190,54 @@ class QuantileHead(keras.layers.Layer):
         """
         x = inputs
 
-        # Apply dropout if configured
+        # 1. FLATTEN (Configuration Option)
+        # Uses ops.reshape as requested, not a Layer
+        if self.flatten_input:
+            input_shape = ops.shape(x)
+            # We assume rank 3 input (Batch, Seq, Dim) if flattening
+            if len(x.shape) == 3:
+                batch_size = input_shape[0]
+                # Reshape to (Batch, Seq*Dim)
+                x = ops.reshape(x, (batch_size, -1))
+
+        # 2. DROPOUT
         if self.dropout is not None:
             x = self.dropout(x, training=training)
 
+        # 3. PROJECTION
         # Project features to flattened quantile predictions
         quantile_preds = self.projection(x, training=training)
 
+        # 4. RESHAPE OUTPUT
         # Reshape to [batch_size, output_length, num_quantiles]
         # Using -1 for batch dimension handles dynamic batch sizes
         quantiles = ops.reshape(
             quantile_preds,
             (-1, self.output_length, self.num_quantiles)
         )
+
+        # 5. MONOTONICITY (Configuration Option)
+        # Ensures Q(tau_i) <= Q(tau_{i+1})
+        if self.enforce_monotonicity and self.num_quantiles > 1:
+            # Split the first quantile from the rest
+            # q0: (Batch, Len, 1)
+            q0 = quantiles[:, :, 0:1]
+            
+            # The rest are interpreted as deltas
+            # rest: (Batch, Len, num_quantiles - 1)
+            rest = quantiles[:, :, 1:]
+            
+            # Force deltas to be positive
+            deltas = ops.softplus(rest)
+            
+            # Accumulate deltas
+            accumulated_deltas = ops.cumsum(deltas, axis=-1)
+            
+            # Add base to accumulation
+            subsequent_quantiles = q0 + accumulated_deltas
+            
+            # Recombine
+            quantiles = ops.concatenate([q0, subsequent_quantiles], axis=-1)
 
         return quantiles
 
@@ -277,6 +254,8 @@ class QuantileHead(keras.layers.Layer):
             "output_length": self.output_length,
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
+            "flatten_input": self.flatten_input,
+            "enforce_monotonicity": self.enforce_monotonicity,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
         })

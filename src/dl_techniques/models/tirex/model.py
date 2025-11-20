@@ -271,8 +271,9 @@ class TiRexCore(keras.Model):
             hidden_states = block(hidden_states, training=training)
 
         hidden_states = self.output_norm(hidden_states, training=training)
-        #pooled = ops.mean(hidden_states, axis=1)
-        # --- FIX: FLATTEN INSTEAD OF MEAN POOLING ---
+
+        # --- DIVERGENCE FROM TIREX: FLATTEN INSTEAD OF MEAN POOLING ---
+        # pooled = ops.mean(hidden_states, axis=1)
         # Preserves sequence history for the dense head to utilize
         batch_size = ops.shape(hidden_states)[0]
         # Flatten patches: (B, Num_Patches, Dim) -> (B, Num_Patches * Dim)
