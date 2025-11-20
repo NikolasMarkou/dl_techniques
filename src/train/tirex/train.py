@@ -1,11 +1,12 @@
 """
-Comprehensive TiRex Training Framework using N-BEATS Style Infrastructure.
+Comprehensive TiRex Training Framework
 """
 
 import os
 import json
 import math
 import random
+import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Tuple
@@ -754,28 +755,95 @@ class TiRexTrainer:
             json.dump(serializable, f, indent=4, default=json_convert)
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments for TiRex training configuration."""
+    parser = argparse.ArgumentParser(description="TiRex Training Framework")
+
+    # General experiment settings
+    parser.add_argument("--experiment_name", type=str, default="tirex",
+                        help="Name of the experiment for logging.")
+
+    # Model architecture settings
+    parser.add_argument("--variant", type=str, default="small",
+                        choices=['tiny', 'small', 'medium', 'large'],
+                        help="Model variant/size.")
+    parser.add_argument("--input_length", type=int, default=256,
+                        help="Length of input time series sequence.")
+    parser.add_argument("--prediction_length", type=int, default=24,
+                        help="Forecasting horizon length.")
+    parser.add_argument("--patch_size", type=int, default=4,
+                        help="Size of patches for tokenization.")
+    parser.add_argument("--embed_dim", type=int, default=128,
+                        help="Dimension of embedding layer.")
+
+    # Training loop settings
+    parser.add_argument("--epochs", type=int, default=200,
+                        help="Maximum number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=128,
+                        help="Training batch size.")
+    parser.add_argument("--steps_per_epoch", type=int, default=1000,
+                        help="Number of steps (batches) per epoch.")
+
+    # Optimization settings
+    parser.add_argument("--learning_rate", type=float, default=1e-4,
+                        help="Initial learning rate.")
+    parser.add_argument("--gradient_clip_norm", type=float, default=1.0,
+                        help="Gradient clipping norm value.")
+    parser.add_argument("--optimizer", type=str, default="adamw",
+                        help="Optimizer to use (e.g., adamw, adam).")
+
+    # Warmup schedule
+    # Defaults to True, can be disabled with --no-warmup
+    parser.add_argument("--no-warmup", dest="use_warmup", action="store_false",
+                        help="Disable learning rate warmup.")
+    parser.set_defaults(use_warmup=True)
+    parser.add_argument("--warmup_steps", type=int, default=5000,
+                        help="Number of warmup steps.")
+    parser.add_argument("--warmup_start_lr", type=float, default=1e-6,
+                        help="Starting learning rate for warmup.")
+
+    # Data processing
+    # Defaults to True, can be disabled with --no-normalize
+    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false",
+                        help="Disable per-instance normalization.")
+    parser.set_defaults(normalize_per_instance=True)
+    parser.add_argument("--max_patterns_per_category", type=int, default=100,
+                        help="Maximum number of patterns to sample per category.")
+
+    # Visualization
+    parser.add_argument("--visualize_every_n_epochs", type=int, default=5,
+                        help="Frequency of generating visualization plots in epochs.")
+    parser.add_argument("--plot_top_k_patterns", type=int, default=12,
+                        help="Number of patterns to plot in visualizations.")
+
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+
     config = TiRexTrainingConfig(
-        experiment_name="tirex",
-        variant="small",
-        input_length=256,
-        prediction_length=24,
-        patch_size=4,
-        embed_dim=128,
+        experiment_name=args.experiment_name,
+        variant=args.variant,
+        input_length=args.input_length,
+        prediction_length=args.prediction_length,
+        patch_size=args.patch_size,
+        embed_dim=args.embed_dim,
+        # Quantile levels are kept as list defaults in code
         quantile_levels=[0.1, 0.25, 0.5, 0.75, 0.9],
-        epochs=200,
-        batch_size=128,
-        steps_per_epoch=1000,
-        learning_rate=1e-4,
-        use_warmup=True,
-        warmup_steps=5000,
-        warmup_start_lr=1e-6,
-        gradient_clip_norm=1.0,
-        optimizer='adamw',
-        normalize_per_instance=True,
-        max_patterns_per_category=100,
-        visualize_every_n_epochs=5,
-        plot_top_k_patterns=12,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        steps_per_epoch=args.steps_per_epoch,
+        learning_rate=args.learning_rate,
+        use_warmup=args.use_warmup,
+        warmup_steps=args.warmup_steps,
+        warmup_start_lr=args.warmup_start_lr,
+        gradient_clip_norm=args.gradient_clip_norm,
+        optimizer=args.optimizer,
+        normalize_per_instance=args.normalize_per_instance,
+        max_patterns_per_category=args.max_patterns_per_category,
+        visualize_every_n_epochs=args.visualize_every_n_epochs,
+        plot_top_k_patterns=args.plot_top_k_patterns,
     )
 
     ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)

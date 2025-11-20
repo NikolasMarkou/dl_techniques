@@ -70,6 +70,7 @@ from typing import Optional, Union, Tuple, Callable, Any, Literal, Dict
 from ..ffn import create_ffn_layer, FFNType
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -323,6 +324,14 @@ class MixedSequentialBlock(keras.layers.Layer):
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate
+                })
+            elif self.attention_type == 'window':
+                attention_kwargs.update({
+                    'dim': self.embed_dim,
+                    'num_heads': self.num_heads,
+                    'dropout_rate': self.dropout_rate,
+                    'window_size': 4,
+                    'normalization': 'softmax'
                 })
             elif self.attention_type == 'differential':
                 attention_kwargs.update({

@@ -207,6 +207,7 @@ class TiRexCore(keras.Model):
                 dropout_rate=self.dropout_rate,
                 use_layer_norm=self.use_layer_norm,
                 normalization_type='rms_norm',
+                attention_type='window',
                 ffn_type='geglu',
                 activation='gelu',
                 name=f"block_{i}"
