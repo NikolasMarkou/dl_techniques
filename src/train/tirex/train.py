@@ -380,6 +380,32 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
         os.makedirs(save_dir, exist_ok=True)
         self.viz_test_data = self._create_viz_test_set()
 
+    def _normalize_instance(
+            self,
+            inputs: tf.Tensor,
+            targets: tf.Tensor
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Normalize per instance to the range [-1, +1] using Min-Max scaling.
+        Calculates stats from inputs ONLY, applies to inputs and targets.
+        """
+        # inputs: (input_length, 1)
+        # targets: (prediction_length,)
+
+        # Calculate min and max from the input history to avoid leakage
+        min_val = tf.reduce_min(inputs)
+        max_val = tf.reduce_max(inputs)
+
+        # Calculate range, ensuring no division by zero (epsilon)
+        range_val = tf.maximum(max_val - min_val, 1e-7)
+
+        # Scale to [0, 1] then transform to [-1, 1]
+        # Formula: 2 * ((x - min) / (max - min)) - 1
+        normalized_inputs = 2.0 * (inputs - min_val) / range_val - 1.0
+        normalized_targets = 2.0 * (targets - min_val) / range_val - 1.0
+
+        return normalized_inputs, normalized_targets
+
     def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
         """Generates a diverse, fixed test set for visualizations."""
         logger.info("Creating a diverse, fixed visualization test set...")
@@ -415,10 +441,7 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
 
                 # Apply normalization if config enabled, to match model expectation
                 if self.config.normalize_per_instance:
-                    mean = np.mean(inputs)
-                    std = max(np.std(inputs), 1e-7)
-                    inputs = (inputs - mean) / std
-                    targets = (targets - mean) / std
+                    inputs, targets = self._normalize_instance(inputs, targets)
 
                 x_list.append(inputs)
                 y_list.append(targets)
@@ -735,8 +758,8 @@ def main() -> None:
     config = TiRexTrainingConfig(
         experiment_name="tirex",
         variant="small",
-        input_length=104,
-        prediction_length=12,
+        input_length=256,
+        prediction_length=24,
         patch_size=4,
         embed_dim=128,
         quantile_levels=[0.1, 0.25, 0.5, 0.75, 0.9],
@@ -749,7 +772,7 @@ def main() -> None:
         warmup_start_lr=1e-6,
         gradient_clip_norm=1.0,
         optimizer='adamw',
-        normalize_per_instance=False,
+        normalize_per_instance=True,
         max_patterns_per_category=100,
         visualize_every_n_epochs=5,
         plot_top_k_patterns=12,

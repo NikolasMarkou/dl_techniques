@@ -191,6 +191,7 @@ class TiRexCore(keras.Model):
             hidden_dim=self.embed_dim * 2,
             output_dim=self.embed_dim,
             dropout_rate=self.dropout_rate,
+            activation="gelu",
             name="input_projection"
         )
 
@@ -205,6 +206,9 @@ class TiRexCore(keras.Model):
                 block_type=block_type,
                 dropout_rate=self.dropout_rate,
                 use_layer_norm=self.use_layer_norm,
+                normalization_type='rms_norm',
+                ffn_type='geglu',
+                activation='gelu',
                 name=f"block_{i}"
             )
             self.blocks.append(block)
@@ -219,7 +223,10 @@ class TiRexCore(keras.Model):
         self.quantile_head = QuantileHead(
             num_quantiles=len(self.quantile_levels),
             output_length=self.prediction_length,
-            dropout_rate=self.dropout_rate,
+            dropout_rate=0.0,
+            enforce_monotonicity=True,
+            use_bias=True,
+            flatten_input=True,
             name="quantile_head"
         )
 
@@ -275,14 +282,14 @@ class TiRexCore(keras.Model):
         # --- DIVERGENCE FROM TIREX: FLATTEN INSTEAD OF MEAN POOLING ---
         # pooled = ops.mean(hidden_states, axis=1)
         # Preserves sequence history for the dense head to utilize
-        batch_size = ops.shape(hidden_states)[0]
+        # batch_size = ops.shape(hidden_states)[0]
         # Flatten patches: (B, Num_Patches, Dim) -> (B, Num_Patches * Dim)
-        pooled = ops.reshape(hidden_states, (batch_size, -1))
+        # pooled = ops.reshape(hidden_states, (batch_size, -1))
         # ---------------------------------------------
 
         # 5. PREDICT (Normalized Space)
         # Shape: [batch, prediction_length, num_quantiles]
-        quantile_predictions = self.quantile_head(pooled, training=training)
+        quantile_predictions = self.quantile_head(hidden_states, training=training)
 
         # 6. DENORMALIZE OUTPUT (Reversible Instance Normalization)
         if self.use_normalization:
@@ -294,51 +301,129 @@ class TiRexCore(keras.Model):
         return quantile_predictions
 
     def predict_quantiles(
-        self,
-        context: Union[np.ndarray, keras.utils.PyDataset],
-        quantile_levels: Optional[List[float]] = None,
-        batch_size: int = 32,
-        **kwargs
+            self,
+            context: Union[np.ndarray, keras.utils.PyDataset],
+            quantile_levels: Optional[List[float]] = None,
+            batch_size: int = 32,
+            **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate quantile predictions for time series forecasting.
+        Generate specific quantile and point forecasts for time series data.
+
+        This method acts as a high-level wrapper around `model.predict()`. It handles
+        the complexity of mapping user-requested quantile levels (e.g., 0.95) to the
+        specific output indices of the model's neural network head. It also automatically
+        extracts the median (0.5 quantile) to serve as a robust point forecast.
+
+        **Shape Logic**:
+        The raw model outputs a tensor of shape `(Batch, Time, Trained_Quantiles)`.
+        This method slices the last dimension based on the requested `quantile_levels`.
 
         Args:
-            context: Input time series data.
-            quantile_levels: List of quantile levels to return. If None, uses model defaults.
-            batch_size: Batch size for prediction.
-            **kwargs: Additional arguments passed to predict().
+            context: Input data.
+                - A Numpy array of shape `(batch_size, input_length, features)`.
+                - Or a `keras.utils.PyDataset` / `tf.data.Dataset`.
+            quantile_levels: List of floats between 0 and 1.
+                The specific probabilities to extract (e.g., `[0.1, 0.5, 0.9]`).
+                If None, returns all quantiles the model was trained with.
+                If a requested quantile was not in the training set, the closest
+                available trained quantile will be used (with a warning).
+            batch_size: Integer, number of samples per batch during inference.
+                Defaults to 32.
+            **kwargs: Additional arguments passed directly to `model.predict()`,
+                such as `verbose` or `callbacks`.
 
         Returns:
-            Tuple of (quantile_predictions, mean_predictions) as numpy arrays.
-            quantile_predictions: [batch, prediction_length, selected_quantiles]
-            mean_predictions: [batch, prediction_length]
+            A tuple `(quantile_preds, point_preds)`:
+            1. **quantile_preds**: Numpy array of shape
+               `(batch_size, prediction_length, num_requested_quantiles)`.
+               Contains the predicted values for the requested probability levels.
+            2. **point_preds**: Numpy array of shape
+               `(batch_size, prediction_length)`.
+               Contains the median prediction (0.5 quantile), used as the primary
+               point forecast.
+
+        Example:
+            ```python
+            # Train with [0.1, 0.5, 0.9]
+            model = TiRexCore(...)
+
+            # Request specific confidence intervals at inference
+            # context shape: (100, 168, 1)
+            q_preds, median = model.predict_quantiles(
+                context,
+                quantile_levels=[0.05, 0.5, 0.95] # 0.05/0.95 map to closest (0.1/0.9)
+            )
+
+            # q_preds shape: (100, 24, 3)
+            # median shape:  (100, 24)
+            ```
         """
+        # ---------------------------------------------------------------------
+        # 1. Setup and Validation
+        # ---------------------------------------------------------------------
+        # If no specific levels requested, return everything the model knows
         if quantile_levels is None:
             quantile_levels = self.quantile_levels
 
-        # Predictions shape: [batch, prediction_length, num_quantiles]
-        predictions = self.predict(context, batch_size=batch_size, **kwargs)
+        # ---------------------------------------------------------------------
+        # 2. Run Inference
+        # ---------------------------------------------------------------------
+        # Perform the forward pass.
+        # Output Shape: [batch_size, prediction_length, num_trained_quantiles]
+        raw_predictions = self.predict(context, batch_size=batch_size, **kwargs)
 
-        # Select requested quantiles
+        # ---------------------------------------------------------------------
+        # 3. Map Requested Quantiles to Model Output Indices
+        # ---------------------------------------------------------------------
+        # We need to find which index in the last dimension corresponds to
+        # the requested quantiles (e.g., user asks for 0.5, we find index 2).
         quantile_indices = []
+        trained_quantiles_arr = np.array(self.quantile_levels)
+
         for q in quantile_levels:
+            # Case A: Exact match found
             if q in self.quantile_levels:
-                quantile_indices.append(self.quantile_levels.index(q))
+                idx = self.quantile_levels.index(q)
+                quantile_indices.append(idx)
+            # Case B: Approximation needed (User asks for 0.95, model has 0.9)
             else:
-                closest_idx = np.argmin(np.abs(np.array(self.quantile_levels) - q))
+                # Find index of the smallest absolute difference
+                closest_idx = int(np.argmin(np.abs(trained_quantiles_arr - q)))
                 quantile_indices.append(closest_idx)
+
                 logger.warning(
-                    f"Quantile {q} not in training quantiles, using closest: {self.quantile_levels[closest_idx]}"
+                    f"Requested quantile {q} not found in trained model "
+                    f"{self.quantile_levels}. Using closest match: "
+                    f"{self.quantile_levels[closest_idx]}"
                 )
 
-        # Slicing the last dimension (quantiles)
-        quantile_preds = predictions[:, :, quantile_indices]
+        # ---------------------------------------------------------------------
+        # 4. Extract Quantile Predictions
+        # ---------------------------------------------------------------------
+        # Slice the raw predictions tensor.
+        # We select all batches (:), all time steps (:), and specific quantile indices.
+        # Result Shape: [batch_size, prediction_length, num_requested_quantiles]
+        quantile_preds = raw_predictions[:, :, quantile_indices]
 
-        # Use median as mean prediction
-        median_idx = self.quantile_levels.index(0.5) if 0.5 in self.quantile_levels else len(self.quantile_levels) // 2
-        # Shape becomes [batch, prediction_length]
-        mean_preds = predictions[:, :, median_idx]
+        # ---------------------------------------------------------------------
+        # 5. Extract Point Forecast (Median)
+        # ---------------------------------------------------------------------
+        # The median (0.5) minimizes MAE and is the standard point forecast
+        # for quantile regression models.
+        if 0.5 in self.quantile_levels:
+            median_idx = self.quantile_levels.index(0.5)
+        else:
+            # Fallback: Use the middle index if strict 0.5 is missing
+            median_idx = len(self.quantile_levels) // 2
+            logger.debug(
+                f"Median (0.5) not found in quantiles. Using index {median_idx} "
+                f"({self.quantile_levels[median_idx]}) as point forecast."
+            )
+
+        # Slice out the median to get a 2D array.
+        # Result Shape: [batch_size, prediction_length]
+        mean_preds = raw_predictions[:, :, median_idx]
 
         return quantile_preds, mean_preds
 
