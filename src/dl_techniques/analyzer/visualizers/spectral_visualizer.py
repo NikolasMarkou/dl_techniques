@@ -306,7 +306,8 @@ class SpectralVisualizer(BaseVisualizer):
         """
         Create and save a power-law fit plot using Logarithmic Binning.
 
-        Updated to anchor the fit line visually to the data and label xmin.
+        Updated to use dynamic binning (to reduce quantization artifacts) and
+        mass-preserving scaling (to fix anchor instability).
 
         Args:
             evals: Array of eigenvalues.
@@ -319,15 +320,25 @@ class SpectralVisualizer(BaseVisualizer):
 
             # Filter valid eigenvalues
             evals_clean = evals[evals > 1e-10]
-            if len(evals_clean) == 0:
+            n_samples = len(evals_clean)
+
+            if n_samples == 0:
                 plt.close(fig)
                 return
 
             min_val, max_val = np.min(evals_clean), np.max(evals_clean)
 
-            # --- 1. Empirical Data (Logarithmic Binning) ---
+            # --- 1. Empirical Data (Dynamic Logarithmic Binning) ---
+            # FIX A: Dynamic Binning to prevent "striation" artifacts.
+            # Using Rice's Rule approximation (2 * n^(1/3)) or Sqrt rule.
+            # Sqrt rule is safer for preventing empty bins in heavy tails.
+            dynamic_bins = int(np.sqrt(n_samples))
+
+            # Clamp bins to reasonable range [10, SPECTRAL_DEFAULT_BINS]
+            n_bins = max(10, min(dynamic_bins, SPECTRAL_DEFAULT_BINS))
+
             # Create bins equally spaced in log-space
-            bins = np.logspace(np.log10(min_val), np.log10(max_val), num=SPECTRAL_DEFAULT_BINS)
+            bins = np.logspace(np.log10(min_val), np.log10(max_val), num=n_bins)
 
             # density=True normalizes by bin width so area sums to 1
             hist, bin_edges = np.histogram(evals_clean, bins=bins, density=True)
@@ -343,41 +354,25 @@ class SpectralVisualizer(BaseVisualizer):
                 alpha=0.6, color='#1f77b4', markeredgecolor='none'
             )
 
-            # --- 2. Theoretical Fit Line (Anchored) ---
+            # --- 2. Theoretical Fit Line (Mass-Preserving Scaling) ---
+            # FIX B: Robust Normalization.
+            # Instead of anchoring to a single noisy bin, we scale the theoretical PDF
+            # so that its integral over [xmin, max_val] matches the empirical fraction
+            # of data in that tail.
             if xmin > 0 and alpha > 1:
                 # Range for the red line
                 x_range = np.logspace(np.log10(xmin), np.log10(max_val), 100)
 
-                # Calculate theoretical PDF shape: x^(-alpha)
-                y_shape = x_range ** (-alpha)
+                # Calculate the fraction of data that actually lies in the tail
+                n_tail = np.sum(evals_clean >= xmin)
+                tail_fraction = n_tail / n_samples
 
-                # --- VISUAL CORRECTION: Anchoring ---
-                # Instead of purely theoretical scaling, we anchor the line to the
-                # histogram bin closest to xmin. This ensures the line touches the dots.
-
-                # Find the bin center closest to xmin that has data
-                valid_centers = bin_centers[valid_mask]
-                valid_hist = hist[valid_mask]
-
-                # Get indices of bins >= xmin
-                tail_indices = np.where(valid_centers >= xmin)[0]
-
-                if len(tail_indices) > 0:
-                    # Use the first valid bin in the tail as the anchor
-                    anchor_idx = tail_indices[0]
-                    anchor_x = valid_centers[anchor_idx]
-                    anchor_y = valid_hist[anchor_idx]
-
-                    # Calculate scaling factor K so that y = K * x^(-alpha) passes through anchor
-                    # K = y_anchor / (x_anchor^(-alpha)) = y_anchor * x_anchor^(alpha)
-                    scaling_factor = anchor_y * (anchor_x ** alpha)
-                    y_fit = scaling_factor * y_shape
-                else:
-                    # Fallback to theoretical scaling if alignment fails
-                    N_tail = np.sum(evals_clean >= xmin)
-                    tail_ratio = N_tail / len(evals_clean)
-                    C = (alpha - 1) * (xmin ** (alpha - 1))
-                    y_fit = tail_ratio * C * y_shape
+                # The PDF of a bounded power law starting at xmin is:
+                # f(x) = (alpha - 1) / xmin * (x / xmin)^(-alpha)
+                # We scale this by tail_fraction because the histogram density
+                # is normalized over the *entire* dataset, not just the tail.
+                theoretical_pdf = ((alpha - 1) / xmin) * ((x_range / xmin) ** (-alpha))
+                y_fit = tail_fraction * theoretical_pdf
 
                 ax.loglog(x_range, y_fit, 'r-', linewidth=3, label=f'Fit: α={alpha:.3f}')
 
@@ -385,7 +380,6 @@ class SpectralVisualizer(BaseVisualizer):
                 ax.axvline(x=xmin, color='gray', linestyle='--', alpha=0.8, linewidth=1.5)
 
                 # Add X-axis label for xmin
-                # We place it at the bottom of the plot, just above the axis
                 ymin_plot, ymax_plot = ax.get_ylim()
 
                 # Add background box for readability
