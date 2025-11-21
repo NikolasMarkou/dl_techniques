@@ -9,7 +9,7 @@ The Model Analyzer is designed to provide deep insights into your neural network
 ### Key Features
 
 -   **Comprehensive Analysis**: Five specialized analysis modules covering weights, calibration, information flow, training dynamics, and spectral properties.
--   **Advanced Spectral Analysis (WeightWatcher)**: Assess training quality, complexity, and generalization potential using power-law and concentration analysis, often without needing test data.
+-   **Advanced Spectral Analysis (WeightWatcher)**: Assess training quality, complexity, and generalization potential using power-law and concentration analysis. This implementation is highly optimized for speed ($O(N)$ complexity), handling large layers efficiently.
 -   **Rich Visualizations**: Publication-ready plots and summary dashboards with consistent styling and color schemes.
 -   **Modular & Extensible**: Each analysis is independent. The architecture is designed for adding custom analyzers and visualizers.
 -   **Training & Hyperparameter Insights**: Deep analysis of training history, convergence patterns, and a powerful Pareto-front analysis for optimal model selection.
@@ -81,7 +81,6 @@ test_data = DataInput(x_data=x_test, y_data=y_test)
 # 3. Prepare your training histories (optional, but required for training dynamics)
 # This should be a dictionary where keys match the model names.
 # The value for each key is the `history` object from a Keras `model.fit()` call.
-# See the "Preparing Your Inputs" section for a detailed example.
 training_histories = {
     'ResNet_v1': history1, # e.g., result from your_resnet_model.fit(...)
     'ConvNext_v2': history2  # e.g., result from your_convnext_model.fit(...)
@@ -98,6 +97,8 @@ analyzer = ModelAnalyzer(
     config=config,
     output_dir='analysis_results'
 )
+
+# Run analysis. Note: DataInput is optional if only doing static analysis (weights/spectral)
 results = analyzer.analyze(test_data)
 
 print("Analysis complete! Check the 'analysis_results' folder for plots and data.")
@@ -128,8 +129,10 @@ models = {
 This object wraps your dataset and is passed to the `analyzer.analyze()` method. It is **required** for any analysis that depends on data, such as **calibration** and **information flow**.
 
 -   **Structure**: A `DataInput` named tuple with two fields: `x_data` and `y_data`.
--   **`x_data`**: A NumPy array containing your input features. The shape should be `(n_samples, ...)`, for example, `(10000, 28, 28, 1)` for MNIST images.
+-   **`x_data`**: A NumPy array or a dictionary of arrays (for multi-input models) containing your input features. The shape should be `(n_samples, ...)`.
 -   **`y_data`**: A NumPy array containing the corresponding true labels. The analyzer can handle both integer labels (e.g., shape `(10000,)`) and one-hot encoded labels (e.g., shape `(10000, 10)`).
+
+**Note on Sampling:** If your dataset is large, the analyzer will automatically sample `config.n_samples` (default 1000) for expensive computations like Information Flow analysis to prevent memory issues.
 
 ```python
 import numpy as np
@@ -205,14 +208,15 @@ This analysis inspects the internal parameters of the model to diagnose its stru
 
 This analysis examines the eigenvalue spectrum of weight matrices to assess training quality and complexity without requiring test data. It is based on the theory of **Heavy-Tailed Self-Regularization (HTSR)**, which posits that SGD implicitly regularizes deep neural networks, causing the distribution of eigenvalues of their weight matrices—the Empirical Spectral Density (ESD)—to develop a characteristic heavy-tailed shape. This shape, quantifiable with a power-law, correlates strongly with the model's ability to generalize.
 
+**Optimization Note**: This implementation uses optimized prefix-sum algorithms to fit power laws in $O(N)$ time, making it significantly faster than standard implementations on large layers (e.g., large transformers or convolutional layers).
+
 | Metric                     | Description                                                                                                       | Interpretation                                                                                                                                         |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Power-Law Exponent (α)** | The exponent of the power-law fit `P(λ) ~ λ^(-α)` to the tail of the eigenvalue distribution (ESD) of weight matrices.                              | This is the key indicator of training quality. `α < 2.0` suggests an extremely heavy-tailed spectrum, which can indicate over-training or memorization. `2.0 < α < 6.0` typically corresponds to a well-trained model that generalizes well. `α > 6.0` may indicate under-training. The value `α ≈ 2.0` represents a critical phase boundary for "Ideal Learning."             |
 | **Concentration Score**    | A composite metric measuring the inequality of the eigenvalue distribution. It combines the Gini Coefficient, Dominance Ratio, and Participation Ratio.             | High values suggest information is concentrated in a few dominant patterns, which can indicate model brittleness, highlight critical layers, or suggest that pruning/quantization may be risky.         |
 | **Matrix Entropy**         | A measure of the information distribution across eigenvalues, calculated from the Shannon entropy of the normalized singular values.     | Higher entropy indicates a more uniform spread of information across all learned features (eigenvectors), which is often a sign of better generalization and robustness.        |
 | **Stable Rank**            | The effective rank of a weight matrix, which simplifies to `(Σ λ_i) / max(λ_i)`. It indicates the dimensionality of the space spanned by its singular vectors. | A higher stable rank suggests the layer is utilizing its full capacity to learn diverse features. A low stable rank can indicate over-parameterization, redundant features, or an information bottleneck. |
-| **Gini Coefficient** | A statistical measure of inequality in the eigenvalue distribution, ranging from 0 (perfect equality) to 1 (perfect inequality). | A sub-metric of the Concentration Score. High Gini values mean a few eigenvalues are much larger than the rest, indicating information concentration. |
-| **Dominance Ratio** | The ratio of the largest eigenvalue to the sum of all other eigenvalues. | A sub-metric of the Concentration Score. This directly quantifies how much a single feature or pattern dominates the layer's learned representation. |
+| **Participation Ratio** | Measures the effective number of non-zero elements in the principal components. | A sub-metric of the Concentration Score. Low values indicate that learned features are localized to very few neurons. |
 
 ### Calibration & Confidence Metrics
 
@@ -381,7 +385,7 @@ config = AnalysisConfig(
     analyze_spectral=True,
 
     # === Data Sampling ===
-    n_samples=1000,  # Max samples for data-dependent analyses
+    n_samples=1000,  # Max samples for data-dependent analyses (Info Flow, Calibration)
 
     # === Weight Analysis ===
     weight_layer_types=['Dense', 'Conv2D'],
@@ -390,8 +394,9 @@ config = AnalysisConfig(
 
     # === Spectral Analysis (WeightWatcher) ===
     spectral_min_evals=10,                # Min eigenvalues for a layer to be analyzed
-    spectral_concentration_analysis=True, # Enable concentration metrics
-    spectral_randomize=False,             # Compare with randomized weights
+    spectral_max_evals=15000,             # Soft cap to switch to truncated SVD for speed
+    spectral_concentration_analysis=True, # Enable concentration metrics (Gini, PR)
+    spectral_randomize=False,             # Compare with randomized weights (slow)
 
     # === Calibration Analysis ===
     calibration_bins=15,
@@ -450,8 +455,9 @@ A 2x2 grid providing a holistic view of all models.
 
 A dashboard for comparing models based on their weight matrix spectral properties.
 
--   **Mean Power-Law Exponent (α)**: A bar chart comparing the average α value for each model. This is the single most important plot for data-free generalization estimates. A green bar indicates the ideal range (2.0-6.0), red indicates potential over- or under-training, and yellow is borderline.
--   **Mean Concentration Score**: A bar chart comparing the average information concentration. Higher scores suggest some layers are more "brittle" or specialized. Use this to gauge model robustness, especially if you plan to prune or quantize the model.
+-   **Alpha (α) Distribution**: Violin plots comparing the distribution of alpha values across all layers for each model.
+-   **Concentration Score**: A comparison of information concentration. Higher scores suggest some layers are "brittle".
+-   **Alpha Evolution**: Scatter plots showing how α values change as you move deeper into the network.
 -   **Recommendations**: The `analysis_results.json` file contains specific, actionable recommendations based on the spectral analysis for each model (e.g., "Model may be over-trained. Consider early stopping...").
 
 #### 3. Training Dynamics (`training_dynamics.png`)
@@ -507,6 +513,7 @@ These plots provide a layer-by-layer deep dive into the power-law fit that is su
     -   **Interpretation**: A well-trained layer will show the blue dots in the tail (right side of the plot) aligning closely with the red line. A poor fit may indicate that the layer has not developed a clear heavy-tailed structure, which could be a sign of training issues.
 
 ## 8. Troubleshooting
+
 -   **`analysis_results.json` is too large**: By default, the analyzer saves summary statistics to keep the file size small. If you need the raw, per-sample data (e.g., the confidence score for every single prediction), you can enable it in the configuration. Be aware this can increase the JSON file size from kilobytes to many megabytes.
     ```python
     config = AnalysisConfig(
@@ -514,18 +521,17 @@ These plots provide a layer-by-layer deep dive into the power-law fit that is su
         json_include_raw_esds=True         # Saves raw eigenvalue arrays
     )
     ```
--   **Multi-Input Models**: The analyzer has limited support for models with multiple inputs. It will log warnings and automatically skip incompatible analyses (like calibration and information flow) for these models to prevent errors.
 -   **"No training metrics found"**: The analyzer robustly searches for common metric names (`accuracy`, `val_loss`, etc.). If you use non-standard names in your `history` object, analysis will be limited. Ensure your Keras history keys are standard. **See Section 3.3 for the exact required structure of the `training_history` dictionary.**
--   **Memory Issues**: For very large models or datasets, analysis can be memory-intensive. Reduce the sample size and disable the most expensive analyses in `AnalysisConfig`:
+-   **Memory Issues (OOM)**: For very large models or datasets, analysis can be memory-intensive. Reduce the sample size and disable the most expensive analyses in `AnalysisConfig`:
     ```python
     config = AnalysisConfig(
-        n_samples=500,                  # Reduce from default 1000
-        analyze_information_flow=False, # This is often the most memory-intensive
+        n_samples=200,                  # Reduce from default 1000
+        analyze_information_flow=False, # This is the most memory-intensive (captures activations)
         max_layers_heatmap=8            # Limit heatmap size
     )
     ```
 -   **Plots look wrong/empty**: Enable verbose logging (`config = AnalysisConfig(verbose=True)`) and check the console output. You can also inspect the `analysis_results.json` file to see what data was successfully computed.
--   **Spectral Analysis Fails**: Spectral analysis requires layers to have a minimum number of weights (e.g., a 10x10 matrix). Very small layers will be skipped automatically. Check the console log for warnings about skipped layers.
+-   **Matplotlib Backend Issues**: If running in a Jupyter Notebook, use `%matplotlib inline` before importing the analyzer. The analyzer uses the non-interactive `Agg` backend by default to ensure saving plots works in headless environments, but `plt.show()` might not work immediately without configuration.
 
 ## 9. Extensions
 

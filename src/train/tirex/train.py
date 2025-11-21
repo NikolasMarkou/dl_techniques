@@ -29,6 +29,10 @@ from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
 from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
 
+# Analyzer imports
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
+from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
+
 # ---------------------------------------------------------------------
 
 plt.style.use('default')
@@ -44,7 +48,6 @@ def set_random_seeds(seed: int = 42) -> None:
 
 
 set_random_seeds(42)
-
 
 # ---------------------------------------------------------------------
 
@@ -111,6 +114,11 @@ class TiRexTrainingConfig:
     plot_top_k_patterns: int = 12
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
+
+    # Deep Analysis Configuration
+    perform_deep_analysis: bool = True
+    analysis_frequency: int = 10
+    analysis_start_epoch: int = 1
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
@@ -709,6 +717,31 @@ class TiRexTrainer:
             keras.callbacks.TerminateOnNaN()
         ]
 
+        # Add Deep Model Analysis Callback if enabled
+        if self.config.perform_deep_analysis:
+            logger.info("Adding Deep Model Analysis (Weights/Spectral) callback.")
+
+            # Configure analysis (Data-free for speed during training loops)
+            analysis_config = AnalysisConfig(
+                analyze_weights=True,
+                analyze_spectral=True, # Spectral analysis (WeightWatcher)
+                analyze_calibration=False, # Skip data-dependent analyses
+                analyze_information_flow=False,
+                analyze_training_dynamics=False,
+                verbose=False
+            )
+
+            analysis_dir = os.path.join(exp_dir, 'deep_analysis')
+
+            analyzer_cb = EpochAnalyzerCallback(
+                output_dir=analysis_dir,
+                analysis_config=analysis_config,
+                start_epoch=self.config.analysis_start_epoch,
+                epoch_frequency=self.config.analysis_frequency,
+                model_name="TiRex"
+            )
+            callbacks.append(analyzer_cb)
+
         history = model.fit(
             data_pipeline['train_ds'],
             validation_data=data_pipeline['val_ds'],
@@ -809,6 +842,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plot_top_k_patterns", type=int, default=12,
                         help="Number of patterns to plot in visualizations.")
 
+    # Deep Analysis (ModelAnalyzer)
+    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false",
+                        help="Disable periodic deep model analysis (WeightWatcher, etc).")
+    parser.set_defaults(perform_deep_analysis=True)
+    parser.add_argument("--analysis_frequency", type=int, default=10,
+                        help="Frequency (in epochs) to run deep model analysis.")
+    parser.add_argument("--analysis_start_epoch", type=int, default=1,
+                        help="Epoch to start running deep model analysis.")
+
     return parser.parse_args()
 
 
@@ -836,6 +878,10 @@ def main() -> None:
         max_patterns_per_category=args.max_patterns_per_category,
         visualize_every_n_epochs=args.visualize_every_n_epochs,
         plot_top_k_patterns=args.plot_top_k_patterns,
+        # Analysis config
+        perform_deep_analysis=args.perform_deep_analysis,
+        analysis_frequency=args.analysis_frequency,
+        analysis_start_epoch=args.analysis_start_epoch
     )
 
     ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)

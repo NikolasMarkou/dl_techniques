@@ -99,7 +99,7 @@ import matplotlib.pyplot as plt
 
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults
-from .utils import find_pareto_front, normalize_metric
+from .utils import find_pareto_front, normalize_metric, DataSampler
 from . import spectral_metrics, spectral_utils
 from .constants import SmoothingMethod
 
@@ -438,40 +438,55 @@ class ModelAnalyzer:
         return self.results
 
     def _cache_predictions(self, data: DataInput) -> None:
-        """Cache model predictions to avoid redundant computation.
+        """
+        Cache model predictions to avoid redundant computation.
 
         Pre-computes and stores model predictions and evaluations to be reused
-        across different analyses. Also handles sampling if dataset is too large.
+        across different analyses. Uses DataSampler to robustly handle various
+        input formats (Arrays, Dicts, TF Datasets) and enforces sampling limits.
 
         Args:
             data: Input data containing x_data and y_data for predictions.
         """
-        x_data, y_data = data.x_data, data.y_data
+        logger.info("Preparing data for analysis...")
 
-        # --- REFINED SAMPLING LOGIC FOR DICTIONARY INPUT ---
-        # Determine the number of samples from the first key if x_data is a dict
-        num_samples_total = len(next(iter(x_data.values()))) if isinstance(x_data, dict) else len(x_data)
+        # Use the robust DataSampler to handle TF Datasets, Dicts, and large arrays
+        # This returns a new DataInput with clean numpy arrays of size <= n_samples
+        sampled_data = DataSampler.sample(data, self.config.n_samples)
 
-        if num_samples_total > self.config.n_samples:
-            indices = np.random.choice(num_samples_total, self.config.n_samples, replace=False)
-            if isinstance(x_data, dict):
-                x_data = {key: val[indices] for key, val in x_data.items()}
-            else:
-                x_data = x_data[indices]
-            y_data = y_data[indices]
+        x_data = sampled_data.x_data
+        y_data = sampled_data.y_data
+
+        sample_size = len(x_data) if not isinstance(x_data, dict) else len(next(iter(x_data.values())))
+        logger.info(f"Using {sample_size} samples for analysis.")
 
         logger.info("Caching model predictions...")
 
         for model_name, model in tqdm(self.models.items(), desc="Computing predictions"):
             try:
+                # Run prediction
                 predictions = model.predict(x_data, verbose=0)
 
-                # The output of a fine-tuned model is logits. We need probabilities for calibration.
-                probabilities = keras.ops.softmax(predictions, axis=-1)
+                # Handle Logits vs Probabilities
+                # The output of a fine-tuned model might be logits.
+                # We need probabilities for calibration.
+                # Simple heuristic: if values are outside [0,1] or don't sum to 1, assume logits.
+                is_logits = False
+                if np.min(predictions) < 0 or np.max(predictions) > 1.00001:
+                    is_logits = True
+
+                if is_logits:
+                    probabilities = keras.ops.softmax(predictions, axis=-1)
+                    logits = predictions
+                else:
+                    probabilities = predictions
+                    # We don't necessarily have logits if the model output softmax directly,
+                    # but we can store None or inverse-transform if really needed.
+                    logits = None
 
                 self._prediction_cache[model_name] = {
-                    CACHE_KEY_PREDICTIONS: np.array(probabilities),  # Store probabilities
-                    CACHE_KEY_LOGITS: np.array(predictions),  # Also store logits
+                    CACHE_KEY_PREDICTIONS: np.array(probabilities),
+                    CACHE_KEY_LOGITS: np.array(logits) if logits is not None else None,
                     CACHE_KEY_X_DATA: x_data,
                     CACHE_KEY_Y_DATA: y_data,
                     CACHE_KEY_MULTI_INPUT: model_name in self._multi_input_models,

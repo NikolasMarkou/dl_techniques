@@ -183,9 +183,10 @@ class TiRexCore(keras.Model):
         dropout_rate: float = 0.1,
         use_layer_norm: bool = True,
         use_normalization: bool = True,
+        name: str = "TiRex",
         **kwargs: Any
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(name=name, **kwargs)
 
         # Validate inputs
         if patch_size <= 0:
