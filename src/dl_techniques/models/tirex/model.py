@@ -716,7 +716,7 @@ class TiRexExtended(TiRexCore):
         self.prediction_query_tokens = self.add_weight(
             name="prediction_query_tokens",
             shape=(1, self.prediction_length, self.embed_dim),
-            initializer="normal",  # Can be tuned to 'glorot_uniform' or 'zeros'
+            initializer=keras.initializers.TruncatedNormal(mean=0.0, stddev=0.05),
             trainable=True,
             dtype=self.dtype
         )
