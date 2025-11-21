@@ -271,4 +271,291 @@ class QuantileHead(keras.layers.Layer):
         })
         return config
 
+
 # ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class QuantileSequenceHead(keras.layers.Layer):
+    """
+    Sequence-wise quantile prediction head for probabilistic time series forecasting.
+
+    This layer implements a neural network head for predicting multiple quantiles
+    at each time step in a sequence. It takes a sequence of encoded features and
+    projects each time step independently to quantile predictions.
+
+    **Intent**: Enable probabilistic sequence-to-sequence forecasting by predicting
+    multiple quantiles (e.g., 10th, 50th, 90th percentiles) at each sequence position.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, seq, feature_dim])
+           ↓
+    Dropout(rate=dropout_rate)  ← (applied per time step)
+           ↓
+    Dense(num_quantiles)  ← (applied independently to each time step)
+           ↓
+    Output(shape=[batch, seq, num_quantiles])
+           ↓
+    Monotonicity Constraint ← (if enforce_monotonicity=True)
+    ```
+
+    **Pointwise Processing**:
+    The Dense layer is applied to each time step independently, ensuring no
+    cross-temporal mixing. This is equivalent to:
+    ```python
+    for t in range(seq_len):
+        output[:, t, :] = Dense(input[:, t, :])
+    ```
+
+    **Monotonicity Logic**:
+    If enabled, at each time step the network outputs raw values [r_0, r_1, r_2...].
+    The final quantiles are calculated as:
+    Q_0 = r_0
+    Q_i = Q_{i-1} + Softplus(r_i)  (for i > 0)
+    This guarantees Q_0 <= Q_1 <= Q_2, preventing "crossing quantiles" at each position.
+
+    Args:
+        num_quantiles: Integer, number of quantiles to predict simultaneously
+            at each sequence position.
+        dropout_rate: Float between 0 and 1. Dropout applied before projection.
+            Defaults to 0.1.
+        use_bias: Boolean, whether to include learnable bias terms in the
+            projection layer. Defaults to True.
+        enforce_monotonicity: Boolean. If True, enforces that quantile predictions
+            are strictly non-decreasing (Q_i <= Q_{i+1}) at each time step.
+            Requires input quantile_levels to be sorted. Defaults to False.
+        kernel_initializer: Initializer for projection weights.
+            Defaults to 'glorot_uniform'.
+        bias_initializer: Initializer for projection biases.
+            Defaults to 'zeros'.
+        kernel_regularizer: Regularizer for projection weights.
+            Defaults to None.
+        bias_regularizer: Regularizer for projection biases.
+            Defaults to None.
+        activity_regularizer: Regularizer for the output.
+            Defaults to None.
+        kernel_constraint: Constraint for projection weights.
+            Defaults to None.
+        bias_constraint: Constraint for projection biases.
+            Defaults to None.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        3D tensor with shape: `(batch_size, sequence_length, features)`.
+
+    Output shape:
+        3D tensor with shape: `(batch_size, sequence_length, num_quantiles)`.
+
+    Example:
+        ```python
+        # Create a sequence quantile head
+        quantile_head = QuantileSequenceHead(
+            num_quantiles=3,  # Predict 10th, 50th, 90th percentiles
+            dropout_rate=0.1,
+            enforce_monotonicity=True
+        )
+
+        # Input: encoded sequence features
+        inputs = keras.Input(shape=(100, 512))  # 100 time steps, 512 features
+        outputs = quantile_head(inputs)  # Shape: (batch, 100, 3)
+
+        # Each output[:, t, :] contains 3 quantiles for time step t
+        ```
+    """
+
+    def __init__(
+            self,
+            num_quantiles: int,
+            dropout_rate: float = 0.1,
+            use_bias: bool = True,
+            enforce_monotonicity: bool = False,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            activity_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_constraint: Optional[keras.constraints.Constraint] = None,
+            bias_constraint: Optional[keras.constraints.Constraint] = None,
+            **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Validate inputs
+        if num_quantiles <= 0:
+            raise ValueError(f"num_quantiles must be positive, got {num_quantiles}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+
+        # Store configuration
+        self.num_quantiles = num_quantiles
+        self.dropout_rate = dropout_rate
+        self.use_bias = use_bias
+        self.enforce_monotonicity = enforce_monotonicity
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.activity_regularizer = keras.regularizers.get(activity_regularizer)
+        self.kernel_constraint = keras.constraints.get(kernel_constraint)
+        self.bias_constraint = keras.constraints.get(bias_constraint)
+
+        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        # The Dense layer will be applied pointwise to each time step
+        self.projection = keras.layers.Dense(
+            units=self.num_quantiles,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            activity_regularizer=self.activity_regularizer,
+            kernel_constraint=self.kernel_constraint,
+            bias_constraint=self.bias_constraint,
+            name="quantile_projection"
+        )
+
+        if self.dropout_rate > 0.0:
+            self.dropout = keras.layers.Dropout(
+                rate=self.dropout_rate,
+                name="quantile_dropout"
+            )
+        else:
+            self.dropout = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build the layer and all its sub-layers.
+
+        Args:
+            input_shape: Expected to be (batch_size, sequence_length, features).
+        """
+        # Validate input shape
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"QuantileSequenceHead expects a 3D input tensor "
+                f"(batch, sequence, features), but received shape {input_shape}."
+            )
+
+        batch_size, seq_len, features = input_shape
+
+        # Ensure features dimension is defined for building Dense layer
+        if features is None:
+            raise ValueError(
+                "The feature dimension must be defined (not None) to build "
+                "the projection layer weights. "
+                f"Received shape: {input_shape}"
+            )
+
+        # Build sub-layers
+        # Dropout preserves shape, so same input shape
+        if self.dropout is not None:
+            self.dropout.build(input_shape)
+
+        # Dense layer will be applied to the last dimension
+        # In Keras 3, Dense handles 3D inputs naturally by applying to the last axis
+        self.projection.build(input_shape)
+
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """
+        Predict quantiles for each time step in the input sequence.
+
+        The processing is done pointwise - each time step is transformed
+        independently without any cross-temporal mixing.
+
+        Args:
+            inputs: Input tensor of shape (batch_size, sequence_length, features).
+            training: Boolean indicating training mode for dropout.
+
+        Returns:
+            Quantile predictions tensor of shape (batch_size, sequence_length, num_quantiles).
+        """
+        x = inputs
+
+        # 1. DROPOUT (applied per time step)
+        if self.dropout is not None:
+            x = self.dropout(x, training=training)
+
+        # 2. POINTWISE PROJECTION
+        # Dense layer in Keras 3 naturally handles 3D inputs by applying
+        # the transformation to the last axis while preserving other dimensions
+        # This is equivalent to TimeDistributed(Dense(...)) but more efficient
+        quantiles = self.projection(x, training=training)
+        # Shape: (batch, seq_len, num_quantiles)
+
+        # 3. MONOTONICITY CONSTRAINT (per time step)
+        # Ensures Q(tau_i) <= Q(tau_{i+1}) at each sequence position
+        if self.enforce_monotonicity and self.num_quantiles > 1:
+            # Split the first quantile from the rest
+            # q0: (batch, seq_len, 1)
+            q0 = quantiles[:, :, 0:1]
+
+            # The rest are interpreted as deltas
+            # rest: (batch, seq_len, num_quantiles - 1)
+            rest = quantiles[:, :, 1:]
+
+            # Force deltas to be positive using softplus
+            # This ensures monotonicity at each time step independently
+            deltas = keras.ops.softplus(rest)
+
+            # Accumulate deltas along the quantile dimension
+            # Each time step's quantiles are accumulated independently
+            accumulated_deltas = keras.ops.cumsum(deltas, axis=-1)
+
+            # Add base quantile to accumulated deltas
+            subsequent_quantiles = q0 + accumulated_deltas
+
+            # Recombine first quantile with subsequent ones
+            quantiles = keras.ops.concatenate([q0, subsequent_quantiles], axis=-1)
+
+        return quantiles
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape: Expected to be (batch_size, sequence_length, features).
+
+        Returns:
+            Output shape tuple: (batch_size, sequence_length, num_quantiles).
+        """
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected 3D input shape, got {len(input_shape)}D: {input_shape}"
+            )
+
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
+        return (batch_size, seq_len, self.num_quantiles)
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Configuration dictionary containing all layer parameters.
+        """
+        config = super().get_config()
+        config.update({
+            "num_quantiles": self.num_quantiles,
+            "dropout_rate": self.dropout_rate,
+            "use_bias": self.use_bias,
+            "enforce_monotonicity": self.enforce_monotonicity,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "bias_initializer": keras.initializers.serialize(self.bias_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
+            "kernel_constraint": keras.constraints.serialize(self.kernel_constraint),
+            "bias_constraint": keras.constraints.serialize(self.bias_constraint),
+        })
+        return config
+
+# ---------------------------------------------------------------------
+

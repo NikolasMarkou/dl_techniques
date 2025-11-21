@@ -764,9 +764,11 @@ class TiRexExtended(TiRexCore):
         # ---------------------------------------------------------------------
         batch_size = ops.shape(x_embedded)[0]
 
+        tokens = ops.zeros(shape=(batch_size, self.prediction_length, self.embed_dim), dtype=inputs.dtype)
+
         # Tile the learned query weights to match the current batch size
         # tokens shape: (1, Pred_Len, Embed_Dim) -> (Batch, Pred_Len, Embed_Dim)
-        tokens = ops.tile(self.prediction_query_tokens, [batch_size, 1, 1])
+        # tokens = ops.tile(self.prediction_query_tokens, [batch_size, 1, 1])
 
         # Concatenate along time dimension (axis 1)
         # New Shape: (Batch, Num_Patches + Prediction_Length, Embed_Dim)
