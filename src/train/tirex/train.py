@@ -821,7 +821,6 @@ def main() -> None:
         input_length=args.input_length,
         prediction_length=args.prediction_length,
         patch_size=args.patch_size,
-        embed_dim=args.embed_dim,
         # Quantile levels are kept as list defaults in code
         quantile_levels=[0.1, 0.25, 0.5, 0.75, 0.9],
         epochs=args.epochs,
