@@ -24,7 +24,6 @@ from typing import Optional, Union, List, Any, Tuple, Dict, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.standard_scaler import StandardScaler
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.time_series.quantile_head import QuantileHead

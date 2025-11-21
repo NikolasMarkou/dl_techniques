@@ -72,9 +72,7 @@ class TiRexTrainingConfig:
     # Model Architecture
     variant: str = "small"  # 'tiny', 'small', 'medium', 'large'
     patch_size: int = 12
-    embed_dim: int = 128
-    num_blocks: int = 6
-    num_heads: int = 8
+
     dropout_rate: float = 0.1
     quantile_levels: List[float] = field(
         default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -629,9 +627,6 @@ class TiRexTrainer:
             input_length=self.config.input_length,
             prediction_length=self.config.prediction_length,
             patch_size=self.config.patch_size,
-            embed_dim=self.config.embed_dim,
-            num_blocks=self.config.num_blocks,
-            num_heads=self.config.num_heads,
             quantile_levels=self.config.quantile_levels,
             dropout_rate=self.config.dropout_rate
         )
@@ -773,8 +768,6 @@ def parse_args() -> argparse.Namespace:
                         help="Forecasting horizon length.")
     parser.add_argument("--patch_size", type=int, default=4,
                         help="Size of patches for tokenization.")
-    parser.add_argument("--embed_dim", type=int, default=128,
-                        help="Dimension of embedding layer.")
 
     # Training loop settings
     parser.add_argument("--epochs", type=int, default=200,
