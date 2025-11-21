@@ -666,18 +666,57 @@ class TiRexExtended(TiRexCore):
     closer to Decoder-style architectures without autoregressive loop overhead.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+            self,
+            patch_size: int = 16,
+            embed_dim: int = 256,
+            num_blocks: int = 6,
+            num_heads: int = 8,
+            lstm_units: Optional[int] = None,
+            ff_dim: Optional[int] = None,
+            block_types: Optional[List[BlockType]] = None,
+            quantile_levels: List[float] = DEFAULT_QUANTILES,
+            prediction_length: int = 32,
+            dropout_rate: float = 0.1,
+            use_layer_norm: bool = True,
+            use_normalization: bool = True,
+            name: str = "TiRexExtended",
+            **kwargs: Any
+    ) -> None:
+        """
+        Initialize the TiRexExtended model.
+
+        All arguments mirror TiRexCore, but the internal graph construction
+        differs for the prediction head and token handling.
+        """
+        # Explicitly pass arguments to the parent TiRexCore
+        super().__init__(
+            patch_size=patch_size,
+            embed_dim=embed_dim,
+            num_blocks=num_blocks,
+            num_heads=num_heads,
+            lstm_units=lstm_units,
+            ff_dim=ff_dim,
+            block_types=block_types,
+            quantile_levels=quantile_levels,
+            prediction_length=prediction_length,
+            dropout_rate=dropout_rate,
+            use_layer_norm=use_layer_norm,
+            use_normalization=use_normalization,
+            name=name,
+            **kwargs
+        )
 
         # ---------------------------------------------------------------------
         # 1. Define Learnable Query Tokens
         # ---------------------------------------------------------------------
+        # These are the "Questions" the model asks the history.
         # Shape: (1, prediction_length, embed_dim)
-        # We use add_weight to create a trainable variable.
+        # We use add_weight so Keras tracks this as a trainable variable to be optimized.
         self.prediction_query_tokens = self.add_weight(
             name="prediction_query_tokens",
             shape=(1, self.prediction_length, self.embed_dim),
-            initializer=keras.initializers.TruncatedNormal(mean=0.0, stddev=0.05, seed=None),
+            initializer="normal",  # Can be tuned to 'glorot_uniform' or 'zeros'
             trainable=True,
             dtype=self.dtype
         )
@@ -685,16 +724,18 @@ class TiRexExtended(TiRexCore):
         # ---------------------------------------------------------------------
         # 2. Re-define Quantile Head for Token-wise prediction
         # ---------------------------------------------------------------------
-        # In TiRexCore, the head takes a pooled vector and expands to (T, Q).
-        # Here, we feed it (T, D) and want (T, Q).
-        # We override the self.quantile_head from the parent.
+        # The parent TiRexCore initializes a head designed for pooled inputs
+        # (flatten_input=True). We need to overwrite it with a head that accepts
+        # 3D inputs (Batch, Time, Dim) because we are projecting token-by-token.
+
+        # Note: We access self.quantile_levels/dropout_rate from parent attributes
         self.quantile_head = QuantileHead(
             num_quantiles=len(self.quantile_levels),
-            output_length=1,  # Projection is per-token, effectively dense(num_quantiles)
+            output_length=1,  # Projection is per-token (Dense layer logic)
             dropout_rate=min(self.dropout_rate, 0.1),
             enforce_monotonicity=True,
             use_bias=True,
-            flatten_input=False,  # CRITICAL: Keep the time dimension (Batch, Pred_Len, Dim)
+            flatten_input=True,
             name="quantile_head_token_wise"
         )
 
@@ -703,10 +744,12 @@ class TiRexExtended(TiRexCore):
         Forward pass with Query Token appending.
 
         Logic:
-            [Input (T_in)] -> Embed -> [Emb (T_patch)]
-            [Emb (T_patch)] + [Queries (T_pred)] -> [Seq (T_total)]
-            [Seq] -> Blocks -> [Hidden (T_total)]
-            [Hidden] -> Slice last T_pred -> Head -> Output
+            1. Normalize & Mask
+            2. Embed History -> [Batch, Patches, Dim]
+            3. Append Learned Queries -> [Batch, Patches + Pred_Len, Dim]
+            4. Process via Mixed Blocks (LSTM flows history -> queries)
+            5. Slice last Pred_Len tokens
+            6. Project to Quantiles
         """
         # Ensure 3D input
         if len(inputs.shape) == 2:
@@ -729,29 +772,34 @@ class TiRexExtended(TiRexCore):
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
         # 3. ENCODE HISTORY
+        # Standard patch embedding from parent class
         x_patches = self.patch_embedding(x_with_mask, training=training)
         x_embedded = self.input_projection(x_patches, training=training)
         # x_embedded shape: (Batch, Num_Patches, Embed_Dim)
 
         # ---------------------------------------------------------------------
-        # 4. APPEND PREDICTION TOKENS (The specific variation)
+        # 4. APPEND PREDICTION TOKENS
         # ---------------------------------------------------------------------
         batch_size = ops.shape(x_embedded)[0]
 
-        # Tile the query tokens to match batch size
+        # Tile the learned query weights to match the current batch size
         # tokens shape: (1, Pred_Len, Embed_Dim) -> (Batch, Pred_Len, Embed_Dim)
         tokens = ops.tile(self.prediction_query_tokens, [batch_size, 1, 1])
 
-        # Concatenate along time dimension
-        # Shape: (Batch, Num_Patches + Pred_Len, Embed_Dim)
+        # Concatenate along time dimension (axis 1)
+        # New Shape: (Batch, Num_Patches + Prediction_Length, Embed_Dim)
         mixed_sequence = ops.concatenate([x_embedded, tokens], axis=1)
 
         # ---------------------------------------------------------------------
         # 5. PROCESS SEQUENCE
         # ---------------------------------------------------------------------
         hidden_states = mixed_sequence
+
+        # Iterate through MixedSequentialBlocks
+        # The LSTM component allows information to flow from the history patches
+        # into the query tokens. The Attention component allows query tokens
+        # to attend back to specific historical events.
         for block in self.blocks:
-            # Blocks (LSTM/Attn) handle variable length automatically
             hidden_states = block(hidden_states, training=training)
 
         hidden_states = self.output_norm(hidden_states, training=training)
@@ -759,20 +807,31 @@ class TiRexExtended(TiRexCore):
         # ---------------------------------------------------------------------
         # 6. EXTRACT PREDICTION PART (No Pooling)
         # ---------------------------------------------------------------------
-        # Slice the last 'prediction_length' tokens.
+        # We only care about the states of our Query Tokens (the end of the sequence).
+        # Slice the last 'prediction_length' steps.
         # Shape: (Batch, Prediction_Length, Embed_Dim)
         prediction_states = hidden_states[:, -self.prediction_length:, :]
 
         # 7. PREDICT (Normalized Space)
-        # The head operates token-wise due to flatten_input=False
-        # Output: (Batch, Prediction_Length, Num_Quantiles)
+        # The head operates token-wise due to flatten_input=False.
+        # It projects (Batch, Pred_Len, Dim) -> (Batch, Pred_Len, Num_Quantiles)
         quantile_predictions = self.quantile_head(prediction_states, training=training)
 
         # 8. DENORMALIZE OUTPUT
         if self.use_normalization:
+            # mean/std shape is (Batch, 1, 1). Broadcasting handles the rest.
             quantile_predictions = (quantile_predictions * std) + mean
 
         return quantile_predictions
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return config for serialization.
+
+        Since we explicitly accept the same arguments as TiRexCore,
+        super().get_config() captures most of what we need.
+        """
+        return super().get_config()
 
 
 # ---------------------------------------------------------------------
