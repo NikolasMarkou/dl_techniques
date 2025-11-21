@@ -83,6 +83,7 @@ class QuantileHead(keras.layers.Layer):
         flatten_input: Boolean. If True, the input tensor is flattened (preserving batch)
             before the dense projection. This allows the head to learn from the full
             sequence history rather than a pooled representation. Defaults to False.
+            Note: Requires fixed sequence length.
         enforce_monotonicity: Boolean. If True, enforces that quantile predictions
             are strictly non-decreasing (Q_i <= Q_{i+1}). Requires input quantile_levels
             to be sorted. Defaults to False.
@@ -155,15 +156,27 @@ class QuantileHead(keras.layers.Layer):
         # If flattening is enabled, the Dense layer needs to see the flattened dimension
         dense_input_shape = input_shape
         
-        if self.flatten_input and len(input_shape) == 3:
-            # (Batch, Seq, Feat) -> (Batch, Seq*Feat)
-            # Note: Seq must be known (not None) for the Dense layer to be built properly
-            # in a static graph context, though Keras 3 handles dynamic shapes well.
-            features = input_shape[-1]
+        if self.flatten_input:
+            # Expecting (Batch, Seq, Feat)
+            if len(input_shape) != 3:
+                raise ValueError(
+                    f"flatten_input=True expects a 3D input tensor (Batch, Seq, Feat), "
+                    f"but received shape {input_shape}."
+                )
+            
             seq_len = input_shape[-2]
-            if features is not None and seq_len is not None:
-                flat_dim = features * seq_len
-                dense_input_shape = (input_shape[0], flat_dim)
+            features = input_shape[-1]
+            
+            # Dense layer weights depend on a fixed input dimension.
+            if features is None or seq_len is None:
+                raise ValueError(
+                    "flatten_input=True requires both sequence length and feature dimension "
+                    "to be defined (not None) to build the projection layer weights. "
+                    f"Received shape: {input_shape}"
+                )
+
+            flat_dim = features * seq_len
+            dense_input_shape = (input_shape[0], flat_dim)
 
         # Build sub-layers
         if self.dropout is not None:
@@ -191,14 +204,11 @@ class QuantileHead(keras.layers.Layer):
         x = inputs
 
         # 1. FLATTEN (Configuration Option)
-        # Uses ops.reshape as requested, not a Layer
         if self.flatten_input:
             input_shape = ops.shape(x)
-            # We assume rank 3 input (Batch, Seq, Dim) if flattening
-            if len(x.shape) == 3:
-                batch_size = input_shape[0]
-                # Reshape to (Batch, Seq*Dim)
-                x = ops.reshape(x, (batch_size, -1))
+            batch_size = input_shape[0]
+            # Reshape to (Batch, Seq*Dim) using -1 to infer dimension
+            x = ops.reshape(x, (batch_size, -1))
 
         # 2. DROPOUT
         if self.dropout is not None:
@@ -210,7 +220,7 @@ class QuantileHead(keras.layers.Layer):
 
         # 4. RESHAPE OUTPUT
         # Reshape to [batch_size, output_length, num_quantiles]
-        # Using -1 for batch dimension handles dynamic batch sizes
+        # Using -1 for batch dimension handles dynamic batch sizes and symbolic tensors
         quantiles = ops.reshape(
             quantile_preds,
             (-1, self.output_length, self.num_quantiles)
@@ -227,7 +237,7 @@ class QuantileHead(keras.layers.Layer):
             # rest: (Batch, Len, num_quantiles - 1)
             rest = quantiles[:, :, 1:]
             
-            # Force deltas to be positive
+            # Force deltas to be positive using softplus
             deltas = ops.softplus(rest)
             
             # Accumulate deltas

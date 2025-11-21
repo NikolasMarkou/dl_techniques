@@ -640,3 +640,191 @@ def create_tirex_by_variant(
     return model
 
 # ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class TiRexExtended(TiRexCore):
+    """
+    TiRex Extended (Query-Based) Architecture.
+
+    This variant differs from the Core architecture in how the prediction representations
+    are formed. Instead of Mean Pooling the historical context and projecting it,
+    this model appends a sequence of learnable 'Query Tokens' to the embedded
+    time series.
+
+    Architecture Changes:
+        1.  **Input**: Standard patch embedding of history.
+        2.  **Token Augmentation**: `prediction_length` learnable vectors are
+            concatenated to the end of the sequence.
+        3.  **Processing**: The Mixed Sequential Blocks process the combined sequence
+            [History, Queries]. The LSTM flows state from history into queries;
+            Attention allows queries to look back at specific historical patches.
+        4.  **Output Extraction**: No pooling is performed. The last `prediction_length`
+            vectors are sliced from the sequence.
+        5.  **Head**: These vectors are projected directly to quantiles.
+
+    This approach allows for more fine-grained control per time-step and aligns
+    closer to Decoder-style architectures without autoregressive loop overhead.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # ---------------------------------------------------------------------
+        # 1. Define Learnable Query Tokens
+        # ---------------------------------------------------------------------
+        # Shape: (1, prediction_length, embed_dim)
+        # We use add_weight to create a trainable variable.
+        self.prediction_query_tokens = self.add_weight(
+            name="prediction_query_tokens",
+            shape=(1, self.prediction_length, self.embed_dim),
+            initializer=keras.initializers.TruncatedNormal(mean=0.0, stddev=0.05, seed=None),
+            trainable=True,
+            dtype=self.dtype
+        )
+
+        # ---------------------------------------------------------------------
+        # 2. Re-define Quantile Head for Token-wise prediction
+        # ---------------------------------------------------------------------
+        # In TiRexCore, the head takes a pooled vector and expands to (T, Q).
+        # Here, we feed it (T, D) and want (T, Q).
+        # We override the self.quantile_head from the parent.
+        self.quantile_head = QuantileHead(
+            num_quantiles=len(self.quantile_levels),
+            output_length=1,  # Projection is per-token, effectively dense(num_quantiles)
+            dropout_rate=min(self.dropout_rate, 0.1),
+            enforce_monotonicity=True,
+            use_bias=True,
+            flatten_input=False,  # CRITICAL: Keep the time dimension (Batch, Pred_Len, Dim)
+            name="quantile_head_token_wise"
+        )
+
+    def call(self, inputs, training=None):
+        """
+        Forward pass with Query Token appending.
+
+        Logic:
+            [Input (T_in)] -> Embed -> [Emb (T_patch)]
+            [Emb (T_patch)] + [Queries (T_pred)] -> [Seq (T_total)]
+            [Seq] -> Blocks -> [Hidden (T_total)]
+            [Hidden] -> Slice last T_pred -> Head -> Output
+        """
+        # Ensure 3D input
+        if len(inputs.shape) == 2:
+            inputs = ops.expand_dims(inputs, axis=-1)
+
+        # 1. CALCULATE STATISTICS & NORMALIZE (Reversible Norm)
+        if self.use_normalization:
+            mean = ops.mean(inputs, axis=1, keepdims=True)
+            std = ops.std(inputs, axis=1, keepdims=True)
+            std = ops.maximum(std, 1e-7)
+            x = (inputs - mean) / std
+        else:
+            x = inputs
+            mean = None
+            std = None
+
+        # 2. HANDLE MASKING
+        nan_mask = ops.logical_not(ops.isnan(inputs))
+        nan_mask = ops.cast(nan_mask, dtype=x.dtype)
+        x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
+
+        # 3. ENCODE HISTORY
+        x_patches = self.patch_embedding(x_with_mask, training=training)
+        x_embedded = self.input_projection(x_patches, training=training)
+        # x_embedded shape: (Batch, Num_Patches, Embed_Dim)
+
+        # ---------------------------------------------------------------------
+        # 4. APPEND PREDICTION TOKENS (The specific variation)
+        # ---------------------------------------------------------------------
+        batch_size = ops.shape(x_embedded)[0]
+
+        # Tile the query tokens to match batch size
+        # tokens shape: (1, Pred_Len, Embed_Dim) -> (Batch, Pred_Len, Embed_Dim)
+        tokens = ops.tile(self.prediction_query_tokens, [batch_size, 1, 1])
+
+        # Concatenate along time dimension
+        # Shape: (Batch, Num_Patches + Pred_Len, Embed_Dim)
+        mixed_sequence = ops.concatenate([x_embedded, tokens], axis=1)
+
+        # ---------------------------------------------------------------------
+        # 5. PROCESS SEQUENCE
+        # ---------------------------------------------------------------------
+        hidden_states = mixed_sequence
+        for block in self.blocks:
+            # Blocks (LSTM/Attn) handle variable length automatically
+            hidden_states = block(hidden_states, training=training)
+
+        hidden_states = self.output_norm(hidden_states, training=training)
+
+        # ---------------------------------------------------------------------
+        # 6. EXTRACT PREDICTION PART (No Pooling)
+        # ---------------------------------------------------------------------
+        # Slice the last 'prediction_length' tokens.
+        # Shape: (Batch, Prediction_Length, Embed_Dim)
+        prediction_states = hidden_states[:, -self.prediction_length:, :]
+
+        # 7. PREDICT (Normalized Space)
+        # The head operates token-wise due to flatten_input=False
+        # Output: (Batch, Prediction_Length, Num_Quantiles)
+        quantile_predictions = self.quantile_head(prediction_states, training=training)
+
+        # 8. DENORMALIZE OUTPUT
+        if self.use_normalization:
+            quantile_predictions = (quantile_predictions * std) + mean
+
+        return quantile_predictions
+
+
+# ---------------------------------------------------------------------
+# Factory Function for the Extended Variant
+# ---------------------------------------------------------------------
+
+def create_tirex_extended(
+    input_length: int,
+    prediction_length: int = 32,
+    patch_size: int = 16,
+    embed_dim: int = 256,
+    num_blocks: int = 6,
+    num_heads: int = 8,
+    quantile_levels: List[float] = DEFAULT_QUANTILES,
+    block_types: Optional[List[str]] = None,
+    **kwargs
+) -> TiRexExtended:
+    """
+    Create a TiRex Extended (Query-Based) model.
+
+    Args:
+        input_length: Integer, length of input sequences.
+        prediction_length: Integer, length of prediction horizon.
+        patch_size: Integer, size of input patches.
+        embed_dim: Integer, embedding dimension.
+        num_blocks: Integer, number of sequential blocks.
+        num_heads: Integer, number of attention heads.
+        quantile_levels: List of quantile levels to predict.
+        block_types: List of block types for each layer.
+        **kwargs: Additional arguments.
+
+    Returns:
+        TiRexExtended model instance.
+    """
+    model = TiRexExtended(
+        patch_size=patch_size,
+        embed_dim=embed_dim,
+        num_blocks=num_blocks,
+        num_heads=num_heads,
+        block_types=block_types,
+        quantile_levels=quantile_levels,
+        prediction_length=prediction_length,
+        **kwargs
+    )
+
+    # Initialize weights with dummy input
+    dummy_input = np.zeros((1, input_length, 1), dtype='float32')
+    _ = model(dummy_input)
+
+    logger.info(
+        f"Created TiRex Extended (Token-Augmented): "
+        f"input_length={input_length}, prediction_length={prediction_length}"
+    )
+
+    return model
