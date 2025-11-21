@@ -839,51 +839,46 @@ class TiRexExtended(TiRexCore):
 # ---------------------------------------------------------------------
 
 def create_tirex_extended(
-    input_length: int,
+    variant: str = "medium",
+    input_length: int = 128,
     prediction_length: int = 32,
-    patch_size: int = 16,
-    embed_dim: int = 256,
-    num_blocks: int = 6,
-    num_heads: int = 8,
     quantile_levels: List[float] = DEFAULT_QUANTILES,
-    block_types: Optional[List[str]] = None,
     **kwargs
-) -> TiRexExtended:
+) -> TiRexCore:
     """
-    Create a TiRex Extended (Query-Based) model.
+    Convenience function to create TiRex models from predefined variants.
 
     Args:
-        input_length: Integer, length of input sequences.
-        prediction_length: Integer, length of prediction horizon.
-        patch_size: Integer, size of input patches.
-        embed_dim: Integer, embedding dimension.
-        num_blocks: Integer, number of sequential blocks.
-        num_heads: Integer, number of attention heads.
-        quantile_levels: List of quantile levels to predict.
-        block_types: List of block types for each layer.
-        **kwargs: Additional arguments.
+        variant: String, model variant ("tiny", "small", "medium", "large")
+        input_length: Integer, length of input sequences
+        prediction_length: Integer, length of prediction horizon
+        quantile_levels: List of quantile levels to predict
+        **kwargs: Additional arguments passed to the model constructor
 
     Returns:
-        TiRexExtended model instance.
+        TiRexCore model instance
+
+    Example:
+        >>> # Create TiRex-Extended-Small for quick experiments
+        >>> model = create_tirex_extended("small", input_length=96, prediction_length=24)
+        >>>
+        >>> # Create TiRex-Extended-Large for production forecasting
+        >>> model = create_tirex_extended("large", input_length=256, prediction_length=48)
     """
-    model = TiRexExtended(
-        patch_size=patch_size,
-        embed_dim=embed_dim,
-        num_blocks=num_blocks,
-        num_heads=num_heads,
-        block_types=block_types,
-        quantile_levels=quantile_levels,
+    model = TiRexExtended.from_variant(
+        variant,
         prediction_length=prediction_length,
+        quantile_levels=quantile_levels,
         **kwargs
     )
 
-    # Initialize weights with dummy input
+    # Build the model with a dummy input
     dummy_input = np.zeros((1, input_length, 1), dtype='float32')
     _ = model(dummy_input)
 
     logger.info(
-        f"Created TiRex Extended (Token-Augmented): "
-        f"input_length={input_length}, prediction_length={prediction_length}"
+        f"Created TiRex-Extended-{variant.upper()}: input_length={input_length}, "
+        f"prediction_length={prediction_length}"
     )
 
     return model
