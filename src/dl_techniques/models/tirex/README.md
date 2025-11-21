@@ -605,10 +605,10 @@ This implementation is inspired by the principles of recent hybrid time series m
 
 -   The original TiRex paper:
     ```bibtex
-    @article{auer2024tirex,
-      title={{TiRex}: Zero-Shot {Forecasting} Across Long and Short Horizons with Enhanced In-Context Learning},
+    @article{auer2025tirex,
+      title={TiRex: Zero-Shot Forecasting Across Long and Short Horizons with Enhanced In-Context Learning},
       author={Auer, Andreas and Podest, Patrick and Klotz, Daniel and B{\"o}ck, Sebastian and Klambauer, G{\"u}nter and Hochreiter, Sepp},
-      journal={arXiv preprint arXiv:2405.18370},
-      year={2024}
+      journal={arXiv preprint arXiv:2505.23719},
+      year={2025}
     }
     ```
