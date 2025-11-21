@@ -721,24 +721,6 @@ class TiRexExtended(TiRexCore):
             dtype=self.dtype
         )
 
-        # ---------------------------------------------------------------------
-        # 2. Re-define Quantile Head for Token-wise prediction
-        # ---------------------------------------------------------------------
-        # The parent TiRexCore initializes a head designed for pooled inputs
-        # (flatten_input=True). We need to overwrite it with a head that accepts
-        # 3D inputs (Batch, Time, Dim) because we are projecting token-by-token.
-
-        # Note: We access self.quantile_levels/dropout_rate from parent attributes
-        self.quantile_head = QuantileHead(
-            num_quantiles=len(self.quantile_levels),
-            output_length=1,  # Projection is per-token (Dense layer logic)
-            dropout_rate=min(self.dropout_rate, 0.1),
-            enforce_monotonicity=True,
-            use_bias=True,
-            flatten_input=True,
-            name="quantile_head_token_wise"
-        )
-
     def call(self, inputs, training=None):
         """
         Forward pass with Query Token appending.
