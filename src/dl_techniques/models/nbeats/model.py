@@ -1,8 +1,50 @@
 """
-N-BEATS: Neural Basis Expansion Analysis for Time Series Forecasting.
+N-BEATS: Neural basis expansion analysis for interpretable time series forecasting
 
-This module implements the N-BEATS architecture following modern Keras 3 patterns
-with proper sub-layer building, serialization, and normalization support.
+Implement the N-BEATS architecture for interpretable, deep neural time series forecasting.
+
+This class realizes the Neural Basis Expansion Analysis for Time Series (N-BEATS)
+architecture, a pure deep learning model that rivals statistical benchmarks without
+relying on recurrent or convolutional components. It treats forecasting as a
+non-linear hierarchical decomposition problem, breaking down complex time series
+into understandable components like trend and seasonality.
+
+Architecture Overview:
+    The model is organized into a sequence of **Stacks**, each containing multiple
+    **Blocks**. The core architectural innovation is the **Doubly Residual Topology**:
+
+    1.  **Backcast (Explanation):** Each block attempts to reconstruct its input
+        (the "backcast"). This reconstruction is subtracted from the input, and the
+        remaining "unexplained" residual is passed to the next block. This allows the
+        model to progressively peel away layers of the signal (e.g., first removing
+        the trend, then the seasonality).
+    2.  **Forecast (Prediction):** Simultaneously, each block projects a partial
+        forecast for the future horizon. These partial forecasts are summed
+        aggregately across all blocks to form the final prediction.
+    3.  **Reversible Instance Normalization (RevIN):** To handle non-stationarity
+        and distribution shifts, the input window is normalized (zero mean, unit variance)
+        before processing. The final forecast is denormalized using the stored statistics,
+        ensuring robustness against scale changes.
+
+Foundational Mathematics:
+    N-BEATS approximates the forecast $y$ as a sum of basis functions $g_\theta$:
+    $$ \hat{y} = \sum_{i} g_{\theta_i}(t) $$
+
+    The coefficients $\theta$ are learned via deep fully-connected networks. The
+    nature of $g(t)$ determines the interpretability:
+    -   **Trend Blocks:** Use a polynomial basis ($1, t, t^2, \dots, t^p$) to model
+        slowly varying monotonic changes.
+    -   **Seasonality Blocks:** Use a Fourier basis ($\cos(2\pi kt), \sin(2\pi kt)$)
+        to model cyclic, periodic behaviors.
+    -   **Generic Blocks:** Use a learnable linear basis, offering maximum flexibility
+        at the cost of interpretability.
+
+References:
+    -   **N-BEATS**: Oreshkin, B. N., Carpov, D., Chapados, N., & Bengio, Y. (2020).
+        "N-BEATS: Neural basis expansion analysis for interpretable time series forecasting."
+        *ICLR 2020*.
+    -   **RevIN**: Kim, T., et al. (2022). "Reversible Instance Normalization for
+        Accurate Time-Series Forecasting against Distribution Shift." *ICLR 2022*.
 """
 
 import keras

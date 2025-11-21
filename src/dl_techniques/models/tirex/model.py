@@ -1,17 +1,54 @@
 """
-TiRex - Time Series Forecasting Model for Keras.
+TiRex hybrid architecture for probabilistic time series forecasting,
+combining recurrent state modeling with attention-based global context.
 
-This module implements a TiRex-inspired time series forecasting model adapted for Keras,
-using a mixed architecture of LSTM and Transformer layers for sequential modeling.
+This class realizes a "Mixed Sequential" architecture designed to address the
+dichotomy between local temporal dynamics and long-range global dependencies
+in time series data. It synthesizes the inductive biases of Recurrent Neural
+Networks (LSTMs) and Transformers into a unified, configurable pipeline.
 
-The implementation follows modern Keras 3 patterns and utilizes the dl_techniques
-factory systems for consistent component creation.
+Architecture Overview:
+    The model processes data through four distinct stages:
+    1.  **Reversible Normalization**: Input data is normalized (z-score) per-instance
+        to handle non-stationary statistics (shifting mean/variance), a technique
+        crucial for robust forecasting across diverse regimes.
+    2.  **Patch Tokenization**: The time series is segmented into sub-sequences
+        (patches) and projected into an embedding space. This reduces the effective
+        sequence length, enabling the processing of long horizons with reduced
+        computational complexity relative to point-wise attention.
+    3.  **Mixed Sequential Encoding**: A stack of configurable blocks processes
+        the tokenized sequence. These blocks can be pure LSTMs, pure Transformers,
+        or "Mixed" blocks.
+        -   **LSTM Layers** enforce a sequential inductive bias, carrying a running
+            state $h_t$ that captures local evolution and short-term causality.
+        -   **Transformer Layers** utilize Self-Attention to model global
+            dependencies ($Attention(Q, K, V)$), allowing the model to attend to
+            distant patches (e.g., yearly seasonality) regardless of their
+            position in the sequence.
+    4.  **Probabilistic Head**: The decoder projects the encoded representation
+        into a distribution of quantiles, approximating the inverse cumulative
+        distribution function (quantile function) of the target.
 
-Based on TiRex architecture principles with enhancements for:
-- Configurable mixed sequential blocks (LSTM + Transformer)
-- Quantile-based probabilistic forecasting
-- Patch-based time series tokenization
-- Modern normalization techniques
+Mathematical Intuition:
+    Standard Transformers suffer from a lack of inherent sequential bias, often
+    requiring complex positional encodings. LSTMs suffer from the vanishing gradient
+    problem over long horizons. TiRex addresses this by applying recurrence *within*
+    or *before* attention.
+
+    Mathematically, the mixed block computes:
+    $$ H_{local} = \text{LSTM}(X_{patches}) $$
+    $$ H_{global} = \text{SelfAttention}(H_{local}) $$
+
+    This structure ensures that the tokens fed into the attention mechanism
+    already contain rich, context-aware local state information, stabilizing
+    optimization and improving zero-shot generalization capabilities.
+
+References:
+    -   **TiRex Architecture**: Auer, A., et al. (2025). "TiRex: Zero-Shot
+        Forecasting Across Long and Short Horizons with Enhanced In-Context Learning."
+        arXiv preprint arXiv:2505.23719.
+    -   **Patching**: Nie, Y., et al. (2023). "A Time Series is Worth 64 Words:
+        Long-term Forecasting with Transformers." ICLR.
 """
 
 import keras
@@ -197,6 +234,7 @@ class TiRexCore(keras.Model):
         # Create sequential processing blocks
         self.blocks = []
         for i, block_type in enumerate(self.block_types):
+            # --- DIVERGENCE FROM TIREX: WINDOW ATTENTION INSTEAD OF GLOBAL ATTENTION ---
             block = MixedSequentialBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
@@ -211,11 +249,17 @@ class TiRexCore(keras.Model):
                 activation='gelu',
                 name=f"block_{i}"
             )
+            # ---------------------------------------------
             self.blocks.append(block)
 
         # Output normalization using factory
         if self.use_layer_norm:
-            self.output_norm = create_normalization_layer('rms_norm', name="output_norm")
+            self.output_norm = (
+                create_normalization_layer(
+                    normalization_type='rms_norm',
+                    name="output_norm"
+                )
+            )
         else:
             self.output_norm = keras.layers.Lambda(lambda x: x, name="output_norm")
 
@@ -223,7 +267,8 @@ class TiRexCore(keras.Model):
         self.quantile_head = QuantileHead(
             num_quantiles=len(self.quantile_levels),
             output_length=self.prediction_length,
-            dropout_rate=0.0,
+            # Hardcode a safe low value, or dividing the global rate
+            dropout_rate=min(self.dropout_rate, 0.1),
             enforce_monotonicity=True,
             use_bias=True,
             flatten_input=True,
