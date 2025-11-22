@@ -63,9 +63,9 @@ from typing import Optional, Union, List, Any, Tuple, Dict, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
-from dl_techniques.layers.time_series.quantile_head import QuantileHead
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding1D
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
+from dl_techniques.layers.time_series.quantile_head import QuantileHead, QuantileSequenceHead
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -707,18 +707,14 @@ class TiRexExtended(TiRexCore):
             **kwargs
         )
 
-        # ---------------------------------------------------------------------
-        # 1. Define Learnable Query Tokens
-        # ---------------------------------------------------------------------
-        # These are the "Questions" the model asks the history.
-        # Shape: (1, prediction_length, embed_dim)
-        # We use add_weight so Keras tracks this as a trainable variable to be optimized.
-        self.prediction_query_tokens = self.add_weight(
-            name="prediction_query_tokens",
-            shape=(1, self.prediction_length, self.embed_dim),
-            initializer=keras.initializers.TruncatedNormal(mean=0.0, stddev=0.05),
-            trainable=True,
-            dtype=self.dtype
+        # Quantile prediction head
+        self.quantile_head = QuantileSequenceHead(
+            num_quantiles=len(self.quantile_levels),
+            # Hardcode a safe low value, or dividing the global rate
+            dropout_rate=min(self.dropout_rate, 0.1),
+            enforce_monotonicity=True,
+            use_bias=True,
+            name="quantile_head"
         )
 
     def call(self, inputs, training=None):
@@ -764,6 +760,7 @@ class TiRexExtended(TiRexCore):
         # ---------------------------------------------------------------------
         batch_size = ops.shape(x_embedded)[0]
 
+        #tokens = keras.random.truncated_normal(shape=(batch_size, self.prediction_length, self.embed_dim), mean=0.0, std=0.01)
         tokens = ops.zeros(shape=(batch_size, self.prediction_length, self.embed_dim), dtype=inputs.dtype)
 
         # Tile the learned query weights to match the current batch size
