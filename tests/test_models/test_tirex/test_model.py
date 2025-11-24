@@ -5,7 +5,7 @@ import numpy as np
 import keras
 from keras import ops
 import tensorflow as tf
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple
 
 from dl_techniques.models.tirex.model import TiRexCore, create_tirex_model, create_tirex_by_variant
 

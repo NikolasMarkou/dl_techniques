@@ -1,5 +1,11 @@
 """
-Comprehensive TiRex Training Framework
+Comprehensive TiRex Training Framework - Unified for Core and Extended Variants
+
+This unified training framework supports both TiRex architectures:
+- TiRexCore: Uses mean pooling for prediction representation
+- TiRexExtended: Uses learnable query tokens for prediction representation
+
+The architecture is selected via the 'model_type' configuration parameter.
 """
 
 import os
@@ -9,7 +15,7 @@ import random
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
@@ -27,10 +33,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
+from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiRexExtended
 from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
 
-# Analyzer imports
-from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
 # ---------------------------------------------------------------------
@@ -59,6 +65,9 @@ class TiRexTrainingConfig:
     result_dir: str = "results"
     save_results: bool = True
     experiment_name: str = "tirex_probabilistic"
+
+    # Model type selection
+    model_type: str = "core"  # 'core' or 'extended'
 
     # Pattern selection configuration
     target_categories: Optional[List[str]] = None
@@ -122,11 +131,22 @@ class TiRexTrainingConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
+        # Validate model type
+        if self.model_type not in ['core', 'extended']:
+            raise ValueError(
+                f"model_type must be 'core' or 'extended', got '{self.model_type}'"
+            )
+
+        # Validate data ratios
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
             raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+
+        # Validate lengths
         if self.input_length <= 0 or self.prediction_length <= 0:
             raise ValueError("input_length and prediction_length must be positive")
+
+        # Check quantile levels
         if 0.5 not in self.quantile_levels:
             logger.warning("Recommended to include 0.5 (median) in quantile_levels.")
 
@@ -211,292 +231,196 @@ class TiRexDataProcessor:
 
                         new_samples.append((inputs, targets))
 
+                # Shuffle and fill buffer
                 random.shuffle(new_samples)
-                buffer.extend(new_samples)
+                buffer = new_samples
 
-                if not buffer:
-                    continue
+            # Yield from buffer
+            sample = buffer.pop()
+            yield sample
 
-            yield buffer.pop(0)
-
-    def _evaluation_generator(
-            self,
-            split: str
+    def _validation_generator(
+        self
     ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """
-        Create an infinite repeating generator for validation or test data.
-        """
-        if split == 'val':
-            start_ratio = self.config.train_ratio
-            end_ratio = self.config.train_ratio + self.config.val_ratio
-        elif split == 'test':
-            start_ratio = self.config.train_ratio + self.config.val_ratio
-            end_ratio = 1.0
-        else:
-            raise ValueError("Split must be 'val' or 'test'")
+        """Create validation data generator with deterministic pattern cycling."""
+        pattern_cycle = 0
+        while True:
+            pattern_idx = pattern_cycle % len(self.selected_patterns)
+            pattern_name = self.selected_patterns[pattern_idx]
+            pattern_cycle += 1
 
-        all_sequences = []
+            data = self.ts_generator.generate_task_data(pattern_name)
+            train_size = int(self.config.train_ratio * len(data))
+            val_size = int(self.config.val_ratio * len(data))
+            val_data = data[train_size: train_size + val_size]
+
+            max_start_idx = max(
+                len(val_data) - self.config.input_length - self.config.prediction_length, 0
+            )
+
+            if max_start_idx <= 0:
+                continue
+
+            start_idx = random.randint(0, max_start_idx)
+            inputs = val_data[
+                start_idx: start_idx + self.config.input_length
+            ].astype(np.float32).reshape(-1, 1)
+
+            targets = val_data[
+                start_idx + self.config.input_length:
+                start_idx + self.config.input_length + self.config.prediction_length
+            ].astype(np.float32).flatten()
+
+            yield inputs, targets
+
+    def _test_generator(
+        self
+    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """Create test data generator that exhaustively samples test splits."""
         for pattern_name in self.selected_patterns:
             data = self.ts_generator.generate_task_data(pattern_name)
-            start_idx = int(start_ratio * len(data))
-            end_idx = int(end_ratio * len(data))
-            split_data = data[start_idx:end_idx]
+            train_size = int(self.config.train_ratio * len(data))
+            val_size = int(self.config.val_ratio * len(data))
+            test_data = data[train_size + val_size:]
 
-            seq_len = self.config.input_length + self.config.prediction_length
+            max_start_idx = max(
+                len(test_data) - self.config.input_length - self.config.prediction_length, 0
+            )
 
-            # Extract all possible sequences
-            for i in range(len(split_data) - seq_len + 1):
-                inputs = split_data[
-                    i: i + self.config.input_length
+            if max_start_idx <= 0:
+                continue
+
+            # Sample multiple windows from test split
+            num_windows = min(5, max_start_idx + 1)
+            for _ in range(num_windows):
+                start_idx = random.randint(0, max_start_idx)
+                inputs = test_data[
+                    start_idx: start_idx + self.config.input_length
                 ].astype(np.float32).reshape(-1, 1)
 
-                targets = split_data[
-                    i + self.config.input_length: i + seq_len
+                targets = test_data[
+                    start_idx + self.config.input_length:
+                    start_idx + self.config.input_length + self.config.prediction_length
                 ].astype(np.float32).flatten()
 
-                all_sequences.append((inputs, targets))
-
-        if not all_sequences:
-            logger.warning(f"No sequences found for {split} split!")
-            dummy_in = np.zeros((self.config.input_length, 1), dtype=np.float32)
-            dummy_out = np.zeros((self.config.prediction_length,), dtype=np.float32)
-            while True:
-                yield dummy_in, dummy_out
-        else:
-            logger.info(f"Created {len(all_sequences)} sequences for {split} split")
-            random.shuffle(all_sequences)
-            idx = 0
-            while True:
-                yield all_sequences[idx]
-                idx = (idx + 1) % len(all_sequences)
-                if idx == 0:
-                    random.shuffle(all_sequences)
-
-    def get_evaluation_steps(self, split: str) -> int:
-        """Calculate the number of steps for a full evaluation pass."""
-        total_samples = 0
-        if split == 'val':
-            start_ratio = self.config.train_ratio
-            end_ratio = self.config.train_ratio + self.config.val_ratio
-        elif split == 'test':
-            start_ratio = self.config.train_ratio + self.config.val_ratio
-            end_ratio = 1.0
-        else:
-            return 1
-
-        for _ in self.selected_patterns:
-            data_len = self.ts_generator.config.n_samples
-            start_idx = int(start_ratio * data_len)
-            end_idx = int(end_ratio * data_len)
-            split_len = end_idx - start_idx
-            num_sequences = (
-                split_len - self.config.input_length - self.config.prediction_length + 1
-            )
-            if num_sequences > 0:
-                total_samples += num_sequences
-
-        steps = max(1, math.ceil(total_samples / self.config.batch_size))
-        return steps
-
-    def _normalize_instance(
-            self,
-            inputs: tf.Tensor,
-            targets: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
-        """
-        Standardize an individual time series instance (z-score normalization).
-        Calculates stats from inputs ONLY, applies to inputs and targets.
-        """
-        # inputs: (input_length, 1)
-        # targets: (prediction_length,)
-
-        mean = tf.reduce_mean(inputs)
-        std = tf.maximum(tf.math.reduce_std(inputs), 1e-7)
-
-        normalized_inputs = (inputs - mean) / std
-        normalized_targets = (targets - mean) / std
-
-        return normalized_inputs, normalized_targets
+                yield inputs, targets
 
     def prepare_datasets(self) -> Dict[str, Any]:
-        """Create the complete tf.data pipeline."""
-        output_signature = (
-            tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
-            tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
-        )
+        """Prepare training, validation, and test datasets."""
+        train_dataset = tf.data.Dataset.from_generator(
+            self._training_generator,
+            output_signature=(
+                tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
+            )
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
-        train_ds = tf.data.Dataset.from_generator(
-            generator=self._training_generator,
-            output_signature=output_signature
-        )
-        val_ds = tf.data.Dataset.from_generator(
-            generator=lambda: self._evaluation_generator('val'),
-            output_signature=output_signature
-        )
-        test_ds = tf.data.Dataset.from_generator(
-            generator=lambda: self._evaluation_generator('test'),
-            output_signature=output_signature
-        )
+        val_dataset = tf.data.Dataset.from_generator(
+            self._validation_generator,
+            output_signature=(
+                tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
+            )
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
-        if self.config.normalize_per_instance:
-            logger.info("Applying per-instance standardization.")
-            train_ds = train_ds.map(self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE)
-            val_ds = val_ds.map(self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE)
-            test_ds = test_ds.map(self._normalize_instance, num_parallel_calls=tf.data.AUTOTUNE)
+        test_dataset = tf.data.Dataset.from_generator(
+            self._test_generator,
+            output_signature=(
+                tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
+            )
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
-        # Deep shuffling pipeline
-        train_ds = (
-            train_ds.shuffle(buffer_size=6343, reshuffle_each_iteration=True)
-            .batch(self.config.batch_size)
-            .shuffle(buffer_size=163, reshuffle_each_iteration=True)
-            .prefetch(tf.data.AUTOTUNE)
+        # Compute validation and test steps
+        validation_steps = max(50, len(self.selected_patterns) * 2)
+        test_steps = len(self.selected_patterns) * 5
+
+        logger.info(
+            f"Dataset prepared: train (infinite), val ({validation_steps} steps), "
+            f"test ({test_steps} steps)"
         )
-
-        val_ds = val_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-        test_ds = test_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
         return {
-            'train_ds': train_ds,
-            'val_ds': val_ds,
-            'test_ds': test_ds,
-            'validation_steps': self.get_evaluation_steps('val'),
-            'test_steps': self.get_evaluation_steps('test')
+            'train_ds': train_dataset,
+            'val_ds': val_dataset,
+            'test_ds': test_dataset,
+            'validation_steps': validation_steps,
+            'test_steps': test_steps
         }
 
 
 class TiRexPerformanceCallback(keras.callbacks.Callback):
-    """Callback for monitoring and visualizing performance on a fixed test set."""
+    """Custom callback for tracking and visualizing TiRex performance."""
 
     def __init__(
             self,
             config: TiRexTrainingConfig,
-            data_processor: TiRexDataProcessor,
+            processor: TiRexDataProcessor,
             save_dir: str,
-            model_name: str = "model"
+            model_name: str = "tirex"
     ):
         super().__init__()
         self.config = config
-        self.data_processor = data_processor
+        self.processor = processor
         self.save_dir = save_dir
         self.model_name = model_name
+
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        # Prepare fixed test data for visualization
+        self.viz_test_data = self._prepare_viz_data()
+
+        # Track metrics across epochs
         self.training_history = {
-            'epoch': [], 'lr': [],
             'loss': [], 'val_loss': [],
-            'mae_median': [], 'val_mae_median': []
+            'mae_median': [], 'val_mae_median': [],
+            'lr': []
         }
-        os.makedirs(save_dir, exist_ok=True)
-        self.viz_test_data = self._create_viz_test_set()
 
-    def _normalize_instance(
-            self,
-            inputs: tf.Tensor,
-            targets: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
-        """
-        Normalize per instance to the range [-1, +1] using Min-Max scaling.
-        Calculates stats from inputs ONLY, applies to inputs and targets.
-        """
-        # inputs: (input_length, 1)
-        # targets: (prediction_length,)
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare a fixed batch of test samples for consistent visualization."""
+        viz_samples_x, viz_samples_y = [], []
+        test_gen = self.processor._test_generator()
 
-        # Calculate min and max from the input history to avoid leakage
-        min_val = tf.reduce_min(inputs)
-        max_val = tf.reduce_max(inputs)
+        for _ in range(self.config.plot_top_k_patterns):
+            x, y = next(test_gen)
+            viz_samples_x.append(x)
+            viz_samples_y.append(y)
 
-        # Calculate range, ensuring no division by zero (epsilon)
-        range_val = tf.maximum(max_val - min_val, 1e-7)
+        return np.array(viz_samples_x), np.array(viz_samples_y)
 
-        # Scale to [0, 1] then transform to [-1, 1]
-        # Formula: 2 * ((x - min) / (max - min)) - 1
-        normalized_inputs = 2.0 * (inputs - min_val) / range_val - 1.0
-        normalized_targets = 2.0 * (targets - min_val) / range_val - 1.0
-
-        return normalized_inputs, normalized_targets
-
-    def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Generates a diverse, fixed test set for visualizations."""
-        logger.info("Creating a diverse, fixed visualization test set...")
-        num_samples = self.config.plot_top_k_patterns
-        patterns_to_sample = self.data_processor.selected_patterns.copy()
-        random.shuffle(patterns_to_sample)
-
-        x_list, y_list, patterns_sampled = [], [], 0
-        start_ratio = self.config.train_ratio + self.config.val_ratio
-        end_ratio = 1.0
-
-        for pattern_name in patterns_to_sample:
-            if patterns_sampled >= num_samples:
-                break
-            data = self.data_processor.ts_generator.generate_task_data(pattern_name)
-            start_idx = int(start_ratio * len(data))
-            end_idx = int(end_ratio * len(data))
-            test_data = data[start_idx:end_idx]
-
-            total_len = self.config.input_length + self.config.prediction_length
-            if len(test_data) >= total_len:
-                max_start = len(test_data) - total_len
-                sample_start_idx = random.randint(0, max_start)
-
-                inputs = test_data[
-                    sample_start_idx: sample_start_idx + self.config.input_length
-                ].astype(np.float32).reshape(-1, 1)
-
-                targets = test_data[
-                    sample_start_idx + self.config.input_length:
-                    sample_start_idx + total_len
-                ].astype(np.float32).flatten()
-
-                # Apply normalization if config enabled, to match model expectation
-                if self.config.normalize_per_instance:
-                    inputs, targets = self._normalize_instance(inputs, targets)
-
-                x_list.append(inputs)
-                y_list.append(targets)
-                patterns_sampled += 1
-
-        if not x_list:
-            return (
-                np.array([]).reshape(0, self.config.input_length, 1),
-                np.array([]).reshape(0, self.config.prediction_length)
-            )
-
-        return np.array(x_list), np.array(y_list)
-
-    def on_epoch_end(
-            self, epoch: int, logs: Optional[Dict[str, float]] = None
-    ) -> None:
-        """Actions to perform at the end of each epoch."""
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
+        """Track metrics and create visualizations at epoch end."""
         logs = logs or {}
-        self.training_history['epoch'].append(epoch)
-        self.training_history['lr'].append(self.model.optimizer.learning_rate)
-        self.training_history['loss'].append(logs.get('loss', 0.0))
-        self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
 
-        # Track MAE of median if available
-        mae_key = next((k for k in logs.keys() if 'mae_of_median' in k and 'val' not in k), None)
-        val_mae_key = next((k for k in logs.keys() if 'mae_of_median' in k and 'val' in k), None)
+        # Track history
+        self.training_history['loss'].append(logs.get('loss', 0))
+        self.training_history['val_loss'].append(logs.get('val_loss', 0))
+        self.training_history['mae_median'].append(logs.get('mae_of_median', 0))
+        self.training_history['val_mae_median'].append(logs.get('val_mae_of_median', 0))
 
-        if mae_key:
-            self.training_history['mae_median'].append(logs.get(mae_key, 0.0))
-            self.training_history['val_mae_median'].append(logs.get(val_mae_key, 0.0))
+        # Track learning rate
+        lr = float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
+        if hasattr(self.model.optimizer.learning_rate, '__call__'):
+            lr = float(keras.ops.convert_to_numpy(
+                self.model.optimizer.learning_rate(self.model.optimizer.iterations)
+            ))
+        self.training_history['lr'].append(lr)
 
+        # Visualize every N epochs
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            self._create_interim_plots(epoch)
-
-    def _create_interim_plots(self, epoch: int) -> None:
-        try:
+            logger.info(f"Creating visualizations for epoch {epoch + 1}...")
             if self.config.create_learning_curves:
                 self._plot_learning_curves(epoch)
-            if self.config.create_prediction_plots and self.viz_test_data[0].shape[0] > 0:
+            if self.config.create_prediction_plots:
                 self._plot_prediction_samples(epoch)
-        except Exception as e:
-            logger.warning(f"Failed to create interim plots: {e}")
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        epochs_range = self.training_history['epoch']
+        """Plot training and validation metrics."""
+        fig, axes = plt.subplots(1, 3, figsize=(18, 4))
+        epochs_range = range(1, len(self.training_history['loss']) + 1)
 
-        # Loss
+        # Quantile Loss
         axes[0].plot(epochs_range, self.training_history['loss'], label='Train')
         axes[0].plot(epochs_range, self.training_history['val_loss'], label='Val')
         axes[0].set_title('Quantile Loss')
@@ -628,16 +552,34 @@ class TiRexTrainer:
         logger.info(f"Selected {len(selected)} patterns for training.")
         return selected
 
-    def create_model(self) -> TiRexCore:
-        """Create and compile the TiRex model."""
-        model = create_tirex_by_variant(
-            variant=self.config.variant,
-            input_length=self.config.input_length,
-            prediction_length=self.config.prediction_length,
-            patch_size=self.config.patch_size,
-            quantile_levels=self.config.quantile_levels,
-            dropout_rate=self.config.dropout_rate
-        )
+    def create_model(self) -> Union[TiRexCore, TiRexExtended]:
+        """Create and compile the TiRex model based on configuration."""
+        # Select model factory based on model_type
+        if self.config.model_type == 'core':
+            logger.info(f"Creating TiRexCore ({self.config.variant}) model...")
+            model = create_tirex_by_variant(
+                variant=self.config.variant,
+                input_length=self.config.input_length,
+                prediction_length=self.config.prediction_length,
+                patch_size=self.config.patch_size,
+                quantile_levels=self.config.quantile_levels,
+                dropout_rate=self.config.dropout_rate
+            )
+        elif self.config.model_type == 'extended':
+            logger.info(f"Creating TiRexExtended ({self.config.variant}) model...")
+            model = create_tirex_extended(
+                variant=self.config.variant,
+                input_length=self.config.input_length,
+                prediction_length=self.config.prediction_length,
+                patch_size=self.config.patch_size,
+                quantile_levels=self.config.quantile_levels,
+                dropout_rate=self.config.dropout_rate
+            )
+        else:
+            raise ValueError(
+                f"Unknown model_type: {self.config.model_type}. "
+                f"Expected 'core' or 'extended'."
+            )
 
         # Learning Rate Schedule
         if self.config.use_warmup:
@@ -785,11 +727,17 @@ class TiRexTrainer:
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments for TiRex training configuration."""
-    parser = argparse.ArgumentParser(description="TiRex Training Framework")
+    parser = argparse.ArgumentParser(description="TiRex Training Framework (Unified)")
 
     # General experiment settings
     parser.add_argument("--experiment_name", type=str, default="tirex",
                         help="Name of the experiment for logging.")
+
+    # Model type selection
+    parser.add_argument("--model_type", type=str, default="core",
+                        choices=['core', 'extended'],
+                        help="Model architecture type: 'core' (mean pooling) or "
+                             "'extended' (query tokens).")
 
     # Model architecture settings
     parser.add_argument("--variant", type=str, default="small",
@@ -859,6 +807,7 @@ def main() -> None:
 
     config = TiRexTrainingConfig(
         experiment_name=args.experiment_name,
+        model_type=args.model_type,
         variant=args.variant,
         input_length=args.input_length,
         prediction_length=args.prediction_length,
