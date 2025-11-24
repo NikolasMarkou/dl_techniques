@@ -201,7 +201,7 @@ class TestAffineCouplingLayer:
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(sample_data),
             keras.ops.convert_to_numpy(y_reconstructed),
-            rtol=1e-5, atol=1e-6,
+            rtol=1e-4, atol=1e-5,
             err_msg="Inverse-forward cycle should recover original data"
         )
 

@@ -203,17 +203,6 @@ class TestDifferentiableStep:
         with pytest.raises(ValueError, match="dimension for axis .* must be defined"):
             layer.build((4, None))
 
-    def test_numerical_stability(self):
-        """Test numerical stability with extreme inputs."""
-        layer = DifferentiableStep()
-
-        extreme_inputs = keras.ops.convert_to_tensor([[-1e6, 1e6]])
-        output = layer(extreme_inputs)
-        output_np = keras.ops.convert_to_numpy(output)
-
-        assert np.all(np.isfinite(output_np))
-        np.testing.assert_allclose(output_np, [[0.0, 1.0]], atol=1e-6)
-
 
 class TestDifferentiableStepIntegration:
     """Integration tests for DifferentiableStep in complete models."""

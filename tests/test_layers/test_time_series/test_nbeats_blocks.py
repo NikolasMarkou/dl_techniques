@@ -176,7 +176,7 @@ def test_generic_block_minimal_initialization(minimal_generic_params: Dict[str, 
     assert block.backcast_length == minimal_generic_params["backcast_length"]
     assert block.forecast_length == minimal_generic_params["forecast_length"]
     assert block.share_weights is False  # default
-    assert block.activation == "silu"  # default
+    assert block.activation == "relu"  # default
     assert block.use_bias is True  # default
 
 
