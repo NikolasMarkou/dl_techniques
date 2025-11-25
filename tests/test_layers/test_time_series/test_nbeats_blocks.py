@@ -177,7 +177,7 @@ def test_generic_block_minimal_initialization(minimal_generic_params: Dict[str, 
     assert block.forecast_length == minimal_generic_params["forecast_length"]
     assert block.share_weights is False  # default
     assert block.activation == "relu"  # default
-    assert block.use_bias is True  # default
+    assert block.use_bias is False  # default
 
 
 def test_generic_block_output_shapes(small_sample_inputs: tf.Tensor, minimal_generic_params: Dict[str, Any]) -> None:
