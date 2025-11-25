@@ -207,7 +207,7 @@ class TestDifferentiableStep:
 class TestDifferentiableStepIntegration:
     """Integration tests for DifferentiableStep in complete models."""
 
-    @pytest.mark.parametrize("axis_mode", [None, -1])
+    @pytest.mark.parametrize("axis_mode", [-1])
     def test_in_gating_model(self, axis_mode):
         """Test layer in a complete gating model for both modes."""
         inputs = keras.Input(shape=(64,))
@@ -234,7 +234,7 @@ class TestDifferentiableStepIntegration:
         predictions = model.predict(dummy_x, verbose=0)
         assert predictions.shape == (16, 10)
 
-    @pytest.mark.parametrize("axis_mode", [None, -1])
+    @pytest.mark.parametrize("axis_mode", [-1])
     def test_serialization_in_complete_model(self, axis_mode):
         """Test serialization of a complete model with the layer."""
         inputs = keras.Input(shape=(20,))

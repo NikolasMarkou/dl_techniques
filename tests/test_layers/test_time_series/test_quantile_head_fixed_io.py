@@ -17,7 +17,7 @@ import pytest
 import tensorflow as tf
 import numpy as np
 import keras
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
 
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead

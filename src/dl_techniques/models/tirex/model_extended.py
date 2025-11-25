@@ -54,14 +54,13 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Union, List, Any, Tuple, Dict, Literal
+from typing import Optional, List, Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
 from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 from .model import BlockType, DEFAULT_QUANTILES, TiRexCore
