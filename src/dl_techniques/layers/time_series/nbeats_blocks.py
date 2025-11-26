@@ -89,7 +89,7 @@ class NBeatsBlock(keras.layers.Layer):
 
     **Architecture**:
     ```
-    Input(shape=[batch, backcast_length])
+    Input(shape=[batch, backcast_length * input_dim])
            ↓
     Dense₁(units, activation)
            ↓
@@ -107,22 +107,21 @@ class NBeatsBlock(keras.layers.Layer):
            ↓
     (Optional) RMSNorm
            ↓
-    ┌─────────────────┬─────────────────┐
-    ↓                 ↓                 ↓
-    ThetaBackcast    ThetaForecast
-    (thetas_dim)     (thetas_dim)
-    ↓                 ↓
-    BasisBackcast    BasisForecast    ← (implemented by subclasses)
-    ↓                 ↓
-    Output([batch, backcast_length], [batch, forecast_length])
+    ┌──────────────────────────────┬───────────────────────────────┐
+    ↓                              ↓                               ↓
+    ThetaBackcast                 ThetaForecast
+    (thetas_dim * input_dim)      (thetas_dim * output_dim)
+    ↓                              ↓
+    BasisBackcast                 BasisForecast    ← (implemented by subclasses)
+    ↓                              ↓
+    Output                        Output
+    [batch, backcast_len * dim]   [batch, forecast_len * dim]
     ```
 
-    **Mathematical Operations**:
-    1. **Feature Extraction**: x₄ = Dense₄(Dense₃(Dense₂(Dense₁(input))))
-    2. **Parameter Generation**: θ_b = ThetaBackcast(x₄), θ_f = ThetaForecast(x₄)
-    3. **Basis Expansion**: backcast = Basis_b(θ_b), forecast = Basis_f(θ_f)
-
-    The basis functions are implemented by concrete subclasses (Generic, Trend, Seasonality).
+    **Multivariate Support**:
+    The block handles multivariate inputs/outputs by flattening dimensions in the dense
+    stack but preserving the concept of (Time, Feature) separation in the basis projection
+    layer. The theta coefficients are generated per-feature.
 
     Args:
         units: Integer, number of hidden units in the fully connected layers.
@@ -133,6 +132,8 @@ class NBeatsBlock(keras.layers.Layer):
             Must be positive. Recommended: 3-5 times forecast_length.
         forecast_length: Integer, length of the forecast horizon.
             Must be positive. The number of future time steps to predict.
+        input_dim: Integer, number of input features (channels). Defaults to 1.
+        output_dim: Integer, number of output features (channels). Defaults to 1.
         share_weights: Boolean, whether to share weights across blocks in the same stack.
             Currently stored but not implemented. Defaults to False.
         activation: String or callable, activation function for hidden layers.
@@ -149,12 +150,12 @@ class NBeatsBlock(keras.layers.Layer):
         **kwargs: Additional keyword arguments for the Layer parent class.
 
     Input shape:
-        2D tensor with shape: `(batch_size, backcast_length)`.
+        2D tensor with shape: `(batch_size, backcast_length * input_dim)`.
 
     Output shape:
         Tuple of 2D tensors:
-        - Backcast: `(batch_size, backcast_length)`
-        - Forecast: `(batch_size, forecast_length)`
+        - Backcast: `(batch_size, backcast_length * input_dim)`
+        - Forecast: `(batch_size, forecast_length * output_dim)`
 
     Attributes:
         dense1, dense2, dense3, dense4: Fully connected feature extraction layers.
@@ -166,24 +167,15 @@ class NBeatsBlock(keras.layers.Layer):
         block = GenericBlock(
             units=512,
             thetas_dim=32,
-            backcast_length=168,  # 1 week hourly
-            forecast_length=24,   # 1 day hourly
-            use_normalization=False # Disable normalization
+            backcast_length=168,
+            forecast_length=24,
+            input_dim=5,
+            output_dim=5
         )
 
-        inputs = keras.Input(shape=(168,))
+        inputs = keras.Input(shape=(168 * 5,))
         backcast, forecast = block(inputs)
         ```
-
-    Note:
-        This is an abstract base class. Use concrete implementations:
-        - GenericBlock: Learnable linear basis functions
-        - TrendBlock: Polynomial basis functions for trends
-        - SeasonalityBlock: Fourier basis functions for seasonality
-
-    Raises:
-        ValueError: If any dimension parameter is non-positive.
-        ValueError: If input shape is not 2D during forward pass.
     """
 
     def __init__(
@@ -192,6 +184,8 @@ class NBeatsBlock(keras.layers.Layer):
             thetas_dim: int,
             backcast_length: int,
             forecast_length: int,
+            input_dim: int = 1,
+            output_dim: int = 1,
             share_weights: bool = False,
             activation: Union[str, callable] = 'relu',
             use_bias: bool = False,
@@ -213,6 +207,10 @@ class NBeatsBlock(keras.layers.Layer):
             raise ValueError(f"backcast_length must be positive, got {backcast_length}")
         if forecast_length <= 0:
             raise ValueError(f"forecast_length must be positive, got {forecast_length}")
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
 
         # Warn if backcast_length might be too short
         if backcast_length < 2 * forecast_length:
@@ -226,6 +224,8 @@ class NBeatsBlock(keras.layers.Layer):
         self.thetas_dim = thetas_dim
         self.backcast_length = backcast_length
         self.forecast_length = forecast_length
+        self.input_dim = input_dim
+        self.output_dim = output_dim
         self.share_weights = share_weights
         self.activation = activation
         self.use_bias = use_bias
@@ -277,8 +277,12 @@ class NBeatsBlock(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name='dense4'
         )
+
+        # Theta projection layers
+        # For multivariate, we generate unique thetas for each feature
+        # Shape: thetas_dim * input_dim (or output_dim)
         self.theta_backcast = keras.layers.Dense(
-            self.thetas_dim,
+            self.thetas_dim * self.input_dim,
             activation='linear',
             use_bias=False,
             kernel_initializer=self.theta_initializer,
@@ -286,7 +290,7 @@ class NBeatsBlock(keras.layers.Layer):
             name='theta_backcast'
         )
         self.theta_forecast = keras.layers.Dense(
-            self.thetas_dim,
+            self.thetas_dim * self.output_dim,
             activation='linear',
             use_bias=False,
             kernel_initializer=self.theta_initializer,
@@ -323,7 +327,7 @@ class NBeatsBlock(keras.layers.Layer):
         Forward pass with performance optimizations.
 
         Args:
-            inputs: Input tensor of shape (batch_size, backcast_length).
+            inputs: Input tensor of shape (batch_size, backcast_length * input_dim).
             training: Boolean indicating training mode.
 
         Returns:
@@ -349,6 +353,7 @@ class NBeatsBlock(keras.layers.Layer):
             x = self.norm4(x)
 
         # Generate theta parameters
+        # Shape: (batch_size, thetas_dim * dim)
         theta_b = self.theta_backcast(x, training=training)
         theta_f = self.theta_forecast(x, training=training)
 
@@ -367,7 +372,7 @@ class NBeatsBlock(keras.layers.Layer):
             theta: Theta parameters for backcast generation.
 
         Returns:
-            Backcast tensor.
+            Backcast tensor of shape (batch, backcast_length * input_dim).
         """
         pass
 
@@ -380,7 +385,7 @@ class NBeatsBlock(keras.layers.Layer):
             theta: Theta parameters for forecast generation.
 
         Returns:
-            Forecast tensor.
+            Forecast tensor of shape (batch, forecast_length * output_dim).
         """
         pass
 
@@ -401,8 +406,8 @@ class NBeatsBlock(keras.layers.Layer):
             raise ValueError(f"Expected 2D input shape, got {len(input_shape)}D: {input_shape}")
 
         batch_size = input_shape[0]
-        backcast_shape = (batch_size, self.backcast_length)
-        forecast_shape = (batch_size, self.forecast_length)
+        backcast_shape = (batch_size, self.backcast_length * self.input_dim)
+        forecast_shape = (batch_size, self.forecast_length * self.output_dim)
         return backcast_shape, forecast_shape
 
     def get_config(self) -> dict:
@@ -418,6 +423,8 @@ class NBeatsBlock(keras.layers.Layer):
             'thetas_dim': self.thetas_dim,
             'backcast_length': self.backcast_length,
             'forecast_length': self.forecast_length,
+            'input_dim': self.input_dim,
+            'output_dim': self.output_dim,
             'share_weights': self.share_weights,
             'activation': self.activation,
             'use_bias': self.use_bias,
@@ -458,12 +465,9 @@ class GenericBlock(NBeatsBlock):
     ```
 
     **Basis Function Details**:
-    - **Backcast Basis**: Dense(thetas_dim → backcast_length, linear activation)
-    - **Forecast Basis**: Dense(thetas_dim → forecast_length, linear activation)
+    - **Backcast Basis**: Dense(thetas_dim*in_dim → backcast_len*in_dim, linear)
+    - **Forecast Basis**: Dense(thetas_dim*out_dim → forecast_len*out_dim, linear)
     - **Initialization**: Orthogonal with small gain (0.1) for stable training
-
-    The orthogonal initialization with small gain helps prevent exploding gradients
-    while maintaining expressiveness for learning diverse patterns.
 
     Args:
         basis_initializer: String or Initializer, initializer for basis matrices.
@@ -472,45 +476,9 @@ class GenericBlock(NBeatsBlock):
             Can help prevent overfitting in the learned basis functions.
         **kwargs: Arguments passed to parent NBeatsBlock.
 
-    Input shape:
-        2D tensor with shape: `(batch_size, backcast_length)`.
-
-    Output shape:
-        Tuple of 2D tensors:
-        - Backcast: `(batch_size, backcast_length)`
-        - Forecast: `(batch_size, forecast_length)`
-
     Attributes:
         backcast_basis: Dense layer for backcast basis function.
         forecast_basis: Dense layer for forecast basis function.
-
-    Example:
-        ```python
-        # Standard generic block
-        block = GenericBlock(
-            units=512,
-            thetas_dim=64,  # Higher for more expressiveness
-            backcast_length=168,
-            forecast_length=24
-        )
-
-        # With regularization for complex datasets
-        block = GenericBlock(
-            units=256,
-            thetas_dim=32,
-            backcast_length=96,
-            forecast_length=12,
-            basis_regularizer=keras.regularizers.L2(0.001)
-        )
-
-        inputs = keras.Input(shape=(96,))
-        backcast, forecast = block(inputs)
-        ```
-
-    Note:
-        Generic blocks are most effective when you don't have strong prior knowledge
-        about the time series patterns. They can learn complex relationships but may
-        require more data and careful regularization to avoid overfitting.
     """
 
     def __init__(
@@ -529,8 +497,10 @@ class GenericBlock(NBeatsBlock):
         # Use orthogonal initialization with small gain for stability
         orthogonal_init = keras.initializers.Orthogonal(gain=0.1)
 
+        # For Generic Block, the projection is just a large matrix multiplication
+        # We project from flattened theta to flattened time series directly.
         self.backcast_basis = keras.layers.Dense(
-            self.backcast_length,
+            self.backcast_length * self.input_dim,
             activation='linear',
             use_bias=False,
             kernel_initializer=orthogonal_init,
@@ -538,7 +508,7 @@ class GenericBlock(NBeatsBlock):
             name='backcast_basis'
         )
         self.forecast_basis = keras.layers.Dense(
-            self.forecast_length,
+            self.forecast_length * self.output_dim,
             activation='linear',
             use_bias=False,
             kernel_initializer=orthogonal_init,
@@ -549,10 +519,12 @@ class GenericBlock(NBeatsBlock):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the generic block and its sub-layers."""
         # BUILD the GenericBlock-specific sub-layers
-        # Their input is theta, which has shape (batch_size, thetas_dim)
-        theta_shape = (input_shape[0], self.thetas_dim)
-        self.backcast_basis.build(theta_shape)
-        self.forecast_basis.build(theta_shape)
+        # Their input is theta, which has shape (batch_size, thetas_dim * dim)
+        theta_backcast_shape = (input_shape[0], self.thetas_dim * self.input_dim)
+        theta_forecast_shape = (input_shape[0], self.thetas_dim * self.output_dim)
+
+        self.backcast_basis.build(theta_backcast_shape)
+        self.forecast_basis.build(theta_forecast_shape)
 
         # Call parent build method (which builds the Dense stack)
         super().build(input_shape)
@@ -562,10 +534,10 @@ class GenericBlock(NBeatsBlock):
         Generate backcast using learnable basis functions.
 
         Args:
-            theta: Theta parameters for backcast generation.
+            theta: Theta parameters (batch, thetas_dim * input_dim).
 
         Returns:
-            Backcast tensor.
+            Backcast tensor (batch, backcast_length * input_dim).
         """
         return self.backcast_basis(theta)
 
@@ -574,10 +546,10 @@ class GenericBlock(NBeatsBlock):
         Generate forecast using learnable basis functions.
 
         Args:
-            theta: Theta parameters for forecast generation.
+            theta: Theta parameters (batch, thetas_dim * output_dim).
 
         Returns:
-            Forecast tensor.
+            Forecast tensor (batch, forecast_length * output_dim).
         """
         return self.forecast_basis(theta)
 
@@ -605,9 +577,8 @@ class TrendBlock(NBeatsBlock):
     Trend N-BEATS block with polynomial basis functions for modeling trending behavior.
 
     This block uses mathematically-defined polynomial basis functions to explicitly
-    model trend patterns in time series data. The polynomial basis functions ensure
-    smooth continuity between backcast and forecast, making them ideal for capturing
-    linear trends, growth patterns, and other monotonic behaviors.
+    model trend patterns in time series data. In multivariate settings, it learns
+    separate polynomial coefficients (thetas) for each feature.
 
     **Intent**: Provide a specialized N-BEATS block for explicitly modeling trend
     components in time series, using polynomial basis functions that guarantee
@@ -632,55 +603,19 @@ class TrendBlock(NBeatsBlock):
     Time normalization: t ∈ [-1, 1] centered at backcast-forecast transition
     ```
 
-    **Continuity Guarantee**: The polynomial basis ensures that the trend at the
-    end of the backcast period exactly matches the trend at the start of the
-    forecast period, providing smooth mathematical continuity.
+    **Multivariate Logic**:
+    Theta is reshaped to `(Batch, FeatureDim, Degree)`. The basis matrix is
+    `(Degree, Time)`. Matrix multiplication produces `(Batch, FeatureDim, Time)`.
+    This preserves the temporal structure of the trend per-feature before flattening.
 
     Args:
         normalize_basis: Boolean, whether to normalize polynomial basis functions
             for better numerical conditioning. Defaults to True.
         **kwargs: Arguments passed to parent NBeatsBlock.
 
-    Input shape:
-        2D tensor with shape: `(batch_size, backcast_length)`.
-
-    Output shape:
-        Tuple of 2D tensors:
-        - Backcast: `(batch_size, backcast_length)`
-        - Forecast: `(batch_size, forecast_length)`
-
     Attributes:
         backcast_basis_matrix: Non-trainable weight matrix for backcast polynomial basis.
         forecast_basis_matrix: Non-trainable weight matrix for forecast polynomial basis.
-
-    Example:
-        ```python
-        # Linear trend modeling (degree 1)
-        block = TrendBlock(
-            units=256,
-            thetas_dim=2,  # constant + linear
-            backcast_length=96,
-            forecast_length=24
-        )
-
-        # Complex trend modeling (up to degree 3)
-        block = TrendBlock(
-            units=512,
-            thetas_dim=4,  # constant + linear + quadratic + cubic
-            backcast_length=168,
-            forecast_length=24,
-            normalize_basis=True  # Better numerical stability
-        )
-
-        inputs = keras.Input(shape=(96,))
-        backcast, forecast = block(inputs)
-        ```
-
-    Note:
-        - thetas_dim controls polynomial degree: thetas_dim=3 → degree 2 polynomial
-        - Higher degrees can model complex trends but may overfit
-        - Normalization improves numerical stability for higher-degree polynomials
-        - Best for time series with clear trending behavior
     """
 
     def __init__(
@@ -747,6 +682,7 @@ class TrendBlock(NBeatsBlock):
                 forecast_basis[degree] /= scale_factor
 
         # Store as non-trainable weights
+        # Shape: (thetas_dim, time)
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
@@ -764,31 +700,57 @@ class TrendBlock(NBeatsBlock):
         self.backcast_basis_matrix.assign(backcast_basis)
         self.forecast_basis_matrix.assign(forecast_basis)
 
-        logger.info(f"TrendBlock: Created continuous polynomial basis with degree {self.thetas_dim - 1}")
-
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
         Generate backcast using polynomial basis functions.
 
+        Process:
+        1. Reshape theta: (Batch, Flat) -> (Batch, InputDim, PolyDegree)
+        2. MatMul: (Batch, InputDim, PolyDegree) @ (PolyDegree, Time) -> (Batch, InputDim, Time)
+        3. Transpose: (Batch, InputDim, Time) -> (Batch, Time, InputDim)
+        4. Flatten: -> (Batch, Time * InputDim)
+
+        This ensures that when the residual stream is reconstructed, index (t, d) corresponds correctly.
+
         Args:
-            theta: Theta parameters for backcast generation.
+            theta: Theta parameters (batch, thetas_dim * input_dim).
 
         Returns:
-            Backcast tensor.
+            Backcast tensor (batch, backcast_length * input_dim).
         """
-        return ops.matmul(theta, self.backcast_basis_matrix)
+        # 1. Reshape to separate features and polynomial degrees
+        theta_reshaped = ops.reshape(theta, (-1, self.input_dim, self.thetas_dim))
+
+        # 2. Apply basis function (broadcasts over batch and input_dim)
+        result = ops.matmul(theta_reshaped, self.backcast_basis_matrix)
+
+        # 3. Transpose to (Batch, Time, InputDim) to match flattened order
+        result = ops.transpose(result, (0, 2, 1))
+
+        # 4. Flatten back to residual stream format
+        return ops.reshape(result, (-1, self.backcast_length * self.input_dim))
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
         Generate forecast using polynomial basis functions.
 
         Args:
-            theta: Theta parameters for forecast generation.
+            theta: Theta parameters (batch, thetas_dim * output_dim).
 
         Returns:
-            Forecast tensor.
+            Forecast tensor (batch, forecast_length * output_dim).
         """
-        return ops.matmul(theta, self.forecast_basis_matrix)
+        # 1. Reshape to separate features and polynomial degrees
+        theta_reshaped = ops.reshape(theta, (-1, self.output_dim, self.thetas_dim))
+
+        # 2. Apply basis function
+        result = ops.matmul(theta_reshaped, self.forecast_basis_matrix)
+
+        # 3. Transpose to (Batch, Time, OutputDim)
+        result = ops.transpose(result, (0, 2, 1))
+
+        # 4. Flatten
+        return ops.reshape(result, (-1, self.forecast_length * self.output_dim))
 
     def get_config(self) -> dict:
         """
@@ -813,10 +775,8 @@ class SeasonalityBlock(NBeatsBlock):
     Seasonality N-BEATS block with corrected Fourier basis functions for periodic patterns.
 
     This block uses mathematically-defined Fourier (sine/cosine) basis functions to
-    explicitly model seasonal and periodic patterns in time series data. The Fourier
-    basis functions ensure proper frequency relationships and mathematical continuity
-    between backcast and forecast, making them ideal for capturing daily, weekly,
-    monthly, and other cyclical behaviors.
+    explicitly model seasonal and periodic patterns. In multivariate settings, it learns
+    separate harmonic coefficients for each feature.
 
     **Intent**: Provide a specialized N-BEATS block for explicitly modeling seasonal
     and periodic components in time series, using Fourier basis functions that
@@ -830,21 +790,12 @@ class SeasonalityBlock(NBeatsBlock):
                                          (harmonics 1,2,3,...)
                                                ↓         ↓
                                            backcast   forecast
-
-    Fourier Basis Functions (for harmonic k):
-    - Cosine: cos(2πk·t / T)  where T = backcast_length + forecast_length
-    - Sine:   sin(2πk·t / T)
-
-    Harmonic Sequence: k = 1, 2, 3, ..., num_harmonics
     ```
 
-    **Frequency Relationship**: The fundamental period T spans the entire sequence
-    (backcast + forecast), ensuring that seasonal patterns align correctly between
-    the two segments and providing smooth mathematical continuity.
-
-    **Theta Dimension Mapping**:
-    - thetas_dim = 2n: Creates n harmonics (n cos/sin pairs)
-    - thetas_dim = 2n+1: Creates n harmonics plus DC component
+    **Multivariate Logic**:
+    Similar to TrendBlock, theta is reshaped to `(Batch, FeatureDim, Harmonics)`
+    before applying the basis matrix. The result is transposed to `(Batch, Time, FeatureDim)`
+    before flattening to ensure correct alignment with the input stream.
 
     Args:
         normalize_basis: Boolean, whether to normalize Fourier basis functions
@@ -852,46 +803,9 @@ class SeasonalityBlock(NBeatsBlock):
             Defaults to True.
         **kwargs: Arguments passed to parent NBeatsBlock.
 
-    Input shape:
-        2D tensor with shape: `(batch_size, backcast_length)`.
-
-    Output shape:
-        Tuple of 2D tensors:
-        - Backcast: `(batch_size, backcast_length)`
-        - Forecast: `(batch_size, forecast_length)`
-
     Attributes:
         backcast_basis_matrix: Non-trainable weight matrix for backcast Fourier basis.
         forecast_basis_matrix: Non-trainable weight matrix for forecast Fourier basis.
-
-    Example:
-        ```python
-        # Daily seasonality (12 harmonics for detailed patterns)
-        block = SeasonalityBlock(
-            units=256,
-            thetas_dim=24,  # 12 harmonics (cos/sin pairs)
-            backcast_length=168,  # 1 week hourly
-            forecast_length=24    # 1 day hourly
-        )
-
-        # Simple seasonality (4 harmonics for basic patterns)
-        block = SeasonalityBlock(
-            units=128,
-            thetas_dim=8,   # 4 harmonics
-            backcast_length=96,
-            forecast_length=12,
-            normalize_basis=True  # Better numerical stability
-        )
-
-        inputs = keras.Input(shape=(96,))
-        backcast, forecast = block(inputs)
-        ```
-
-    Note:
-        - More harmonics (higher thetas_dim) capture finer seasonal details
-        - Normalization improves numerical stability and continuity
-        - Best for time series with clear periodic/seasonal patterns
-        - Consider data frequency when choosing backcast/forecast lengths
     """
 
     def __init__(
@@ -1013,31 +927,55 @@ class SeasonalityBlock(NBeatsBlock):
         self.backcast_basis_matrix.assign(backcast_basis)
         self.forecast_basis_matrix.assign(forecast_basis)
 
-        logger.info(f"SeasonalityBlock: Created continuous Fourier basis with {num_harmonics} harmonics")
-
     def _generate_backcast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
         Generate backcast using Fourier basis functions.
 
+        Process:
+        1. Reshape theta: (Batch, Flat) -> (Batch, InputDim, Harmonics)
+        2. MatMul: (Batch, InputDim, Harmonics) @ (Harmonics, Time) -> (Batch, InputDim, Time)
+        3. Transpose: (Batch, InputDim, Time) -> (Batch, Time, InputDim)
+        4. Flatten: -> (Batch, Time * InputDim)
+
         Args:
-            theta: Theta parameters for backcast generation.
+            theta: Theta parameters (batch, thetas_dim * input_dim).
 
         Returns:
-            Backcast tensor.
+            Backcast tensor (batch, backcast_length * input_dim).
         """
-        return ops.matmul(theta, self.backcast_basis_matrix)
+        # 1. Reshape
+        theta_reshaped = ops.reshape(theta, (-1, self.input_dim, self.thetas_dim))
+
+        # 2. Apply basis function
+        result = ops.matmul(theta_reshaped, self.backcast_basis_matrix)
+
+        # 3. Transpose
+        result = ops.transpose(result, (0, 2, 1))
+
+        # 4. Flatten
+        return ops.reshape(result, (-1, self.backcast_length * self.input_dim))
 
     def _generate_forecast(self, theta: keras.KerasTensor) -> keras.KerasTensor:
         """
         Generate forecast using Fourier basis functions.
 
         Args:
-            theta: Theta parameters for forecast generation.
+            theta: Theta parameters (batch, thetas_dim * output_dim).
 
         Returns:
-            Forecast tensor.
+            Forecast tensor (batch, forecast_length * output_dim).
         """
-        return ops.matmul(theta, self.forecast_basis_matrix)
+        # 1. Reshape
+        theta_reshaped = ops.reshape(theta, (-1, self.output_dim, self.thetas_dim))
+
+        # 2. Apply basis function
+        result = ops.matmul(theta_reshaped, self.forecast_basis_matrix)
+
+        # 3. Transpose
+        result = ops.transpose(result, (0, 2, 1))
+
+        # 4. Flatten
+        return ops.reshape(result, (-1, self.forecast_length * self.output_dim))
 
     def get_config(self) -> dict:
         """

@@ -1,7 +1,4 @@
 """
-This module provides a suite of custom Keras layers designed for building and
-training deep ensembles in a highly efficient and memory-conscious manner.
-
 Deep Ensembling is a powerful technique for improving model robustness, accuracy, and
 uncertainty estimation. The standard approach involves training multiple independent
 models and averaging their predictions. However, this can be computationally expensive
