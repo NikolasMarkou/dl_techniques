@@ -1,11 +1,65 @@
 """
-Comprehensive TiRex Training Framework - Unified for Core and Extended Variants
+Orchestrate the end-to-end training and evaluation of the TiRex probabilistic forecasting framework.
 
-This unified training framework supports both TiRex architectures:
-- TiRexCore: Uses mean pooling for prediction representation
-- TiRexExtended: Uses learnable query tokens for prediction representation
+Architecture
+------------
+The TiRex (Time-series Representation EXchange) framework implements a patch-based
+Transformer architecture designed to capture long-range dependencies in time series data
+while maintaining computational efficiency. The architecture consists of three distinct stages:
 
-The architecture is selected via the 'model_type' configuration parameter.
+1.  **Patching and Embedding**: The input time series history is segmented into
+    non-overlapping patches. This reduces the sequence length from $L$ to $L/P$ (where $P$
+    is stride/patch size), effectively increasing the receptive field and forcing the
+    model to learn semantic local patterns rather than point-wise correlations.
+
+2.  **Transformer Encoder**: A stack of standard Transformer encoder layers processes
+    the sequence of patch embeddings. This stage utilizes multi-head self-attention to
+    capture temporal dependencies between different time segments.
+
+3.  **Variant-Specific Decoding**: The framework supports two distinct decoding strategies
+    to project the latent representation into the forecast horizon:
+    *   **TiRexCore (Global Pooling)**: Aggregates the temporal dimension via mean pooling
+        to create a single global context vector, which is then projected via an MLP to
+        the forecast horizon. This is computationally efficient and assumes the history's
+        sentiment is globally relevant.
+    *   **TiRexExtended (Query-Based)**: Utilizes a set of learnable "Query Tokens"
+        (representing the future horizon) that attend to the encoded history via
+        cross-attention (or interactions within the sequence). This allows the model to
+        selectively extract historical information relevant to specific future time steps.
+
+Foundational Mathematics
+------------------------
+Given an input series $\mathbf{x} \in \mathbb{R}^{L}$ and a target quantile $q \in (0, 1)$,
+the model minimizes the Quantile Loss (Pinball Loss).
+
+**1. Patching Operation:**
+The input is reshaped into $N$ patches of size $P$:
+.. math::
+    \mathbf{X}_p = \text{Unfold}(\mathbf{x}) \in \mathbb{R}^{N \times P}, \quad \text{where } N = \lfloor \frac{L-P}{S} \rfloor + 2
+
+**2. Probabilistic Objective:**
+The network outputs a forecast $\hat{y}^{(q)}_t$ for each quantile level $q$. The
+objective function sums the asymmetric loss over all time steps $t$ and quantiles $q$:
+.. math::
+    \mathcal{L}(\Omega) = \sum_{t} \sum_{q} \rho_q(y_t - \hat{y}^{(q)}_t)
+
+Where $\rho_q$ is the check function:
+.. math::
+    \rho_q(u) = u(q - \mathbb{I}(u < 0)) = \max(qu, (q-1)u)
+
+This ensures that the predicted quantiles satisfy the property $P(y_t \le \hat{y}^{(q)}_t) = q$,
+providing calibrated uncertainty intervals rather than point estimates.
+
+References
+----------
+1.  Nie, Y., Nguyen, N. H., Sinthong, P., & Kalagnanam, J. (2023).
+    A Time Series is Worth 64 Words: Long-term Forecasting with Transformers.
+    In International Conference on Learning Representations (ICLR).
+2.  Das, A., Kong, W., Leach, A., Mathur, S., Sen, R., & Yu, R. (2023).
+    Long-term Forecasting with TiDE: Time-series Dense Encoder.
+    arXiv preprint arXiv:2304.08424.
+3.  Koenker, R., & Bassett Jr, G. (1978). Regression quantiles.
+    Econometrica: journal of the Econometric Society, 33-50.
 """
 
 import os

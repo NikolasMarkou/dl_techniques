@@ -111,3 +111,5 @@ class HuberLoss(keras.losses.Loss):
             'delta': self.delta,
         })
         return config
+
+# ---------------------------------------------------------------------

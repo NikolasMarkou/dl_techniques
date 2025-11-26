@@ -7,7 +7,7 @@ from keras import ops
 import tensorflow as tf
 from typing import Dict, Any, Tuple
 
-from dl_techniques.models.nbeats.model import NBeatsNet, create_nbeats_model
+from dl_techniques.models.nbeats import NBeatsNet, create_nbeats_model
 
 
 class TestNBeatsNet:

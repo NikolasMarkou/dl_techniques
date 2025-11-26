@@ -1,11 +1,58 @@
 """
-Comprehensive N-BEATS Training Framework - Normalized & Unified
+Orchestrate the end-to-end training and evaluation lifecycle of the N-BEATS forecasting architecture.
 
-This framework trains the N-BEATS architecture with:
-1. Robust Instance Normalization (-1, +1 scaling based on backcast).
-2. High-entropy reservoir sampling (Shuffling like TiRex).
-3. Infinite Data Streams (Prevents OUT_OF_RANGE errors).
-4. Diverse Visualization (Ensures plots show different patterns).
+Architecture
+------------
+This component manages the Neural Basis Expansion Analysis for Time Series (N-BEATS),
+a pure deep neural architecture utilizing backward and forward residual links. The model
+is organized into a sequence of "stacks," where each stack comprises multiple basic blocks.
+
+The architecture employs a specific "doubly residual" topology designed to decompose
+time series into distinct components:
+1. Backcast Residual: Each block attempts to reconstruct the input history. The residual
+   (the unexplained signal) is subtracted from the input and passed to the next block.
+   This acts as a filter, allowing subsequent layers to focus solely on signal dynamics
+   not yet captured.
+2. Forecast Aggregation: Each block predicts a partial forecast vector. The final global
+   prediction is the element-wise sum of these partial forecasts.
+
+This implementation orchestrates a "meta-learning" style workflow, training a single
+global model on diverse synthetic patterns (e.g., Trend, Seasonality, Volatility) via
+instance-wise normalization. It supports both "Generic" stacks (fully learnable basis)
+and "Interpretable" stacks (fixed functional forms) to separate trend and seasonality.
+
+Foundational Mathematics
+------------------------
+Let $\mathbf{x} \in \mathbb{R}^{H}$ be the input history window (backcast length) and
+$\mathbf{y} \in \mathbb{R}^{T}$ be the forecast horizon. The network produces the
+final forecast $\hat{\mathbf{y}}$ by aggregating outputs from $L$ blocks.
+
+For the $l$-th block, the residual data flow is defined as:
+
+.. math::
+    \mathbf{x}_{l} = \mathbf{x}_{l-1} - \hat{\mathbf{x}}_{l-1} \quad \text{(Residual Input for next block)} \\
+    \hat{\mathbf{y}} = \sum_{l=1}^{L} \hat{\mathbf{y}}_l \quad \text{(Hierarchical Sum)}
+
+Internally, each block projects the input via a multilayer perceptron (MLP) to produce
+expansion coefficients $\mathbf{\theta}_l$. These coefficients generate the backcast
+and forecast vectors via basis functions $g$:
+
+.. math::
+    \hat{\mathbf{y}}_l = \mathbf{V}_l \cdot g^f(\mathbf{\theta}_l^f, t), \quad
+    \hat{\mathbf{x}}_l = \mathbf{U}_l \cdot g^b(\mathbf{\theta}_l^b, t)
+
+Where:
+- For **Trend Stacks**: Basis functions $g$ are polynomials of small degree $p$ (modeling
+  slowly varying components).
+- For **Seasonality Stacks**: Basis functions $g$ are Fourier series (modeling cyclical
+  components).
+- For **Generic Stacks**: The functions are learned directly from the data.
+
+References
+----------
+Oreshkin, B. N., Carpov, D., Chapados, N., & Bengio, Y. (2019).
+N-BEATS: Neural basis expansion analysis for interpretable time series forecasting.
+In International Conference on Learning Representations (ICLR).
 """
 
 import os
@@ -31,9 +78,12 @@ import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
+from dl_techniques.models.nbeats import create_nbeats_model
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
-from dl_techniques.models.nbeats.model import create_nbeats_model
 from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
+
+from dl_techniques.analyzer import AnalysisConfig
+from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
 # ---------------------------------------------------------------------
 
@@ -84,7 +134,7 @@ class NBeatsTrainingConfig:
     hidden_layer_units: int = 128
     use_normalization: bool = True  # Model internal normalization layers
     use_bias: bool = True
-    activation: str = "relu"
+    activation: str = "gelu"
 
     # Training configuration
     epochs: int = 150
@@ -93,7 +143,7 @@ class NBeatsTrainingConfig:
     learning_rate: float = 1e-4
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adam'
-    primary_loss: Union[str, keras.losses.Loss] = "mae"
+    primary_loss: Union[str, keras.losses.Loss] = "mase_loss"
     mase_seasonal_periods: int = 1
 
     # Learning rate schedule with warmup
@@ -125,6 +175,11 @@ class NBeatsTrainingConfig:
     plot_top_k_patterns: int = 12
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
+
+    # DEEP ANALYSIS CONFIGURATION
+    perform_deep_analysis: bool = True
+    analysis_frequency: int = 10
+    analysis_start_epoch: int = 1
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
@@ -616,7 +671,7 @@ class NBeatsTrainer:
 
             losses = [
                 forecast_loss,
-                keras.losses.MeanAbsoluteError(name="residual_loss")
+                keras.losses.MeanAbsoluteError(name="residual_loss", reduction="mean")
             ]
             loss_weights = [1.0, self.config.reconstruction_loss_weight]
             metrics = [
@@ -690,6 +745,31 @@ class NBeatsTrainer:
             keras.callbacks.TerminateOnNaN()
         ]
 
+        # --- DEEP MODEL ANALYSIS CALLBACK ---
+        if self.config.perform_deep_analysis:
+            logger.info("Adding Deep Model Analysis (Weights/Spectral) callback.")
+
+            # Configure analysis (Data-free for speed during training loops)
+            analysis_config = AnalysisConfig(
+                analyze_weights=True,
+                analyze_spectral=True, # Spectral analysis (WeightWatcher)
+                analyze_calibration=False, # Skip data-dependent analyses
+                analyze_information_flow=False,
+                analyze_training_dynamics=False,
+                verbose=False
+            )
+
+            analysis_dir = os.path.join(exp_dir, 'deep_analysis')
+
+            analyzer_cb = EpochAnalyzerCallback(
+                output_dir=analysis_dir,
+                analysis_config=analysis_config,
+                start_epoch=self.config.analysis_start_epoch,
+                epoch_frequency=self.config.analysis_frequency,
+                model_name="N-BEATS"
+            )
+            callbacks.append(analyzer_cb)
+
         history = model.fit(
             data_pipeline['train_ds'],
             validation_data=data_pipeline['val_ds'],
@@ -741,7 +821,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forecast_length", type=int, default=24)
 
     # Training Loop
-    parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--steps_per_epoch", type=int, default=1000)
 
@@ -757,9 +837,18 @@ def parse_args() -> argparse.Namespace:
 
     # N-BEATS Structure
     parser.add_argument("--stack_types", nargs='+', default=["trend", "seasonality", "generic"])
-    parser.add_argument("--hidden_layer_units", type=int, default=128)
+    parser.add_argument("--hidden_layer_units", type=int, default=256)
     parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5,
                         help="Weight for backcast reconstruction loss (default: 0.5)")
+
+    # Deep Analysis (ModelAnalyzer)
+    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false",
+                        help="Disable periodic deep model analysis (WeightWatcher, etc).")
+    parser.set_defaults(perform_deep_analysis=True)
+    parser.add_argument("--analysis_frequency", type=int, default=10,
+                        help="Frequency (in epochs) to run deep model analysis.")
+    parser.add_argument("--analysis_start_epoch", type=int, default=1,
+                        help="Epoch to start running deep model analysis.")
 
     return parser.parse_args()
 
@@ -783,7 +872,11 @@ def main() -> None:
         gradient_clip_norm=args.gradient_clip_norm,
         # Data
         normalize_per_instance=args.normalize_per_instance,
-        reconstruction_loss_weight=args.reconstruction_loss_weight
+        reconstruction_loss_weight=args.reconstruction_loss_weight,
+        # Analysis config
+        perform_deep_analysis=args.perform_deep_analysis,
+        analysis_frequency=args.analysis_frequency,
+        analysis_start_epoch=args.analysis_start_epoch
     )
 
     ts_config = TimeSeriesConfig(
