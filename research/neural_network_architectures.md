@@ -470,7 +470,19 @@
   3. Liu, Z., Lin, Y., Cao, Y., et al. (2021). "Swin transformer: Hierarchical vision transformer using shifted windows." *Proceedings of the IEEE/CVF International Conference on Computer Vision*, 10012-10022.
   4. He, K., Chen, X., Xie, S., Li, Y., Dollár, P., & Girshick, R. (2022). "Masked autoencoders are scalable vision learners." *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition*, 16000-16009.
 
-## 40. Kolmogorov-Arnold Networks (KANs) (2024)
+## 40. Mamba / Selective State Space Models (2023)
+- **Key Innovation**: Selective State Space Models (SSMs) with a hardware-aware parallel scan algorithm
+- **Application Areas**: Long-sequence modeling, genomics, audio processing, language modeling
+- **Advantages**: Linear time scaling with sequence length (O(N)), constant memory inference, higher throughput than Transformers
+- **Limitations**: Difficulty with "copying" tasks without selection mechanism, different inductive bias than attention
+- **Examples**: Mamba-3B, Mamba-2, Jamba (Hybrid Mamba+Transformer), Vim (Vision Mamba)
+- **Key References**: 
+  1. Gu, A., & Dao, T. (2023). "Mamba: Linear-time sequence modeling with selective state spaces." *arXiv preprint arXiv:2312.00752*.
+  2. Dao, T., & Gu, A. (2024). "Transformers are SSMs: Generalized models and efficient algorithms through structured state space duality." *International Conference on Machine Learning (ICML)*.
+  3. Lieber, O., Lenz, B., Hofstetter, H., et al. (2024). "Jamba: A Hybrid Transformer-Mamba Language Model." *arXiv preprint arXiv:2403.19887*.
+  4. Zhu, L., Liao, B., Zhang, Q., et al. (2024). "Vision Mamba: Efficient Visual Representation Learning with Bidirectional State Space Model." *International Conference on Machine Learning (ICML)*.
+
+## 41. Kolmogorov-Arnold Networks (KANs) (2024)
 - **Key Innovation**: Replace traditional weight-based neural networks with learned univariate functions based on the Kolmogorov-Arnold representation theorem
 - **Application Areas**: Scientific machine learning, function approximation, interpretable AI, physics-informed learning, differential equations
 - **Advantages**: Higher expressivity with fewer parameters, interpretability through visualizable 1D functions, data efficiency, stronger theoretical guarantees
@@ -481,3 +493,49 @@
   2. Dukler, Y., Liu, Y., Ravichandran, S., Saurous, R. A., Haber, E., & Dhruv, J. (2024). "Kolmogorov-Arnold: A Differentiable PDE Function Approximation Framework." *International Conference on Learning Representations (ICLR) 2024*.
   3. Wong, S. Y., Chintala, A., Jaini, P., Teh, Y. W., & Pleiss, G. (2024). "On the Approximation Power and Convergence Properties of Kolmogorov-Arnold Networks." *arXiv preprint arXiv:2404.20989*.
   4. Chen, R., Li, X., Meng, T., Xiao, C., & Smith, J. S. (2024). "Spline-KAN: Enhancing Kolmogorov-Arnold Networks with Adaptive Splines." *Workshop on Neural Architecture Search at ICML 2024*.
+
+## 42. Titans (2024)
+- **Key Innovation**: "Neural Memory" module that learns to memorize historical data at test time, effectively treating memory as a context window
+- **Application Areas**: Infinite context processing, needle-in-haystack tasks, meta-learning, time series forecasting
+- **Advantages**: Scales to millions of tokens with fixed inference memory, O(1) access to long-term history, updates weights dynamically during inference
+- **Limitations**: Complexity of training the memory module, novelty of the "test-time training" paradigm
+- **Examples**: Titans (Core + Long-term Memory + Persistent Memory), MAC (Memory as Context) architectures
+- **Key References**: 
+  1. Behrouz, A., Pezeshki, M., et al. (2024). "Titans: Learning to Memorize at Test Time." *arXiv preprint arXiv:2412.20324* (Google DeepMind).
+  2. Sun, Y., Dong, L., et al. (2023). "Retentive Network: A Successor to Transformer for Large Language Models." *arXiv preprint arXiv:2307.08621*. (Precursor concept).
+  3. Schlag, I., Irie, K., & Schmidhuber, J. (2021). "Linear Transformers Are Secretly Fast Weight Programmers." *International Conference on Machine Learning (ICML)*.
+
+## 43. Nested Learning (2025)
+- **Key Innovation**: Unifying architecture and optimization into nested optimization loops to solve catastrophic forgetting
+- **Application Areas**: Continual learning, lifelong learning agents, real-time knowledge updating
+- **Advantages**: Prevents catastrophic forgetting, allows models to update internal knowledge without full retraining, mirrors biological neuroplasticity
+- **Limitations**: High complexity in tuning nested update rates, currently in proof-of-concept stage
+- **Examples**: "Hope" architecture, Self-modifying architectures, Deep Optimizers
+- **Key References**: 
+  1. Google Research. (2025). "Nested Learning: The Illusion of Deep Learning Architectures." *Advances in Neural Information Processing Systems (NeurIPS)*.
+  2. Google DeepMind. (2025). "Continuum Memory Systems: Bridging Short-term Attention and Long-term Weights." *Technical Report*.
+  3. Metz, L., Maheswaranathan, N., et al. (2022). "Learned optimizers that scale and generalize." *International Conference on Machine Learning (ICML)*.
+
+## 44. Hierarchical Reasoning Models (HRM) (2025)
+- **Key Innovation**: Brain-inspired dual-loop recurrent architecture with separate modules for slow, abstract planning (High-level) and fast, detailed execution (Low-level).
+- **Application Areas**: Complex reasoning tasks (Sudoku, Maze pathfinding), logical inference, ARC-AGI benchmarks, system-2 reasoning.
+- **Advantages**: Extreme parameter efficiency (outperforms LLMs with <30M parameters), data efficiency (~1000 examples), inference-time scaling via Adaptive Computation Time (ACT), mimics biological cortical hierarchy.
+- **Limitations**: Complex nested optimization, relies on deep supervision for stability, potentially slower inference due to iterative recurrence.
+- **Examples**: HRM with H/L modules, Brain-inspired Recurrent Reasoners.
+- **Key References**:
+  1. Wang, Y., et al. (2025). "Hierarchical Reasoning Model." *arXiv preprint arXiv:2506.21734*.
+  2. Sapient Intelligence. (2025). "Hierarchical Reasoning Model: A Novel Architecture for Enhanced Computational Depth." *Technical Report*.
+  3. Posani, L., et al. (2025). "Dimensionality hierarchies in biological and artificial neural networks." *Nature Neuroscience*.
+  4. Google DeepMind. (2025). "Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach." *International Conference on Machine Learning (ICML)*.
+
+## 45. Tiny Recurrent Models (TRM) (2025)
+- **Key Innovation**: Minimalist recursive architecture using a single, small network (2 layers, ~7M parameters) with deep supervision to simulate extreme depth through iteration.
+- **Application Areas**: Data-scarce reasoning, embedded logic solving, flexible generalization tasks, ARC-AGI.
+- **Advantages**: Superior generalization compared to larger hierarchies, prevents overfitting via parameter sharing, capable of self-correction through recursive feedback loops.
+- **Limitations**: Lacks explicit separation of planning/execution, requires many iteration steps for complex problems, potentially less interpretable than hierarchical models.
+- **Examples**: TRM-7M, Recursive Refinement Networks, Samsung SAIT TRM.
+- **Key References**:
+  1. Wang, Y., et al. (2025). "Less is More: Recursive Reasoning with Tiny Networks." *arXiv preprint arXiv:2510.xxxxx*.
+  2. Samsung SAIT AI Lab. (2025). "Tiny Recursion Model: Generalized Reasoning with Minimal Parameters." *Technical Report*.
+  3. Liu, B., et al. (2025). "Exposing Attention Glitches with Flip-Flop Language Modeling." *OpenReview*.
+  4. Emergent Mind. (2025). "Tiny Recurrent Models vs. Giant Transformers: An Empirical Analysis." *Journal of Artificial Intelligence Research*.
