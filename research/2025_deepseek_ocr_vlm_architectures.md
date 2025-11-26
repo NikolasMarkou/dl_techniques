@@ -1,4 +1,3 @@
-
 # A Technical Guide to Vision Encoder Architectures in Modern VLMs
 
 ## Table of Contents

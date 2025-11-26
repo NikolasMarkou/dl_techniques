@@ -1,7 +1,3 @@
-Here is the refined and modernized version of the RBF Neurosymbolic Guide. It integrates the cutting-edge breakthroughs from the 2024-2025 SOTA report—specifically **Sparse Autoencoders (SAEs)**, **Finite Scalar Quantization (FSQ)**, and **Object-Centric Learning (DINOSAUR)**—transforming the traditional RBF approach into a state-of-the-art neurosymbolic architecture.
-
----
-
 # Extracting Neurosymbols with Sparse RBF Networks (v2.0)
 ## A Modernized Guide Integrating 2024-2025 SOTA
 
