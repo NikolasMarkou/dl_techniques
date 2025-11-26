@@ -192,7 +192,7 @@ import random
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
@@ -253,6 +253,7 @@ class NBeatsTrainingConfig:
     train_ratio: float = 0.7
     val_ratio: float = 0.15
     test_ratio: float = 0.15
+    num_realizations_per_pattern: int = 10  # Pre-generated diversity
 
     # N-BEATS specific configuration
     backcast_length: int = 168
@@ -293,7 +294,7 @@ class NBeatsTrainingConfig:
     # Regularization
     kernel_regularizer_l2: float = 1e-5
     reconstruction_loss_weight: float = 0.5
-    dropout_rate: float = 0.1
+    dropout_rate: float = 0.25
 
     # Pattern selection & Data Processing
     max_patterns: Optional[int] = None
@@ -330,7 +331,9 @@ class NBeatsTrainingConfig:
 
 
 class MultiPatternDataProcessor:
-    """Streams multi-pattern time series data using Python generators."""
+    """
+    Manages high-performance data loading using pre-generated Tensors and TF Graph sampling.
+    """
 
     def __init__(
             self,
@@ -343,180 +346,174 @@ class MultiPatternDataProcessor:
         self.ts_generator = generator
         self.selected_patterns = selected_patterns
         self.pattern_to_category = pattern_to_category
-        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
+        
+        # Prepare sampling weights
+        self.pattern_names, self.sampling_weights = self._prepare_weights()
+        
+        # Pre-load data into Tensors (Train/Val/Test)
+        self.datasets = self._preload_data_tensors()
 
-    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
-        """Prepare lists for weighted random pattern selection."""
+    def _prepare_weights(self) -> Tuple[List[str], np.ndarray]:
+        """Prepare normalized probability weights for each pattern."""
         patterns, weights = [], []
         for pattern_name in self.selected_patterns:
-            category = self.pattern_to_category[pattern_name]
+            category = self.pattern_to_category.get(pattern_name, "unknown")
             weight = self.config.category_weights.get(category, 1.0)
             patterns.append(pattern_name)
             weights.append(weight)
 
-        weights_sum = sum(weights)
-        normalized_weights = [w / weights_sum for w in weights]
+        total_weight = sum(weights)
+        if total_weight > 0:
+            normalized_weights = np.array([w / total_weight for w in weights], dtype=np.float32)
+        else:
+            normalized_weights = np.ones(len(weights), dtype=np.float32) / len(weights)
+            
         return patterns, normalized_weights
 
-    def _normalize_sequence(
-            self,
-            series: np.ndarray,
-            epsilon: float = 1e-8
-    ) -> Tuple[np.ndarray, float, float]:
+    def _normalize_sequence(self, series: np.ndarray) -> np.ndarray:
+        """Normalize sequence to [-1, 1] range."""
+        if not self.config.normalize_per_instance:
+            return series
+
+        s_min = np.min(series)
+        s_max = np.max(series)
+        rng = s_max - s_min
+        if rng < 1e-7:
+            return np.zeros_like(series)
+        return 2.0 * (series - s_min) / rng - 1.0
+
+    def _preload_data_tensors(self) -> Dict[str, tf.Tensor]:
         """
-        Normalize sequence to [-1, 1] range using min-max scaling.
-
-        Args:
-            series: Input time series with shape (n_samples, features).
-            epsilon: Small constant for numerical stability.
-
-        Returns:
-            Tuple of (normalized_series, series_min, series_max).
+        Generates and caches data tensors in memory.
+        Structure: (NumPatterns, NumRealizations, TimeSteps, 1)
         """
-        series_min = np.min(series)
-        series_max = np.max(series)
-        series_range = series_max - series_min
+        logger.info("Pre-loading and normalizing dataset into memory Tensors...")
+        
+        num_patterns = len(self.pattern_names)
+        num_realizations = self.config.num_realizations_per_pattern
+        
+        # Generate one sample to get length
+        dummy = self.ts_generator.generate_task_data(self.pattern_names[0])
+        total_len = len(dummy)
+        
+        # Calculate split indices
+        idx_train = int(total_len * self.config.train_ratio)
+        idx_val = int(total_len * (self.config.train_ratio + self.config.val_ratio))
+        
+        # Containers
+        train_buffer = np.zeros((num_patterns, num_realizations, idx_train, 1), dtype=np.float32)
+        val_buffer = np.zeros((num_patterns, num_realizations, idx_val - idx_train, 1), dtype=np.float32)
+        test_buffer = np.zeros((num_patterns, num_realizations, total_len - idx_val, 1), dtype=np.float32)
+        
+        for p_idx, pattern_name in enumerate(self.pattern_names):
+            for r_idx in range(num_realizations):
+                # Generate fresh realization
+                raw_series = self.ts_generator.generate_task_data(pattern_name)
+                
+                # Normalize full series (consistent with original logic)
+                norm_series = self._normalize_sequence(raw_series).reshape(-1, 1)
+                
+                # Split
+                train_buffer[p_idx, r_idx] = norm_series[:idx_train]
+                val_buffer[p_idx, r_idx] = norm_series[idx_train:idx_val]
+                test_buffer[p_idx, r_idx] = norm_series[idx_val:]
+                
+        logger.info(f"Data tensors ready. Train shape: {train_buffer.shape}, Size: {train_buffer.nbytes / 1e6:.1f} MB")
+        
+        return {
+            'train': tf.constant(train_buffer),
+            'val': tf.constant(val_buffer),
+            'test': tf.constant(test_buffer)
+        }
 
-        if series_range < epsilon:
-            return np.zeros_like(series), series_min, series_max
-
-        normalized = 2.0 * (series - series_min) / series_range - 1.0
-        return normalized, series_min, series_max
-
-    def _sample_window(
-            self,
-            series: np.ndarray,
-            backcast_length: int,
-            forecast_length: int
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _create_tf_dataset(self, data_tensor: tf.Tensor, is_training: bool = True) -> tf.data.Dataset:
         """
-        Sample a random window from the series for training.
-
-        Args:
-            series: Complete time series with shape (n_samples, features).
-            backcast_length: Length of the input window.
-            forecast_length: Length of the forecast window.
-
-        Returns:
-            Tuple of (x_window, y_window) for model input/output.
+        Creates a pure TensorFlow dataset pipeline using graph-based sampling.
         """
-        total_length = backcast_length + forecast_length
-        if len(series) < total_length:
-            raise ValueError(
-                f"Series length {len(series)} is less than required {total_length}"
-            )
+        # Tensor constants
+        data_const = data_tensor
+        weights_const = tf.constant(self.sampling_weights) # (NumPatterns,)
+        log_weights = tf.math.log(tf.reshape(weights_const, (1, -1))) # (1, NumPatterns) for categorical
+        
+        num_patterns = data_tensor.shape[0]
+        num_realizations = data_tensor.shape[1]
+        time_steps = data_tensor.shape[2]
+        
+        backcast_len = self.config.backcast_length
+        forecast_len = self.config.forecast_length
+        window_size = backcast_len + forecast_len
+        input_dim = self.config.input_dim
+        
+        use_reconstruction = (self.config.reconstruction_loss_weight > 0.0)
 
-        max_start_idx = len(series) - total_length
-        start_idx = np.random.randint(0, max_start_idx + 1)
+        @tf.function
+        def sample_window(_):
+            # 1. Sample Pattern Index (Weighted)
+            # tf.random.categorical returns int64
+            p_idx = tf.random.categorical(log_weights, 1, dtype=tf.int32)[0, 0]
+            
+            # 2. Sample Realization Index (Uniform)
+            r_idx = tf.random.uniform((), maxval=num_realizations, dtype=tf.int32)
+            
+            # 3. Sample Start Time (Uniform valid range)
+            max_start = time_steps - window_size
+            # Ensure we have enough data (robustness check)
+            if max_start <= 0:
+                # Fallback to zeros if segment is too short (unlikely with valid config)
+                return (tf.zeros((backcast_len, input_dim)), 
+                        tf.zeros((forecast_len, input_dim)))
 
-        x_window = series[start_idx:start_idx + backcast_length]
-        y_window = series[start_idx + backcast_length:start_idx + total_length]
+            start_idx = tf.random.uniform((), maxval=max_start + 1, dtype=tf.int32)
+            
+            # 4. Slice Window
+            # Shape: (window_size, 1)
+            full_window = data_const[p_idx, r_idx, start_idx : start_idx + window_size]
+            
+            x = full_window[:backcast_len]
+            y = full_window[backcast_len:]
+            
+            # --- CRITICAL: Explicitly set static shapes to avoid NoneType errors in MASELoss ---
+            x.set_shape([backcast_len, input_dim])
+            y.set_shape([forecast_len, input_dim])
 
-        return x_window, y_window
-
-    def _generate_data(self, batch_size: int) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]], None, None]:
-        """
-        Infinite generator for streaming time series data.
-
-        Args:
-            batch_size: Number of samples per batch.
-
-        Yields:
-            Tuples of (X_batch, y_structure) matching the model output.
-        """
-        while True:
-            X_batch = np.zeros(
-                (batch_size, self.config.backcast_length, self.config.input_dim),
-                dtype=np.float32
-            )
-            y_batch = np.zeros(
-                (batch_size, self.config.forecast_length, self.config.input_dim),
-                dtype=np.float32
-            )
-
-            for i in range(batch_size):
-                pattern_name = np.random.choice(
-                    self.weighted_patterns,
-                    p=self.weights
-                )
-
-                # Use the existing generator instance instead of re-initializing
-                series = self.ts_generator.generate_task_data(pattern_name)
-
-                if self.config.normalize_per_instance:
-                    series, _, _ = self._normalize_sequence(series)
-
-                x_window, y_window = self._sample_window(
-                    series,
-                    self.config.backcast_length,
-                    self.config.forecast_length
-                )
-
-                X_batch[i] = x_window
-                y_batch[i] = y_window
-
-            if self.config.reconstruction_loss_weight > 0.0:
-                # Provide zero target for reconstruction residual
-                # Shape: (batch, backcast_length * input_dim) - flattened in N-BEATS output
-                residual_batch = np.zeros(
-                    (batch_size, self.config.backcast_length * self.config.input_dim),
-                    dtype=np.float32
-                )
-                yield X_batch, (y_batch, residual_batch)
+            # 5. Format Output
+            if use_reconstruction:
+                # Flatten x for residual target
+                rec_target = tf.reshape(x, (-1,))
+                rec_target.set_shape([backcast_len * input_dim])
+                return x, (y, rec_target)
             else:
-                yield X_batch, y_batch
+                return x, y
+
+        # Create infinite dataset of dummy signals to drive the sampling
+        dataset = tf.data.Dataset.from_tensors(0).repeat()
+        
+        # Parallel mapping on the graph
+        dataset = dataset.map(sample_window, num_parallel_calls=tf.data.AUTOTUNE)
+        
+        if is_training:
+            # Shuffle simply decorrelates the stream slightly, 
+            # though random sampling above already does that.
+            # Batching is the main operation.
+            dataset = dataset.batch(self.config.batch_size)
+        else:
+            dataset = dataset.batch(self.config.batch_size)
+            
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+        return dataset
 
     def prepare_datasets(self) -> Dict[str, Any]:
         """
         Prepare TensorFlow datasets for training, validation, and testing.
-
-        Returns:
-            Dictionary containing datasets and step counts.
         """
         val_steps = max(1, int(self.config.steps_per_epoch * self.config.val_ratio))
         test_steps = max(1, int(self.config.steps_per_epoch * self.config.test_ratio))
 
-        train_gen = self._generate_data(self.config.batch_size)
-        val_gen = self._generate_data(self.config.batch_size)
-        test_gen = self._generate_data(self.config.batch_size)
+        train_ds = self._create_tf_dataset(self.datasets['train'], is_training=True)
+        val_ds = self._create_tf_dataset(self.datasets['val'], is_training=False)
+        test_ds = self._create_tf_dataset(self.datasets['test'], is_training=False)
 
-        x_spec = tf.TensorSpec(
-            shape=(self.config.batch_size, self.config.backcast_length, self.config.input_dim),
-            dtype=tf.float32
-        )
-        y_spec = tf.TensorSpec(
-            shape=(self.config.batch_size, self.config.forecast_length, self.config.input_dim),
-            dtype=tf.float32
-        )
-
-        if self.config.reconstruction_loss_weight > 0.0:
-            residual_spec = tf.TensorSpec(
-                shape=(self.config.batch_size, self.config.backcast_length * self.config.input_dim),
-                dtype=tf.float32
-            )
-            output_signature = (x_spec, (y_spec, residual_spec))
-        else:
-            output_signature = (x_spec, y_spec)
-
-        train_ds = tf.data.Dataset.from_generator(
-            lambda: train_gen,
-            output_signature=output_signature
-        ).prefetch(tf.data.AUTOTUNE)
-
-        val_ds = tf.data.Dataset.from_generator(
-            lambda: val_gen,
-            output_signature=output_signature
-        ).prefetch(tf.data.AUTOTUNE)
-
-        test_ds = tf.data.Dataset.from_generator(
-            lambda: test_gen,
-            output_signature=output_signature
-        ).prefetch(tf.data.AUTOTUNE)
-
-        logger.info("Data pipeline created:")
-        logger.info(f"  Training: {self.config.steps_per_epoch} steps/epoch")
-        logger.info(f"  Validation: {val_steps} steps")
-        logger.info(f"  Test: {test_steps} steps")
+        logger.info("TF Graph Data Pipeline ready.")
 
         return {
             'train_ds': train_ds,
@@ -573,7 +570,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
             # Normalize entire sequence first (consistent with train_advanced philosophy)
             if self.config.normalize_per_instance:
-                data, _, _ = self.processor._normalize_sequence(data)
+                data = self.processor._normalize_sequence(data)
 
             # Slice test split
             start_idx_split = int(start_ratio * len(data))

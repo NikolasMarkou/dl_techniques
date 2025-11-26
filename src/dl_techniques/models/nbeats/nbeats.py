@@ -69,9 +69,7 @@ from dl_techniques.layers.time_series.nbeats_blocks import (
     GenericBlock, TrendBlock, SeasonalityBlock
 )
 
-
 # ---------------------------------------------------------------------
-
 
 @keras.saving.register_keras_serializable()
 class NBeatsNet(keras.Model):
@@ -316,10 +314,9 @@ class NBeatsNet(keras.Model):
         """
         Create all N-BEATS block stacks.
 
-        Creates blocks and dropout layers in __init__ as required by modern
+        Creates blocks in __init__ as required by modern
         Keras 3 patterns. Blocks will be built later in build() method.
         """
-        dropout_counter = 0
 
         for stack_id, (stack_type, theta_dim) in enumerate(
                 zip(self.stack_types, self.thetas_dim)
@@ -343,6 +340,7 @@ class NBeatsNet(keras.Model):
                     'kernel_initializer': self.kernel_initializer,
                     'kernel_regularizer': self.kernel_regularizer,
                     'theta_regularizer': self.theta_regularizer,
+                    'dropout_rate': self.dropout_rate,
                     'name': block_name
                 }
 
@@ -355,16 +353,6 @@ class NBeatsNet(keras.Model):
                     block = SeasonalityBlock(**block_kwargs)
 
                 stack_blocks.append(block)
-
-                # Create dropout layer if needed
-                if self.dropout_rate > 0.0:
-                    self.dropout_layers.append(
-                        layers.Dropout(
-                            self.dropout_rate,
-                            name=f"dropout_{dropout_counter}"
-                        )
-                    )
-                    dropout_counter += 1
 
             self.blocks.append(stack_blocks)
 
@@ -400,10 +388,6 @@ class NBeatsNet(keras.Model):
         for stack_blocks in self.blocks:
             for block in stack_blocks:
                 block.build(block_input_shape)
-
-        # Build dropout layers
-        for dropout_layer in self.dropout_layers:
-            dropout_layer.build(block_input_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -474,7 +458,6 @@ class NBeatsNet(keras.Model):
         )
 
         # Process through all stacks and blocks
-        dropout_idx = 0
         for stack_blocks in self.blocks:
             for block in stack_blocks:
                 # Block produces backcast (explanation) and forecast (prediction)
@@ -486,13 +469,6 @@ class NBeatsNet(keras.Model):
 
                 # Accumulate forecast
                 forecast_sum = forecast_sum + forecast
-
-                # Apply dropout between blocks if configured
-                if self.dropout_rate > 0.0 and dropout_idx < len(self.dropout_layers):
-                    residual = self.dropout_layers[dropout_idx](
-                        residual, training=training
-                    )
-                    dropout_idx += 1
 
         # Reshape forecast to 3D
         forecast_3d = ops.reshape(

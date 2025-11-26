@@ -95,17 +95,25 @@ class NBeatsBlock(keras.layers.Layer):
            ↓
     (Optional) RMSNorm
            ↓
+    (Optional) Dropout
+           ↓
     Dense₂(units, activation)
            ↓
     (Optional) RMSNorm
+           ↓
+    (Optional) Dropout
            ↓
     Dense₃(units, activation)
            ↓
     (Optional) RMSNorm
            ↓
+    (Optional) Dropout
+           ↓
     Dense₄(units, activation)
            ↓
     (Optional) RMSNorm
+           ↓
+    (Optional) Dropout
            ↓
     ┌──────────────────────────────┬───────────────────────────────┐
     ↓                              ↓                               ↓
@@ -136,6 +144,8 @@ class NBeatsBlock(keras.layers.Layer):
         output_dim: Integer, number of output features (channels). Defaults to 1.
         share_weights: Boolean, whether to share weights across blocks in the same stack.
             Currently stored but not implemented. Defaults to False.
+        dropout_rate: Float, dropout rate (0 to 1) to apply after each dense layer in the stack.
+            Defaults to 0.0 (no dropout).
         activation: String or callable, activation function for hidden layers.
             Defaults to 'silu' for better gradient flow than ReLU.
         use_bias: Boolean, whether to add bias to the dense layers. Defaults to True.
@@ -160,6 +170,7 @@ class NBeatsBlock(keras.layers.Layer):
     Attributes:
         dense1, dense2, dense3, dense4: Fully connected feature extraction layers.
         theta_backcast, theta_forecast: Parameter generation layers.
+        dropout1, dropout2, dropout3, dropout4: Dropout layers (if rate > 0).
 
     Example:
         ```python
@@ -169,8 +180,7 @@ class NBeatsBlock(keras.layers.Layer):
             thetas_dim=32,
             backcast_length=168,
             forecast_length=24,
-            input_dim=5,
-            output_dim=5
+            dropout_rate=0.1
         )
 
         inputs = keras.Input(shape=(168 * 5,))
@@ -187,6 +197,7 @@ class NBeatsBlock(keras.layers.Layer):
             input_dim: int = 1,
             output_dim: int = 1,
             share_weights: bool = False,
+            dropout_rate: float = 0.0,
             activation: Union[str, callable] = 'relu',
             use_bias: bool = False,
             use_normalization: bool = False,
@@ -211,6 +222,8 @@ class NBeatsBlock(keras.layers.Layer):
             raise ValueError(f"input_dim must be positive, got {input_dim}")
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
         # Warn if backcast_length might be too short
         if backcast_length < 2 * forecast_length:
@@ -227,6 +240,7 @@ class NBeatsBlock(keras.layers.Layer):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.share_weights = share_weights
+        self.dropout_rate = dropout_rate
         self.activation = activation
         self.use_bias = use_bias
         self.use_normalization = use_normalization
@@ -243,6 +257,15 @@ class NBeatsBlock(keras.layers.Layer):
             self.norm4 = RMSNorm(axis=-1, use_scale=False)
         else:
             self.norm1 = self.norm2 = self.norm3 = self.norm4 = None
+
+        # Conditionally create dropout layers
+        if self.dropout_rate > 0:
+            self.dropout1 = keras.layers.Dropout(self.dropout_rate)
+            self.dropout2 = keras.layers.Dropout(self.dropout_rate)
+            self.dropout3 = keras.layers.Dropout(self.dropout_rate)
+            self.dropout4 = keras.layers.Dropout(self.dropout_rate)
+        else:
+            self.dropout1 = self.dropout2 = self.dropout3 = self.dropout4 = None
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         self.dense1 = keras.layers.Dense(
@@ -339,18 +362,33 @@ class NBeatsBlock(keras.layers.Layer):
             raise ValueError(f"Expected 2D input, got shape: {input_shape}")
 
         # Pass through four fully connected layers
+        # Stack 1
         x = self.dense1(inputs, training=training)
         if self.use_normalization:
             x = self.norm1(x)
+        if self.dropout_rate > 0:
+            x = self.dropout1(x, training=training)
+
+        # Stack 2
         x = self.dense2(x, training=training)
         if self.use_normalization:
             x = self.norm2(x)
+        if self.dropout_rate > 0:
+            x = self.dropout2(x, training=training)
+
+        # Stack 3
         x = self.dense3(x, training=training)
         if self.use_normalization:
             x = self.norm3(x)
+        if self.dropout_rate > 0:
+            x = self.dropout3(x, training=training)
+
+        # Stack 4
         x = self.dense4(x, training=training)
         if self.use_normalization:
             x = self.norm4(x)
+        if self.dropout_rate > 0:
+            x = self.dropout4(x, training=training)
 
         # Generate theta parameters
         # Shape: (batch_size, thetas_dim * dim)
@@ -426,6 +464,7 @@ class NBeatsBlock(keras.layers.Layer):
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
             'share_weights': self.share_weights,
+            'dropout_rate': self.dropout_rate,
             'activation': self.activation,
             'use_bias': self.use_bias,
             'use_normalization': self.use_normalization,
