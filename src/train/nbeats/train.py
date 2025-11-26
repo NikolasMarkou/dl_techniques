@@ -1,11 +1,18 @@
 """
-Comprehensive N-BEATS Training Framework for Multiple Time Series Patterns
+Comprehensive N-BEATS Training Framework - Normalized & Unified
+
+This framework trains the N-BEATS architecture with:
+1. Robust Instance Normalization (-1, +1 scaling based on backcast).
+2. High-entropy reservoir sampling (Shuffling like TiRex).
+3. Infinite Data Streams (Prevents OUT_OF_RANGE errors).
+4. Diverse Visualization (Ensures plots show different patterns).
 """
 
 import os
 import json
 import math
 import random
+import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
@@ -25,7 +32,7 @@ import tensorflow as tf
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
-from dl_techniques.models.nbeats.model import NBeatsNet, create_nbeats_model
+from dl_techniques.models.nbeats.model import create_nbeats_model
 from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
 
 # ---------------------------------------------------------------------
@@ -50,7 +57,7 @@ set_random_seeds(42)
 
 @dataclass
 class NBeatsTrainingConfig:
-    """Configuration dataclass for N-BEATS training on multiple patterns."""
+    """Configuration dataclass for N-BEATS training."""
     # General experiment configuration
     result_dir: str = "results"
     save_results: bool = True
@@ -67,45 +74,42 @@ class NBeatsTrainingConfig:
     # N-BEATS specific configuration
     backcast_length: int = 168
     forecast_length: int = 24
-    input_dim: int = 1  # Explicitly define input dimension
+    input_dim: int = 1
 
     # Model architecture
     stack_types: List[str] = field(
         default_factory=lambda: ["trend", "seasonality", "generic"]
     )
-    nb_blocks_per_stack: int = 2
+    nb_blocks_per_stack: int = 3
     hidden_layer_units: int = 128
-    use_normalization: bool = True
+    use_normalization: bool = True  # Model internal normalization layers
     use_bias: bool = True
     activation: str = "relu"
 
     # Training configuration
     epochs: int = 150
     batch_size: int = 128
-    steps_per_epoch: int = 500
+    steps_per_epoch: int = 1000
     learning_rate: float = 1e-4
     gradient_clip_norm: float = 1.0
     optimizer: str = 'adam'
-    primary_loss: Union[str, keras.losses.Loss] = keras.losses.MeanAbsoluteError(
-        reduction="mean"
-    )
+    primary_loss: Union[str, keras.losses.Loss] = "mae"
     mase_seasonal_periods: int = 1
 
     # Learning rate schedule with warmup
     use_warmup: bool = True
-    warmup_steps: int = 1000
+    warmup_steps: int = 5000
     warmup_start_lr: float = 1e-6
 
     # Regularization
-    kernel_regularizer_l2: float = 0.0
-    reconstruction_loss_weight: float = 0.0
-    dropout_rate: float = 0.0
+    kernel_regularizer_l2: float = 1e-5
+    reconstruction_loss_weight: float = 0.5
+    dropout_rate: float = 0.1
 
-    # Pattern selection
+    # Pattern selection & Data Processing
     max_patterns: Optional[int] = None
-    max_patterns_per_category: int = 10
-    min_data_length: int = 2000
-    normalize_per_instance: bool = False
+    max_patterns_per_category: int = 100
+    normalize_per_instance: bool = True  # Enforce [-1, 1] scaling
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -121,12 +125,6 @@ class NBeatsTrainingConfig:
     plot_top_k_patterns: int = 12
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
-
-    # Data augmentation configuration
-    multiplicative_noise_std: float = 0.0
-    additive_noise_std: float = 0.0
-    enable_multiplicative_noise: bool = False
-    enable_additive_noise: bool = False
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
@@ -170,99 +168,100 @@ class MultiPatternDataProcessor:
             normalized_weights = [1.0 / num_patterns] * num_patterns
         return patterns, normalized_weights
 
+    def _normalize_window(
+        self, backcast: np.ndarray, forecast: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Normalize the instance to the range [-1, +1] using Backcast statistics.
+        Formula: X_norm = (X - min) / (max - min) * 2 - 1
+        """
+        if not self.config.normalize_per_instance:
+            return backcast, forecast
+
+        # Calculate statistics from the backcast (history) ONLY
+        min_val = np.min(backcast)
+        max_val = np.max(backcast)
+        scale = max_val - min_val
+
+        # Avoid division by zero
+        if scale < 1e-7:
+            scale = 1.0
+
+        # Apply normalization to match range [-1, +1]
+        backcast_norm = ((backcast - min_val) / scale) * 2.0 - 1.0
+        forecast_norm = ((forecast - min_val) / scale) * 2.0 - 1.0
+
+        return backcast_norm.astype(np.float32), forecast_norm.astype(np.float32)
+
     def _training_generator(
-        self, forecast_length: int
+        self
     ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
         """
         Create an infinite generator for training data with high diversity.
-
-        Strategy:
-        1. Select a large mix of different patterns (e.g., 50).
-        2. Extract a small number of windows from each (e.g., 5).
-        3. Shuffle this pool thoroughly.
-        4. Yield.
-
-        This ensures that within the generator's buffer, there is no blocking.
         """
-        # Tuning for diversity:
-        # 50 patterns * 5 windows = 250 samples per refill.
-        # This ensures we don't dwell on one pattern for too long.
         patterns_to_mix = 50
         windows_per_pattern = 5
-
         buffer = []
 
         while True:
-            # If buffer is empty, refill it with a highly diverse mix
             if not buffer:
-                # 1. Select a large mix of patterns based on weights
-                selected_patterns = random.choices(
-                    self.weighted_patterns, self.weights, k=patterns_to_mix
-                )
+                # 1. Select a mix of patterns
+                try:
+                    selected_patterns = random.choices(
+                        self.weighted_patterns, self.weights, k=patterns_to_mix
+                    )
+                except IndexError:
+                    selected_patterns = self.selected_patterns
 
                 new_samples = []
 
                 for pattern_name in selected_patterns:
-                    # Generate fresh data
                     data = self.ts_generator.generate_task_data(pattern_name)
                     train_size = int(self.config.train_ratio * len(data))
                     train_data = data[:train_size]
 
-                    max_start_idx = max(
-                        len(train_data) - self.config.backcast_length - forecast_length, 0
-                    )
+                    total_len = self.config.backcast_length + self.config.forecast_length
+                    max_start_idx = len(train_data) - total_len
 
                     if max_start_idx <= 0:
                         continue
 
-                    # 2. Extract limited random windows to maximize variety
+                    # 2. Extract random windows
                     for _ in range(windows_per_pattern):
                         start_idx = random.randint(0, max_start_idx)
 
-                        backcast = train_data[
-                            start_idx: start_idx + self.config.backcast_length
-                        ]
-                        forecast = train_data[
-                            start_idx + self.config.backcast_length:
-                            start_idx + self.config.backcast_length + forecast_length
-                        ]
+                        backcast_raw = train_data[
+                            start_idx : start_idx + self.config.backcast_length
+                        ].reshape(-1, 1)
 
-                        backcast_out = backcast.astype(np.float32).reshape(-1, 1)
-                        forecast_out = forecast.astype(np.float32).reshape(-1, 1)
+                        forecast_raw = train_data[
+                            start_idx + self.config.backcast_length :
+                            start_idx + total_len
+                        ].reshape(-1, 1)
+
+                        # 3. Apply Instance Normalization [-1, 1]
+                        x, y = self._normalize_window(backcast_raw, forecast_raw)
 
                         if self.config.reconstruction_loss_weight > 0.0:
-                            # Residual target is strictly zero.
-                            # Shape: (backcast_len * input_dim, ) to match model output
-                            residual_target = np.zeros(
-                                (self.config.backcast_length * self.config.input_dim,),
-                                dtype=np.float32
-                            )
-                            new_samples.append(
-                                (backcast_out, (forecast_out, residual_target))
-                            )
+                            residual_target = x.flatten()
+                            new_samples.append((x, (y, residual_target)))
                         else:
-                            new_samples.append((backcast_out, forecast_out))
+                            new_samples.append((x, y))
 
-                # 3. Shuffle the refill batch to ensure local diversity
+                if not new_samples:
+                    continue
+
+                # 4. Shuffle the refill batch thoroughly
                 random.shuffle(new_samples)
                 buffer.extend(new_samples)
 
-                if not buffer:
-                    continue
-
-            # Yield one sample from the mixed buffer
             yield buffer.pop(0)
 
     def _evaluation_generator(
-            self,
-            forecast_length: int,
-            split: str
+            self, split: str
     ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
         """
-        Create an infinite repeating generator for validation or test data.
-
-        Shuffles the complete evaluation set to ensure validation batches
-        are statistically representative of the whole dataset.
+        Create an INFINITE generator for validation or test data.
         """
         if split == 'val':
             start_ratio = self.config.train_ratio
@@ -273,204 +272,94 @@ class MultiPatternDataProcessor:
         else:
             raise ValueError("Split must be 'val' or 'test'")
 
-        all_sequences = []
-        for pattern_name in self.selected_patterns:
-            data = self.ts_generator.generate_task_data(pattern_name)
-            start_idx = int(start_ratio * len(data))
-            end_idx = int(end_ratio * len(data))
-            split_data = data[start_idx:end_idx]
+        task_list = self.selected_patterns.copy()
 
-            seq_len = self.config.backcast_length + forecast_length
-            # Extract all possible sequences from the split
-            for i in range(len(split_data) - seq_len + 1):
-                backcast = split_data[i: i + self.config.backcast_length]
-                forecast = split_data[
-                    i + self.config.backcast_length: i + seq_len
-                ]
-                backcast_out = backcast.astype(np.float32).reshape(-1, 1)
-                forecast_out = forecast.astype(np.float32).reshape(-1, 1)
+        while True:
+            # Shuffle tasks every pass for validation to keep batches statistically consistent
+            if split == 'val':
+                random.shuffle(task_list)
 
+            samples_yielded_in_pass = 0
+
+            for pattern_name in task_list:
+                data = self.ts_generator.generate_task_data(pattern_name)
+                start_idx = int(start_ratio * len(data))
+                end_idx = int(end_ratio * len(data))
+                split_data = data[start_idx:end_idx]
+
+                total_len = self.config.backcast_length + self.config.forecast_length
+                stride = self.config.forecast_length // 2
+                if stride < 1: stride = 1
+
+                max_start = len(split_data) - total_len
+
+                if max_start <= 0:
+                    continue
+
+                for i in range(0, max_start + 1, stride):
+                    backcast_raw = split_data[i : i + self.config.backcast_length].reshape(-1, 1)
+                    forecast_raw = split_data[
+                        i + self.config.backcast_length : i + total_len
+                    ].reshape(-1, 1)
+
+                    x, y = self._normalize_window(backcast_raw, forecast_raw)
+
+                    samples_yielded_in_pass += 1
+                    if self.config.reconstruction_loss_weight > 0.0:
+                        yield x, (y, x.flatten())
+                    else:
+                        yield x, y
+
+            if samples_yielded_in_pass == 0:
+                logger.warning(f"No samples found for {split} split. Yielding zero-sample.")
+                x_dummy = np.zeros((self.config.backcast_length, 1), dtype=np.float32)
+                y_dummy = np.zeros((self.config.forecast_length, 1), dtype=np.float32)
                 if self.config.reconstruction_loss_weight > 0.0:
-                    residual_target = np.zeros(
-                        (self.config.backcast_length * self.config.input_dim,),
-                        dtype=np.float32
-                    )
-                    all_sequences.append(
-                        (backcast_out, (forecast_out, residual_target))
-                    )
+                    yield x_dummy, (y_dummy, x_dummy.flatten())
                 else:
-                    all_sequences.append((backcast_out, forecast_out))
+                    yield x_dummy, y_dummy
 
-        if not all_sequences:
-            logger.warning(f"No sequences found for {split} split!")
-            dummy_backcast = np.zeros((self.config.backcast_length, 1), dtype=np.float32)
-            dummy_forecast = np.zeros((forecast_length, 1), dtype=np.float32)
-            while True:
-                if self.config.reconstruction_loss_weight > 0.0:
-                    dummy_residual = np.zeros(
-                        (self.config.backcast_length * self.config.input_dim,),
-                        dtype=np.float32
-                    )
-                    yield dummy_backcast, (dummy_forecast, dummy_residual)
-                else:
-                    yield dummy_backcast, dummy_forecast
-        else:
-            logger.info(f"Created {len(all_sequences)} sequences for {split} split")
+    def get_evaluation_steps(self, split: str) -> int:
+        return max(10, len(self.selected_patterns) * 5)
 
-            # Shuffle to prevent blocking by pattern type during validation
-            random.shuffle(all_sequences)
+    def prepare_datasets(self) -> Dict[str, Any]:
+        """Create the complete tf.data pipeline."""
+        x_shape = (self.config.backcast_length, 1)
+        y_shape = (self.config.forecast_length, 1)
 
-            idx = 0
-            while True:
-                yield all_sequences[idx]
-                idx = (idx + 1) % len(all_sequences)
-                # Reshuffle at the end of every full pass
-                if idx == 0:
-                    random.shuffle(all_sequences)
-
-    def get_evaluation_steps(self, forecast_length: int, split: str) -> int:
-        """Calculate the number of steps for a full evaluation pass."""
-        total_samples = 0
-        if split == 'val':
-            start_ratio = self.config.train_ratio
-            end_ratio = self.config.train_ratio + self.config.val_ratio
-        elif split == 'test':
-            start_ratio = self.config.train_ratio + self.config.val_ratio
-            end_ratio = 1.0
-        else:
-            return 1
-
-        for _ in self.selected_patterns:
-            data_len = self.ts_generator.config.n_samples
-            start_idx = int(start_ratio * data_len)
-            end_idx = int(end_ratio * data_len)
-            split_len = end_idx - start_idx
-            num_sequences = (
-                split_len - self.config.backcast_length - forecast_length + 1
-            )
-            if num_sequences > 0:
-                total_samples += num_sequences
-
-        steps = max(1, math.ceil(total_samples / self.config.batch_size))
-        logger.info(f"Calculated {steps} steps for {split} split ({total_samples} samples)")
-        return steps
-
-    def _normalize_instance(
-            self,
-            backcast: tf.Tensor,
-            targets: Union[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]
-    ) -> Tuple[tf.Tensor, Union[tf.Tensor, Tuple[tf.Tensor, tf.Tensor]]]:
-        """
-        Standardize an individual time series instance (z-score normalization).
-
-        This function is designed to be used with `tf.data.Dataset.map`. It
-        calculates the mean and standard deviation from the `backcast` ONLY
-        and applies this normalization to both the `backcast` and the `forecast`
-        part of the `targets`.
-
-        It correctly handles two different structures for `targets`:
-        1. A single tensor (the forecast) when reconstruction loss is disabled.
-        2. A tuple of tensors (forecast, residual_target) when reconstruction
-           loss is enabled. The residual_target is passed through unmodified.
-        """
-        # Calculate normalization statistics from the backcast only.
-        mean = tf.reduce_mean(backcast)
-        std = tf.maximum(tf.math.reduce_std(backcast), 1e-7)
-
-        # Normalize the backcast.
-        normalized_backcast = (backcast - mean) / std
-
-        # Normalize the forecast component of the targets, preserving structure.
         if self.config.reconstruction_loss_weight > 0.0:
-            # Handle the (forecast, residual_target) tuple structure.
-            forecast, residual_target = targets
-            normalized_forecast = (forecast - mean) / std
-            # Return the data in the same nested structure.
-            # residual_target is already zero, so we don't normalize it.
-            return normalized_backcast, (normalized_forecast, residual_target)
-        else:
-            # Handle the single forecast tensor structure.
-            forecast = targets
-            normalized_forecast = (forecast - mean) / std
-            return normalized_backcast, normalized_forecast
-
-    def prepare_datasets(self, forecast_length: int) -> Dict[str, Any]:
-        """Create the complete tf.data pipeline for a given forecast horizon."""
-        if self.config.reconstruction_loss_weight > 0.0:
-            logger.info("Adapting data pipeline for reconstruction loss.")
+            rec_shape = (self.config.backcast_length * self.config.input_dim,)
             output_signature = (
-                tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=x_shape, dtype=tf.float32),
                 (
-                    tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32),
-                    tf.TensorSpec(
-                        shape=(self.config.backcast_length * self.config.input_dim,),
-                        dtype=tf.float32
-                    )
+                    tf.TensorSpec(shape=y_shape, dtype=tf.float32),
+                    tf.TensorSpec(shape=rec_shape, dtype=tf.float32)
                 )
             )
         else:
             output_signature = (
-                tf.TensorSpec(shape=(self.config.backcast_length, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(forecast_length, 1), dtype=tf.float32)
+                tf.TensorSpec(shape=x_shape, dtype=tf.float32),
+                tf.TensorSpec(shape=y_shape, dtype=tf.float32)
             )
 
         train_ds = tf.data.Dataset.from_generator(
-            generator=lambda: self._training_generator(forecast_length),
-            output_signature=output_signature
-        )
+            self._training_generator, output_signature=output_signature
+        ).repeat().shuffle(1603).batch(self.config.batch_size).shuffle(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
         val_ds = tf.data.Dataset.from_generator(
-            generator=lambda: self._evaluation_generator(forecast_length, 'val'),
-            output_signature=output_signature
-        )
+            lambda: self._evaluation_generator('val'), output_signature=output_signature
+        ).repeat().batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+
         test_ds = tf.data.Dataset.from_generator(
-            generator=lambda: self._evaluation_generator(forecast_length, 'test'),
-            output_signature=output_signature
-        )
-
-        if self.config.normalize_per_instance:
-            logger.info("Applying per-instance standardization to all datasets.")
-            train_ds = train_ds.map(
-                self._normalize_instance,
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-            val_ds = val_ds.map(
-                self._normalize_instance,
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-            test_ds = test_ds.map(
-                self._normalize_instance,
-                num_parallel_calls=tf.data.AUTOTUNE
-            )
-
-        # PIPELINE SHUFFLING:
-        # 1. The generator yields a shuffled mix of diverse patterns.
-        # 2. We add a tf.data.shuffle buffer here to mix samples ACROSS generator refill cycles.
-        # This guarantees that no "blocks" of similar data ever reach the batching stage.
-        train_ds = (
-            train_ds.shuffle(
-                buffer_size=6343, # global mixing, prime number
-                reshuffle_each_iteration=True
-            )
-            .batch(self.config.batch_size)
-            .shuffle(
-                buffer_size=163, # batch mixing, prime number
-                reshuffle_each_iteration=True)
-            .prefetch(tf.data.AUTOTUNE)
-        )
-
-        val_ds = val_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-        test_ds = test_ds.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        val_steps = self.get_evaluation_steps(forecast_length, 'val')
-        test_steps = self.get_evaluation_steps(forecast_length, 'test')
+            lambda: self._evaluation_generator('test'), output_signature=output_signature
+        ).repeat().batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
         return {
             'train_ds': train_ds,
             'val_ds': val_ds,
             'test_ds': test_ds,
-            'validation_steps': val_steps,
-            'test_steps': test_steps
+            'validation_steps': self.get_evaluation_steps('val'),
+            'test_steps': self.get_evaluation_steps('test')
         }
 
 
@@ -481,209 +370,146 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             self,
             config: NBeatsTrainingConfig,
             data_processor: MultiPatternDataProcessor,
-            forecast_length: int,
             save_dir: str,
             model_name: str = "model"
     ):
         super().__init__()
         self.config = config
         self.data_processor = data_processor
-        self.forecast_length = forecast_length
         self.save_dir = save_dir
         self.model_name = model_name
-        # Initialize history with explicit, named metrics
         self.training_history = {
-            'epoch': [], 'lr': [],
-            'loss': [], 'val_loss': [],
-            'forecast_mae': [], 'val_forecast_mae': [],
-            'residual_mae': [], 'val_residual_mae': [],
+            'loss': [], 'val_loss': [], 'forecast_mae': [], 'val_forecast_mae': []
         }
         os.makedirs(save_dir, exist_ok=True)
         self.viz_test_data = self._create_viz_test_set()
 
     def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Generates a small, fixed, and diverse test set for visualizations."""
+        """
+        Generates a GUARANTEED DIVERSE visualization test set.
+        Instead of using the sequential generator, we pick 1 sample from N different patterns.
+        """
         logger.info("Creating a diverse, fixed visualization test set...")
-        num_samples = self.config.plot_top_k_patterns
-        patterns_to_sample = self.data_processor.selected_patterns.copy()
-        random.shuffle(patterns_to_sample)
 
-        x_list, y_list, patterns_sampled = [], [], 0
+        x_list, y_list = [], []
+
+        # Get list of patterns and shuffle them to pick random ones
+        available_patterns = self.data_processor.selected_patterns.copy()
+        random.shuffle(available_patterns)
+
+        # Ratio for test split
         start_ratio = self.config.train_ratio + self.config.val_ratio
-        end_ratio = 1.0
 
-        for pattern_name in patterns_to_sample:
-            if patterns_sampled >= num_samples:
+        # Iterate through distinct patterns to ensure variety
+        for pattern_name in available_patterns:
+            if len(x_list) >= self.config.plot_top_k_patterns:
                 break
+
             data = self.data_processor.ts_generator.generate_task_data(pattern_name)
-            start_idx = int(start_ratio * len(data))
-            end_idx = int(end_ratio * len(data))
-            test_data = data[start_idx:end_idx]
-            sequence_length = self.config.backcast_length + self.forecast_length
 
-            if len(test_data) >= sequence_length:
-                max_start = len(test_data) - sequence_length
-                sample_start_idx = random.randint(0, max_start)
-                backcast = test_data[
-                    sample_start_idx: sample_start_idx + self.config.backcast_length
-                ]
-                forecast = test_data[
-                    sample_start_idx + self.config.backcast_length:
-                    sample_start_idx + sequence_length
-                ]
+            # Slice test split
+            start_idx_split = int(start_ratio * len(data))
+            test_data = data[start_idx_split:]
 
-                if not (np.isnan(backcast).any() or np.isnan(forecast).any()):
-                    x_list.append(backcast.astype(np.float32).reshape(-1, 1))
-                    y_list.append(forecast.astype(np.float32).reshape(-1, 1))
-                    patterns_sampled += 1
+            total_len = self.config.backcast_length + self.config.forecast_length
+            max_start = len(test_data) - total_len
+
+            if max_start <= 0:
+                continue
+
+            # Pick a random window within this specific pattern's test data
+            rand_idx = random.randint(0, max_start)
+
+            backcast_raw = test_data[rand_idx : rand_idx + self.config.backcast_length].reshape(-1, 1)
+            forecast_raw = test_data[
+                rand_idx + self.config.backcast_length :
+                rand_idx + total_len
+            ].reshape(-1, 1)
+
+            # Normalize
+            x, y = self.data_processor._normalize_window(backcast_raw, forecast_raw)
+
+            x_list.append(x)
+            y_list.append(y)
 
         if not x_list:
-            logger.warning("Could not generate any visualization samples.")
-            return (
-                np.array([]).reshape(0, self.config.backcast_length, 1),
-                np.array([]).reshape(0, self.forecast_length, 1)
-            )
+            logger.warning("Could not generate viz samples.")
+            return np.array([]), np.array([])
 
-        logger.info(
-            f"Successfully created viz set with {len(x_list)} diverse samples."
-        )
+        logger.info(f"Created {len(x_list)} diverse samples from different patterns.")
         return np.array(x_list), np.array(y_list)
 
-    def on_epoch_end(
-            self, epoch: int, logs: Optional[Dict[str, float]] = None
-    ) -> None:
-        """Actions to perform at the end of each epoch."""
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:
         logs = logs or {}
-
-        # Update history with new, clearly named metrics
-        self.training_history['epoch'].append(epoch)
-        self.training_history['lr'].append(self.model.optimizer.learning_rate)
         self.training_history['loss'].append(logs.get('loss', 0.0))
         self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
         self.training_history['forecast_mae'].append(logs.get('forecast_mae', 0.0))
         self.training_history['val_forecast_mae'].append(logs.get('val_forecast_mae', 0.0))
-        # Only append residual mae if it's being tracked (reconstruction is on)
-        if 'residual_mae' in logs:
-            self.training_history['residual_mae'].append(logs.get('residual_mae', 0.0))
-            self.training_history['val_residual_mae'].append(logs.get('val_residual_mae', 0.0))
 
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            logger.info(
-                f"Creating visualizations for {self.model_name} at epoch {epoch + 1}"
-            )
             self._create_interim_plots(epoch)
 
     def _create_interim_plots(self, epoch: int) -> None:
-        """Generate and save all configured plots for the current epoch."""
-        try:
-            os.makedirs(self.save_dir, exist_ok=True)
-
-            if self.config.create_learning_curves:
-                self._plot_learning_curves(epoch)
-            if self.config.create_prediction_plots and self.viz_test_data[0].shape[0] > 0:
-                self._plot_prediction_samples(epoch)
-        except Exception as e:
-            logger.warning(
-                f"Failed to create interim plots for {self.model_name}: {e}"
-            )
+        if self.config.create_learning_curves:
+            self._plot_learning_curves(epoch)
+        if self.config.create_prediction_plots and len(self.viz_test_data[0]) > 0:
+            self._plot_prediction_samples(epoch)
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        """Plot and save comprehensive training and validation learning curves."""
-        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
-        axes = axes.flatten()
-        epochs_range = self.training_history['epoch']
-
-        # Plot 1: Total Loss
-        axes[0].plot(epochs_range, self.training_history['loss'], label='Training Loss')
-        axes[0].plot(epochs_range, self.training_history['val_loss'], label='Validation Loss')
-        axes[0].set_title(f'Total Loss (Epoch {epoch + 1})')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        axes[0].plot(self.training_history['loss'], label='Train Loss')
+        axes[0].plot(self.training_history['val_loss'], label='Val Loss')
+        axes[0].set_title(f'Total Loss (Epoch {epoch+1})')
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
 
-        # Plot 2: Forecast MAE
-        axes[1].plot(epochs_range, self.training_history['forecast_mae'], label='Training Forecast MAE')
-        axes[1].plot(epochs_range, self.training_history['val_forecast_mae'], label='Validation Forecast MAE')
-        axes[1].set_title(f'Forecast MAE (Epoch {epoch + 1})')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('MAE')
+        axes[1].plot(self.training_history['forecast_mae'], label='Train MAE')
+        axes[1].plot(self.training_history['val_forecast_mae'], label='Val MAE')
+        axes[1].set_title('Forecast MAE')
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
 
-        # Plot 3: Residual MAE (only if reconstruction is enabled)
-        if self.training_history['residual_mae']:
-            axes[2].plot(epochs_range, self.training_history['residual_mae'], label='Training Residual MAE')
-            axes[2].plot(epochs_range, self.training_history['val_residual_mae'], label='Validation Residual MAE')
-            axes[2].set_title(f'Residual MAE (Epoch {epoch + 1})')
-            axes[2].set_xlabel('Epoch')
-            axes[2].set_ylabel('MAE')
-        else:
-            axes[2].text(0.5, 0.5, 'Reconstruction Loss Disabled', ha='center', va='center')
-            axes[2].set_title('Residual MAE')
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
-
-        # Plot 4: Learning Rate
-        axes[3].plot(epochs_range, self.training_history['lr'], label='Learning Rate')
-        axes[3].set_title(f'Learning Rate Schedule (Epoch {epoch + 1})')
-        axes[3].set_xlabel('Epoch')
-        axes[3].set_ylabel('LR')
-        axes[3].legend()
-        axes[3].grid(True, alpha=0.3)
-
         plt.tight_layout()
-        plt.savefig(
-            os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png')
-        )
+        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch+1:03d}.png'))
         plt.close()
 
     def _plot_prediction_samples(self, epoch: int) -> None:
-        """Plot and save prediction samples against true values."""
-        if self.viz_test_data[0].shape[0] == 0:
-            return
-
         test_x, test_y = self.viz_test_data
-
         predictions_tuple = self.model(test_x, training=False)
-        if isinstance(predictions_tuple, tuple):
-            predictions = predictions_tuple[0].numpy()
+
+        if isinstance(predictions_tuple, (tuple, list)):
+            predictions = predictions_tuple[0]
+            if isinstance(predictions, tf.Tensor):
+                predictions = predictions.numpy()
         else:
             predictions = predictions_tuple.numpy()
 
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
         n_cols = 3
         n_rows = math.ceil(num_plots / n_cols)
-        # Use squeeze=False to ensure axes is always a 2D array for consistency
-        fig, axes = plt.subplots(
-            n_rows, n_cols, figsize=(18, 4 * n_rows), squeeze=False
-        )
-        # Flatten the axes array to easily iterate over it, regardless of grid size
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 3 * n_rows), squeeze=False)
         axes = axes.flatten()
 
         for i in range(num_plots):
             ax = axes[i]
-            backcast_x = np.arange(-self.config.backcast_length, 0)
-            forecast_x = np.arange(0, self.forecast_length)
-            ax.plot(backcast_x, test_x[i].flatten(), label='Input', color='blue')
-            ax.plot(forecast_x, test_y[i].flatten(), label='True', color='green')
-            ax.plot(
-                forecast_x, predictions[i].flatten(), label='Predicted',
-                color='red', linestyle='--'
-            )
-            ax.set_title(f'Sample {i + 1}')
-            ax.legend()
+            backcast_steps = np.arange(-self.config.backcast_length, 0)
+            forecast_steps = np.arange(0, self.config.forecast_length)
+
+            ax.plot(backcast_steps, test_x[i].flatten(), label='Backcast', color='blue', alpha=0.6)
+            ax.plot(forecast_steps, test_y[i].flatten(), label='True Future', color='green')
+            ax.plot(forecast_steps, predictions[i].flatten(), label='Pred Future', color='red', linestyle='--')
+
+            ax.set_title(f'Sample {i+1}')
+            if i == 0: ax.legend()
             ax.grid(True, alpha=0.3)
 
-        # Turn off any unused subplots
         for j in range(num_plots, len(axes)):
             axes[j].axis('off')
 
-        plt.suptitle(f'Prediction Samples (Epoch {epoch + 1})', fontsize=16)
+        plt.suptitle(f'N-BEATS Predictions (Epoch {epoch + 1})', fontsize=14)
         plt.tight_layout()
-        plt.savefig(
-            os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png')
-        )
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
         plt.close()
 
 
@@ -709,7 +535,6 @@ class NBeatsTrainer:
         )
 
     def _select_patterns(self) -> List[str]:
-        """Select time series patterns based on the configuration."""
         if self.config.target_categories:
             patterns_to_consider = {
                 p for c in self.config.target_categories
@@ -733,7 +558,7 @@ class NBeatsTrainer:
         logger.info(f"Selected {len(selected)} patterns for training.")
         return selected
 
-    def create_model(self, forecast_length: int) -> NBeatsNet:
+    def create_model(self) -> keras.Model:
         """Create and compile an N-BEATS Keras model."""
         kernel_regularizer = None
         if self.config.kernel_regularizer_l2 > 0:
@@ -741,9 +566,10 @@ class NBeatsTrainer:
                 self.config.kernel_regularizer_l2
             )
 
-        model = create_nbeats_model(
+        # Instantiate the base N-BEATS architecture
+        base_model = create_nbeats_model(
             backcast_length=self.config.backcast_length,
-            forecast_length=forecast_length,
+            forecast_length=self.config.forecast_length,
             stack_types=self.config.stack_types,
             nb_blocks_per_stack=self.config.nb_blocks_per_stack,
             hidden_layer_units=self.config.hidden_layer_units,
@@ -753,16 +579,11 @@ class NBeatsTrainer:
             dropout_rate=self.config.dropout_rate,
             reconstruction_weight=self.config.reconstruction_loss_weight,
             input_dim=self.config.input_dim,
-            output_dim=1 # NBeats output dim usually 1 for univariate
+            output_dim=1
         )
 
+        # Configure Learning Rate
         if self.config.use_warmup:
-            logger.info(
-                f"Using learning rate schedule with warmup. "
-                f"Warmup steps: {self.config.warmup_steps}, "
-                f"Start LR: {self.config.warmup_start_lr}, "
-                f"Target LR: {self.config.learning_rate}"
-            )
             primary_schedule = keras.optimizers.schedules.CosineDecay(
                 initial_learning_rate=self.config.learning_rate,
                 decay_steps=self.config.steps_per_epoch * self.config.epochs,
@@ -774,51 +595,53 @@ class NBeatsTrainer:
                 primary_schedule=primary_schedule
             )
         else:
-            logger.info(f"Using fixed learning rate: {self.config.learning_rate}")
             lr_schedule = self.config.learning_rate
 
+        # Configure Optimizer
         optimizer_cls = keras.optimizers.get(self.config.optimizer).__class__
         optimizer = optimizer_cls(
             learning_rate=lr_schedule,
             clipnorm=self.config.gradient_clip_norm
         )
-        logger.info(f"Using optimizer: {optimizer.__class__.__name__}")
 
-        if isinstance(self.config.primary_loss, str):
+        # Prepare Loss Functions and Model Wrapping
+        if self.config.reconstruction_loss_weight > 0.0:
+            # Case A: Reconstruction Enabled
+            model = base_model
+
             if self.config.primary_loss == 'mase_loss':
-                forecast_loss = MASELoss(
-                    seasonal_periods=self.config.mase_seasonal_periods
-                )
+                forecast_loss = MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
             else:
                 forecast_loss = keras.losses.get(self.config.primary_loss)
-        else:
-            forecast_loss = self.config.primary_loss
 
-        # Use explicitly named metrics for clear reporting
-        forecast_metrics = [
-            keras.metrics.MeanAbsoluteError(name="forecast_mae"),
-            keras.metrics.MeanSquaredError(name="forecast_mse"),
-        ]
-
-        if self.config.reconstruction_loss_weight > 0.0:
             losses = [
                 forecast_loss,
-                keras.losses.MeanAbsoluteError(reduction="mean", name="residual_loss")
+                keras.losses.MeanAbsoluteError(name="residual_loss")
             ]
             loss_weights = [1.0, self.config.reconstruction_loss_weight]
             metrics = [
-                forecast_metrics,
+                [keras.metrics.MeanAbsoluteError(name="forecast_mae")],
                 [keras.metrics.MeanAbsoluteError(name="residual_mae")]
             ]
-            logger.info(
-                f"Using forecast loss + reconstruction loss "
-                f"(weight={self.config.reconstruction_loss_weight})"
-            )
         else:
-            losses = [forecast_loss, None]
+            # Case B: Forecast Only - Wrap base_model to select first output
+            inputs = keras.Input(shape=(self.config.backcast_length, self.config.input_dim))
+            raw_output = base_model(inputs)
+
+            if isinstance(raw_output, (list, tuple)):
+                forecast = raw_output[0]
+            else:
+                forecast = raw_output
+
+            model = keras.Model(inputs=inputs, outputs=forecast, name="nbeats_forecast_only")
+
+            if self.config.primary_loss == 'mase_loss':
+                losses = MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
+            else:
+                losses = keras.losses.get(self.config.primary_loss)
+
             loss_weights = None
-            metrics = [forecast_metrics, []]
-            logger.info("Using forecast loss only (no reconstruction loss)")
+            metrics = [keras.metrics.MeanAbsoluteError(name="forecast_mae")]
 
         model.compile(
             optimizer=optimizer,
@@ -830,7 +653,6 @@ class NBeatsTrainer:
         return model
 
     def run_experiment(self) -> Dict[str, Any]:
-        """Execute the full training and evaluation experiment."""
         exp_dir = os.path.join(
             self.config.result_dir,
             f"{self.config.experiment_name}_"
@@ -839,55 +661,34 @@ class NBeatsTrainer:
         os.makedirs(exp_dir, exist_ok=True)
         logger.info(f"Starting N-BEATS Experiment: {exp_dir}")
 
-        results = {}
-        horizon = self.config.forecast_length
-        logger.info(f"Training Model for Horizon={horizon}")
-        data_pipeline = self.processor.prepare_datasets(horizon)
-        results[horizon] = self._train_model(data_pipeline, horizon, exp_dir)
+        data_pipeline = self.processor.prepare_datasets()
+        results = self._train_model(data_pipeline, exp_dir)
 
         self._save_results(results, exp_dir)
-        logger.info("N-BEATS Experiment completed successfully.")
         return {"results_dir": exp_dir, "results": results}
 
-    def _train_model(
-            self, data_pipeline: Dict, horizon: int, exp_dir: str
-    ) -> Dict[str, Any]:
-        """Train and evaluate a single model for a specific horizon."""
-        model = self.create_model(horizon)
-
-        # Build shape explicitly: (batch, backcast, input_dim)
+    def _train_model(self, data_pipeline: Dict, exp_dir: str) -> Dict[str, Any]:
+        model = self.create_model()
         model.build((None, self.config.backcast_length, self.config.input_dim))
+        model.summary(print_fn=logger.info)
 
-        logger.info(f"Model created with {model.count_params():,} parameters")
-
-        viz_dir = os.path.join(exp_dir, f'visualizations_h{horizon}')
+        viz_dir = os.path.join(exp_dir, 'visualizations')
         performance_cb = PatternPerformanceCallback(
-            self.config, self.processor, horizon, viz_dir, "nbeats_model"
+            self.config, self.processor, viz_dir, "nbeats"
         )
 
-        model_path = os.path.join(exp_dir, f'best_model_h{horizon}.keras')
+        model_path = os.path.join(exp_dir, 'best_model.keras')
 
         callbacks = [
             keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=30,
-                restore_best_weights=True,
-                verbose=1
+                monitor='val_loss', patience=25, restore_best_weights=True, verbose=1
             ),
             keras.callbacks.ModelCheckpoint(
-                filepath=model_path,
-                monitor='val_loss',
-                save_best_only=True,
-                verbose=1
+                filepath=model_path, monitor='val_loss', save_best_only=True, verbose=1
             ),
             performance_cb,
             keras.callbacks.TerminateOnNaN()
         ]
-
-        logger.info(
-            f"Training with {self.config.steps_per_epoch} steps/epoch and "
-            f"validating with {data_pipeline['validation_steps']} steps."
-        )
 
         history = model.fit(
             data_pipeline['train_ds'],
@@ -900,82 +701,93 @@ class NBeatsTrainer:
         )
 
         logger.info("Evaluating on test set...")
-        test_results_list = model.evaluate(
+        test_results = model.evaluate(
             data_pipeline['test_ds'],
             steps=data_pipeline['test_steps'],
             verbose=1,
-            return_dict=False # Ensure list output for zipping
+            return_dict=True
         )
 
-        # Robustly parse test results into a dictionary
-        test_metrics = dict(zip(model.metrics_names, test_results_list))
-        logger.info(f"Test Set Metrics: {test_metrics}")
-
-        final_epoch = len(history.history['loss'])
-
-        # Prepare final results dictionary
-        final_results = {
+        return {
             'history': history.history,
-            'final_epoch': final_epoch,
-            'test_metrics': {k: float(v) for k, v in test_metrics.items()}
+            'test_metrics': {k: float(v) for k, v in test_results.items()},
+            'final_epoch': len(history.history['loss'])
         }
 
-        return final_results
-
     def _save_results(self, results: Dict, exp_dir: str) -> None:
-        """Save the final experiment results to a JSON file."""
-        logger.info(f"Saving results to {exp_dir}")
-        serializable_results = {}
+        serializable = {
+            'history': results['history'],
+            'test_metrics': results['test_metrics'],
+            'final_epoch': results['final_epoch'],
+            'config': self.config.__dict__
+        }
 
-        for h, r in results.items():
-            history_serializable = {
-                k: [float(v) for v in val]
-                for k, val in r['history'].items()
-            }
-            serializable_results[h] = {
-                'history': history_serializable,
-                'final_epoch': r['final_epoch'],
-                'test_metrics': r['test_metrics']
-            }
+        def default(o):
+            if isinstance(o, (np.integer, np.floating)):
+                return float(o)
+            return str(o)
 
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-            json.dump(serializable_results, f, indent=4)
+            json.dump(serializable, f, indent=4, default=default)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments for N-BEATS training."""
+    parser = argparse.ArgumentParser(description="N-BEATS Training (Normalized & Unified)")
+
+    parser.add_argument("--experiment_name", type=str, default="nbeats",
+                        help="Name for logging.")
+    parser.add_argument("--backcast_length", type=int, default=168)
+    parser.add_argument("--forecast_length", type=int, default=24)
+
+    # Training Loop
+    parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--steps_per_epoch", type=int, default=1000)
+
+    # Optimizer
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--optimizer", type=str, default="adamw")
+    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
+
+    # Data Processing
+    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false",
+                        help="Disable [-1, 1] normalization.")
+    parser.set_defaults(normalize_per_instance=True)
+
+    # N-BEATS Structure
+    parser.add_argument("--stack_types", nargs='+', default=["trend", "seasonality", "generic"])
+    parser.add_argument("--hidden_layer_units", type=int, default=128)
+    parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5,
+                        help="Weight for backcast reconstruction loss (default: 0.5)")
+
+    return parser.parse_args()
 
 
 def main() -> None:
     """Main function to configure and run the N-BEATS training experiment."""
+    args = parse_args()
+
     config = NBeatsTrainingConfig(
-        experiment_name="nbeats",
-        activation="relu",
-        backcast_length=104,
-        forecast_length=12,
-        input_dim=1,
-        stack_types=["trend", "seasonality", "generic"],
-        nb_blocks_per_stack=3,
-        hidden_layer_units=256,
-        use_normalization=True,
-        normalize_per_instance=False,
-        use_bias=True,
-        max_patterns_per_category=100,
-        epochs=200,
-        batch_size=128,
-        steps_per_epoch=1000,
-        learning_rate=1e-4,
-        use_warmup=True,
-        warmup_steps=5000,
-        warmup_start_lr=1e-6,
-        gradient_clip_norm=1.0,
-        optimizer='adamw',
-        primary_loss="mase_loss",
-        dropout_rate=0.1,
-        kernel_regularizer_l2=1e-5,
-        reconstruction_loss_weight=0.5,
-        visualize_every_n_epochs=5,
-        plot_top_k_patterns=12,
+        experiment_name=args.experiment_name,
+        backcast_length=args.backcast_length,
+        forecast_length=args.forecast_length,
+        stack_types=args.stack_types,
+        hidden_layer_units=args.hidden_layer_units,
+        # Training
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        steps_per_epoch=args.steps_per_epoch,
+        learning_rate=args.learning_rate,
+        optimizer=args.optimizer,
+        gradient_clip_norm=args.gradient_clip_norm,
+        # Data
+        normalize_per_instance=args.normalize_per_instance,
+        reconstruction_loss_weight=args.reconstruction_loss_weight
     )
 
     ts_config = TimeSeriesConfig(
-        n_samples=1000,
+        n_samples=5000,
         random_seed=42
     )
 
