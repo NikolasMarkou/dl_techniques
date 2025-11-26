@@ -6,7 +6,7 @@
 
 A production-ready, fully-featured implementation of the **FNet** architecture in **Keras 3**, based on the paper ["FNet: Mixing Tokens with Fourier Transforms"](https://arxiv.org/abs/2105.03824) by Lee-Thorp et al. (2021).
 
-The architecture is designed as a pure encoder, separating the core logic from task-specific heads, making it ideal for pre-training, fine-tuning, and multi-task learning.
+This architecture is designed as a **pure encoder**, separating core mixing logic from task-specific heads. This modular design makes it ideal for pre-training, fine-tuning, and complex multi-task learning workflows.
 
 ---
 
@@ -33,54 +33,39 @@ The architecture is designed as a pure encoder, separating the core logic from t
 
 ## 1. Overview: What is FNet and Why It Matters
 
-### What is an FNet?
+### What is FNet?
 
-**FNet** is a Transformer-like architecture that replaces the computationally expensive self-attention mechanism with a simple, unparameterized **2D Fourier Transform**. It demonstrates that for many NLP tasks, the complex, content-aware mixing of self-attention can be effectively replaced by a much more efficient method.
+**FNet** is a Transformer-like architecture that replaces the computationally expensive self-attention mechanism with a simple, unparameterized **2D Fourier Transform**. It demonstrates that for many NLP tasks, the complex, content-aware mixing of self-attention can be effectively replaced by a much more efficient, deterministic method.
 
 For each encoder block, FNet performs token mixing by:
--   Applying a Fast Fourier Transform (FFT) along the sequence dimension.
--   Applying another FFT along the hidden (feature) dimension.
+-   Applying a Fast Fourier Transform (FFT) along the **sequence** dimension.
+-   Applying another FFT along the **hidden (feature)** dimension.
 
 ### Key Innovations
 
-1.  **Parameter-Free Token Mixing**: The Fourier Transform requires no learnable weights, reducing the model's parameter count and memory footprint.
-2.  **Exceptional Efficiency**: It reduces the complexity of the token-mixing step from `O(N²)` (quadratic in sequence length) for self-attention to `O(N log N)`.
-3.  **BERT-Level Performance**: Despite its simplicity, FNet achieves comparable accuracy to BERT on many standard NLP benchmarks, while being significantly faster to train and run.
-4.  **Drop-in Replacement**: The `FNetEncoderBlock` can be used as a direct, more efficient substitute for a standard Transformer encoder block.
+1.  **Parameter-Free Token Mixing**: The Fourier Transform requires **zero** learnable weights, significantly reducing the model's memory footprint.
+2.  **Exceptional Efficiency**: It reduces the algorithmic complexity of the token-mixing step from `O(N²)` (quadratic) to `O(N log N)` (quasi-linear).
+3.  **BERT-Level Performance**: Despite its simplicity, FNet achieves 92-97% of BERT's accuracy on GLUE benchmarks while training up to **80% faster**.
+4.  **Drop-in Replacement**: The `FNetEncoderBlock` serves as a direct, highly efficient substitute for standard Transformer encoder blocks.
 
 ### Why FNet Matters
 
-**Standard Transformer (BERT) Problem**:
-```
-Problem: Classify a long document.
-Standard Solution:
-  1. Use a BERT-like model.
-  2. The self-attention mechanism compares every token to every other token.
-  3. Limitation: For a sequence of 4096 tokens, this requires 4096² ≈ 16.7 million
-     comparisons per head, per layer. This is computationally massive and
-     memory-intensive.
-  4. Result: Processing long sequences is often infeasible.
-```
+**The Standard Transformer (BERT) Bottleneck**:
+To classify a long document (e.g., 4096 tokens), a standard self-attention mechanism must compare every token to every other token.
+*   **Cost**: $4096^2 \approx 16.7$ million comparisons per head, per layer.
+*   **Result**: Massive memory consumption and slow processing, making long sequences infeasible.
 
-**FNet's Solution**:
-```
-FNet Approach:
-  1. Replace self-attention with a 2D Fourier Transform.
-  2. The FFT naturally mixes information across the entire sequence in O(N log N) time.
-  3. For a sequence of 4096 tokens, the complexity is proportional to
-     4096 * log(4096) ≈ 49,000 operations.
-  4. Benefit: Drastically faster training and inference, enabling the use of
-     much longer sequences.
-```
+**The FNet Solution**:
+FNet replaces self-attention with a 2D Fourier Transform.
+*   **Cost**: Proportional to $4096 \times \log(4096) \approx 49,000$ operations.
+*   **Result**: Drastically faster training and inference, enabling the processing of much longer sequences on commodity hardware.
 
-### Real-World Impact
+### Real-World Applications
 
-FNet addresses the primary bottleneck in Transformer models, unlocking new possibilities:
-
--   🧬 **Genomics**: Process extremely long DNA or protein sequences.
--   📚 **Long-Document Analysis**: Summarize or classify entire articles, legal documents, or books.
--   🔊 **Audio Processing**: Analyze long audio waveforms represented as sequences.
--   ⏱️ **Real-Time NLP**: Deploy faster and more efficient models for on-device or edge applications.
+FNet unlocks capabilities in domains where sequence length is the primary constraint:
+-   **Genomics**: Processing extremely long DNA/protein sequences.
+-   **Long-Document Analysis**: Summarizing or classifying legal contracts, books, or scientific papers.
+-   **Real-Time NLP**: Low-latency deployment for on-device or edge applications.
 
 ---
 
@@ -88,57 +73,48 @@ FNet addresses the primary bottleneck in Transformer models, unlocking new possi
 
 ### The Tyranny of Quadratic Complexity
 
-Standard Transformer models, while powerful, are fundamentally limited by the self-attention mechanism.
+Standard Transformer models are fundamentally limited by the memory and compute requirements of the self-attention matrix.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │  Standard Transformer (Self-Attention)                      │
 │                                                             │
 │  The Core Bottleneck:                                       │
-│    Complexity is O(SequenceLength² * HiddenDim).            │
-│    Doubling the sequence length quadruples the computation  │
-│    and memory required for the attention matrix.            │
+│    Complexity is O(L² * H)                                  │
+│    Doubling sequence length = 4x computation & memory.      │
 │                                                             │
-│  This leads to:                                             │
-│  1. Slow Training: Training on long sequences is extremely  │
-│     time-consuming.                                         │
-│  2. High Memory Usage: The attention matrix alone can       │
-│     consume gigabytes of VRAM.                              │
-│  3. Sequence Length Limits: Most models are practically     │
-│     limited to 512 or 1024 tokens.                          │
+│  Consequences:                                              │
+│  1. Slow Training: Iterations take too long on long text.   │
+│  2. OOM Errors: Attention matrices consume GBs of VRAM.     │
+│  3. Hard Limits: Most models cap at 512 or 1024 tokens.     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Example: The cost of self-attention**
--   At 512 tokens, the attention matrix is 512x512.
--   At 1024 tokens, it's 1024x1024 (4x larger).
--   At 4096 tokens, it's 4096x4096 (64x larger than at 512).
-
-
-*Self-attention's quadratic complexity makes it impractical for long sequences, while FNet's O(N log N) complexity scales gracefully.*
+**Scaling Cost Example:**
+-   **512 tokens**: Baseline.
+-   **4096 tokens**: 64x more memory/compute than at 512 tokens.
 
 ### How FNet Changes the Game
 
-FNet proposes a radical simplification: the main purpose of self-attention is token mixing, and this can be approximated efficiently.
+FNet operates on the principle that **token mixing** is the primary goal of attention, and this can be approximated without learnable weights.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │  FNet's Efficiency Principle                                │
 │                                                             │
-│  1. Replace the learnable, content-aware attention mechanism│
-│     with a fixed, parameter-free Fourier Transform.         │
+│  1. Mechanism: Replace learnable attention with a fixed,    │
+│     parameter-free Fourier Transform.                       │
 │                                                             │
-│  2. The Fourier Transform provides complete, global mixing  │
-│     of token information in quasi-linear time.              │
+│  2. Global Mixing: The FFT allows every token to affect     │
+│     every other token in quasi-linear time.                 │
 │                                                             │
-│  3. The model relies on the Feed-Forward Network (FFN)      │
-│     sub-layer to perform all the necessary content-based,   │
-│     non-linear transformations.                             │
+│  3. Burden Shift: The Feed-Forward Network (FFN) handles    │
+│     all content-based, non-linear feature extraction.       │
 │                                                             │
-│  This allows the model to:                                  │
-│  - Process very long sequences without memory explosion.    │
-│  - Train up to 80% faster than BERT on GPUs.                │
-│  - Reduce the total number of model parameters.             │
+│  Benefits:                                                  │
+│  - Linear-ish scaling with sequence length.                 │
+│  - Up to 80% faster training on GPUs.                       │
+│  - Significantly fewer parameters to store and load.        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -148,9 +124,9 @@ FNet proposes a radical simplification: the main purpose of self-attention is to
 
 ### The Two-Sublayer Encoder Block
 
-An FNet model is a stack of `FNetEncoderBlock` layers. Each block has two main sub-layers, similar to a standard Transformer.
+An FNet model consists of a stack of `FNetEncoderBlock` layers. The structure mirrors the Transformer, replacing only the first sub-layer.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    FNet Encoder Block                       │
 │                                                             │
@@ -159,11 +135,9 @@ An FNet model is a stack of `FNetEncoderBlock` layers. Each block has two main s
 │  │    (FFT)        ├──────►      (Feed-Forward Net)       │ │
 │  │                 │      │                               │ │
 │  │  - Applies 2D   │      │  - Same as standard           │ │
-│  │    FFT to mix   │      │    Transformer FFN.           │ │
-│  │    information  │      │  - Learns content-based       │ │
-│  │    globally.    │      │    transformations.           │ │
-│  │  - Paramtr-free │      │  - Position-wise.             │ │
-│  │                 │      │                               │ │
+│  │    FFT (seq/dim)│      │    Transformer FFN.           │ │
+│  │  - Parameter    │      │  - Learns content-based       │ │
+│  │    Free         │      │    features position-wise.    │ │
 │  └─────────────────┘      └───────────────────────────────┘ │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -171,63 +145,42 @@ An FNet model is a stack of `FNetEncoderBlock` layers. Each block has two main s
 
 ### The Fourier Transform for Token Mixing
 
-The core innovation lies in how FNet mixes token information. For an input tensor `X` of shape `(seq_len, hidden_dim)`:
+For an input tensor `X` of shape `(seq_len, hidden_dim)`:
 
-1.  **FFT along Sequence**: `FFT(X, axis=0)`. This step mixes information across all tokens. Every element in the output is a linear combination of all input tokens.
-2.  **FFT along Hidden Dim**: `FFT(X, axis=1)`. This step mixes information within the feature representation of each token.
-3.  **Real Part**: `Real(...)`. The imaginary part is discarded.
+1.  **Sequence FFT**: `FFT(X, axis=0)`. Mixes information across all tokens. Every output element is a linear combination of all input tokens.
+2.  **Hidden FFT**: `FFT(X, axis=1)`. Mixes information within the feature vector of each token.
+3.  **Real Part Extraction**: `Real(...)`. The imaginary component is discarded.
 
-The final operation is **`Y = Real(FFT(FFT(X)))`**. This simple operation provides powerful, global mixing.
+**Formula**: $Y = \Re(\mathcal{F}_{seq}(\mathcal{F}_h(X)))$
 
 ### The Complete Data Flow
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     FNet Complete Data Flow                             │
-└─────────────────────────────────────────────────────────────────────────┘
-
+```text
 STEP 1: Embedding
 ─────────────────
 Input IDs (B, L)
     │
-    ├─► Token Embeddings
-    ├─► Position Embeddings
-    ├─► Token Type Embeddings
-    │
-    ├─► Sum Embeddings -> LayerNorm -> Dropout
-    │
-    └─► Output: (B, L, H) ← EMBEDDING OUTPUT
+    ├─► Sum(Token + Position + Type Embeddings)
+    └─► LayerNorm -> Dropout -> (B, L, H)
 
+STEP 2: FNet Encoder Stack (Repeated N times)
+─────────────────────────────────────────────
+Input (B, L, H)
+    │
+    ├─► FNetEncoderBlock
+    │   ├─► Fourier Transform (Mixing)
+    │   ├─► Residual + LayerNorm
+    │   ├─► Feed-Forward Network (Projections)
+    │   └─► Residual + LayerNorm
+    │
+    └─► Next Block...
 
-STEP 2: FNet Encoder Stack (repeated for N layers)
-──────────────────────────────────────────────────
-Embedding Output (B, L, H)
-    │
-    ├─► FNetEncoderBlock 1
-    │   ├─► Fourier Transform (mixing along L and H)
-    │   ├─► Residual Connection + LayerNorm
-    │   ├─► Feed-Forward Network
-    │   └─► Residual Connection + LayerNorm
-    │
-    ├─► FNetEncoderBlock 2
-    │   └─► ...
-    │
-    ├─► FNetEncoderBlock N
-    │
-    └─► Final Hidden State (B, L, H)
-
-
-STEP 3: Task-Specific Head (Example: Classification)
-────────────────────────────────────────────────────
+STEP 3: Task-Specific Head
+──────────────────────────
 Final Hidden State (B, L, H)
     │
-    ├─► Select [CLS] token representation: (B, H)
-    │
-    ├─► [Optional] Pooling Layer
-    │
-    ├─► Dense Layer (Classification)
-    │
-    └─► Logits (B, num_classes)
+    ├─► Extract [CLS] or Pool
+    └─► Dense Layer -> Logits
 ```
 
 ---
@@ -236,83 +189,51 @@ Final Hidden State (B, L, H)
 
 ### 4.1 Embedding Layer (`BertEmbeddings`)
 
-FNet uses a standard BERT-style embedding layer, which is a sum of three components:
+FNet utilizes standard BERT-style embeddings to ensure compatibility with existing tokenizers and transfer learning paradigms.
 
-```
-┌───────────────────────────────────────────────────┐
-│               BertEmbeddings                      │
-└───────────────────────────────────────────────────┘
-Input IDs, Token Type IDs
-  │
-  ├─► Token Embeddings (learnable vocab lookup)
-  │
-  ├─► Position Embeddings (learnable, for token order)
-  │
-  ├─► Token Type Embeddings (learnable, for sentence pairs)
-  │
-  ▼
-Sum all three embeddings
-  │
-  ▼
-Layer Normalization
-  │
-  ▼
-Dropout
-  │
-  ▼
-Output: (B, L, H)
-```
+-   **Token Embeddings**: Learnable lookup table.
+-   **Position Embeddings**: Learnable vectors (critical for FNet, as FFT is position-invariant without them).
+-   **Token Type Embeddings**: Segment IDs for sentence pairs.
 
 ### 4.2 FNet Encoder Block (`FNetEncoderBlock`)
 
-This is the heart of the FNet model.
+This is the core architectural contribution.
 
 #### Architecture Diagram
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    FNetEncoderBlock (Internal)              │
-└─────────────────────────────────────────────────────────────┘
+```text
 Input: (B, L, H)
   │
   ▼
 ┌──────────────────────────┐
-│  FNetFourierTransform    │  ← Token Mixing Sub-layer
+│  FNetFourierTransform    │  ← Mixing Sub-layer
 └──────────────────────────┘
   │
-  │
+  │ (Residual Connection)
   ▼
 Add & Norm
-(Input + Fourier Output)
   │
   ▼
 ┌──────────────────────────┐
-│ Feed-Forward Network     │  ← Channel Mixing Sub-layer
-│ (e.g., MLP, SwiGLU)      │
+│ Feed-Forward Network     │  ← Knowledge Sub-layer
+│ (MLP / SwiGLU / GEGLU)   │
 └──────────────────────────┘
   │
-  │
+  │ (Residual Connection)
   ▼
 Add & Norm
-(FFN Input + FFN Output)
   │
   ▼
 Output: (B, L, H)
 ```
 
-#### Key Design Decisions Explained
+#### Design Q&A
 
-**Q: Why use a Fourier Transform?**
-
-A: The convolution theorem states that convolution in the time domain is equivalent to element-wise multiplication in the frequency domain. An FFT can be seen as an efficient way to perform a specific type of global convolution, allowing every token to interact with every other token. It's a highly efficient, parameter-free way to achieve global mixing.
-
-**Q: Why a 2D Fourier Transform (along both sequence and hidden dimensions)?**
-
-A: Mixing along the sequence dimension is the key for replacing self-attention. The authors found that also mixing along the hidden dimension provided a small but consistent performance boost. It encourages features within a token's representation to interact more richly.
+**Q: Why a 2D Fourier Transform?**
+A: The FFT along the sequence dimension replaces Self-Attention. The authors found that adding an FFT along the hidden dimension provided a small, consistent performance boost by encouraging richer feature interaction within tokens.
 
 **Q: What is the trade-off?**
-
-A: FNet sacrifices the **dynamic, content-aware** nature of self-attention. In BERT, the attention weights are computed based on the input tokens (Query-Key interactions). In FNet, the mixing operation is **static and independent of the input content**. The model relies entirely on the FFN layers to learn content-specific logic. The surprising result of the FNet paper is that this trade-off is often worth it.
+A: FNet sacrifices **adaptivity**. In Self-Attention, mixing weights are dynamic (computed from the input). In FNet, mixing is static. The model relies entirely on the Feed-Forward layers to learn content-specific logic.
 
 ---
 
@@ -321,68 +242,57 @@ A: FNet sacrifices the **dynamic, content-aware** nature of self-attention. In B
 ### Installation
 
 ```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
+# Core dependencies
+pip install keras>=3.0 tensorflow>=2.18 numpy
 ```
 
-### Your First FNet Model (30 seconds)
+### Your First FNet Model
 
-Let's build a simple sentiment classifier using a pretrained FNet encoder.
+Here is how to create a sentiment classifier using the `fnet_tiny` configuration.
 
 ```python
 import keras
 import numpy as np
 
-# Local imports from your project structure
-from dl_techniques.models.nlp.fnet.model import create_fnet_with_head
+# Local imports
+from dl_techniques.models.fnet.model import create_fnet_with_head, FNet
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
 
-# 1. Define the classification task
-# Note: For real use, download actual pretrained weights.
-# The default URLs are placeholders, so we'll use pretrained=False.
+# 1. Define the task configuration
 task_config = NLPTaskConfig(
     name="sentiment_analysis",
     task_type=NLPTaskType.SENTIMENT_ANALYSIS,
     num_classes=2
 )
 
-# 2. Create an end-to-end model using the factory function
-# This combines a FNet-base encoder with a classification head.
+# 2. Instantiate the model using the factory
+# We use 'tiny' for demonstration; use 'base' for real work.
 model = create_fnet_with_head(
-    fnet_variant="tiny",         # Use "tiny" for a quick example
+    fnet_variant="tiny",
     task_config=task_config,
-    pretrained=False,            # Set to True or a file path for real weights
-    sequence_length=128          # Fixed sequence length for the model
+    pretrained=False,     # Set True to download weights
+    sequence_length=128   # Fixed length is recommended for FFT efficiency
 )
 
-# 3. Compile the model
+# 3. Compile
 model.compile(
-    optimizer='adam',
+    optimizer='adamw',    # AdamW is preferred for Transformers
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=['accuracy']
 )
-print("✅ FNet model with classification head created and compiled!")
+
 model.summary()
 
-# 4. Create dummy data for a forward pass
-batch_size = 4
-seq_len = 128
-vocab_size = FNet.DEFAULT_VOCAB_SIZE
-
+# 4. Mock Training Run
 dummy_inputs = {
-    "input_ids": np.random.randint(0, vocab_size, (batch_size, seq_len)),
-    "attention_mask": np.ones((batch_size, seq_len), dtype="int32"),
-    "token_type_ids": np.zeros((batch_size, seq_len), dtype="int32"),
+    "input_ids": np.random.randint(0, FNet.DEFAULT_VOCAB_SIZE, (4, 128)),
+    "attention_mask": np.ones((4, 128), dtype="int32"),
+    "token_type_ids": np.zeros((4, 128), dtype="int32"),
 }
-dummy_labels = np.random.randint(0, 2, (batch_size,))
+dummy_labels = np.array([0, 1, 0, 1])
 
-# 5. Train for one step
 loss, acc = model.train_on_batch(dummy_inputs, dummy_labels)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
-
-# 6. Run inference
-predictions = model.predict(dummy_inputs)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
+print(f"✅ Training Step - Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 ```
 
 ---
@@ -391,206 +301,155 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 
 ### 6.1 `FNet` (Model Class)
 
-**Purpose**: A pure foundation model that serves as a text encoder. It outputs the final hidden states for each token.
+**Location**: `dl_techniques.models.fnet.model.FNet`
 
-**Location**: `dl_techniques.models.nlp.fnet.model.FNet`
+The foundation encoder. It outputs raw hidden states.
 
 ```python
-from dl_techniques.models.nlp.fnet.model import FNet
+from dl_techniques.models.fnet.model import FNet
 
-# Create from a variant, with optional pretrained weights
 encoder = FNet.from_variant(
     "base",
-    pretrained=False, # or True, or "path/to/weights.keras"
-    vocab_size=50265, # Override default vocab size
+    pretrained=False,
+    vocab_size=30522
 )
 ```
 
-**Key Parameters**:
-
-| Parameter | Description |
-| :--- | :--- |
-| `vocab_size` | Size of the token vocabulary. |
-| `hidden_size` | Dimensionality of the encoder layers and embeddings. |
-| `num_layers` | Number of `FNetEncoderBlock` layers. |
-| `intermediate_size` | The size of the FFN's hidden layer. |
-| `max_position_embeddings` | The maximum sequence length the model can handle. |
-
-**Key Methods**:
--   `from_variant(variant, pretrained, **kwargs)`: The recommended factory method for creating standard FNet models (`base`, `large`, etc.).
--   `load_pretrained_weights(path, skip_mismatch)`: Loads weights from a file, with options to handle architecture mismatches (e.g., different `vocab_size`).
-
 ### 6.2 `FNetEncoderBlock`
 
-**Purpose**: The core building block of the FNet model, replacing the standard Transformer encoder.
-
 **Location**: `dl_techniques.layers.fnet_encoder_block.FNetEncoderBlock`
+
+The layer class. Useful for building custom architectures outside of the standard FNet topology.
 
 ```python
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
 
-# Can be used to build custom architectures
 block = FNetEncoderBlock(
     intermediate_dim=3072,
     dropout_rate=0.1,
-    normalization_type='rms_norm', # Modernize with RMSNorm
-    ffn_type='swiglu'              # and a SwiGLU FFN
+    normalization_type='rms_norm', # Modern option
+    ffn_type='swiglu'              # Modern option
 )
 ```
 
 ### 6.3 `create_fnet_with_head`
 
-**Purpose**: A high-level factory function to assemble a complete, task-specific model.
+**Location**: `dl_techniques.models.fnet.model.create_fnet_with_head`
 
-**Location**: `dl_techniques.models.nlp.fnet.model.create_fnet_with_head`
+A high-level factory to attach NLP heads (Classification, NER, etc.) to the encoder.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-The implementation provides several standard FNet configurations.
+| Variant | Hidden Size | Layers | FFN Size | Params (Approx) | Use Case |
+| :--- | :---: |:---: |:---: |:---: |:--- |
+| **`large`** | 1024 | 24 | 4096 | 340M | Max Performance |
+| **`base`** | 768 | 12 | 3072 | 110M | General Purpose |
+| **`small`** | 512 | 6 | 2048 | 35M | Edge / Speed |
+| **`tiny`** | 256 | 4 | 512 | 4M | Mobile / Embedded |
 
-| Variant | Hidden Size | Layers | FFN Size | Description |
-| :---: | :---: |:---: |:---: |:--- |
-| **`large`** | 1024 | 24 | 4096 | FNet-Large: Maximum performance |
-| **`base`** | 768 | 12 | 3072 | FNet-Base: Good balance for most tasks |
-| **`small`** | 512 | 6 | 2048 | Lightweight for resource-constrained use |
-| **`tiny`** | 256 | 4 | 512 | Ultra-lightweight for mobile/edge |
-
-**Guideline**: Use `base` for general-purpose tasks. Use `large` when you need maximum accuracy and have the resources. Use `small` or `tiny` for faster inference or deployment on edge devices.
+**Recommendation**: Start with `base`. If inference latency is critical, move to `small`.
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Feature Extraction for Downstream Tasks
+### Example 1: Pure Feature Extraction
 
-Use a pretrained FNet as a universal text feature extractor.
+Use FNet to generate embeddings for clustering or downstream non-neural models.
 
 ```python
 import keras
-from dl_techniques.models.nlp.fnet.model import FNet
+from dl_techniques.models.fnet.model import FNet
 
-# 1. Load a pretrained FNet encoder
-# (Assuming weights are available)
+# Load encoder
 fnet_encoder = FNet.from_variant("base", pretrained=False)
 
-# 2. Define inputs
+# Define inputs
 inputs = {
     "input_ids": keras.Input(shape=(None,), dtype="int32"),
     "attention_mask": keras.Input(shape=(None,), dtype="int32"),
 }
 
-# 3. Get contextual embeddings
+# Forward pass
 outputs = fnet_encoder(inputs)
-last_hidden_state = outputs["last_hidden_state"] # Shape: (batch, seq_len, 768)
+# Extract the [CLS] token embedding (first token)
+cls_embedding = outputs["last_hidden_state"][:, 0, :]
 
-# 4. Build a model that extracts features
-feature_extractor = keras.Model(inputs, last_hidden_state)
-
-# 5. Use the features for any downstream task
-# For classification, you could take the [CLS] token's embedding
-cls_embedding = last_hidden_state[:, 0, :] # Shape: (batch, 768)
+extractor = keras.Model(inputs, cls_embedding)
 ```
 
-### Example 2: Building a Token Classification (NER) Model
-
-This example uses the factory function to create a Named Entity Recognition model.
+### Example 2: Named Entity Recognition (NER)
 
 ```python
-from dl_techniques.models.nlp.fnet.model import create_fnet_with_head
+from dl_techniques.models.fnet.model import create_fnet_with_head
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
 
-# 1. Define the NER task
-ner_task_config = NLPTaskConfig(
+# Configuration for 9 NER classes (e.g., CoNLL-2003)
+ner_config = NLPTaskConfig(
     name="ner",
     task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-    num_classes=9 # e.g., B-PER, I-PER, B-LOC, I-LOC, etc. + O
+    num_classes=9
 )
 
-# 2. Create the full model
+# Create model with fixed sequence length for efficiency
 ner_model = create_fnet_with_head(
     fnet_variant="base",
-    task_config=ner_task_config,
+    task_config=ner_config,
     pretrained=False,
     sequence_length=256
 )
 
-# 3. Compile and inspect
-ner_model.compile(
-    optimizer="adam",
-    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-)
-ner_model.summary()
-
-# The model will output logits for each token in the sequence
-# Output shape: (batch_size, sequence_length, num_classes)
+# Output shape: (batch_size, 256, 9)
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Modernizing the FNet Block
+### Pattern 1: Modernizing the Architecture
 
-The `FNetEncoderBlock` is highly configurable. You can replace the standard LayerNorm and MLP with more modern components like RMSNorm and SwiGLU.
+You are not stuck with the 2021 architecture. This implementation allows you to inject modern components like **RMSNorm** (for stability) and **SwiGLU** (for performance).
 
 ```python
-from dl_techniques.models.nlp.fnet.model import FNet
+from dl_techniques.models.fnet.model import FNet
 
-# Create a 'base' model but override the encoder block configurations
-# This is done by passing the configuration to from_variant()
 modern_fnet = FNet.from_variant(
     "base",
-    # These kwargs are passed down to the FNetEncoderBlock
+    # Pass kwargs down to FNetEncoderBlock
     normalization_type="rms_norm",
+    normalization_position="pre", # Pre-Norm is generally more stable
     ffn_type="swiglu"
 )
-
-modern_fnet.summary()
 ```
 
-### Pattern 2: Fine-tuning on a Multi-Task Problem
+### Pattern 2: Multi-Task Learning
 
-Since `FNet` is a pure encoder, you can easily attach multiple heads for multi-task learning.
+Since FNet is a pure encoder, you can share it across multiple heads.
 
 ```python
-import keras
-from dl_techniques.models.nlp.fnet.model import FNet
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType, create_nlp_head
+# 1. Shared Encoder
+shared_encoder = FNet.from_variant("base")
+inputs = {...} # Define inputs
+encoder_out = shared_encoder(inputs)
 
-# 1. Create the shared FNet encoder
-shared_encoder = FNet.from_variant("base", pretrained=False)
-
-# 2. Define tasks and create heads
-sentiment_task = NLPTaskConfig(name="sentiment", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=3)
-ner_task = NLPTaskConfig(name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION, num_classes=9)
-
-sentiment_head = create_nlp_head(sentiment_task, input_dim=shared_encoder.hidden_size)
-ner_head = create_nlp_head(ner_task, input_dim=shared_encoder.hidden_size)
-
-# 3. Build the combined model
-inputs = { ... } # Standard FNet inputs
-encoder_output = shared_encoder(inputs)
-
-head_input = {
-    "hidden_states": encoder_output["last_hidden_state"],
-    "attention_mask": encoder_output["attention_mask"],
-}
-
-sentiment_output = sentiment_head(head_input, name="sentiment_output")
-ner_output = ner_head(head_input, name="ner_output")
-
-multitask_model = keras.Model(
-    inputs=inputs,
-    outputs={"sentiment": sentiment_output, "ner": ner_output}
+# 2. Heads
+sentiment_head = create_nlp_head(
+    NLPTaskConfig(name="sent", task_type=NLPTaskType.SENTIMENT_ANALYSIS, num_classes=2),
+    input_dim=768
+)
+ner_head = create_nlp_head(
+    NLPTaskConfig(name="ner", task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION, num_classes=9),
+    input_dim=768
 )
 
-# Compile with separate losses
-multitask_model.compile(
-    optimizer="adam",
-    loss={"sentiment": "sparse_categorical_crossentropy", "ner": "sparse_categorical_crossentropy"}
-)
+# 3. Connect
+y_sent = sentiment_head(encoder_out)
+y_ner = ner_head(encoder_out)
+
+# 4. Multi-output Model
+model = keras.Model(inputs=inputs, outputs={"sent": y_sent, "ner": y_ner})
 ```
 
 ---
@@ -599,145 +458,83 @@ multitask_model.compile(
 
 ### Mixed Precision Training
 
-FNet benefits significantly from mixed precision, which uses float16 for most computations to accelerate training.
+FNet is compute-bound by the FFN layers. Using `float16` or `bfloat16` provides significant speedups.
 
 ```python
-# Enable mixed precision globally
+# Set policy globally
 keras.mixed_precision.set_global_policy('mixed_float16')
 
-# Create model (will automatically use mixed precision)
+# Model creation automatically respects this policy
 model = FNet.from_variant("base")
-model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
 ```
 
-### TensorFlow XLA Compilation
+### XLA Compilation (JIT)
 
-Use XLA (Accelerated Linear Algebra) to compile the model's computation graph for an additional speed boost.
+For static sequence lengths, XLA compilation is highly effective with FNet.
 
 ```python
 import tensorflow as tf
 
-model = create_fnet_with_head(...) # Create your model
-
-# Compile the predict function with XLA
 @tf.function(jit_compile=True)
-def compiled_predict(inputs):
-    return model(inputs, training=False)
-
-# Usage
-predictions = compiled_predict(dummy_inputs)
+def train_step(inputs, labels):
+    with tf.GradientTape() as tape:
+        preds = model(inputs, training=True)
+        loss = loss_fn(labels, preds)
+    grads = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    return loss
 ```
 
 ---
 
 ## 11. Training and Best Practices
 
-### Optimizer and Learning Rate
-
--   **Optimizer**: AdamW is the standard choice for training Transformer-like models.
--   **Learning Rate Schedule**: A linear decay schedule with a warmup period is highly recommended. Start with a peak learning rate of `1e-4` to `5e-5` for fine-tuning.
-
-### Handling Sequence Length
-
--   The FFT operation is most efficient on sequences whose length is a power of two. While not strictly required, padding your sequences to the nearest power of two (e.g., 64, 128, 256, 512) can improve performance.
--   This implementation handles dynamic sequence lengths, but providing a fixed `sequence_length` to `create_fnet_with_head` can sometimes lead to better performance due to static graph optimizations.
+1.  **Fixed Sequence Lengths**: The FFT algorithm is optimized for fixed sizes (ideally powers of 2, e.g., 512). While the model accepts dynamic shapes, using fixed padding/truncation during training is recommended for maximum throughput.
+2.  **Optimizer**: Use `AdamW`.
+3.  **Learning Rate**: Standard Transformer schedules apply. Linear decay with a warmup period (e.g., 10% of steps). Peak LR is usually around `1e-4` to `5e-5` for fine-tuning.
+4.  **Batch Size**: Because FNet uses less memory than BERT, you can often use significantly larger batch sizes (2x-4x larger).
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `FNet` model and its custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+This implementation is fully compliant with Keras 3 serialization standards.
 
 ```python
-# Create and train model
-model = create_fnet_with_head(...)
-# model.compile(...) and model.fit(...)
+# Save to the zip-based .keras format
+model.save('my_fnet_model.keras')
 
-# Save the entire model
-model.save('fnet_classifier.keras')
-print("Model saved to fnet_classifier.keras")
-
-# Load the model in a new session
-loaded_model = keras.models.load_model('fnet_classifier.keras')
-print("Model loaded successfully")
+# Load cleanly in a new process (or inference server)
+loaded_model = keras.models.load_model('my_fnet_model.keras')
 ```
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
+The codebase includes verification utilities to ensure architectural correctness.
 
 ```python
-import keras
-import numpy as np
-from dl_techniques.models.nlp.fnet.model import FNet
-
-def test_model_creation_from_variant():
-    """Test that models can be created from all variants."""
-    for variant in FNet.MODEL_VARIANTS.keys():
-        model = FNet.from_variant(variant)
-        assert model is not None
-        print(f"✓ FNet-{variant} created successfully")
-
-def test_forward_pass_shape():
-    """Test the output shape of a forward pass."""
-    model = FNet.from_variant("tiny")
-    dummy_input = {
-        "input_ids": keras.random.uniform((4, 64), 0, 1000, dtype="int32"),
-        "attention_mask": keras.ops.ones((4, 64), dtype="int32"),
-    }
-    output = model(dummy_input)
-    hidden_state = output["last_hidden_state"]
-    expected_shape = (4, 64, FNet.MODEL_VARIANTS["tiny"]["hidden_size"])
-    assert hidden_state.shape == expected_shape
-    print("✓ Forward pass has correct shape")
-
-def test_serialization():
-    """Test model save/load."""
-    model = FNet.from_variant("tiny")
-    model.save('test_fnet.keras')
-    loaded_model = keras.models.load_model('test_fnet.keras')
-    assert model.get_config()['hidden_size'] == loaded_model.get_config()['hidden_size']
-    print("✓ Serialization successful")
-
-# Run tests
-if __name__ == '__main__':
-    test_model_creation_from_variant()
-    test_forward_pass_shape()
-    test_serialization()
-    print("\n✅ All tests passed!")
+# Run the included test suite
+python -m pytest tests/models/fnet
 ```
+
+*See `test_fnet.py` in the repository for unit test examples covering shape inference, serialization, and numerical stability.*
 
 ---
 
 ## 14. Troubleshooting & FAQs
 
-**Issue 1: Performance is slightly lower than BERT on a specific task.**
+**Issue: "My accuracy is 2-3% lower than RoBERTa."**
+*   **Context**: This is expected. FNet trades a small amount of accuracy for massive speed and scalability.
+*   **Tip**: Try training for more epochs. FNet often converges faster in wall-clock time, but might need more steps to settle than an Attention model.
 
--   **Cause**: FNet is an approximation of a full Transformer. Its static mixing mechanism may not be optimal for all tasks, especially those requiring highly content-sensitive token interactions.
--   **Solution**: This is the inherent trade-off. FNet offers a massive speedup for a potential small drop in accuracy. Consider if the speed/efficiency gain is worth it for your application. Also, try fine-tuning for more epochs, as the learning dynamics may differ from BERT.
+**Issue: "Training is slow with variable sequence lengths."**
+*   **Context**: FFT operations on TPUs/GPUs trigger recompilation if shapes change frequently.
+*   **Tip**: Pad your batches to fixed buckets (e.g., 128, 256, 512) or a single fixed length.
 
-**Issue 2: Training is slow when using dynamic sequence lengths.**
-
--   **Cause**: While the model supports dynamic shapes, FFT implementations and XLA compilation are often heavily optimized for static shapes. Re-compiling the graph for each batch with a different shape can add overhead.
--   **Solution**: If possible, batch inputs by sequence length or pad all inputs in a batch to a uniform length. For inference, using a fixed sequence length is often best.
-
-### Frequently Asked Questions
-
-**Q: Is FNet a universal replacement for BERT?**
-
-A: No. It's a highly efficient alternative. For tasks where inference speed, memory, or the ability to handle long sequences is critical, FNet is an excellent choice. For tasks requiring the absolute highest accuracy where computational cost is not a concern, a standard Transformer like RoBERTa or DeBERTa might still be superior.
-
-**Q: How does FNet compare to other efficient Transformers like Linformer or Reformer?**
-
-A: FNet is arguably the simplest. Linformer uses a low-rank projection to approximate the attention matrix, while Reformer uses locality-sensitive hashing. FNet's Fourier Transform is completely parameter-free and deterministic. This simplicity makes it very fast and easy to implement.
-
-**Q: Can I use this for non-NLP sequence tasks?**
-
-A: Absolutely. As long as you can represent your data as a sequence of vectors, you can use an FNet encoder. This could include time-series data, flattened image patches, or biological sequences. You would just need to create an appropriate embedding layer for your specific data modality.
+**Q: Can I use FNet for generation (Decoder)?**
+*   **A**: No. The Fourier Transform is a global operation (bidirectional). It cannot easily be masked for causal (left-to-right) generation. FNet is strictly an Encoder.
 
 ---
 
@@ -745,31 +542,23 @@ A: Absolutely. As long as you can represent your data as a sequence of vectors, 
 
 ### Complexity Analysis
 
-The key advantage of FNet comes from its reduced computational complexity. Let `L` be the sequence length and `H` be the hidden size.
+Let $L$ be sequence length and $H$ be hidden size.
 
--   **Self-Attention (e.g., BERT)**:
-    -   The dot-product attention mechanism has a complexity of **`O(L² * H)`**.
-    -   This quadratic scaling with `L` is the primary bottleneck.
-
--   **FNet (Fourier Transform)**:
-    -   The Fast Fourier Transform algorithm has a complexity of `O(L * log L)`.
-    -   The FNet block's mixing step applies this along two dimensions, leading to a complexity of **`O(L * H * log(L*H))`**, but in practice, it is dominated by **`O(L * H * log L)`**.
-    -   This is a near-linear relationship with `L`, allowing the model to scale to much longer sequences.
+| Component | Complexity | Scaling |
+| :--- | :--- | :--- |
+| **Self-Attention** | $O(L^2 \cdot H)$ | Quadratic (Bottleneck) |
+| **FNet Mixing (FFT)** | $O(L \log L \cdot H)$ | Quasi-Linear |
+| **Feed-Forward** | $O(L \cdot H^2)$ | Linear (w.r.t $L$) |
 
 ### The Role of the Feed-Forward Network
 
-Since the Fourier Transform is a linear, static operation, the FFN sub-layer in FNet carries a heavy burden. It is responsible for:
-1.  **Non-linearity**: Introducing non-linear transformations that are essential for learning complex functions.
-2.  **Content-based Reasoning**: Acting on each token's representation independently to model content-specific features.
-3.  **Memorization**: Storing factual knowledge learned during pre-training.
-
-The success of FNet suggests that decoupling global mixing (FFT) from local, content-aware processing (FFN) is a viable and highly efficient architectural choice.
+In FNet, the mixing layer (FFT) is linear and static. Therefore, the **Feed-Forward Network (FFN)** bears the entire burden of learning non-linear, content-specific relationships. This is why FNet can benefit from advanced FFN structures like GLU variants more than standard Transformers might.
 
 ---
 
 ## 16. Citation
 
-If you use FNet in your research, please cite the original paper:
+If you use this implementation or the FNet architecture in your research, please cite the original paper:
 
 ```bibtex
 @article{lee2021fnet,
