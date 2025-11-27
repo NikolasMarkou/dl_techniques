@@ -54,7 +54,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Optional, Union, Tuple, Any, List
+from typing import Optional, Union, Tuple, Any, List, Dict
 
 # ---------------------------------------------------------------------
 
@@ -63,89 +63,93 @@ class HANCLayer(keras.layers.Layer):
     """
     Hierarchical Aggregation of Neighborhood Context (HANC) Layer.
 
-    This layer implements hierarchical context aggregation by computing average
-    and max pooling at multiple scales (2×2, 4×4, 8×8, 16×16, 32×32) and concatenating
-    them along the channel dimension. This provides an approximate version of
-    self-attention by comparing pixels with neighborhood statistics at multiple scales.
+    This layer approximates global self-attention by aggregating statistical
+    summaries (mean and max) from local neighborhoods at multiple scales.
+    It combines these multi-scale context features with the original input
+    to create a rich, context-aware representation with linear complexity O(k).
 
-    The layer concatenates:
-    - Original features
-    - Average pooled features at k-1 different scales (upsampled back)
-    - Max pooled features at k-1 different scales (upsampled back)
+    **Intent**: To provide a computationally efficient alternative to
+    self-attention for high-resolution feature maps, bridging the gap between
+    local convolution and global transformer contexts.
 
-    Total output channels after concatenation = input_channels × (2×k - 1)
-    Final output channels = out_channels (after 1×1 convolution)
+    **Architecture**:
+    ```
+    Input(shape=[H, W, C])
+           ↓
+    Path 1: Identity
+    Path 2..k:
+       ├─ AvgPool(2^s) → Resize(H, W)
+       └─ MaxPool(2^s) → Resize(H, W)
+           ↓
+    Concatenate(axis=-1)  [Channels = C * (2k - 1)]
+           ↓
+    Conv1x1(out_channels)
+           ↓
+    BatchNorm → LeakyReLU
+           ↓
+    Output(shape=[H, W, out_channels])
+    ```
+
+    **Mathematical Operations**:
+    Let $X$ be the input. For scales $s \in \{1, \dots, k-1\}$:
+    1.  $C_{avg}^{(s)} = \text{Up}(\text{AvgPool}_{2^s}(X))$
+    2.  $C_{max}^{(s)} = \text{Up}(\text{MaxPool}_{2^s}(X))$
+    3.  $X_{concat} = [X, C_{avg}^{(1)}, C_{max}^{(1)}, \dots, C_{avg}^{(k-1)}, C_{max}^{(k-1)}]$
+    4.  $Y = \sigma(BN(W * X_{concat}))$
 
     Args:
         in_channels: Integer, number of input channels. Must be positive.
-        out_channels: Integer, number of output channels after final 1×1 convolution.
+        out_channels: Integer, number of output channels after projection.
             Must be positive.
-        k: Integer, number of hierarchical levels. Must be between 1 and 5.
-            k=1 means no pooling (original only), k=2 adds 2×2 pooling,
-            k=3 adds 2×2 and 4×4, etc. Higher k values provide more contextual
-            information but increase computational cost.
-        kernel_initializer: String or Initializer, initializer for the 1×1 convolution kernel.
+        k: Integer, number of hierarchical levels (1-5).
+            k=1: Identity only (no pooling).
+            k=2: Adds 2x2 pooling context.
+            k=3: Adds 2x2 and 4x4 pooling context.
+        kernel_initializer: Initializer for the 1x1 convolution kernel.
             Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional Regularizer, regularizer for the 1×1 convolution kernel.
-            Defaults to None.
+        kernel_regularizer: Optional Regularizer for the convolution kernel.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape:
-        4D tensor with shape (batch_size, height, width, in_channels).
+        4D tensor with shape `(batch_size, height, width, in_channels)`.
 
     Output shape:
-        4D tensor with shape (batch_size, height, width, out_channels).
+        4D tensor with shape `(batch_size, height, width, out_channels)`.
 
     Attributes:
-        conv: 1×1 convolution layer for dimensional compression.
-        batch_norm: Batch normalization layer for training stability.
-        activation: LeakyReLU activation function.
-        avg_pooling_layers: List of average pooling layers for each scale.
-        max_pooling_layers: List of max pooling layers for each scale.
-        concatenate: Concatenation layer for combining multi-scale features.
+        conv: 1x1 Convolution for feature fusion and dimension reduction.
+        batch_norm: BatchNormalization applied after convolution.
+        avg_pooling_layers: List of AveragePooling2D layers.
+        max_pooling_layers: List of MaxPooling2D layers.
 
     Example:
         ```python
-        # Basic usage with default parameters
-        hanc = HANCLayer(in_channels=64, out_channels=64, k=3)
+        # Standard usage (Context from 2x2 and 4x4 neighborhoods)
+        layer = HANCLayer(in_channels=64, out_channels=64, k=3)
+        y = layer(x)
 
-        # Custom configuration with regularization
-        hanc = HANCLayer(
+        # High-level context (up to 16x16 neighborhoods)
+        layer = HANCLayer(
             in_channels=128,
-            out_channels=128,
-            k=4,
-            kernel_initializer='he_normal',
-            kernel_regularizer=keras.regularizers.L2(1e-4)
+            out_channels=256,
+            k=5,
+            kernel_regularizer='l2'
         )
-
-        # In a model
-        inputs = keras.Input(shape=(32, 32, 64))
-        outputs = HANCLayer(in_channels=64, out_channels=64, k=3)(inputs)
         ```
 
     Raises:
-        ValueError: If in_channels is not positive.
-        ValueError: If out_channels is not positive.
+        ValueError: If in_channels, out_channels are not positive.
         ValueError: If k is not between 1 and 5.
-
-    Note:
-        Higher k values provide more contextual information but increase
-        computational cost and memory usage. k=3 (up to 8×8 patches) is
-        recommended for most applications as it provides comprehensive
-        context modeling with reasonable computational overhead.
-
-        The layer automatically handles spatial dimension alignment through
-        `keras.ops.image.resize`, making it robust to dynamic input shapes.
     """
 
     def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        k: int = 3,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs: Any
+            self,
+            in_channels: int,
+            out_channels: int,
+            k: int = 3,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -157,19 +161,51 @@ class HANCLayer(keras.layers.Layer):
         if k < 1 or k > 5:
             raise ValueError(f"k must be between 1 and 5, got {k}")
 
-        # Store ALL configuration parameters
+        # Store configuration
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.k = k
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Calculate total channels after concatenation
-        self.total_channels = in_channels * (2 * k - 1)
+        # Compute derived parameters
+        # Original (1) + (Avg + Max) * (k-1) scales
+        self.total_concat_channels = in_channels * (1 + 2 * (k - 1))
 
-        # CREATE all sub-layers in __init__ (following Modern Keras 3 pattern)
+        # ---------------------------------------------------------------------
+        # CREATE sub-layers (Golden Rule: Create in __init__)
+        # ---------------------------------------------------------------------
 
-        # Main processing layers
+        # 1. Pooling layers for hierarchical scales
+        # We create exactly the layers needed for the specified k
+        self.avg_pooling_layers: List[keras.layers.Layer] = []
+        self.max_pooling_layers: List[keras.layers.Layer] = []
+
+        for scale in range(1, self.k):
+            pool_size = 2 ** scale
+
+            self.avg_pooling_layers.append(
+                keras.layers.AveragePooling2D(
+                    pool_size=pool_size,
+                    strides=pool_size,
+                    padding='same',
+                    name=f'avg_pool_{pool_size}x{pool_size}'
+                )
+            )
+
+            self.max_pooling_layers.append(
+                keras.layers.MaxPooling2D(
+                    pool_size=pool_size,
+                    strides=pool_size,
+                    padding='same',
+                    name=f'max_pool_{pool_size}x{pool_size}'
+                )
+            )
+
+        # 2. Concatenation
+        self.concatenate = keras.layers.Concatenate(axis=-1, name='concat_features')
+
+        # 3. Fusion and Projection
         self.conv = keras.layers.Conv2D(
             filters=self.out_channels,
             kernel_size=1,
@@ -177,53 +213,17 @@ class HANCLayer(keras.layers.Layer):
             use_bias=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name='hanc_conv'
+            name='fusion_conv'
         )
 
-        self.batch_norm = keras.layers.BatchNormalization(name='hanc_bn')
-        self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='hanc_activation')
-
-        # Concatenation layer
-        self.concatenate = keras.layers.Concatenate(axis=-1, name='hanc_concat')
-
-        # Pre-create pooling layers for all possible scales (1 to k-1)
-        max_k = 5  # Maximum supported k value
-        self.avg_pooling_layers: List[keras.layers.Layer] = []
-        self.max_pooling_layers: List[keras.layers.Layer] = []
-
-        for scale in range(1, max_k):  # scales 1, 2, 3, 4 (for k up to 5)
-            pool_size = 2 ** scale  # 2, 4, 8, 16
-
-            # Average pooling
-            avg_pool = keras.layers.AveragePooling2D(
-                pool_size=pool_size,
-                strides=pool_size,
-                padding='same',
-                name=f'hanc_avg_pool_{scale}'
-            )
-
-            # Max pooling
-            max_pool = keras.layers.MaxPooling2D(
-                pool_size=pool_size,
-                strides=pool_size,
-                padding='same',
-                name=f'hanc_max_pool_{scale}'
-            )
-
-            self.avg_pooling_layers.append(avg_pool)
-            self.max_pooling_layers.append(max_pool)
-
+        self.batch_norm = keras.layers.BatchNormalization(name='fusion_bn')
+        self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures all weight variables exist before weight restoration during
-        model loading.
-
-        Args:
-            input_shape: Shape of the input tensor.
+        CRITICAL: Explicitly builds sub-layers in computational order.
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -235,110 +235,96 @@ class HANCLayer(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
-        # Build main processing layers
-        # For concatenation, we need to compute the expected concatenated shape
-        concat_channels = self.in_channels * (2 * self.k - 1)
-        concat_shape = tuple(input_shape[:-1]) + (concat_channels,)
+        # ---------------------------------------------------------------------
+        # BUILD sub-layers (Golden Rule: Build in build)
+        # ---------------------------------------------------------------------
 
+        # 1. Build pooling layers
+        # Pooling layers generally don't have weights, but we build them for completeness
+        for avg_pool, max_pool in zip(self.avg_pooling_layers, self.max_pooling_layers):
+            avg_pool.build(input_shape)
+            max_pool.build(input_shape)
+
+        # 2. Compute shape after concatenation to build the convolution
+        # Shape: (Batch, H, W, total_concat_channels)
+        concat_shape = tuple(input_shape[:-1]) + (self.total_concat_channels,)
+
+        # 3. Build Convolution
         self.conv.build(concat_shape)
         conv_output_shape = self.conv.compute_output_shape(concat_shape)
+
+        # 4. Build Batch Norm
         self.batch_norm.build(conv_output_shape)
 
-        # Build pooling and upsampling layers that will be used (based on k)
-        for scale in range(min(self.k - 1, len(self.avg_pooling_layers))):
-            self.avg_pooling_layers[scale].build(input_shape)
-            self.max_pooling_layers[scale].build(input_shape)
-
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass computation through hierarchical context aggregation.
-
-        Implements the six-stage processing pipeline:
-        1. Original feature preservation
-        2. Multi-scale average pooling and upsampling
-        3. Multi-scale max pooling and upsampling
-        4. Hierarchical concatenation
-        5. Dimensional compression via 1×1 convolution
-        6. Feature normalization and activation
+        Forward pass computation.
 
         Args:
-            inputs: Input tensor of shape (batch_size, height, width, in_channels).
+            inputs: Input tensor of shape (batch, height, width, in_channels).
             training: Boolean indicating training mode for batch normalization.
 
         Returns:
-            Output tensor of shape (batch_size, height, width, out_channels).
+            Output tensor of shape (batch, height, width, out_channels).
         """
-        # Stage 1: Start with original features
-        features_list = [inputs]
-
         if self.k == 1:
-            # No hierarchical pooling, just use original features
+            # Even if k=1, we might need to project channels if in != out
+            # However, logic dictates we still proceed through conv/bn logic below
+            # treating inputs as the 'concatenated' tensor.
             concatenated = inputs
         else:
-            # Get target shape for resizing, compatible with graph mode
-            target_shape = ops.shape(inputs)
-            target_height, target_width = target_shape[1], target_shape[2]
+            # 1. Gather Multi-scale Context
+            features_list = [inputs]
 
-            # Stage 2 & 3: Add average and max pooled features at different scales
-            for scale in range(self.k - 1):  # scales 0 to k-2, representing 2^1 to 2^(k-1)
+            # Use dynamic shape for resizing
+            input_shape = ops.shape(inputs)
+            height, width = input_shape[1], input_shape[2]
+
+            for avg_pool, max_pool in zip(self.avg_pooling_layers, self.max_pooling_layers):
                 # Average pooling path
-                avg_pooled = self.avg_pooling_layers[scale](inputs)
-                avg_upsampled = ops.image.resize(
-                    avg_pooled,
-                    size=(target_height, target_width),
+                avg_feat = avg_pool(inputs)
+                avg_resized = ops.image.resize(
+                    avg_feat,
+                    size=(height, width),
                     interpolation='nearest'
                 )
-                features_list.append(avg_upsampled)
+                features_list.append(avg_resized)
 
                 # Max pooling path
-                max_pooled = self.max_pooling_layers[scale](inputs)
-                max_upsampled = ops.image.resize(
-                    max_pooled,
-                    size=(target_height, target_width),
+                max_feat = max_pool(inputs)
+                max_resized = ops.image.resize(
+                    max_feat,
+                    size=(height, width),
                     interpolation='nearest'
                 )
-                features_list.append(max_upsampled)
+                features_list.append(max_resized)
 
-            # Stage 4: Hierarchical concatenation along channel dimension
+            # 2. Concatenate
             concatenated = self.concatenate(features_list)
 
-        # Stage 5: Dimensional compression via 1×1 convolution
+        # 3. Fusion & Projection
         x = self.conv(concatenated)
-
-        # Stage 6: Feature normalization and activation
         x = self.batch_norm(x, training=training)
         x = self.activation(x)
 
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple with same spatial dimensions and out_channels.
-        """
+        """Compute output shape."""
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 
         return tuple(list(input_shape[:-1]) + [self.out_channels])
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         """
         Get layer configuration for serialization.
-
-        Returns ALL constructor parameters for proper serialization/deserialization.
-        This is critical for model saving and loading.
 
         Returns:
             Dictionary containing all layer configuration parameters.

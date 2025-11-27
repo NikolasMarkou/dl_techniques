@@ -59,7 +59,7 @@ References:
 """
 
 import keras
-from typing import Optional, Union, Tuple, Any
+from typing import Optional, Union, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -76,80 +76,93 @@ class HANCBlock(keras.layers.Layer):
     """
     Hierarchical Aggregation of Neighborhood Context (HANC) Block.
 
-    This block implements the main building block from ACC-UNet, combining:
-    1. Inverted bottleneck expansion (1x1 conv to expand channels)
-    2. Depthwise 3x3 convolution
-    3. Hierarchical context aggregation (HANC layer)
-    4. Residual connection (when input/output channels match)
-    5. Final 1x1 convolution with Squeeze-Excitation
+    This block implements the main building block from ACC-UNet, providing
+    long-range dependencies through hierarchical pooling operations while
+    maintaining efficiency through depthwise separable convolutions.
 
-    The block provides long-range dependencies through hierarchical pooling
-    operations while maintaining efficiency through depthwise convolutions.
+    **Intent**: To serve as a drop-in replacement for standard convolutional
+    blocks or Transformer blocks in U-Net architectures, providing global
+    context awareness with linear computational complexity O(k).
+
+    **Architecture**:
+    ```
+    Input(shape=[..., input_channels])
+           ↓
+    Expand: Conv1x1(expanded_channels) → BN → LeakyReLU
+           ↓
+    Spatial: DepthwiseConv3x3 → BN → LeakyReLU
+           ↓
+    Context: HANCLayer(k levels)
+           ↓
+    Residual: + Input (if input_channels == filters) → BN
+           ↓
+    Project: Conv1x1(filters) → BN → LeakyReLU
+           ↓
+    Calibrate: SqueezeExcitation
+           ↓
+    Output(shape=[..., filters])
+    ```
+
+    **Mathematical Operation**:
+    The block approximates self-attention by aggregating multi-scale statistics:
+    1.  **Expansion**: $X_{exp} = \sigma(BN(W_{exp} * X))$
+    2.  **Spatial**: $X_{dw} = \sigma(BN(W_{dw} * X_{exp}))$
+    3.  **HANC**: $X_{ctx} = \text{Agg}(\{P_s(X_{dw})\}_{s=1}^k)$
+        where $P_s$ are pooling operations at scale $s$.
+    4.  **Projection**: $Y = \text{SE}(\sigma(BN(W_{proj} * X_{ctx})))$
 
     Args:
         filters: Integer, number of output filters. Must be positive.
         input_channels: Integer, number of input channels. Must be positive.
         k: Integer, hierarchical levels for HANC operation (1-5 supported).
-            Must be between 1 and 5.
-        inv_factor: Integer, inverted bottleneck expansion factor. Must be positive.
-        kernel_initializer: String or Initializer, initializer for convolution kernels.
+            Determines the granularity of context aggregation.
+        inv_factor: Integer, inverted bottleneck expansion factor.
+            Determines the channel width of the internal processing.
+        kernel_initializer: Initializer for convolution kernels.
             Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, initializer for bias vectors.
+        bias_initializer: Initializer for bias vectors.
             Defaults to 'zeros'.
-        kernel_regularizer: Optional Regularizer, regularizer for convolution kernels.
-            Defaults to None.
-        bias_regularizer: Optional Regularizer, regularizer for bias vectors.
-            Defaults to None.
+        kernel_regularizer: Optional Regularizer for convolution kernels.
+        bias_regularizer: Optional Regularizer for bias vectors.
         **kwargs: Additional arguments for the Layer base class.
 
     Input shape:
-        4D tensor with shape (batch_size, height, width, input_channels).
+        4D tensor with shape `(batch_size, height, width, input_channels)`.
 
     Output shape:
-        4D tensor with shape (batch_size, height, width, filters).
+        4D tensor with shape `(batch_size, height, width, filters)`.
 
     Attributes:
         expand_conv: 1x1 convolution for channel expansion.
-        expand_bn: Batch normalization after expansion.
         depthwise_conv: 3x3 depthwise convolution for spatial processing.
-        depthwise_bn: Batch normalization after depthwise convolution.
         hanc_layer: Hierarchical context aggregation layer.
-        residual_bn: Batch normalization applied after residual addition.
         output_conv: 1x1 convolution for output projection.
-        output_bn: Batch normalization after output projection.
         squeeze_excitation: Squeeze-Excitation attention mechanism.
-        activation: LeakyReLU activation function.
 
     Example:
         ```python
-        # Basic usage
-        block = HANCBlock(filters=64, input_channels=32, k=3, inv_factor=3)
+        # Basic usage in a model
+        inputs = keras.Input(shape=(256, 256, 32))
+        x = HANCBlock(
+            filters=64,
+            input_channels=32,
+            k=3,
+            inv_factor=3
+        )(inputs)
 
-        # Custom configuration
-        block = HANCBlock(
+        # High-capacity configuration
+        x = HANCBlock(
             filters=128,
             input_channels=64,
-            k=4,
+            k=5,
             inv_factor=4,
-            kernel_initializer='he_normal',
             kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 32))
-        x = HANCBlock(filters=64, input_channels=32)(inputs)
+        )(x)
         ```
 
     Raises:
-        ValueError: If filters is not positive.
-        ValueError: If input_channels is not positive.
+        ValueError: If filters, input_channels, or inv_factor are not positive.
         ValueError: If k is not between 1 and 5.
-        ValueError: If inv_factor is not positive.
-
-    Note:
-        The block includes automatic residual connections when input and output
-        channels match. The hierarchical context aggregation provides transformer-like
-        global modeling with convolutional efficiency.
     """
 
     def __init__(
@@ -190,9 +203,11 @@ class HANCBlock(keras.layers.Layer):
         self.expanded_channels = self.input_channels * self.inv_factor
         self.use_residual = (self.input_channels == self.filters)
 
-        # CREATE all sub-layers in __init__ (following Modern Keras 3 pattern)
+        # ---------------------------------------------------------------------
+        # CREATE sub-layers (Golden Rule: Create in __init__)
+        # ---------------------------------------------------------------------
 
-        # 1. Expansion convolution (1x1)
+        # 1. Expansion layers
         self.expand_conv = keras.layers.Conv2D(
             filters=self.expanded_channels,
             kernel_size=1,
@@ -204,7 +219,7 @@ class HANCBlock(keras.layers.Layer):
         )
         self.expand_bn = keras.layers.BatchNormalization(name='expand_bn')
 
-        # 2. Depthwise convolution (3x3)
+        # 2. Depthwise layers
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
             kernel_size=3,
             padding='same',
@@ -215,7 +230,7 @@ class HANCBlock(keras.layers.Layer):
         )
         self.depthwise_bn = keras.layers.BatchNormalization(name='depthwise_bn')
 
-        # 3. HANC layer for hierarchical context aggregation
+        # 3. HANC layer
         self.hanc_layer = HANCLayer(
             in_channels=self.expanded_channels,
             out_channels=self.input_channels,
@@ -225,13 +240,13 @@ class HANCBlock(keras.layers.Layer):
             name='hanc'
         )
 
-        # 4. Residual connection batch norm (applied after adding residual)
+        # 4. Residual connection batch norm
         if self.use_residual:
             self.residual_bn = keras.layers.BatchNormalization(name='residual_bn')
         else:
             self.residual_bn = None
 
-        # 5. Output convolution (1x1)
+        # 5. Output layers
         self.output_conv = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=1,
@@ -258,12 +273,8 @@ class HANCBlock(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures all weight variables exist before weight restoration during
-        model loading.
-
-        Args:
-            input_shape: Shape of the input tensor.
+        CRITICAL: Explicitly builds sub-layers in computational order to ensure
+        weights are created and shapes are validated before training/loading.
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -275,38 +286,39 @@ class HANCBlock(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
-        # Build sub-layers in computational order
+        # ---------------------------------------------------------------------
+        # BUILD sub-layers (Golden Rule: Build in build)
+        # ---------------------------------------------------------------------
 
-        # 1. Expansion layers
+        # 1. Expansion
         self.expand_conv.build(input_shape)
         expand_output_shape = self.expand_conv.compute_output_shape(input_shape)
         self.expand_bn.build(expand_output_shape)
 
-        # 2. Depthwise layers
+        # 2. Depthwise
         self.depthwise_conv.build(expand_output_shape)
         depthwise_output_shape = self.depthwise_conv.compute_output_shape(expand_output_shape)
         self.depthwise_bn.build(depthwise_output_shape)
 
-        # 3. HANC layer
+        # 3. HANC
         self.hanc_layer.build(depthwise_output_shape)
         hanc_output_shape = self.hanc_layer.compute_output_shape(depthwise_output_shape)
 
-        # 4. Residual batch norm (if applicable)
+        # 4. Residual
         if self.residual_bn is not None:
             self.residual_bn.build(hanc_output_shape)
 
-        # 5. Output layers
-        output_input_shape = hanc_output_shape  # Same shape after residual
+        # 5. Output Projection
+        # Note: Shape is same as HANC output (concatenation logic is handled inside HANCLayer
+        # or it preserves spatial dims, input_channels was restored by HANCLayer out_channels)
+        output_input_shape = hanc_output_shape
         self.output_conv.build(output_input_shape)
         output_conv_shape = self.output_conv.compute_output_shape(output_input_shape)
         self.output_bn.build(output_conv_shape)
 
-        # 6. Squeeze-Excitation
+        # 6. SE Block
         self.squeeze_excitation.build(output_conv_shape)
 
-        # 7. Activation doesn't need explicit building
-
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -315,23 +327,14 @@ class HANCBlock(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass computation through the HANC block.
-
-        Implements the seven-stage processing pipeline:
-        1. Channel expansion via 1x1 convolution
-        2. Spatial processing via depthwise convolution
-        3. Hierarchical context aggregation via HANC layer
-        4. Optional residual connection with batch normalization
-        5. Output projection via 1x1 convolution
-        6. Channel recalibration via Squeeze-Excitation
+        Forward pass computation.
 
         Args:
-            inputs: Input tensor of shape (batch_size, height, width, input_channels).
-            training: Boolean indicating training mode for batch normalization
-                and dropout layers.
+            inputs: Input tensor of shape (batch, height, width, input_channels).
+            training: Boolean indicating training mode for batch normalization.
 
         Returns:
-            Output tensor of shape (batch_size, height, width, filters).
+            Output tensor of shape (batch, height, width, filters).
         """
         # 1. Expansion phase
         x = self.expand_conv(inputs)
@@ -362,26 +365,15 @@ class HANCBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape of the layer.
-
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple with same spatial dimensions and filters channels.
-        """
+        """Compute output shape of the layer."""
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 
         return tuple(list(input_shape[:-1]) + [self.filters])
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         """
         Get layer configuration for serialization.
-
-        Returns ALL constructor parameters for proper serialization/deserialization.
-        This is critical for model saving and loading.
 
         Returns:
             Dictionary containing all layer configuration parameters.
