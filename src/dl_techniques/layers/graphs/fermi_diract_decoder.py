@@ -17,8 +17,8 @@ where:
 """
 
 import keras
+from typing import List, Any
 from keras import layers, initializers, ops
-from typing import List, Optional, Any
 
 
 @keras.saving.register_keras_serializable()

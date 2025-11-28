@@ -8,7 +8,7 @@ for efficient graph neural network operations.
 
 import numpy as np
 import tensorflow as tf
-from typing import Tuple, Optional, Union
+from typing import Tuple, Union
 import scipy.sparse as sp
 
 
