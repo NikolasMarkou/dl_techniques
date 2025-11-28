@@ -82,7 +82,6 @@ Each message passing scheme is based on a seminal paper in the field:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 # ---------------------------------------------------------------------
@@ -232,10 +231,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             use_residual: bool = True,
             num_attention_heads: int = 4,
             epsilon: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -265,8 +264,8 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         self.use_residual = use_residual
         self.num_attention_heads = num_attention_heads
         self.epsilon = epsilon
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
 
@@ -280,7 +279,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             if self.message_passing == 'gcn':
                 # GCN uses a simple linear transformation
                 self.gnn_layers.append(
-                    layers.Dense(
+                    keras.layers.Dense(
                         self.concept_dim,
                         activation=None,  # Apply activation separately for flexibility
                         kernel_initializer=self.kernel_initializer,
@@ -293,7 +292,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             elif self.message_passing == 'graphsage':
                 # GraphSAGE uses separate transformations for self and neighbors
                 self.gnn_layers.append({
-                    'self': layers.Dense(
+                    'self': keras.layers.Dense(
                         self.concept_dim,
                         activation=None,
                         kernel_initializer=self.kernel_initializer,
@@ -302,7 +301,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                         bias_regularizer=self.bias_regularizer,
                         name=f'sage_self_{i}'
                     ),
-                    'neighbor': layers.Dense(
+                    'neighbor': keras.layers.Dense(
                         self.concept_dim,
                         activation=None,
                         kernel_initializer=self.kernel_initializer,
@@ -315,7 +314,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             elif self.message_passing == 'gat':
                 # GAT uses multi-head attention
                 self.gnn_layers.append(
-                    layers.MultiHeadAttention(
+                    keras.layers.MultiHeadAttention(
                         num_heads=self.num_attention_heads,
                         key_dim=self.concept_dim // self.num_attention_heads,
                         dropout=self.dropout_rate,
@@ -345,13 +344,13 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
             # Dropout for regularization
             self.dropout_layers.append(
-                layers.Dropout(self.dropout_rate, name=f'gnn_dropout_{i}')
+                keras.layers.Dropout(self.dropout_rate, name=f'gnn_dropout_{i}')
             )
 
             # Normalization layers
             if self.normalization == 'layer':
                 self.norm_layers.append(
-                    layers.LayerNormalization(name=f'gnn_layer_norm_{i}')
+                    keras.layers.LayerNormalization(name=f'gnn_layer_norm_{i}')
                 )
             elif self.normalization == 'rms':
                 # Re-use RMSNorm from dl_techniques
@@ -360,14 +359,14 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
                 )
             elif self.normalization == 'batch':
                 self.norm_layers.append(
-                    layers.BatchNormalization(name=f'gnn_batch_norm_{i}')
+                    keras.layers.BatchNormalization(name=f'gnn_batch_norm_{i}')
                 )
             else:  # 'none'
                 self.norm_layers.append(None)
 
         # Final aggregation layer
         if self.aggregation == 'attention':
-            self.aggregation_attention = layers.MultiHeadAttention(
+            self.aggregation_attention = keras.layers.MultiHeadAttention(
                 num_heads=4,
                 key_dim=self.concept_dim // 4,
                 dropout=self.dropout_rate,
@@ -454,12 +453,12 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
         # Normalize adjacency matrix inline for stability
         # Compute degree matrix
-        degree = ops.sum(adjacency_matrix, axis=-1, keepdims=False)  # (batch, num_nodes)
-        degree = ops.maximum(degree, 1e-12)  # Avoid division by zero
+        degree = keras.ops.sum(adjacency_matrix, axis=-1, keepdims=False)  # (batch, num_nodes)
+        degree = keras.ops.maximum(degree, 1e-12)  # Avoid division by zero
 
         # Row normalization: D^(-1) * A
         degree_inv = 1.0 / degree  # (batch, num_nodes)
-        degree_inv_matrix = ops.expand_dims(degree_inv, axis=1)  # (batch, 1, num_nodes)
+        degree_inv_matrix = keras.ops.expand_dims(degree_inv, axis=1)  # (batch, 1, num_nodes)
         normalized_adj = adjacency_matrix * degree_inv_matrix  # Broadcasting
 
         # Process through GNN layers
@@ -470,20 +469,20 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
             if self.message_passing == 'gcn':
                 # GCN: H' = σ(A_norm * H * W)
-                messages = ops.matmul(normalized_adj, h)
+                messages = keras.ops.matmul(normalized_adj, h)
                 h_new = self.gnn_layers[i](messages)
 
             elif self.message_passing == 'graphsage':
                 # GraphSAGE: H' = σ(W_self * H + W_neighbor * AGG(A * H))
                 self_features = self.gnn_layers[i]['self'](h)
-                neighbor_messages = ops.matmul(normalized_adj, h)
+                neighbor_messages = keras.ops.matmul(normalized_adj, h)
                 neighbor_features = self.gnn_layers[i]['neighbor'](neighbor_messages)
                 h_new = self_features + neighbor_features
 
             elif self.message_passing == 'gat':
                 # GAT: Use attention mechanism with masking based on adjacency
                 # Create attention mask from adjacency matrix
-                attention_mask = ops.cast(adjacency_matrix > 0, dtype='float32')
+                attention_mask = keras.ops.cast(adjacency_matrix > 0, dtype='float32')
                 h_new = self.gnn_layers[i](
                     query=h,
                     value=h,
@@ -493,7 +492,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
             elif self.message_passing == 'gin':
                 # GIN: H' = MLP((1 + ε) * H + Σ_neighbors)
-                neighbor_sum = ops.matmul(adjacency_matrix, h)
+                neighbor_sum = keras.ops.matmul(adjacency_matrix, h)
                 if self.gin_epsilon is not None:
                     eps = self.gin_epsilon[i]
                     combined = (1 + eps) * h + neighbor_sum
@@ -524,13 +523,13 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             h = self.aggregation_attention(h, h, training=training)
         elif self.aggregation == 'mean':
             # Global mean pooling
-            h = ops.mean(h, axis=1, keepdims=True)
+            h = keras.ops.mean(h, axis=1, keepdims=True)
         elif self.aggregation == 'max':
             # Global max pooling
-            h = ops.max(h, axis=1, keepdims=True)
+            h = keras.ops.max(h, axis=1, keepdims=True)
         elif self.aggregation == 'sum':
             # Global sum pooling
-            h = ops.sum(h, axis=1, keepdims=True)
+            h = keras.ops.sum(h, axis=1, keepdims=True)
         # If aggregation == 'none', return as is
 
         return h
@@ -563,10 +562,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             'use_residual': self.use_residual,
             'num_attention_heads': self.num_attention_heads,
             'epsilon': self.epsilon,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 

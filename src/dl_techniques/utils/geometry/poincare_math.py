@@ -26,6 +26,7 @@ from keras import ops
 import tensorflow as tf
 from typing import Union
 
+# ---------------------------------------------------------------------
 
 class PoincareMath:
     """
@@ -271,3 +272,5 @@ class PoincareMath:
         term2 = coeff2 * y
 
         return (term1 + term2) / den
+
+# ---------------------------------------------------------------------

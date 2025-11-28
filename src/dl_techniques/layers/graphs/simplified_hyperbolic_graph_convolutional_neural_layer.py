@@ -19,18 +19,24 @@ where:
 """
 
 import keras
-from keras import layers, initializers, ops
 import tensorflow as tf
 from typing import Optional, Union, List, Tuple, Any
 
-from .poincare_math import PoincareMath
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.geometry.poincare_math import PoincareMath
+
+# ---------------------------------------------------------------------
 
 # Initialize global math utility instance
 _poincare_math = PoincareMath(eps=1e-5)
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class SHGCNLayer(layers.Layer):
+class SHGCNLayer(keras.layers.Layer):
     """
     Simplified Hyperbolic Graph Convolutional Layer.
 
@@ -143,8 +149,8 @@ class SHGCNLayer(layers.Layer):
             use_bias: bool = True,
             use_curvature: bool = True,
             dropout_rate: float = 0.0,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
             **kwargs: Any
     ) -> None:
         """Initialize sHGCN layer with configuration."""
@@ -164,7 +170,7 @@ class SHGCNLayer(layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
 
         # Create dropout layer
-        self.dropout = layers.Dropout(dropout_rate)
+        self.dropout = keras.layers.Dropout(dropout_rate)
 
     def build(self, input_shape: Union[Tuple, List[Tuple]]) -> None:
         """
@@ -206,7 +212,7 @@ class SHGCNLayer(layers.Layer):
         if self.use_curvature:
             self.c_theta = self.add_weight(
                 shape=(),
-                initializer=initializers.Constant(0.54),
+                initializer=keras.initializers.Constant(0.54),
                 name='curvature_theta',
                 trainable=True
             )
@@ -227,7 +233,7 @@ class SHGCNLayer(layers.Layer):
         Returns:
             Scalar tensor representing curvature c = softplus(c_theta).
         """
-        return ops.softplus(self.c_theta)
+        return keras.ops.softplus(self.c_theta)
 
     def call(
             self,
@@ -254,7 +260,7 @@ class SHGCNLayer(layers.Layer):
 
         # Step 1: Euclidean linear transformation
         # Z = X @ W: [N, input_dim] @ [input_dim, units] -> [N, units]
-        z_euclid = ops.matmul(x, self.kernel)
+        z_euclid = keras.ops.matmul(x, self.kernel)
 
         # Get current curvature
         c = self.curvature
@@ -326,3 +332,5 @@ class SHGCNLayer(layers.Layer):
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
         })
         return config
+
+# ---------------------------------------------------------------------

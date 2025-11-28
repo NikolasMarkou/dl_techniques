@@ -11,15 +11,14 @@ layers based on the task.
 """
 
 import keras
-from keras import layers, ops
 from typing import List, Optional, Union, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.graphs.shgcn_layer import SHGCNLayer
 from dl_techniques.layers.graphs.fermi_diract_decoder import FermiDiracDecoder
+from dl_techniques.layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer import SHGCNLayer
 
 # ---------------------------------------------------------------------
 
@@ -354,7 +353,7 @@ class SHGCNNodeClassifier(keras.Model):
         )
 
         # Classification head
-        self.classifier = layers.Dense(
+        self.classifier = keras.layers.Dense(
             num_classes,
             activation='softmax',
             name='classifier'
@@ -543,8 +542,8 @@ class SHGCNLinkPredictor(keras.Model):
         src_indices = edge_pairs[:, 0]
         tgt_indices = edge_pairs[:, 1]
 
-        src_embeddings = ops.take(embeddings, src_indices, axis=0)
-        tgt_embeddings = ops.take(embeddings, tgt_indices, axis=0)
+        src_embeddings = keras.ops.take(embeddings, src_indices, axis=0)
+        tgt_embeddings = keras.ops.take(embeddings, tgt_indices, axis=0)
 
         # Compute edge probabilities
         probabilities = self.decoder([src_embeddings, tgt_embeddings])

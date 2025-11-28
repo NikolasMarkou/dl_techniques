@@ -11,6 +11,7 @@ import tensorflow as tf
 from typing import Tuple, Union
 import scipy.sparse as sp
 
+# ---------------------------------------------------------------------
 
 def normalize_adjacency_symmetric(
         adj_matrix: Union[np.ndarray, sp.spmatrix],
@@ -87,6 +88,7 @@ def normalize_adjacency_symmetric(
 
     return adj_normalized.tocoo()
 
+# ---------------------------------------------------------------------
 
 def normalize_adjacency_row(
         adj_matrix: Union[np.ndarray, sp.spmatrix],
@@ -315,6 +317,7 @@ def preprocess_features(
 
     return features
 
+# ---------------------------------------------------------------------
 
 def sample_negative_edges(
         num_nodes: int,
@@ -386,3 +389,5 @@ def sample_negative_edges(
         )
 
     return np.array(negative_edges, dtype=np.int64)
+
+# ---------------------------------------------------------------------

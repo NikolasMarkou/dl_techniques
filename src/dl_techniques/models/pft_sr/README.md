@@ -2,6 +2,7 @@
 
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 [![CVPR 2025](https://img.shields.io/badge/CVPR-2025-blue.svg)](https://cvpr.thecvf.com/)
 
 A production-ready, fully-featured implementation of the **Progressive Focused Transformer (PFT-SR)** architecture in **Keras 3**. This implementation is based on the CVPR 2025 paper by Long et al. and achieves state-of-the-art performance on single image super-resolution benchmarks.
