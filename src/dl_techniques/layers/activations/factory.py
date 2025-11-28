@@ -25,6 +25,7 @@ from .hard_swish import HardSwish
 from .mish import Mish, SaturatedMish
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
+from .sparsemax import Sparsemax
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
 
@@ -48,6 +49,7 @@ ActivationType = Literal[
     'relu',
     'relu_k',
     'routing_probabilities',
+    'sparsemax',
     'squash',
     'thresh_max'
 ]
@@ -218,6 +220,16 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'without trainable weights.'
         )
     },
+    'sparsemax': {
+        'class': Sparsemax,
+        'description': 'Projects logits onto the probability simplex using Euclidean projection (L2).',
+        'required_params': [],
+        'optional_params': {'axis': -1},
+        'use_case': (
+            'Produces sparse probability distributions (with exact zeros), '
+            'ideal for interpretable attention mechanisms.'
+        )
+    },
     'squash': {
         'class': SquashLayer,
         'description': 'Squashing non-linearity for Capsule Networks.',
@@ -374,6 +386,13 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
         if not isinstance(epsilon, (float, int)) or epsilon <= 0:
             raise ValueError(
                 f"epsilon must be a positive number, but received: {epsilon}"
+            )
+
+    if activation_type == 'sparsemax':
+        axis = kwargs.get('axis', -1)
+        if not isinstance(axis, int):
+            raise ValueError(
+                f"axis must be an integer, got {type(axis).__name__}"
             )
 
     if activation_type == 'thresh_max':

@@ -4,7 +4,7 @@ The `dl_techniques.layers.activations` module provides a comprehensive collectio
 
 ## Overview
 
-This module includes seventeen distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
+This module includes distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
 
 ## Available Activation Types
 
@@ -27,6 +27,7 @@ The following layers are supported by the factory system with automated paramete
 | `saturated_mish` | `SaturatedMish` | Mish variant that smoothly saturates for large inputs. | Preventing activation explosion in very deep networks. |
 | `relu_k` | `ReLUK` | Powered ReLU activation: `max(0, x)^k`. | Creating more aggressive non-linearities than standard ReLU. |
 | `routing_probabilities` | `RoutingProbabilitiesLayer` | A non-trainable hierarchical routing layer for probabilistic classification, an alternative to softmax. | Parameter-free alternative to softmax, introducing hierarchical bias without trainable weights. |
+| `sparsemax` | `Sparsemax` | Projects logits onto the probability simplex using Euclidean projection (L2). | Sparse attention mechanisms and interpretable multi-label classification. |
 | `squash` | `SquashLayer` | Squashing non-linearity for Capsule Networks. | Normalizing vector outputs in Capsule Networks. |
 | `thresh_max` | `ThreshMax` | Sparse softmax variant using a differentiable step function. | Creating sparse, confident probability distributions. |
 
@@ -156,6 +157,14 @@ relu_squared = create_activation_layer('relu_k', k=2)
 routing_probs = create_activation_layer('routing_probabilities', output_dim=10) # `output_dim` can also be inferred
 ```
 
+### Sparsemax
+**Optional:** `axis` (int, default: -1)
+
+```python
+# Create sparse attention mechanism
+sparse_attn = create_activation_layer('sparsemax', axis=-1)
+```
+
 ### SquashLayer
 **Optional:** `axis` (int, default: -1), `epsilon` (float, default: 1e-7)
 
@@ -178,12 +187,13 @@ sharp_threshmax = create_activation_layer(
 While the factory is recommended, direct instantiation is always available.
 
 ```python
-from dl_techniques.layers.activations import ReLUK, SaturatedMish, ThreshMax
+from dl_techniques.layers.activations import ReLUK, SaturatedMish, ThreshMax, Sparsemax
 
 # Direct instantiation (bypasses factory validation and logging)
 relu_k = ReLUK(k=2)
 sat_mish = SaturatedMish(alpha=4.0, beta=0.2)
 thresh_max = ThreshMax(slope=20.0)
+sparsemax = Sparsemax(axis=-1)
 ```
 
 ## Integration Patterns
@@ -200,7 +210,7 @@ model = keras.Sequential([
     keras.layers.Dense(64),
     create_activation_layer('hard_swish'),
     keras.layers.Dense(10),
-    create_activation_layer('adaptive_softmax')
+    create_activation_layer('sparsemax')
 ])
 ```
 
@@ -266,8 +276,8 @@ from dl_techniques.layers.activations import create_activation_layer
 # Will raise TypeError: k must be an integer
 # create_activation_layer('relu_k', k=2.5)
 
-# Will raise ValueError: alpha must be positive
-# create_activation_layer('saturated_mish', alpha=0)
+# Will raise ValueError: axis must be an integer
+# create_activation_layer('sparsemax', axis='last')
 ```
 
 ## Logging and Debugging
@@ -321,4 +331,4 @@ Get comprehensive information about all available activation types.
 ### Types
 
 #### `ActivationType`
-A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'routing_probabilities'`, `'xsilu'`, etc.
+A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'sparsemax'`, `'xsilu'`, etc.
