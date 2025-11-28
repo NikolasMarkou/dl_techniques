@@ -682,7 +682,7 @@ class ByteLatentTransformer(keras.Model):
 
 
 # ---------------------------------------------------------------------
-# Convenience functions following ConvNeXtV2 pattern
+# Convenience functions
 # ---------------------------------------------------------------------
 
 def create_blt_model(
@@ -690,9 +690,6 @@ def create_blt_model(
         vocab_size: int = 260,
         max_sequence_length: int = 2048,
         entropy_threshold: float = 1.5,
-        compile_model: bool = False,
-        optimizer: str = 'adam',
-        learning_rate: float = 1e-4,
         **kwargs: Any
 ) -> ByteLatentTransformer:
     """
@@ -706,9 +703,6 @@ def create_blt_model(
         vocab_size: Size of byte vocabulary (typically 256 + special tokens).
         max_sequence_length: Maximum sequence length in bytes.
         entropy_threshold: Threshold for dynamic patching decisions.
-        compile_model: Whether to compile the model for training.
-        optimizer: Optimizer to use if compiling.
-        learning_rate: Learning rate if compiling.
         **kwargs: Additional arguments passed to the model constructor.
 
     Returns:
@@ -732,94 +726,6 @@ def create_blt_model(
         **kwargs
     )
 
-    if compile_model:
-        model.compile(
-            optimizer=keras.optimizers.get({
-                'class_name': optimizer,
-                'config': {'learning_rate': learning_rate}
-            }),
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        logger.info(f"Compiled BLT-{variant.upper()} model for training")
-
     return model
-
-# ---------------------------------------------------------------------
-
-def train_entropy_model(
-        vocab_size: int = 260,
-        hidden_dim: int = 256,
-        num_layers: int = 6,
-        num_heads: int = 8,
-        max_seq_len: int = 2048,
-        dataset: Optional[Any] = None,
-        epochs: int = 10,
-        batch_size: int = 32,
-        **kwargs: Any
-) -> EntropyModel:
-    """
-    Train a separate entropy model for dynamic patching in BLT.
-
-    This function creates and trains a lightweight causal transformer
-    to serve as the entropy model for BLT's dynamic patching mechanism.
-    The entropy model learns to predict next-byte probabilities and
-    provides entropy estimates for patch boundary detection.
-
-    Args:
-        vocab_size: Size of byte vocabulary.
-        hidden_dim: Hidden dimension of the entropy model.
-        num_layers: Number of transformer layers.
-        num_heads: Number of attention heads.
-        max_seq_len: Maximum sequence length.
-        dataset: Training dataset yielding byte token sequences.
-        epochs: Number of training epochs.
-        batch_size: Batch size for training.
-        **kwargs: Additional arguments for model creation.
-
-    Returns:
-        Trained entropy model ready for use in BLT.
-
-    Example:
-        >>> # Train entropy model on dataset
-        >>> entropy_model = train_entropy_model(
-        ...     dataset=byte_dataset,
-        ...     epochs=5,
-        ...     batch_size=16
-        ... )
-        >>>
-        >>> # Use in BLT model
-        >>> blt_model = create_blt_model("base", entropy_model=entropy_model)
-    """
-    entropy_model = EntropyModel(
-        vocab_size=vocab_size,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        max_seq_len=max_seq_len,
-        **kwargs
-    )
-
-    # Compile for language modeling
-    entropy_model.compile(
-        optimizer='adam',
-        loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
-    )
-
-    # Train if dataset provided
-    if dataset is not None:
-        logger.info("Training entropy model for BLT dynamic patching...")
-        entropy_model.fit(
-            dataset,
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=1
-        )
-        logger.info("Entropy model training completed successfully")
-    else:
-        logger.warning("No dataset provided. Returning untrained entropy model.")
-
-    return entropy_model
 
 # ---------------------------------------------------------------------
