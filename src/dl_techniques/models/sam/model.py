@@ -1,5 +1,5 @@
 """
-Segment Anything Model (SAM) Keras 3 Implementation
+Segment Anything Model (SAM)
 ===================================================
 
 This file provides the main `SAM` model class, which integrates the image

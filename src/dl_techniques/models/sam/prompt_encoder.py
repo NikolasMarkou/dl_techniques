@@ -2,7 +2,7 @@
 SAM Prompt Encoder
 ============================================
 
-This file provides a Keras 3 implementation of the prompt encoder from the
+Implementation of the prompt encoder from the
 Segment Anything Model (SAM). The prompt encoder is responsible for converting
 various user inputs (points, boxes, masks) into high-dimensional embeddings that
 can be consumed by the mask decoder.

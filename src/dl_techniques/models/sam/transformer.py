@@ -2,7 +2,7 @@
 SAM Two-Way Transformer Implementation
 =================================================
 
-This file provides a Keras 3 implementation of the Two-Way Transformer used
+Implementation of the Two-Way Transformer used
 in the Segment Anything Model's mask decoder. This is a specialized decoder
 architecture that bidirectionally updates both token and image embeddings.
 

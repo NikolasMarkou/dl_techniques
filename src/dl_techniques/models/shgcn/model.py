@@ -14,8 +14,14 @@ import keras
 from keras import layers, ops
 from typing import List, Optional, Union, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.graphs.shgcn_layer import SHGCNLayer
 from dl_techniques.layers.graphs.fermi_diract_decoder import FermiDiracDecoder
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SHGCNModel(keras.Model):
@@ -556,3 +562,5 @@ class SHGCNLinkPredictor(keras.Model):
             'use_curvature': self.use_curvature,
         })
         return config
+
+# ---------------------------------------------------------------------

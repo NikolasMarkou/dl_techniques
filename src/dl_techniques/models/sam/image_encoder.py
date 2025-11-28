@@ -1,8 +1,8 @@
 """
-SAM Image Encoder (ViT) Implementation in Keras 3
+SAM Image Encoder (ViT) Implementation
 =================================================
 
-This file provides a Keras 3 implementation of the Vision Transformer (ViT)
+Implementation of the Vision Transformer (ViT)
 based image encoder used in the Segment Anything Model (SAM). It is meticulously
 crafted to follow modern Keras best practices for creating composite,
 serializable, and production-ready layers and models.

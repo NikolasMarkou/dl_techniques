@@ -1,8 +1,8 @@
 """
-SAM Mask Decoder Implementation in Keras 3
+SAM Mask Decoder Implementation
 ==========================================
 
-This file provides a Keras 3 implementation of the mask decoder from the
+Implementation of the mask decoder from the
 Segment Anything Model (SAM). The mask decoder takes image and prompt
 embeddings as input and predicts segmentation masks.
 
