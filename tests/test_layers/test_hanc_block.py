@@ -4,8 +4,6 @@ Comprehensive test suite for HANCBlock layer implementation.
 This test suite follows modern Keras 3 testing patterns and validates the
 HANCBlock layer's functionality, serialization, and integration capabilities.
 The tests cover the core innovation of ACC-UNet's hierarchical context aggregation.
-
-Place this file in: tests/test_layers/test_hanc_block.py
 """
 
 import pytest

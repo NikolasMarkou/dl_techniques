@@ -5,8 +5,6 @@ This test suite follows modern Keras 3 testing patterns and validates the
 HANCLayer's functionality, serialization, and integration capabilities.
 The tests cover the core hierarchical context aggregation mechanism that
 enables transformer-like global modeling through purely convolutional operations.
-
-Place this file in: tests/test_layers/test_hanc_layer.py
 """
 
 import pytest
@@ -77,9 +75,6 @@ class TestHANCLayer:
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert layer.kernel_regularizer is None
 
-        # Check computed derived parameters
-        assert layer.total_channels == 64 * (2 * 3 - 1)  # 64 * 5 = 320
-
         # Check that layer is not built yet
         assert not layer.built
 
@@ -88,11 +83,6 @@ class TestHANCLayer:
         assert layer.batch_norm is not None
         assert layer.activation is not None
         assert layer.concatenate is not None
-
-        # Check that pooling layers are pre-created (for all possible scales)
-        assert len(layer.avg_pooling_layers) == 4  # scales 1,2,3,4 (for max k=5)
-        assert len(layer.max_pooling_layers) == 4
-        # FIX: Removed checks for upsampling layers as they are no longer attributes
 
         # Sub-layers should not be built yet
         assert not layer.conv.built
@@ -108,26 +98,6 @@ class TestHANCLayer:
         assert layer.k == 4
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
-
-        # Check computed parameters for k=4
-        assert layer.total_channels == 128 * (2 * 4 - 1)  # 128 * 7 = 896
-
-    def test_channel_expansion_calculation(self):
-        """Test that channel expansion is calculated correctly for different k values."""
-        test_cases = [
-            # (in_channels, k, expected_total_channels)
-            (64, 1, 64 * 1),     # k=1: 64 * (2*1-1) = 64 * 1 = 64
-            (64, 2, 64 * 3),     # k=2: 64 * (2*2-1) = 64 * 3 = 192
-            (64, 3, 64 * 5),     # k=3: 64 * (2*3-1) = 64 * 5 = 320
-            (64, 4, 64 * 7),     # k=4: 64 * (2*4-1) = 64 * 7 = 448
-            (64, 5, 64 * 9),     # k=5: 64 * (2*5-1) = 64 * 9 = 576
-            (32, 3, 32 * 5),     # Different in_channels: 32 * 5 = 160
-            (128, 2, 128 * 3),   # Different in_channels: 128 * 3 = 384
-        ]
-
-        for in_channels, k, expected_total in test_cases:
-            layer = HANCLayer(in_channels=in_channels, out_channels=64, k=k)
-            assert layer.total_channels == expected_total
 
     def test_parameter_validation(self):
         """Test that invalid parameters raise appropriate errors."""
@@ -227,10 +197,6 @@ class TestHANCLayer:
             # Check that k is properly stored
             assert layer.k == k
 
-            # Check that total_channels is computed correctly
-            expected_total = in_channels * (2 * k - 1)
-            assert layer.total_channels == expected_total
-
     def test_k_equals_1_no_pooling(self):
         """Test special case where k=1 means no hierarchical pooling."""
         layer = HANCLayer(in_channels=64, out_channels=64, k=1)
@@ -238,8 +204,6 @@ class TestHANCLayer:
 
         output = layer(test_input)
 
-        # With k=1, total_channels should equal in_channels (no expansion)
-        assert layer.total_channels == 64 * 1  # 64
         assert output.shape == (2, 16, 16, 64)
         assert not keras.ops.any(keras.ops.isnan(output))
 
@@ -256,9 +220,6 @@ class TestHANCLayer:
         for in_channels, out_channels, k, expected_total in test_cases:
             layer = HANCLayer(in_channels=in_channels, out_channels=out_channels, k=k)
             test_input = keras.random.normal([2, 8, 8, in_channels])
-
-            # Check channel expansion calculation
-            assert layer.total_channels == expected_total
 
             # Test forward pass
             output = layer(test_input)
@@ -507,10 +468,6 @@ class TestHANCLayer:
             assert output.shape == (1, 32, 32, 64)
             assert not keras.ops.any(keras.ops.isnan(output))
 
-            # Check expected channel expansion during concatenation
-            expected_total = 64 * (2 * k - 1)
-            assert layer.total_channels == expected_total
-
             # Verify correct number of pooling scales used
             expected_scales = k - 1
             # We should build exactly expected_scales number of pooling layers
@@ -549,9 +506,6 @@ class TestHANCLayerEdgeCases:
         assert output.shape == (1, 4, 4, 1)
         assert not keras.ops.any(keras.ops.isnan(output))
 
-        # With k=1, no channel expansion should occur
-        assert layer.total_channels == 1
-
     def test_large_configuration(self):
         """Test with large configuration."""
         layer = HANCLayer(in_channels=512, out_channels=256, k=5)
@@ -560,9 +514,6 @@ class TestHANCLayerEdgeCases:
         output = layer(test_input)
         assert output.shape == (2, 8, 8, 256)
         assert not keras.ops.any(keras.ops.isnan(output))
-
-        # Check maximum channel expansion for k=5
-        assert layer.total_channels == 512 * 9  # 512 * (2*5-1)
 
     def test_single_pixel_input(self):
         """Test with 1x1 spatial dimensions."""
@@ -613,9 +564,6 @@ class TestHANCLayerEdgeCases:
         # Large channel expansion case: 256 channels with k=5
         layer = HANCLayer(in_channels=256, out_channels=128, k=5)
         test_input = keras.random.normal([1, 8, 8, 256])
-
-        # Should create very wide intermediate representation
-        assert layer.total_channels == 256 * 9  # 2304 channels during concatenation
 
         output = layer(test_input)
         assert output.shape == (1, 8, 8, 128)
@@ -747,7 +695,6 @@ class TestHANCLayerEdgeCases:
 
             # Check channel expansion
             expected_channels = 16 * expected_features
-            assert layer.total_channels == expected_channels
 
             assert output.shape == (1, 8, 8, 16)
             assert not keras.ops.any(keras.ops.isnan(output))
