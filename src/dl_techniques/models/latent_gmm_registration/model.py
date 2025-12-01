@@ -6,7 +6,8 @@ from typing import Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.losses.chamfer_loss import ChamferLoss
-from dl_techniques.layers.geometric.point_cloud_autoencoder import PointCloudAutoencoder, CorrespondenceNetwork
+from dl_techniques.layers.geometric.point_cloud_autoencoder import (
+    PointCloudAutoencoder, CorrespondenceNetwork)
 
 # ---------------------------------------------------------------------
 
