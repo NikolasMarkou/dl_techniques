@@ -473,12 +473,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             inputs_transposed = inputs
 
         # Reshape to 2D: (batch_size, input_dim)
-        # where batch_size is the product of all dimensions except the last
-        transposed_shape = ops.shape(inputs_transposed)
-        batch_size = ops.prod(transposed_shape[:-1])
-        input_dim = transposed_shape[-1]
-
-        inputs_2d = ops.reshape(inputs_transposed, (batch_size, input_dim))
+        # Using -1 for the batch dimension handles dynamic shapes safely
+        # in graph mode, unlike passing a symbolic batch_size calculation.
+        input_dim = inputs_transposed.shape[-1]
+        inputs_2d = ops.reshape(inputs_transposed, (-1, input_dim))
 
         # Step 1: Compute deterministic routing decisions from inputs
         # For each decision, compute weighted sum of inputs using
@@ -591,7 +589,8 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
             # Reshape to flatten, creating interleaved structure
             # Final shape: (batch_size, 2**(i+1))
-            padded_probs = ops.reshape(combined, (batch_size, 2 ** (i + 1)))
+            # Note: Using -1 for batch dimension is graph-safe
+            padded_probs = ops.reshape(combined, (-1, 2 ** (i + 1)))
 
         # After the loop, padded_probs contains a valid probability
         # distribution over padded_output_dim leaves, guaranteed to sum
@@ -639,23 +638,36 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # Target:
         #   Shape: (B, H, W, output_dim)  ← routing axis still at end
         #
-        # Example (B=2, H=4, W=4, output_dim=5):
-        #   (32, 5)  →  (2, 4, 4, 5)
+        # We must reconstruct the shape tensor using tensor operations
+        # to remain graph-safe (avoiding list(tensor) or tuple issues).
         #
-        output_shape_transposed = list(transposed_shape)
-        output_shape_transposed[-1] = self.output_dim
 
-        # Convert to concrete values where possible for reshape
-        output_shape_concrete = []
-        for i, dim in enumerate(output_shape_transposed[:-1]):
-            if (i < len(inputs_transposed.shape) - 1 and
-                    inputs_transposed.shape[i] is not None):
-                output_shape_concrete.append(inputs_transposed.shape[i])
-            else:
-                output_shape_concrete.append(dim)
-        output_shape_concrete.append(self.output_dim)
+        # Get the symbolic shape tensor of the transposed input.
+        # Note: ops.shape() might return a tuple (e.g. in some backends or
+        # eagerly) or a tensor. To safely use it with ops.concatenate,
+        # we explicitly convert it to a tensor of type int32.
+        input_transposed_shape = ops.shape(inputs_transposed)
+        input_transposed_shape_tensor = ops.convert_to_tensor(
+            input_transposed_shape, dtype="int32"
+        )
 
-        outputs_transposed = ops.reshape(final_probs, output_shape_concrete)
+        # Slice to get all dimensions except the last one (B, H, W)
+        batch_shape_tensor = input_transposed_shape_tensor[:-1]
+
+        # Create a tensor for the new output dimension
+        target_dim_tensor = ops.convert_to_tensor(
+            [self.output_dim], dtype="int32"
+        )
+
+        # Concatenate to form the full target shape: (B, H, W, output_dim)
+        # Both inputs to concatenate are now strictly tensors.
+        target_shape_tensor = ops.concatenate(
+            [batch_shape_tensor, target_dim_tensor],
+            axis=0
+        )
+
+        # Reshape the 2D final_probs back to the rank of the input
+        outputs_transposed = ops.reshape(final_probs, target_shape_tensor)
 
         # Step 6: Transpose back to original axis order if needed
         # Reverse the transpose from Step 0 to restore original axis layout

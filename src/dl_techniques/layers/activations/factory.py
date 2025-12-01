@@ -12,6 +12,7 @@ from typing import Dict, Any, Literal, Optional
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
