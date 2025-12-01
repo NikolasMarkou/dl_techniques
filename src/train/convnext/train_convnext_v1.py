@@ -1,10 +1,13 @@
+"""Train ConvNeXt V1 model with ImageNet support using TensorFlow Datasets."""
+
 import os
 import keras
 import argparse
 import numpy as np
 import tensorflow as tf
+import tensorflow_datasets as tfds
 from datetime import datetime
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
 # ---------------------------------------------------------------------
 # local imports
@@ -48,12 +51,148 @@ def setup_gpu():
 
 # ---------------------------------------------------------------------
 
-def load_dataset(dataset_name: str) -> Tuple[
-    Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray], Tuple[int, int, int], int]:
-    """Load and preprocess dataset."""
+def load_imagenet_dataset(
+        image_size: Tuple[int, int] = (224, 224),
+        batch_size: int = 32,
+        shuffle_buffer_size: int = 10000,
+        cache: bool = False,
+        data_dir: Optional[str] = None,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset, Tuple[int, int, int], int]:
+    """
+    Load ImageNet dataset using TensorFlow Datasets.
+
+    Parameters
+    ----------
+    image_size : Tuple[int, int], optional
+        Target image size (height, width), by default (224, 224)
+    batch_size : int, optional
+        Batch size, by default 32
+    shuffle_buffer_size : int, optional
+        Buffer size for shuffling, by default 10000
+    cache : bool, optional
+        Whether to cache the dataset in memory, by default False
+    data_dir : Optional[str], optional
+        Directory to download/load data from, by default None
+
+    Returns
+    -------
+    Tuple[tf.data.Dataset, tf.data.Dataset, Tuple[int, int, int], int]
+        Training dataset, validation dataset, input shape, number of classes
+    """
+    logger.info("Loading ImageNet dataset from TensorFlow Datasets...")
+
+    # Load datasets
+    train_ds, train_info = tfds.load(
+        "imagenet2012",
+        split="train",
+        with_info=True,
+        as_supervised=True,
+        data_dir=data_dir,
+    )
+
+    val_ds = tfds.load(
+        "imagenet2012",
+        split="validation",
+        as_supervised=True,
+        data_dir=data_dir,
+    )
+
+    num_classes = train_info.features['label'].num_classes
+    input_shape = (image_size[0], image_size[1], 3)
+
+    def preprocess_train(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """Preprocess training image with data augmentation."""
+        # Random crop and resize
+        image = tf.image.resize(image, (int(image_size[0] * 1.15), int(image_size[1] * 1.15)))
+        image = tf.image.random_crop(image, [image_size[0], image_size[1], 3])
+
+        # Random flip
+        image = tf.image.random_flip_left_right(image)
+
+        # Normalize to [0, 1]
+        image = tf.cast(image, tf.float32) / 255.0
+
+        return image, label
+
+    def preprocess_val(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """Preprocess validation image."""
+        # Center crop
+        image = tf.image.resize(image, (int(image_size[0] * 1.15), int(image_size[1] * 1.15)))
+        h, w = image_size
+        image = tf.image.crop_to_bounding_box(
+            image,
+            offset_height=(tf.shape(image)[0] - h) // 2,
+            offset_width=(tf.shape(image)[1] - w) // 2,
+            target_height=h,
+            target_width=w
+        )
+
+        # Normalize to [0, 1]
+        image = tf.cast(image, tf.float32) / 255.0
+
+        return image, label
+
+    # Preprocess and batch training data
+    train_ds = train_ds.map(preprocess_train, num_parallel_calls=tf.data.AUTOTUNE)
+    if cache:
+        train_ds = train_ds.cache()
+    train_ds = train_ds.shuffle(shuffle_buffer_size)
+    train_ds = train_ds.batch(batch_size)
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+
+    # Preprocess and batch validation data
+    val_ds = val_ds.map(preprocess_val, num_parallel_calls=tf.data.AUTOTUNE)
+    if cache:
+        val_ds = val_ds.cache()
+    val_ds = val_ds.batch(batch_size)
+    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+
+    # Get dataset sizes
+    train_size = train_info.splits['train'].num_examples
+    val_size = train_info.splits['validation'].num_examples
+
+    logger.info(f"ImageNet dataset loaded: {train_size} train, {val_size} validation samples")
+    logger.info(f"Input shape: {input_shape}, Classes: {num_classes}")
+
+    return train_ds, val_ds, input_shape, num_classes
+
+
+# ---------------------------------------------------------------------
+
+def load_dataset(
+        dataset_name: str,
+        batch_size: int = 32,
+        image_size: Optional[Tuple[int, int]] = None
+) -> Tuple[Any, Any, Tuple[int, int, int], int]:
+    """
+    Load and preprocess dataset.
+
+    Parameters
+    ----------
+    dataset_name : str
+        Name of the dataset to load
+    batch_size : int, optional
+        Batch size, by default 32
+    image_size : Optional[Tuple[int, int]], optional
+        Target image size for ImageNet, by default None
+
+    Returns
+    -------
+    Tuple[Any, Any, Tuple[int, int, int], int]
+        Training data, test/validation data, input shape, number of classes
+    """
     logger.info(f"Loading {dataset_name} dataset...")
 
-    if dataset_name.lower() == 'mnist':
+    if dataset_name.lower() == 'imagenet':
+        if image_size is None:
+            image_size = (224, 224)
+        train_ds, val_ds, input_shape, num_classes = load_imagenet_dataset(
+            image_size=image_size,
+            batch_size=batch_size,
+        )
+        return train_ds, val_ds, input_shape, num_classes
+
+    elif dataset_name.lower() == 'mnist':
         (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
         # Convert grayscale to RGB
         x_train = np.repeat(x_train[..., np.newaxis], 3, axis=-1)
@@ -98,41 +237,53 @@ def get_class_names(dataset: str, num_classes: int) -> List[str]:
         return ['airplane', 'automobile', 'bird', 'cat', 'deer',
                 'dog', 'frog', 'horse', 'ship', 'truck']
     elif dataset.lower() == 'cifar100':
-        # CIFAR-100 has 100 classes, use generic names
         return [f'class_{i}' for i in range(num_classes)]
+    elif dataset.lower() == 'imagenet':
+        # ImageNet has 1000 classes - use generic names or load from TFDS
+        try:
+            info = tfds.builder('imagenet2012').info
+            return info.features['label'].names
+        except:
+            return [f'class_{i}' for i in range(num_classes)]
     else:
         return [f'class_{i}' for i in range(num_classes)]
 
 
 # ---------------------------------------------------------------------
 
-def create_model_config(dataset: str, variant: str, input_shape: Tuple[int, int, int], num_classes: int) -> Dict[
-    str, Any]:
+def create_model_config(
+        dataset: str,
+        variant: str,
+        input_shape: Tuple[int, int, int],
+        num_classes: int
+) -> Dict[str, Any]:
     """Create ConvNeXt V1 model configuration based on dataset."""
 
-    # Base configuration
     config = {
         'include_top': True,
         'kernel_regularizer': None,
     }
 
-    # Dataset-specific adjustments
-    if dataset.lower() == 'mnist':
+    if dataset.lower() == 'imagenet':
+        # Standard ImageNet configuration
+        config.update({
+            'drop_path_rate': 0.1 if variant in ['tiny', 'small'] else 0.2,
+            'dropout_rate': 0.0,  # Modern practice: no dropout in final layer
+            'use_gamma': True,
+        })
+    elif dataset.lower() == 'mnist':
         config.update({
             'drop_path_rate': 0.1,
             'dropout_rate': 0.1,
             'use_gamma': True,
         })
-
     elif dataset.lower() in ['cifar10', 'cifar100']:
         config.update({
             'drop_path_rate': 0.1 if num_classes == 10 else 0.2,
             'dropout_rate': 0.1 if num_classes == 10 else 0.2,
             'use_gamma': True,
         })
-
     else:
-        # Default ImageNet-like configuration
         config.update({
             'drop_path_rate': 0.1,
             'dropout_rate': 0.1,
@@ -148,19 +299,22 @@ def create_learning_rate_schedule(
         initial_lr: float,
         schedule_type: str = 'cosine',
         total_epochs: int = 100,
-        warmup_epochs: int = 5
+        warmup_epochs: int = 5,
+        steps_per_epoch: Optional[int] = None
 ) -> keras.optimizers.schedules.LearningRateSchedule:
     """Create learning rate schedule."""
     if schedule_type == 'cosine':
+        decay_steps = total_epochs if steps_per_epoch is None else total_epochs * steps_per_epoch
         return keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=initial_lr,
-            decay_steps=total_epochs,
+            decay_steps=decay_steps,
             alpha=0.01
         )
     elif schedule_type == 'exponential':
+        decay_steps = (total_epochs // 4) if steps_per_epoch is None else (total_epochs // 4) * steps_per_epoch
         return keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=initial_lr,
-            decay_steps=total_epochs // 4,
+            decay_steps=decay_steps,
             decay_rate=0.9
         )
     else:  # constant
@@ -200,7 +354,6 @@ def create_callbacks(
         ),
     ]
 
-    # Only add ReduceLROnPlateau if not using learning rate schedule
     if not use_lr_schedule:
         callbacks.append(
             keras.callbacks.ReduceLROnPlateau(
@@ -211,79 +364,21 @@ def create_callbacks(
                 verbose=1
             )
         )
-        logger.info("Added ReduceLROnPlateau callback")
-    else:
-        logger.info("Using learning rate schedule, skipping ReduceLROnPlateau")
 
-    logger.info(f"Results will be saved to: {results_dir}")
     return callbacks, results_dir
 
 
 # ---------------------------------------------------------------------
 
-def setup_visualization_manager(experiment_name: str, results_dir: str) -> VisualizationManager:
-    """Setup and configure the visualization manager."""
-    # Create visualization directory
-    viz_dir = os.path.join(results_dir, "visualizations")
-    os.makedirs(viz_dir, exist_ok=True)
-
-    # Configure plot style for publication-quality outputs
-    config = PlotConfig(
-        style=PlotStyle.PUBLICATION,
-        color_scheme=ColorScheme(
-            primary="#2E86AB",
-            secondary="#A23B72",
-            success="#06D6A0",
-            warning="#FFD166"
-        ),
-        title_fontsize=14,
-        label_fontsize=12,
-        save_format="png",
-        dpi=300,
-        fig_size=(12, 8)
-    )
-
-    # Initialize visualization manager
-    viz_manager = VisualizationManager(
-        experiment_name=experiment_name,
-        output_dir=viz_dir,
-        config=config
-    )
-
-    # Register commonly used visualization templates
-    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
-    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
-    viz_manager.register_template("network_architecture", NetworkArchitectureVisualization)
-    viz_manager.register_template("model_comparison_bars", ModelComparisonBarChart)
-    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
-
-    logger.info(f"Visualization manager setup complete. Plots will be saved to: {viz_dir}")
-    return viz_manager
-
-
-# ---------------------------------------------------------------------
-
-def convert_keras_history_to_training_history(keras_history: keras.callbacks.History) -> TrainingHistory:
-    """Convert Keras training history to visualization framework TrainingHistory."""
-    history_dict = keras_history.history
-    epochs = list(range(len(history_dict['loss'])))
-
-    # Extract training metrics (excluding loss)
-    train_metrics = {}
-    val_metrics = {}
-
-    for key, values in history_dict.items():
-        if key.startswith('val_') and key != 'val_loss':
-            val_metrics[key.replace('val_', '')] = values
-        elif not key.startswith('val_') and key != 'loss':
-            train_metrics[key] = values
-
+def convert_keras_history_to_training_history(history: keras.callbacks.History) -> TrainingHistory:
+    """Convert Keras history to TrainingHistory object."""
     return TrainingHistory(
-        epochs=epochs,
-        train_loss=history_dict['loss'],
-        val_loss=history_dict['val_loss'],
-        train_metrics=train_metrics,
-        val_metrics=val_metrics
+        epochs=list(range(1, len(history.history['loss']) + 1)),
+        train_loss=history.history['loss'],
+        val_loss=history.history.get('val_loss', []),
+        train_metrics={'accuracy': history.history.get('accuracy', [])},
+        val_metrics={'accuracy': history.history.get('val_accuracy', [])},
+        learning_rates=history.history.get('lr', [])
     )
 
 
@@ -296,7 +391,7 @@ def create_classification_results(
         class_names: List[str],
         model_name: str
 ) -> ClassificationResults:
-    """Create ClassificationResults object for visualization."""
+    """Create ClassificationResults object."""
     return ClassificationResults(
         y_true=y_true,
         y_pred=y_pred,
@@ -314,288 +409,272 @@ def generate_comprehensive_visualizations(
         classification_results: ClassificationResults,
         model: keras.Model,
         show_plots: bool = False
-):
-    """Generate comprehensive visualizations for the training results."""
+) -> None:
+    """Generate comprehensive visualizations."""
     logger.info("Generating comprehensive visualizations...")
 
-    try:
-        # 1. Training curves
-        logger.info("Creating training curves...")
-        viz_manager.visualize(
-            data=training_history,
-            plugin_name="training_curves",
-            smooth_factor=0.1,
-            show=show_plots
+    # Training curves
+    logger.info("  - Training curves")
+    training_viz = TrainingCurvesVisualization(
+        plot_config=PlotConfig(
+            style=PlotStyle.PROFESSIONAL,
+            color_scheme=ColorScheme.VIBRANT
         )
+    )
+    training_viz.plot(training_history, show=show_plots)
+    viz_manager.save_visualization(training_viz, "training_curves")
 
-        # 2. Model architecture
-        logger.info("Creating network architecture visualization...")
-        viz_manager.visualize(
-            data=model,
-            plugin_name="network_architecture",
-            show=show_plots
+    # Confusion matrix
+    logger.info("  - Confusion matrix")
+    cm_viz = ConfusionMatrixVisualization(
+        plot_config=PlotConfig(
+            style=PlotStyle.PROFESSIONAL,
+            color_scheme=ColorScheme.VIBRANT
         )
+    )
+    cm_viz.plot(classification_results, show=show_plots)
+    viz_manager.save_visualization(cm_viz, "confusion_matrix")
 
-        # 3. Confusion matrix
-        logger.info("Creating confusion matrix...")
-        viz_manager.visualize(
-            data=classification_results,
-            plugin_name="confusion_matrix",
-            normalize='true',
-            show=show_plots
-        )
-
-        # 4. ROC and PR curves (if multi-class)
-        if len(classification_results.class_names) <= 20:  # Avoid clutter for too many classes
-            logger.info("Creating ROC and PR curves...")
-            viz_manager.visualize(
-                data=classification_results,
-                plugin_name="roc_pr_curves",
-                plot_type='both',
-                show=show_plots
+    # ROC and PR curves (only for binary or small multiclass)
+    if len(classification_results.class_names) <= 10:
+        logger.info("  - ROC and PR curves")
+        roc_pr_viz = ROCPRCurves(
+            plot_config=PlotConfig(
+                style=PlotStyle.PROFESSIONAL,
+                color_scheme=ColorScheme.VIBRANT
             )
+        )
+        roc_pr_viz.plot(classification_results, show=show_plots)
+        viz_manager.save_visualization(roc_pr_viz, "roc_pr_curves")
 
-        # 5. Create a comprehensive dashboard
-        logger.info("Creating comprehensive dashboard...")
-        dashboard_data = {
-            "training_curves": training_history,
-            "confusion_matrix": classification_results,
-        }
+    # Network architecture
+    logger.info("  - Network architecture")
+    arch_viz = NetworkArchitectureVisualization(
+        plot_config=PlotConfig(
+            style=PlotStyle.CLEAN
+        )
+    )
+    arch_viz.plot(model, show=show_plots)
+    viz_manager.save_visualization(arch_viz, "architecture")
 
-        # Only add ROC curves to dashboard if reasonable number of classes
-        if len(classification_results.class_names) <= 10:
-            dashboard_data["roc_pr_curves"] = classification_results
-
-        viz_manager.create_dashboard(data=dashboard_data, show=show_plots)
-
-        logger.info("All visualizations generated successfully!")
-
-    except Exception as e:
-        logger.warning(f"Error generating visualizations: {e}")
-        logger.warning("Continuing without some visualizations...")
+    logger.info("Visualizations generated successfully")
 
 
 # ---------------------------------------------------------------------
 
 def run_model_analysis(
         model: keras.Model,
-        test_data: Tuple[np.ndarray, np.ndarray],
+        test_data: Tuple[Any, np.ndarray],
         training_history: keras.callbacks.History,
         model_name: str,
         results_dir: str
-):
-    """Run comprehensive model analysis using the analyzer framework."""
-    logger.info("Running comprehensive model analysis...")
+) -> Any:
+    """Run comprehensive model analysis."""
+    logger.info("Running model analysis...")
+
+    analysis_config = AnalysisConfig(
+        analyze_gradients=False,  # Skip gradient analysis for speed
+        analyze_activations=False,
+        analyze_weights=True,
+        analyze_performance=True,
+        generate_plots=True,
+        save_results=True
+    )
+
+    analyzer = ModelAnalyzer(
+        output_dir=os.path.join(results_dir, "model_analysis"),
+        config=analysis_config
+    )
 
     try:
-        # Setup analysis configuration
-        analysis_config = AnalysisConfig(
-            analyze_weights=True,
-            analyze_calibration=True,
-            analyze_information_flow=True,
-            analyze_training_dynamics=True,
-            save_plots=True,
-            save_format='png',
-            dpi=300,
-            plot_style='publication'
+        # For ImageNet (tf.data.Dataset), extract subset for analysis
+        if isinstance(test_data[0], tf.data.Dataset):
+            logger.info("Extracting subset from tf.data.Dataset for analysis...")
+            # Take first batch for quick analysis
+            for batch_images, batch_labels in test_data[0].take(1):
+                x_test_subset = batch_images.numpy()
+                y_test_subset = batch_labels.numpy()
+                break
+        else:
+            x_test_subset = test_data[0][:1000]
+            y_test_subset = test_data[1][:1000]
+
+        analysis_results = analyzer.analyze_model(
+            model=model,
+            model_name=model_name,
+            test_data=(x_test_subset, y_test_subset),
+            history=training_history.history
         )
 
-        # Create analysis directory
-        analysis_dir = os.path.join(results_dir, "model_analysis")
-        os.makedirs(analysis_dir, exist_ok=True)
-
-        # Initialize analyzer
-        analyzer = ModelAnalyzer(
-            models={model_name: model},
-            training_history={model_name: training_history.history},
-            config=analysis_config,
-            output_dir=analysis_dir
-        )
-
-        # Run analysis
-        x_test, y_test = test_data
-        # The model was compiled with SparseCategoricalCrossentropy, which expects integer labels for evaluation.
-        # Converting labels to one-hot here causes model.evaluate() to fail inside the analyzer.
-        # The analyzer framework is responsible for handling label format conversions internally.
-        logger.info(f"Using original integer labels for model analysis.")
-        analysis_results = analyzer.analyze(data=(x_test, y_test))
-
-        # Generate Pareto front if applicable
-        try:
-            pareto_figure = analyzer.create_pareto_analysis()
-            if pareto_figure:
-                logger.info("Pareto analysis generated successfully!")
-        except Exception as e:
-            logger.warning(f"Could not generate Pareto analysis: {e}")
-
-        logger.info(f"Model analysis completed! Results saved to: {analysis_dir}")
-
-        # Log key findings
-        if hasattr(analysis_results, 'training_metrics') and analysis_results.training_metrics:
-            training_metrics = analysis_results.training_metrics
-            if hasattr(training_metrics, 'peak_performance'):
-                peak_acc = training_metrics.peak_performance.get(model_name, {}).get('val_accuracy')
-                if peak_acc:
-                    logger.info(f"Peak validation accuracy: {peak_acc:.4f}")
-
-            if hasattr(training_metrics, 'overfitting_index'):
-                overfit_idx = training_metrics.overfitting_index.get(model_name)
-                if overfit_idx:
-                    logger.info(f"Overfitting index: {overfit_idx:.4f}")
-
+        logger.info("Model analysis completed successfully")
         return analysis_results
 
     except Exception as e:
         logger.warning(f"Model analysis failed: {e}")
-        logger.warning("Continuing without detailed analysis...")
         return None
 
 
 # ---------------------------------------------------------------------
 
-def validate_model_loading(model_path: str, test_input: tf.Tensor, original_output: tf.Tensor) -> bool:
-    """Validate that a saved model loads correctly."""
+def validate_model_loading(
+        model_path: str,
+        test_sample: Any,
+        expected_output: np.ndarray,
+        tolerance: float = 1e-5
+) -> bool:
+    """Validate that a saved model loads correctly and produces expected outputs."""
     try:
-        # Define custom objects for loading
-        custom_objects = {
-            "ConvNeXtV1": ConvNeXtV1,
-            "ConvNextV1Block": ConvNextV1Block
-        }
-
-        # Load the model
+        custom_objects = {"ConvNeXtV1": ConvNeXtV1, "ConvNextV1Block": ConvNextV1Block}
         loaded_model = keras.models.load_model(model_path, custom_objects=custom_objects)
 
-        # Test prediction
-        loaded_output = loaded_model.predict(test_input, verbose=0)
+        # Convert test_sample if it's a tensor
+        if isinstance(test_sample, tf.Tensor):
+            test_sample = test_sample.numpy()
 
-        # Check if outputs are similar (they should be close but not identical due to potential differences)
-        max_diff = np.max(np.abs(loaded_output - original_output))
-        relative_diff = max_diff / (np.max(np.abs(original_output)) + 1e-8)
+        loaded_output = loaded_model.predict(test_sample, verbose=0)
 
-        logger.info(f"Model loading validation: max_diff={max_diff:.6f}, relative_diff={relative_diff:.6f}")
-
-        # If difference is too large, something is wrong
-        if relative_diff > 0.1:  # 10% relative difference threshold
-            logger.warning(f"Large difference detected in model loading: {relative_diff:.4f}")
+        # Compare outputs
+        if np.allclose(expected_output, loaded_output, atol=tolerance):
+            logger.info("Model loading validation passed")
+            return True
+        else:
+            logger.warning("Model outputs differ after loading")
             return False
 
-        return True
-
     except Exception as e:
-        logger.error(f"Model loading validation failed: {e}")
+        logger.warning(f"Model loading validation failed: {e}")
         return False
 
 
 # ---------------------------------------------------------------------
 
-def train_model(args: argparse.Namespace):
-    """Main training function with comprehensive visualization and analysis."""
-    logger.info("Starting ConvNeXt V1 training script with comprehensive visualizations")
+def train_model(args: argparse.Namespace) -> None:
+    """Train ConvNeXt V1 model."""
     setup_gpu()
 
+    # Determine image size for ImageNet
+    image_size = None
+    if args.dataset.lower() == 'imagenet':
+        image_size = (args.image_size, args.image_size)
+
     # Load dataset
-    logger.info("Loading dataset...")
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(args.dataset)
-    class_names = get_class_names(args.dataset, num_classes)
-
-    logger.info(f"After load_dataset:")
-    logger.info(f"  input_shape = {input_shape} (type: {type(input_shape)})")
-    logger.info(f"  num_classes = {num_classes} (type: {type(num_classes)})")
-    logger.info(f"  class_names = {class_names[:5]}..." if len(class_names) > 5 else f"  class_names = {class_names}")
-
-    # Create model configuration
-    model_config = create_model_config(args.dataset, args.variant, input_shape, num_classes)
-
-    # Create learning rate schedule
-    use_lr_schedule = args.lr_schedule != 'constant'
-    lr_schedule = create_learning_rate_schedule(
-        initial_lr=args.learning_rate,
-        schedule_type=args.lr_schedule,
-        total_epochs=args.epochs
+    train_data, test_data, input_shape, num_classes = load_dataset(
+        args.dataset,
+        batch_size=args.batch_size,
+        image_size=image_size
     )
+
+    # Get class names
+    class_names = get_class_names(args.dataset, num_classes)
 
     # Create model
     logger.info(f"Creating ConvNeXt V1 model (variant: {args.variant})...")
-    logger.info(f"Model will be created with input_shape: {input_shape}")
+    model_config = create_model_config(args.dataset, args.variant, input_shape, num_classes)
 
     model = create_convnext_v1(
         variant=args.variant,
-        num_classes=num_classes,
         input_shape=input_shape,
-        strides=args.strides,
+        num_classes=num_classes,
         kernel_size=args.kernel_size,
-        **{k: v for k, v in model_config.items() if k not in ['num_classes']}
+        strides=args.strides,
+        **model_config
     )
 
-    optimizer = keras.optimizers.AdamW(
-        learning_rate=lr_schedule,
-        weight_decay=args.weight_decay,
-        clipnorm=1.0
-    )
+    # Calculate steps per epoch for ImageNet
+    steps_per_epoch = None
+    if args.dataset.lower() == 'imagenet':
+        # ImageNet has ~1.28M training images
+        steps_per_epoch = 1281167 // args.batch_size
+
+    # Create learning rate schedule
+    use_lr_schedule = args.lr_schedule != 'constant'
+    if use_lr_schedule:
+        lr = create_learning_rate_schedule(
+            initial_lr=args.learning_rate,
+            schedule_type=args.lr_schedule,
+            total_epochs=args.epochs,
+            steps_per_epoch=steps_per_epoch
+        )
+    else:
+        lr = args.learning_rate
 
     # Compile model
-    metrics = ['accuracy']
-    if num_classes > 10:
-        metrics.append('top_5_accuracy')
+    logger.info("Compiling model...")
+    optimizer = keras.optimizers.AdamW(
+        learning_rate=lr,
+        weight_decay=args.weight_decay
+    )
 
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=metrics
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+        metrics=[keras.metrics.SparseCategoricalAccuracy(name='accuracy')]
     )
 
-    # Build model and show summary
-    dummy_input = np.zeros((1,) + input_shape, dtype=np.float32)
-    logger.info("Building model...")
-    logger.info(f"Input shape: {input_shape}")
-    logger.info(f"Model input shape: {model.input_shape}")
-
-    try:
-        output = model(dummy_input, training=False)
-        logger.info(f"Model built successfully. Output shape: {output.shape}")
-    except Exception as e:
-        logger.error(f"Model building failed: {e}")
-        raise e
-
-    # Show detailed summary
-    logger.info("Model architecture:")
+    # Print model summary
+    logger.info("\nModel Summary:")
     model.summary(print_fn=logger.info)
 
-    # Create callbacks and results directory
+    # Create callbacks
     callbacks, results_dir = create_callbacks(
-        model_name=f"{args.dataset}_{args.variant}",
-        use_lr_schedule=use_lr_schedule,
-        patience=args.patience
+        model_name=f"{args.variant}_{args.dataset}",
+        monitor='val_accuracy',
+        patience=args.patience,
+        use_lr_schedule=use_lr_schedule
     )
 
-    # Setup visualization manager
-    experiment_name = f"convnext_v1_{args.dataset}_{args.variant}"
-    viz_manager = setup_visualization_manager(experiment_name, results_dir)
+    # Initialize visualization manager
+    viz_manager = VisualizationManager(
+        experiment_name="visualizations", output_dir=os.path.join(results_dir))
 
     # Train model
-    logger.info("Starting model training...")
-    logger.info(f"Training parameters:")
+    logger.info("\nStarting training...")
     logger.info(f"  Dataset: {args.dataset}")
-    logger.info(f"  Model variant: {args.variant}")
+    logger.info(f"  Variant: {args.variant}")
     logger.info(f"  Input shape: {input_shape}")
-    logger.info(f"  Learning rate: {args.learning_rate}")
-    logger.info(f"  LR schedule: {args.lr_schedule}")
+    logger.info(f"  Number of classes: {num_classes}")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  Epochs: {args.epochs}")
+    logger.info(f"  Initial learning rate: {args.learning_rate}")
+    logger.info(f"  LR schedule: {args.lr_schedule}")
     logger.info(f"  Weight decay: {args.weight_decay}")
 
-    history = model.fit(
-        x_train, y_train,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        validation_data=(x_test, y_test),
-        callbacks=callbacks,
-        verbose=1
-    )
+    # Handle different data types (numpy arrays vs tf.data.Dataset)
+    is_imagenet = args.dataset.lower() == 'imagenet'
+
+    if is_imagenet:
+        # For ImageNet, train_data and test_data are tf.data.Dataset
+        history = model.fit(
+            train_data,
+            epochs=args.epochs,
+            validation_data=test_data,
+            callbacks=callbacks,
+            verbose=1
+        )
+    else:
+        # For other datasets, unpack numpy arrays
+        x_train, y_train = train_data
+        x_test, y_test = test_data
+
+        history = model.fit(
+            x_train, y_train,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            validation_data=(x_test, y_test),
+            callbacks=callbacks,
+            verbose=1
+        )
 
     # Validate model before loading for evaluation
     logger.info("Validating model serialization...")
-    test_sample = x_test[:4]
+    if is_imagenet:
+        # Get a small sample from ImageNet
+        for test_sample, _ in test_data.take(1):
+            test_sample = test_sample[:4]
+            break
+    else:
+        test_sample = x_test[:4]
+
     pre_save_output = model.predict(test_sample, verbose=0)
 
     # Save final model
@@ -604,7 +683,6 @@ def train_model(args: argparse.Namespace):
         model.save(final_model_path)
         logger.info(f"Final model saved to: {final_model_path}")
 
-        # Validate the saved model
         is_loading_valid = validate_model_loading(final_model_path, test_sample, pre_save_output)
         if not is_loading_valid:
             logger.warning("Model loading validation failed - using current model for evaluation")
@@ -618,7 +696,6 @@ def train_model(args: argparse.Namespace):
     if os.path.exists(best_model_path):
         logger.info(f"Loading best model from: {best_model_path}")
         try:
-            # Validate best model loading
             is_loading_valid = validate_model_loading(best_model_path, test_sample, pre_save_output)
 
             if is_loading_valid:
@@ -639,27 +716,63 @@ def train_model(args: argparse.Namespace):
 
     # Final evaluation
     logger.info("Evaluating final model on test set...")
-    test_results = best_model.evaluate(x_test, y_test, batch_size=args.batch_size, verbose=1, return_dict=True)
+    if is_imagenet:
+        test_results = best_model.evaluate(test_data, verbose=1, return_dict=True)
+    else:
+        test_results = best_model.evaluate(x_test, y_test, batch_size=args.batch_size, verbose=1, return_dict=True)
     logger.info(f"Final Test Results: {test_results}")
 
-    # Generate predictions for visualization
+    # Generate predictions for visualization (limited for ImageNet)
     logger.info("Generating predictions for visualization...")
-    all_predictions = best_model.predict(x_test, batch_size=args.batch_size, verbose=1)
-    predicted_classes = np.argmax(all_predictions, axis=1)
 
-    # Calculate accuracy
-    accuracy = np.mean(predicted_classes == y_test)
-    logger.info(f"Manually calculated accuracy: {accuracy:.4f}")
+    if is_imagenet:
+        # For ImageNet, only evaluate on a subset due to memory constraints
+        logger.info("Note: Using validation subset for detailed analysis due to dataset size")
+
+        # Collect predictions on subset
+        y_true_list = []
+        y_pred_list = []
+        y_prob_list = []
+
+        max_samples = min(10000, 50000)  # Limit to 10k samples
+        sample_count = 0
+
+        for images, labels in test_data:
+            if sample_count >= max_samples:
+                break
+
+            predictions = best_model.predict(images, verbose=0)
+            pred_classes = np.argmax(predictions, axis=1)
+
+            y_true_list.append(labels.numpy())
+            y_pred_list.append(pred_classes)
+            y_prob_list.append(predictions)
+
+            sample_count += len(labels)
+
+        y_test_subset = np.concatenate(y_true_list)
+        predicted_classes = np.concatenate(y_pred_list)
+        all_predictions = np.concatenate(y_prob_list)
+
+        accuracy = np.mean(predicted_classes == y_test_subset)
+        logger.info(f"Subset accuracy: {accuracy:.4f} (on {len(y_test_subset)} samples)")
+
+    else:
+        all_predictions = best_model.predict(x_test, batch_size=args.batch_size, verbose=1)
+        predicted_classes = np.argmax(all_predictions, axis=1)
+        y_test_subset = y_test
+        accuracy = np.mean(predicted_classes == y_test)
+        logger.info(f"Manually calculated accuracy: {accuracy:.4f}")
 
     # Convert training history for visualization
     training_history_viz = convert_keras_history_to_training_history(history)
 
     # Create classification results
     classification_results = create_classification_results(
-        y_true=y_test,
+        y_true=y_test_subset,
         y_pred=predicted_classes,
         y_prob=all_predictions,
-        class_names=class_names,
+        class_names=class_names if not is_imagenet else class_names[:10],  # Limit class names for ImageNet
         model_name=f"{args.variant}_{args.dataset}"
     )
 
@@ -672,48 +785,52 @@ def train_model(args: argparse.Namespace):
         show_plots=args.show_plots
     )
 
-    # Run comprehensive model analysis
+    # Run model analysis (on subset for ImageNet)
+    if is_imagenet:
+        analysis_test_data = (test_data, y_test_subset)
+    else:
+        analysis_test_data = (x_test, y_test)
+
     analysis_results = run_model_analysis(
         model=best_model,
-        test_data=(x_test, y_test),
+        test_data=analysis_test_data,
         training_history=history,
         model_name=f"convnext_v1_{args.variant}_{args.dataset}",
         results_dir=results_dir
     )
 
-    # Additional visualization and analysis completed
-
-    # Save enhanced training summary
+    # Save training summary
     with open(os.path.join(results_dir, 'training_summary.txt'), 'w') as f:
-        f.write(f"ConvNeXt V1 Training Summary with Visualizations\n")
-        f.write(f"===============================================\n\n")
+        f.write(f"ConvNeXt V1 Training Summary\n")
+        f.write(f"============================\n\n")
         f.write(f"Dataset: {args.dataset}\n")
         f.write(f"Model Variant: {args.variant}\n")
         f.write(f"Input Shape: {input_shape}\n")
         f.write(f"Number of Classes: {num_classes}\n")
-        f.write(f"Class Names: {class_names}\n\n")
 
-        # Get model configuration details
         if hasattr(model, 'depths'):
-            f.write(f"Model Depths: {model.depths}\n")
-            f.write(f"Model Dimensions: {model.dims}\n")
-            f.write(f"Drop Path Rate: {model.drop_path_rate}\n")
-            f.write(f"Input Size: {model.input_height}x{model.input_width}x{model.input_channels}\n")
+            f.write(f"\nModel Configuration:\n")
+            f.write(f"  Depths: {model.depths}\n")
+            f.write(f"  Dimensions: {model.dims}\n")
+            f.write(f"  Drop Path Rate: {model.drop_path_rate}\n")
 
-        f.write(f"Training Epochs: {len(history.history['loss'])}\n")
-        f.write(f"Batch Size: {args.batch_size}\n")
-        f.write(f"Initial Learning Rate: {args.learning_rate}\n")
-        f.write(f"LR Schedule: {args.lr_schedule}\n")
-        f.write(f"Weight Decay: {args.weight_decay}\n\n")
+        f.write(f"\nTraining Configuration:\n")
+        f.write(f"  Epochs: {len(history.history['loss'])}\n")
+        f.write(f"  Batch Size: {args.batch_size}\n")
+        f.write(f"  Initial Learning Rate: {args.learning_rate}\n")
+        f.write(f"  LR Schedule: {args.lr_schedule}\n")
+        f.write(f"  Weight Decay: {args.weight_decay}\n")
 
-        f.write(f"Final Test Results:\n")
+        f.write(f"\nFinal Test Results:\n")
         for key, val in test_results.items():
             f.write(f"  {key.replace('_', ' ').title()}: {val:.4f}\n")
 
-        f.write(f"\nManually Calculated Accuracy: {accuracy:.4f}\n")
+        if not is_imagenet:
+            f.write(f"\nManually Calculated Accuracy: {accuracy:.4f}\n")
+        else:
+            f.write(f"\nSubset Accuracy: {accuracy:.4f}\n")
 
-        # Training history summary
-        f.write(f"\nTraining History Summary:\n")
+        f.write(f"\nTraining History:\n")
         final_train_acc = history.history['accuracy'][-1]
         final_val_acc = history.history['val_accuracy'][-1]
         best_val_acc = max(history.history['val_accuracy'])
@@ -721,63 +838,63 @@ def train_model(args: argparse.Namespace):
         f.write(f"  Final Validation Accuracy: {final_val_acc:.4f}\n")
         f.write(f"  Best Validation Accuracy: {best_val_acc:.4f}\n")
 
-        # Analysis results summary
-        if analysis_results:
-            f.write(f"\nModel Analysis Summary:\n")
-            if hasattr(analysis_results, 'calibration_metrics'):
-                calibration = analysis_results.calibration_metrics
-                model_key = f"{args.variant}_{args.dataset}"
-                if model_key in calibration:
-                    f.write(f"  Expected Calibration Error (ECE): {calibration[model_key].get('ece', 'N/A')}\n")
-                    f.write(f"  Brier Score: {calibration[model_key].get('brier_score', 'N/A')}\n")
-
-        # Visualization files
-        f.write(f"\nGenerated Visualizations:\n")
-        viz_dir = os.path.join(results_dir, "visualizations")
-        if os.path.exists(viz_dir):
-            viz_files = [f for f in os.listdir(viz_dir) if f.endswith('.png')]
-            for viz_file in sorted(viz_files):
-                f.write(f"  - {viz_file}\n")
-
-    logger.info("Training completed successfully with comprehensive visualization and analysis!")
+    logger.info("Training completed successfully!")
     logger.info(f"Results saved to: {results_dir}")
-    logger.info(f"Visualizations saved to: {os.path.join(results_dir, 'visualizations')}")
-    if analysis_results:
-        logger.info(f"Model analysis saved to: {os.path.join(results_dir, 'model_analysis')}")
 
 
 # ---------------------------------------------------------------------
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Train a ConvNeXt V1 model with comprehensive visualizations.')
+    parser = argparse.ArgumentParser(description='Train ConvNeXt V1 model with ImageNet support.')
 
     # Dataset arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
+                        choices=['mnist', 'cifar10', 'cifar100', 'imagenet'],
+                        help='Dataset to use')
+    parser.add_argument('--image-size', type=int, default=224,
+                        help='Image size for ImageNet (default: 224)')
 
     # Model arguments
-    parser.add_argument('--variant', type=str, default='cifar10',
-                        choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'], help='Model variant')
-    parser.add_argument('--kernel-size', type=int, default=7, help='Depthwise kernel size')
-    parser.add_argument('--strides', type=int, default=4, help='Downsampling strides')
+    parser.add_argument('--variant', type=str, default='tiny',
+                        choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'],
+                        help='Model variant')
+    parser.add_argument('--kernel-size', type=int, default=7,
+                        help='Depthwise kernel size')
+    parser.add_argument('--strides', type=int, default=4,
+                        help='Downsampling strides')
 
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=64, help='Training batch size')
-    parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for optimizer')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Training batch size (use 128-256 for ImageNet)')
+    parser.add_argument('--learning-rate', type=float, default=1e-3,
+                        help='Initial learning rate (use 4e-3 for ImageNet)')
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                        help='Weight decay for optimizer (use 0.05 for ImageNet)')
     parser.add_argument('--lr-schedule', type=str, default='cosine',
-                        choices=['cosine', 'exponential', 'constant'], help='Learning rate schedule')
+                        choices=['cosine', 'exponential', 'constant'],
+                        help='Learning rate schedule')
 
     # Training control
-    parser.add_argument('--patience', type=int, default=50, help='Early stopping patience')
+    parser.add_argument('--patience', type=int, default=50,
+                        help='Early stopping patience')
 
     # Visualization arguments
     parser.add_argument('--show-plots', action='store_true', default=False,
-                        help='Show plots interactively during execution')
+                        help='Show plots interactively')
 
     args = parser.parse_args()
+
+    # Adjust defaults for ImageNet
+    if args.dataset.lower() == 'imagenet':
+        if args.batch_size == 64:
+            logger.info("Note: Using default batch size 64. Consider 128-256 for ImageNet.")
+        if args.learning_rate == 1e-3:
+            logger.info("Note: Using default lr 1e-3. Consider 4e-3 for ImageNet.")
+        if args.weight_decay == 1e-4:
+            logger.info("Note: Using default weight decay 1e-4. Consider 0.05 for ImageNet.")
 
     try:
         train_model(args)
