@@ -379,6 +379,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         activation: Union[str, callable] = 'relu',
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        use_batch_norm: bool = True,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -410,7 +411,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            use_batch_norm=True,
+            use_batch_norm=use_batch_norm,
             name=f'{self.name}_conv1'
         )
 
@@ -421,7 +422,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             activation=None,  # No activation before addition
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            use_batch_norm=True,
+            use_batch_norm=use_batch_norm,
             name=f'{self.name}_conv2'
         )
 

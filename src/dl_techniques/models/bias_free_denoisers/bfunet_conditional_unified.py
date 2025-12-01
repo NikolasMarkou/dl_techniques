@@ -45,7 +45,8 @@ def create_dense_conditioning_encoder(
         encoder_type: str = 'custom',
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        activation: Union[str, callable] = 'relu'
+        activation: Union[str, callable] = 'relu',
+        use_batch_norm: bool = False
 ) -> List[keras.layers.Layer]:
     """
     Create multi-scale feature encoder for dense conditioning signals.
@@ -61,6 +62,7 @@ def create_dense_conditioning_encoder(
         kernel_initializer: Weight initializer.
         kernel_regularizer: Weight regularizer.
         activation: Activation function.
+        use_batch_norm: Whether to use batch normalization (breaks bias-free property if True).
 
     Returns:
         List of feature tensors at different scales, ordered from high to low resolution:
@@ -83,7 +85,7 @@ def create_dense_conditioning_encoder(
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                use_batch_norm=True,
+                use_batch_norm=use_batch_norm,
                 name=f'dense_encoder_level_{level}_conv_{block_idx}'
             )(x)
 
@@ -157,7 +159,6 @@ class DenseConditioningInjection(keras.layers.Layer):
                 self.projection_layer = BiasFreeConv2D(
                     filters=target_channels,
                     kernel_size=1,
-                    use_bias=False,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     use_batch_norm=False,
@@ -169,7 +170,6 @@ class DenseConditioningInjection(keras.layers.Layer):
             self.projection_layer = BiasFreeConv2D(
                 filters=target_channels,
                 kernel_size=1,
-                use_bias=False,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 use_batch_norm=False,
@@ -377,6 +377,7 @@ def create_unified_conditional_bfunet(
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_residual_blocks: bool = True,
+        use_batch_norm: bool = False,
         dense_conditioning_encoder_filters: int = 64,
         dense_injection_method: str = 'film',
         class_embedding_dim: int = 128,
@@ -411,6 +412,8 @@ def create_unified_conditional_bfunet(
         kernel_initializer: Weight initializer.
         kernel_regularizer: Weight regularizer.
         use_residual_blocks: Whether to use residual blocks.
+        use_batch_norm: Whether to use batch normalization. 
+                        NOTE: Must be False for strict Bias-Free scaling invariance.
         dense_conditioning_encoder_filters: Base filters for dense encoder.
         dense_injection_method: Method for dense injection ('film', 'concatenation').
         class_embedding_dim: Dimension of class embeddings.
@@ -434,7 +437,8 @@ def create_unified_conditional_bfunet(
         >>> model = create_unified_conditional_bfunet(
         ...     target_shape=(256, 256, 1),  # Depth map
         ...     dense_conditioning_shape=(256, 256, 3),  # RGB image
-        ...     num_classes=None
+        ...     num_classes=None,
+        ...     use_batch_norm=False # Ensure bias-free
         ... )
     """
 
@@ -488,7 +492,8 @@ def create_unified_conditional_bfunet(
             encoder_type='custom',
             kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
-            activation=activation
+            activation=activation,
+            use_batch_norm=use_batch_norm
         )
 
     # Discrete conditioning input and embedding
@@ -588,6 +593,7 @@ def create_unified_conditional_bfunet(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
+                    use_batch_norm=use_batch_norm,
                     name=f'encoder_level_{level}_residual_block_{block_idx}'
                 )(x)
             else:
@@ -597,7 +603,7 @@ def create_unified_conditional_bfunet(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
-                    use_batch_norm=True,
+                    use_batch_norm=use_batch_norm,
                     name=f'encoder_level_{level}_conv_{block_idx}'
                 )(x)
 
@@ -636,6 +642,7 @@ def create_unified_conditional_bfunet(
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
+                use_batch_norm=use_batch_norm,
                 name=f'bottleneck_residual_block_{block_idx}'
             )(x)
         else:
@@ -645,7 +652,7 @@ def create_unified_conditional_bfunet(
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                use_batch_norm=True,
+                use_batch_norm=use_batch_norm,
                 name=f'bottleneck_conv_{block_idx}'
             )(x)
 
@@ -698,6 +705,7 @@ def create_unified_conditional_bfunet(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
+                    use_batch_norm=use_batch_norm,
                     name=f'decoder_level_{level}_residual_block_{block_idx}'
                 )(x)
             else:
@@ -707,7 +715,7 @@ def create_unified_conditional_bfunet(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
-                    use_batch_norm=True,
+                    use_batch_norm=use_batch_norm,
                     name=f'decoder_level_{level}_conv_{block_idx}'
                 )(x)
 
@@ -719,7 +727,7 @@ def create_unified_conditional_bfunet(
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                use_batch_norm=True,
+                use_batch_norm=use_batch_norm,
                 name=f'supervision_intermediate_level_{level}'
             )(x)
 
@@ -788,6 +796,7 @@ def create_unified_conditional_bfunet(
     logger.info(f"  Filter progression: {filter_sizes}")
     logger.info(f"  Target shape: {target_shape}")
     logger.info(f"  Deep supervision: {enable_deep_supervision}")
+    logger.info(f"  Batch normalization: {use_batch_norm}")
     logger.info(f"  Total parameters: {model.count_params():,}")
 
     return model
@@ -910,5 +919,3 @@ def create_semantic_depth_bfunet(
         model_name='semantic_depth_bfunet',
         **kwargs
     )
-
-# ---------------------------------------------------------------------
