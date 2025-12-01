@@ -7,7 +7,7 @@ score function ∇log p(y|c) where c is a class label.
 
 Key features:
 - Class-conditional denoising via embedding layer
-- Maintains bias-free properties for scaling invariance
+- Maintains bias-free properties for scaling invariance (Homogeneity of Degree 1)
 - Supports Classifier-Free Guidance (CFG) training
 - Compatible with deep supervision
 - Optional unconditional token for CFG sampling
@@ -49,7 +49,6 @@ def create_conditional_bfunet_denoiser(
         class_embedding_dim: int = 128,
         class_injection_method: str = 'spatial_broadcast',
         enable_cfg_training: bool = True,
-        cfg_dropout_prob: float = 0.1,
         model_name: str = 'conditional_bias_free_unet'
 ) -> keras.Model:
     """
@@ -62,6 +61,13 @@ def create_conditional_bfunet_denoiser(
 
     The model follows Miyasawa's theorem for conditionals:
         x̂(y, c) = E[x|y, c] = y + σ² ∇_y log p(y|c)
+
+    CRITICAL NOTE ON BIAS-FREE CONSTRAINT:
+    To strictly satisfy the Bias-Free property f(αx) = αf(x), the class conditioning
+    must be Multiplicative (Gating) rather than Additive. Additive injection would
+    introduce a static bias term that does not scale with the input intensity α,
+    breaking generalization to unseen noise levels. This implementation uses
+    multiplicative modulation.
 
     Args:
         input_shape: Tuple of integers, shape of input images (height, width, channels).
@@ -82,7 +88,6 @@ def create_conditional_bfunet_denoiser(
         class_injection_method: String, method for injecting class information.
                                Options: 'spatial_broadcast', 'channel_concat'. Defaults to 'spatial_broadcast'.
         enable_cfg_training: Boolean, whether to support CFG by including unconditional token. Defaults to True.
-        cfg_dropout_prob: Float, probability of dropping class label during training. Defaults to 0.1.
         model_name: String, name for the model. Defaults to 'conditional_bias_free_unet'.
 
     Returns:
@@ -168,6 +173,11 @@ def create_conditional_bfunet_denoiser(
         """
         Inject class conditioning into feature maps.
 
+        Uses Multiplicative Modulation to ensure the Bias-Free property:
+        f(alpha * x) = alpha * f(x).
+
+        Additive injection is strictly avoided as it introduces static biases.
+
         Args:
             x: Feature tensor (batch, height, width, channels)
             class_emb: Class embedding vector (batch, embedding_dim)
@@ -179,11 +189,12 @@ def create_conditional_bfunet_denoiser(
         """
         spatial_shape = keras.ops.shape(x)
         height, width = spatial_shape[1], spatial_shape[2]
+        feature_channels = x.shape[-1] # Static shape access if available
 
         if class_injection_method == 'spatial_broadcast':
             # Project embedding to match feature channels
             projected = keras.layers.Dense(
-                keras.ops.shape(x)[-1],
+                feature_channels if feature_channels is not None else keras.ops.shape(x)[-1],
                 use_bias=False,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
@@ -191,36 +202,60 @@ def create_conditional_bfunet_denoiser(
             )(class_emb)
 
             # Reshape to (batch, 1, 1, channels) for broadcasting
-            projected = keras.layers.Reshape((1, 1, keras.ops.shape(projected)[-1]))(projected)
+            projected = keras.layers.Reshape((1, 1, -1))(projected)
 
-            # Broadcast and add to features (bias-free addition)
-            # This is equivalent to FiLM-style modulation but without bias
-            conditioned = keras.layers.Add(
-                name=f'{stage}_level_{level}_class_inject'
+            # Multiplicative Modulation (Gating)
+            # x_out = x * (1 + P(c)) would be ideal for initialization,
+            # but x * P(c) is strictly homogeneous if P(c) acts as a scaler.
+            # We use Multiply. The network learns the scaling factor.
+            # To preserve signal flow at init, P(c) should optimally be close to 1 (or we can adding 1).
+            # Here we rely on standard Multiply, assuming proper training dynamics.
+            conditioned = keras.layers.Multiply(
+                name=f'{stage}_level_{level}_class_gate'
             )([x, projected])
 
         elif class_injection_method == 'channel_concat':
-            # Broadcast class embedding spatially
+            # To maintain Bias-Free property with concatenation, the concatenated
+            # features must also scale with the input intensity.
+            # We achieve this by scaling the broadcasted embedding by the average
+            # energy of the input features.
+
+            # 1. Project embedding
             projected = keras.layers.Dense(
-                initial_filters // 2,  # Smaller to avoid parameter explosion
+                initial_filters // 2,
                 use_bias=False,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 name=f'{stage}_level_{level}_class_project'
             )(class_emb)
 
-            # Tile to spatial dimensions
+            # 2. Tile to spatial dimensions
             tiled = keras.layers.RepeatVector(height * width)(projected)
             tiled = keras.layers.Reshape(
-                (height, width, initial_filters // 2),
+                (height, width, -1),
                 name=f'{stage}_level_{level}_class_reshape'
             )(tiled)
 
-            # Concatenate with features
+            # 3. Compute Scaling Factor from Input (Mean Absolute Amplitude)
+            # This ensures that if x scales by alpha, the scale factor also scales by alpha
+            # preserving homogeneity.
+            # shape: (batch, height, width, 1) or (batch, 1, 1, 1) depending on granularity.
+            # We use global spatial average for stability.
+            scale_factor = keras.layers.Lambda(
+                lambda t: keras.ops.mean(keras.ops.abs(t), axis=[1, 2, 3], keepdims=True),
+                name=f'{stage}_level_{level}_energy_calc'
+            )(x)
+
+            # 4. Modulate the tiled embedding
+            tiled_scaled = keras.layers.Multiply(
+                name=f'{stage}_level_{level}_emb_scale'
+            )([tiled, scale_factor])
+
+            # 5. Concatenate with features
             conditioned = keras.layers.Concatenate(
                 axis=-1,
                 name=f'{stage}_level_{level}_class_concat'
-            )([x, tiled])
+            )([x, tiled_scaled])
 
         return conditioned
 
@@ -468,6 +503,7 @@ def create_conditional_bfunet_denoiser(
 
     return model
 
+# ---------------------------------------------------------------------
 
 def create_conditional_bfunet_variant(
         variant: str,
@@ -526,3 +562,5 @@ def create_conditional_bfunet_variant(
         num_classes=num_classes,
         **config
     )
+
+# ---------------------------------------------------------------------

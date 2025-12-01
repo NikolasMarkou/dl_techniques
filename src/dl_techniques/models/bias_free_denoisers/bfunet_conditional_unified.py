@@ -18,11 +18,10 @@ Key features:
 - Deep supervision support
 - Classifier-Free Guidance (CFG) for discrete conditioning
 
-Applications:
-- Monocular depth estimation (RGB → depth)
-- Class-conditional image generation/denoising
-- Semantic-aware depth estimation (RGB + class → depth)
-- Multi-modal regression tasks
+THEORETICAL CONSTRAINT:
+To maintain the Bias-Free property f(αx) = αf(x), all conditioning injections
+must be Multiplicative (Gating/FiLM) or Energy-Scaled Concatenation. 
+Purely additive injections are strictly prohibited as they introduce static biases.
 """
 
 import keras
@@ -66,11 +65,6 @@ def create_dense_conditioning_encoder(
     Returns:
         List of feature tensors at different scales, ordered from high to low resolution:
         [level_0 (H,W), level_1 (H/2,W/2), level_2 (H/4,W/4), ...]
-
-    Example:
-        >>> rgb_input = keras.Input(shape=(256, 256, 3))
-        >>> features = create_dense_conditioning_encoder(rgb_input, num_levels=5)
-        >>> # Returns: [(256,256,F0), (128,128,F1), (64,64,F2), (32,32,F3), (16,16,F4)]
     """
 
     logger.info(f"Building dense conditioning encoder: {encoder_type}, {num_levels} levels")
@@ -116,15 +110,17 @@ class DenseConditioningInjection(keras.layers.Layer):
     """
     Inject dense conditioning features into target features.
 
-    Supports multiple injection methods:
-    - 'addition': Project and add conditioning features
-    - 'concatenation': Concatenate along channel dimension
-    - 'film': Feature-wise linear modulation (bias-free)
+    Supports multiple injection methods compatible with Bias-Free constraints:
+    - 'film': Scale-only Feature-wise Linear Modulation (x * (1 + P(c))).
+    - 'multiplication': Direct gating (x * P(c)).
+    - 'concatenation': Energy-scaled concatenation to preserve homogeneity.
+    
+    NOTE: 'addition' is not supported as it violates bias-free constraints.
     """
 
     def __init__(
             self,
-            method: str = 'addition',
+            method: str = 'film',
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             name: str = 'dense_injection',
@@ -134,12 +130,16 @@ class DenseConditioningInjection(keras.layers.Layer):
         Initialize dense conditioning injection layer.
 
         Args:
-            method: Injection method ('addition', 'concatenation', 'film').
+            method: Injection method ('film', 'multiplication', 'concatenation').
             kernel_initializer: Weight initializer.
             kernel_regularizer: Weight regularizer.
             name: Layer name.
         """
         super().__init__(name=name, **kwargs)
+        if method == 'addition':
+            logger.warning(f"Method 'addition' violates bias-free constraints. Promoting to 'film'.")
+            method = 'film'
+            
         self.method = method
         self.kernel_initializer = kernel_initializer
         self.kernel_regularizer = kernel_regularizer
@@ -151,7 +151,7 @@ class DenseConditioningInjection(keras.layers.Layer):
         target_channels = target_shape[-1]
         conditioning_channels = conditioning_shape[-1]
 
-        if self.method == 'addition':
+        if self.method == 'multiplication':
             # Project conditioning to match target channels
             if conditioning_channels != target_channels:
                 self.projection_layer = BiasFreeConv2D(
@@ -190,16 +190,27 @@ class DenseConditioningInjection(keras.layers.Layer):
         """
         target_features, conditioning_features = inputs
 
-        if self.method == 'addition':
+        if self.method == 'multiplication':
             if self.projection_layer is not None:
                 conditioning_projected = self.projection_layer(conditioning_features)
             else:
                 conditioning_projected = conditioning_features
 
-            return keras.layers.Add()([target_features, conditioning_projected])
+            return keras.layers.Multiply()([target_features, conditioning_projected])
 
         elif self.method == 'concatenation':
-            return keras.layers.Concatenate(axis=-1)([target_features, conditioning_features])
+            # For concatenation to be bias-free, the conditioning signal must scale
+            # with the target signal's energy.
+            # Calculate mean absolute amplitude of target features
+            scale_factor = keras.layers.Lambda(
+                lambda t: keras.ops.mean(keras.ops.abs(t), axis=[1, 2, 3], keepdims=True),
+                name=f'{self.name}_energy_calc'
+            )(target_features)
+            
+            # Scale the conditioning features
+            conditioning_scaled = keras.layers.Multiply()([conditioning_features, scale_factor])
+            
+            return keras.layers.Concatenate(axis=-1)([target_features, conditioning_scaled])
 
         elif self.method == 'film':
             # FiLM without bias: y = x * (1 + scale)
@@ -228,9 +239,9 @@ class DiscreteConditioningInjection(keras.layers.Layer):
     """
     Inject discrete conditioning (embeddings) into target features.
 
-    Converts embedding vectors to spatial feature maps through:
-    - 'spatial_broadcast': Project and broadcast to spatial dimensions
-    - 'channel_concat': Tile spatially and concatenate
+    Methods:
+    - 'spatial_broadcast': Scale-only FiLM (x * (1 + P(emb))).
+    - 'channel_concat': Energy-scaled concatenation.
     """
 
     def __init__(
@@ -253,6 +264,9 @@ class DiscreteConditioningInjection(keras.layers.Layer):
             name: Layer name.
         """
         super().__init__(name=name, **kwargs)
+        if method == 'addition': # Backwards compatibility/correction
+             method = 'spatial_broadcast' # mapped to multiplicative broadcast below
+
         self.method = method
         self.projected_channels = projected_channels
         self.kernel_initializer = kernel_initializer
@@ -263,8 +277,7 @@ class DiscreteConditioningInjection(keras.layers.Layer):
         """Build layer based on input shapes."""
         target_shape, embedding_shape = input_shape
         target_channels = target_shape[-1]
-        embedding_dim = embedding_shape[-1]
-
+        
         # Determine projection size
         if self.projected_channels is None:
             if self.method == 'spatial_broadcast':
@@ -302,8 +315,9 @@ class DiscreteConditioningInjection(keras.layers.Layer):
             # Reshape to (batch, 1, 1, channels) for broadcasting
             projected = keras.layers.Reshape((1, 1, self.projected_channels))(projected)
 
-            # Add to target features
-            return keras.layers.Add()([target_features, projected])
+            # Multiplicative Modulation (Scale-only FiLM)
+            # x_out = x * (1 + P(c))
+            return keras.layers.Multiply()([target_features, projected + 1.0])
 
         elif self.method == 'channel_concat':
             # Get spatial dimensions from target
@@ -314,8 +328,17 @@ class DiscreteConditioningInjection(keras.layers.Layer):
             tiled = keras.layers.RepeatVector(spatial_h * spatial_w)(projected)
             tiled = keras.layers.Reshape((spatial_h, spatial_w, self.projected_channels))(tiled)
 
+            # Calculate mean absolute amplitude of target features for scaling
+            scale_factor = keras.layers.Lambda(
+                lambda t: keras.ops.mean(keras.ops.abs(t), axis=[1, 2, 3], keepdims=True),
+                name=f'{self.name}_energy_calc'
+            )(target_features)
+            
+            # Scale the tiled embeddings
+            tiled_scaled = keras.layers.Multiply()([tiled, scale_factor])
+
             # Concatenate along channel dimension
-            return keras.layers.Concatenate(axis=-1)([target_features, tiled])
+            return keras.layers.Concatenate(axis=-1)([target_features, tiled_scaled])
 
         else:
             raise ValueError(f"Unknown injection method: {self.method}")
@@ -355,11 +378,10 @@ def create_unified_conditional_bfunet(
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_residual_blocks: bool = True,
         dense_conditioning_encoder_filters: int = 64,
-        dense_injection_method: str = 'addition',
+        dense_injection_method: str = 'film',
         class_embedding_dim: int = 128,
         discrete_injection_method: str = 'spatial_broadcast',
         enable_cfg_training: bool = False,
-        cfg_dropout_prob: float = 0.1,
         enable_deep_supervision: bool = False,
         model_name: str = 'unified_conditional_bfunet'
 ) -> keras.Model:
@@ -390,11 +412,10 @@ def create_unified_conditional_bfunet(
         kernel_regularizer: Weight regularizer.
         use_residual_blocks: Whether to use residual blocks.
         dense_conditioning_encoder_filters: Base filters for dense encoder.
-        dense_injection_method: Method for dense injection ('addition', 'concatenation', 'film').
+        dense_injection_method: Method for dense injection ('film', 'concatenation').
         class_embedding_dim: Dimension of class embeddings.
         discrete_injection_method: Method for discrete injection ('spatial_broadcast', 'channel_concat').
         enable_cfg_training: Enable classifier-free guidance training for discrete conditioning.
-        cfg_dropout_prob: Dropout probability for CFG training.
         enable_deep_supervision: Enable multi-scale deep supervision.
         model_name: Name for the model.
 
@@ -414,22 +435,6 @@ def create_unified_conditional_bfunet(
         ...     target_shape=(256, 256, 1),  # Depth map
         ...     dense_conditioning_shape=(256, 256, 3),  # RGB image
         ...     num_classes=None
-        ... )
-        >>>
-        >>> # Class-conditional generation (discrete only)
-        >>> model = create_unified_conditional_bfunet(
-        ...     target_shape=(256, 256, 3),  # Image
-        ...     dense_conditioning_shape=None,
-        ...     num_classes=10,
-        ...     enable_cfg_training=True
-        ... )
-        >>>
-        >>> # Hybrid: Semantic-aware depth estimation
-        >>> model = create_unified_conditional_bfunet(
-        ...     target_shape=(256, 256, 1),  # Depth
-        ...     dense_conditioning_shape=(256, 256, 3),  # RGB
-        ...     num_classes=20,  # Semantic classes
-        ...     enable_cfg_training=False
         ... )
     """
 
