@@ -87,7 +87,6 @@ class TestNBeatsNet:
         # For this implementation, we check the flag
         assert model.use_normalization is True
         assert len(model.blocks) == len(basic_config['stack_types'])
-        assert len(model.dropout_layers) > 0  # Dropout configured
         assert not model.built  # Not built yet
 
     def test_initialization_multivariate(self, multivariate_config):

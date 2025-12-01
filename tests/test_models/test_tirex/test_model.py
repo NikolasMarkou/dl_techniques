@@ -80,7 +80,6 @@ class TestTiRexCore:
         assert model.use_layer_norm == basic_config['use_layer_norm']
 
         # Check sub-layers created
-        assert model.scaler is not None
         assert model.patch_embedding is not None
         assert model.input_projection is not None
         assert len(model.blocks) == basic_config['num_blocks']
@@ -109,10 +108,10 @@ class TestTiRexCore:
         # Forward pass
         output = model(sample_univariate_input)
 
-        # Check output shape: [batch_size, num_quantiles, prediction_length]
+        # Check output shape: [batch_size, prediction_length, num_quantiles]
         assert output.shape[0] == sample_univariate_input.shape[0]  # Batch size preserved
-        assert output.shape[1] == len(basic_config['quantile_levels'])  # Number of quantiles
-        assert output.shape[2] == basic_config['prediction_length']  # Prediction length
+        assert output.shape[1] == basic_config['prediction_length']  # Prediction length
+        assert output.shape[2] == len(basic_config['quantile_levels'])  # Number of quantiles
 
         # Check output is not all zeros (model actually processed)
         output_np = ops.convert_to_numpy(output)
@@ -126,8 +125,8 @@ class TestTiRexCore:
 
         # Should expand 2D to 3D and process correctly
         assert output.shape[0] == sample_2d_input.shape[0]  # Batch size preserved
-        assert output.shape[1] == len(basic_config['quantile_levels'])  # Number of quantiles
-        assert output.shape[2] == basic_config['prediction_length']  # Prediction length
+        assert output.shape[1] == basic_config['prediction_length']  # Prediction length
+        assert output.shape[2] == len(basic_config['quantile_levels'])  # Number of quantiles
 
         # Verify model processes 2D input correctly
         output_np = ops.convert_to_numpy(output)
@@ -140,8 +139,8 @@ class TestTiRexCore:
         output = model(sample_multivariate_input)
 
         assert output.shape[0] == sample_multivariate_input.shape[0]  # Batch size
-        assert output.shape[1] == len(multivariate_config['quantile_levels'])  # Num quantiles
-        assert output.shape[2] == multivariate_config['prediction_length']  # Prediction length
+        assert output.shape[1] == multivariate_config['prediction_length']  # Prediction length
+        assert output.shape[2] == len(multivariate_config['quantile_levels'])  # Num quantiles
 
         # Check output is meaningful
         output_np = ops.convert_to_numpy(output)
@@ -240,8 +239,8 @@ class TestTiRexCore:
         output = model(sample_univariate_input, training=training)
 
         assert output.shape[0] == sample_univariate_input.shape[0]
-        assert output.shape[1] == len(basic_config['quantile_levels'])
-        assert output.shape[2] == basic_config['prediction_length']
+        assert output.shape[1] == basic_config['prediction_length']
+        assert output.shape[2] == len(basic_config['quantile_levels'])
 
         # Check that output changes with training mode when dropout is enabled
         if basic_config['dropout_rate'] > 0.0 and training is not None:
@@ -286,7 +285,8 @@ class TestTiRexCore:
 
         # Test invalid input shape (4D)
         invalid_4d_input = keras.random.normal((8, 96, 1, 1))
-        with pytest.raises(ValueError, match="Input must be 2D or 3D tensor"):
+        # PatchEmbedding1D will raise validation error for 4D input
+        with pytest.raises(ValueError, match="Expected 3D input"):
             model(invalid_4d_input)
 
     def test_different_block_configurations(self, sample_univariate_input):
@@ -317,7 +317,7 @@ class TestTiRexCore:
             model = TiRexCore(**config)
             output = model(sample_univariate_input)
 
-            expected_shape = (sample_univariate_input.shape[0], 3, 12)  # batch, quantiles, pred_length
+            expected_shape = (sample_univariate_input.shape[0], 12, 3)  # batch, pred_length, quantiles
             assert output.shape == expected_shape
             assert len(model.blocks) == len(block_types)
 
@@ -332,8 +332,8 @@ class TestTiRexCore:
         quantile_preds, mean_preds = model.predict_quantiles(input_np)
 
         assert quantile_preds.shape[0] == input_np.shape[0]  # Batch size
-        assert quantile_preds.shape[1] == len(basic_config['quantile_levels'])  # All quantiles
-        assert quantile_preds.shape[2] == basic_config['prediction_length']  # Prediction length
+        assert quantile_preds.shape[1] == basic_config['prediction_length']  # Prediction length
+        assert quantile_preds.shape[2] == len(basic_config['quantile_levels'])  # All quantiles
 
         assert mean_preds.shape[0] == input_np.shape[0]  # Batch size
         assert mean_preds.shape[1] == basic_config['prediction_length']  # Prediction length
@@ -341,7 +341,7 @@ class TestTiRexCore:
         # Test with custom quantiles
         custom_quantiles = [0.25, 0.75]
         quantile_preds_custom, _ = model.predict_quantiles(input_np, quantile_levels=custom_quantiles)
-        assert quantile_preds_custom.shape[1] == 2  # Two quantiles
+        assert quantile_preds_custom.shape[2] == 2  # Two quantiles in last dim
 
     def test_variant_creation(self):
         """Test creation from variants."""
@@ -500,8 +500,8 @@ class TestTiRexFactory:
         output = model(x_train)
 
         assert output.shape[0] == x_train.shape[0]  # Batch size
-        assert output.shape[1] == 9  # Default quantiles
-        assert output.shape[2] == 24  # Prediction length
+        assert output.shape[1] == 24  # Prediction length
+        assert output.shape[2] == 9  # Default quantiles
 
     def test_factory_serialization_compatibility(self, sample_data):
         """Test that factory-created models serialize correctly."""

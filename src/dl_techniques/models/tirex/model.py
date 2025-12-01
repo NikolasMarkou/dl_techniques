@@ -281,7 +281,11 @@ class TiRexCore(keras.Model):
             f"embed_dim={embed_dim}, prediction_length={prediction_length}"
         )
 
-    def call(self, inputs, training=None):
+    def call(
+            self,
+            inputs: Union[keras.KerasTensor, np.ndarray],
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Forward pass through the TiRex model.
 
@@ -300,6 +304,7 @@ class TiRexCore(keras.Model):
         # 1. CALCULATE STATISTICS & NORMALIZE
         if self.use_normalization:
             # Calculate stats across the time dimension (axis 1)
+            # Shape: (Batch, 1, Features)
             mean = ops.mean(inputs, axis=1, keepdims=True)
             std = ops.std(inputs, axis=1, keepdims=True)
             std = ops.maximum(std, 1e-7)  # Prevent division by zero
@@ -332,10 +337,21 @@ class TiRexCore(keras.Model):
 
         # 6. DENORMALIZE OUTPUT (Reversible Instance Normalization)
         if self.use_normalization:
-            # mean/std shape: (Batch, 1, 1) via keepdims=True in step 1
-            # predictions shape: (Batch, Time, Quantiles)
-            # Broadcasting will apply scale/shift to all time steps and all quantiles
-            quantile_predictions = (quantile_predictions * std) + mean
+            # The model predicts the distribution of a target variable.
+            # If the input is multivariate, we assume the target is the last feature.
+            # We must slice the statistics to match the univariate output shape.
+
+            # mean/std shape is (Batch, 1, Features)
+            if mean.shape[-1] > 1:
+                # Select stats for the last feature -> (Batch, 1, 1)
+                norm_mean = mean[:, :, -1:]
+                norm_std = std[:, :, -1:]
+            else:
+                norm_mean = mean
+                norm_std = std
+
+            # Broadcasting: (B, PredLen, Quantiles) * (B, 1, 1) + (B, 1, 1)
+            quantile_predictions = (quantile_predictions * norm_std) + norm_mean
 
         return quantile_predictions
 

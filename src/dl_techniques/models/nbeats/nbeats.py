@@ -246,7 +246,6 @@ class NBeatsNet(keras.Model):
 
         # CREATE all sub-layers in __init__ (Golden Rule #1)
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
-        self.dropout_layers: List[layers.Dropout] = []
         self._create_block_stacks()
 
     def _validate_configuration(
