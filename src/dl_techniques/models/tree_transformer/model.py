@@ -102,7 +102,7 @@ class PositionalEncoding(keras.layers.Layer):
         Add Positional Encoding Matrix (precomputed)
                │
                ▼
-        Dropout(rate=dropout_prob)
+        Dropout(rate=dropout_rate)
                │
                ▼
         Output(shape=[batch, seq_len, hidden_size])
@@ -114,8 +114,8 @@ class PositionalEncoding(keras.layers.Layer):
 
     :param hidden_size: The dimensionality of the embeddings. Must be positive.
     :type hidden_size: int
-    :param dropout_prob: Dropout probability after adding encodings. Must be in [0, 1].
-    :type dropout_prob: float
+    :param dropout_rate: Dropout probability after adding encodings. Must be in [0, 1].
+    :type dropout_rate: float
     :param max_len: Maximum sequence length for pre-computation.
     :type max_len: int
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
@@ -134,7 +134,7 @@ class PositionalEncoding(keras.layers.Layer):
     def __init__(
         self,
         hidden_size: int,
-        dropout_prob: float,
+        dropout_rate: float,
         max_len: int = 5000,
         **kwargs: Any,
     ) -> None:
@@ -144,16 +144,16 @@ class PositionalEncoding(keras.layers.Layer):
             raise ValueError(
                 f"hidden_size must be positive, got {hidden_size}"
             )
-        if not (0.0 <= dropout_prob <= 1.0):
+        if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(
-                f"dropout_prob must be in [0, 1], got {dropout_prob}"
+                f"dropout_rate must be in [0, 1], got {dropout_rate}"
             )
         self.hidden_size = hidden_size
-        self.dropout_prob = dropout_prob
+        self.dropout_rate = dropout_rate
         self.max_len = max_len
 
         # Create sub-layers in __init__
-        self.dropout = keras.layers.Dropout(dropout_prob)
+        self.dropout = keras.layers.Dropout(dropout_rate)
         self.pe = None # Weight created in build()
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -190,7 +190,7 @@ class PositionalEncoding(keras.layers.Layer):
         config.update(
             {
                 "hidden_size": self.hidden_size,
-                "dropout_prob": self.dropout_prob,
+                "dropout_rate": self.dropout_rate,
                 "max_len": self.max_len,
             }
         )
@@ -411,8 +411,8 @@ class TreeMHA(keras.layers.Layer):
     :type num_heads: int
     :param hidden_size: The dimensionality of the model. Must be divisible by `num_heads`.
     :type hidden_size: int
-    :param attention_dropout_prob: Dropout probability for attention scores.
-    :type attention_dropout_prob: float
+    :param attention_dropout_rate: Dropout probability for attention scores.
+    :type attention_dropout_rate: float
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
     **Input shape**:
@@ -429,19 +429,19 @@ class TreeMHA(keras.layers.Layer):
         self,
         num_heads: int,
         hidden_size: int,
-        attention_dropout_prob: float = 0.1,
+        attention_dropout_rate: float = 0.1,
         **kwargs: Any,
     ) -> None:
         """Initializes the TreeMHA layer."""
         super().__init__(**kwargs)
         if hidden_size <= 0 or num_heads <= 0 or hidden_size % num_heads != 0:
             raise ValueError("Invalid hidden_size or num_heads configuration.")
-        if not (0.0 <= attention_dropout_prob <= 1.0):
-            raise ValueError("attention_dropout_prob must be in [0, 1].")
+        if not (0.0 <= attention_dropout_rate <= 1.0):
+            raise ValueError("attention_dropout_rate must be in [0, 1].")
 
         self.num_heads = num_heads
         self.hidden_size = hidden_size
-        self.attention_dropout_prob = attention_dropout_prob
+        self.attention_dropout_rate = attention_dropout_rate
         self.depth = hidden_size // num_heads
 
         # Create sub-layers in __init__
@@ -449,7 +449,7 @@ class TreeMHA(keras.layers.Layer):
         self.wk = keras.layers.Dense(hidden_size, name="key")
         self.wv = keras.layers.Dense(hidden_size, name="value")
         self.dense = keras.layers.Dense(hidden_size, name="output_projection")
-        self.dropout = keras.layers.Dropout(attention_dropout_prob)
+        self.dropout = keras.layers.Dropout(attention_dropout_rate)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Builds all sub-layers for robust serialization."""
@@ -518,7 +518,7 @@ class TreeMHA(keras.layers.Layer):
             {
                 "num_heads": self.num_heads,
                 "hidden_size": self.hidden_size,
-                "attention_dropout_prob": self.attention_dropout_prob,
+                "attention_dropout_rate": self.attention_dropout_rate,
             }
         )
         return config
@@ -560,10 +560,10 @@ class TreeTransformerBlock(keras.layers.Layer):
     :type num_heads: int
     :param intermediate_size: Dimensionality of the FFN layer.
     :type intermediate_size: int
-    :param hidden_dropout_prob: Dropout for hidden layers.
-    :type hidden_dropout_prob: float
-    :param attention_dropout_prob: Dropout for attention scores.
-    :type attention_dropout_prob: float
+    :param hidden_dropout_rate: Dropout for hidden layers.
+    :type hidden_dropout_rate: float
+    :param attention_dropout_rate: Dropout for attention scores.
+    :type attention_dropout_rate: float
     :param normalization_type: Type of normalization layer.
     :type normalization_type: NormalizationType
     :param ffn_type: Type of feed-forward network.
@@ -586,8 +586,8 @@ class TreeTransformerBlock(keras.layers.Layer):
         hidden_size: int,
         num_heads: int,
         intermediate_size: int,
-        hidden_dropout_prob: float = 0.1,
-        attention_dropout_prob: float = 0.1,
+        hidden_dropout_rate: float = 0.1,
+        attention_dropout_rate: float = 0.1,
         normalization_type: NormalizationType = "layer_norm",
         ffn_type: FFNType = "mlp",
         hidden_act: str = "gelu",
@@ -599,8 +599,8 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
-        self.hidden_dropout_prob = hidden_dropout_prob
-        self.attention_dropout_prob = attention_dropout_prob
+        self.hidden_dropout_rate = hidden_dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
         self.normalization_type = normalization_type
         self.ffn_type = ffn_type
         self.hidden_act = hidden_act
@@ -613,14 +613,14 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.self_attn = TreeMHA(
             num_heads=num_heads,
             hidden_size=hidden_size,
-            attention_dropout_prob=attention_dropout_prob,
+            attention_dropout_rate=attention_dropout_rate,
         )
         self.ffn = create_ffn_layer(
             ffn_type=ffn_type,
             hidden_dim=intermediate_size,
             output_dim=hidden_size,
             activation=hidden_act,
-            dropout_rate=hidden_dropout_prob,
+            dropout_rate=hidden_dropout_rate,
             name="ffn",
         )
         self.norm1 = create_normalization_layer(
@@ -633,8 +633,8 @@ class TreeTransformerBlock(keras.layers.Layer):
             epsilon=layer_norm_eps,
             name="norm2",
         )
-        self.dropout1 = keras.layers.Dropout(hidden_dropout_prob)
-        self.dropout2 = keras.layers.Dropout(hidden_dropout_prob)
+        self.dropout1 = keras.layers.Dropout(hidden_dropout_rate)
+        self.dropout2 = keras.layers.Dropout(hidden_dropout_rate)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Builds all sub-layers explicitly for robust serialization."""
@@ -691,8 +691,8 @@ class TreeTransformerBlock(keras.layers.Layer):
                 "hidden_size": self.hidden_size,
                 "num_heads": self.num_heads,
                 "intermediate_size": self.intermediate_size,
-                "hidden_dropout_prob": self.hidden_dropout_prob,
-                "attention_dropout_prob": self.attention_dropout_prob,
+                "hidden_dropout_rate": self.hidden_dropout_rate,
+                "attention_dropout_rate": self.attention_dropout_rate,
                 "normalization_type": self.normalization_type,
                 "ffn_type": self.ffn_type,
                 "hidden_act": self.hidden_act,
@@ -759,10 +759,10 @@ class TreeTransformer(keras.Model):
     :type intermediate_size: int
     :param hidden_act: Activation function in the encoder. Defaults to "gelu".
     :type hidden_act: str
-    :param hidden_dropout_prob: Dropout for embeddings/encoder. Defaults to 0.1.
-    :type hidden_dropout_prob: float
-    :param attention_dropout_prob: Dropout for attention scores. Defaults to 0.1.
-    :type attention_dropout_prob: float
+    :param hidden_dropout_rate: Dropout for embeddings/encoder. Defaults to 0.1.
+    :type hidden_dropout_rate: float
+    :param attention_dropout_rate: Dropout for attention scores. Defaults to 0.1.
+    :type attention_dropout_rate: float
     :param max_len: Maximum sequence length. Defaults to 256.
     :type max_len: int
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-6.
@@ -832,8 +832,8 @@ class TreeTransformer(keras.Model):
         num_heads: int = 8,
         intermediate_size: int = 2048,
         hidden_act: str = DEFAULT_HIDDEN_ACT,
-        hidden_dropout_prob: float = 0.1,
-        attention_dropout_prob: float = 0.1,
+        hidden_dropout_rate: float = 0.1,
+        attention_dropout_rate: float = 0.1,
         max_len: int = DEFAULT_MAX_LEN,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPSILON,
         pad_token_id: int = DEFAULT_PAD_TOKEN_ID,
@@ -849,8 +849,8 @@ class TreeTransformer(keras.Model):
             hidden_size,
             num_layers,
             num_heads,
-            hidden_dropout_prob,
-            attention_dropout_prob,
+            hidden_dropout_rate,
+            attention_dropout_rate,
         )
 
         self.vocab_size = vocab_size
@@ -859,8 +859,8 @@ class TreeTransformer(keras.Model):
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act
-        self.hidden_dropout_prob = hidden_dropout_prob
-        self.attention_dropout_prob = attention_dropout_prob
+        self.hidden_dropout_rate = hidden_dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
         self.max_len = max_len
         self.layer_norm_eps = layer_norm_eps
         self.pad_token_id = pad_token_id
@@ -880,8 +880,8 @@ class TreeTransformer(keras.Model):
         hidden_size,
         num_layers,
         num_heads,
-        hidden_dropout_prob,
-        attention_dropout_prob,
+        hidden_dropout_rate,
+        attention_dropout_rate,
     ) -> None:
         """Validates model configuration parameters."""
         if vocab_size <= 0:
@@ -903,13 +903,13 @@ class TreeTransformer(keras.Model):
                 f"hidden_size ({hidden_size}) must be divisible by "
                 f"num_heads ({num_heads})"
             )
-        if not (0.0 <= hidden_dropout_prob <= 1.0):
+        if not (0.0 <= hidden_dropout_rate <= 1.0):
             raise ValueError(
-                f"hidden_dropout_prob must be in [0, 1], got {hidden_dropout_prob}"
+                f"hidden_dropout_rate must be in [0, 1], got {hidden_dropout_rate}"
             )
-        if not (0.0 <= attention_dropout_prob <= 1.0):
+        if not (0.0 <= attention_dropout_rate <= 1.0):
             raise ValueError(
-                f"attention_dropout_prob must be in [0, 1], got {attention_dropout_prob}"
+                f"attention_dropout_rate must be in [0, 1], got {attention_dropout_rate}"
             )
 
     def _build_architecture(self) -> None:
@@ -919,7 +919,7 @@ class TreeTransformer(keras.Model):
         )
         self.pos_encoding = PositionalEncoding(
             hidden_size=self.hidden_size,
-            dropout_prob=self.hidden_dropout_prob,
+            dropout_rate=self.hidden_dropout_rate,
             max_len=self.max_len,
             name="pos_encoding",
         )
@@ -928,8 +928,8 @@ class TreeTransformer(keras.Model):
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
-                hidden_dropout_prob=self.hidden_dropout_prob,
-                attention_dropout_prob=self.attention_dropout_prob,
+                hidden_dropout_rate=self.hidden_dropout_rate,
+                attention_dropout_rate=self.attention_dropout_rate,
                 normalization_type=self.normalization_type,
                 ffn_type=self.ffn_type,
                 hidden_act=self.hidden_act,
@@ -1133,8 +1133,8 @@ class TreeTransformer(keras.Model):
                 "num_heads": self.num_heads,
                 "intermediate_size": self.intermediate_size,
                 "hidden_act": self.hidden_act,
-                "hidden_dropout_prob": self.hidden_dropout_prob,
-                "attention_dropout_prob": self.attention_dropout_prob,
+                "hidden_dropout_rate": self.hidden_dropout_rate,
+                "attention_dropout_rate": self.attention_dropout_rate,
                 "max_len": self.max_len,
                 "layer_norm_eps": self.layer_norm_eps,
                 "pad_token_id": self.pad_token_id,

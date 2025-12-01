@@ -70,14 +70,14 @@ class TestTreeTransformerModelInitialization:
             )
 
         with pytest.raises(
-            ValueError, match="hidden_dropout_prob must be in"
+            ValueError, match="hidden_dropout_rate must be in"
         ):
             TreeTransformer(
                 vocab_size=1000,
                 hidden_size=256,
                 num_layers=4,
                 num_heads=8,
-                hidden_dropout_prob=1.5,
+                hidden_dropout_rate=1.5,
             )
 
     def test_initialization_with_custom_config(self):
@@ -88,14 +88,14 @@ class TestTreeTransformerModelInitialization:
             num_layers=8,
             num_heads=8,
             intermediate_size=2048,
-            hidden_dropout_prob=0.2,
-            attention_dropout_prob=0.1,
+            hidden_dropout_rate=0.2,
+            attention_dropout_rate=0.1,
             normalization_type="rms_norm",
         )
         assert model.vocab_size == 25000
         assert model.hidden_size == 512
         assert model.num_layers == 8
-        assert model.hidden_dropout_prob == 0.2
+        assert model.hidden_dropout_rate == 0.2
         assert model.normalization_type == "rms_norm"
 
 
