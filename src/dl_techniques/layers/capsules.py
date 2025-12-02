@@ -64,16 +64,59 @@ class PrimaryCapsule(keras.layers.Layer):
     into capsule format. It consists of a convolutional layer followed by reshaping
     and squashing operations.
 
+    **Intent**: Transform traditional convolutional feature maps into capsule representation,
+    where each capsule encodes the instantiation parameters of a specific feature type.
+    This is the bridge between standard CNN architectures and capsule-based processing.
+
+    **Architecture**:
+    ```
+    Input(shape=[batch, height, width, channels])
+           ↓
+    Conv2D(filters=num_capsules × dim_capsules, kernel_size, strides)
+           ↓
+    Reshape([batch, num_spatial_locations, num_capsules, dim_capsules])
+           ↓
+    Reshape([batch, num_spatial_locations × num_capsules, dim_capsules])
+           ↓
+    SquashLayer(axis=-1)  ← Non-linear activation preserving direction
+           ↓
+    Output(shape=[batch, num_capsules_total, dim_capsules])
+    ```
+
+    **Mathematical Operation**:
+        ```
+        conv_out = Conv2D(inputs)                    # Shape: [B, H', W', C']
+        capsules = Reshape(conv_out)                 # Shape: [B, N, D]
+        output = Squash(capsules, axis=-1)           # Shape: [B, N, D]
+        ```
+
+    Where:
+    - B = batch_size
+    - H', W' = spatial dimensions after convolution
+    - C' = num_capsules × dim_capsules
+    - N = num_spatial_locations × num_capsules (total capsules)
+    - D = dim_capsules
+
     Args:
-        num_capsules: Integer, number of primary capsules to create. Must be positive.
+        num_capsules: Integer, number of primary capsules to create per spatial location.
+            Must be positive. For example, 32 capsules means 32 different feature types
+            are encoded at each spatial position.
         dim_capsules: Integer, dimension of each capsule's output vector. Must be positive.
+            Typical values are 8 or 16. Higher dimensions allow capsules to encode more
+            information about their detected features.
         kernel_size: Integer or tuple of integers, size of the convolutional kernel.
-        strides: Integer or tuple of integers, stride length for convolution. Defaults to 1.
-        padding: String, type of padding for convolution ('valid' or 'same'). Defaults to 'valid'.
-        kernel_initializer: String or Initializer, initializer for the conv kernel. Defaults to 'he_normal'.
+            Controls the receptive field size for capsule extraction.
+        strides: Integer or tuple of integers, stride length for convolution.
+            Controls spatial downsampling. Defaults to 1.
+        padding: String, type of padding for convolution ('valid' or 'same').
+            'valid' reduces spatial size, 'same' preserves it. Defaults to 'valid'.
+        kernel_initializer: String or Initializer, initializer for the conv kernel.
+            Defaults to 'he_normal'.
         kernel_regularizer: Optional regularizer function for the conv kernel.
-        use_bias: Boolean, whether to include bias terms. Defaults to True.
-        squash_axis: Integer, axis along which to apply squashing operation. Defaults to -1.
+            Helps prevent overfitting in the capsule extraction stage.
+        use_bias: Boolean, whether to include bias terms in convolution. Defaults to True.
+        squash_axis: Integer, axis along which to apply squashing operation.
+            Should be -1 to squash along capsule dimension. Defaults to -1.
         squash_epsilon: Float, epsilon for numerical stability in squashing. Optional.
         **kwargs: Additional keyword arguments for the Layer base class.
 
@@ -83,6 +126,10 @@ class PrimaryCapsule(keras.layers.Layer):
     Output shape:
         3D tensor with shape: ``(batch_size, num_spatial_capsules * num_capsules, dim_capsules)``
         where ``num_spatial_capsules`` depends on the input size and convolution parameters.
+
+    Attributes:
+        conv: Conv2D layer that extracts capsule features from input.
+        squash_layer: SquashLayer that applies non-linear squashing activation.
 
     Example:
         ```python
@@ -103,6 +150,11 @@ class PrimaryCapsule(keras.layers.Layer):
     Raises:
         ValueError: If num_capsules or dim_capsules is not positive.
         ValueError: If padding is not 'valid' or 'same'.
+        ValueError: If input shape is not 4D during build.
+
+    Note:
+        The number of output capsules depends on the spatial dimensions after convolution.
+        With valid padding and stride > 1, spatial size decreases significantly.
     """
 
     def __init__(
@@ -277,21 +329,40 @@ class RoutingCapsule(keras.layers.Layer):
     of Capsule Networks that replaces max-pooling with a more sophisticated routing
     mechanism based on agreement between predictions and outputs.
 
-    ## Dynamic Routing Algorithm
+    **Intent**: Enable dynamic, learned routing of information between capsule layers
+    through an iterative agreement mechanism. Unlike fixed connections in traditional
+    neural networks, routing coefficients are computed on-the-fly based on the
+    agreement between capsule predictions and outputs, allowing the network to
+    discover part-whole relationships.
 
-    The routing process iteratively refines the connection strengths between input
-    and output capsules through an agreement mechanism:
+    **Architecture** (per routing iteration):
+    ```
+    Input Capsules(shape=[batch, num_input_capsules, input_dim])
+           ↓
+    Transform via W: û_j|i = W_ij × u_i  [Prediction vectors]
+           ↓
+    Initialize: b_ij = 0  [Routing logits]
+           ↓
+    ┌─────────────────────── Routing Iteration ───────────────────────┐
+    │                                                                 │
+    │  Softmax: c_ij = softmax(b_ij)  ← [Routing coefficients]        │
+    │           ↓                                                     │
+    │  Weighted Sum: s_j = Σ_i c_ij × û_j|i                           │
+    │           ↓                                                     │
+    │  Add Bias: s_j = s_j + bias_j (if use_bias=True)                │
+    │           ↓                                                     │
+    │  Squash: v_j = squash(s_j)  ← [Output capsule activation]       │
+    │           ↓                                                     │
+    │  Agreement: a_ij = û_j|i · v_j  [Dot product measures match]    │
+    │           ↓                                                     │
+    │  Update: b_ij ← b_ij + a_ij  [Strengthen agreeing connections]  │
+    │           ↓                                                     │
+    └──────────────────────── Repeat 3 times ─────────────────────────┘
+           ↓
+    Output Capsules(shape=[batch, num_capsules, dim_capsules])
+    ```
 
-    1. **Initialize**: All routing coefficients start equal (uniform routing)
-    2. **For each iteration**:
-       - Convert routing logits to coefficients via softmax
-       - Compute weighted sum of input predictions
-       - Apply squashing non-linearity to get output
-       - Measure agreement between predictions and outputs
-       - Update routing logits based on agreement
-    3. **Converge**: Strong agreements strengthen connections, weak ones weaken
-
-    ## Mathematical Formulation
+    **Mathematical Formulation**:
 
     For each routing iteration:
 
@@ -307,18 +378,30 @@ class RoutingCapsule(keras.layers.Layer):
     .. math::
         b_{ij} \\leftarrow b_{ij} + \\hat{u}_{j|i} \\cdot v_j \\quad \\text{(update logits)}
 
+    **Key Innovation**:
+    The routing coefficients c_ij are not learned parameters but are computed
+    dynamically for each input based on the agreement between predicted and
+    actual capsule activations. This allows the network to route information
+    flexibly based on the input content.
+
     Args:
         num_capsules: Integer, number of output capsules to produce. Must be positive.
+            This is typically much smaller than num_input_capsules (e.g., 10 for digit
+            classification from 1152 primary capsules).
         dim_capsules: Integer, dimension of each output capsule's vector. Must be positive.
+            Larger dimensions allow capsules to encode more detailed instantiation
+            parameters. Typical values are 8-32.
         routing_iterations: Integer, number of dynamic routing iterations. The paper recommends 3
             iterations as a good balance between performance and computational cost.
             Must be positive. Defaults to 3.
         kernel_initializer: String or Initializer, initializer for the transformation matrices W that transform
             input capsule predictions to output capsule space. Defaults to 'glorot_uniform'.
         kernel_regularizer: Optional regularizer function applied to the transformation matrices.
-        use_bias: Boolean, whether to include bias terms in the routing computation. Defaults to True.
+            Helps prevent overfitting in the transformation weights.
+        use_bias: Boolean, whether to include bias terms in the routing computation.
+            Adds a learned bias to the weighted sum before squashing. Defaults to True.
         squash_axis: Integer, axis along which to apply the squashing non-linearity. Default is -2
-            to squash along the capsule dimension.
+            to squash along the capsule dimension in the intermediate representation.
         squash_epsilon: Optional float, small constant for numerical stability in the squashing function.
         **kwargs: Additional keyword arguments passed to the Layer base class.
 
@@ -327,6 +410,12 @@ class RoutingCapsule(keras.layers.Layer):
 
     Output shape:
         3D tensor with shape: ``(batch_size, num_capsules, dim_capsules)``
+
+    Attributes:
+        W: Transformation weight matrix of shape [1, num_input_capsules, num_capsules,
+            dim_capsules, input_dim_capsules]. Projects input capsules to output space.
+        bias: Optional bias vector of shape [1, 1, num_capsules, dim_capsules, 1].
+        squash_layer: SquashLayer instance for non-linear capsule activation.
 
     Example:
         ```python
@@ -339,10 +428,25 @@ class RoutingCapsule(keras.layers.Layer):
         primary_caps = keras.random.normal((32, 1152, 8))
         digit_caps = routing_layer(primary_caps)
         print(digit_caps.shape)  # (32, 10, 16)
+
+        # Lower-dimensional routing for efficiency
+        routing_layer = RoutingCapsule(
+            num_capsules=10,
+            dim_capsules=8,
+            routing_iterations=2,  # Fewer iterations for speed
+            use_bias=False         # No bias for regularization
+        )
         ```
 
     Raises:
         ValueError: If num_capsules, dim_capsules, or routing_iterations is not positive.
+        ValueError: If input shape is not 3D during build.
+
+    Note:
+        The computational complexity is O(routing_iterations × num_input_capsules ×
+        num_capsules × dim_capsules), which can be significant for large capsule layers.
+        Consider using fewer routing iterations or smaller capsule dimensions for
+        efficiency when working with large-scale problems.
 
     References:
         Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between capsules.
@@ -558,19 +662,60 @@ class CapsuleBlock(keras.layers.Layer):
 
     This block combines a RoutingCapsule layer with optional regularization
     techniques like dropout and layer normalization to create a robust
-    capsule processing unit.
+    capsule processing unit suitable for production use.
+
+    **Intent**: Provide a modular, reusable capsule processing unit that combines
+    dynamic routing with modern regularization techniques. This block can be
+    stacked to create deeper capsule networks while maintaining training stability
+    through optional normalization and preventing overfitting through dropout.
+
+    **Architecture**:
+    ```
+    Input Capsules(shape=[batch, num_input_capsules, input_dim])
+           ↓
+    RoutingCapsule(num_capsules, dim_capsules, routing_iterations)
+           ├─→ Transform: W × input_capsules
+           ├─→ Dynamic Routing: 3 iterations (default)
+           └─→ Squash activation
+           ↓
+    [Optional] Dropout(dropout_rate) ← Applied during training only
+           ↓                            Randomly zeros elements
+           ↓
+    [Optional] LayerNormalization ← Normalizes across capsule dimension
+           ↓                         Stabilizes training
+           ↓
+    Output Capsules(shape=[batch, num_capsules, dim_capsules])
+    ```
+
+    **Processing Flow**:
+    ```
+    x = RoutingCapsule(inputs)           # Core capsule routing
+    if dropout_rate > 0:
+        x = Dropout(x, training=training)  # Regularization
+    if use_layer_norm:
+        x = LayerNorm(x)                  # Normalization
+    return x
+    ```
 
     Args:
         num_capsules: Integer, number of output capsules. Must be positive.
+            This defines the cardinality of the capsule representation at this level.
         dim_capsules: Integer, dimension of each output capsule's vector. Must be positive.
+            Higher dimensions allow more expressive capsule representations.
         routing_iterations: Integer, number of routing iterations. Must be positive. Defaults to 3.
+            More iterations allow better routing convergence but increase computation.
         dropout_rate: Float, dropout rate. Must be in [0.0, 1.0). 0.0 means no dropout. Defaults to 0.0.
+            Typical values are 0.2-0.5 for regularization. Applied only during training.
         use_layer_norm: Boolean, whether to use layer normalization. Defaults to False.
+            Recommended for deeper networks to stabilize training and gradients.
         kernel_initializer: String or Initializer, initializer for the transformation matrices.
             Defaults to 'glorot_uniform'.
         kernel_regularizer: Optional regularizer function for the transformation matrices.
+            L1/L2 regularization can be applied to routing weights for better generalization.
         use_bias: Boolean, whether to use biases in routing. Defaults to True.
+            Bias can help the model learn better capsule activations.
         squash_axis: Integer, axis along which to apply squashing operation. Defaults to -2.
+            Should match the axis used in RoutingCapsule for consistency.
         squash_epsilon: Optional float, epsilon for numerical stability in squashing.
         **kwargs: Additional keyword arguments for the Layer base class.
 
@@ -579,6 +724,11 @@ class CapsuleBlock(keras.layers.Layer):
 
     Output shape:
         3D tensor with shape: ``(batch_size, num_capsules, dim_capsules)``
+
+    Attributes:
+        capsule_layer: RoutingCapsule instance performing dynamic routing.
+        dropout: Optional Dropout layer for regularization.
+        layer_norm: Optional LayerNormalization for training stability.
 
     Example:
         ```python
@@ -595,11 +745,35 @@ class CapsuleBlock(keras.layers.Layer):
         primary_caps = keras.random.normal((32, 1152, 8))
         digit_caps = capsule_block(primary_caps, training=True)
         print(digit_caps.shape)  # (32, 10, 16)
+
+        # Minimal block without regularization (for small datasets)
+        simple_block = CapsuleBlock(
+            num_capsules=5,
+            dim_capsules=8,
+            routing_iterations=2,
+            dropout_rate=0.0,        # No dropout
+            use_layer_norm=False     # No normalization
+        )
+
+        # Heavy regularization block (for large datasets prone to overfitting)
+        regularized_block = CapsuleBlock(
+            num_capsules=20,
+            dim_capsules=32,
+            routing_iterations=3,
+            dropout_rate=0.5,        # Strong dropout
+            use_layer_norm=True,     # With normalization
+            kernel_regularizer=keras.regularizers.L2(1e-4)
+        )
         ```
 
     Raises:
         ValueError: If dropout_rate is not in [0.0, 1.0).
         TypeError: If use_layer_norm is not boolean.
+
+    Note:
+        When using dropout, ensure training=True is passed during training and
+        training=False during inference. Layer normalization is applied after
+        dropout for better training dynamics.
     """
 
     def __init__(
