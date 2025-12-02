@@ -1,9 +1,3 @@
-"""
-ImageNet-1k Output Layer Comparison: Hierarchical Routing vs. Softmax
-======================================================================
-... (Same docstring as before) ...
-"""
-
 # ==============================================================================
 # IMPORTS AND DEPENDENCIES
 # ==============================================================================
@@ -100,27 +94,19 @@ def load_and_preprocess_imagenet(
         # Load the dataset builder with specific data_dir
         builder = tfds.builder('imagenet2012', data_dir=data_dir)
 
-        # Get dataset info for class names (does not require download)
+        # Explicitly prepare the data.
+        # This checks if TFRecords exist. If not, it looks for manual .tar files
+        # in <data_dir>/downloads/manual/ and generates the TFRecords.
+        logger.info("Preparing ImageNet dataset (checking for TFRecords or manual files)...")
+        builder.download_and_prepare()
+
+        # Get dataset info for class names
         info = builder.info
         class_names = info.features['label'].names
 
-        # Load splits directly. tfds.load will look in data_dir first.
-        # If dataset is not prepared, it will try to find 'downloads/manual' inside data_dir.
-        train_ds = tfds.load(
-            'imagenet2012',
-            split='train',
-            data_dir=data_dir,
-            shuffle_files=True,
-            download=False  # Assume data is prepared or manually downloaded
-        )
-
-        val_ds = tfds.load(
-            'imagenet2012',
-            split='validation',
-            data_dir=data_dir,
-            shuffle_files=False,
-            download=False
-        )
+        # Load splits using the builder to ensure we access the prepared data
+        train_ds = builder.as_dataset(split='train', shuffle_files=True)
+        val_ds = builder.as_dataset(split='validation', shuffle_files=False)
 
         # Apply preprocessing
         logger.info("Building data pipelines (Resize 224x224, Normalize)...")
@@ -151,7 +137,7 @@ def load_and_preprocess_imagenet(
 
         val_sample = (np.array(x_sample), np.array(y_sample))
 
-        logger.info(f"ImageNet loaded. Train batches: {len(train_ds)}, Val batches: {len(val_ds)}")
+        logger.info(f"ImageNet loaded. Train batches: {len(train_ds) if hasattr(train_ds, '__len__') else 'Unknown'}, Val batches: {len(val_ds) if hasattr(val_ds, '__len__') else 'Unknown'}")
 
         return ImageNetData(
             train_ds=train_ds,
@@ -162,7 +148,7 @@ def load_and_preprocess_imagenet(
 
     except Exception as e:
         logger.error(f"Failed to load ImageNet from {data_dir}.")
-        logger.error("Ensure 'imagenet2012' is prepared or manual files exist in <data_dir>/downloads/manual")
+        logger.error("Ensure 'ILSVRC2012_img_train.tar' and 'ILSVRC2012_img_val.tar' exist in <data_dir>/downloads/manual")
         logger.error("Error details: " + str(e))
         raise
 
@@ -182,7 +168,7 @@ class ExperimentConfig:
     num_classes: int = 1000
     input_shape: Tuple[int, ...] = (224, 224, 3)
 
-    # !!! UPDATED: Explicitly set the custom TFDS data directory
+    # Explicitly set the custom TFDS data directory
     data_dir: str = "/media/arxwn/data0_4tb/datasets/tensorflow_datasets/"
 
     # --- Model Architecture Parameters (Scaled for ImageNet) ---
@@ -236,7 +222,6 @@ class ExperimentConfig:
 # MODEL ARCHITECTURE BUILDING UTILITIES
 # ==============================================================================
 
-# ... (Same build_residual_block, build_conv_block, build_model as provided previously) ...
 def build_residual_block(
     inputs: keras.layers.Layer,
     filters: int,
@@ -407,7 +392,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    # !!! UPDATED: Pass the data_dir from config
     imagenet_data = load_and_preprocess_imagenet(
         batch_size=config.batch_size,
         data_dir=config.data_dir
@@ -514,7 +498,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 # ==============================================================================
 
 def print_experiment_summary(results: Dict[str, Any], analyzer_config: AnalysisConfig) -> None:
-    # ... (Same summary printing logic) ...
     logger.info("")
     logger.info("=" * 80)
     logger.info("IMAGENET EXPERIMENT SUMMARY")
