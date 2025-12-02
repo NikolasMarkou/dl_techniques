@@ -137,8 +137,6 @@ class DynamicConv2D(keras.layers.Layer):
         strides: An integer or tuple/list of 2 integers, specifying the strides of
             the convolution. Defaults to (1, 1).
         padding: String, either "valid" or "same" (case-insensitive). Defaults to "valid".
-        data_format: String, either "channels_last" or "channels_first". If None,
-            uses the default from Keras config. Defaults to None.
         dilation_rate: An integer or tuple/list of 2 integers, specifying dilation rate.
             Defaults to (1, 1).
         groups: A positive integer specifying number of groups for grouped convolution.
@@ -156,65 +154,47 @@ class DynamicConv2D(keras.layers.Layer):
         **kwargs: Additional arguments for Layer base class.
 
     Input shape:
-        4D tensor with shape: (batch_size, height, width, channels) if data_format
-        is "channels_last", or (batch_size, channels, height, width) if data_format
-        is "channels_first".
+        4D tensor with shape: (batch_size, height, width, channels) in channels_last format.
 
     Output shape:
-        4D tensor with shape: (batch_size, new_height, new_width, filters) if
-        data_format is "channels_last", or (batch_size, filters, new_height, new_width)
-        if data_format is "channels_first". Spatial dimensions change based on kernel_size,
-        strides, padding, and dilation_rate.
-
-    Attributes:
-        conv_layers: List of Conv2D layers for parallel convolution operations.
-        gap: GlobalAveragePooling2D layer for spatial compression.
-        attention_dense1: First dense layer of attention mechanism.
-        attention_dense2: Second dense layer outputting attention logits.
+        4D tensor with shape: (batch_size, new_height, new_width, filters) in channels_last format.
 
     Example:
         ```python
-        # Basic usage - drop-in replacement for Conv2D
-        inputs = keras.Input(shape=(224, 224, 3))
+        # Basic usage as drop-in replacement for Conv2D
+        x = keras.random.normal((32, 64, 64, 3))
+        layer = DynamicConv2D(filters=64, kernel_size=3, padding='same', activation='relu')
+        y = layer(x)  # Shape: (32, 64, 64, 64)
 
-        # Replace: outputs = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
-        # With:    outputs = DynamicConv2D(64, 3, activation='relu')(inputs)
-        outputs = DynamicConv2D(64, 3, num_kernels=4, activation='relu')(inputs)
-
-        # Advanced configuration for MobileNet-style architecture
+        # With advanced configuration
         layer = DynamicConv2D(
             filters=128,
-            kernel_size=3,
-            num_kernels=4,
-            temperature=30.0,  # High temperature for stable training
+            kernel_size=(3, 3),
+            num_kernels=6,
+            temperature=15.0,
             strides=2,
             padding='same',
-            activation='relu'
+            activation='gelu'
         )
+        y = layer(x)  # Shape: (32, 32, 32, 128)
 
-        # Depthwise convolution with dynamic kernels
-        depthwise_conv = DynamicConv2D(
-            filters=128,
-            kernel_size=3,
-            num_kernels=4,
-            groups=128,  # Each input channel has its own kernel
-            padding='same'
-        )
-
-        # Temperature annealing during training (paper recommendation)
-        # Start with temperature=30.0, anneal to 1.0 over first 10 epochs
+        # In a model
+        inputs = keras.Input(shape=(224, 224, 3))
+        x = DynamicConv2D(64, 7, strides=2, padding='same', activation='relu')(inputs)
+        x = keras.layers.MaxPooling2D(3, strides=2, padding='same')(x)
+        x = DynamicConv2D(128, 3, padding='same', activation='relu')(x)
+        outputs = keras.layers.GlobalAveragePooling2D()(x)
+        model = keras.Model(inputs, outputs)
         ```
 
-    References:
-        Chen, Y., Dai, X., Liu, M., Chen, D., Yuan, L., & Liu, Z. (2019).
-        Dynamic Convolution: Attention over Convolution Kernels.
-        arXiv preprint arXiv:1912.03458.
-
-    Note:
-        The paper demonstrates significant improvements on efficient networks like
-        MobileNet, where limited capacity benefits from dynamic kernel selection.
-        Training requires joint optimization of kernels and attention - use high
-        initial temperature (30.0) with gradual annealing for stability.
+    Notes:
+        - This layer assumes channels_last data format (batch, height, width, channels)
+        - The attention mechanism uses a squeeze-and-excitation pattern which adds
+          minimal computational overhead (~4% FLOPs)
+        - Temperature parameter τ is crucial: start with default (30.0) and adjust if needed
+        - For best results, use K=4 kernels as recommended in the paper
+        - All convolution experts share the same parameters (strides, padding, etc.)
+          but have independent weights
     """
 
     def __init__(
@@ -224,25 +204,25 @@ class DynamicConv2D(keras.layers.Layer):
             num_kernels: int = 4,
             temperature: float = 30.0,
             attention_reduction_ratio: int = 4,
-            strides: Union[int, Tuple[int, int]] = (1, 1),
+            strides: Union[int, Tuple[int, int]] = 1,
             padding: str = "valid",
-            data_format: Optional[str] = None,
-            dilation_rate: Union[int, Tuple[int, int]] = (1, 1),
+            dilation_rate: Union[int, Tuple[int, int]] = 1,
             groups: int = 1,
-            activation: Optional[Union[str, callable]] = None,
+            activation: Optional[Union[str, keras.layers.Activation]] = None,
             use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             activity_regularizer: Optional[keras.regularizers.Regularizer] = None,
             kernel_constraint: Optional[keras.constraints.Constraint] = None,
             bias_constraint: Optional[keras.constraints.Constraint] = None,
-            **kwargs: Any
-    ) -> None:
+            **kwargs
+    ):
+        """Initialize the DynamicConv2D layer."""
         super().__init__(**kwargs)
 
-        # Validate inputs
+        # Validate core parameters
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
         if num_kernels < 2:
@@ -254,29 +234,45 @@ class DynamicConv2D(keras.layers.Layer):
         if groups <= 0:
             raise ValueError(f"groups must be positive, got {groups}")
 
-        # Normalize kernel_size and strides to tuples
-        if isinstance(kernel_size, int):
-            kernel_size = (kernel_size, kernel_size)
-        if isinstance(strides, int):
-            strides = (strides, strides)
-        if isinstance(dilation_rate, int):
-            dilation_rate = (dilation_rate, dilation_rate)
-
         # Store configuration
         self.filters = filters
-        self.kernel_size = kernel_size
         self.num_kernels = num_kernels
-        self.temperature = temperature
+        self.temperature = float(temperature)
         self.attention_reduction_ratio = attention_reduction_ratio
-        self.strides = strides
+
+        # Normalize kernel_size to tuple
+        if isinstance(kernel_size, int):
+            self.kernel_size = (kernel_size, kernel_size)
+        else:
+            self.kernel_size = tuple(kernel_size)
+
+        # Normalize strides to tuple
+        if isinstance(strides, int):
+            self.strides = (strides, strides)
+        else:
+            self.strides = tuple(strides)
+
+        # Normalize dilation_rate to tuple
+        if isinstance(dilation_rate, int):
+            self.dilation_rate = (dilation_rate, dilation_rate)
+        else:
+            self.dilation_rate = tuple(dilation_rate)
+
+        # Validate padding
+        if padding.lower() not in ['valid', 'same']:
+            raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
         self.padding = padding.lower()
-        self.data_format = (
-            keras.backend.image_data_format() if data_format is None else data_format.lower()
-        )
-        self.dilation_rate = dilation_rate
+
         self.groups = groups
-        self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
+
+        # Handle activation
+        if activation is not None:
+            self.activation = keras.activations.get(activation)
+        else:
+            self.activation = None
+
+        # Store initializers, regularizers, and constraints
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -285,39 +281,36 @@ class DynamicConv2D(keras.layers.Layer):
         self.kernel_constraint = keras.constraints.get(kernel_constraint)
         self.bias_constraint = keras.constraints.get(bias_constraint)
 
-        # Validate padding
-        if self.padding not in ['valid', 'same']:
-            raise ValueError(f"padding must be 'valid' or 'same', got {self.padding}")
-
-        # CREATE sub-layers in __init__ (following modern Keras 3 pattern)
-        # K parallel convolution layers (will be built in build())
+        # Initialize sub-layers as None - they will be created in build()
         self.conv_layers: List[keras.layers.Conv2D] = []
-
-        # Attention mechanism components
-        self.gap = keras.layers.GlobalAveragePooling2D(
-            keepdims=False,
-            data_format=self.data_format,
-            name='attention_gap'
-        )
-
-        # Attention dense layers (will be configured in build())
+        self.gap: Optional[keras.layers.GlobalAveragePooling2D] = None
         self.attention_dense1: Optional[keras.layers.Dense] = None
         self.attention_dense2: Optional[keras.layers.Dense] = None
 
+        # Pre-create GAP layer since it doesn't depend on input shape
+        self.gap = keras.layers.GlobalAveragePooling2D(
+            data_format='channels_last',
+            keepdims=False,
+            name='gap'
+        )
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and create convolution layers and attention mechanism."""
+        """
+        Build the layer by creating all sub-layers.
+
+        Args:
+            input_shape: Shape tuple with format (batch_size, height, width, channels).
+        """
         if len(input_shape) != 4:
-            raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
+            raise ValueError(
+                f"Expected 4D input shape (batch, height, width, channels), got {input_shape}"
+            )
 
-        if self.data_format == "channels_first":
-            channel_axis = 1
-        else:
-            channel_axis = -1
-
-        input_channels = input_shape[channel_axis]
+        # Extract input channels (channels_last format)
+        batch_size, height, width, input_channels = input_shape
 
         if input_channels is None:
-            raise ValueError("Input channels dimension cannot be None")
+            raise ValueError("Channel dimension of input must be defined at build time")
 
         # Validate groups compatibility
         if input_channels % self.groups != 0:
@@ -337,7 +330,7 @@ class DynamicConv2D(keras.layers.Layer):
                 kernel_size=self.kernel_size,
                 strides=self.strides,
                 padding=self.padding,
-                data_format=self.data_format,
+                data_format='channels_last',
                 dilation_rate=self.dilation_rate,
                 groups=self.groups,
                 activation=None,  # Activation applied after aggregation
@@ -346,13 +339,14 @@ class DynamicConv2D(keras.layers.Layer):
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
+                activity_regularizer=None,  # Activity regularizer applied on final output
                 kernel_constraint=self.kernel_constraint,
                 bias_constraint=self.bias_constraint,
-                name=f'conv_{k}'
+                name=f'conv_expert_{k}'
             )
             self.conv_layers.append(conv_layer)
 
-        # Build attention mechanism
+        # Create attention mechanism layers
         # Calculate reduced channels for first dense layer
         attention_channels = max(1, input_channels // self.attention_reduction_ratio)
 
@@ -401,7 +395,16 @@ class DynamicConv2D(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass with dynamic kernel aggregation."""
+        """
+        Forward pass with dynamic kernel aggregation.
+
+        Args:
+            inputs: Input tensor with shape (batch_size, height, width, channels).
+            training: Boolean or None, indicates whether in training mode.
+
+        Returns:
+            Output tensor with shape (batch_size, new_height, new_width, filters).
+        """
         # Step 1: Compute attention weights
         # Global Average Pooling to compress spatial dimensions
         pooled = self.gap(inputs, training=training)  # Shape: (batch_size, input_channels)
@@ -424,7 +427,7 @@ class DynamicConv2D(keras.layers.Layer):
             conv_output = conv_layer(inputs, training=training)
             conv_outputs.append(conv_output)
 
-        # Stack all convolution outputs: (num_kernels, batch_size, H', W', filters) or (num_kernels, batch, filters, H', W')
+        # Stack all convolution outputs: (num_kernels, batch_size, H', W', filters)
         stacked_outputs = keras.ops.stack(conv_outputs, axis=0)
 
         # Step 3: Aggregate outputs using attention weights
@@ -444,7 +447,7 @@ class DynamicConv2D(keras.layers.Layer):
 
         # Sum over kernel dimension to get final aggregated output
         aggregated_output = keras.ops.sum(weighted_outputs, axis=0)
-        # Shape: (batch_size, H', W', filters) or (batch, filters, H', W')
+        # Shape: (batch_size, H', W', filters)
 
         # Apply activation if specified
         if self.activation is not None:
@@ -453,7 +456,15 @@ class DynamicConv2D(keras.layers.Layer):
         return aggregated_output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape: Shape tuple (batch_size, height, width, channels).
+
+        Returns:
+            Output shape tuple (batch_size, new_height, new_width, filters).
+        """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
 
@@ -463,12 +474,10 @@ class DynamicConv2D(keras.layers.Layer):
 
         # Manual calculation if the layer is not yet built.
         # This mirrors Keras's internal logic for robustness.
-        if self.data_format == 'channels_last':
-            batch_size, height, width, _ = input_shape
-        else:  # channels_first
-            batch_size, _, height, width = input_shape
+        batch_size, height, width, _ = input_shape
 
         def conv_output_length(input_length, kernel_size, padding, stride, dilation):
+            """Calculate output length for convolution dimension."""
             if input_length is None:
                 return None
             if padding == "same":
@@ -486,13 +495,15 @@ class DynamicConv2D(keras.layers.Layer):
             width, self.kernel_size[1], self.padding, self.strides[1], self.dilation_rate[1]
         )
 
-        if self.data_format == 'channels_last':
-            return (batch_size, out_height, out_width, self.filters)
-        else:  # channels_first
-            return (batch_size, self.filters, out_height, out_width)
+        return (batch_size, out_height, out_width, self.filters)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return configuration for serialization.
+
+        Returns:
+            Dictionary containing layer configuration.
+        """
         config = super().get_config()
         config.update({
             'filters': self.filters,
@@ -502,7 +513,6 @@ class DynamicConv2D(keras.layers.Layer):
             'attention_reduction_ratio': self.attention_reduction_ratio,
             'strides': self.strides,
             'padding': self.padding,
-            'data_format': self.data_format,
             'dilation_rate': self.dilation_rate,
             'groups': self.groups,
             'activation': keras.activations.serialize(self.activation),

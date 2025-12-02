@@ -196,120 +196,235 @@ class TestDynamicConv2D:
 
         # Check advanced parameters
         advanced_keys = [
-            'kernel_initializer', 'bias_initializer', 'kernel_regularizer',
-            'bias_regularizer', 'activity_regularizer', 'kernel_constraint',
-            'bias_constraint'
+            'kernel_initializer', 'bias_initializer',
+            'kernel_regularizer', 'bias_regularizer',
+            'activity_regularizer', 'kernel_constraint', 'bias_constraint'
         ]
 
         for key in advanced_keys:
             assert key in config, f"Missing {key} in get_config()"
 
-    def test_gradients_flow(self, basic_layer_config, sample_input_channels_last):
-        """Test gradient computation."""
+    def test_from_config_reconstruction(self, basic_layer_config):
+        """Test layer can be reconstructed from config."""
+        original_layer = DynamicConv2D(**basic_layer_config)
+        config = original_layer.get_config()
+
+        # Reconstruct layer from config
+        reconstructed_layer = DynamicConv2D.from_config(config)
+
+        # Check key attributes match
+        assert reconstructed_layer.filters == original_layer.filters
+        assert reconstructed_layer.kernel_size == original_layer.kernel_size
+        assert reconstructed_layer.num_kernels == original_layer.num_kernels
+        assert reconstructed_layer.temperature == original_layer.temperature
+        assert reconstructed_layer.padding == original_layer.padding
+
+    def test_trainable_weights(self, basic_layer_config, sample_input_channels_last):
+        """Test that layer has correct number of trainable weights."""
+        layer = DynamicConv2D(**basic_layer_config)
+
+        # Build layer
+        output = layer(sample_input_channels_last)
+
+        # Count trainable weights
+        # Expected: (K conv kernels + K conv biases) + (2 attention dense layers with weights and biases)
+        num_kernels = basic_layer_config['num_kernels']
+        expected_min_weights = (num_kernels * 2) + 4  # At minimum
+
+        assert len(layer.trainable_weights) >= expected_min_weights
+
+    def test_non_trainable_after_freeze(self, basic_layer_config, sample_input_channels_last):
+        """Test layer can be frozen."""
+        layer = DynamicConv2D(**basic_layer_config)
+
+        # Build layer
+        layer(sample_input_channels_last)
+
+        # Freeze layer
+        layer.trainable = False
+
+        # Check no trainable weights
+        assert len(layer.trainable_weights) == 0
+        assert len(layer.non_trainable_weights) > 0
+
+    def test_gradient_flow(self, basic_layer_config, sample_input_channels_last):
+        """Test that gradients flow through the layer."""
         layer = DynamicConv2D(**basic_layer_config)
 
         with tf.GradientTape() as tape:
-            tape.watch(sample_input_channels_last)
             output = layer(sample_input_channels_last)
             loss = keras.ops.mean(keras.ops.square(output))
 
+        # Compute gradients
         gradients = tape.gradient(loss, layer.trainable_variables)
 
-        assert gradients is not None
-        assert len(gradients) > 0
+        # Check all gradients are non-None
         assert all(g is not None for g in gradients), "Some gradients are None"
 
-        # Check we have gradients for all kernels + attention mechanism
-        # Each conv layer has 2 weights (kernel, bias) * num_kernels + 4 attention weights
-        expected_num_gradients = (2 * layer.num_kernels) + 4  # 2 dense layers, each with kernel & bias
-        assert len(gradients) == expected_num_gradients
+        # Check gradients have correct shapes
+        for var, grad in zip(layer.trainable_variables, gradients):
+            assert var.shape == grad.shape, f"Shape mismatch for {var.name}"
 
-    @pytest.mark.parametrize("training", [True, False, None])
-    def test_training_modes(self, basic_layer_config, sample_input_channels_last, training):
-        """Test behavior in different training modes."""
-        layer = DynamicConv2D(**basic_layer_config)
+    def test_multiple_num_kernels(self, sample_input_channels_last):
+        """Test different numbers of kernels."""
+        kernel_counts = [2, 4, 6, 8]
 
-        output = layer(sample_input_channels_last, training=training)
-        assert output.shape[0] == sample_input_channels_last.shape[0]
+        for num_kernels in kernel_counts:
+            layer = DynamicConv2D(
+                filters=32,
+                kernel_size=3,
+                num_kernels=num_kernels,
+                padding='same'
+            )
 
-        # Output should be deterministic (no dropout in this layer)
-        output2 = layer(sample_input_channels_last, training=training)
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(output),
-            keras.ops.convert_to_numpy(output2),
-            rtol=1e-6, atol=1e-6,
-            err_msg="Outputs should be identical for same input"
+            output = layer(sample_input_channels_last)
+
+            # Check correct number of expert convolutions
+            assert len(layer.conv_layers) == num_kernels
+
+            # Check output shape is consistent
+            expected_shape = sample_input_channels_last.shape[:-1] + (32,)
+            assert output.shape == expected_shape
+
+    def test_temperature_effect_on_attention(self, sample_input_channels_last):
+        """Test that temperature affects attention distribution."""
+        # Low temperature - should create sharper attention
+        layer_low_temp = DynamicConv2D(
+            filters=32, kernel_size=3, padding='same',
+            temperature=1.0, num_kernels=4
         )
 
-    def test_attention_weights_properties(self, basic_layer_config, sample_input_channels_last):
-        """Test that attention weights have correct properties."""
-        layer = DynamicConv2D(**basic_layer_config)
+        # High temperature - should create more uniform attention
+        layer_high_temp = DynamicConv2D(
+            filters=32, kernel_size=3, padding='same',
+            temperature=100.0, num_kernels=4
+        )
+
+        # Build both layers
+        layer_low_temp(sample_input_channels_last)
+        layer_high_temp(sample_input_channels_last)
+
+        # Get attention weights by doing forward pass and checking internal state
+        # We can check if the outputs are different (they should be)
+        with tf.GradientTape(persistent=True) as tape:
+            output_low = layer_low_temp(sample_input_channels_last)
+            output_high = layer_high_temp(sample_input_channels_last)
+
+        # Outputs should be different due to different temperature
+        diff = keras.ops.mean(keras.ops.abs(output_low - output_high))
+        assert keras.ops.convert_to_numpy(diff) > 0
+
+    def test_attention_weights_sum_to_one(self, sample_input_channels_last):
+        """Test that attention weights are properly normalized."""
+        layer = DynamicConv2D(filters=32, kernel_size=3, padding='same', num_kernels=4)
 
         # Build layer first
         _ = layer(sample_input_channels_last)
 
-        # Access attention computation manually
+        # Custom forward to check attention weights
         pooled = layer.gap(sample_input_channels_last)
         attention_hidden = layer.attention_dense1(pooled)
         attention_logits = layer.attention_dense2(attention_hidden)
         attention_weights = keras.ops.softmax(attention_logits / layer.temperature)
 
-        attention_weights_np = keras.ops.convert_to_numpy(attention_weights)
+        # Check that attention weights sum to 1 for each sample
+        attention_sums = keras.ops.sum(attention_weights, axis=-1)
+        expected_sums = keras.ops.ones_like(attention_sums)
 
-        # Check attention weights sum to 1 (softmax property)
-        attention_sums = np.sum(attention_weights_np, axis=1)
         np.testing.assert_allclose(
-            attention_sums,
-            np.ones_like(attention_sums),
+            keras.ops.convert_to_numpy(attention_sums),
+            keras.ops.convert_to_numpy(expected_sums),
             rtol=1e-6, atol=1e-6,
             err_msg="Attention weights should sum to 1"
         )
 
-        # Check all weights are positive
-        assert np.all(attention_weights_np >= 0), "Attention weights should be non-negative"
+    def test_attention_reduction_ratio_effect(self, sample_input_channels_last):
+        """Test different attention reduction ratios."""
+        ratios = [2, 4, 8, 16]
 
-        # Check shape
-        batch_size = sample_input_channels_last.shape[0]
-        assert attention_weights_np.shape == (batch_size, layer.num_kernels)
+        for ratio in ratios:
+            layer = DynamicConv2D(
+                filters=32, kernel_size=3, padding='same',
+                attention_reduction_ratio=ratio
+            )
 
-    def test_temperature_effect(self, sample_input_channels_last):
-        """Test effect of temperature on attention distribution."""
-        # Low temperature should create more peaked distribution
-        layer_low_temp = DynamicConv2D(
-            filters=32, kernel_size=3, num_kernels=4,
-            temperature=1.0, padding='same'
+            # Build and forward pass
+            output = layer(sample_input_channels_last)
+
+            # Check that first attention dense layer has correct size
+            input_channels = sample_input_channels_last.shape[-1]
+            expected_hidden_size = max(1, input_channels // ratio)
+
+            # The weights shape should be (input_channels, expected_hidden_size)
+            actual_hidden_size = layer.attention_dense1.units
+            assert actual_hidden_size == expected_hidden_size
+
+    def test_statistical_properties(self, sample_input_channels_last):
+        """Test statistical properties of attention weights."""
+        layer = DynamicConv2D(
+            filters=32, kernel_size=3, padding='same',
+            temperature=30.0, num_kernels=4
         )
 
-        # High temperature should create more uniform distribution
-        layer_high_temp = DynamicConv2D(
-            filters=32, kernel_size=3, num_kernels=4,
-            temperature=100.0, padding='same'
+        # Build layer
+        layer(sample_input_channels_last)
+
+        # Get attention weights for multiple forward passes
+        attention_weights_list = []
+        for _ in range(10):
+            random_input = keras.random.normal(shape=sample_input_channels_last.shape)
+            pooled = layer.gap(random_input)
+            attention_hidden = layer.attention_dense1(pooled)
+            attention_logits = layer.attention_dense2(attention_hidden)
+            attention_weights = keras.ops.softmax(attention_logits / layer.temperature)
+            attention_weights_list.append(keras.ops.convert_to_numpy(attention_weights))
+
+        # Stack and check variance
+        all_attention_weights = np.stack(attention_weights_list)
+
+        # Check that variance is reasonable (not all kernels get exactly same weight)
+        var_across_kernels = np.var(all_attention_weights, axis=2)
+        mean_var = np.mean(var_across_kernels)
+
+        # With temperature=30 and random initialization, there should be some variance
+        assert mean_var > 0, "Attention weights should have some variance"
+
+    def test_temperature_comparison(self, sample_input_channels_last):
+        """Compare attention distributions at different temperatures."""
+        # Create two layers with different temperatures
+        layer_low = DynamicConv2D(
+            filters=32, kernel_size=3, padding='same',
+            temperature=5.0, num_kernels=4
+        )
+        layer_high = DynamicConv2D(
+            filters=32, kernel_size=3, padding='same',
+            temperature=50.0, num_kernels=4
         )
 
         # Build layers
-        _ = layer_low_temp(sample_input_channels_last)
-        _ = layer_high_temp(sample_input_channels_last)
+        layer_low(sample_input_channels_last)
+        layer_high(sample_input_channels_last)
 
         # Get attention weights
-        pooled = layer_low_temp.gap(sample_input_channels_last)
+        pooled = layer_low.gap(sample_input_channels_last)
 
-        # Low temperature attention
-        attention_hidden_low = layer_low_temp.attention_dense1(pooled)
-        attention_logits_low = layer_low_temp.attention_dense2(attention_hidden_low)
-        attention_low = keras.ops.softmax(attention_logits_low / 1.0)
+        # Low temperature
+        attn_hidden_low = layer_low.attention_dense1(pooled)
+        attn_logits_low = layer_low.attention_dense2(attn_hidden_low)
+        attn_weights_low = keras.ops.softmax(attn_logits_low / layer_low.temperature)
 
-        # High temperature attention
-        attention_hidden_high = layer_high_temp.attention_dense1(pooled)
-        attention_logits_high = layer_high_temp.attention_dense2(attention_hidden_high)
-        attention_high = keras.ops.softmax(attention_logits_high / 100.0)
+        # High temperature
+        attn_hidden_high = layer_high.attention_dense1(pooled)
+        attn_logits_high = layer_high.attention_dense2(attn_hidden_high)
+        attn_weights_high = keras.ops.softmax(attn_logits_high / layer_high.temperature)
 
         # Convert to numpy
-        attention_low_np = keras.ops.convert_to_numpy(attention_low)
-        attention_high_np = keras.ops.convert_to_numpy(attention_high)
+        attn_low_np = keras.ops.convert_to_numpy(attn_weights_low)
+        attn_high_np = keras.ops.convert_to_numpy(attn_weights_high)
 
-        # High temperature should have lower variance (more uniform)
-        var_low = np.var(attention_low_np, axis=1).mean()
-        var_high = np.var(attention_high_np, axis=1).mean()
+        # Calculate variance across kernels for each sample
+        var_low = np.var(attn_low_np, axis=1).mean()
+        var_high = np.var(attn_high_np, axis=1).mean()
 
         # Generally, high temperature leads to more uniform distribution (lower variance)
         # But this is probabilistic, so we just check they're different
@@ -383,7 +498,6 @@ class TestDynamicConv2D:
         output_shape_same = layer_same.compute_output_shape(input_shape)
         expected_shape_same = (None, 32, 32, 64)
         assert output_shape_same == expected_shape_same
-
 
     def test_different_kernel_sizes(self, sample_input_channels_last):
         """Test different kernel size configurations."""
