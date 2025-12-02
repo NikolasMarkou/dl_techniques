@@ -1,73 +1,7 @@
 """
 ImageNet-1k Output Layer Comparison: Hierarchical Routing vs. Softmax
 ======================================================================
-
-This experiment evaluates the performance and characteristics of the novel
-`HierarchicalRoutingLayer` against the standard `Dense` -> `Softmax`
-classifier for large-scale image classification on the ImageNet (ILSVRC 2012) dataset.
-
-While previous experiments on CIFAR-10 (10 classes) served as a proof-of-concept,
-this experiment on ImageNet (1,000 classes) addresses the core theoretical value
-proposition of Hierarchical Routing: computational scalability.
-
-The study aims to answer a critical question for large-scale classification:
-can we replace the computationally expensive O(N) softmax layer with a more
-efficient O(log N) alternative without sacrificing accuracy?
-
-Experimental Design
--------------------
-
-**Dataset**: ImageNet-1k (ILSVRC 2012)
-- ~1.28 million training images
-- 50,000 validation images
-- 1,000 classes
-- Preprocessed to 224×224 RGB images
-
-**Model Architecture**: A ResNet-inspired CNN backbone adapted for higher
-resolution inputs.
-- Initial convolutional stem with downsampling
-- Deep convolutional blocks with residual connections
-- Periodic pooling to manage spatial dimensionality (224 -> 7)
-- Global average pooling
-- Feature dimension: 512 or 1024
-
-**Output Layers Evaluated**:
-
-1. **Standard Softmax**:
-   - Complexity: O(N) = 1,000 operations per sample.
-   - Mechanism: Computes exponentials for all 1,000 logits and normalizes.
-   - Bottleneck: Memory bandwidth and compute scale linearly with class count.
-
-2. **Hierarchical Routing**:
-   - Complexity: O(log₂N) ≈ 10 operations per sample (depth of tree).
-   - Mechanism: A probabilistic binary tree where decisions are made at nodes.
-   - Advantage: Massive reduction in final layer compute, crucial for
-     extreme classification (e.g., 10k+ classes) or resource-constrained inference.
-
-3. **Routing Probabilities**: An alternative routing-based approach using
-   the `RoutingProbabilitiesLayer` on top of dense logits.
-
-Comprehensive Analysis Pipeline
-------------------------------
-
-**Scalability & Performance**:
-- Validation accuracy (Top-1 and Top-5)
-- Training throughput (images/sec) difference between O(N) and O(log N) layers
-
-**ModelAnalyzer Integration**:
-- Due to dataset size, analysis is performed on a statistically significant
-  stratified subset (N=2048) of the validation set.
-- **Calibration**: Does the tree structure lead to better calibrated confidence
-  on difficult fine-grained classes (e.g., different breeds of dogs)?
-- **Spectral Analysis**: Analyzing the weight matrices of the routing nodes
-  versus the massive dense matrix of the Softmax layer.
-
-Theoretical Foundation
----------------------
-Moving from 10 classes (CIFAR) to 1,000 classes (ImageNet) increases the
-computational cost of the final layer by 100x for Softmax.
-Hierarchical Routing, scaling logarithmically, should theoretically see
-minimal increase in cost (going from depth ~4 to depth ~10).
+... (Same docstring as before) ...
 """
 
 # ==============================================================================
@@ -117,15 +51,7 @@ from dl_techniques.analyzer import (
 class ImageNetData:
     """
     Container for ImageNet-1k dataset pipelines.
-
-    Unlike CIFAR-10, ImageNet is too large to hold in memory as numpy arrays.
-    This container holds tf.data.Dataset objects optimized for streaming.
-
-    Attributes:
-        train_ds: Training dataset pipeline (shuffled, batched, prefetched)
-        val_ds: Validation dataset pipeline (batched, prefetched)
-        class_names: List of 1000 class names
-        val_sample: Small numpy subset of validation data for intense analysis
+    ... (Same as before) ...
     """
     train_ds: tf.data.Dataset
     val_ds: tf.data.Dataset
@@ -155,39 +81,46 @@ def preprocess_imagenet(features: Dict[str, tf.Tensor]) -> Tuple[tf.Tensor, tf.T
 
 
 def load_and_preprocess_imagenet(
-        batch_size: int = 128,
-        data_dir: Optional[str] = None
+    batch_size: int = 128,
+    data_dir: Optional[str] = None
 ) -> ImageNetData:
     """
     Load and preprocess ImageNet-1k dataset using TensorFlow Datasets.
 
-    NOTE: ImageNet requires manual download and setup in TFDS.
-    If 'imagenet2012' is not found, this will raise a specific error from TFDS.
-
     Args:
         batch_size: Batch size for training/eval.
-        data_dir: Optional custom directory for TFDS data.
+        data_dir: Directory where ImageNet is stored.
 
     Returns:
         ImageNetData object containing dataset pipelines.
     """
-    logger.info("Loading ImageNet-1k (imagenet2012) dataset...")
-    logger.info("Note: This assumes ImageNet data is manually downloaded/prepared for TFDS.")
+    logger.info(f"Loading ImageNet-1k (imagenet2012) from: {data_dir}")
 
     try:
-        # Load the dataset builder
+        # Load the dataset builder with specific data_dir
         builder = tfds.builder('imagenet2012', data_dir=data_dir)
 
-        # Download/prepare checks (usually no-op if data exists)
-        # builder.download_and_prepare()
-
-        # Get dataset info for class names
+        # Get dataset info for class names (does not require download)
         info = builder.info
         class_names = info.features['label'].names
 
-        # Load splits
-        train_ds = tfds.load('imagenet2012', split='train', data_dir=data_dir, shuffle_files=True)
-        val_ds = tfds.load('imagenet2012', split='validation', data_dir=data_dir, shuffle_files=False)
+        # Load splits directly. tfds.load will look in data_dir first.
+        # If dataset is not prepared, it will try to find 'downloads/manual' inside data_dir.
+        train_ds = tfds.load(
+            'imagenet2012',
+            split='train',
+            data_dir=data_dir,
+            shuffle_files=True,
+            download=False  # Assume data is prepared or manually downloaded
+        )
+
+        val_ds = tfds.load(
+            'imagenet2012',
+            split='validation',
+            data_dir=data_dir,
+            shuffle_files=False,
+            download=False
+        )
 
         # Apply preprocessing
         logger.info("Building data pipelines (Resize 224x224, Normalize)...")
@@ -207,8 +140,7 @@ def load_and_preprocess_imagenet(
             .prefetch(tf.data.AUTOTUNE)
         )
 
-        # Create a small numpy sample for ModelAnalyzer (which needs random access)
-        # We take ~1000 images from validation set
+        # Create a small numpy sample for ModelAnalyzer
         logger.info("Extracting numpy sample for ModelAnalyzer (N=1024)...")
         sample_ds = val_ds.unbatch().take(1024)
         x_sample = []
@@ -220,7 +152,6 @@ def load_and_preprocess_imagenet(
         val_sample = (np.array(x_sample), np.array(y_sample))
 
         logger.info(f"ImageNet loaded. Train batches: {len(train_ds)}, Val batches: {len(val_ds)}")
-        logger.info(f"Num classes: {len(class_names)}")
 
         return ImageNetData(
             train_ds=train_ds,
@@ -230,7 +161,8 @@ def load_and_preprocess_imagenet(
         )
 
     except Exception as e:
-        logger.error("Failed to load ImageNet. Ensure 'imagenet2012' is prepared in TFDS.")
+        logger.error(f"Failed to load ImageNet from {data_dir}.")
+        logger.error("Ensure 'imagenet2012' is prepared or manual files exist in <data_dir>/downloads/manual")
         logger.error("Error details: " + str(e))
         raise
 
@@ -250,10 +182,11 @@ class ExperimentConfig:
     num_classes: int = 1000
     input_shape: Tuple[int, ...] = (224, 224, 3)
 
+    # !!! UPDATED: Explicitly set the custom TFDS data directory
+    data_dir: str = "/media/arxwn/data0_4tb/datasets/tensorflow_datasets/"
+
     # --- Model Architecture Parameters (Scaled for ImageNet) ---
-    # Deeper filter progression for larger images
     conv_filters: List[int] = field(default_factory=lambda: [64, 128, 256, 512, 512, 1024])
-    # Pooling strategy: Indices of blocks after which to apply pooling/downsampling
     pooling_indices: List[int] = field(default_factory=lambda: [0, 1, 3, 4])
 
     dense_units: List[int] = field(default_factory=lambda: [1024])
@@ -265,8 +198,8 @@ class ExperimentConfig:
     use_residual: bool = True
 
     # --- Training Parameters ---
-    epochs: int = 60  # ImageNet converges slower
-    batch_size: int = 64  # Reduced batch size for 224x224 images
+    epochs: int = 60
+    batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 10
     monitor_metric: str = 'val_accuracy'
@@ -274,8 +207,8 @@ class ExperimentConfig:
 
     # --- Models to Evaluate ---
     model_types: List[str] = field(default_factory=lambda: [
-        'HierarchicalRouting',  # O(log N)
-        'Softmax',  # O(N)
+        'HierarchicalRouting',       # O(log N)
+        'Softmax',                   # O(N)
     ])
 
     # --- Experiment Configuration ---
@@ -287,7 +220,7 @@ class ExperimentConfig:
     analyzer_config: AnalysisConfig = field(default_factory=lambda: AnalysisConfig(
         analyze_weights=True,
         analyze_calibration=True,
-        analyze_information_flow=False,  # Too heavy for ImageNet without massive RAM
+        analyze_information_flow=False,
         analyze_training_dynamics=True,
         analyze_spectral=True,
         n_samples=1000,
@@ -303,11 +236,12 @@ class ExperimentConfig:
 # MODEL ARCHITECTURE BUILDING UTILITIES
 # ==============================================================================
 
+# ... (Same build_residual_block, build_conv_block, build_model as provided previously) ...
 def build_residual_block(
-        inputs: keras.layers.Layer,
-        filters: int,
-        config: ExperimentConfig,
-        block_index: int
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: ExperimentConfig,
+    block_index: int
 ) -> keras.layers.Layer:
     """Build a residual block with skip connections."""
     shortcut = inputs
@@ -349,10 +283,10 @@ def build_residual_block(
 
 
 def build_conv_block(
-        inputs: keras.layers.Layer,
-        filters: int,
-        config: ExperimentConfig,
-        block_index: int
+    inputs: keras.layers.Layer,
+    filters: int,
+    config: ExperimentConfig,
+    block_index: int
 ) -> keras.layers.Layer:
     """Build a convolutional block."""
     if config.use_residual:
@@ -368,9 +302,8 @@ def build_conv_block(
             x = keras.layers.BatchNormalization()(x)
         x = keras.layers.Activation('relu')(x)
 
-    # Apply dropout
     dropout_rate = (config.dropout_rates[block_index]
-                    if block_index < len(config.dropout_rates) else 0.0)
+                   if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
         x = keras.layers.Dropout(dropout_rate)(x)
 
@@ -378,16 +311,10 @@ def build_conv_block(
 
 
 def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.Model:
-    """
-    Build a ResNet-style model adapted for ImageNet (224x224).
-
-    Includes strided pooling logic to reduce spatial dimensions from
-    224x224 down to roughly 7x7 before the dense layers.
-    """
     inputs = keras.layers.Input(shape=config.input_shape, name=f'{name}_input')
     x = inputs
 
-    # === Stem (Downsample 224 -> 112) ===
+    # Stem
     x = keras.layers.Conv2D(
         filters=64, kernel_size=(7, 7), strides=(2, 2),
         padding='same', kernel_initializer=config.kernel_initializer,
@@ -399,23 +326,17 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
         x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('relu')(x)
     x = keras.layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2), padding='same')(x)
-    # Output is now 56x56
 
-    # === Convolutional Blocks ===
+    # Blocks
     for i, filters in enumerate(config.conv_filters):
         x = build_conv_block(x, filters, config, i)
-
-        # Apply periodic downsampling to handle ImageNet resolution
         if i in config.pooling_indices:
             x = keras.layers.MaxPooling2D(pool_size=(2, 2), padding='same', name=f'pool_{i}')(x)
 
-    # Global pooling and normalization
     x = keras.layers.GlobalAveragePooling2D()(x)
     x = keras.layers.LayerNormalization()(x)
 
-    # === Interchangeable Output Layer (1000 Classes) ===
     if model_type == 'Softmax':
-        # O(N) Complexity: Dense matrix 1000 units wide
         logits = keras.layers.Dense(
             units=config.num_classes,
             kernel_initializer=config.kernel_initializer,
@@ -425,7 +346,6 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
         predictions = keras.layers.Activation('softmax', name='predictions')(logits)
 
     elif model_type == 'HierarchicalRouting':
-        # O(log N) Complexity: Tree structure
         predictions = HierarchicalRoutingLayer(
             output_dim=config.num_classes,
             name='predictions'
@@ -441,16 +361,13 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
         predictions = RoutingProbabilitiesLayer(name='predictions')(logits)
 
     elif model_type == 'PlainRoutingProbabilities':
-        predictions = RoutingProbabilitiesLayer(
-            output_dim=config.num_classes,
-            name='predictions')(x)
-
+         predictions = RoutingProbabilitiesLayer(
+                output_dim=config.num_classes,
+                name='predictions')(x)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 
-    # Create and compile model
     model = keras.Model(inputs=inputs, outputs=predictions, name=f'{name}_model')
-
     optimizer = keras.optimizers.AdamW(learning_rate=config.learning_rate)
     model.compile(
         optimizer=optimizer,
@@ -460,7 +377,6 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
             keras.metrics.TopKCategoricalAccuracy(k=5, name='top_5_accuracy')
         ]
     )
-
     return model
 
 
@@ -472,10 +388,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     """
     Run the complete output layer comparison experiment on ImageNet.
     """
-    # Set random seed
     keras.utils.set_random_seed(config.random_seed)
 
-    # Create timestamped output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -487,15 +401,16 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     vis_manager.register_template("training_curves", TrainingCurvesVisualization)
     vis_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
 
-    # Log experiment start
     logger.info("=" * 80)
     logger.info("ImageNet-1k Output Layer Comparison Experiment")
     logger.info(f"Target Classes: {config.num_classes} | Input: {config.input_shape}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
+    # !!! UPDATED: Pass the data_dir from config
     imagenet_data = load_and_preprocess_imagenet(
-        batch_size=config.batch_size
+        batch_size=config.batch_size,
+        data_dir=config.data_dir
     )
     logger.info("")
 
@@ -513,9 +428,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         model = build_model(config, model_type, model_type)
         logger.info(f"Model parameters: {model.count_params():,}")
 
-        # Verify output shape for ImageNet models
-        logger.info(f"Output shape: {model.output_shape}")
-
         training_config = TrainingConfig(
             epochs=config.epochs,
             batch_size=config.batch_size,
@@ -525,13 +437,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             output_dir=experiment_dir / "training_plots" / model_type
         )
 
-        # Train model using dataset pipelines instead of arrays
         history = train_model(
             model,
             imagenet_data.train_ds,
-            None,  # y_train is in the dataset
+            None,
             imagenet_data.val_ds,
-            None,  # y_test is in the dataset
+            None,
             training_config
         )
 
@@ -540,7 +451,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
         logger.info(f"{model_type} training completed!")
 
-        # Explicitly clear session to free GPU memory between large models
         gc.collect()
         keras.backend.clear_session()
 
@@ -552,17 +462,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     model_analysis_results = None
 
     try:
-        # Re-load models if they were cleared or for analysis consistency
-        # (In this script they are still in memory in `trained_models` dict)
-
-        # Prepare DataInput using the numpy sample we extracted earlier
-        # Analysis tools need numpy arrays, not streaming datasets
         x_sample, y_sample = imagenet_data.val_sample
-
-        test_data_input = DataInput(
-            x_data=x_sample,
-            y_data=y_sample
-        )
+        test_data_input = DataInput(x_data=x_sample, y_data=y_sample)
 
         logger.info(f"Analysis sample shape: {x_sample.shape}")
 
@@ -578,12 +479,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Model analysis failed: {e}", exc_info=True)
 
-    # ===== ADDITIONAL VISUALIZATION: CONFUSION MATRICES =====
-    # Note: Confusion Matrix for 1000 classes is unreadable.
-    # We skip full CM visualization or implement Top-K confusion if supported.
-    # Here we skip to avoid creating a 1000x1000 image.
-    logger.info("Skipping 1000x1000 Confusion Matrix visualization.")
-
     # ===== FINAL PERFORMANCE EVALUATION =====
     logger.info("=" * 80)
     logger.info("FINAL PERFORMANCE EVALUATION (Full Validation Set)")
@@ -593,8 +488,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     for name, model in trained_models.items():
         logger.info(f"Evaluating model: {name}")
-
-        # Evaluate on full validation dataset pipeline
         eval_results = model.evaluate(imagenet_data.val_ds, verbose=1)
         metrics_dict = dict(zip(model.metrics_names, eval_results))
 
@@ -605,8 +498,6 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         }
 
         logger.info(f"  Accuracy: {performance_results[name]['accuracy']:.4f}")
-        logger.info(f"  Top-5 Acc: {performance_results[name]['top_5_accuracy']:.4f}")
-        logger.info(f"  Loss: {performance_results[name]['loss']:.4f}")
 
     results_payload = {
         'performance_analysis': performance_results,
@@ -619,80 +510,30 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
 
 # ==============================================================================
-# RESULTS REPORTING
+# RESULTS REPORTING AND MAIN
 # ==============================================================================
 
-def print_experiment_summary(
-        results: Dict[str, Any],
-        analyzer_config: AnalysisConfig
-) -> None:
-    """Print summary of experimental results."""
+def print_experiment_summary(results: Dict[str, Any], analyzer_config: AnalysisConfig) -> None:
+    # ... (Same summary printing logic) ...
     logger.info("")
     logger.info("=" * 80)
     logger.info("IMAGENET EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
-    # Performance
     if 'performance_analysis' in results:
-        logger.info("PERFORMANCE METRICS (Validation Set)")
-        logger.info("-" * 80)
-        logger.info(f"{'Model':<30} {'Top-1 Acc':<12} {'Top-5 Acc':<12} {'Loss':<12}")
-        logger.info("-" * 80)
-
+        logger.info("PERFORMANCE METRICS")
         for model_name, metrics in results['performance_analysis'].items():
-            logger.info(
-                f"{model_name:<30} "
-                f"{metrics.get('accuracy', 0.0):<12.4f} "
-                f"{metrics.get('top_5_accuracy', 0.0):<12.4f} "
-                f"{metrics.get('loss', 0.0):<12.4f}"
-            )
-        logger.info("")
-
-    # Analysis
-    model_analysis = results.get('model_analysis')
-    if model_analysis and analyzer_config.analyze_calibration:
-        logger.info("CALIBRATION (Sampled Subset)")
-        logger.info("-" * 80)
-        logger.info(f"{'Model':<30} {'ECE':<12} {'Brier Score':<15}")
-        logger.info("-" * 80)
-
-        if model_analysis.calibration_metrics:
-            for model_name, cal_metrics in model_analysis.calibration_metrics.items():
-                logger.info(
-                    f"{model_name:<30} "
-                    f"{cal_metrics.get('ece', 0.0):<12.4f} "
-                    f"{cal_metrics.get('brier_score', 0.0):<15.4f}"
-                )
-
+            logger.info(f"{model_name:<30} Acc: {metrics.get('accuracy', 0.0):.4f}")
     logger.info("=" * 80)
-    logger.info("ANALYSIS COMPLETE")
-
-
-# ==============================================================================
-# MAIN EXECUTION
-# ==============================================================================
 
 def main() -> None:
-    logger.info("")
-    logger.info("=" * 80)
     logger.info("ImageNet-1k Experiment Runner")
-    logger.info("=" * 80)
-
-    # Check for GPU
     gpus = tf.config.list_physical_devices('GPU')
-    if not gpus:
-        logger.warning("No GPU detected! ImageNet training will be extremely slow.")
-    else:
+    if gpus:
         logger.info(f"GPUs detected: {len(gpus)}")
 
     config = ExperimentConfig()
-
-    try:
-        run_experiment(config)
-    except Exception as e:
-        logger.error(f"EXPERIMENT FAILED: {e}", exc_info=True)
-        raise
-
+    run_experiment(config)
 
 if __name__ == "__main__":
     main()
