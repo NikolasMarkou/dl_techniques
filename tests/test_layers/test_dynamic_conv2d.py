@@ -4,9 +4,8 @@ import os
 import numpy as np
 import tensorflow as tf
 import keras
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
-# Import the layer to test
 from dl_techniques.layers.dynamic_conv2d import DynamicConv2D
 
 
