@@ -3,6 +3,7 @@
 # ==============================================================================
 
 import gc
+import os
 import keras
 import numpy as np
 import tensorflow as tf
@@ -50,7 +51,6 @@ class ImageNetData:
     train_ds: tf.data.Dataset
     val_ds: tf.data.Dataset
     class_names: List[str]
-    # For ModelAnalyzer which usually requires in-memory data
     val_sample: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
 
@@ -75,36 +75,54 @@ def preprocess_imagenet(features: Dict[str, tf.Tensor]) -> Tuple[tf.Tensor, tf.T
 
 
 def load_and_preprocess_imagenet(
-    batch_size: int = 128,
-    data_dir: Optional[str] = None
+        batch_size: int = 128,
+        data_dir: Optional[str] = None,
+        manual_dir: Optional[str] = None
 ) -> ImageNetData:
     """
     Load and preprocess ImageNet-1k dataset using TensorFlow Datasets.
 
     Args:
         batch_size: Batch size for training/eval.
-        data_dir: Directory where ImageNet is stored.
+        data_dir: Directory where prepared TFRecords are/will be stored.
+        manual_dir: Directory containing 'ILSVRC2012_img_train.tar' and 'ILSVRC2012_img_val.tar'.
 
     Returns:
         ImageNetData object containing dataset pipelines.
     """
-    logger.info(f"Loading ImageNet-1k (imagenet2012) from: {data_dir}")
+    logger.info(f"Loading ImageNet-1k (imagenet2012)...")
+    logger.info(f"  Data Dir (TFRecords): {data_dir}")
+    logger.info(f"  Manual Dir (Tar files): {manual_dir}")
 
     try:
-        # Load the dataset builder with specific data_dir
+        # Load the dataset builder
         builder = tfds.builder('imagenet2012', data_dir=data_dir)
 
-        # Explicitly prepare the data.
-        # This checks if TFRecords exist. If not, it looks for manual .tar files
-        # in <data_dir>/downloads/manual/ and generates the TFRecords.
-        logger.info("Preparing ImageNet dataset (checking for TFRecords or manual files)...")
-        builder.download_and_prepare()
+        # Configure download options with the specific manual directory
+        download_config = tfds.download.DownloadConfig(
+            manual_dir=manual_dir
+        )
 
-        # Get dataset info for class names
+        # Explicitly prepare the data.
+        # If dataset is already prepared, this returns immediately.
+        # If not, it uses manual_dir to find tarballs and generate TFRecords.
+        logger.info("Checking/Preparing ImageNet dataset...")
+        try:
+            builder.download_and_prepare(download_config=download_config)
+        except Exception as e:
+            # Provide a helpful error if preparation fails (likely missing files)
+            if manual_dir and not os.path.exists(manual_dir):
+                logger.error(f"Manual directory does not exist: {manual_dir}")
+            else:
+                logger.error(
+                    f"Preparation failed. Ensure ILSVRC2012_img_train.tar and ILSVRC2012_img_val.tar are in {manual_dir}")
+            raise e
+
+        # Get dataset info
         info = builder.info
         class_names = info.features['label'].names
 
-        # Load splits using the builder to ensure we access the prepared data
+        # Load splits
         train_ds = builder.as_dataset(split='train', shuffle_files=True)
         val_ds = builder.as_dataset(split='validation', shuffle_files=False)
 
@@ -137,7 +155,7 @@ def load_and_preprocess_imagenet(
 
         val_sample = (np.array(x_sample), np.array(y_sample))
 
-        logger.info(f"ImageNet loaded. Train batches: {len(train_ds) if hasattr(train_ds, '__len__') else 'Unknown'}, Val batches: {len(val_ds) if hasattr(val_ds, '__len__') else 'Unknown'}")
+        logger.info(f"ImageNet loaded successfully.")
 
         return ImageNetData(
             train_ds=train_ds,
@@ -147,8 +165,7 @@ def load_and_preprocess_imagenet(
         )
 
     except Exception as e:
-        logger.error(f"Failed to load ImageNet from {data_dir}.")
-        logger.error("Ensure 'ILSVRC2012_img_train.tar' and 'ILSVRC2012_img_val.tar' exist in <data_dir>/downloads/manual")
+        logger.error(f"Failed to load ImageNet.")
         logger.error("Error details: " + str(e))
         raise
 
@@ -168,8 +185,13 @@ class ExperimentConfig:
     num_classes: int = 1000
     input_shape: Tuple[int, ...] = (224, 224, 3)
 
-    # Explicitly set the custom TFDS data directory
+    # Path where TFDS will generate/look for the TFRecord files
     data_dir: str = "/media/arxwn/data0_4tb/datasets/tensorflow_datasets/"
+
+    # !!! UPDATED: Path containing the downloaded .tar files
+    # Change this to wherever your ILSVRC2012 tar files are located
+    # Common default is <data_dir>/downloads/manual
+    manual_dir: str = "/media/arxwn/data0_4tb/datasets/tensorflow_datasets/downloads/manual/"
 
     # --- Model Architecture Parameters (Scaled for ImageNet) ---
     conv_filters: List[int] = field(default_factory=lambda: [64, 128, 256, 512, 512, 1024])
@@ -193,8 +215,8 @@ class ExperimentConfig:
 
     # --- Models to Evaluate ---
     model_types: List[str] = field(default_factory=lambda: [
-        'HierarchicalRouting',       # O(log N)
-        'Softmax',                   # O(N)
+        'HierarchicalRouting',  # O(log N)
+        'Softmax',  # O(N)
     ])
 
     # --- Experiment Configuration ---
@@ -222,11 +244,12 @@ class ExperimentConfig:
 # MODEL ARCHITECTURE BUILDING UTILITIES
 # ==============================================================================
 
+# ... (Same build_residual_block, build_conv_block, build_model as before) ...
 def build_residual_block(
-    inputs: keras.layers.Layer,
-    filters: int,
-    config: ExperimentConfig,
-    block_index: int
+        inputs: keras.layers.Layer,
+        filters: int,
+        config: ExperimentConfig,
+        block_index: int
 ) -> keras.layers.Layer:
     """Build a residual block with skip connections."""
     shortcut = inputs
@@ -268,10 +291,10 @@ def build_residual_block(
 
 
 def build_conv_block(
-    inputs: keras.layers.Layer,
-    filters: int,
-    config: ExperimentConfig,
-    block_index: int
+        inputs: keras.layers.Layer,
+        filters: int,
+        config: ExperimentConfig,
+        block_index: int
 ) -> keras.layers.Layer:
     """Build a convolutional block."""
     if config.use_residual:
@@ -288,7 +311,7 @@ def build_conv_block(
         x = keras.layers.Activation('relu')(x)
 
     dropout_rate = (config.dropout_rates[block_index]
-                   if block_index < len(config.dropout_rates) else 0.0)
+                    if block_index < len(config.dropout_rates) else 0.0)
     if dropout_rate > 0:
         x = keras.layers.Dropout(dropout_rate)(x)
 
@@ -346,9 +369,9 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
         predictions = RoutingProbabilitiesLayer(name='predictions')(logits)
 
     elif model_type == 'PlainRoutingProbabilities':
-         predictions = RoutingProbabilitiesLayer(
-                output_dim=config.num_classes,
-                name='predictions')(x)
+        predictions = RoutingProbabilitiesLayer(
+            output_dim=config.num_classes,
+            name='predictions')(x)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -394,7 +417,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     # ===== DATASET LOADING =====
     imagenet_data = load_and_preprocess_imagenet(
         batch_size=config.batch_size,
-        data_dir=config.data_dir
+        data_dir=config.data_dir,
+        manual_dir=config.manual_dir
     )
     logger.info("")
 
@@ -509,6 +533,7 @@ def print_experiment_summary(results: Dict[str, Any], analyzer_config: AnalysisC
             logger.info(f"{model_name:<30} Acc: {metrics.get('accuracy', 0.0):.4f}")
     logger.info("=" * 80)
 
+
 def main() -> None:
     logger.info("ImageNet-1k Experiment Runner")
     gpus = tf.config.list_physical_devices('GPU')
@@ -517,6 +542,7 @@ def main() -> None:
 
     config = ExperimentConfig()
     run_experiment(config)
+
 
 if __name__ == "__main__":
     main()
