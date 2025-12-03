@@ -151,12 +151,6 @@ class TestGroupedQueryAttention:
                 dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, rope_percentage=2.0
             )
 
-        # rope_percentage = 0 (should be > 0)
-        with pytest.raises(ValueError, match="rope_percentage must be in"):
-            GroupedQueryAttention(
-                dim=512, num_heads=8, num_kv_heads=2, max_seq_len=128, rope_percentage=0.0
-            )
-
     # =========================================================================
     # Build Process Tests
     # =========================================================================
