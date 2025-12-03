@@ -30,7 +30,7 @@ Computational Benefits:
 
 Architecture Details:
     1. Project input to Q (num_heads), K (num_kv_heads), V (num_kv_heads)
-    2. Apply rotary position embeddings to Q and K
+    2. Apply rotary position embeddings to Q and K (Optional)
     3. Repeat K,V tensors to match Q head count
     4. Perform standard scaled dot-product attention
     5. Project output back to model dimension
@@ -62,40 +62,34 @@ from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 @keras.saving.register_keras_serializable()
 class GroupedQueryAttention(keras.layers.Layer):
     """
-    Grouped Query Attention layer with rotary position embeddings.
+    Grouped Query Attention layer with optional rotary position embeddings.
 
     This layer implements an efficient attention mechanism that reduces computational
-    and memory costs by sharing key-value projections across multiple query heads
-    while maintaining most of the representational power of full multi-head attention.
+    and memory costs by sharing key-value projections across multiple query heads.
+    It supports both 3D (sequence) and 4D (vision) inputs.
 
     **Intent**: Provide a production-ready grouped query attention implementation
     that achieves significant memory and computational savings over standard
-    multi-head attention, particularly beneficial for large language models and
-    long sequence processing.
+    multi-head attention.
 
     **Architecture**:
     ```
-    Input [B, seq_len, dim]
+    Input [B, seq_len, dim] OR [B, H, W, dim]
            ↓
-    Q_proj → Q [B, num_heads, seq_len, head_dim]
-    K_proj → K [B, num_kv_heads, seq_len, head_dim] → repeat → [B, num_heads, seq_len, head_dim]
-    V_proj → V [B, num_kv_heads, seq_len, head_dim] → repeat → [B, num_heads, seq_len, head_dim]
+    Q_proj → Q, K_proj → K, V_proj → V
            ↓
-    RoPE(Q, K) → Q', K'
+    (Optional) RoPE(Q, K)
            ↓
-    Attention(Q', K', V) → [B, num_heads, seq_len, head_dim]
+    Flatten spatial dims if 4D
            ↓
-    Reshape → [B, seq_len, dim]
+    Repeat K, V to match Q heads (Grouped Broadcast)
            ↓
-    Output_proj → Output [B, seq_len, dim]
+    Attention(Q, K, V)
+           ↓
+    Reshape → [B, seq_len, dim] OR [B, H, W, dim]
+           ↓
+    Output_proj → Output
     ```
-
-    **Mathematical Operations**:
-    1. **Projections**: Q = X W_q, K = X W_k, V = X W_v
-    2. **Grouping**: K' = repeat(K, group_size, axis=1), V' = repeat(V, group_size, axis=1)
-    3. **RoPE**: Q_rope = RoPE(Q), K_rope = RoPE(K')
-    4. **Attention**: A = softmax(Q_rope K_rope^T / √d_k) V'
-    5. **Output**: O = A W_o
 
     Args:
         dim: Integer, input/output dimension (embedding size). Must be positive and
@@ -108,8 +102,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         dropout_rate: Float, dropout rate applied to attention weights.
             Must be between 0.0 and 1.0. Defaults to 0.0.
         rope_percentage: Float, fraction of head dimensions to apply rotary
-            embeddings to. Must be between 0.0 (exclusive) and 1.0 (inclusive).
-            Defaults to 1.0.
+            embeddings to. If 0.0, RoPE is disabled. Defaults to 1.0.
         rope_theta: Float, base frequency for rotary position embeddings.
             Must be positive. Defaults to 10000.0.
         use_bias: Boolean, whether to use bias in linear projections.
@@ -123,84 +116,11 @@ class GroupedQueryAttention(keras.layers.Layer):
         **kwargs: Additional keyword arguments for the Layer parent class.
 
     Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`
+        3D tensor: `(batch_size, sequence_length, dim)`
+        4D tensor: `(batch_size, height, width, dim)`
 
     Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`
-
-    Attributes:
-        w_q: Dense layer for query projection with shape (dim, num_heads * head_dim).
-        w_k: Dense layer for key projection with shape (dim, num_kv_heads * head_dim).
-        w_v: Dense layer for value projection with shape (dim, num_kv_heads * head_dim).
-        w_o: Dense layer for output projection with shape (num_heads * head_dim, dim).
-        dropout: Dropout layer for attention weights.
-        rope: Rotary position embedding layer.
-
-    Call arguments:
-        inputs: Input tensor of shape `(batch_size, seq_len, dim)`.
-        training: Boolean indicating training or inference mode. Affects dropout.
-        mask: Optional attention mask of shape `(batch_size, seq_len, seq_len)`
-            or `(batch_size, 1, seq_len, seq_len)`. Values should be 1 for
-            positions to attend to and 0 for masked positions.
-        return_attention_weights: Boolean, whether to return attention weights
-            along with the output. Defaults to False.
-
-    Returns:
-        If return_attention_weights=False:
-            Output tensor of shape `(batch_size, seq_len, dim)`
-        If return_attention_weights=True:
-            Tuple of (output, attention_weights) where attention_weights
-            has shape `(batch_size, num_heads, seq_len, seq_len)`
-
-    Example:
-        ```python
-        # Basic usage
-        gqa = GroupedQueryAttention(
-            dim=512,
-            num_heads=8,
-            num_kv_heads=2,  # 4 query heads per key/value head
-            max_seq_len=2048
-        )
-
-        inputs = keras.Input(shape=(128, 512))
-        outputs = gqa(inputs)
-
-        # Advanced configuration
-        gqa = GroupedQueryAttention(
-            dim=768,
-            num_heads=12,
-            num_kv_heads=4,
-            dropout_rate=0.1,
-            rope_percentage=0.8,
-            rope_theta=50000.0,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a transformer decoder
-        def decoder_layer(x):
-            # Self-attention with GQA
-            attn_out = GroupedQueryAttention(
-                dim=512, num_heads=8, num_kv_heads=2
-            )(x)
-            x = x + attn_out
-
-            # Feed-forward network
-            ffn_out = FeedForward(...)(keras.layers.LayerNormalization()(x))
-            return x + ffn_out
-        ```
-
-    Raises:
-        ValueError: If dim is not positive or not divisible by num_heads.
-        ValueError: If num_heads is not positive or not divisible by num_kv_heads.
-        ValueError: If num_kv_heads is not positive.
-        ValueError: If dropout_rate is not between 0.0 and 1.0.
-        ValueError: If rope_percentage is not between 0.0 (exclusive) and 1.0 (inclusive).
-        ValueError: If max_seq_len or rope_theta are not positive.
-
-    Note:
-        This implementation follows modern Keras 3 patterns where all sub-layers
-        are created in __init__ and explicitly built in build() method for robust
-        serialization support.
+        Same as input shape.
     """
 
     def __init__(
@@ -243,7 +163,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.head_dim = self.dim // self.num_heads
         self.num_groups = self.num_heads // self.num_kv_heads
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
+        # CREATE all sub-layers in __init__
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -287,14 +207,17 @@ class GroupedQueryAttention(keras.layers.Layer):
         # Attention dropout layer
         self.dropout = keras.layers.Dropout(self.dropout_rate, name='attention_dropout')
 
-        # Rotary position embeddings
-        self.rope = RotaryPositionEmbedding(
-            head_dim=self.head_dim,
-            max_seq_len=self.max_seq_len,
-            rope_theta=self.rope_theta,
-            rope_percentage=self.rope_percentage,
-            name='rope'
-        )
+        # Rotary position embeddings (only if percentage > 0)
+        if self.rope_percentage > 0.0:
+            self.rope = RotaryPositionEmbedding(
+                head_dim=self.head_dim,
+                max_seq_len=self.max_seq_len,
+                rope_theta=self.rope_theta,
+                rope_percentage=self.rope_percentage,
+                name='rope'
+            )
+        else:
+            self.rope = None
 
         logger.info(f"GroupedQueryAttention initialized: dim={dim}, "
                    f"num_heads={num_heads}, num_kv_heads={num_kv_heads}, groups={self.num_groups}")
@@ -309,21 +232,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         rope_percentage: float,
         rope_theta: float
     ) -> None:
-        """
-        Validate initialization parameters.
-
-        Args:
-            dim: Model dimension to validate.
-            num_heads: Number of query heads to validate.
-            num_kv_heads: Number of key-value heads to validate.
-            max_seq_len: Maximum sequence length to validate.
-            dropout_rate: Dropout rate to validate.
-            rope_percentage: RoPE percentage to validate (must be > 0.0 and <= 1.0).
-            rope_theta: RoPE theta parameter to validate.
-
-        Raises:
-            ValueError: If any parameter is invalid.
-        """
+        """Validate initialization parameters."""
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
@@ -340,39 +249,39 @@ class GroupedQueryAttention(keras.layers.Layer):
             raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
-        if not 0.0 < rope_percentage <= 1.0:
-            raise ValueError(f"rope_percentage must be in (0, 1], got {rope_percentage}")
+        if not 0.0 <= rope_percentage <= 1.0:
+            raise ValueError(f"rope_percentage must be in [0, 1], got {rope_percentage}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the layer and all its sub-layers.
-
-        This method explicitly builds each sub-layer for robust serialization
-        support, ensuring all weight variables exist before weight restoration.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        Explicitly builds sub-layers for robust serialization.
         """
-        # Build sub-layers in computational order
+        # Detect if we need to flatten for 4D inputs during build logic if needed,
+        # but Dense layers are generally agnostic to outer dimensions.
         self.w_q.build(input_shape)
         self.w_k.build(input_shape)
         self.w_v.build(input_shape)
-
-        # Output projection uses the same input shape as it processes the
-        # reshaped attention output which has the same dim dimension
         self.w_o.build(input_shape)
-
-        # Dropout doesn't need explicit building as it has no weights
         self.dropout.build(input_shape)
 
-        # Build RoPE layer explicitly for serialization robustness
-        # RoPE expects (batch, num_heads, seq_len, head_dim)
-        batch_size = input_shape[0] if input_shape[0] is not None else 1
-        seq_len = input_shape[1] if input_shape[1] is not None else self.max_seq_len
-        rope_input_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
-        self.rope.build(rope_input_shape)
+        if self.rope is not None:
+            # RoPE expects (batch, num_heads, seq_len, head_dim)
+            # We estimate shapes based on input rank
+            batch_size = input_shape[0] if input_shape[0] is not None else 1
+            
+            if len(input_shape) == 4:
+                # 4D Input: (B, H, W, C) -> seq_len = H*W
+                h = input_shape[1] if input_shape[1] is not None else self.max_seq_len
+                w = input_shape[2] if input_shape[2] is not None else 1
+                seq_len = h * w
+            else:
+                # 3D Input: (B, S, C)
+                seq_len = input_shape[1] if input_shape[1] is not None else self.max_seq_len
+                
+            rope_input_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
+            self.rope.build(rope_input_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -383,129 +292,101 @@ class GroupedQueryAttention(keras.layers.Layer):
         return_attention_weights: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """
-        Apply grouped query attention.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim).
-            training: Boolean, whether in training mode. Affects dropout behavior.
-            attention_mask: Optional attention mask of shape (batch_size, seq_len, seq_len)
-                or (batch_size, 1, seq_len, seq_len). Values should be 1 for
-                positions to attend to and 0 for masked positions.
-            return_attention_weights: Boolean, whether to return attention weights
-                along with the output. Defaults to False.
-
-        Returns:
-            If return_attention_weights=False:
-                Output tensor of shape (batch_size, seq_len, dim)
-            If return_attention_weights=True:
-                Tuple of (output, attention_weights) where attention_weights
-                has shape (batch_size, num_heads, seq_len, seq_len)
+        Apply grouped query attention. Supports 3D (B, S, D) and 4D (B, H, W, D) inputs.
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        input_shape = ops.shape(inputs)
+        rank = len(inputs.shape)
+        batch_size = input_shape[0]
+        
+        # 1. Project to Q, K, V
+        # Dense layers broadcast over spatial dims, so this works for 3D and 4D
+        q = self.w_q(inputs, training=training)
+        k = self.w_k(inputs, training=training)
+        v = self.w_v(inputs, training=training)
 
-        # Project to Q, K, V with different head counts
-        q = self.w_q(inputs, training=training)  # (batch, seq_len, num_heads * head_dim)
-        k = self.w_k(inputs, training=training)  # (batch, seq_len, num_kv_heads * head_dim)
-        v = self.w_v(inputs, training=training)  # (batch, seq_len, num_kv_heads * head_dim)
+        # 2. Flatten spatial dimensions if 4D
+        if rank == 4:
+            height, width = input_shape[1], input_shape[2]
+            seq_len = height * width
+            q = ops.reshape(q, (batch_size, seq_len, -1))
+            k = ops.reshape(k, (batch_size, seq_len, -1))
+            v = ops.reshape(v, (batch_size, seq_len, -1))
+        else:
+            seq_len = input_shape[1]
 
-        # Reshape for multi-head attention
+        # 3. Reshape for Multi-Head Attention
+        # Q: (B, S, H, D_h)
         q = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
         k = ops.reshape(k, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
         v = ops.reshape(v, (batch_size, seq_len, self.num_kv_heads, self.head_dim))
 
-        # Transpose to (batch, num_heads, seq_len, head_dim) for attention computation
+        # Transpose to (B, H, S, D_h) for efficient attention
         q = ops.transpose(q, (0, 2, 1, 3))
         k = ops.transpose(k, (0, 2, 1, 3))
         v = ops.transpose(v, (0, 2, 1, 3))
 
-        # Apply rotary position embeddings to Q and K
-        # RoPE expects (batch, num_heads, seq_len, head_dim) which is what we have
-        q = self.rope(q, training=training)
-        k = self.rope(k, training=training)
+        # 4. Apply RoPE (Optional)
+        if self.rope is not None:
+            q = self.rope(q, training=training)
+            k = self.rope(k, training=training)
 
-        # Key insight: Repeat K,V for each group to match Q head count
-        # Each K,V head serves num_groups query heads
-        k = ops.repeat(k, self.num_groups, axis=1)  # (batch, num_heads, seq_len, head_dim)
-        v = ops.repeat(v, self.num_groups, axis=1)  # (batch, num_heads, seq_len, head_dim)
+        # 5. Grouping: Repeat K, V to match Q head count
+        if self.num_groups > 1:
+            k = ops.repeat(k, self.num_groups, axis=1)
+            v = ops.repeat(v, self.num_groups, axis=1)
 
-        # Scaled dot-product attention
+        # 6. Scaled Dot-Product Attention
+        # (B, H, S, D_h) @ (B, H, D_h, S) -> (B, H, S, S)
         scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
         scores = scores / ops.sqrt(ops.cast(self.head_dim, scores.dtype))
 
-        # Apply attention mask if provided
         if attention_mask is not None:
-            # The scores tensor has shape (batch, num_heads, query_seq_len, key_seq_len).
-            # The attention_mask must be broadcastable to this shape.
-            mask_shape = ops.shape(attention_mask)
+            scores = self._apply_mask(scores, attention_mask)
 
-            # Prepare the mask for broadcasting by ensuring it is 4D.
-            if len(mask_shape) == 2:
-                # Case 1: Padding mask of shape (batch_size, key_seq_len).
-                # This mask indicates which key tokens to ignore.
-                # Reshape to (batch, 1, 1, key_seq_len) to broadcast across
-                # the heads and query sequence dimensions.
-                attention_mask = ops.reshape(
-                    attention_mask, (mask_shape[0], 1, 1, mask_shape[1])
-                )
-            elif len(mask_shape) == 3:
-                # Case 2: Causal or combined mask of shape (batch, query_seq_len, key_seq_len).
-                # Expand to (batch, 1, q_len, k_len) to broadcast across heads.
-                attention_mask = ops.expand_dims(attention_mask, axis=1)
-
-            # At this point, the mask is 4D. If the head dimension is 1,
-            # we explicitly repeat it to match the number of heads.
-            if len(ops.shape(attention_mask)) == 4 and ops.shape(attention_mask)[1] == 1:
-                attention_mask = ops.repeat(attention_mask, self.num_heads, axis=1)
-
-            # Convert the binary mask (0s and 1s) to an additive mask (-inf and 0s).
-            # A value of `1` in the original mask means "attend," which translates
-            # to `0` in the additive mask. A value of `0` means "mask out,"
-            # which translates to a large negative number.
-            additive_mask = (1.0 - ops.cast(attention_mask, scores.dtype)) * -1e9
-            scores = scores + additive_mask
-
-        # Softmax and dropout
         attention_weights = ops.softmax(scores, axis=-1)
         attention_weights = self.dropout(attention_weights, training=training)
 
-        # Apply attention to values
-        out = ops.matmul(attention_weights, v)  # (batch, num_heads, seq_len, head_dim)
+        # 7. Apply weights to Values
+        # (B, H, S, S) @ (B, H, S, D_h) -> (B, H, S, D_h)
+        out = ops.matmul(attention_weights, v)
 
-        # Transpose back and reshape to original format
-        out = ops.transpose(out, (0, 2, 1, 3))  # (batch, seq_len, num_heads, head_dim)
-        out = ops.reshape(out, (batch_size, seq_len, self.dim))
+        # 8. Restore Output Shape
+        out = ops.transpose(out, (0, 2, 1, 3))  # (B, S, H, D_h)
+        out = ops.reshape(out, (batch_size, seq_len, self.dim))  # (B, S, D)
 
-        # Final output projection
+        # Final projection
         output = self.w_o(out, training=training)
+
+        # 9. Reshape back to 4D if input was 4D
+        if rank == 4:
+            output = ops.reshape(output, (batch_size, height, width, self.dim))
 
         if return_attention_weights:
             return output, attention_weights
         return output
 
+    def _apply_mask(self, scores, mask):
+        """Helper to broadcast and apply attention mask."""
+        mask_shape = ops.shape(mask)
+        
+        # Handle 2D padding mask (B, S)
+        if len(mask_shape) == 2:
+            mask = ops.reshape(mask, (mask_shape[0], 1, 1, mask_shape[1]))
+        # Handle 3D causal/combined mask (B, S, S)
+        elif len(mask_shape) == 3:
+            mask = ops.expand_dims(mask, axis=1)
+
+        # Broadcast head dim if necessary
+        if len(ops.shape(mask)) == 4 and ops.shape(mask)[1] == 1:
+            mask = ops.repeat(mask, self.num_heads, axis=1)
+
+        additive_mask = (1.0 - ops.cast(mask, scores.dtype)) * -1e9
+        return scores + additive_mask
+
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple, same as input shape for attention layers.
-        """
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
-
-        Returns ALL configuration parameters passed to __init__ for proper
-        serialization and deserialization.
-
-        Returns:
-            Dictionary containing the layer configuration with all parameters
-            required to recreate this layer.
-        """
         config = super().get_config()
         config.update({
             'dim': self.dim,
