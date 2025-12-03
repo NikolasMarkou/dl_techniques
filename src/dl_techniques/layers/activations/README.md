@@ -4,32 +4,36 @@ The `dl_techniques.layers.activations` module provides a comprehensive collectio
 
 ## Overview
 
-This module includes distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization, making them suitable for any deep learning pipeline.
+This module includes distinct activation layer types and a factory system for standardized instantiation and parameter validation. All layers are designed for modern Keras 3.x compatibility and support full serialization.
 
 ## Available Activation Types
 
-The following layers are supported by the factory system with automated parameter validation and defaults:
+The following layers are supported by the factory system:
 
-| Type | Class | Description | Use Case |
-|------|-------|-------------|----------|
-| `adaptive_softmax` | `AdaptiveTemperatureSoftmax` | Softmax with dynamic temperature based on input entropy. | Maintaining sharpness in softmax for large output spaces. |
-| `basis_function` | `BasisFunction` | Implements `b(x) = x * sigmoid(x)`, same as SiLU/Swish. | PowerMLP architectures; smooth, self-gated activation. |
-| `gelu` | `GELU` | Gaussian Error Linear Unit. | State-of-the-art activation for Transformer models. |
-| `golu` | `GoLU` | Gompertz Linear Unit, a self-gated activation using an asymmetrical Gompertz curve. | Asymmetrical self-gated activation for smoother loss landscapes and improved generalization. |
-| `hard_sigmoid` | `HardSigmoid` | Piecewise linear approximation of the sigmoid function. | Efficient gating in mobile architectures like MobileNetV3. |
-| `hard_swish` | `HardSwish` | Computationally efficient approximation of the Swish/SiLU function. | High-performance activation for mobile-optimized models. |
-| `silu` | `SiLU` | Sigmoid Linear Unit (Swish). | Self-gated activation that often outperforms ReLU. |
-| `xatlu` | `xATLU` | Expanded ArcTan Linear Unit with a trainable `alpha`. | Adaptable arctan-based gating for specialized tasks. |
-| `xgelu` | `xGELU` | Expanded Gaussian Error Linear Unit with a trainable `alpha`. | Extends GELU with a customizable gating range. |
-| `xsilu` | `xSiLU` | Expanded Sigmoid Linear Unit with a trainable `alpha`. | Extends SiLU with a customizable gating range. |
-| `elu_plus_one` | `EluPlusOne` | Enhanced ELU: `ELU(x) + 1 + epsilon`. | Ensuring strictly positive outputs (e.g., for rate parameters). |
-| `mish` | `Mish` | A self-regularized, non-monotonic activation function. | Smooth activation that can outperform ReLU in deep models. |
-| `saturated_mish` | `SaturatedMish` | Mish variant that smoothly saturates for large inputs. | Preventing activation explosion in very deep networks. |
-| `relu_k` | `ReLUK` | Powered ReLU activation: `max(0, x)^k`. | Creating more aggressive non-linearities than standard ReLU. |
-| `routing_probabilities` | `RoutingProbabilitiesLayer` | A non-trainable hierarchical routing layer for probabilistic classification, an alternative to softmax. | Parameter-free alternative to softmax, introducing hierarchical bias without trainable weights. |
-| `sparsemax` | `Sparsemax` | Projects logits onto the probability simplex using Euclidean projection (L2). | Sparse attention mechanisms and interpretable multi-label classification. |
-| `squash` | `SquashLayer` | Squashing non-linearity for Capsule Networks. | Normalizing vector outputs in Capsule Networks. |
-| `thresh_max` | `ThreshMax` | Sparse softmax variant using a differentiable step function. | Creating sparse, confident probability distributions. |
+| Type | Class | Description |
+|------|-------|-------------|
+| `adaptive_softmax` | `AdaptiveTemperatureSoftmax` | Softmax with dynamic temperature based on input entropy. |
+| `basis_function` | `BasisFunction` | Implements `b(x) = x * sigmoid(x)`, same as SiLU/Swish. |
+| `differentiable_step` | `DifferentiableStep` | Learnable, differentiable approximation of a step function. |
+| `elu_plus_one` | `EluPlusOne` | Enhanced ELU ensuring strictly positive outputs (`ELU(x) + 1 + ε`). |
+| `gelu` | `GELU` | Gaussian Error Linear Unit. |
+| `golu` | `GoLU` | Gompertz Linear Unit, asymmetrical self-gated activation. |
+| `hard_sigmoid` | `HardSigmoid` | Piecewise linear approximation of the sigmoid function. |
+| `hard_swish` | `HardSwish` | Computationally efficient approximation of Swish/SiLU. |
+| `hierarchical_routing` | `HierarchicalRoutingLayer` | Trainable probabilistic routing tree for `O(log N)` classification. |
+| `mish` | `Mish` | Self-regularized, non-monotonic activation. |
+| `monotonicity` | `MonotonicityLayer` | Enforces monotonic constraints (e.g., for quantile regression). |
+| `relu` | `keras.layers.ReLU` | Standard Rectified Linear Unit. |
+| `relu_k` | `ReLUK` | Powered ReLU activation: `max(0, x)^k`. |
+| `routing_probabilities` | `RoutingProbabilitiesLayer` | Parameter-free hierarchical routing using cosine basis patterns. |
+| `saturated_mish` | `SaturatedMish` | Mish variant that smoothly saturates for large inputs. |
+| `silu` | `SiLU` | Sigmoid Linear Unit (Swish). |
+| `sparsemax` | `Sparsemax` | Euclidean projection onto the probability simplex (sparse outputs). |
+| `squash` | `SquashLayer` | Vector length normalization for Capsule Networks. |
+| `thresh_max` | `ThreshMax` | Sparse softmax variant using differentiable confidence thresholding. |
+| `xatlu` | `xATLU` | Expanded ArcTan Linear Unit with trainable alpha. |
+| `xgelu` | `xGELU` | Expanded GELU with trainable alpha. |
+| `xsilu` | `xSiLU` | Expanded SiLU with trainable alpha. |
 
 ## Factory Interface
 
@@ -38,11 +42,11 @@ The following layers are supported by the factory system with automated paramete
 ```python
 from dl_techniques.layers.activations import create_activation_layer
 
-# Create a standard GELU layer
+# Create standard layers
 gelu_layer = create_activation_layer('gelu')
 
-# Create ReLUK with a custom power
-relu_k_layer = create_activation_layer('relu_k', k=2, name='relu_squared')
+# Create parameterized layers
+relu_k = create_activation_layer('relu_k', k=2, name='relu_squared')
 ```
 
 ### Configuration-Based Creation
@@ -59,276 +63,120 @@ config = {
 activation_layer = create_activation_from_config(config)
 ```
 
-### Parameter Discovery
+### Parameter Validation and Discovery
 
 ```python
-from dl_techniques.layers.activations import get_activation_info
+from dl_techniques.layers.activations import get_activation_info, validate_activation_config
 
-# Get information about all activation types
+# Get registry info
 info = get_activation_info()
+print(info['differentiable_step']['optional_params'])
 
-# Print requirements for a specific type
-xgelu_info = info['xgelu']
-print(f"Optional parameters for xGELU: {list(xgelu_info['optional_params'].keys())}")
-```
-
-### Validation
-
-```python
-from dl_techniques.layers.activations import validate_activation_config
-
-# Validate configuration before creation
+# Validate before creation
 try:
-    validate_activation_config('relu_k', k=3)
-    print("Configuration is valid")
+    validate_activation_config('monotonicity', method='invalid_method')
 except ValueError as e:
-    print(f"Validation error: {e}")
+    print(f"Config error: {e}")
 ```
 
-## Layer-Specific Parameters
+## Layer-Specific Configuration
 
-### Parameter-Free Activations
-The following activations have no configurable parameters: `basis_function`, `elu_plus_one`, `gelu`, `hard_sigmoid`, `hard_swish`, `mish`, `silu`. They can be created simply by name.
-
+### DifferentiableStep
+A learnable binary gate.
 ```python
-mish_layer = create_activation_layer('mish')
-hard_swish_layer = create_activation_layer('hard_swish')
+step = create_activation_layer(
+    'differentiable_step',
+    axis=-1,
+    slope_initializer='ones',  # Learnable steepness
+    shift_initializer='zeros'  # Learnable threshold
+)
+```
+
+### Hierarchical Routing (Trainable)
+Efficient classification for massive vocabularies/classes.
+```python
+routing = create_activation_layer(
+    'hierarchical_routing',
+    output_dim=50000,
+    axis=-1,
+    use_bias=True
+)
+```
+
+### Monotonicity Layer
+Enforces constraints like $Q(0.1) \le Q(0.5) \le Q(0.9)$.
+```python
+mono = create_activation_layer(
+    'monotonicity',
+    method='cumulative_softplus',
+    axis=-1
+)
+
+# For bounded outputs (e.g., probability cumulative sums)
+mono_bounded = create_activation_layer(
+    'monotonicity',
+    method='sigmoid',
+    value_range=(0.0, 1.0)
+)
 ```
 
 ### AdaptiveTemperatureSoftmax
-**Optional:** `min_temp` (default: 0.1), `max_temp` (default: 1.0), `entropy_threshold` (default: 0.5), `eps` (default: 1e-7)
-
+Softmax that sharpens distribution based on entropy.
 ```python
-adaptive_softmax = create_activation_layer(
+adaptive = create_activation_layer(
     'adaptive_softmax',
-    min_temp=0.05,
-    max_temp=1.5,
-    entropy_threshold=0.4
+    min_temp=0.1,
+    max_temp=1.0,
+    entropy_threshold=0.5
 )
 ```
 
-### Expanded Activations (xATLU, xGELU, xSiLU)
-**Optional:** `alpha_initializer` (default: 'zeros'), `alpha_regularizer` (default: None), `alpha_constraint` (default: None)
-
+### RoutingProbabilities (Parameter-Free)
+Deterministic routing based on fixed cosine patterns.
 ```python
-import keras
-
-xgelu_reg = create_activation_layer(
-    'xgelu',
-    alpha_initializer='ones',
-    alpha_regularizer=keras.regularizers.L2(1e-4)
+# Infers output_dim from input shape if not provided
+fixed_routing = create_activation_layer(
+    'routing_probabilities',
+    output_dim=100
 )
-```
-
-### GoLU
-**Optional:** `alpha` (float, default: 1.0), `beta` (float, default: 1.0), `gamma` (float, default: 1.0)
-
-```python
-golu_layer = create_activation_layer(
-    'golu',
-    alpha=0.9,
-    beta=1.1,
-    gamma=1.0
-)
-```
-
-### SaturatedMish
-**Optional:** `alpha` (default: 3.0), `beta` (default: 0.5)
-
-```python
-sat_mish = create_activation_layer(
-    'saturated_mish',
-    alpha=4.0,  # Saturation starts later
-    beta=0.2    # Sharper transition
-)
-```
-
-### ReLUK
-**Optional:** `k` (int, default: 3)
-
-```python
-relu_squared = create_activation_layer('relu_k', k=2)
-```
-
-### RoutingProbabilitiesLayer
-**Optional:** `output_dim` (int, default: None), `axis` (int, default: -1), `epsilon` (float, default: 1e-7)
-
-```python
-routing_probs = create_activation_layer('routing_probabilities', output_dim=10) # `output_dim` can also be inferred
-```
-
-### Sparsemax
-**Optional:** `axis` (int, default: -1)
-
-```python
-# Create sparse attention mechanism
-sparse_attn = create_activation_layer('sparsemax', axis=-1)
-```
-
-### SquashLayer
-**Optional:** `axis` (int, default: -1), `epsilon` (float, default: 1e-7)
-
-```python
-squash = create_activation_layer('squash', axis=2) # Squash along the 3rd dimension
 ```
 
 ### ThreshMax
-**Optional:** `axis` (int, default: -1), `slope` (float, default: 10.0), `epsilon` (float, default: 1e-12)
-
+Sparse softmax variant.
 ```python
-sharp_threshmax = create_activation_layer(
+sparse_soft = create_activation_layer(
     'thresh_max',
-    slope=50.0 # Creates a very sparse distribution
+    slope=20.0,
+    trainable_slope=True
 )
-```
-
-## Direct Layer Instantiation
-
-While the factory is recommended, direct instantiation is always available.
-
-```python
-from dl_techniques.layers.activations import ReLUK, SaturatedMish, ThreshMax, Sparsemax
-
-# Direct instantiation (bypasses factory validation and logging)
-relu_k = ReLUK(k=2)
-sat_mish = SaturatedMish(alpha=4.0, beta=0.2)
-thresh_max = ThreshMax(slope=20.0)
-sparsemax = Sparsemax(axis=-1)
 ```
 
 ## Integration Patterns
 
-### In Sequential Models
-
-```python
-import keras
-from dl_techniques.layers.activations import create_activation_layer
-
-model = keras.Sequential([
-    keras.layers.Dense(128, input_shape=(784,)),
-    create_activation_layer('mish'),
-    keras.layers.Dense(64),
-    create_activation_layer('hard_swish'),
-    keras.layers.Dense(10),
-    create_activation_layer('sparsemax')
-])
-```
-
-### As an Argument to Other Layers
-
-```python
-import keras
-from dl_techniques.layers.activations import create_activation_layer
-
-# The factory returns a layer instance, not a string or function
-# So it can be used directly where a layer is expected
-dense_layer = keras.layers.Dense(
-    64,
-    activation=create_activation_layer('gelu')
-)
-```
-
-### In Custom Layers
-
+### Custom Blocks
 ```python
 import keras
 from dl_techniques.layers.activations import create_activation_layer
 
 @keras.saving.register_keras_serializable()
-class CustomBlock(keras.layers.Layer):
-    def __init__(self, units, activation_type='relu', **act_kwargs, **kwargs):
+class GatedBlock(keras.layers.Layer):
+    def __init__(self, units, **kwargs):
         super().__init__(**kwargs)
-        self.units = units
-        self.activation_type = activation_type
-        self.act_kwargs = act_kwargs
-
         self.dense = keras.layers.Dense(units)
-        self.activation = create_activation_layer(
-            activation_type,
-            **act_kwargs
-        )
-
+        self.gate = create_activation_layer('differentiable_step')
+        
     def call(self, inputs):
         x = self.dense(inputs)
-        return self.activation(x)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'units': self.units,
-            'activation_type': self.activation_type,
-            'act_kwargs': self.act_kwargs
-        })
-        return config
+        return x * self.gate(x)
 ```
 
-## Parameter Validation
-
-The factory performs comprehensive validation for layers with configurable parameters.
-
-### Value Range and Type Validation
+### Sequential Models
 ```python
-from dl_techniques.layers.activations import create_activation_layer
-
-# Will raise ValueError: k must be a positive integer
-# create_activation_layer('relu_k', k=-2)
-
-# Will raise TypeError: k must be an integer
-# create_activation_layer('relu_k', k=2.5)
-
-# Will raise ValueError: axis must be an integer
-# create_activation_layer('sparsemax', axis='last')
+model = keras.Sequential([
+    keras.layers.Input(shape=(128,)),
+    keras.layers.Dense(64),
+    create_activation_layer('mish'),
+    keras.layers.Dense(10),
+    create_activation_layer('sparsemax')
+])
 ```
-
-## Logging and Debugging
-
-The factory provides detailed logging for easier debugging.
-
-### Info Level Logging
-Shows all parameters used to create each layer:
-```
-INFO Creating relu_k activation layer with parameters:
-INFO   k: 2
-INFO   name: 'relu_squared'
-```
-
-### Debug Level Logging
-Confirms successful layer creation:
-```
-DEBUG Successfully created relu_k layer: relu_squared
-```
-
-### Error Logging
-Provides detailed context when creation fails:
-```
-ERROR Failed to create relu_k layer (ReLUK). Provided parameters: ['k'].
-      Check parameter compatibility and types.
-      Original error: k must be a positive integer, got -2
-```
-
-## Best Practices
-
-1.  **Use the Factory for Consistency**: The factory ensures all activation layers are created through a single, validated interface.
-2.  **Leverage Configuration Files**: For complex models, define activations in JSON or YAML files and create them with `create_activation_from_config` for reproducibility.
-3.  **Validate Configurations**: Use `validate_activation_config` in production pipelines to catch errors early.
-
-## API Reference
-
-### Functions
-
-#### `create_activation_layer(activation_type, name=None, **kwargs)`
-Factory function for creating activation layers with validation.
-
-#### `create_activation_from_config(config)`
-Create an activation layer from a configuration dictionary.
-
-#### `validate_activation_config(activation_type, **kwargs)`
-Validate activation configuration parameters before creation.
-
-#### `get_activation_info()`
-Get comprehensive information about all available activation types.
-
-### Types
-
-#### `ActivationType`
-A `Literal` type defining all valid activation type strings, such as `'gelu'`, `'hard_swish'`, `'sparsemax'`, `'xsilu'`, etc.
