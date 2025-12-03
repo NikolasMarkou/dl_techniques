@@ -1,5 +1,5 @@
 """
-Enhance self-attention with a capsule-based dynamic routing mechanism.
+Capsule-based dynamic routing mechanism.
 
 This layer replaces the standard softmax normalization in multi-head
 attention with a structured, iterative agreement process inspired by Capsule

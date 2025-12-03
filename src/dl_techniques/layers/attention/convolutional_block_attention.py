@@ -1,8 +1,6 @@
 """
-Refine feature maps by sequentially applying channel and spatial attention.
-
-This module implements the Convolutional Block Attention Module (CBAM), a
-lightweight and effective attention mechanism for CNNs. CBAM operates on the
+Convolutional Block Attention Module (CBAM), a lightweight and
+effective attention mechanism for CNNs. CBAM operates on the
 principle of inferring attention maps along two separate dimensions, channel
 and spatial, and then sequentially applying them to the input feature map for
 adaptive feature refinement. The key architectural choice is this sequential

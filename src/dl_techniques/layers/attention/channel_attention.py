@@ -1,5 +1,5 @@
 """
-Generates channel-wise attention weights for convolutional feature maps.
+Channel-wise attention weights for convolutional feature maps.
 
 This module implements the channel attention mechanism from the Convolutional
 Block Attention Module (CBAM). Its purpose is to learn the importance of
