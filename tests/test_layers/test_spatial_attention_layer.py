@@ -638,5 +638,4 @@ class TestSpatialAttention:
 
 
 if __name__ == '__main__':
-    # Run with: python -m pytest spatial_attention_test.py -v
     pytest.main([__file__, '-v', '--tb=short'])

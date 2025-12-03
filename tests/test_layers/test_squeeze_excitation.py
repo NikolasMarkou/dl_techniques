@@ -200,6 +200,8 @@ class TestSqueezeExcitation:
             ((None, 32, 32, 64), (None, 32, 32, 64)),
             ((4, 16, 16, 128), (4, 16, 16, 128)),
             ((1, 224, 224, 3), (1, 224, 224, 3)),
+            ((None, 64), (None, 64)),  # 2D input
+            ((None, 10, 32), (None, 10, 32)),  # 3D input
         ]
 
         for input_shape, expected_output_shape in test_shapes:
@@ -426,7 +428,6 @@ class TestSqueezeExcitation:
 
         assert len(kernel_shapes) == 2, "Should have 2 kernel weights"
         assert len(bias_shapes) == 2, "Should have 2 bias weights"
-
 
     def test_minimal_input_size(self):
         """Test with minimal spatial dimensions."""
@@ -829,3 +830,154 @@ class TestSqueezeExcitation:
             assert t > 0
             assert not np.isnan(t)
             assert not np.isinf(t)
+
+    # --------------------------------------------------------------------------
+    # New tests for 2D and 3D input support
+    # --------------------------------------------------------------------------
+
+    def test_2d_input_support(self):
+        """Test support for 2D (batch, channels) inputs."""
+        batch_size = 32
+        channels = 64
+        layer = SqueezeExcitation(reduction_ratio=0.25)
+
+        # 2D Input
+        inputs = keras.random.normal(shape=(batch_size, channels))
+        output = layer(inputs)
+
+        # Check shapes
+        assert output.shape == inputs.shape
+        assert not keras.ops.any(keras.ops.isnan(output))
+
+        # Verify it works in a dense model context
+        model = keras.Sequential([
+            keras.Input(shape=(channels,)),
+            keras.layers.Dense(channels),
+            SqueezeExcitation(reduction_ratio=0.25),
+            keras.layers.Dense(10)
+        ])
+
+        result = model(inputs)
+        assert result.shape == (batch_size, 10)
+
+    def test_3d_input_support(self):
+        """Test support for 3D (batch, steps, channels) inputs."""
+        batch_size = 16
+        steps = 20
+        channels = 32
+        layer = SqueezeExcitation(reduction_ratio=0.25)
+
+        # 3D Input
+        inputs = keras.random.normal(shape=(batch_size, steps, channels))
+        output = layer(inputs)
+
+        # Check shapes
+        assert output.shape == inputs.shape
+        assert not keras.ops.any(keras.ops.isnan(output))
+
+        # Verify gradient flow for 3D
+        with tf.GradientTape() as tape:
+            tape.watch(inputs)
+            out = layer(inputs)
+            loss = keras.ops.mean(out)
+
+        grads = tape.gradient(loss, layer.trainable_variables)
+        assert all(g is not None for g in grads)
+
+    def test_variable_sequence_length(self):
+        """Test 3D inputs with undefined sequence length."""
+        channels = 32
+        layer = SqueezeExcitation(reduction_ratio=0.25)
+
+        # Input with variable sequence length
+        inputs = keras.Input(shape=(None, channels))
+        outputs = layer(inputs)
+        model = keras.Model(inputs, outputs)
+
+        # Test with different sequence lengths
+        seq_len_1 = keras.random.normal((2, 10, channels))
+        seq_len_2 = keras.random.normal((2, 25, channels))
+
+        out1 = model(seq_len_1)
+        out2 = model(seq_len_2)
+
+        assert out1.shape == (2, 10, channels)
+        assert out2.shape == (2, 25, channels)
+
+    def test_rank_agnostic_reuse(self):
+        """Test reusing the same layer instance across different ranks."""
+        channels = 64
+        layer = SqueezeExcitation(reduction_ratio=0.25)
+
+        # 4D Input
+        in_4d = keras.random.normal((2, 16, 16, channels))
+        out_4d = layer(in_4d)
+
+        # 3D Input (same channels)
+        in_3d = keras.random.normal((2, 20, channels))
+        out_3d = layer(in_3d)
+
+        # 2D Input (same channels)
+        in_2d = keras.random.normal((2, channels))
+        out_2d = layer(in_2d)
+
+        assert out_4d.shape == in_4d.shape
+        assert out_3d.shape == in_3d.shape
+        assert out_2d.shape == in_2d.shape
+
+    def test_integration_mlp(self):
+        """Test integration in a Dense/MLP network."""
+        inputs = keras.Input(shape=(128,))
+        x = keras.layers.Dense(256, activation='relu')(inputs)
+        x = SqueezeExcitation(reduction_ratio=0.25)(x)
+        x = keras.layers.Dense(64, activation='relu')(x)
+        x = SqueezeExcitation(reduction_ratio=0.25)(x)
+        outputs = keras.layers.Dense(10)(x)
+
+        model = keras.Model(inputs, outputs)
+        test_data = keras.random.normal((32, 128))
+        result = model(test_data)
+
+        assert result.shape == (32, 10)
+        assert not keras.ops.any(keras.ops.isnan(result))
+
+    def test_integration_rnn(self):
+        """Test integration in a Recurrent network (LSTM)."""
+        inputs = keras.Input(shape=(20, 32))
+        x = keras.layers.LSTM(64, return_sequences=True)(inputs)
+        # Apply SE to sequence of LSTM outputs
+        x = SqueezeExcitation(reduction_ratio=0.25)(x)
+        x = keras.layers.LSTM(32)(x)
+        outputs = keras.layers.Dense(10)(x)
+
+        model = keras.Model(inputs, outputs)
+        test_data = keras.random.normal((16, 20, 32))
+        result = model(test_data)
+
+        assert result.shape == (16, 10)
+        assert not keras.ops.any(keras.ops.isnan(result))
+
+    def test_serialization_multi_rank(self):
+        """Test serialization with 3D input model."""
+        inputs = keras.Input(shape=(None, 64))
+        x = SqueezeExcitation(reduction_ratio=0.25)(inputs)
+        model = keras.Model(inputs, x)
+
+        test_input = keras.random.normal((1, 15, 64))
+        original_pred = model(test_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'rnn_se.keras')
+            model.save(path)
+            loaded_model = keras.models.load_model(path)
+            loaded_pred = loaded_model(test_input)
+
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_pred),
+                keras.ops.convert_to_numpy(loaded_pred),
+                rtol=1e-6, atol=1e-6,
+                err_msg="3D input serialization failed"
+            )
+
+if __name__ == '__main__':
+    pytest.main([__file__, '-v', '--tb=short'])
