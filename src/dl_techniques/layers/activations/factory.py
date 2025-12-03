@@ -34,6 +34,9 @@ from .sparsemax import Sparsemax
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
 
+from ...regularizers.l2_custom import L2_custom
+from ...constraints.value_range_constraint import ValueRangeConstraint
+
 # ---------------------------------------------------------------------
 
 # Type definition for Activation types
@@ -259,10 +262,10 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'axis': -1,
             'slope': 10.0,
             'epsilon': 1e-12,
-            'trainable_slope': False,
+            'trainable_slope': True,
             'slope_initializer': 'ones',
-            'slope_regularizer': keras.regularizers.L2(-1e-3),
-            'slope_constraint': None
+            'slope_regularizer': L2_custom(-1e-3),
+            'slope_constraint': ValueRangeConstraint(1.0, 50.0),
         },
         'use_case': 'Creates sparse, confident probability distributions as an alternative to softmax.'
     },

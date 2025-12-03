@@ -3,13 +3,14 @@ CIFAR-10 Window Attention Comparison Experiment
 ===============================================
 
 This experiment evaluates and compares three windowed attention mechanisms
-on the CIFAR-10 image classification task:
+on the CIFAR-10 image classification task.
 
-1. **WindowAttention**: Standard windowed multi-head self-attention from Swin Transformer
-2. **WindowZigZagAttention**: Windowed attention with zigzag position bias and optional
-   adaptive normalization strategies (adaptive softmax, hierarchical routing)
+Updated to use the unified `WindowAttention` layer which consolidates:
+1. **WindowAttention**: Standard windowed multi-head self-attention (Grid partition).
+2. **WindowZigZagAttention**: Windowed attention with zigzag partitioning and
+   optional adaptive normalization strategies.
 3. **WindowKAN**: Windowed attention with KAN (Kolmogorov-Arnold Network)
-   projections that learn B-spline activation functions
+   projections.
 
 Research Questions
 ------------------
@@ -24,7 +25,7 @@ Research Questions
    provides the best accuracy-efficiency trade-off?
 
 4. **Calibration**: Do the different attention mechanisms produce differently calibrated
-   probability distributions? (Especially relevant for WindowZigZagAttention with
+   probability distributions? (Especially relevant for Zigzag variants with
    adaptive normalization)
 
 Experimental Design
@@ -44,7 +45,7 @@ Conv2D (5×5, stride=2) as Patch Embedding  → [16×16×dim] -> [256, dim]
       ↓
 Transformer Encoder Block x N:
   - LayerNorm
-  - Attention Layer (window_size=4, num_heads=4)
+  - Attention Layer (Unified WindowAttention)
   - Residual
   - LayerNorm
   - MLP (4*dim hidden)
@@ -61,19 +62,19 @@ Dense(10) + Softmax
 
 **Attention Configurations**:
 
-1. **WindowAttention**:
-   - Standard Swin-style windowed attention
-   - Relative position bias
-   - Efficient O(M²) complexity per window
+1. **WindowAttention** (Baseline):
+   - Partition: Grid (Swin-style)
+   - Normalization: Softmax
+   - Relative Position Bias: Yes
 
 2. **WindowZigZagAttention**:
-   - Zigzag-ordered relative position bias
-   - Standard softmax normalization (baseline)
-   - Comparison with adaptive temperature softmax variant
+   - Partition: Zigzag (Frequency locality)
+   - Normalization: Softmax (baseline), Adaptive, or Hierarchical
+   - Relative Position Bias: No (Spatial structure altered)
 
 3. **WindowKAN**:
-   - KAN-based Q, K, V projections
-   - Learnable B-spline activations
+   - Partition: Grid
+   - Attention Mode: KAN (Learnable B-spline projections for Keys)
    - Grid size: 5, Spline order: 3
 
 **Training Configuration**:
@@ -85,49 +86,15 @@ Dense(10) + Softmax
 - Data augmentation: Random flips and crops
 
 **Analysis Pipeline**:
-
-1. **Performance Metrics**:
-   - Test accuracy and top-5 accuracy
-   - Training/validation curves
-   - Convergence speed
-
-2. **Calibration Analysis**:
-   - Expected Calibration Error (ECE)
-   - Brier score
-   - Confidence distributions
-
-3. **Weight Analysis**:
-   - Layer-wise weight distributions
-   - Spectral properties (via WeightWatcher)
-   - Parameter efficiency
-
-4. **Training Dynamics**:
-   - Overfitting indices
-   - Training stability scores
-   - Epochs to convergence
+- Performance Metrics (Accuracy, Top-5)
+- Calibration Analysis (ECE, Brier)
+- Weight Analysis (Spectral properties)
+- Training Dynamics (Stability, Overfitting)
 
 Expected Outcomes
 -----------------
-
-1. **WindowAttention** (baseline): Should provide solid performance as a proven
-   architecture from Swin Transformer
-
-2. **WindowZigZagAttention**: May show improved performance if zigzag ordering
-   provides better inductive bias for CIFAR-10's image patterns
-
-3. **WindowKAN**: Higher expressiveness from learnable activations may
-   lead to better accuracy but potentially slower training and higher risk of
-   overfitting given the small dataset
-
-Visual Analysis
----------------
-
-The experiment generates:
-- Training history comparison plots
-- Confusion matrices for each attention type
-- Calibration curves and reliability diagrams
-- Weight distribution visualizations
-- Comprehensive summary dashboard
+See main documentation for hypotheses regarding zigzag inductive bias and
+KAN expressiveness.
 """
 
 # ==============================================================================
@@ -149,11 +116,7 @@ from typing import Dict, Any, List, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 
-from dl_techniques.layers.attention import (
-    WindowAttention,
-    WindowZigZagAttention,
-    WindowAttentionKAN
-)
+from dl_techniques.layers.attention import WindowAttention
 
 from sklearn.model_selection import train_test_split
 
@@ -185,7 +148,10 @@ class ExperimentConfig:
 
     Attributes:
         # Model configurations
-        attention_types: List of attention types to compare
+        attention_types: List of attention types to compare.
+                         Options: 'window', 'window_zigzag',
+                         'window_zigzag_adaptive', 'window_zigzag_hierarchical',
+                         'window_kan'
         attention_dim: Embedding dimension for attention layers
         num_attention_layers: Number of transformer encoder blocks
         mlp_dim_multiplier: Multiplier for the MLP hidden layer size
@@ -197,6 +163,7 @@ class ExperimentConfig:
         kan_grid_size: Grid size for KAN B-spline basis
         kan_spline_order: Order of B-spline basis functions
         kan_activation: Base activation for KAN layers
+        kan_regularization: L2 regularization factor for KAN weights
 
         # Training parameters
         epochs: Maximum number of training epochs
@@ -230,8 +197,8 @@ class ExperimentConfig:
     kan_regularization: float = 0.01
 
     # Training configuration
-    epochs: int = 50
-    batch_size: int = 32
+    epochs: int = 10
+    batch_size: int = 64
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
     validation_split: float = 0.1  # For manual splitting
@@ -254,7 +221,7 @@ class ExperimentConfig:
 
     # Output configuration
     output_dir: Path = field(default_factory=lambda: Path(
-        f"window_attention_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"results/window_attention_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     ))
 
 
@@ -330,11 +297,13 @@ def create_attention_layer(
     config: ExperimentConfig
 ) -> keras.layers.Layer:
     """
-    Factory function to create the appropriate attention layer.
+    Factory function to create the appropriate attention layer configuration
+    using the unified WindowAttention class.
 
     Args:
-        attention_type: Type of attention ('window', 'window_zigzag',
-                       'window_zigzag_adaptive', 'window_kan')
+        index: Layer index (for naming)
+        attention_type: Type of attention configuration
+                        ('window', 'window_zigzag', 'window_kan', etc.)
         dim: Embedding dimension
         window_size: Window size for local attention
         num_heads: Number of attention heads
@@ -342,39 +311,48 @@ def create_attention_layer(
         config: Experiment configuration
 
     Returns:
-        Configured attention layer
+        Configured WindowAttention layer
     """
+    # Common base configuration
+    base_config = {
+        "dim": dim,
+        "window_size": window_size,
+        "num_heads": num_heads,
+        "dropout_rate": dropout_rate,
+        "qkv_bias": True,
+        "proj_bias": True,
+    }
+
+    # 1. Standard Window Attention (Grid Partitioning)
     if attention_type == 'window':
         return WindowAttention(
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            dropout_rate=dropout_rate,
+            **base_config,
+            partition_mode="grid",
+            attention_mode="linear",
+            normalization="softmax",
+            use_relative_position_bias=True,
             name=f'window_attn_{dim}_{index}'
         )
 
+    # 2. Window Zigzag Attention (Zigzag Partitioning)
     elif attention_type == 'window_zigzag':
-        return WindowZigZagAttention(
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            dropout_rate=dropout_rate,
-            use_hierarchical_routing=False,
-            use_adaptive_softmax=False,
+        return WindowAttention(
+            **base_config,
+            partition_mode="zigzag",
+            attention_mode="linear",
+            normalization="softmax",
+            use_relative_position_bias=False,  # Relative pos often disabled for zigzag
             name=f'window_zigzag_attn_{dim}_{index}'
         )
 
+    # 3. Window Zigzag + Adaptive Softmax
     elif attention_type == 'window_zigzag_adaptive':
-        return WindowZigZagAttention(
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            dropout_rate=dropout_rate,
-            use_hierarchical_routing=False,
-            use_adaptive_softmax=True,
+        return WindowAttention(
+            **base_config,
+            partition_mode="zigzag",
+            attention_mode="linear",
+            normalization="adaptive_softmax",
+            use_relative_position_bias=False,
             adaptive_softmax_config={
                 'min_temp': 0.1,
                 'max_temp': 2.0,
@@ -383,28 +361,28 @@ def create_attention_layer(
             name=f'window_zigzag_adaptive_attn_{dim}_{index}'
         )
 
+    # 4. Window Zigzag + Hierarchical Routing
     elif attention_type == 'window_zigzag_hierarchical':
-        return WindowZigZagAttention(
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            dropout_rate=dropout_rate,
-            use_hierarchical_routing=True,
-            use_adaptive_softmax=False,
+        return WindowAttention(
+            **base_config,
+            partition_mode="zigzag",
+            attention_mode="linear",
+            normalization="hierarchical_routing",
+            use_relative_position_bias=False,
             name=f'window_zigzag_hierarchical_attn_{dim}_{index}'
         )
 
+    # 5. Window KAN Attention (Grid Partition + KAN Keys)
     elif attention_type == 'window_kan':
-        return WindowAttentionKAN(
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
+        return WindowAttention(
+            **base_config,
+            partition_mode="grid",
+            attention_mode="kan_key",
+            normalization="softmax",
+            use_relative_position_bias=True,
             kan_grid_size=config.kan_grid_size,
             kan_spline_order=config.kan_spline_order,
             kan_activation=config.kan_activation,
-            attn_dropout_rate=dropout_rate,
-            proj_dropout_rate=dropout_rate,
             name=f'kan_window_attn_{dim}_{index}'
         )
 
@@ -448,9 +426,10 @@ def build_attention_model(
         name='patch_embed_conv'
     )(inputs)
 
-    # Reshape to a sequence of tokens: (B, H, W, C) -> (B, H*W, C)
-    _, H, W, C = x.shape
-    x = keras.layers.Reshape((H * W, C), name='flatten_patches')(x)
+    x = keras.layers.Reshape(
+        target_shape=(-1, config.attention_dim),
+        name='flatten_patches'
+    )(x)
 
     # 2. Transformer Blocks
     for i in range(config.num_attention_layers):
@@ -488,7 +467,8 @@ def build_attention_model(
             kernel_initializer='he_normal',
             name=f'mlp_dense2_block{i}'
         )(x)
-        #x = keras.layers.Dropout(config.dropout_rate, name=f'drop_mlp_block{i}')(x)
+        # Note: Dropout after second dense is typically omitted in modern architectures,
+        # but kept consistent with original script if present, though it was commented out there.
         x = keras.layers.Add(name=f'add_mlp_block{i}')([x_res, x])
 
     # 3. Final Layer Normalization
@@ -514,11 +494,11 @@ def build_attention_model(
 def get_model_name(attention_type: str) -> str:
     """Get a human-readable model name for the attention type."""
     name_mapping = {
-        'window': 'WindowAttention',
+        'window': 'WindowAttention (Grid)',
         'window_kan': 'WindowKAN',
-        'window_zigzag': 'WindowZigZag',
-        'window_zigzag_adaptive': 'WindowZigZag+Adaptive',
-        'window_zigzag_hierarchical': 'WindowZigZag+Hierarchical',
+        'window_zigzag': 'WindowZigZag (Softmax)',
+        'window_zigzag_adaptive': 'WindowZigZag (Adaptive)',
+        'window_zigzag_hierarchical': 'WindowZigZag (Hierarchical)',
     }
     return name_mapping.get(attention_type, attention_type)
 
@@ -550,6 +530,8 @@ def train_and_evaluate_model(
     logger.info(f"Training: {model_name}")
     logger.info("=" * 80)
 
+    model.summary()
+
     # Print model summary
     param_count = model.count_params()
     logger.info(f"Total parameters: {param_count:,}")
@@ -573,7 +555,8 @@ def train_and_evaluate_model(
     model.compile(
         optimizer=keras.optimizers.AdamW(
             learning_rate=config.learning_rate,
-            weight_decay=config.weight_decay
+            weight_decay=config.weight_decay,
+            clipnorm=1.0,
         ),
         loss=keras.losses.CategoricalCrossentropy(from_logits=True),
         metrics=['accuracy']
@@ -584,7 +567,7 @@ def train_and_evaluate_model(
         epochs=config.epochs,
         batch_size=config.batch_size,
         output_dir=config.output_dir,
-        model_name=model_name.replace(' ', '_').replace('+', '_'),
+        model_name=model_name.replace(' ', '_').replace('+', '_').replace('(', '').replace(')', ''),
         early_stopping_patience=config.early_stopping_patience,
         reduce_lr_patience=config.reduce_lr_patience,
         reduce_lr_factor=config.reduce_lr_factor,
@@ -686,7 +669,7 @@ def analyze_models(
     logger.info("")
     logger.info("Running ModelAnalyzer...")
 
-    # Prepare data input for analyzer as per the README documentation.
+    # Prepare data input for analyzer
     data_input = DataInput(
         x_data=data.x_test,
         y_data=data.y_test
@@ -714,7 +697,7 @@ def analyze_models(
         output_dir=config.output_dir
     )
 
-    # Register the visualization templates to be used, as per the new API.
+    # Register the visualization templates
     viz_manager.register_template("training_curves", TrainingCurvesVisualization)
     viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
     viz_manager.register_template("roc_pr_curves", ROCPRCurves)
@@ -1023,7 +1006,7 @@ def main() -> None:
     logger.info("")
     logger.info("=" * 80)
     logger.info("CIFAR-10 Window Attention Comparison Experiment")
-    logger.info("WindowAttention vs WindowZigZag vs WindowKAN")
+    logger.info("Unified WindowAttention: Grid vs ZigZag vs KAN")
     logger.info("=" * 80)
     logger.info("")
 
