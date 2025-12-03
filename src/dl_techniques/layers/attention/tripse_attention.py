@@ -23,7 +23,6 @@ from typing import Optional, Tuple, Any, List
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from ..squeeze_excitation import SqueezeExcitation
 
 # ---------------------------------------------------------------------
@@ -173,6 +172,7 @@ class TripletAttentionBranch(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TripSE1(layers.Layer):
@@ -275,6 +275,7 @@ class TripSE1(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TripSE2(layers.Layer):
@@ -403,6 +404,7 @@ class TripSE2(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TripSE3(layers.Layer):
@@ -530,6 +532,7 @@ class TripSE3(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class _SEWeights(layers.Layer):
@@ -611,6 +614,7 @@ class _SEWeights(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class TripSE4(layers.Layer):
@@ -756,3 +760,6 @@ class TripSE4(layers.Layer):
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
+

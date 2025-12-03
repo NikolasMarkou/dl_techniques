@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports seventeen different attention mechanisms, from standard multi-head attention
+The factory supports twenty-one different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -26,8 +26,8 @@ Example:
     >>> # Create an efficient mobile MQA layer
     >>> mobile_attn = create_attention_layer('mobile_mqa', dim=256, use_downsampling=True)
     >>>
-    >>> # Create CBAM for CNN enhancement
-    >>> cbam = create_attention_layer('cbam', channels=128, ratio=16)
+    >>> # Create TripSE1 for 3D attention
+    >>> tripse = create_attention_layer('tripse1', reduction_ratio=0.0625, kernel_size=7)
 """
 
 import keras
@@ -54,6 +54,7 @@ from .non_local_attention import NonLocalAttention
 from .perceiver_attention import PerceiverAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 from .spatial_attention import SpatialAttention
+from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
 from .window_attention import (
     create_zigzag_window_attention,
     create_grid_window_attention
@@ -79,6 +80,10 @@ AttentionType = Literal[
     'perceiver',
     'shared_weights_cross',
     'spatial',
+    'tripse1',
+    'tripse2',
+    'tripse3',
+    'tripse4',
     'window',
     'window_zigzag'
 ]
@@ -508,6 +513,102 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'paper': 'CBAM: Convolutional Block Attention Module'
     },
 
+    'tripse1': {
+        'class': TripSE1,
+        'description': (
+            'Triplet Attention with Post-Fusion Squeeze-and-Excitation. Combines multi-axis '
+            'triplet attention (capturing cross-dimensional interactions) with a global channel '
+            'recalibration block after branch fusion, achieving comprehensive 3D attention.'
+        ),
+        'required_params': [],
+        'optional_params': {
+            'reduction_ratio': 0.0625,
+            'kernel_size': 7,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None
+        },
+        'use_case': (
+            'Computer vision tasks requiring both spatial and channel-wise refinement. '
+            'A powerful drop-in replacement for standard CBAM or SE blocks in CNNs '
+            'where capturing inter-dimensional relationships is beneficial.'
+        ),
+        'complexity': 'O(HWC) + SE overhead',
+        'paper': 'Achieving 3D Attention via Triplet Squeeze and Excitation Block'
+    },
+
+    'tripse2': {
+        'class': TripSE2,
+        'description': (
+            'Triplet Attention with Pre-Process Squeeze-and-Excitation. Applies channel '
+            'recalibration independently to each permuted branch before spatial processing, '
+            'allowing the network to weight features prior to rotation and filtering.'
+        ),
+        'required_params': [],
+        'optional_params': {
+            'reduction_ratio': 0.0625,
+            'kernel_size': 7,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None
+        },
+        'use_case': (
+            'Variants of 3D attention where channel importance is dominant and should '
+            'condition the spatial attention generation process. Effective for complex '
+            'feature extraction in deeper network stages.'
+        ),
+        'complexity': '3x SE overhead compared to TripSE1',
+        'paper': 'Achieving 3D Attention via Triplet Squeeze and Excitation Block'
+    },
+
+    'tripse3': {
+        'class': TripSE3,
+        'description': (
+            'Triplet Attention with Parallel Squeeze-and-Excitation. Processes spatial '
+            'and channel attention paths concurrently and combines them via element-wise '
+            'multiplication, treating them as independent descriptors of feature importance.'
+        ),
+        'required_params': [],
+        'optional_params': {
+            'reduction_ratio': 0.0625,
+            'kernel_size': 7,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None
+        },
+        'use_case': (
+            'Architectures favoring parallel processing paths to preserve gradient flow '
+            'for both spatial and channel characteristics. Useful when spatial and channel '
+            'information are relatively decoupled.'
+        ),
+        'complexity': 'O(HWC) with parallel execution paths',
+        'paper': 'Achieving 3D Attention via Triplet Squeeze and Excitation Block'
+    },
+
+    'tripse4': {
+        'class': TripSE4,
+        'description': (
+            'Hybrid 3D Attention with Affine Fusion. Merges spatial and channel logits '
+            'before activation, creating a unified 3D attention map that jointly optimizes '
+            'spatial locations and channel features rather than applying them sequentially.'
+        ),
+        'required_params': [],
+        'optional_params': {
+            'reduction_ratio': 0.0625,
+            'kernel_size': 7,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None
+        },
+        'use_case': (
+            'Advanced vision tasks where the correlation between "where" (spatial) and '
+            '"what" (channel) is highly entangled. Provides the most strictly defined '
+            '"3D attention" mechanism among the variants.'
+        ),
+        'complexity': 'Similar to TripSE2 but with broadcasted logit fusion',
+        'paper': 'Achieving 3D Attention via Triplet Squeeze and Excitation Block'
+    },
+
     'window': {
         'class': create_grid_window_attention,
         'description': (
@@ -710,6 +811,11 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     # Validate ratio parameters (must be positive)
     if 'ratio' in kwargs and kwargs['ratio'] <= 0:
         raise ValueError(f"Parameter 'ratio' must be positive, got {kwargs['ratio']}")
+    if 'reduction_ratio' in kwargs and kwargs['reduction_ratio'] <= 0:
+        raise ValueError(
+            f"Parameter 'reduction_ratio' must be positive, "
+            f"got {kwargs['reduction_ratio']}"
+        )
 
     # Validate max_seq_len parameter
     if 'max_seq_len' in kwargs and kwargs['max_seq_len'] <= 0:

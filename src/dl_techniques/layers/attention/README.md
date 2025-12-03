@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes twenty-one different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes twenty-five different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -31,6 +31,10 @@ The following layers are supported by the factory system with automated paramete
 | `rpc` | `RPCAttention` | Robust attention via Principal Component Pursuit decomposition. | Models needing robustness to noise and adversarial attacks. | `(batch, seq_len, dim)` |
 | `shared_weights_cross` | `SharedWeightsCrossAttention`| Cross-attention between modalities with shared weights. | Efficient multi-modal learning where different data types exchange information. | `(batch, total_seq_len, dim)` |
 | `spatial` | `SpatialAttention` | Spatial attention module from CBAM. | CNNs to highlight spatially significant feature regions. | `(batch, H, W, channels)` |
+| `tripse1` | `TripSE1` | Triplet Attention with Post-Fusion Squeeze-and-Excitation. | Vision tasks needing comprehensive 3D attention (Spatial + Channel). | `(batch, H, W, channels)` |
+| `tripse2` | `TripSE2` | Triplet Attention with Pre-Process Squeeze-and-Excitation. | Vision tasks where channel recalibration should precede spatial rotation. | `(batch, H, W, channels)` |
+| `tripse3` | `TripSE3` | Triplet Attention with Parallel Squeeze-and-Excitation. | Vision tasks requiring independent spatial and channel modeling. | `(batch, H, W, channels)` |
+| `tripse4` | `TripSE4` | Hybrid 3D Attention with Affine Fusion of logits. | Advanced vision tasks requiring deep integration of spatial/channel contexts. | `(batch, H, W, channels)` |
 | `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
 | `window_zigzag` | `WindowAttention` | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
 
@@ -46,6 +50,16 @@ mha = create_attention_layer('multi_head', dim=256, num_heads=8)
 
 # Create a CBAM block for a CNN
 cbam = create_attention_layer('cbam', channels=128, ratio=16)
+```
+
+```python
+from dl_techniques.layers.attention import create_attention_layer
+
+# Create a standard multi-head attention layer
+mha = create_attention_layer('multi_head', dim=256, num_heads=8)
+
+# Create a TripSE block for 3D attention in a CNN
+tripse = create_attention_layer('tripse1', kernel_size=7, reduction_ratio=0.0625)
 ```
 
 ### Configuration-Based Creation
@@ -323,6 +337,18 @@ attn = create_attention_layer(
 )
 ```
 
+### `tripse1` / `tripse2` / `tripse3` / `tripse4`
+**Required:** None  
+**Optional:** `reduction_ratio` (default: 0.0625), `kernel_size` (default: 7), `use_bias` (default: False)
+```python
+# Create TripSE1 (Post-Fusion SE)
+attn = create_attention_layer(
+    'tripse1',
+    reduction_ratio=0.125,
+    kernel_size=5
+)
+```
+
 ### `window`
 **Required:** `dim`, `window_size`, `num_heads`  
 **Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True)
@@ -356,11 +382,12 @@ attn = create_attention_layer(
 While the factory is recommended, direct instantiation is always available.
 
 ```python
-from dl_techniques.layers.attention import MultiHeadAttention, CBAM, WindowAttention
+from dl_techniques.layers.attention import MultiHeadAttention, CBAM, TripSE1, WindowAttention
 
 # Direct instantiation (bypasses factory validation and defaults)
 mha = MultiHeadAttention(dim=512, num_heads=8)
 cbam = CBAM(channels=256, ratio=16)
+tripse = TripSE1(reduction_ratio=0.0625, kernel_size=7)
 window_attn = WindowAttention(dim=96, window_size=7, num_heads=4)
 ```
 
