@@ -50,6 +50,9 @@ class AnalysisConfig:
     spectral_randomize: bool = False
     spectral_concentration_analysis: bool = True
 
+    # NEW FLAG: Controls generation of individual layer plot files
+    spectral_per_layer_diagnostics: bool = False
+
     # Visualization settings
     plot_style: str = 'publication'
     color_palette: str = 'deep'

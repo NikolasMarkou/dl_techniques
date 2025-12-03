@@ -197,7 +197,7 @@ class ExperimentConfig:
     kan_regularization: float = 0.01
 
     # Training configuration
-    epochs: int = 10
+    epochs: int = 100
     batch_size: int = 64
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
@@ -729,38 +729,36 @@ def analyze_models(
     y_true_indices = np.argmax(data.y_test, axis=1)
 
     # --- 2. Individual Confusion Matrices ---
+    all_classification_results = {}
     for model_name, predictions in all_predictions.items():
-        classification_results = ClassificationResults(
-            y_true=y_true_indices,
-            y_pred=np.argmax(predictions, axis=1),
-            y_prob=predictions,
-            class_names=data.class_names,
-            model_name=model_name
-        )
-        viz_manager.visualize(
-            data=classification_results,
-            plugin_name="confusion_matrix",
-            title=f"Confusion Matrix: {model_name}"
-        )
+        try:
+            classification_data = ClassificationResults(
+                y_true=y_true_indices,
+                y_pred=np.argmax(predictions, axis=1),
+                y_prob=predictions,
+                class_names=data.class_names,
+                model_name=model_name
+            )
+            all_classification_results[model_name] = classification_data
+        except Exception as e:
+            logger.error(f"Failed to prepare classification results for {model_name}: {e}")
 
     # --- 3. Multi-Model Comparison (ROC & PR Curves) ---
-    multi_model_data = MultiModelClassification(
-        results={
-            name: ClassificationResults(
-                y_true=y_true_indices,
-                y_pred=np.argmax(preds, axis=1),
-                y_prob=preds,
-                class_names=data.class_names,
-                model_name=name
-            ) for name, preds in all_predictions.items()
-        },
-        dataset_name="CIFAR-10"
-    )
-    viz_manager.visualize(
-        data=multi_model_data,
-        plugin_name="roc_pr_curves",
-        title="ROC & PR Curves: Attention Mechanisms Comparison"
-    )
+    # Create multi-model visualization
+    if all_classification_results:
+        multi_model_data = MultiModelClassification(
+            results=all_classification_results,
+            dataset_name="CIFAR-10"
+        )
+
+        viz_manager.visualize(
+            data=multi_model_data,
+            plugin_name="confusion_matrix",
+            normalize='true',
+            show=False
+        )
+        logger.info("Multi-model confusion matrix visualization created")
+        logger.info("")
 
     logger.info(f"Visualizations saved to: {config.output_dir}")
 

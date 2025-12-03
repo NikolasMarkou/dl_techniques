@@ -1,6 +1,4 @@
 """
-This module implements the Stochastic Depth regularization technique.
-
 Stochastic Depth is a regularization method primarily used in very deep neural networks,
 particularly those with residual connections (e.g., ResNets, Vision Transformers). Its
 purpose is to improve training stability and generalization by randomly dropping

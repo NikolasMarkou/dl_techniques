@@ -55,6 +55,12 @@ from typing import Optional, Union, Tuple, Dict, Any
 from keras import layers, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from .squeeze_excitation import SqueezeExcitation
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MobileOneBlock(keras.layers.Layer):
@@ -242,7 +248,6 @@ class MobileOneBlock(keras.layers.Layer):
 
         # SE block if requested - reuse dl_techniques implementation
         if use_se:
-            from dl_techniques.layers.squeeze_excitation import SqueezeExcitation
             self.se_block = SqueezeExcitation(
                 reduction_ratio=0.25,
                 kernel_initializer=self.kernel_initializer,
