@@ -51,7 +51,7 @@ class SpectralVisualizer(BaseVisualizer):
         self._create_summary_dashboard()
 
         # 2. Create detailed diagnostic plots for each analyzed layer, saved in a subdirectory.
-        if self.config.plot_spectral_per_layer_diagnostics:
+        if self.config.spectral_per_layer_diagnostics:
             self._create_per_layer_plots()
 
     def _create_summary_dashboard(self) -> None:
