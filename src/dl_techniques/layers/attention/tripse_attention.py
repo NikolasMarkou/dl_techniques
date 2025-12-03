@@ -9,271 +9,50 @@ Combines Triplet Attention with Squeeze-and-Excitation to create 3D attention th
 - Global channel importance (from SE)
 
 Four variants are implemented:
-- TripSE1: SE block after branch summation
-- TripSE2: SE block at beginning of each branch
-- TripSE3: SE blocks embedded within branches (parallel)
-- TripSE4: Hybrid with SE at multiple positions and affine transformation
+- TripSE1: SE block after branch summation (Post-fusion SE).
+- TripSE2: SE block at beginning of each branch (Pre-process SE).
+- TripSE3: SE blocks embedded within branches (Parallel SE).
+- TripSE4: Hybrid with affine combination of spatial and channel descriptors (3D Attention).
 """
 
 import keras
-from typing import Optional, Tuple, Literal
+from keras import ops, layers, initializers, regularizers
+from typing import Optional, Tuple, Any, List
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from ..squeeze_excitation import SqueezeExcitation
+
+# ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
-class SqueezeExcitation(keras.layers.Layer):
-    """
-    Squeeze-and-Excitation block.
-
-    Applies global average pooling followed by two fully connected layers
-    to recalibrate channel-wise features.
-
-    ASCII Diagram::
-
-        Input (B, H, W, C)
-                |
-        Global Avg Pool
-                |
-            (B, 1, 1, C)
-                |
-          Dense (C/r)
-                |
-            ReLU
-                |
-          Dense (C)
-                |
-            Sigmoid
-                |
-            (B, 1, 1, C)
-                |
-                × (element-wise multiply)
-                |
-        Output (B, H, W, C)
-
-    Parameters
-    ----------
-    channels : int
-        Number of channels to recalibrate.
-    reduction_ratio : int, default=16
-        Channel reduction ratio for bottleneck.
-    activation : str, default="relu"
-        Activation function for the bottleneck layer.
-    use_bias : bool, default=True
-        Whether to use bias in dense layers.
-    kernel_initializer : str, default="glorot_uniform"
-        Initializer for kernel weights.
-    bias_initializer : str, default="zeros"
-        Initializer for bias weights.
-    kernel_regularizer : Optional, default=None
-        Regularizer for kernel weights.
-    bias_regularizer : Optional, default=None
-        Regularizer for bias weights.
-
-    References
-    ----------
-    Hu et al., "Squeeze-and-Excitation Networks," CVPR 2018.
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        reduction_ratio: int = 16,
-        activation: str = "relu",
-        use_bias: bool = True,
-        kernel_initializer: str = "glorot_uniform",
-        bias_initializer: str = "zeros",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.channels = channels
-        self.reduction_ratio = reduction_ratio
-        self.activation = activation
-        self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
-
-        # Sub-layers created in __init__
-        reduced_channels = max(channels // reduction_ratio, 1)
-
-        self.global_avg_pool = keras.layers.GlobalAveragePooling2D(
-            keepdims=True,
-            name="gap"
-        )
-
-        self.dense_1 = keras.layers.Dense(
-            reduced_channels,
-            activation=activation,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name="fc1"
-        )
-
-        self.dense_2 = keras.layers.Dense(
-            channels,
-            activation="sigmoid",
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name="fc2"
-        )
-
-        logger.debug(
-            f"Initialized SqueezeExcitation: channels={channels}, "
-            f"reduction_ratio={reduction_ratio}, reduced_channels={reduced_channels}"
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of input tensor (batch, height, width, channels).
-        """
-        # Build sub-layers explicitly
-        batch, height, width, channels = input_shape
-
-        # GAP output shape
-        gap_output_shape = (batch, 1, 1, channels)
-        self.global_avg_pool.build(input_shape)
-
-        # Dense 1 processes flattened GAP output
-        self.dense_1.build((batch, 1, 1, channels))
-
-        # Dense 2 output shape
-        reduced_channels = max(self.channels // self.reduction_ratio, 1)
-        self.dense_2.build((batch, 1, 1, reduced_channels))
-
-        super().build(input_shape)
-        logger.debug(f"Built SqueezeExcitation with input_shape={input_shape}")
-
-    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """
-        Forward pass of SE block.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch, height, width, channels).
-        training : bool, optional
-            Whether in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Recalibrated tensor of same shape as input.
-        """
-        # Squeeze: Global average pooling
-        squeeze = self.global_avg_pool(inputs)
-
-        # Excitation: FC -> activation -> FC -> sigmoid
-        excitation = self.dense_1(squeeze)
-        excitation = self.dense_2(excitation)
-
-        # Scale input by channel attention weights
-        return keras.ops.multiply(inputs, excitation)
-
-    def get_config(self) -> dict:
-        """Return layer configuration."""
-        config = super().get_config()
-        config.update({
-            "channels": self.channels,
-            "reduction_ratio": self.reduction_ratio,
-            "activation": self.activation,
-            "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "bias_initializer": self.bias_initializer,
-            "kernel_regularizer": keras.saving.serialize_keras_object(self.kernel_regularizer),
-            "bias_regularizer": keras.saving.serialize_keras_object(self.bias_regularizer),
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config: dict) -> "SqueezeExcitation":
-        """Create layer from config."""
-        kernel_regularizer = config.pop("kernel_regularizer", None)
-        bias_regularizer = config.pop("bias_regularizer", None)
-
-        if kernel_regularizer is not None:
-            config["kernel_regularizer"] = keras.saving.deserialize_keras_object(kernel_regularizer)
-        if bias_regularizer is not None:
-            config["bias_regularizer"] = keras.saving.deserialize_keras_object(bias_regularizer)
-
-        return cls(**config)
-
-
-@keras.saving.register_keras_serializable(package="dl_techniques")
-class TripletAttentionBranch(keras.layers.Layer):
+@keras.saving.register_keras_serializable()
+class TripletAttentionBranch(layers.Layer):
     """
     Single branch of Triplet Attention mechanism.
 
     Captures cross-dimensional interaction by rotating tensor dimensions,
     applying Z-pooling (avg + max), convolution, and sigmoid activation.
 
-    ASCII Diagram::
+    Shape Flow:
+        Input (B, H, W, C) -> Permute -> (B, D1, D2, D3)
+        Z-Pool (D3) -> (B, D1, D2, 2)
+        Conv2D -> (B, D1, D2, 1)
+        Sigmoid -> Attention Map
+        Output -> Input * Attention Map (Broadcasted) -> Inverse Permute
 
-        Input (B, H, W, C)
-                |
-            Permute (rotation depends on branch)
-                |
-        (B, D1, D2, D3)  [D1, D2, D3 are permuted dimensions]
-                |
-            Z-Pooling
-        +-------+-------+
-        |               |
-    Avg Pool        Max Pool
-    (along D3)      (along D3)
-        |               |
-        +-------+-------+
-                |
-        Concatenate → (B, D1, D2, 2)
-                |
-            Conv 7x7
-                |
-        (B, D1, D2, 1)
-                |
-            BatchNorm
-                |
-            Sigmoid
-                |
-        Attention Map (B, D1, D2, 1)
-                |
-                × (multiply with permuted input)
-                |
-        Inverse Permute (rotate back)
-                |
-        Output (B, H, W, C)
-
-    Parameters
-    ----------
-    kernel_size : int, default=7
-        Convolutional kernel size for attention computation.
-    permute_pattern : Tuple[int, int, int]
-        Permutation pattern for dimension rotation.
-        (0,1,2) = no rotation (H-W branch)
-        (0,2,1) = rotate C-W (height<->channel)
-        (2,1,0) = rotate H-C (width<->channel)
-    use_bias : bool, default=False
-        Whether to use bias in conv layer.
-    kernel_initializer : str, default="glorot_uniform"
-        Initializer for kernel weights.
-    kernel_regularizer : Optional, default=None
-        Regularizer for kernel weights.
-
-    References
-    ----------
-    Misra et al., "Rotate to Attend: Convolutional Triplet Attention Module," WACV 2021.
+    Parameters:
+        kernel_size: Int, kernel size for the convolution. Default 7.
+        permute_pattern: Tuple of 3 ints, permutation pattern.
+            (0, 1, 2) means no rotation (H-W plane).
+            (0, 2, 1) means C-W plane (rotate H-C).
+            (2, 1, 0) means H-C plane (rotate W-C).
+        use_bias: Bool, whether to use bias in convolution.
+        kernel_initializer: Initializer for kernel weights.
+        kernel_regularizer: Regularizer for kernel weights.
     """
 
     def __init__(
@@ -282,1197 +61,698 @@ class TripletAttentionBranch(keras.layers.Layer):
         permute_pattern: Tuple[int, int, int] = (0, 1, 2),
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[Any] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.kernel_size = kernel_size
         self.permute_pattern = permute_pattern
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Sub-layers
-        self.conv = keras.layers.Conv2D(
+        # Layers defined in init, built in build
+        self.conv = layers.Conv2D(
             filters=1,
             kernel_size=kernel_size,
             strides=1,
             padding="same",
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name="conv"
         )
-
-        self.batch_norm = keras.layers.BatchNormalization(name="bn")
-        self.sigmoid = keras.layers.Activation("sigmoid", name="sigmoid")
-
-        logger.debug(
-            f"Initialized TripletAttentionBranch: kernel_size={kernel_size}, "
-            f"permute_pattern={permute_pattern}"
-        )
+        self.batch_norm = layers.BatchNormalization(name="bn")
+        self.sigmoid = layers.Activation("sigmoid", name="sigmoid")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
+        """Build the branch layers."""
+        # Determine shape after permutation
+        # input_shape is (B, H, W, C)
+        # We need to simulate the permutation to know the spatial dims for logging/debug
+        # ensuring the conv builds correctly on the pooled channel dim (which is always 2).
+        
+        # The input to Conv2D is always (B, D1, D2, 2) regardless of permutation
+        # because Z-pooling (Mean+Max) reduces the last dim to 2.
+        # However, we must ensure explicit build for serialization safety.
+        
+        if len(input_shape) != 4:
+            raise ValueError(f"Input must be 4D, got {input_shape}")
 
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of input tensor (batch, height, width, channels).
-        """
-        batch, height, width, channels = input_shape
-
-        # After permutation and Z-pooling, we have 2 channels
-        # Shape depends on permutation pattern
-        if self.permute_pattern == (0, 1, 2):  # H-W branch (no rotation)
-            conv_input_shape = (batch, height, width, 2)
-        elif self.permute_pattern == (0, 2, 1):  # C-W branch
-            conv_input_shape = (batch, channels, width, 2)
-        else:  # H-C branch
-            conv_input_shape = (batch, height, channels, 2)
-
+        batch = input_shape[0]
+        # Map input dimensions based on pattern to simulate the 'internal' shape
+        # Pattern (0,1,2) -> (H, W, C)
+        # Pattern (0,2,1) -> (C, W, H) (Example logic, actual depends on implementation)
+        # We just need to know the Conv input has 2 channels.
+        
+        permuted_dims = [input_shape[i+1] for i in self.permute_pattern]
+        
+        # Conv input: (Batch, D1, D2, 2)
+        conv_input_shape = (batch, permuted_dims[0], permuted_dims[1], 2)
         self.conv.build(conv_input_shape)
-        self.batch_norm.build((batch, conv_input_shape[1], conv_input_shape[2], 1))
-
+        
+        # BN input: (Batch, D1, D2, 1)
+        conv_output_shape = (batch, permuted_dims[0], permuted_dims[1], 1)
+        self.batch_norm.build(conv_output_shape)
+        
         super().build(input_shape)
-        logger.debug(f"Built TripletAttentionBranch with input_shape={input_shape}")
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass of triplet attention branch.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch, height, width, channels).
-        training : bool, optional
-            Whether in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Attention-modulated tensor of same shape as input.
-        """
-        # Step 1: Permute dimensions (rotate tensor)
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        # 1. Permute
         if self.permute_pattern != (0, 1, 2):
-            x = keras.ops.transpose(inputs, [0] + list(self.permute_pattern))
+            # ops.transpose expects [batch_dim, ...dims]
+            # permute_pattern is relative to spatial+channel dims (0,1,2)
+            # We map (0,1,2,3) -> (0, p0+1, p1+1, p2+1)
+            perm_order = [0] + [p + 1 for p in self.permute_pattern]
+            x = ops.transpose(inputs, perm_order)
         else:
             x = inputs
 
-        # Step 2: Z-pooling (concatenate avg and max pooling along last dimension)
-        avg_pool = keras.ops.mean(x, axis=-1, keepdims=True)
-        max_pool = keras.ops.max(x, axis=-1, keepdims=True)
-        pooled = keras.ops.concatenate([avg_pool, max_pool], axis=-1)
+        # 2. Z-Pooling (Concatenate Avg and Max along last dimension)
+        # Result shape: (B, D1, D2, 2)
+        avg_pool = ops.mean(x, axis=-1, keepdims=True)
+        max_pool = ops.max(x, axis=-1, keepdims=True)
+        pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
 
-        # Step 3: Convolution + BatchNorm + Sigmoid
+        # 3. Attention Map Generation
         attention = self.conv(pooled)
         attention = self.batch_norm(attention, training=training)
         attention = self.sigmoid(attention)
 
-        # Step 4: Scale the permuted input
-        scaled = keras.ops.multiply(x, attention)
+        # 4. Apply Attention
+        # x shape: (B, D1, D2, D3), attention shape: (B, D1, D2, 1)
+        # Broadcasting handles the multiplication automatically
+        scaled = ops.multiply(x, attention)
 
-        # Step 5: Rotate back to original dimensions
+        # 5. Inverse Permute
         if self.permute_pattern != (0, 1, 2):
-            # Inverse permutation
-            inv_pattern = [self.permute_pattern.index(i) for i in range(3)]
-            scaled = keras.ops.transpose(scaled, [0] + inv_pattern)
+            # Calculate inverse permutation
+            # Current axes order relative to original: permute_pattern
+            # We need to find indices to restore 0,1,2
+            inv_pattern = [0, 0, 0]
+            for i, p in enumerate(self.permute_pattern):
+                inv_pattern[p] = i
+            
+            # Add batch dim back
+            inv_order = [0] + [p + 1 for p in inv_pattern]
+            scaled = ops.transpose(scaled, inv_order)
 
         return scaled
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        return input_shape
+
     def get_config(self) -> dict:
-        """Return layer configuration."""
         config = super().get_config()
         config.update({
             "kernel_size": self.kernel_size,
             "permute_pattern": self.permute_pattern,
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": keras.saving.serialize_keras_object(self.kernel_regularizer),
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: dict) -> "TripletAttentionBranch":
-        """Create layer from config."""
-        kernel_regularizer = config.pop("kernel_regularizer", None)
-        if kernel_regularizer is not None:
-            config["kernel_regularizer"] = keras.saving.deserialize_keras_object(kernel_regularizer)
-        return cls(**config)
 
-
-@keras.saving.register_keras_serializable(package="dl_techniques")
-class TripSE1(keras.layers.Layer):
+@keras.saving.register_keras_serializable()
+class TripSE1(layers.Layer):
     """
-    TripSE1: Triplet Attention with SE block after branch summation.
+    TripSE1: Triplet Attention with Post-Fusion Squeeze-and-Excitation.
 
     Architecture:
-    1. Three parallel Triplet Attention branches (H-W, C-W, H-C)
-    2. Sum branch outputs
-    3. Apply single SE block to combined output
+    1. Parallel Branches: H-W (no rot), C-W (rot), H-C (rot).
+    2. Summation: Combine outputs of all branches.
+    3. SE Block: Apply channel-wise recalibration to the summed features.
 
-    This variant applies global channel weighting after cross-dimensional interaction.
-
-    ASCII Diagram::
-
-                                Input (B, H, W, C)
-                                        |
-                    +-------------------+-------------------+
-                    |                   |                   |
-                Branch H-W          Branch C-W          Branch H-C
-                (no rotation)       (rotate C-W)        (rotate H-C)
-                    |                   |                   |
-                Z-Pool              Z-Pool              Z-Pool
-            (avg + max pool)    (avg + max pool)    (avg + max pool)
-                    |                   |                   |
-                Conv 7x7            Conv 7x7            Conv 7x7
-                    |                   |                   |
-                BatchNorm           BatchNorm           BatchNorm
-                    |                   |                   |
-                Sigmoid             Sigmoid             Sigmoid
-                    |                   |                   |
-                Scale Input         Scale Input         Scale Input
-                    |                   |                   |
-                Rotate Back         Rotate Back         Rotate Back
-                    |                   |                   |
-                    +-------------------+-------------------+
-                                        |
-                                      Sum
-                                        |
-                                    SE Block
-                                (GAP → FC → FC)
-                                        |
-                                Output (B, H, W, C)
-
-    Parameters
-    ----------
-    reduction_ratio : int, default=16
-        Channel reduction ratio for SE block.
-    kernel_size : int, default=7
-        Convolutional kernel size for triplet attention.
-    use_bias : bool, default=False
-        Whether to use bias in conv layers.
-    kernel_initializer : str, default="glorot_uniform"
-        Initializer for kernel weights.
-    kernel_regularizer : Optional, default=None
-        Regularizer for kernel weights.
-
-    References
-    ----------
-    Alhazmi & Altahhan, "Achieving 3D Attention via Triplet Squeeze and Excitation Block," 2025.
+    Parameters:
+        reduction_ratio: Float, SE reduction ratio.
+        kernel_size: Int, convolution kernel size.
+        use_bias: Bool, use bias in convolution.
+        kernel_initializer: Weights initializer.
+        kernel_regularizer: Weights regularizer.
     """
 
     def __init__(
         self,
-        reduction_ratio: int = 16,
+        reduction_ratio: float = 0.0625,
         kernel_size: int = 7,
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[Any] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Three triplet attention branches
+        # Triplet Attention Branches
         self.branch_hw = TripletAttentionBranch(
             kernel_size=kernel_size,
-            permute_pattern=(0, 1, 2),  # H-W (no rotation)
+            permute_pattern=(0, 1, 2),  # H-W
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name="branch_hw"
         )
-
         self.branch_cw = TripletAttentionBranch(
             kernel_size=kernel_size,
-            permute_pattern=(0, 2, 1),  # C-W (rotate height<->channel)
+            permute_pattern=(0, 2, 1),  # C-W
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name="branch_cw"
         )
-
         self.branch_hc = TripletAttentionBranch(
             kernel_size=kernel_size,
-            permute_pattern=(2, 1, 0),  # H-C (rotate width<->channel)
+            permute_pattern=(2, 1, 0),  # H-C
             use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
             name="branch_hc"
         )
-
-        # SE block will be created in build() when we know channels
-        self.se_block = None
-
-        logger.debug(
-            f"Initialized TripSE1: reduction_ratio={reduction_ratio}, "
-            f"kernel_size={kernel_size}"
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of input tensor (batch, height, width, channels).
-        """
-        batch, height, width, channels = input_shape
-
-        # Build triplet attention branches
-        self.branch_hw.build(input_shape)
-        self.branch_cw.build(input_shape)
-        self.branch_hc.build(input_shape)
-
-        # Create and build SE block
+        
+        # SE Block (created here, built in build)
         self.se_block = SqueezeExcitation(
-            channels=channels,
-            reduction_ratio=self.reduction_ratio,
+            reduction_ratio=reduction_ratio,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="se"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        self.branch_hw.build(input_shape)
+        self.branch_cw.build(input_shape)
+        self.branch_hc.build(input_shape)
         self.se_block.build(input_shape)
-
         super().build(input_shape)
-        logger.debug(f"Built TripSE1 with input_shape={input_shape}, channels={channels}")
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass of TripSE1.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch, height, width, channels).
-        training : bool, optional
-            Whether in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Attention-modulated tensor of same shape as input.
-        """
-        # Three parallel branches
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         out_hw = self.branch_hw(inputs, training=training)
         out_cw = self.branch_cw(inputs, training=training)
         out_hc = self.branch_hc(inputs, training=training)
 
-        # Sum branch outputs
-        combined = keras.ops.add(keras.ops.add(out_hw, out_cw), out_hc)
-
-        # Apply SE block to combined output
+        combined = ops.add(ops.add(out_hw, out_cw), out_hc)
+        # Average before SE? Original paper usually implies Sum or Avg.
+        # We'll use sum as per the prompt's implied logic, SE handles magnitude.
+        
         output = self.se_block(combined, training=training)
-
         return output
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        return input_shape
+
     def get_config(self) -> dict:
-        """Return layer configuration."""
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": keras.saving.serialize_keras_object(self.kernel_regularizer),
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: dict) -> "TripSE1":
-        """Create layer from config."""
-        kernel_regularizer = config.pop("kernel_regularizer", None)
-        if kernel_regularizer is not None:
-            config["kernel_regularizer"] = keras.saving.deserialize_keras_object(kernel_regularizer)
-        return cls(**config)
 
-
-@keras.saving.register_keras_serializable(package="dl_techniques")
-class TripSE2(keras.layers.Layer):
+@keras.saving.register_keras_serializable()
+class TripSE2(layers.Layer):
     """
-    TripSE2: Triplet Attention with SE block at beginning of each branch.
+    TripSE2: Pre-Process Squeeze-and-Excitation.
 
     Architecture:
-    1. Each of three branches starts with SE block (on permuted input)
-    2. SE output goes through Z-pooling, conv, BatchNorm, sigmoid
-    3. Average branch outputs
-
-    This variant applies channel weighting before cross-dimensional operations.
-
-    ASCII Diagram::
-
-                                Input (B, H, W, C)
-                                        |
-                    +-------------------+-------------------+
-                    |                   |                   |
-                Branch H-W          Branch C-W          Branch H-C
-                    |                   |                   |
-                (no rotation)       Permute (C,W,H)     Permute (H,C,W)
-                    |                   |                   |
-                SE Block            SE Block            SE Block
-            (GAP → FC → FC)     (GAP → FC → FC)     (GAP → FC → FC)
-                    |                   |                   |
-                Z-Pool              Z-Pool              Z-Pool
-            (avg + max pool)    (avg + max pool)    (avg + max pool)
-                    |                   |                   |
-                Conv 7x7            Conv 7x7            Conv 7x7
-                    |                   |                   |
-                BatchNorm           BatchNorm           BatchNorm
-                    |                   |                   |
-                Sigmoid             Sigmoid             Sigmoid
-                    |                   |                   |
-                Scale Input         Scale Input         Scale Input
-                    |                   |                   |
-                (no rotation)       Rotate Back         Rotate Back
-                    |                   |                   |
-                    +-------------------+-------------------+
-                                        |
-                                    Average
-                                        |
-                                Output (B, H, W, C)
-
-    Parameters
-    ----------
-    reduction_ratio : int, default=16
-        Channel reduction ratio for SE blocks.
-    kernel_size : int, default=7
-        Convolutional kernel size for triplet attention.
-    use_bias : bool, default=False
-        Whether to use bias in conv layers.
-    kernel_initializer : str, default="glorot_uniform"
-        Initializer for kernel weights.
-    kernel_regularizer : Optional, default=None
-        Regularizer for kernel weights.
-
-    References
-    ----------
-    Alhazmi & Altahhan, "Achieving 3D Attention via Triplet Squeeze and Excitation Block," 2025.
+    1. Permute Input for each branch.
+    2. Apply SE Block to the permuted input (treating permuted 'channels' as features).
+    3. Apply Triplet Attention (Z-Pool -> Conv -> BN -> Sigmoid) to SE output.
+    4. Inverse Permute and Average branches.
     """
 
     def __init__(
         self,
-        reduction_ratio: int = 16,
+        reduction_ratio: float = 0.0625,
         kernel_size: int = 7,
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[Any] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # SE blocks and triplet branches will be created in build()
-        self.se_hw = None
-        self.se_cw = None
-        self.se_hc = None
-
-        self.branch_hw = None
-        self.branch_cw = None
-        self.branch_hc = None
-
-        logger.debug(
-            f"Initialized TripSE2: reduction_ratio={reduction_ratio}, "
-            f"kernel_size={kernel_size}"
-        )
+        # We need distinct SE and Conv blocks for each branch because shapes differ
+        self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
+        self._suffixes = ["hw", "cw", "hc"]
+        
+        # Containers for sub-layers
+        self.se_layers: List[SqueezeExcitation] = []
+        self.conv_layers: List[layers.Conv2D] = []
+        self.bn_layers: List[layers.BatchNormalization] = []
+        
+        for suffix in self._suffixes:
+            self.se_layers.append(SqueezeExcitation(
+                reduction_ratio=reduction_ratio,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"se_{suffix}"
+            ))
+            self.conv_layers.append(layers.Conv2D(
+                filters=1,
+                kernel_size=kernel_size,
+                padding="same",
+                use_bias=use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"conv_{suffix}"
+            ))
+            self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of input tensor (batch, height, width, channels).
-        """
-        batch, height, width, channels = input_shape
-
-        # Create SE blocks for each branch
-        self.se_hw = SqueezeExcitation(
-            channels=channels,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_hw"
-        )
-        self.se_hw.build(input_shape)
-
-        # For C-W branch, after permutation shape is (batch, channels, width, height)
-        # But SE still operates on last dimension which is now height (original channels)
-        self.se_cw = SqueezeExcitation(
-            channels=height,  # After permutation, height becomes channel dim
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_cw"
-        )
-        cw_shape = (batch, channels, width, height)
-        self.se_cw.build(cw_shape)
-
-        # For H-C branch, after permutation shape is (batch, height, channels, width)
-        self.se_hc = SqueezeExcitation(
-            channels=width,  # After permutation, width becomes channel dim
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_hc"
-        )
-        hc_shape = (batch, height, channels, width)
-        self.se_hc.build(hc_shape)
-
-        # Create triplet attention processing (without SE, since it's applied before)
-        # We need custom processing per branch
-        # Conv layers for each branch
-        self.conv_hw = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_hw"
-        )
-        self.conv_hw.build((batch, height, width, 2))
-
-        self.conv_cw = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_cw"
-        )
-        self.conv_cw.build((batch, channels, width, 2))
-
-        self.conv_hc = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_hc"
-        )
-        self.conv_hc.build((batch, height, channels, 2))
-
-        # BatchNorm layers
-        self.bn_hw = keras.layers.BatchNormalization(name="bn_hw")
-        self.bn_hw.build((batch, height, width, 1))
-
-        self.bn_cw = keras.layers.BatchNormalization(name="bn_cw")
-        self.bn_cw.build((batch, channels, width, 1))
-
-        self.bn_hc = keras.layers.BatchNormalization(name="bn_hc")
-        self.bn_hc.build((batch, height, channels, 1))
+        batch = input_shape[0]
+        
+        for i, pattern in enumerate(self._patterns):
+            # Calculate permuted shape
+            # Pattern relative to (H,W,C) -> e.g. (0,2,1) means (H,C,W)
+            # Ops.transpose uses (B, H, W, C) indices [0, 1, 2, 3]
+            # Pattern indices map to [1, 2, 3]
+            perm_indices = [p + 1 for p in pattern]
+            permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
+            
+            # Build SE on permuted shape
+            self.se_layers[i].build(permuted_shape)
+            
+            # Conv input is (B, D1, D2, 2)
+            d1, d2 = permuted_shape[1], permuted_shape[2]
+            self.conv_layers[i].build((batch, d1, d2, 2))
+            self.bn_layers[i].build((batch, d1, d2, 1))
 
         super().build(input_shape)
-        logger.debug(f"Built TripSE2 with input_shape={input_shape}, channels={channels}")
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass of TripSE2.
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        outputs = []
+        
+        for i, pattern in enumerate(self._patterns):
+            # 1. Permute
+            if pattern != (0, 1, 2):
+                perm_order = [0] + [p + 1 for p in pattern]
+                x = ops.transpose(inputs, perm_order)
+            else:
+                x = inputs
+            
+            # 2. SE Block
+            x_se = self.se_layers[i](x, training=training)
+            
+            # 3. Triplet Attention Core
+            avg_pool = ops.mean(x_se, axis=-1, keepdims=True)
+            max_pool = ops.max(x_se, axis=-1, keepdims=True)
+            pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+            
+            att = self.conv_layers[i](pooled)
+            att = self.bn_layers[i](att, training=training)
+            att = ops.sigmoid(att)
+            
+            # 4. Scale
+            branch_out = ops.multiply(x_se, att)
+            
+            # 5. Inverse Permute
+            if pattern != (0, 1, 2):
+                inv_pattern = [0, 0, 0]
+                for idx, p in enumerate(pattern):
+                    inv_pattern[p] = idx
+                inv_order = [0] + [p + 1 for p in inv_pattern]
+                branch_out = ops.transpose(branch_out, inv_order)
+            
+            outputs.append(branch_out)
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch, height, width, channels).
-        training : bool, optional
-            Whether in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Attention-modulated tensor of same shape as input.
-        """
-        # Branch H-W (no rotation)
-        x_hw = inputs
-        x_hw = self.se_hw(x_hw, training=training)
-        # Z-pooling
-        avg_hw = keras.ops.mean(x_hw, axis=-1, keepdims=True)
-        max_hw = keras.ops.max(x_hw, axis=-1, keepdims=True)
-        pooled_hw = keras.ops.concatenate([avg_hw, max_hw], axis=-1)
-        # Conv + BN + Sigmoid
-        att_hw = self.conv_hw(pooled_hw)
-        att_hw = self.bn_hw(att_hw, training=training)
-        att_hw = keras.ops.sigmoid(att_hw)
-        out_hw = keras.ops.multiply(x_hw, att_hw)
-
-        # Branch C-W (permute to channels, width, height)
-        x_cw = keras.ops.transpose(inputs, [0, 3, 2, 1])  # (B, C, W, H)
-        x_cw = self.se_cw(x_cw, training=training)
-        # Z-pooling
-        avg_cw = keras.ops.mean(x_cw, axis=-1, keepdims=True)
-        max_cw = keras.ops.max(x_cw, axis=-1, keepdims=True)
-        pooled_cw = keras.ops.concatenate([avg_cw, max_cw], axis=-1)
-        # Conv + BN + Sigmoid
-        att_cw = self.conv_cw(pooled_cw)
-        att_cw = self.bn_cw(att_cw, training=training)
-        att_cw = keras.ops.sigmoid(att_cw)
-        scaled_cw = keras.ops.multiply(x_cw, att_cw)
-        # Rotate back
-        out_cw = keras.ops.transpose(scaled_cw, [0, 3, 2, 1])  # (B, H, W, C)
-
-        # Branch H-C (permute to height, channels, width)
-        x_hc = keras.ops.transpose(inputs, [0, 1, 3, 2])  # (B, H, C, W)
-        x_hc = self.se_hc(x_hc, training=training)
-        # Z-pooling
-        avg_hc = keras.ops.mean(x_hc, axis=-1, keepdims=True)
-        max_hc = keras.ops.max(x_hc, axis=-1, keepdims=True)
-        pooled_hc = keras.ops.concatenate([avg_hc, max_hc], axis=-1)
-        # Conv + BN + Sigmoid
-        att_hc = self.conv_hc(pooled_hc)
-        att_hc = self.bn_hc(att_hc, training=training)
-        att_hc = keras.ops.sigmoid(att_hc)
-        scaled_hc = keras.ops.multiply(x_hc, att_hc)
-        # Rotate back
-        out_hc = keras.ops.transpose(scaled_hc, [0, 1, 3, 2])  # (B, H, W, C)
-
-        # Average the three branches
-        output = keras.ops.add(keras.ops.add(out_hw, out_cw), out_hc)
-        output = keras.ops.divide(output, 3.0)
-
-        return output
+        # Average results
+        total = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
+        return ops.divide(total, 3.0)
 
     def get_config(self) -> dict:
-        """Return layer configuration."""
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": keras.saving.serialize_keras_object(self.kernel_regularizer),
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: dict) -> "TripSE2":
-        """Create layer from config."""
-        kernel_regularizer = config.pop("kernel_regularizer", None)
-        if kernel_regularizer is not None:
-            config["kernel_regularizer"] = keras.saving.deserialize_keras_object(kernel_regularizer)
-        return cls(**config)
 
-
-@keras.saving.register_keras_serializable(package="dl_techniques")
-class TripSE3(keras.layers.Layer):
+@keras.saving.register_keras_serializable()
+class TripSE3(layers.Layer):
     """
-    TripSE3: Triplet Attention with SE blocks embedded within branches (parallel).
+    TripSE3: Parallel Squeeze-and-Excitation.
 
     Architecture:
-    1. Each branch processes input through triplet attention (rotation + Z-pool + conv)
-    2. In parallel, SE block processes permuted input
-    3. SE output scales the branch attention map
-    4. Average branch outputs
-
-    This variant applies intermediate channel attention in parallel within each branch.
-
-    ASCII Diagram::
-
-                                Input (B, H, W, C)
-                                        |
-                    +-------------------+-------------------+
-                    |                   |                   |
-                Branch H-W          Branch C-W          Branch H-C
-                    |                   |                   |
-                (no rotation)       Permute (C,W,H)     Permute (H,C,W)
-                    |                   |                   |
-            +-------+-------+     +-----+-------+     +-----+-------+
-            |               |     |             |     |             |
-        Z-Pool          SE Block  Z-Pool    SE Block  Z-Pool    SE Block
-     (avg+max pool)  (GAP→FC→FC)  |       (GAP→FC→FC)  |       (GAP→FC→FC)
-            |               |     |             |     |             |
-        Conv 7x7            |     Conv 7x7      |     Conv 7x7      |
-            |               |     |             |     |             |
-        BatchNorm           |     BatchNorm     |     BatchNorm     |
-            |               |     |             |     |             |
-        Sigmoid             |     Sigmoid       |     Sigmoid       |
-            |               |     |             |     |             |
-            +-------×-------+     +------×------+     +------×------+
-                    |                   |                   |
-              (multiply att        (multiply att      (multiply att
-               with SE weights)     with SE weights)   with SE weights)
-                    |                   |                   |
-                Scale Input         Scale Input         Scale Input
-                    |                   |                   |
-                (no rotation)       Rotate Back         Rotate Back
-                    |                   |                   |
-                    +-------------------+-------------------+
-                                        |
-                                    Average
-                                        |
-                                Output (B, H, W, C)
-
-    Parameters
-    ----------
-    reduction_ratio : int, default=16
-        Channel reduction ratio for SE blocks.
-    kernel_size : int, default=7
-        Convolutional kernel size for triplet attention.
-    use_bias : bool, default=False
-        Whether to use bias in conv layers.
-    kernel_initializer : str, default="glorot_uniform"
-        Initializer for kernel weights.
-    kernel_regularizer : Optional, default=None
-        Regularizer for kernel weights.
-
-    References
-    ----------
-    Alhazmi & Altahhan, "Achieving 3D Attention via Triplet Squeeze and Excitation Block," 2025.
+    1. For each branch, process Input via Triplet Attention (Spatial).
+    2. In parallel, process Input via SE Block (Channel).
+    3. Multiply Spatial Attention Map by Channel Attention Weights.
+    4. Scale Input by combined attention.
     """
 
     def __init__(
         self,
-        reduction_ratio: int = 16,
+        reduction_ratio: float = 0.0625,
         kernel_size: int = 7,
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[Any] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Sub-layers will be created in build()
-        self.se_hw = None
-        self.se_cw = None
-        self.se_hc = None
-
-        self.conv_hw = None
-        self.conv_cw = None
-        self.conv_hc = None
-
-        self.bn_hw = None
-        self.bn_cw = None
-        self.bn_hc = None
-
-        logger.debug(
-            f"Initialized TripSE3: reduction_ratio={reduction_ratio}, "
-            f"kernel_size={kernel_size}"
-        )
+        # Initialize helper class to get weights instead of scaled input
+        # Note: Since the provided SqueezeExcitation returns x*s, and we want s,
+        # we will use SqueezeExcitation but need to extract s. 
+        # Standard SqueezeExcitation does not expose 's'.
+        # However, TripSE3 logic in source was: Output = X * (Att_spatial * Weights_SE).
+        # This is equivalent to Output = (X * Weights_SE) * Att_spatial = SE(X) * Att_spatial.
+        # So we can use the standard SE block output!
+        
+        self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
+        self._suffixes = ["hw", "cw", "hc"]
+        
+        self.se_layers: List[SqueezeExcitation] = []
+        self.conv_layers: List[layers.Conv2D] = []
+        self.bn_layers: List[layers.BatchNormalization] = []
+        
+        for suffix in self._suffixes:
+            self.se_layers.append(SqueezeExcitation(
+                reduction_ratio=reduction_ratio,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"se_{suffix}"
+            ))
+            self.conv_layers.append(layers.Conv2D(
+                filters=1,
+                kernel_size=kernel_size,
+                padding="same",
+                use_bias=use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"conv_{suffix}"
+            ))
+            self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of input tensor (batch, height, width, channels).
-        """
-        batch, height, width, channels = input_shape
-
-        # SE blocks for each branch (operate on permuted input)
-        self.se_hw = SqueezeExcitation(
-            channels=channels,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_hw"
-        )
-        self.se_hw.build(input_shape)
-
-        self.se_cw = SqueezeExcitation(
-            channels=height,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_cw"
-        )
-        self.se_cw.build((batch, channels, width, height))
-
-        self.se_hc = SqueezeExcitation(
-            channels=width,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_hc"
-        )
-        self.se_hc.build((batch, height, channels, width))
-
-        # Conv layers for triplet attention processing
-        self.conv_hw = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_hw"
-        )
-        self.conv_hw.build((batch, height, width, 2))
-
-        self.conv_cw = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_cw"
-        )
-        self.conv_cw.build((batch, channels, width, 2))
-
-        self.conv_hc = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_hc"
-        )
-        self.conv_hc.build((batch, height, channels, 2))
-
-        # BatchNorm layers
-        self.bn_hw = keras.layers.BatchNormalization(name="bn_hw")
-        self.bn_hw.build((batch, height, width, 1))
-
-        self.bn_cw = keras.layers.BatchNormalization(name="bn_cw")
-        self.bn_cw.build((batch, channels, width, 1))
-
-        self.bn_hc = keras.layers.BatchNormalization(name="bn_hc")
-        self.bn_hc.build((batch, height, channels, 1))
-
+        batch = input_shape[0]
+        for i, pattern in enumerate(self._patterns):
+            perm_indices = [p + 1 for p in pattern]
+            permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
+            
+            self.se_layers[i].build(permuted_shape)
+            
+            d1, d2 = permuted_shape[1], permuted_shape[2]
+            self.conv_layers[i].build((batch, d1, d2, 2))
+            self.bn_layers[i].build((batch, d1, d2, 1))
+            
         super().build(input_shape)
-        logger.debug(f"Built TripSE3 with input_shape={input_shape}, channels={channels}")
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass of TripSE3.
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        outputs = []
+        
+        for i, pattern in enumerate(self._patterns):
+            # 1. Permute
+            if pattern != (0, 1, 2):
+                perm_order = [0] + [p + 1 for p in pattern]
+                x = ops.transpose(inputs, perm_order)
+            else:
+                x = inputs
+            
+            # 2. Parallel Path 1: SE Output (X * ChannelWeights)
+            x_se_scaled = self.se_layers[i](x, training=training)
+            
+            # 3. Parallel Path 2: Spatial Attention Map
+            avg_pool = ops.mean(x, axis=-1, keepdims=True)
+            max_pool = ops.max(x, axis=-1, keepdims=True)
+            pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+            
+            att_spatial = self.conv_layers[i](pooled)
+            att_spatial = self.bn_layers[i](att_spatial, training=training)
+            att_spatial = ops.sigmoid(att_spatial)
+            
+            # 4. Combine: SE_Output * Spatial_Map
+            # equivalent to X * ChannelWeights * SpatialWeights
+            branch_out = ops.multiply(x_se_scaled, att_spatial)
+            
+            # 5. Inverse Permute
+            if pattern != (0, 1, 2):
+                inv_pattern = [0, 0, 0]
+                for idx, p in enumerate(pattern):
+                    inv_pattern[p] = idx
+                inv_order = [0] + [p + 1 for p in inv_pattern]
+                branch_out = ops.transpose(branch_out, inv_order)
+                
+            outputs.append(branch_out)
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch, height, width, channels).
-        training : bool, optional
-            Whether in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Attention-modulated tensor of same shape as input.
-        """
-        # Branch H-W (no rotation)
-        x_hw = inputs
-        # Parallel: Triplet attention processing
-        avg_hw = keras.ops.mean(x_hw, axis=-1, keepdims=True)
-        max_hw = keras.ops.max(x_hw, axis=-1, keepdims=True)
-        pooled_hw = keras.ops.concatenate([avg_hw, max_hw], axis=-1)
-        att_hw = self.conv_hw(pooled_hw)
-        att_hw = self.bn_hw(att_hw, training=training)
-        att_hw = keras.ops.sigmoid(att_hw)
-        # Parallel: SE block
-        se_weights_hw = self.se_hw(x_hw, training=training)
-        # Combine: multiply attention by SE weights, then scale input
-        combined_att_hw = keras.ops.multiply(att_hw, se_weights_hw)
-        out_hw = keras.ops.multiply(x_hw, combined_att_hw)
-
-        # Branch C-W (permute)
-        x_cw = keras.ops.transpose(inputs, [0, 3, 2, 1])  # (B, C, W, H)
-        # Triplet attention
-        avg_cw = keras.ops.mean(x_cw, axis=-1, keepdims=True)
-        max_cw = keras.ops.max(x_cw, axis=-1, keepdims=True)
-        pooled_cw = keras.ops.concatenate([avg_cw, max_cw], axis=-1)
-        att_cw = self.conv_cw(pooled_cw)
-        att_cw = self.bn_cw(att_cw, training=training)
-        att_cw = keras.ops.sigmoid(att_cw)
-        # SE block
-        se_weights_cw = self.se_cw(x_cw, training=training)
-        # Combine
-        combined_att_cw = keras.ops.multiply(att_cw, se_weights_cw)
-        scaled_cw = keras.ops.multiply(x_cw, combined_att_cw)
-        out_cw = keras.ops.transpose(scaled_cw, [0, 3, 2, 1])  # Back to (B, H, W, C)
-
-        # Branch H-C (permute)
-        x_hc = keras.ops.transpose(inputs, [0, 1, 3, 2])  # (B, H, C, W)
-        # Triplet attention
-        avg_hc = keras.ops.mean(x_hc, axis=-1, keepdims=True)
-        max_hc = keras.ops.max(x_hc, axis=-1, keepdims=True)
-        pooled_hc = keras.ops.concatenate([avg_hc, max_hc], axis=-1)
-        att_hc = self.conv_hc(pooled_hc)
-        att_hc = self.bn_hc(att_hc, training=training)
-        att_hc = keras.ops.sigmoid(att_hc)
-        # SE block
-        se_weights_hc = self.se_hc(x_hc, training=training)
-        # Combine
-        combined_att_hc = keras.ops.multiply(att_hc, se_weights_hc)
-        scaled_hc = keras.ops.multiply(x_hc, combined_att_hc)
-        out_hc = keras.ops.transpose(scaled_hc, [0, 1, 3, 2])  # Back to (B, H, W, C)
-
-        # Average the three branches
-        output = keras.ops.add(keras.ops.add(out_hw, out_cw), out_hc)
-        output = keras.ops.divide(output, 3.0)
-
-        return output
+        total = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
+        return ops.divide(total, 3.0)
 
     def get_config(self) -> dict:
-        """Return layer configuration."""
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": keras.saving.serialize_keras_object(self.kernel_regularizer),
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: dict) -> "TripSE3":
-        """Create layer from config."""
-        kernel_regularizer = config.pop("kernel_regularizer", None)
-        if kernel_regularizer is not None:
-            config["kernel_regularizer"] = keras.saving.deserialize_keras_object(kernel_regularizer)
-        return cls(**config)
 
-
-@keras.saving.register_keras_serializable(package="dl_techniques")
-class TripSE4(keras.layers.Layer):
+@keras.saving.register_keras_serializable()
+class _SEWeights(layers.Layer):
     """
-    TripSE4: Hybrid TripSE with SE at multiple positions and affine transformation.
+    Internal helper layer to compute SE logits/weights.
+    
+    Duplicates logic of SqueezeExcitation but returns the transformed weights 
+    (before or after sigmoid) instead of scaling the input.
+    Used for TripSE4 where we need to add SE logits to spatial logits.
+    """
+    def __init__(
+        self,
+        reduction_ratio: float = 0.25,
+        activation: str = 'relu',
+        use_bias: bool = False,
+        kernel_initializer: str = 'glorot_uniform',
+        kernel_regularizer: Optional[Any] = None,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.reduction_ratio = reduction_ratio
+        self.activation = activation
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        
+        self.global_pool = layers.GlobalAveragePooling2D(keepdims=True)
+        self.reduction_activation = layers.Activation(activation)
+        self.conv_reduce = None
+        self.conv_restore = None
+
+    def build(self, input_shape):
+        input_channels = input_shape[-1]
+        bottleneck_channels = max(1, int(input_channels * self.reduction_ratio))
+        
+        self.conv_reduce = layers.Conv2D(
+            filters=bottleneck_channels,
+            kernel_size=1,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer
+        )
+        self.conv_restore = layers.Conv2D(
+            filters=input_channels,
+            kernel_size=1,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer
+        )
+        
+        # Build explicitly
+        self.global_pool.build(input_shape)
+        # GAP out: (B, 1, 1, C)
+        pooled_shape = (input_shape[0], 1, 1, input_channels)
+        self.conv_reduce.build(pooled_shape)
+        reduced_shape = (input_shape[0], 1, 1, bottleneck_channels)
+        self.conv_restore.build(reduced_shape)
+        
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        # Squeeze
+        x = self.global_pool(inputs)
+        # Excitation (MLP)
+        x = self.conv_reduce(x, training=training)
+        x = self.reduction_activation(x)
+        logits = self.conv_restore(x, training=training)
+        # Return logits (pre-sigmoid) for addition in TripSE4
+        return logits
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "reduction_ratio": self.reduction_ratio,
+            "activation": self.activation,
+            "use_bias": self.use_bias,
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+        })
+        return config
+
+
+@keras.saving.register_keras_serializable()
+class TripSE4(layers.Layer):
+    """
+    TripSE4: Hybrid 3D Attention with Affine Fusion.
 
     Architecture:
-    1. Each branch: triplet attention processing in parallel with SE block
-    2. SE output is added to branch attention (affine: shift + scale)
-    3. Combined through sigmoid to create 3D attention tensor
-    4. Sum all branch outputs
-    5. Apply final SE block on summed output
-
-    This is the most complex variant with maximum flexibility and best performance.
-
-    ASCII Diagram::
-
-                                Input (B, H, W, C)
-                                        |
-                    +-------------------+-------------------+
-                    |                   |                   |
-                Branch H-W          Branch C-W          Branch H-C
-                    |                   |                   |
-                (no rotation)       Permute (C,W,H)     Permute (H,C,W)
-                    |                   |                   |
-            +-------+-------+     +-----+-------+     +-----+-------+
-            |               |     |             |     |             |
-        Z-Pool          SE Block  Z-Pool    SE Block  Z-Pool    SE Block
-     (avg+max pool)  (GAP→squeeze)  |     (GAP→squeeze)  |     (GAP→squeeze)
-            |               |     |             |     |             |
-        Conv 7x7            |     Conv 7x7      |     Conv 7x7      |
-            |               |     |             |     |             |
-        BatchNorm           |     BatchNorm     |     BatchNorm     |
-            |               |     |             |     |             |
-            |    Broadcast  |     |    Broadcast|     |    Broadcast|
-            |    to 3D      |     |    to 3D    |     |    to 3D    |
-            |               |     |             |     |             |
-            +-------+-------+     +------+------+     +------+------+
-                    |                   |                   |
-              (add: affine          (add: affine       (add: affine
-               transformation)       transformation)    transformation)
-                    |                   |                   |
-                Sigmoid             Sigmoid             Sigmoid
-              (3D attention)      (3D attention)      (3D attention)
-                    |                   |                   |
-                Scale Input         Scale Input         Scale Input
-                    |                   |                   |
-                (no rotation)       Rotate Back         Rotate Back
-                    |                   |                   |
-                    +-------------------+-------------------+
-                                        |
-                                      Sum
-                                        |
-                                Final SE Block
-                                (GAP → FC → FC)
-                                        |
-                                Output (B, H, W, C)
-
-    Note: The key innovation in TripSE4 is the affine transformation that adds SE weights
-    to branch attention before sigmoid, creating true 3D attention tensors rather than
-    just 2D attention maps.
-
-    Parameters
-    ----------
-    reduction_ratio : int, default=16
-        Channel reduction ratio for SE blocks.
-    kernel_size : int, default=7
-        Convolutional kernel size for triplet attention.
-    use_bias : bool, default=False
-        Whether to use bias in conv layers.
-    kernel_initializer : str, default="glorot_uniform"
-        Initializer for kernel weights.
-    kernel_regularizer : Optional, default=None
-        Regularizer for kernel weights.
-
-    References
-    ----------
-    Alhazmi & Altahhan, "Achieving 3D Attention via Triplet Squeeze and Excitation Block," 2025.
+    1. Per Branch:
+       - Path A: Z-Pool -> Conv -> BN (Spatial Logits)
+       - Path B: GAP -> MLP (Channel Logits)
+       - Fusion: Spatial Logits + Channel Logits (Broadcasting addition)
+       - Activation: Sigmoid(Fused Logits) -> 3D Attention Tensor
+    2. Fuse branches (Sum).
+    3. Final SE Block on output.
+    
+    This variant constructs a true 3D attention map by fusing spatial and channel
+    contexts in the logit domain before activation.
     """
 
     def __init__(
         self,
-        reduction_ratio: int = 16,
+        reduction_ratio: float = 0.0625,
         kernel_size: int = 7,
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_regularizer: Optional[Any] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
         self.use_bias = use_bias
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Sub-layers will be created in build()
-        self.se_hw = None
-        self.se_cw = None
-        self.se_hc = None
-        self.se_final = None
-
-        self.conv_hw = None
-        self.conv_cw = None
-        self.conv_hc = None
-
-        self.bn_hw = None
-        self.bn_cw = None
-        self.bn_hc = None
-
-        logger.debug(
-            f"Initialized TripSE4: reduction_ratio={reduction_ratio}, "
-            f"kernel_size={kernel_size}"
+        self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
+        self._suffixes = ["hw", "cw", "hc"]
+        
+        # Components
+        self.se_logit_layers: List[_SEWeights] = []
+        self.conv_layers: List[layers.Conv2D] = []
+        self.bn_layers: List[layers.BatchNormalization] = []
+        
+        for suffix in self._suffixes:
+            # Internal helper to get MLP logits
+            self.se_logit_layers.append(_SEWeights(
+                reduction_ratio=reduction_ratio,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"se_logits_{suffix}"
+            ))
+            self.conv_layers.append(layers.Conv2D(
+                filters=1,
+                kernel_size=kernel_size,
+                padding="same",
+                use_bias=use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"conv_{suffix}"
+            ))
+            self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
+            
+        self.final_se = SqueezeExcitation(
+            reduction_ratio=reduction_ratio,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name="final_se"
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
-
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of input tensor (batch, height, width, channels).
-        """
-        batch, height, width, channels = input_shape
-
-        # SE blocks for each branch
-        self.se_hw = SqueezeExcitation(
-            channels=channels,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_hw"
-        )
-        self.se_hw.build(input_shape)
-
-        self.se_cw = SqueezeExcitation(
-            channels=height,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_cw"
-        )
-        self.se_cw.build((batch, channels, width, height))
-
-        self.se_hc = SqueezeExcitation(
-            channels=width,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_hc"
-        )
-        self.se_hc.build((batch, height, channels, width))
-
-        # Final SE block on summed output
-        self.se_final = SqueezeExcitation(
-            channels=channels,
-            reduction_ratio=self.reduction_ratio,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="se_final"
-        )
-        self.se_final.build(input_shape)
-
-        # Conv layers
-        self.conv_hw = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_hw"
-        )
-        self.conv_hw.build((batch, height, width, 2))
-
-        self.conv_cw = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_cw"
-        )
-        self.conv_cw.build((batch, channels, width, 2))
-
-        self.conv_hc = keras.layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="conv_hc"
-        )
-        self.conv_hc.build((batch, height, channels, 2))
-
-        # BatchNorm layers
-        self.bn_hw = keras.layers.BatchNormalization(name="bn_hw")
-        self.bn_hw.build((batch, height, width, 1))
-
-        self.bn_cw = keras.layers.BatchNormalization(name="bn_cw")
-        self.bn_cw.build((batch, channels, width, 1))
-
-        self.bn_hc = keras.layers.BatchNormalization(name="bn_hc")
-        self.bn_hc.build((batch, height, channels, 1))
-
+        batch = input_shape[0]
+        
+        for i, pattern in enumerate(self._patterns):
+            perm_indices = [p + 1 for p in pattern]
+            permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
+            
+            self.se_logit_layers[i].build(permuted_shape)
+            
+            d1, d2 = permuted_shape[1], permuted_shape[2]
+            self.conv_layers[i].build((batch, d1, d2, 2))
+            self.bn_layers[i].build((batch, d1, d2, 1))
+        
+        self.final_se.build(input_shape)
         super().build(input_shape)
-        logger.debug(f"Built TripSE4 with input_shape={input_shape}, channels={channels}")
 
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass of TripSE4.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch, height, width, channels).
-        training : bool, optional
-            Whether in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Attention-modulated tensor of same shape as input.
-        """
-        # Branch H-W
-        x_hw = inputs
-        # Triplet attention processing
-        avg_hw = keras.ops.mean(x_hw, axis=-1, keepdims=True)
-        max_hw = keras.ops.max(x_hw, axis=-1, keepdims=True)
-        pooled_hw = keras.ops.concatenate([avg_hw, max_hw], axis=-1)
-        att_hw = self.conv_hw(pooled_hw)
-        att_hw = self.bn_hw(att_hw, training=training)
-        # SE block (produces channel weights, need to broadcast to 3D)
-        # SE output has shape (B, 1, 1, C) after processing
-        # We need it to match att_hw shape (B, H, W, 1)
-        # Get SE channel attention vector
-        se_out_hw = self.se_hw(x_hw, training=training)
-        # Extract just the attention weights without multiplying
-        # We need to recompute SE to get just the weights
-        squeeze_hw = keras.ops.mean(x_hw, axis=[1, 2], keepdims=True)  # (B, 1, 1, C)
-        # Add this to the branch attention (affine transformation: shift)
-        # att_hw is (B, H, W, 1), squeeze_hw is (B, 1, 1, C)
-        # We need to broadcast squeeze_hw to (B, H, W, C)
-        se_weights_hw = keras.ops.tile(squeeze_hw, [1, keras.ops.shape(att_hw)[1], keras.ops.shape(att_hw)[2], 1])
-        # att_hw needs to be broadcast to (B, H, W, C)
-        att_hw_broadcast = keras.ops.tile(att_hw, [1, 1, 1, keras.ops.shape(x_hw)[-1]])
-        # Affine: add SE weights (shift) to attention
-        combined_hw = keras.ops.add(att_hw_broadcast, se_weights_hw)
-        combined_hw = keras.ops.sigmoid(combined_hw)  # 3D attention tensor
-        out_hw = keras.ops.multiply(x_hw, combined_hw)
-
-        # Branch C-W
-        x_cw = keras.ops.transpose(inputs, [0, 3, 2, 1])  # (B, C, W, H)
-        avg_cw = keras.ops.mean(x_cw, axis=-1, keepdims=True)
-        max_cw = keras.ops.max(x_cw, axis=-1, keepdims=True)
-        pooled_cw = keras.ops.concatenate([avg_cw, max_cw], axis=-1)
-        att_cw = self.conv_cw(pooled_cw)
-        att_cw = self.bn_cw(att_cw, training=training)
-        squeeze_cw = keras.ops.mean(x_cw, axis=[1, 2], keepdims=True)
-        se_weights_cw = keras.ops.tile(squeeze_cw, [1, keras.ops.shape(att_cw)[1], keras.ops.shape(att_cw)[2], 1])
-        att_cw_broadcast = keras.ops.tile(att_cw, [1, 1, 1, keras.ops.shape(x_cw)[-1]])
-        combined_cw = keras.ops.add(att_cw_broadcast, se_weights_cw)
-        combined_cw = keras.ops.sigmoid(combined_cw)
-        scaled_cw = keras.ops.multiply(x_cw, combined_cw)
-        out_cw = keras.ops.transpose(scaled_cw, [0, 3, 2, 1])
-
-        # Branch H-C
-        x_hc = keras.ops.transpose(inputs, [0, 1, 3, 2])  # (B, H, C, W)
-        avg_hc = keras.ops.mean(x_hc, axis=-1, keepdims=True)
-        max_hc = keras.ops.max(x_hc, axis=-1, keepdims=True)
-        pooled_hc = keras.ops.concatenate([avg_hc, max_hc], axis=-1)
-        att_hc = self.conv_hc(pooled_hc)
-        att_hc = self.bn_hc(att_hc, training=training)
-        squeeze_hc = keras.ops.mean(x_hc, axis=[1, 2], keepdims=True)
-        se_weights_hc = keras.ops.tile(squeeze_hc, [1, keras.ops.shape(att_hc)[1], keras.ops.shape(att_hc)[2], 1])
-        att_hc_broadcast = keras.ops.tile(att_hc, [1, 1, 1, keras.ops.shape(x_hc)[-1]])
-        combined_hc = keras.ops.add(att_hc_broadcast, se_weights_hc)
-        combined_hc = keras.ops.sigmoid(combined_hc)
-        scaled_hc = keras.ops.multiply(x_hc, combined_hc)
-        out_hc = keras.ops.transpose(scaled_hc, [0, 1, 3, 2])
-
-        # Sum all branches
-        combined = keras.ops.add(keras.ops.add(out_hw, out_cw), out_hc)
-
-        # Apply final SE block
-        output = self.se_final(combined, training=training)
-
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+        outputs = []
+        
+        for i, pattern in enumerate(self._patterns):
+            # 1. Permute
+            if pattern != (0, 1, 2):
+                perm_order = [0] + [p + 1 for p in pattern]
+                x = ops.transpose(inputs, perm_order)
+            else:
+                x = inputs
+                
+            # 2. Path A: Spatial Logits
+            avg_pool = ops.mean(x, axis=-1, keepdims=True)
+            max_pool = ops.max(x, axis=-1, keepdims=True)
+            pooled = ops.concatenate([avg_pool, max_pool], axis=-1)
+            
+            logits_spatial = self.conv_layers[i](pooled)
+            logits_spatial = self.bn_layers[i](logits_spatial, training=training)
+            # Shape: (B, D1, D2, 1)
+            
+            # 3. Path B: Channel Logits
+            logits_channel = self.se_logit_layers[i](x, training=training)
+            # Shape: (B, 1, 1, D3)
+            
+            # 4. Fusion: Broadcast Add
+            # (B, D1, D2, 1) + (B, 1, 1, D3) -> (B, D1, D2, D3)
+            # This creates a 3D attention tensor
+            fused_logits = ops.add(logits_spatial, logits_channel)
+            attention_3d = ops.sigmoid(fused_logits)
+            
+            # 5. Apply
+            scaled = ops.multiply(x, attention_3d)
+            
+            # 6. Inverse Permute
+            if pattern != (0, 1, 2):
+                inv_pattern = [0, 0, 0]
+                for idx, p in enumerate(pattern):
+                    inv_pattern[p] = idx
+                inv_order = [0] + [p + 1 for p in inv_pattern]
+                scaled = ops.transpose(scaled, inv_order)
+                
+            outputs.append(scaled)
+            
+        # Sum branches
+        combined = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
+        
+        # Final SE
+        output = self.final_se(combined, training=training)
         return output
 
     def get_config(self) -> dict:
-        """Return layer configuration."""
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
             "kernel_size": self.kernel_size,
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
-            "kernel_regularizer": keras.saving.serialize_keras_object(self.kernel_regularizer),
+            "kernel_initializer": initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-    @classmethod
-    def from_config(cls, config: dict) -> "TripSE4":
-        """Create layer from config."""
-        kernel_regularizer = config.pop("kernel_regularizer", None)
-        if kernel_regularizer is not None:
-            config["kernel_regularizer"] = keras.saving.deserialize_keras_object(kernel_regularizer)
-        return cls(**config)
-
-
-# Convenience alias for the most commonly used variant
-TripSE = TripSE1
