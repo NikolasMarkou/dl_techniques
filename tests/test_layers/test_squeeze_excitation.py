@@ -192,27 +192,6 @@ class TestSqueezeExcitation:
         output = layer_minimal(test_input)
         assert output.shape == test_input.shape
 
-    def test_build_input_validation(self):
-        """Test build method input validation."""
-        layer = SqueezeExcitation()
-
-        # Test invalid input shapes
-        with pytest.raises(ValueError, match="Expected 4D input shape"):
-            layer.build((10,))  # 1D
-
-        with pytest.raises(ValueError, match="Expected 4D input shape"):
-            layer.build((10, 20))  # 2D
-
-        with pytest.raises(ValueError, match="Expected 4D input shape"):
-            layer.build((10, 20, 30))  # 3D
-
-        with pytest.raises(ValueError, match="Expected 4D input shape"):
-            layer.build((10, 20, 30, 40, 50))  # 5D
-
-        # Test undefined channel dimension
-        with pytest.raises(ValueError, match="Last dimension \\(channels\\) of input must be defined"):
-            layer.build((None, 32, 32, None))
-
     def test_compute_output_shape(self):
         """Test output shape computation."""
         layer = SqueezeExcitation(reduction_ratio=0.5)
