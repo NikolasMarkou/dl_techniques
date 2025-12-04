@@ -2,7 +2,7 @@
 Trainable hierarchical routing tree for large-scale classification.
 
 This module provides a learnable alternative to the standard Dense -> Softmax
-architecture. Unlike 'routing_probabilities.py' which uses fixed deterministic
+architecture. Unlike RoutingProbabilitiesLayer which uses fixed deterministic
 projections, this layer learns the optimal routing decisions via backpropagation.
 
 Complete Architecture Flow::
