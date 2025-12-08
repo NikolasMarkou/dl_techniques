@@ -61,7 +61,7 @@ from dl_techniques.utils.masking.strategies import apply_mlm_masking
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.pretraining")
+@keras.saving.register_keras_serializable()
 class MaskedLanguageModel(keras.Model):
     """A model-agnostic Masked Language Modeling (MLM) pre-trainer.
 
