@@ -612,6 +612,4 @@ def create_test_model_with_bias_free_layers() -> keras.Model:
 
 
 if __name__ == "__main__":
-    # Run tests with: pytest test_bias_free_conv1d.py -v
-    # Or run specific test class: pytest test_bias_free_conv1d.py::TestBiasFreeConv1D -v
     pytest.main([__file__, "-v"])

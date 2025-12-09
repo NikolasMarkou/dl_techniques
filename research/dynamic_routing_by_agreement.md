@@ -93,10 +93,10 @@ Predictions (ûⱼ|ᵢ)
 ┌─────────────────────┐
 │  Routing Iteration  │ ← Repeat r times (typically 3-5)
 │                     │
-│  bᵢⱼ → cᵢⱼ         │ (softmax)
-│  cᵢⱼ, ûⱼ|ᵢ → sⱼ    │ (weighted sum)
-│  sⱼ → vⱼ           │ (squash)
-│  ûⱼ|ᵢ, vⱼ → bᵢⱼ    │ (update by agreement)
+│  bᵢⱼ → cᵢⱼ          │ (softmax)
+│  cᵢⱼ, ûⱼ|ᵢ → sⱼ     │ (weighted sum)
+│  sⱼ → vⱼ            │ (squash)
+│  ûⱼ|ᵢ, vⱼ → bᵢⱼ     │ (update by agreement)
 │                     │
 └─────────────────────┘
       ↓
