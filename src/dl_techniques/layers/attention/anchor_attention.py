@@ -66,6 +66,8 @@ References:
 """
 
 import keras
+import numpy as np
+from keras import ops, layers, initializers, regularizers
 from typing import Optional, Any, Dict, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -92,7 +94,7 @@ class AnchorAttention(keras.layers.Layer):
 
     Hierarchical Mode (num_anchor_tokens=K):
     Anchors[1:K] → QKV_projection → Self_Attention ────┐
-                                                        ├→ Combined_Output
+                                                       ├→ Combined_Output
     Queries[K+1:N] → Q_projection → Cross_Attention ───┘
     ```
 
@@ -174,10 +176,10 @@ class AnchorAttention(keras.layers.Layer):
             num_heads: int = 8,
             dropout_rate: float = 0.0,
             use_bias: bool = True,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
-            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            bias_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -198,13 +200,13 @@ class AnchorAttention(keras.layers.Layer):
         self.head_dim = dim // num_heads
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
 
         # Scale factor for attention scores
-        self.scale = 1.0 / keras.ops.sqrt(float(self.head_dim))
+        self.scale = 1.0 / np.sqrt(float(self.head_dim))
 
         # Create ALL sub-layers in __init__ (following modern Keras 3 pattern)
         self.qkv_dense = keras.layers.Dense(
@@ -283,16 +285,8 @@ class AnchorAttention(keras.layers.Layer):
 
         # Build dropout layer if it exists
         if self.dropout_layer is not None:
-            # Dropout operates on attention weights: (batch, num_heads, seq_len, seq_len)
-            # We don't need to build it explicitly as it has no weights,
-            # but we include it for completeness
-            attention_shape = (
-                input_shape[0],  # batch_size
-                self.num_heads,  # num_heads
-                input_shape[1],  # seq_len
-                input_shape[1]  # seq_len (for attention matrix)
-            )
-            self.dropout_layer.build(attention_shape)
+            # Dropout operates on attention weights
+            self.dropout_layer.build(input_shape)
 
         # Always call parent build at the END
         super().build(input_shape)
@@ -334,34 +328,41 @@ class AnchorAttention(keras.layers.Layer):
         batch_size, seq_len, _ = keras.ops.shape(x)
 
         # Compute Q, K, V projections
-        qkv = self.qkv_dense(x)  # (batch_size, seq_len, dim * 3)
-        qkv = keras.ops.reshape(
+        # Shape: (batch_size, seq_len, dim * 3)
+        qkv = self.qkv_dense(x)
+
+        # Reshape to (batch_size, seq_len, 3, num_heads, head_dim)
+        qkv = ops.reshape(
             qkv, (batch_size, seq_len, 3, self.num_heads, self.head_dim)
         )
-        qkv = keras.ops.transpose(
-            qkv, (2, 0, 3, 1, 4)
-        )  # (3, batch_size, num_heads, seq_len, head_dim)
+
+        # Transpose to (3, batch_size, num_heads, seq_len, head_dim)
+        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
 
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # Scaled dot-product attention
-        scores = keras.ops.matmul(
-            q, keras.ops.transpose(k, (0, 1, 3, 2))
+        # q: (batch, heads, seq, head_dim)
+        # k: (batch, heads, seq, head_dim)
+        # matmul -> (batch, heads, seq, seq)
+        scores = ops.matmul(
+            q, ops.transpose(k, (0, 1, 3, 2))
         ) * self.scale
-        attn_weights = keras.ops.softmax(scores, axis=-1)
+
+        attn_weights = ops.softmax(scores, axis=-1)
 
         # Apply dropout to attention weights if configured
         if self.dropout_layer is not None:
             attn_weights = self.dropout_layer(attn_weights, training=training)
 
         # Apply attention to values
-        out = keras.ops.matmul(attn_weights, v)
+        out = ops.matmul(attn_weights, v)
         # Shape: (batch_size, num_heads, seq_len, head_dim)
 
         # Reshape and project to output
-        out = keras.ops.transpose(out, (0, 2, 1, 3))
+        out = ops.transpose(out, (0, 2, 1, 3))
         # Shape: (batch_size, seq_len, num_heads, head_dim)
-        out = keras.ops.reshape(out, (batch_size, seq_len, self.dim))
+        out = ops.reshape(out, (batch_size, seq_len, self.dim))
         out = self.proj_dense(out)
 
         return out
@@ -373,67 +374,67 @@ class AnchorAttention(keras.layers.Layer):
             training: Optional[bool]
     ) -> keras.KerasTensor:
         """Apply hierarchical anchor-query attention pattern."""
-        batch_size, seq_len, _ = keras.ops.shape(x)
+        batch_size, seq_len, _ = ops.shape(x)
 
+        # If all tokens are anchors, use standard attention
         if num_anchor_tokens >= seq_len:
-            # All tokens are anchors - fallback to standard attention
             return self._standard_attention(x, training)
 
         # Split input into anchor and query tokens
         anchor_tokens = x[:, :num_anchor_tokens, :]
-        # Shape: (batch_size, num_anchor_tokens, dim)
         query_tokens = x[:, num_anchor_tokens:, :]
-        # Shape: (batch_size, num_query_tokens, dim)
+
+        # Get dimensions
         num_query_tokens = seq_len - num_anchor_tokens
 
-        # Process anchor tokens with full self-attention
+        # Process anchor tokens with full self-attention projection (Q, K, V)
         anchor_qkv = self.qkv_dense(anchor_tokens)
-        # Shape: (batch_size, num_anchor_tokens, dim * 3)
-        anchor_qkv = keras.ops.reshape(
+        anchor_qkv = ops.reshape(
             anchor_qkv,
             (batch_size, num_anchor_tokens, 3, self.num_heads, self.head_dim)
         )
-        anchor_qkv = keras.ops.transpose(
+        anchor_qkv = ops.transpose(
             anchor_qkv, (2, 0, 3, 1, 4)
-        )  # Shape: (3, batch_size, num_heads, num_anchor_tokens, head_dim)
+        )  # Shape: (3, batch, heads, num_anchors, head_dim)
 
         anchor_q, anchor_k, anchor_v = anchor_qkv[0], anchor_qkv[1], anchor_qkv[2]
 
         # Process query tokens (only Q projection - they don't self-attend)
         query_q = self.q_dense(query_tokens)
-        # Shape: (batch_size, num_query_tokens, dim)
-        query_q = keras.ops.reshape(
+        query_q = ops.reshape(
             query_q, (batch_size, num_query_tokens, self.num_heads, self.head_dim)
         )
-        query_q = keras.ops.transpose(
+        query_q = ops.transpose(
             query_q, (0, 2, 1, 3)
-        )  # Shape: (batch_size, num_heads, num_query_tokens, head_dim)
+        )  # Shape: (batch, heads, num_queries, head_dim)
 
         # Combine Q vectors: anchors first, then queries
-        combined_q = keras.ops.concatenate(
-            [anchor_q, query_q], axis=2
-        )  # Shape: (batch_size, num_heads, seq_len, head_dim)
+        # Shape: (batch, heads, seq_len, head_dim)
+        combined_q = ops.concatenate([anchor_q, query_q], axis=2)
 
         # Attention computation: all tokens attend to anchor tokens only
-        scores = keras.ops.matmul(
-            combined_q, keras.ops.transpose(anchor_k, (0, 1, 3, 2))
+        # combined_q: (batch, heads, seq_len, head_dim)
+        # anchor_k.T: (batch, heads, head_dim, num_anchors)
+        # scores: (batch, heads, seq_len, num_anchors)
+        scores = ops.matmul(
+            combined_q, ops.transpose(anchor_k, (0, 1, 3, 2))
         ) * self.scale
-        # Shape: (batch_size, num_heads, seq_len, num_anchor_tokens)
 
-        attn_weights = keras.ops.softmax(scores, axis=-1)
+        attn_weights = ops.softmax(scores, axis=-1)
 
         # Apply dropout to attention weights if configured
         if self.dropout_layer is not None:
             attn_weights = self.dropout_layer(attn_weights, training=training)
 
         # Apply attention to anchor values
-        out = keras.ops.matmul(attn_weights, anchor_v)
-        # Shape: (batch_size, num_heads, seq_len, head_dim)
+        # attn_weights: (batch, heads, seq_len, num_anchors)
+        # anchor_v: (batch, heads, num_anchors, head_dim)
+        # out: (batch, heads, seq_len, head_dim)
+        out = ops.matmul(attn_weights, anchor_v)
 
         # Reshape and project to output
-        out = keras.ops.transpose(out, (0, 2, 1, 3))
-        # Shape: (batch_size, seq_len, num_heads, head_dim)
-        out = keras.ops.reshape(out, (batch_size, seq_len, self.dim))
+        out = ops.transpose(out, (0, 2, 1, 3))
+        out = ops.reshape(out, (batch_size, seq_len, self.dim))
         out = self.proj_dense(out)
 
         return out
@@ -443,9 +444,6 @@ class AnchorAttention(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """
         Compute the output shape of the layer.
-
-        Output shape is identical to input shape since attention preserves
-        sequence length and feature dimensions.
 
         Args:
             input_shape: Shape tuple of the input.
@@ -459,11 +457,8 @@ class AnchorAttention(keras.layers.Layer):
         """
         Return configuration dictionary for serialization.
 
-        This method must include ALL constructor parameters to ensure complete
-        serialization and deserialization compatibility.
-
         Returns:
-            Dictionary containing all initialization parameters and their values.
+            Dictionary containing all initialization parameters.
         """
         config = super().get_config()
         config.update({
