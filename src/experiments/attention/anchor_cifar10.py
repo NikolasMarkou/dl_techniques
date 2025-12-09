@@ -197,7 +197,7 @@ class ExperimentConfig:
     dropout_rate: float = 0.1
 
     # Training configuration
-    epochs: int = 5
+    epochs: int = 100
     batch_size: int = 64
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
