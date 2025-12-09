@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes twenty-five different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes twenty-six different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -24,6 +24,7 @@ The following layers are supported by the factory system with automated paramete
 | `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. | `(batch, H, W, dim)` |
 | `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention (wrapper for cross-attention). | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
 | `multi_head_cross` | `MultiHeadCrossAttention` | Unified layer for self- and cross-attention with adaptive softmax. | Core component for encoder-decoders or advanced custom attention. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
+| `multi_head_latent` | `MultiHeadLatentAttention` | DeepSeek-V2 MLA with KV compression. | Efficient LLM inference with small KV cache. | `(batch, seq_len, dim)` |
 | `non_local` | `NonLocalAttention` | Non-local attention for capturing long-range dependencies in CNNs. | Augmenting CNNs with global context reasoning. | `(batch, H, W, channels)` |
 | `perceiver` | `PerceiverAttention` | Cross-attention from the Perceiver architecture (wrapper for cross-attention). | Cross-modal attention (e.g., text to image) and latent bottleneck models. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
 | `performer` | `PerformerAttention` | Approximates softmax attention with linear complexity via random features. | Models processing very long sequences (e.g., 65K+ tokens). | `(batch, seq_len, dim)` |
@@ -249,6 +250,19 @@ attn = create_attention_layer(
     num_heads=8,
     use_adaptive_softmax=True,
     adaptive_softmax_config={'min_temp': 0.2, 'max_temp': 1.5}
+)
+```
+
+### `multi_head_latent`
+**Required:** `dim`, `num_heads`, `kv_latent_dim`
+**Optional:** `qk_nope_head_dim` (default: 128), `qk_rope_head_dim` (default: 64), `v_head_dim` (default: 128), `q_latent_dim` (default: None), `normalization_type` (default: 'rms_norm')
+```python
+attn = create_attention_layer(
+    'multi_head_latent',
+    dim=2048,
+    num_heads=16,
+    kv_latent_dim=512,
+    q_latent_dim=1536  # Optional query compression
 )
 ```
 

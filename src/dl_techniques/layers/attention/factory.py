@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports twenty-one different attention mechanisms, from standard multi-head attention
+The factory supports twenty-two different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -26,8 +26,8 @@ Example:
     >>> # Create an efficient mobile MQA layer
     >>> mobile_attn = create_attention_layer('mobile_mqa', dim=256, use_downsampling=True)
     >>>
-    >>> # Create TripSE1 for 3D attention
-    >>> tripse = create_attention_layer('tripse1', reduction_ratio=0.0625, kernel_size=7)
+    >>> # Create Multi-Head Latent Attention
+    >>> mla = create_attention_layer('multi_head_latent', dim=2048, num_heads=16, kv_latent_dim=512)
 """
 
 import keras
@@ -50,6 +50,7 @@ from .hopfield_attention import HopfieldAttention
 from .mobile_mqa import MobileMQA
 from .multi_head_attention import MultiHeadAttention
 from .multi_head_cross_attention import MultiHeadCrossAttention
+from .multi_head_latent_attention import MultiHeadLatentAttention
 from .non_local_attention import NonLocalAttention
 from .perceiver_attention import PerceiverAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
@@ -76,6 +77,7 @@ AttentionType = Literal[
     'mobile_mqa',
     'multi_head',
     'multi_head_cross',
+    'multi_head_latent',
     'non_local',
     'perceiver',
     'shared_weights_cross',
@@ -400,6 +402,36 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(nm*d) where n is query length, m is key/value length',
         'paper': 'Attention Is All You Need'
+    },
+
+    'multi_head_latent': {
+        'class': MultiHeadLatentAttention,
+        'description': (
+            'Multi-Head Latent Attention (MLA). Significantly reduces KV cache '
+            'memory usage through low-rank compression while maintaining performance comparable '
+            'to MHA. Features decoupled RoPE and optional query compression.'
+        ),
+        'required_params': ['dim', 'num_heads', 'kv_latent_dim'],
+        'optional_params': {
+            'qk_nope_head_dim': 128,
+            'qk_rope_head_dim': 64,
+            'v_head_dim': 128,
+            'q_latent_dim': None,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'max_seq_len': 4096,
+            'rope_theta': 10000.0,
+            'rope_percentage': 1.0,
+            'normalization_type': "rms_norm",
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None
+        },
+        'use_case': (
+            'Large Language Models (LLMs) where inference memory bandwidth and KV cache capacity '
+            'are bottlenecks. Enables significantly larger batch sizes or longer context windows.'
+        ),
+        'complexity': 'KV cache reduced by ~90% compared to standard MHA',
+        'paper': 'DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model'
     },
 
     'non_local': {
@@ -781,7 +813,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     # Validate positive integer parameters
     positive_int_params = [
         'dim', 'channels', 'attention_channels', 'num_heads', 'num_kv_heads',
-        'window_size', 'head_dim'
+        'window_size', 'head_dim', 'kv_latent_dim'
     ]
     for param in positive_int_params:
         if param in kwargs and kwargs[param] <= 0:
