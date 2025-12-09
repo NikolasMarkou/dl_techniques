@@ -24,6 +24,7 @@ from .routing_probabilities_hierarchical import HierarchicalRoutingLayer
 from .sparsemax import Sparsemax
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
+from .probability_output import ProbabilityOutput
 
 __all__ = [
     # Factory Utilities
@@ -48,5 +49,6 @@ __all__ = [
     "HierarchicalRoutingLayer",
     "Sparsemax",
     "SquashLayer",
-    "ThreshMax"
+    "ThreshMax",
+    "ProbabilityOutput",
 ]

@@ -634,3 +634,6 @@ class TestSaturatedMish:
         distance_to_saturation3 = abs(output3[0, 4] - layer3.mish_at_alpha)
         distance_to_saturation4 = abs(output4[0, 4] - layer4.mish_at_alpha)
         assert distance_to_saturation3 < distance_to_saturation4
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

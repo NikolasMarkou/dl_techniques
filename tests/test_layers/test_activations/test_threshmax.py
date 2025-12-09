@@ -295,4 +295,4 @@ def test_model_save_load_keras_v3(sample_logits: tf.Tensor, tmp_path) -> None:
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    pytest.main([__file__, "-v", "--tb=short"])

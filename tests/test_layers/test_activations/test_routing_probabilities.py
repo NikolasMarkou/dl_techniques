@@ -895,3 +895,6 @@ class TestRoutingProbabilitiesLayer:
         # Each spatial location should have valid probability distribution
         sums = tf.reduce_sum(predictions, axis=-1).numpy()
         assert np.allclose(sums, 1.0, atol=1e-6)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

@@ -260,3 +260,6 @@ class TestDifferentiableStepIntegration:
                 rtol=1e-6, atol=1e-6,
                 err_msg=f"Model predictions should match after serialization for axis={axis_mode}"
             )
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

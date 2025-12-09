@@ -17,21 +17,6 @@ Key Features & Differences from Standard GQA:
 4.  **No RoPE**: MobileMQA typically relies on explicit positional embeddings or
     CNN-induced locality, so Rotary Position Embeddings are disabled by default.
 
-Architecture:
-    Input [B, H, W, C]
-           ↓
-    Projections (Q, K, V) -- Shared K/V head
-           ↓
-    (Optional) Downsample K, V (Depthwise Conv stride 2)
-           ↓
-    Flatten & Broadcast K, V to match Q heads
-           ↓
-    Attention(Q, K, V)
-           ↓
-    Output Projection
-           ↓
-    Residual: Input + lambda * Output
-
 References:
     - Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need."
     - Rombach et al. (2022). "High-Resolution Image Synthesis with Latent Diffusion Models."
@@ -57,6 +42,21 @@ class MobileMQA(GroupedQueryAttention):
     A specialized subclass of GroupedQueryAttention that enforces Multi-Query
     Attention (1 KV head), supports optional spatial downsampling for Key/Value
     projections, and utilizes a learnable residual connection.
+
+    Architecture:
+        Input [B, H, W, C]
+               ↓
+        Projections (Q, K, V) -- Shared K/V head
+               ↓
+        (Optional) Downsample K, V (Depthwise Conv stride 2)
+               ↓
+        Flatten & Broadcast K, V to match Q heads
+               ↓
+        Attention(Q, K, V)
+               ↓
+        Output Projection
+               ↓
+        Residual: Input + lambda * Output
 
     Args:
         dim: Integer, input/output dimension. Must be positive and divisible by num_heads.

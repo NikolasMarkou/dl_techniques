@@ -304,3 +304,6 @@ class TestHierarchicalRoutingLayer:
 
             np.testing.assert_allclose(y_ref, y_new, atol=1e-6)
             assert isinstance(loaded_model.layers[-1], HierarchicalRoutingLayer)
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

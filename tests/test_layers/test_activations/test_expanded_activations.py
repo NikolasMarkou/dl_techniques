@@ -447,5 +447,4 @@ def debug_layer_serialization(layer_class, layer_config, sample_input):
 
 
 if __name__ == "__main__":
-    # Run with: python -m pytest test_expanded_activations.py -v
     pytest.main([__file__, "-v", "--tb=short"])

@@ -492,3 +492,6 @@ class TestAdaptiveTemperatureSoftmaxIntegration:
                 rtol=1e-6, atol=1e-6,
                 err_msg="Complete model predictions should match after serialization"
             )
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
