@@ -346,18 +346,26 @@ class RPCAttention(keras.layers.Layer):
             Low-rank approximation of the input matrix.
         """
         # Perform SVD
-        # Note: keras.ops.svd returns (U, S, V) where V is already transposed
+        # Note: keras.ops.svd returns (u, s, v)
+        # For TF backend, v corresponds to V^H (adjoint of right singular vectors)
         u, s, v = ops.svd(matrix, full_matrices=False)
 
         # Apply soft thresholding to singular values
         s_thresholded = ops.maximum(s - threshold, 0.0)
 
         # Reconstruct low-rank matrix
-        # Create diagonal matrix from thresholded singular values
-        s_diag = ops.diag(s_thresholded)
+        # Need to construct a batch of diagonal matrices from s_thresholded
+        # s_thresholded is (B, K)
+        # We need s_diag to be (B, K, K)
 
-        # Reconstruct: U @ S @ V^T
-        # Since v is already transposed from svd, we use it directly
+        k = ops.shape(s)[-1]
+        eye = ops.eye(k, dtype=s.dtype)
+
+        # Broadcasting: (B, K, 1) * (1, K, K) -> (B, K, K)
+        s_diag = ops.expand_dims(s_thresholded, axis=-1) * ops.expand_dims(eye, axis=0)
+
+        # Reconstruct: U @ S @ V^H
+        # Since v is already V^H in Keras/TF, we use it directly
         low_rank = ops.matmul(ops.matmul(u, s_diag), v)
 
         return low_rank
@@ -381,53 +389,38 @@ class RPCAttention(keras.layers.Layer):
             - L: Low-rank component (global patterns)
             - S: Sparse component (local details)
         """
-        # Initialize components
-        L = ops.zeros_like(attention_matrix)
-        S = ops.zeros_like(attention_matrix)
+        # Get shape info
+        shape = ops.shape(attention_matrix)
+        seq_len = shape[2]
 
-        # Get shape for batch processing
-        batch_size = ops.shape(attention_matrix)[0]
-        num_heads = self.num_heads
-        seq_len = ops.shape(attention_matrix)[2]
+        # Reshape to (Batch * Heads, Seq, Seq) for vectorized SVD
+        # We use -1 for the batch dimension to handle symbolic shapes
+        flat_matrix = ops.reshape(attention_matrix, (-1, seq_len, seq_len))
+
+        # Initialize components
+        L_flat = ops.zeros_like(flat_matrix)
+        S_flat = ops.zeros_like(flat_matrix)
 
         # Alternating minimization
-        for iteration in range(self.max_pcp_iter):
+        for _ in range(self.max_pcp_iter):
             # Update L (low-rank component) via nuclear norm minimization
             # L = argmin ||L||_* s.t. A = L + S
             # Solution: L = SVT(A - S) where SVT is singular value thresholding
+            residual = flat_matrix - S_flat
 
-            residual = attention_matrix - S
-
-            # Process each batch and head separately for SVD stability
-            L_list = []
-            for b in range(batch_size):
-                head_list = []
-                for h in range(num_heads):
-                    # Extract single attention matrix
-                    mat = residual[b, h, :, :]
-
-                    # Apply nuclear norm minimization
-                    L_bh = self._nuclear_norm_minimization(mat, self.svd_threshold)
-                    head_list.append(ops.expand_dims(L_bh, axis=0))
-
-                # Stack heads
-                L_b = ops.concatenate(head_list, axis=0)
-                L_list.append(ops.expand_dims(L_b, axis=0))
-
-            # Stack batches
-            L = ops.concatenate(L_list, axis=0)
+            # _nuclear_norm_minimization handles batched inputs correctly
+            L_flat = self._nuclear_norm_minimization(residual, self.svd_threshold)
 
             # Update S (sparse component) via soft thresholding
             # S = argmin ||S||_1 s.t. A = L + S
             # Solution: S = soft_threshold(A - L, λ)
-            S = self._soft_threshold(attention_matrix - L, self.lambda_sparse)
+            S_flat = self._soft_threshold(flat_matrix - L_flat, self.lambda_sparse)
 
-            # Early stopping if converged
-            if iteration > 0:
-                # Check convergence (simplified - could use more sophisticated criteria)
-                reconstruction_error = ops.mean(ops.abs(attention_matrix - L - S))
-                if reconstruction_error < 1e-6:
-                    break
+            # Note: Early stopping removed for Graph mode compatibility
+
+        # Reshape back to (Batch, Num_Heads, Seq, Seq)
+        L = ops.reshape(L_flat, shape)
+        S = ops.reshape(S_flat, shape)
 
         return L, S
 
@@ -457,6 +450,17 @@ class RPCAttention(keras.layers.Layer):
 
         # Apply mask if provided
         if mask is not None:
+            # Broadcast mask to (batch, num_heads, seq_len, seq_len)
+            mask_shape = ops.shape(mask)
+
+            # Case 1: Mask is (batch, seq_len) -> Expand to (batch, 1, 1, seq_len)
+            if len(mask.shape) == 2:
+                mask = ops.expand_dims(mask, axis=1)
+                mask = ops.expand_dims(mask, axis=1)
+            # Case 2: Mask is (batch, seq_len, seq_len) -> Expand to (batch, 1, seq_len, seq_len)
+            elif len(mask.shape) == 3:
+                mask = ops.expand_dims(mask, axis=1)
+
             attention_scores = ops.where(
                 mask == 0,
                 ops.cast(-1e9, dtype=attention_scores.dtype),
