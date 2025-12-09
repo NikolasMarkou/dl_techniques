@@ -182,7 +182,7 @@ model.summary()
 Instantiate a state-of-the-art time series model capable of generating robust, uncertainty-aware forecasts.
 
 ```python
-from dl_techniques.models.tirex import create_tirex_model
+from dl_techniques.models.tirex.model import create_tirex_model
 
 # Create a TiRex model for multivariate probabilistic forecasting
 model = create_tirex_model(
@@ -205,7 +205,8 @@ model.compile(
 Construct a powerful, efficient vision-language model for complex multimodal tasks in just a few lines.
 
 ```python
-from dl_techniques.models.fastvlm import FastVLM
+import keras
+from dl_techniques.models.fastvlm.model import FastVLM
 
 # Create a FastVLM instance from a predefined, optimized variant
 vlm = FastVLM.from_variant(
@@ -282,7 +283,8 @@ model.compile(
 Unlock insights from graph-structured data with our powerful and configurable GNN implementations.
 
 ```python
-from dl_techniques.layers.graphs import GraphNeuralNetworkLayer
+import keras
+from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetworkLayer
 
 # Create a Graph Attention Network (GAT) to process relational data
 gnn = GraphNeuralNetworkLayer(
@@ -311,7 +313,7 @@ This library is engineered to be a living knowledge base, bridging the gap betwe
 Our `research/` directory contains over 50 articles providing the theoretical foundations, implementation details, and best practices behind key components. Highlights include:
 
 -   **[Complete Transformer Guide (2025)](./research/2025_transformer_architectures.md)**: A production-focused guide to implementing state-of-the-art Transformer architectures.
--   **[Model Analyzer Guide](./research/model_analyzer.md)**: A comprehensive tutorial for the advanced model analysis toolkit.
+-   **[Model Analyzer Guide](./src/dl_techniques/analyzer/README.md)**: A comprehensive tutorial for the advanced model analysis toolkit.
 -   **[AnyLoss Framework](./research/anyloss_classification_metrics_loss_functions.md)**: A deep dive into the theory and practice of direct metric optimization.
 -   **[Chronological Neural Architectures](./research/neural_network_architectures.md)**: An extensive chronological guide to influential architectures with implementation notes.
 -   **[Band-Constrained Normalization](./research/bcn_thesis.md)**: A novel normalization technique that preserves magnitude information within bounded constraints.

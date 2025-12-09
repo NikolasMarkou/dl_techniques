@@ -82,3 +82,120 @@ class L2_custom(keras.regularizers.Regularizer):
         return {"l2": float(self.l2)}
 
 # ---------------------------------------------------------------------
+
+
+@keras.utils.register_keras_serializable()
+class SigmoidL2(keras.regularizers.Regularizer):
+    """A regularizer combining L2 penalty with sigmoid saturation for diminishing returns.
+
+    This regularizer provides:
+
+    - **Positive l2**: Encourages smaller weight values (standard penalty behavior).
+    - **Negative l2**: Encourages larger weight values (inverted penalty).
+    - **Diminishing returns**: Uses exponential saturation so the marginal penalty
+      decreases as weight magnitude increases.
+    - **Bounded contributions**: Per-element contributions are bounded by min_val and max_val.
+
+    The regularization loss is computed as:
+
+    .. math::
+
+        \\text{loss} = l2 \\cdot \\sum \\left[ \\text{min\\_val} +
+        (\\text{max\\_val} - \\text{min\\_val}) \\cdot (1 - e^{-\\text{scale} \\cdot x^2}) \\right]
+
+    The term :math:`1 - e^{-\\text{scale} \\cdot x^2}` provides sigmoid-like saturation:
+
+    - At :math:`x = 0`: contribution is min_val
+    - As :math:`|x| \\to \\infty`: contribution approaches max_val asymptotically
+
+    Example usage:
+
+    >>> layer = keras.layers.Dense(64, kernel_regularizer=SigmoidL2(l2=0.01))
+    >>> layer = keras.layers.Dense(64, kernel_regularizer=SigmoidL2(l2=-0.01))  # Encourages larger weights
+
+    :param l2: Regularization factor. Positive penalizes large weights,
+        negative encourages large weights. Defaults to 0.01.
+    :type l2: float
+    :param scale: Controls how quickly the saturation occurs. Higher values
+        cause faster saturation. Defaults to 1.0.
+    :type scale: float
+    :param min_val: Minimum per-element contribution (before l2 scaling).
+        Defaults to 0.0.
+    :type min_val: float
+    :param max_val: Maximum per-element contribution (before l2 scaling).
+        Defaults to 1.0.
+    :type max_val: float
+    """
+
+    def __init__(
+        self,
+        l2: float = 0.01,
+        scale: float = 1.0,
+        min_val: float = 0.0,
+        max_val: float = 1.0,
+    ) -> None:
+        """Initialize the SigmoidL2 regularizer.
+
+        :param l2: Regularization factor.
+        :param scale: Saturation rate control.
+        :param min_val: Minimum per-element contribution.
+        :param max_val: Maximum per-element contribution.
+        :raises ValueError: If scale is not positive or min_val > max_val.
+        """
+        l2 = 0.01 if l2 is None else l2
+        scale = 1.0 if scale is None else scale
+        min_val = 0.0 if min_val is None else min_val
+        max_val = 1.0 if max_val is None else max_val
+
+        validate_float_arg(l2, name="l2")
+        validate_float_arg(scale, name="scale")
+        validate_float_arg(min_val, name="min_val")
+        validate_float_arg(max_val, name="max_val")
+
+        if scale <= 0:
+            raise ValueError(
+                f"scale must be positive. Received: scale={scale}"
+            )
+        if min_val > max_val:
+            raise ValueError(
+                f"min_val must be <= max_val. "
+                f"Received: min_val={min_val}, max_val={max_val}"
+            )
+
+        self.l2 = l2
+        self.scale = scale
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def __call__(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        """Compute the regularization loss for input weights.
+
+        :param x: Weight tensor to regularize.
+        :type x: keras.KerasTensor
+        :return: Scalar regularization loss.
+        :rtype: keras.KerasTensor
+        """
+        squared = keras.ops.square(x)
+
+        # Exponential saturation: 0 at x=0, approaches 1 as |x| -> inf
+        saturation = 1.0 - keras.ops.exp(-self.scale * squared)
+
+        # Scale to [min_val, max_val] range
+        per_element = self.min_val + (self.max_val - self.min_val) * saturation
+
+        return self.l2 * keras.ops.sum(per_element)
+
+    def get_config(self) -> dict:
+        """Return the config of the regularizer.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
+        return {
+            "l2": float(self.l2),
+            "scale": float(self.scale),
+            "min_val": float(self.min_val),
+            "max_val": float(self.max_val),
+        }
+
+# ---------------------------------------------------------------------

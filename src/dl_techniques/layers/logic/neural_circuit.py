@@ -1,64 +1,65 @@
-"""Implements a parallelized, learnable computational block for a neural circuit.
+"""
+A parallelized, learnable computational block for a neural circuit.
 
-    This layer represents a single, complex computational stage designed to be
-    stacked in a deep "neural circuit." It departs from monolithic layers like
-    convolution by creating a parallel ensemble of diverse, learnable operators
-    (both logical and arithmetic) and then learning how to route information
-    between them.
+This layer represents a single, complex computational stage designed to be
+stacked in a deep "neural circuit." It departs from monolithic layers like
+convolution by creating a parallel ensemble of diverse, learnable operators
+(both logical and arithmetic) and then learning how to route information
+between them.
 
-    Architecture:
-        The layer's design is heavily inspired by the Mixture of Experts (MoE)
-        paradigm. It consists of two primary learnable mechanisms operating on a
-        bank of parallel "expert" operators:
+Architecture:
+    The layer's design is heavily inspired by the Mixture of Experts (MoE)
+    paradigm. It consists of two primary learnable mechanisms operating on a
+    bank of parallel "expert" operators:
 
-        1.  **Soft Input Routing:** Instead of sending the entire input tensor
-            to every operator, a learnable "gating" mechanism distributes the
-            input. A vector of routing weights is passed through a softmax
-            function to create a probability distribution. Each operator
-            receives the input tensor scaled by its corresponding probability,
-            allowing the model to learn which operators should receive a
-            stronger signal for a given task.
+    1.  **Soft Input Routing:** Instead of sending the entire input tensor
+        to every operator, a learnable "gating" mechanism distributes the
+        input. A vector of routing weights is passed through a softmax
+        function to create a probability distribution. Each operator
+        receives the input tensor scaled by its corresponding probability,
+        allowing the model to learn which operators should receive a
+        stronger signal for a given task.
 
-        2.  **Parallel Expert Operators:** The core of the layer is a set of
-            `LearnableLogicOperator` and `LearnableArithmeticOperator`
-            instances. These experts run concurrently, each performing a
-            different, internally-learned transformation on its weighted input.
-            This creates a rich and diverse set of candidate feature
-            representations.
+    2.  **Parallel Expert Operators:** The core of the layer is a set of
+        `LearnableLogicOperator` and `LearnableArithmeticOperator`
+        instances. These experts run concurrently, each performing a
+        different, internally-learned transformation on its weighted input.
+        This creates a rich and diverse set of candidate feature
+        representations.
 
-        3.  **Soft Output Combination:** The outputs from all expert operators
-            are fused into a single output tensor. This is not a simple sum or
-            concatenation but a learnable, weighted average. A second vector of
-            combination weights, also passed through a softmax, determines the
-            contribution of each expert's output to the final result.
+    3.  **Soft Output Combination:** The outputs from all expert operators
+        are fused into a single output tensor. This is not a simple sum or
+        concatenation but a learnable, weighted average. A second vector of
+        combination weights, also passed through a softmax, determines the
+        contribution of each expert's output to the final result.
 
-        An optional residual connection can be added, summing the original
-        input with the final combined output to stabilize gradient flow in
-        deeply stacked circuits.
+    An optional residual connection can be added, summing the original
+    input with the final combined output to stabilize gradient flow in
+    deeply stacked circuits.
 
-    Foundational Mathematics:
-        The layer's differentiability hinges on using the softmax function to
-        create continuous, probabilistic weights for routing and combination.
+Foundational Mathematics:
+    The layer's differentiability hinges on using the softmax function to
+    create continuous, probabilistic weights for routing and combination.
 
-        Let `X` be the input tensor, `f_i` be the i-th expert operator, `w_r` be
-        the routing weight vector, and `w_c` be the combination weight vector.
+    Let `X` be the input tensor, `f_i` be the i-th expert operator, `w_r` be
+    the routing weight vector, and `w_c` be the combination weight vector.
 
-        First, routing probabilities `alpha` are computed to gate the input:
-            alpha = softmax(w_r)
+    First, routing probabilities `alpha` are computed to gate the input:
+        alpha = softmax(w_r)
 
-        The input to each expert `f_i` is then a scaled version of `X`:
-            X_i = alpha_i * X
+    The input to each expert `f_i` is then a scaled version of `X`:
+        X_i = alpha_i * X
 
-        Next, combination probabilities `beta` are computed to fuse the outputs:
-            beta = softmax(w_c)
+    Next, combination probabilities `beta` are computed to fuse the outputs:
+        beta = softmax(w_c)
 
-        The final output `Y` is a convex combination of the results from all
-        experts applied to their respective gated inputs:
-            Y = sum_i( beta_i * f_i(X_i) )
+    The final output `Y` is a convex combination of the results from all
+    experts applied to their respective gated inputs:
+        Y = sum_i( beta_i * f_i(X_i) )
 
-        This two-stage gating and fusion process is fully differentiable,
-        allowing the network to learn the optimal data flow and transformation
-        strategy within the layer via standard backpropagation.
+    This two-stage gating and fusion process is fully differentiable,
+    allowing the network to learn the optimal data flow and transformation
+    strategy within the layer via standard backpropagation.
 """
 
 import keras

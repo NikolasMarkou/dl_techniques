@@ -1,84 +1,85 @@
-"""Implements a differentiable operator that learns logical functions.
+"""
+A differentiable operator that learns logical functions.
 
-    This layer embeds principles of fuzzy logic into a neural network,
-    enabling it to learn logical combinations of input features. It provides a
-    differentiable framework for selecting and applying logical operations
-    (e.g., AND, OR, XOR), moving beyond traditional feature summation or
-    concatenation and toward a form of neuro-symbolic reasoning.
+This layer embeds principles of fuzzy logic into a neural network,
+enabling it to learn logical combinations of input features. It provides a
+differentiable framework for selecting and applying logical operations
+(e.g., AND, OR, XOR), moving beyond traditional feature summation or
+concatenation and toward a form of neuro-symbolic reasoning.
 
-    Architecture:
-        The layer's architecture is designed to create a continuous and
-        differentiable proxy for discrete Boolean logic. The process involves
-        three main stages:
+Architecture:
+    The layer's architecture is designed to create a continuous and
+    differentiable proxy for discrete Boolean logic. The process involves
+    three main stages:
 
-        1.  **Input Normalization:** Input tensors, which can have any real
-            values, are first passed through a sigmoid function. This maps all
-            values to the range `[0, 1]`, allowing them to be interpreted as
-            probabilistic or "fuzzy" truth values, where 0 represents `False`
-            and 1 represents `True`.
+    1.  **Input Normalization:** Input tensors, which can have any real
+        values, are first passed through a sigmoid function. This maps all
+        values to the range `[0, 1]`, allowing them to be interpreted as
+        probabilistic or "fuzzy" truth values, where 0 represents `False`
+        and 1 represents `True`.
 
-        2.  **Soft Logic Operations:** A predefined set of "soft" logical
-            operations are applied in parallel to the normalized inputs. Each
-            operation is a differentiable function that emulates the behavior
-            of its discrete Boolean counterpart at the boundaries (0 and 1)
-            while providing smooth gradients for intermediate values.
+    2.  **Soft Logic Operations:** A predefined set of "soft" logical
+        operations are applied in parallel to the normalized inputs. Each
+        operation is a differentiable function that emulates the behavior
+        of its discrete Boolean counterpart at the boundaries (0 and 1)
+        while providing smooth gradients for intermediate values.
 
-        3.  **Differentiable Selection:** The final output is a convex
-            combination of the results from all soft logic operations. This is
-            achieved using a learnable weight vector, passed through a softmax
-            function, which assigns a probability to each operation. The
-            network learns to increase the weights for operations that are
-            most effective for the task.
+    3.  **Differentiable Selection:** The final output is a convex
+        combination of the results from all soft logic operations. This is
+        achieved using a learnable weight vector, passed through a softmax
+        function, which assigns a probability to each operation. The
+        network learns to increase the weights for operations that are
+        most effective for the task.
 
-    Foundational Mathematics:
-        The core of this layer lies in its formulation of differentiable logic
-        gates, which draw heavily from probability theory and fuzzy logic. For
-        inputs `p` and `q` in the range `[0, 1]`:
+Foundational Mathematics:
+    The core of this layer lies in its formulation of differentiable logic
+    gates, which draw heavily from probability theory and fuzzy logic. For
+    inputs `p` and `q` in the range `[0, 1]`:
 
-        -   **Soft NOT:** The standard complement is used:
-            `NOT(p) = 1 - p`
+    -   **Soft NOT:** The standard complement is used:
+        `NOT(p) = 1 - p`
 
-        -   **Soft AND:** This is modeled by the product of probabilities,
-            corresponding to the 'product t-norm' in fuzzy logic:
-            `AND(p, q) = p * q`
+    -   **Soft AND:** This is modeled by the product of probabilities,
+        corresponding to the 'product t-norm' in fuzzy logic:
+        `AND(p, q) = p * q`
 
-        -   **Soft OR:** Modeled using the probabilistic sum (derived from the
-            inclusion-exclusion principle):
-            `OR(p, q) = P(p U q) = P(p) + P(q) - P(p intersect q) = p + q - p*q`
+    -   **Soft OR:** Modeled using the probabilistic sum (derived from the
+        inclusion-exclusion principle):
+        `OR(p, q) = P(p U q) = P(p) + P(q) - P(p intersect q) = p + q - p*q`
 
-        -   **Soft XOR:** Derived from its definition `(p OR q) AND (NOT(p AND q))`,
-            a common differentiable form is:
-            `XOR(p, q) = p + q - 2*p*q`
+    -   **Soft XOR:** Derived from its definition `(p OR q) AND (NOT(p AND q))`,
+        a common differentiable form is:
+        `XOR(p, q) = p + q - 2*p*q`
 
-        The weighted combination of these operations is controlled by a softmax
-        distribution over a learnable weight vector `w`, often with a
-        temperature `T`. The probability `alpha_i` for selecting the i-th
-        logical operation `f_i` is:
+    The weighted combination of these operations is controlled by a softmax
+    distribution over a learnable weight vector `w`, often with a
+    temperature `T`. The probability `alpha_i` for selecting the i-th
+    logical operation `f_i` is:
 
-            alpha_i = exp(w_i / T) / sum_j(exp(w_j / T))
+        alpha_i = exp(w_i / T) / sum_j(exp(w_j / T))
 
-        The final output `Y` is the weighted sum of all operation results:
+    The final output `Y` is the weighted sum of all operation results:
 
-            Y = sum_i(alpha_i * f_i(X))
+        Y = sum_i(alpha_i * f_i(X))
 
-        This design allows gradients to flow back to the weights `w` and the
-        temperature `T`, enabling the model to learn the optimal logical
-        structure from data.
+    This design allows gradients to flow back to the weights `w` and the
+    temperature `T`, enabling the model to learn the optimal logical
+    structure from data.
 
-    References:
-        - The concept of continuous relaxations for discrete choices is central
-          to Differentiable Architecture Search (DARTS).
-          Liu, H., Simonyan, K., & Yang, Y. (2018). "DARTS: Differentiable
-          Architecture Search".
+References:
+    - The concept of continuous relaxations for discrete choices is central
+      to Differentiable Architecture Search (DARTS).
+      Liu, H., Simonyan, K., & Yang, Y. (2018). "DARTS: Differentiable
+      Architecture Search".
 
-        - The mathematical forms of the soft logic gates are standard in
-          fuzzy logic literature.
-          Zadeh, L. A. (1965). "Fuzzy sets". Information and Control.
+    - The mathematical forms of the soft logic gates are standard in
+      fuzzy logic literature.
+      Zadeh, L. A. (1965). "Fuzzy sets". Information and Control.
 
-        - This approach is part of a broader field of neuro-symbolic AI, which
-          aims to integrate neural learning with symbolic reasoning.
-          Garcez, A. S., Broda, K., & Gabbay, D. M. (2002). "Neural-Symbolic
-          Learning Systems: Foundations and Applications".
+    - This approach is part of a broader field of neuro-symbolic AI, which
+      aims to integrate neural learning with symbolic reasoning.
+      Garcez, A. S., Broda, K., & Gabbay, D. M. (2002). "Neural-Symbolic
+      Learning Systems: Foundations and Applications".
 """
 
 import keras
