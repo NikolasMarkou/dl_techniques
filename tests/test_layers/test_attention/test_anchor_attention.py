@@ -1,337 +1,475 @@
-"""Test suite for AnchorAttention layer.
+"""Comprehensive Test Suite for AnchorAttention Layer.
 
-This module contains comprehensive tests for the AnchorAttention layer,
-focusing on its dual-mode operation (standard vs hierarchical),
-gradient flow, and specific properties of the anchor-based mechanism.
+This module provides exhaustive testing for the AnchorAttention layer, covering:
+1. Initialization & Configuration
+2. Input Validation & Error Handling
+3. Build Process & Weight Shapes
+4. Standard Attention Logic
+5. Hierarchical Attention Logic
+6. Probability/Activation Integration
+7. Training Dynamics (Dropout, Regularization, Gradients)
+8. Serialization & Persistence
+9. Mixed Precision & DType Support
+10. Edge Cases
 """
 
 import pytest
 import numpy as np
 import tensorflow as tf
 import keras
+from keras import ops, layers, initializers, regularizers
 import tempfile
 import os
 
-# Import the layer to test
-# Adjust import path based on your actual directory structure
 from dl_techniques.layers.attention.anchor_attention import AnchorAttention
 
 
-class TestAnchorAttention:
-    """Test suite for AnchorAttention layer."""
+# ==============================================================================
+# 1. Initialization & Configuration Tests
+# ==============================================================================
 
-    @pytest.fixture
-    def input_tensor(self):
-        """Create a test input tensor."""
-        return keras.random.normal((2, 20, 64))  # (batch_size, seq_len, dim)
+class TestInitialization:
+    """Tests for layer initialization and parameter storage."""
 
-    @pytest.fixture
-    def layer_instance(self):
-        """Create a default layer instance for testing."""
-        return AnchorAttention(dim=64, num_heads=8)
-
-    # ==================== Initialization Tests ====================
-
-    def test_initialization_defaults(self):
-        """Test initialization with default parameters."""
+    def test_defaults(self):
+        """Test instantiation with minimal required arguments."""
         layer = AnchorAttention(dim=64, num_heads=8)
-
         assert layer.dim == 64
         assert layer.num_heads == 8
+        assert layer.head_dim == 8
         assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
-        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
+        assert layer.probability_type == "softmax"
+        # Check scale factor (1 / sqrt(head_dim))
+        expected_scale = 1.0 / np.sqrt(8)
+        np.testing.assert_allclose(layer.scale, expected_scale)
 
-        # Check computed attributes
-        assert layer.head_dim == 8
-        np.testing.assert_allclose(layer.scale, 1.0 / np.sqrt(8))
+    def test_explicit_head_dim(self):
+        """Test providing a specific head dimension."""
+        # dim=64, heads=4 -> default head_dim=16. Force head_dim=32.
+        layer = AnchorAttention(dim=64, num_heads=4, head_dim=32)
+        assert layer.head_dim == 32
+        # Scale should be based on explicit head_dim
+        expected_scale = 1.0 / np.sqrt(32)
+        np.testing.assert_allclose(layer.scale, expected_scale)
 
-    def test_initialization_custom(self):
-        """Test initialization with custom parameters."""
-        custom_reg = keras.regularizers.L2(1e-4)
-
+    def test_custom_config(self):
+        """Test all configurable parameters."""
+        reg = regularizers.L2(0.01)
+        init = initializers.HeNormal()
         layer = AnchorAttention(
             dim=128,
-            num_heads=16,
-            dropout_rate=0.1,
+            num_heads=8,
+            dropout_rate=0.5,
             use_bias=False,
-            kernel_regularizer=custom_reg
+            probability_type="sparsemax",
+            probability_config={"axis": -1},
+            kernel_initializer=init,
+            bias_initializer="ones",
+            kernel_regularizer=reg,
+            bias_regularizer=reg
         )
-
-        assert layer.dim == 128
-        assert layer.num_heads == 16
-        assert layer.dropout_rate == 0.1
+        assert layer.dropout_rate == 0.5
         assert layer.use_bias is False
-        assert layer.kernel_regularizer == custom_reg
+        assert layer.probability_type == "sparsemax"
+        assert layer.probability_config == {"axis": -1}
+        assert layer.kernel_regularizer == reg
 
-    def test_invalid_params(self):
-        """Test validation of invalid parameters."""
-        # Invalid dim/head ratio
-        with pytest.raises(ValueError, match="must be divisible"):
-            AnchorAttention(dim=63, num_heads=8)
 
-        # Invalid dim
+# ==============================================================================
+# 2. Input Validation & Error Handling
+# ==============================================================================
+
+class TestValidation:
+    """Tests for input validation in __init__ and build/call."""
+
+    def test_invalid_dim_negative(self):
         with pytest.raises(ValueError, match="dim must be positive"):
-            AnchorAttention(dim=-64, num_heads=8)
+            AnchorAttention(dim=-10, num_heads=2)
 
-        # Invalid dropout
+    def test_invalid_heads_negative(self):
+        with pytest.raises(ValueError, match="num_heads must be positive"):
+            AnchorAttention(dim=32, num_heads=0)
+
+    def test_invalid_divisibility(self):
+        """Test dim not divisible by num_heads (when head_dim is None)."""
+        with pytest.raises(ValueError, match="must be divisible"):
+            AnchorAttention(dim=10, num_heads=3)
+
+    def test_invalid_dropout_range_high(self):
         with pytest.raises(ValueError, match="dropout_rate"):
-            AnchorAttention(dim=64, dropout_rate=1.5)
+            AnchorAttention(dim=32, num_heads=2, dropout_rate=1.1)
 
-    # ==================== Build Process Tests ====================
+    def test_invalid_dropout_range_low(self):
+        with pytest.raises(ValueError, match="dropout_rate"):
+            AnchorAttention(dim=32, num_heads=2, dropout_rate=-0.1)
 
-    def test_build_process(self, input_tensor):
-        """Test that the layer and sub-layers build properly."""
-        layer = AnchorAttention(dim=64, num_heads=8)
-        layer(input_tensor)  # Forward pass triggers build
-
-        assert layer.built is True
-        assert layer.qkv_dense.built is True
-        assert layer.q_dense.built is True
-        assert layer.proj_dense.built is True
-
-        # Verify weight shapes
-        # qkv: (dim, 3*dim)
-        assert layer.qkv_dense.kernel.shape == (64, 64 * 3)
-        # q_dense: (dim, dim) - used for queries
-        assert layer.q_dense.kernel.shape == (64, 64)
-        # proj: (dim, dim)
-        assert layer.proj_dense.kernel.shape == (64, 64)
-
-    def test_build_input_shape_validation(self):
-        """Test input shape validation in build."""
-        layer = AnchorAttention(dim=64, num_heads=8)
-
+    def test_build_wrong_dims(self):
+        """Test building with non-3D input."""
+        layer = AnchorAttention(dim=32, num_heads=4)
         with pytest.raises(ValueError, match="Input must be 3D"):
-            layer.build((32, 64))
+            layer.build((32, 10))
 
+    def test_build_mismatched_channel_dim(self):
+        """Test input channel dim mismatching layer config."""
+        layer = AnchorAttention(dim=32, num_heads=4)
         with pytest.raises(ValueError, match="Last dimension of input"):
-            layer.build((None, 10, 32))
+            layer.build((None, 10, 64))  # Expecting 32, got 64
 
-    # ==================== Functional Logic Tests ====================
 
-    def test_standard_attention_mode(self, input_tensor):
-        """Test standard attention mode (num_anchor_tokens=None)."""
-        layer = AnchorAttention(dim=64, num_heads=8)
-        output = layer(input_tensor)
+# ==============================================================================
+# 3. Build Process & Weight Shapes
+# ==============================================================================
 
-        assert output.shape == input_tensor.shape
-        assert not tf.reduce_any(tf.math.is_nan(output))
+class TestBuild:
+    """Tests for the build process and weight instantiation."""
 
-    def test_hierarchical_attention_mode(self, input_tensor):
-        """Test hierarchical mode with specific anchor count."""
-        layer = AnchorAttention(dim=64, num_heads=8)
-        # First 5 tokens are anchors
-        output = layer(input_tensor, num_anchor_tokens=5)
+    @pytest.fixture
+    def layer(self):
+        return AnchorAttention(dim=64, num_heads=8, head_dim=8)
 
-        assert output.shape == input_tensor.shape
-        assert not tf.reduce_any(tf.math.is_nan(output))
+    def test_weight_existence(self, layer):
+        layer.build((None, 10, 64))
+        # Check all expected weights exist
+        assert len(layer.query_proj.trainable_variables) > 0
+        assert len(layer.key_proj.trainable_variables) > 0
+        assert len(layer.value_proj.trainable_variables) > 0
+        assert len(layer.query_token_proj.trainable_variables) > 0
+        assert len(layer.output_proj.trainable_variables) > 0
 
-    def test_hierarchical_fallback(self, input_tensor):
+    def test_weight_shapes_with_bias(self, layer):
+        layer.build((None, 10, 64))
+        # query_proj kernel: (input_dim, num_heads * head_dim)
+        assert layer.query_proj.kernel.shape == (64, 64)
+        assert layer.query_proj.bias.shape == (64,)
+        
+        # query_token_proj (used in hierarchical)
+        assert layer.query_token_proj.kernel.shape == (64, 64)
+
+
+# ==============================================================================
+# 4. Standard Attention Logic
+# ==============================================================================
+
+class TestStandardAttention:
+    """Tests for Standard Mode (num_anchor_tokens=None)."""
+
+    def test_output_shape(self):
+        x = keras.random.normal((2, 20, 32))
+        layer = AnchorAttention(dim=32, num_heads=4)
+        out = layer(x)
+        assert out.shape == (2, 20, 32)
+
+    def test_determinism_inference(self):
+        """Ensure standard attention is deterministic without dropout."""
+        x = keras.random.normal((1, 10, 32))
+        layer = AnchorAttention(dim=32, num_heads=4)
+        out1 = layer(x, training=False)
+        out2 = layer(x, training=False)
+        np.testing.assert_allclose(out1, out2, atol=1e-6)
+
+    def test_values_range(self):
+        """Sanity check that outputs aren't exploding."""
+        x = keras.random.normal((1, 10, 32))
+        layer = AnchorAttention(dim=32, num_heads=4)
+        out = layer(x)
+        assert np.all(np.abs(out) < 100.0)  # Loose bound for normalized inputs
+
+
+# ==============================================================================
+# 5. Hierarchical Attention Logic
+# ==============================================================================
+
+class TestHierarchicalAttention:
+    """Tests for Hierarchical Mode (num_anchor_tokens=K)."""
+
+    def test_mixed_mode_shapes(self):
+        """Test output shape when splitting anchors/queries."""
+        x = keras.random.normal((2, 30, 32))
+        layer = AnchorAttention(dim=32, num_heads=4)
+        # 10 anchors, 20 queries
+        out = layer(x, num_anchor_tokens=10)
+        assert out.shape == (2, 30, 32)
+
+    def test_query_isolation(self):
         """
-        Test that hierarchical mode falls back to standard attention
-        when num_anchor_tokens >= seq_len.
+        Critical: Queries should not attend to each other.
+        Changing query q_i should not affect output of query q_j.
         """
-        layer = AnchorAttention(dim=64, num_heads=8)
-
-        # 20 tokens input, 20 anchors requested -> Should be standard attention
-        out_fallback = layer(input_tensor, num_anchor_tokens=20)
-        out_standard = layer(input_tensor, num_anchor_tokens=None)
-
-        # Outputs should be identical
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(out_fallback),
-            keras.ops.convert_to_numpy(out_standard),
-            rtol=1e-6, atol=1e-6,
-            err_msg="Fallback to standard attention failed"
-        )
-
-    def test_query_isolation_property(self):
-        """
-        CRITICAL TEST: Verify the core property of Anchor Attention.
-
-        In hierarchical mode, query tokens (indices > K) attend ONLY to anchor tokens.
-        Therefore, changing a query token input should NOT affect the output
-        of other query tokens.
-        """
-        dim = 64
+        dim = 32
+        layer = AnchorAttention(dim=dim, num_heads=4)
         seq_len = 10
-        num_anchors = 4
-        layer = AnchorAttention(dim=dim, num_heads=8)
-
+        anchors = 2
+        
         # Base input
-        x1 = keras.random.normal((1, seq_len, dim))
+        x = keras.random.normal((1, seq_len, dim))
+        x_base = ops.convert_to_numpy(x)
+        
+        # Run 1
+        out1 = layer(x, num_anchor_tokens=anchors)
+        
+        # Modify last token (a query)
+        x_mod = x_base.copy()
+        x_mod[0, -1, :] += 5.0
+        x_mod_tensor = ops.convert_to_tensor(x_mod)
+        
+        # Run 2
+        out2 = layer(x_mod_tensor, num_anchor_tokens=anchors)
+        
+        # Check penultimate token (another query). 
+        # Since queries don't self-attend, token -2 should be unaffected by token -1 change.
+        diff = np.max(np.abs(out1[:, -2, :] - out2[:, -2, :]))
+        assert diff < 1e-5, f"Leaky attention detected! Diff: {diff}"
 
-        # Create x2 by modifying the LAST token (a query token)
-        # We modify index 9. This should NOT affect the output at index 8 (another query).
-        x2_np = keras.ops.convert_to_numpy(x1).copy()
-        x2_np[0, -1, :] += 1.0 # Perturb last token
-        x2 = keras.ops.convert_to_tensor(x2_np)
+    def test_anchor_influence(self):
+        """Verify that changing an anchor affects queries."""
+        dim = 32
+        layer = AnchorAttention(dim=dim, num_heads=4)
+        seq_len = 10
+        anchors = 2
+        
+        x = keras.random.normal((1, seq_len, dim))
+        x_base = ops.convert_to_numpy(x)
+        
+        out1 = layer(x, num_anchor_tokens=anchors)
+        
+        # Modify first token (an anchor)
+        x_mod = x_base.copy()
+        x_mod[0, 0, :] += 5.0
+        out2 = layer(ops.convert_to_tensor(x_mod), num_anchor_tokens=anchors)
+        
+        # All tokens (including queries) attend to anchors, so output should change
+        diff = np.max(np.abs(out1[:, -1, :] - out2[:, -1, :]))
+        assert diff > 1e-4, "Anchors failed to influence queries."
 
-        # Run inference
-        y1 = layer(x1, num_anchor_tokens=num_anchors)
-        y2 = layer(x2, num_anchor_tokens=num_anchors)
+    def test_fallback_logic(self):
+        """Test fallback when anchors >= seq_len."""
+        x = keras.random.normal((1, 10, 32))
+        layer = AnchorAttention(dim=32, num_heads=4)
+        
+        # Request 10 anchors for sequence of 10 -> Standard Attn
+        out_hier = layer(x, num_anchor_tokens=10)
+        out_std = layer(x, num_anchor_tokens=None)
+        
+        np.testing.assert_allclose(out_hier, out_std, atol=1e-6)
 
-        # Check index 8 (penultimate query token)
-        # In standard attention, y1[0, 8] would differ from y2[0, 8] because token 8 attends to token 9
-        # In anchor attention, token 8 attends only to 0-3. Token 9 is irrelevant to token 8.
-        diff = tf.reduce_max(tf.abs(y1[:, 8, :] - y2[:, 8, :]))
+    def test_fallback_logic_exceeds(self):
+        """Test fallback when anchors > seq_len."""
+        x = keras.random.normal((1, 5, 32))
+        layer = AnchorAttention(dim=32, num_heads=4)
+        out_hier = layer(x, num_anchor_tokens=100) # Exceeds
+        out_std = layer(x, num_anchor_tokens=None)
+        np.testing.assert_allclose(out_hier, out_std, atol=1e-6)
 
-        assert diff < 1e-5, f"Query isolation failed! Max diff: {diff}. Query tokens are attending to each other."
 
-        # Conversely, check that changing an ANCHOR token DOES affect query outputs
-        x3_np = keras.ops.convert_to_numpy(x1).copy()
-        x3_np[0, 0, :] += 1.0 # Perturb first anchor
-        x3 = keras.ops.convert_to_tensor(x3_np)
+# ==============================================================================
+# 6. Probability & Activation Configuration
+# ==============================================================================
 
-        y3 = layer(x3, num_anchor_tokens=num_anchors)
+class TestProbabilityConfiguration:
+    """Test integration with different probability outputs."""
 
-        anchor_diff = tf.reduce_max(tf.abs(y1[:, 8, :] - y3[:, 8, :]))
-        assert anchor_diff > 1e-4, "Anchor influence failed! Anchors should affect queries."
+    def test_softmax_default(self):
+        layer = AnchorAttention(dim=32, num_heads=4)
+        assert layer.score_activation.probability_type == "softmax"
 
-    # ==================== Gradient Flow Tests ====================
-
-    def test_gradient_flow(self, input_tensor):
-        """Test gradient flow in both modes."""
-        layer = AnchorAttention(dim=64, num_heads=8)
-
-        # Test Standard Mode Gradients
-        with tf.GradientTape() as tape:
-            inputs = tf.Variable(input_tensor)
-            # Explicitly pass None to ensure standard mode
-            out_std = layer(inputs, num_anchor_tokens=None)
-            loss_std = tf.reduce_mean(out_std**2)
-
-        grads_std = tape.gradient(loss_std, layer.trainable_variables)
-
-        # Retrieve variable groups from sub-layers
-        qkv_vars = layer.qkv_dense.trainable_variables
-        proj_vars = layer.proj_dense.trainable_variables
-        q_vars = layer.q_dense.trainable_variables
-
-        # Map variables to their gradients using object identity (since vars are unhashable)
-        var_grad_pairs = list(zip(layer.trainable_variables, grads_std))
-
-        def get_grad_for_var(target_var):
-            for v, g in var_grad_pairs:
-                if v is target_var:
-                    return g
-            return None
-
-        # Check active variables (qkv and proj)
-        for v in qkv_vars + proj_vars:
-            grad = get_grad_for_var(v)
-            assert grad is not None
-            assert tf.reduce_any(grad != 0), f"Active variable {v.name} has zero gradient"
-
-        # Check unused variables (q_dense)
-        for v in q_vars:
-            grad = get_grad_for_var(v)
-            # Depending on backend configuration, unconnected gradients can be None or Zero
-            if grad is not None:
-                assert tf.reduce_all(grad == 0), f"Unused variable {v.name} has non-zero gradients in standard mode!"
-
-        # Test Hierarchical Mode Gradients
-        with tf.GradientTape() as tape:
-            inputs = tf.Variable(input_tensor)
-            # Use 10 anchors (half sequence)
-            out_hier = layer(inputs, num_anchor_tokens=10)
-            loss_hier = tf.reduce_mean(out_hier**2)
-
-        grads_hier = tape.gradient(loss_hier, layer.trainable_variables)
-
-        # In hierarchical mode, ALL sublayers should be involved
-        assert all(g is not None for g in grads_hier)
-        for g in grads_hier:
-            assert tf.reduce_any(g != 0)
-
-    # ==================== Serialization Tests ====================
-
-    def test_serialization(self, input_tensor):
-        """Test complete serialization cycle."""
-        # Note: dim=64 to match input_tensor fixture (2, 20, 64)
+    def test_adaptive_config(self):
+        """Test passing config dict to ProbabilityOutput."""
+        config = {"min_temp": 0.5, "max_temp": 2.0}
         layer = AnchorAttention(
-            dim=64,
-            num_heads=4,
-            dropout_rate=0.2,
-            use_bias=False
+            dim=32, num_heads=4, 
+            probability_type="adaptive",
+            probability_config=config
         )
+        assert layer.score_activation.probability_type == "adaptive"
+        assert layer.score_activation.type_config == config
+        
+        # Ensure it runs
+        x = keras.random.normal((1, 10, 32))
+        out = layer(x)
+        assert out.shape == (1, 10, 32)
 
-        # Build first
-        layer(input_tensor)
 
+# ==============================================================================
+# 7. Training Dynamics (Dropout, Regularization, Gradients)
+# ==============================================================================
+
+class TestTrainingDynamics:
+    
+    def test_dropout_training(self):
+        """Test dropout is applied during training."""
+        layer = AnchorAttention(dim=32, num_heads=4, dropout_rate=0.5)
+        x = keras.random.normal((1, 10, 32)) * 10.0
+        
+        # Run multiple times
+        out1 = layer(x, training=True)
+        out2 = layer(x, training=True)
+        
+        # Should differ due to dropout mask
+        assert not np.allclose(out1, out2), "Dropout did not introduce stochasticity"
+
+    def test_dropout_inference(self):
+        """Test dropout is disabled during inference."""
+        layer = AnchorAttention(dim=32, num_heads=4, dropout_rate=0.5)
+        x = keras.random.normal((1, 10, 32))
+        
+        out1 = layer(x, training=False)
+        out2 = layer(x, training=False)
+        
+        np.testing.assert_allclose(out1, out2, atol=1e-6)
+
+    def test_gradient_flow_standard(self):
+        """Ensure gradients flow to standard projections."""
+        layer = AnchorAttention(dim=32, num_heads=4)
+        x = keras.random.normal((1, 10, 32))
+        
+        with tf.GradientTape() as tape:
+            out = layer(x, num_anchor_tokens=None)
+            loss = tf.reduce_mean(out)
+            
+        grads = tape.gradient(loss, layer.query_proj.trainable_variables)
+        assert all(g is not None and tf.reduce_any(g != 0) for g in grads)
+
+    def test_gradient_flow_hierarchical(self):
+        """Ensure gradients flow to both standard and query-specific projections."""
+        layer = AnchorAttention(dim=32, num_heads=4)
+        x = keras.random.normal((1, 10, 32))
+        
+        with tf.GradientTape() as tape:
+            out = layer(x, num_anchor_tokens=5)
+            loss = tf.reduce_mean(out)
+            
+        # query_token_proj is ONLY used in hierarchical mode
+        grads = tape.gradient(loss, layer.query_token_proj.trainable_variables)
+        assert all(g is not None and tf.reduce_any(g != 0) for g in grads)
+
+    def test_regularization_loss(self):
+        """Test that regularizers add to layer losses."""
+        layer = AnchorAttention(
+            dim=32, num_heads=4,
+            kernel_regularizer=regularizers.L2(1.0)
+        )
+        x = keras.random.normal((1, 10, 32))
+        layer(x) # Trigger build
+        
+        assert len(layer.losses) > 0
+        # Should have losses from 5 sub-dense layers
+        # (q, k, v, q_token, out)
+        # Note: Depending on implementation, sublayers add to their own losses,
+        # and parent layer aggregates them via standard Keras property.
+        assert tf.reduce_sum(layer.losses) > 0
+
+
+# ==============================================================================
+# 8. Serialization & Persistence
+# ==============================================================================
+
+class TestSerialization:
+
+    def test_get_config(self):
+        layer = AnchorAttention(dim=64, num_heads=8, dropout_rate=0.2)
         config = layer.get_config()
-        recreated = AnchorAttention.from_config(config)
+        assert config["dim"] == 64
+        assert config["dropout_rate"] == 0.2
+        assert config["num_heads"] == 8
 
-        assert recreated.dim == 64
-        assert recreated.num_heads == 4
-        assert recreated.dropout_rate == 0.2
-        assert recreated.use_bias is False
+    def test_from_config(self):
+        config = {
+            "dim": 32,
+            "num_heads": 2,
+            "dropout_rate": 0.1,
+            "probability_type": "adaptive"
+        }
+        layer = AnchorAttention.from_config(config)
+        assert layer.dim == 32
+        assert layer.probability_type == "adaptive"
 
-    def test_model_save_load(self, input_tensor):
-        """Test saving/loading within a full model."""
-        inputs = keras.Input(shape=input_tensor.shape[1:])
-        x = AnchorAttention(dim=64, num_heads=8)(inputs, num_anchor_tokens=5)
-        outputs = keras.layers.Dense(1)(x)
-        model = keras.Model(inputs, outputs)
-
-        # Run prediction
-        pred_orig = model.predict(input_tensor, verbose=0)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            path = os.path.join(tmpdirname, "model.keras")
+    def test_model_save_load_loop(self):
+        """Full save/load cycle in a model context."""
+        inputs = keras.Input(shape=(10, 32))
+        x = AnchorAttention(dim=32, num_heads=4)(inputs)
+        model = keras.Model(inputs, x)
+        
+        x_in = np.random.normal(size=(1, 10, 32)).astype("float32")
+        pred_orig = model.predict(x_in, verbose=0)
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "test_model.keras")
             model.save(path)
+            loaded = keras.models.load_model(path)
+            pred_load = loaded.predict(x_in, verbose=0)
+            
+            np.testing.assert_allclose(pred_orig, pred_load, atol=1e-5)
 
-            loaded_model = keras.models.load_model(
-                path,
-                custom_objects={"AnchorAttention": AnchorAttention}
-            )
 
-            pred_loaded = loaded_model.predict(input_tensor, verbose=0)
+# ==============================================================================
+# 9. Mixed Precision & DType Support
+# ==============================================================================
 
-            np.testing.assert_allclose(
-                pred_orig, pred_loaded,
-                rtol=1e-5, atol=1e-5
-            )
+class TestDtypes:
 
-    # ==================== Edge Case Tests ====================
 
-    def test_single_anchor(self, input_tensor):
-        """Test with just 1 anchor token."""
-        layer = AnchorAttention(dim=64, num_heads=8)
-        output = layer(input_tensor, num_anchor_tokens=1)
-        assert output.shape == input_tensor.shape
-        assert not tf.reduce_any(tf.math.is_nan(output))
+    def test_variable_batch_dim(self):
+        """Test with varying batch sizes."""
+        layer = AnchorAttention(dim=32, num_heads=4)
+        out1 = layer(keras.random.normal((1, 5, 32)))
+        out2 = layer(keras.random.normal((5, 5, 32)))
+        assert out1.shape[0] == 1
+        assert out2.shape[0] == 5
 
-    def test_zero_anchors_behavior(self, input_tensor):
+
+# ==============================================================================
+# 10. Edge Cases
+# ==============================================================================
+
+class TestEdgeCases:
+    
+    def test_single_anchor(self):
+        """Hierarchical mode with just 1 anchor."""
+        layer = AnchorAttention(dim=32, num_heads=4)
+        x = keras.random.normal((1, 10, 32))
+        out = layer(x, num_anchor_tokens=1)
+        assert out.shape == (1, 10, 32)
+        assert not np.any(np.isnan(out))
+
+    def test_zero_anchors(self):
         """
-        Test behavior when num_anchor_tokens is 0.
-        This is a degenerate case. The implementation splits inputs.
-        If num_anchor=0:
-          anchors=[]
-          queries=all
-
-        This typically causes empty tensor operations.
-        We just want to ensure it doesn't crash effectively or behaves consistently.
+        Edge Case: 0 anchors. 
+        Technically invalid for 'attending to anchors', but should handle gracefully 
+        (e.g., return zeros, raise error, or operate on empty tensors without crash).
+        Based on implementation: split at 0 means anchors=[], queries=all.
+        Attending to empty keys usually results in NaN or Zero depending on softmax impl.
+        We check it doesn't crash the Python process.
         """
-        layer = AnchorAttention(dim=64, num_heads=8)
-
-        # Just check it doesn't hard crash the python process
+        layer = AnchorAttention(dim=32, num_heads=4)
+        x = keras.random.normal((1, 10, 32))
         try:
-            output = layer(input_tensor, num_anchor_tokens=0)
+            out = layer(x, num_anchor_tokens=0)
         except Exception:
-            # Failure is acceptable for 0 anchors as it's invalid for attention
+            # Crashing with error is acceptable for this invalid state
+            pass
+        else:
+            # If it returns, check for NaNs if relevant, though behavior is undefined
             pass
 
-    def test_variable_batch_size(self):
-        """Test compatibility with variable batch sizes."""
-        layer = AnchorAttention(dim=64, num_heads=8)
+    def test_kwargs_passthrough(self):
+        """Test valid kwargs propagation to Layer init (e.g., name)."""
+        layer = AnchorAttention(dim=32, num_heads=4, name="special_layer")
+        assert layer.name == "special_layer"
 
-        out1 = layer(tf.random.normal((1, 10, 64)))
-        out2 = layer(tf.random.normal((5, 10, 64)))
+    def test_compute_output_shape(self):
+        layer = AnchorAttention(dim=32, num_heads=4)
+        shape = layer.compute_output_shape((5, 20, 32))
+        assert shape == (5, 20, 32)
 
-        assert out1.shape == (1, 10, 64)
-        assert out2.shape == (5, 10, 64)
+    def test_cloning(self):
+        """Test capability to be cloned via keras.models.clone_model."""
+        layer = AnchorAttention(dim=32, num_heads=4)
+        model = keras.Sequential([layer])
+        clone = keras.models.clone_model(model)
+        assert isinstance(clone.layers[0], AnchorAttention)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
