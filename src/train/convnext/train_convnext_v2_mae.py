@@ -27,7 +27,7 @@ from typing import Tuple, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
-from dl_techniques.layers.masked_autoencoder import (
+from dl_techniques.models.masked_autoencoder import (
     MaskedAutoencoder,
     visualize_reconstruction,
 )
