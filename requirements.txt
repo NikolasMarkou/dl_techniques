@@ -16,3 +16,4 @@ psutil
 tensorflow-datasets
 tiktoken
 datasets # hugging face datasets
+dotenv

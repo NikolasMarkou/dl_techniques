@@ -7,6 +7,11 @@ This script implements a production-grade Two-Stage training workflow:
 2. **Supervised Fine-tuning**: Fine-tuning the pretrained U-Net on **COCO-Stuff**
    for semantic segmentation.
 
+Configuration:
+--------------
+Data locations can be configured via command line arguments or a .env file.
+Define `TFDS_DATA_DIR` in your .env file to set a custom TFDS download location.
+
 Architecture Strategy:
 ----------------------
 We utilize a "Shared-Weight Wrapper" pattern. The `ConvUNextModel` is instantiated
@@ -25,6 +30,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from datetime import datetime
 from typing import Tuple, Optional
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------
 # Framework Imports
@@ -47,7 +53,10 @@ from dl_techniques.optimization import (
 # ---------------------------------------------------------------------
 
 def setup_environment():
-    """Configure GPU settings and precision."""
+    """Configure GPU settings, precision, and load environment variables."""
+    # Load environment variables from .env file
+    load_dotenv()
+
     # NOTE: Mixed Precision disabled to ensure stability with ConvNeXtV2 blocks
     # keras.mixed_precision.set_global_policy("mixed_float16")
 
@@ -510,13 +519,16 @@ def run_segmentation_finetuning(
 # ---------------------------------------------------------------------
 
 def main():
+    setup_environment()
+
     parser = argparse.ArgumentParser(
         description="ConvUNext (ImageNet MAE -> COCO Seg)"
     )
 
     # Data params
     parser.add_argument(
-        "--data-dir", type=str, default=None, help="TFDS data directory"
+        "--data-dir", type=str, default=None,
+        help="TFDS data directory. Overrides TFDS_DATA_DIR env var."
     )
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -546,7 +558,22 @@ def main():
 
     args = parser.parse_args()
 
-    setup_environment()
+    # Resolve Data Directory
+    # Priority: 1. CLI Arg, 2. Env Var, 3. None (Default)
+    if args.data_dir is None:
+        env_data_dir = os.getenv("TFDS_DATA_DIR", "~/tensorflow_datasets/")
+        if env_data_dir:
+            args.data_dir = env_data_dir
+            logger.info(
+                f"Resolved TFDS data directory from .env: {args.data_dir}"
+            )
+        else:
+            logger.info(
+                "No custom data directory provided. Using TFDS default."
+            )
+    else:
+        logger.info(f"Using CLI provided data directory: {args.data_dir}")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = os.path.join(
         "results", f"full_run_{args.variant}_{timestamp}"
