@@ -1,16 +1,17 @@
 """
-ConvUNext Model: Modern Bias-Free U-Net with ConvNeXt-Inspired Architecture
+ConvUNext Model: Modern U-Net with ConvNeXt-Inspired Architecture
 
 Refined implementation adhering to Keras 3 strict serialization, layer tracking,
 and explicit build patterns following the Complete Guide to Modern Keras 3 Custom
 Layers and Models.
 
-Key improvements:
+Key features:
 - Complete Sphinx-style documentation
 - Proper type hints throughout
 - Explicit sub-layer building in build()
 - Graph-safe operations in call()
 - Full serialization support
+- Configurable bias for standard or restoration tasks
 """
 
 import os
@@ -50,7 +51,7 @@ class ConvUNextStem(keras.layers.Layer):
     ```
     Input(shape=[batch, height, width, channels])
            ↓
-    Conv2D(filters, kernel_size, padding='same', bias=False)
+    Conv2D(filters, kernel_size, padding='same', use_bias=use_bias)
            ↓
     LayerNormalization(epsilon=1e-6)
            ↓
@@ -62,6 +63,8 @@ class ConvUNextStem(keras.layers.Layer):
             Determines the channel dimensionality after stem processing.
         kernel_size: Integer or tuple of 2 integers, specifying the spatial
             dimensions of the convolution kernel. Defaults to 7.
+        use_bias: Boolean, whether the convolution layer uses a bias vector.
+            Defaults to True. Set to False for restoration tasks.
         kernel_initializer: String or initializer instance for convolution weights.
             Defaults to 'he_normal'.
         kernel_regularizer: Optional string or regularizer instance for convolution
@@ -74,19 +77,13 @@ class ConvUNextStem(keras.layers.Layer):
     Output shape:
         4D tensor with shape: `(batch_size, height, width, filters)`.
         Spatial dimensions are preserved due to 'same' padding.
-
-    Example:
-        ```python
-        stem = ConvUNextStem(filters=64, kernel_size=7)
-        x = keras.random.normal((2, 224, 224, 3))
-        y = stem(x)  # shape: (2, 224, 224, 64)
-        ```
     """
 
     def __init__(
         self,
         filters: int,
         kernel_size: Union[int, Tuple[int, int]] = 7,
+        use_bias: bool = True,
         kernel_initializer: str = 'he_normal',
         kernel_regularizer: Optional[str] = None,
         **kwargs: Any
@@ -100,6 +97,8 @@ class ConvUNextStem(keras.layers.Layer):
             Number of output filters.
         kernel_size : int or tuple of 2 ints, optional
             Size of the convolution kernel, by default 7.
+        use_bias : bool, optional
+            Whether to use bias in convolution, by default True.
         kernel_initializer : str, optional
             Initializer for kernel weights, by default 'he_normal'.
         kernel_regularizer : str or None, optional
@@ -112,6 +111,7 @@ class ConvUNextStem(keras.layers.Layer):
         # Store configuration for serialization
         self.filters = filters
         self.kernel_size = kernel_size
+        self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
@@ -120,7 +120,7 @@ class ConvUNextStem(keras.layers.Layer):
             filters=self.filters,
             kernel_size=self.kernel_size,
             padding='same',
-            use_bias=False,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='stem_conv'
@@ -205,6 +205,7 @@ class ConvUNextStem(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
+            'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
         })
@@ -249,7 +250,7 @@ class ConvUNextModel(keras.Model):
     This model implements a U-Net-style encoder-decoder architecture using ConvNeXt
     blocks for feature extraction and transformation. It supports multiple model
     variants (tiny to xlarge), optional deep supervision for multi-scale training,
-    and flexible architecture configuration.
+    and flexible architecture configuration including bias control.
 
     **Intent**: Provide a modern, efficient U-Net-style architecture for dense
     prediction tasks (segmentation, super-resolution, etc.) with state-of-the-art
@@ -299,6 +300,8 @@ class ConvUNextModel(keras.Model):
         final_activation: String or callable, activation for final output layer.
             Common choices: 'sigmoid' (binary), 'softmax' (multi-class),
             'linear' (regression). Defaults to 'linear'.
+        use_bias: Boolean, whether to use bias in convolutions. Defaults to True.
+            Set to False for bias-free restoration tasks.
         kernel_initializer: String or initializer instance for convolution weights.
             Defaults to 'he_normal'.
         kernel_regularizer: Optional string or regularizer instance for convolution
@@ -327,7 +330,7 @@ class ConvUNextModel(keras.Model):
 
     Example:
         ```python
-        # Create base model
+        # Create base model (default use_bias=True)
         model = ConvUNextModel(
             input_shape=(256, 256, 3),
             depth=4,
@@ -336,19 +339,11 @@ class ConvUNextModel(keras.Model):
             final_activation='sigmoid'
         )
 
-        # Or use a predefined variant
+        # Create bias-free model for restoration
         model = ConvUNextModel.from_variant(
             'base',
             input_shape=(256, 256, 3),
-            output_channels=1
-        )
-
-        # Training with deep supervision
-        train_model = ConvUNextModel.from_variant(
-            'small',
-            input_shape=(256, 256, 3),
-            enable_deep_supervision=True,
-            output_channels=1
+            use_bias=False
         )
         ```
     """
@@ -416,6 +411,7 @@ class ConvUNextModel(keras.Model):
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         drop_path_rate: float = 0.1,
         final_activation: str = 'linear',
+        use_bias: bool = True,
         kernel_initializer: str = 'he_normal',
         kernel_regularizer: Optional[str] = None,
         enable_deep_supervision: bool = False,
@@ -447,6 +443,8 @@ class ConvUNextModel(keras.Model):
             Maximum drop path rate for stochastic depth, by default 0.1.
         final_activation : str, optional
             Activation for output layer, by default 'linear'.
+        use_bias : bool, optional
+            Whether to use bias in convolutions, by default True.
         kernel_initializer : str, optional
             Kernel weight initializer, by default 'he_normal'.
         kernel_regularizer : str or None, optional
@@ -480,6 +478,7 @@ class ConvUNextModel(keras.Model):
         self.block_kernel_size = block_kernel_size
         self.drop_path_rate = drop_path_rate
         self.final_activation = final_activation
+        self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.enable_deep_supervision = enable_deep_supervision
@@ -515,7 +514,7 @@ class ConvUNextModel(keras.Model):
             filters=self.output_channels,
             kernel_size=1,
             activation=self.final_activation,
-            use_bias=False,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='final_output'
@@ -526,6 +525,7 @@ class ConvUNextModel(keras.Model):
         self.stem = ConvUNextStem(
             filters=self.filter_sizes[0],
             kernel_size=self.stem_kernel_size,
+            use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='encoder_stem'
@@ -553,7 +553,7 @@ class ConvUNextModel(keras.Model):
                     kernel_size=self.block_kernel_size,
                     filters=current_filters,
                     activation='gelu',
-                    use_bias=False,
+                    use_bias=self.use_bias,
                     dropout_rate=current_drop_path,
                     spatial_dropout_rate=0.0,
                     name=f'enc_L{level}_blk{block_idx}'
@@ -581,7 +581,7 @@ class ConvUNextModel(keras.Model):
                         layers.Conv2D(
                             filters=next_filters,
                             kernel_size=1,
-                            use_bias=False,
+                            use_bias=self.use_bias,
                             kernel_initializer=self.kernel_initializer,
                             kernel_regularizer=self.kernel_regularizer,
                             name=f'enc_down_adjust_{level}'
@@ -611,7 +611,7 @@ class ConvUNextModel(keras.Model):
                 layers.Conv2D(
                     filters=bottleneck_filters,
                     kernel_size=1,
-                    use_bias=False,
+                    use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     name='bn_adjust'
@@ -628,7 +628,7 @@ class ConvUNextModel(keras.Model):
                     kernel_size=self.block_kernel_size,
                     filters=bottleneck_filters,
                     activation='gelu',
-                    use_bias=False,
+                    use_bias=self.use_bias,
                     dropout_rate=self.drop_path_rate,
                     name=f'bn_blk_{block_idx}'
                 )
@@ -659,7 +659,7 @@ class ConvUNextModel(keras.Model):
                 layers.Conv2D(
                     filters=current_filters,
                     kernel_size=1,
-                    use_bias=False,
+                    use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     name=f'dec_L{level}_adjust'
@@ -680,7 +680,7 @@ class ConvUNextModel(keras.Model):
                         kernel_size=self.block_kernel_size,
                         filters=current_filters,
                         activation='gelu',
-                        use_bias=False,
+                        use_bias=self.use_bias,
                         dropout_rate=current_drop_path,
                         name=f'dec_L{level}_blk_{block_idx}'
                     )
@@ -698,7 +698,7 @@ class ConvUNextModel(keras.Model):
                 layers.Conv2D(
                     self.filter_sizes[level] // 2,
                     1,
-                    use_bias=False,
+                    use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer
                 ),
@@ -708,7 +708,7 @@ class ConvUNextModel(keras.Model):
                     self.output_channels,
                     1,
                     activation=self.final_activation,
-                    use_bias=False,
+                    use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer
                 )
@@ -934,6 +934,7 @@ class ConvUNextModel(keras.Model):
             'block_kernel_size': self.block_kernel_size,
             'drop_path_rate': self.drop_path_rate,
             'final_activation': self.final_activation,
+            'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'enable_deep_supervision': self.enable_deep_supervision,
@@ -994,12 +995,6 @@ class ConvUNextModel(keras.Model):
         ------
         ValueError
             If no pretrained weights available for variant.
-
-        Note
-        ----
-        This is a placeholder implementation. Actual implementation would
-        include proper download logic with progress tracking and checksum
-        verification.
         """
         if variant not in ConvUNextModel.PRETRAINED_WEIGHTS:
             raise ValueError(
@@ -1018,6 +1013,7 @@ class ConvUNextModel(keras.Model):
         input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
         enable_deep_supervision: bool = False,
         output_channels: Optional[int] = None,
+        use_bias: bool = True,
         **kwargs: Any
     ) -> 'ConvUNextModel':
         """
@@ -1034,6 +1030,8 @@ class ConvUNextModel(keras.Model):
             Whether to enable deep supervision, by default False.
         output_channels : int or None, optional
             Number of output channels, by default None.
+        use_bias : bool, optional
+            Whether to use bias in convolutions, by default True.
         **kwargs : Any
             Additional arguments to override variant defaults.
 
@@ -1053,12 +1051,12 @@ class ConvUNextModel(keras.Model):
         # Create a base model
         model = ConvUNextModel.from_variant('base', input_shape=(256, 256, 3))
 
-        # Create a small model with custom output channels
+        # Create a small model with custom output channels and bias-free mode
         model = ConvUNextModel.from_variant(
             'small',
             input_shape=(512, 512, 3),
             output_channels=5,
-            enable_deep_supervision=True
+            use_bias=False
         )
         ```
         """
@@ -1077,6 +1075,7 @@ class ConvUNextModel(keras.Model):
 
         # Set deep supervision and output channels
         config['enable_deep_supervision'] = enable_deep_supervision
+        config['use_bias'] = use_bias
 
         # Create model
         return cls(
@@ -1095,6 +1094,7 @@ def create_convunext_variant(
     input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
     enable_deep_supervision: bool = False,
     output_channels: Optional[int] = None,
+    use_bias: bool = True,
     **kwargs: Any
 ) -> ConvUNextModel:
     """
@@ -1112,6 +1112,8 @@ def create_convunext_variant(
         Whether to enable deep supervision, by default False.
     output_channels : int or None, optional
         Number of output channels, by default None.
+    use_bias : bool, optional
+        Whether to use bias in convolutions, by default True.
     **kwargs : Any
         Additional arguments to override variant defaults.
 
@@ -1127,7 +1129,8 @@ def create_convunext_variant(
         'base',
         input_shape=(256, 256, 3),
         output_channels=1,
-        final_activation='sigmoid'
+        final_activation='sigmoid',
+        use_bias=True
     )
     ```
     """
@@ -1136,6 +1139,7 @@ def create_convunext_variant(
         input_shape=input_shape,
         enable_deep_supervision=enable_deep_supervision,
         output_channels=output_channels,
+        use_bias=use_bias,
         **kwargs
     )
 
