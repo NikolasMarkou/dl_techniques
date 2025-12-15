@@ -46,14 +46,20 @@ Usage:
 import os
 import numpy as np
 import tensorflow as tf
-from typing import Tuple, Dict, Any, Optional, List
-from dataclasses import dataclass, field
 import tensorflow_datasets as tfds
+from dataclasses import dataclass, field
+from typing import Tuple, Dict, Any, Optional, List
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
-
+# ---------------------------------------------------------------------
 # COCO 2017 Classes (80 classes)
+# ---------------------------------------------------------------------
+
 COCO_CLASSES = [
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
     'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
@@ -71,6 +77,7 @@ COCO_NUM_CLASSES = len(COCO_CLASSES)
 # Sentinel value for padding detection targets (avoids confusion with valid zeros)
 INVALID_BBOX_VALUE = -1.0
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class AugmentationConfig:
@@ -86,6 +93,7 @@ class AugmentationConfig:
     cutmix_alpha: float = 0.0        # Disabled by default
     mosaic_prob: float = 0.0         # Disabled by default
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class DatasetConfig:
@@ -108,6 +116,7 @@ class DatasetConfig:
         """Create default COCO configuration."""
         return cls(class_names=COCO_CLASSES)
 
+# ---------------------------------------------------------------------
 
 def create_dummy_coco_dataset(
     num_samples: int,
@@ -210,6 +219,7 @@ def create_dummy_coco_dataset(
     dataset = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
     return dataset
 
+# ---------------------------------------------------------------------
 
 class COCODatasetBuilder:
     """
@@ -929,6 +939,7 @@ class COCODatasetBuilder:
             ]
         }
 
+# ---------------------------------------------------------------------
 
 def create_coco_dataset(
     img_size: int = 640,
@@ -990,6 +1001,8 @@ def create_coco_dataset(
 
     return train_ds, val_ds
 
+# ---------------------------------------------------------------------
+
 
 def create_coco_pretraining_dataset(
     img_size: int = 640,
@@ -1017,6 +1030,7 @@ def create_coco_pretraining_dataset(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_crack_dataset_placeholder(
     img_size: int = 640,
@@ -1045,3 +1059,5 @@ def create_crack_dataset_placeholder(
         augment_data=True,
         **kwargs
     )
+
+# ---------------------------------------------------------------------

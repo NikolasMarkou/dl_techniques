@@ -59,9 +59,9 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.vision_heads.task_types import (
     TaskType,
 )
-from dl_techniques.datasets.vision.coco import COCODatasetBuilder
 from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
+from dl_techniques.datasets.vision.coco import COCODatasetBuilder, COCO_CLASSES as COCO_CLASSES_ORIGINAL
 
 # ---------------------------------------------------------------------
 
@@ -338,20 +338,7 @@ class COCOVisualizationCallback(keras.callbacks.Callback):
     """
 
     # COCO class names for visualization
-    COCO_CLASSES = [
-        'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck',
-        'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench',
-        'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra',
-        'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-        'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove',
-        'skateboard', 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup',
-        'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange',
-        'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-        'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse',
-        'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-        'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier',
-        'toothbrush'
-    ]
+    COCO_CLASSES = COCO_CLASSES_ORIGINAL
 
     def __init__(
             self,
@@ -1144,8 +1131,6 @@ def main():
         enable_visualizations=enable_visualizations,  # FIXED: Use computed value
         visualization_freq=args.visualization_freq
     )
-
-
 
     # Train model
     logger.info("🏋️ Starting COCO pre-training...")
