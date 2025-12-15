@@ -786,7 +786,7 @@ def main():
     parser.add_argument("--cache-dir", type=str, default=None,
                         help="Directory for caching processed data")
     parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=16)
 
     # Model params
     parser.add_argument(
@@ -797,7 +797,7 @@ def main():
                         help="Number of segmentation classes (80 for COCO)")
 
     # MAE params
-    parser.add_argument("--mae-epochs", type=int, default=100)
+    parser.add_argument("--mae-epochs", type=int, default=5)
     parser.add_argument("--mae-lr", type=float, default=1e-3)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--mask-ratio", type=float, default=0.75)
