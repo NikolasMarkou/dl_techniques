@@ -2,16 +2,10 @@
 ConvUNext MAE Deep Supervision Training Pipeline (ImageNet + COCO)
 ==================================================================
 
-Complete training pipeline implementing:
-1. **Multi-Scale MAE Pretraining**: Self-supervised learning calculating
-   reconstruction loss at every decoder resolution (Deep Supervision).
-2. **Robust Weight Transfer**: Correctly handles nested Keras layer structures.
-3. **Segmentation Fine-tuning**: Transfers knowledge to COCO segmentation
-   with automatic multi-scale target generation.
-
-Key Features:
-- Deep Supervision (Multi-scale Loss & Targets)
-- Zero-Dropout Modern Architecture
+Refined pipeline with:
+1. Multi-Scale Visualization: Plots segmentation masks for every deep supervision level.
+2. Per-Scale Metrics: Reports accuracy/loss for every resolution.
+3. Robustness: Keras 3 compliant serialization and serialization.
 """
 
 import os
@@ -29,7 +23,7 @@ from typing import Tuple, Optional, Dict, Any, List, Union
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------
-# Framework Imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -147,9 +141,6 @@ def get_coco_segmentation_dataset(
         """Adapts dictionary targets to mask tensors. Handles batched inputs."""
         seg_mask = targets['segmentation']
 
-        # Check rank to handle both batched and unbatched (just in case)
-        # Usually builder returns batched data
-
         if num_classes == 1:
             mask = tf.cast(seg_mask > 0.5, tf.int32)
         else:
@@ -165,15 +156,12 @@ def get_coco_segmentation_dataset(
 
 
 # ---------------------------------------------------------------------
-# MAE Components (Deep Supervision Support)
+# MAE Components
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ConvUNextWrapper(keras.Model):
-    """
-    Wraps ConvUNextModel to act as an MAE 'Encoder'.
-    Passes through list outputs for deep supervision.
-    """
+    """Wraps ConvUNextModel to act as an MAE 'Encoder'."""
     def __init__(self, convunext_model: ConvUNextModel, **kwargs):
         super().__init__(**kwargs)
         self.convunext_model = convunext_model
@@ -199,41 +187,24 @@ class ConvUNextWrapper(keras.Model):
 
 @keras.saving.register_keras_serializable()
 class MultiScaleIdentityDecoder(keras.layers.Layer):
-    """
-    Pass-through decoder.
-
-    Since ConvUNextModel (with output_channels=3) already projects feature maps
-    to RGB at every scale via its internal deep supervision heads, the MAE
-    decoder doesn't need to do any work. It just passes the list of tensors.
-    """
+    """Pass-through decoder for MAE deep supervision."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
     def call(self, inputs, training=None):
-        # inputs is [Main_Output, Aux_1, Aux_2...]
         return inputs
 
 
 @keras.saving.register_keras_serializable()
 class DeepSupervisionMAE(MaskedAutoencoder):
-    """
-    Masked Autoencoder that calculates loss across multiple scales.
-
-    Expects the encoder to return a list of tensors [main, aux1, aux2...].
-    """
-    def __init__(
-        self,
-        loss_weights: Optional[List[float]] = None,
-        **kwargs
-    ):
+    """MAE that calculates loss across multiple scales."""
+    def __init__(self, loss_weights: Optional[List[float]] = None, **kwargs):
         super().__init__(**kwargs)
         self.loss_weights = loss_weights
-
         self.loss_tracker_main = keras.metrics.Mean(name="loss_main")
         self.loss_tracker_aux = keras.metrics.Mean(name="loss_aux_avg")
 
     def _create_decoder(self):
-        # ConvUNextModel does the projection, so we use Identity
         return MultiScaleIdentityDecoder(name="identity_decoder")
 
     def compute_loss(
@@ -243,76 +214,49 @@ class DeepSupervisionMAE(MaskedAutoencoder):
         y_pred: Optional[Dict[str, Union[keras.KerasTensor, List[keras.KerasTensor]]]] = None,
         **kwargs: Any
     ) -> keras.KerasTensor:
-
         reconstructions = y_pred["reconstruction"]
         mask = y_pred["mask"]
 
-        # 1. Normalize Inputs
         target_full = ops.cast(x, "float32")
         mask_float = ops.cast(mask, "float32")
 
-        # 2. Handle List vs Single Output
         if not isinstance(reconstructions, list):
             reconstructions = [reconstructions]
 
-        # 3. Initialize Weights
         if self.loss_weights is None:
             weights = [1.0 / (2**i) for i in range(len(reconstructions))]
         elif len(self.loss_weights) != len(reconstructions):
-            # Default fallback if weights don't match
             weights = [1.0] * len(reconstructions)
         else:
             weights = self.loss_weights
 
         total_loss = 0.0
 
-        # 4. Iterate scales (Main is index 0)
         for i, pred in enumerate(reconstructions):
             pred = ops.cast(pred, "float32")
             pred_shape = ops.shape(pred)
             h_pred, w_pred = pred_shape[1], pred_shape[2]
 
-            # Resize Target (Bilinear for RGB)
             target_resized = ops.image.resize(
-                target_full,
-                size=(h_pred, w_pred),
-                interpolation="bilinear"
+                target_full, size=(h_pred, w_pred), interpolation="bilinear"
             )
 
-            # Resize Mask (Nearest for Binary)
-            # a. Get (B, H, W) mask from patches
             mask_img_full = self._reshape_mask_for_loss(mask_float, target_full)
-            # b. Expand to (B, H, W, 1) so resize treats it as an image channel
             mask_img_full = ops.expand_dims(mask_img_full, axis=-1)
-            # c. Resize to current scale
             mask_resized = ops.image.resize(
-                mask_img_full,
-                size=(h_pred, w_pred),
-                interpolation="nearest"
+                mask_img_full, size=(h_pred, w_pred), interpolation="nearest"
             )
-            # mask_resized is (B, h_pred, w_pred, 1)
-
             mask_resized = ops.maximum(mask_resized, self.non_mask_value)
 
-            # MSE
             diff = ops.square(target_resized - pred)
-
-            # Keep dims to match mask shape (B, H, W, 1) during channel averaging
             mse_pixel = ops.mean(diff, axis=-1, keepdims=True)
-
-            # Apply Mask
             masked_loss = mse_pixel * mask_resized
-
-            # Normalize by mask sum
-            # Sum over spatial [1, 2] AND channel [3] dimensions
             loss_sum = ops.sum(masked_loss, axis=[1, 2, 3])
             mask_sum = ops.sum(mask_resized, axis=[1, 2, 3]) + 1e-6
-
             scale_loss = ops.mean(loss_sum / mask_sum)
 
             total_loss += weights[i] * scale_loss
 
-            # Metrics
             if i == 0:
                 self.loss_tracker_main.update_state(scale_loss)
             elif i == 1:
@@ -329,7 +273,6 @@ class DeepSupervisionMAE(MaskedAutoencoder):
         ]
 
     def visualize(self, image, return_arrays=True):
-        """Handle list output for visualization (take main output)."""
         if len(image.shape) == 3:
             image_batch = np.expand_dims(image, axis=0)
         else:
@@ -337,11 +280,7 @@ class DeepSupervisionMAE(MaskedAutoencoder):
 
         outputs = self(image_batch, training=True)
         recon_list = outputs["reconstruction"]
-
-        if isinstance(recon_list, list):
-            recon_t = recon_list[0]
-        else:
-            recon_t = recon_list
+        recon_t = recon_list[0] if isinstance(recon_list, list) else recon_list
 
         if return_arrays:
             return (
@@ -376,13 +315,120 @@ class ImageReconstructionCallback(keras.callbacks.Callback):
         plt.close()
 
 
+class MultiScaleSegmentationCallback(keras.callbacks.Callback):
+    """
+    Visualizes segmentation results for every scale (Deep Supervision).
+    """
+    def __init__(self, val_batch, save_dir, num_classes, num_samples=3):
+        super().__init__()
+        # val_batch is (images, masks) - unpack them
+        self.images, self.masks = val_batch
+        self.save_dir = save_dir
+        self.num_classes = num_classes
+        self.num_samples = min(num_samples, len(self.images))
+        os.makedirs(self.save_dir, exist_ok=True)
+
+    def on_epoch_end(self, epoch, logs=None):
+        # 1. Run inference (training=False)
+        # Output might be single tensor or list of tensors
+        outputs = self.model.predict(self.images[:self.num_samples], verbose=0)
+
+        # Ensure list format for uniform handling
+        if not isinstance(outputs, list):
+            outputs = [outputs]
+
+        # 2. Setup Plot
+        # Rows = Samples
+        # Cols = Input | GT | Main Pred | Aux 1 | Aux 2 ...
+        num_scales = len(outputs)
+        cols = 2 + num_scales
+
+        fig, axes = plt.subplots(
+            self.num_samples, cols,
+            figsize=(3 * cols, 3 * self.num_samples)
+        )
+
+        # Handle single sample case (axes is 1D)
+        if self.num_samples == 1:
+            axes = np.expand_dims(axes, axis=0)
+
+        # 3. Iterate Samples
+        for i in range(self.num_samples):
+            # A. Input Image
+            img = self.images[i]
+            if isinstance(img, tf.Tensor): img = img.numpy()
+            axes[i, 0].imshow(img)
+            axes[i, 0].set_title("Input")
+            axes[i, 0].axis("off")
+
+            # B. Ground Truth
+            gt = self.masks[i]
+            if isinstance(gt, tf.Tensor): gt = gt.numpy()
+            if gt.shape[-1] == 1: gt = gt[:, :, 0] # Remove channel dim for plotting
+
+            axes[i, 1].imshow(gt, cmap='jet', interpolation='nearest')
+            axes[i, 1].set_title("Ground Truth")
+            axes[i, 1].axis("off")
+
+            # C. Predictions (Main + Aux scales)
+            for j, scale_out in enumerate(outputs):
+                pred_raw = scale_out[i] # (H, W, Classes)
+
+                # Resize to original input size for visualization
+                # Using TF resize (fastest)
+                orig_h, orig_w = img.shape[:2]
+                pred_resized = tf.image.resize(
+                    np.expand_dims(pred_raw, 0),
+                    (orig_h, orig_w),
+                    method='bilinear'
+                )[0]
+
+                # Convert logits to mask
+                if self.num_classes == 1:
+                    pred_mask = (tf.nn.sigmoid(pred_resized) > 0.5).numpy()[:, :, 0]
+                else:
+                    pred_mask = tf.argmax(pred_resized, axis=-1).numpy()
+
+                # Plot
+                col_idx = 2 + j
+                title = "Main Output" if j == 0 else f"Aux Scale {j}"
+                axes[i, col_idx].imshow(pred_mask, cmap='jet', interpolation='nearest')
+                axes[i, col_idx].set_title(title)
+                axes[i, col_idx].axis("off")
+
+        plt.tight_layout()
+        save_path = os.path.join(self.save_dir, f"epoch_{epoch + 1:03d}.png")
+        plt.savefig(save_path)
+        plt.close()
+
+
 class ProgressLoggingCallback(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
         msg = f"Epoch {epoch+1}"
+
+        # Filter and format logs for cleaner output
+        # Prioritize loss and accuracy metrics
+        main_metrics = []
+        aux_metrics = []
+
         for k, v in logs.items():
-            msg += f" - {k}: {v:.4f}"
-        logger.info(msg)
+            if "val_" in k: continue # Skip validation logs here, print separate if needed
+            val_v = logs.get(f"val_{k}")
+
+            v_str = f"{v:.4f}"
+            val_str = f"{val_v:.4f}" if val_v is not None else "N/A"
+
+            item = f"{k}: {v_str} (val: {val_str})"
+
+            if "deep_sup" in k or "aux" in k:
+                aux_metrics.append(item)
+            else:
+                main_metrics.append(item)
+
+        logger.info(f"{msg} | Main: {', '.join(main_metrics)}")
+        if aux_metrics:
+            logger.info(f"   Details: {', '.join(aux_metrics)}")
 
 
 # ---------------------------------------------------------------------
@@ -402,8 +448,6 @@ def run_mae_pretraining(
     logger.info("=" * 60)
 
     encoder_wrapper = ConvUNextWrapper(convunext_model)
-
-    # Weights: Main (1.0), Aux1 (0.5), Aux2 (0.25)...
     loss_weights = [1.0, 0.5, 0.25, 0.125]
 
     mae = DeepSupervisionMAE(
@@ -412,7 +456,7 @@ def run_mae_pretraining(
         mask_ratio=args.mask_ratio,
         input_shape=(args.image_size, args.image_size, 3),
         loss_weights=loss_weights,
-        decoder_dims=[] # Not used by IdentityDecoder
+        decoder_dims=[]
     )
 
     total_steps = args.mae_epochs * (int(train_ds.cardinality()) if int(train_ds.cardinality()) > 0 else 1000)
@@ -466,10 +510,16 @@ def run_segmentation_finetuning(
     results_dir: str,
     dataset_info: Dict
 ) -> keras.Model:
-    """Stage 2: Segmentation Fine-tuning."""
+    """Stage 2: Segmentation Fine-tuning with Multi-Scale Monitoring."""
     logger.info("=" * 60)
     logger.info(f"STAGE 2: SEGMENTATION FINE-TUNING")
     logger.info("=" * 60)
+
+    # 1. Extract Visualization Batch BEFORE deep supervision mapping
+    # This ensures we have a clean (Image, Mask) tuple for the callback
+    viz_batch = next(iter(val_ds))
+    # viz_batch is (Batch_Images, Batch_Masks)
+    # Ensure they are numpy/tensor and unmapped
 
     steps_per_epoch = args.steps_per_epoch or 500
     total_steps = args.finetune_epochs * steps_per_epoch
@@ -487,7 +537,7 @@ def run_segmentation_finetuning(
         "gradient_clipping_by_norm": 1.0
     }, lr_schedule)
 
-    # Configure loss for Deep Supervision
+    # 2. Configure loss for Deep Supervision
     if convunext_model.enable_deep_supervision:
         # Weights for [Main, Aux1, Aux2...]
         base_weights = [1.0, 0.4, 0.2, 0.1]
@@ -495,36 +545,29 @@ def run_segmentation_finetuning(
         loss_weights = base_weights[:num_outputs]
         loss = ["sparse_categorical_crossentropy"] * num_outputs
 
-        # CRITICAL FIX: Metrics must also match output length for Keras 3 strictness
+        # Explicitly requesting accuracy for each head
+        # Keras will name them: output_name + "_accuracy"
         metrics = ["accuracy"] * num_outputs
 
-        logger.info(f"Deep Supervision enabled: Preparing multi-scale targets for {num_outputs} heads...")
+        logger.info(f"Deep Supervision enabled: {num_outputs} heads.")
+        logger.info(f"Loss weights: {loss_weights}")
 
         def multiscale_target_map(image, mask):
-            """
-            Maps (B,H,W,C), (B,H,W,1) -> (B,H,W,C), [Target1, Target2...]
-            """
+            """Maps (B,H,W,C), (B,H,W,1) -> (B,H,W,C), [Target1, Target2...]"""
             targets = [mask]
-
-            # Shape for batched input: [Batch, Height, Width, Channels]
-            h = tf.shape(image)[1] # Height is index 1
-            w = tf.shape(image)[2] # Width is index 2
+            h = tf.shape(image)[1]
+            w = tf.shape(image)[2]
 
             for i in range(num_outputs - 1):
-                # Scale factor: 2**(i+1) means 2, 4, 8...
                 factor = 2 ** (i + 1)
-
-                # Resize mask (Nearest Neighbor)
                 m_resized = tf.image.resize(
                     mask,
                     (h // factor, w // factor),
                     method='nearest'
                 )
                 targets.append(m_resized)
-
             return image, tuple(targets)
 
-        # Apply mapping
         train_ds = train_ds.map(multiscale_target_map, num_parallel_calls=tf.data.AUTOTUNE)
         val_ds = val_ds.map(multiscale_target_map, num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -540,6 +583,9 @@ def run_segmentation_finetuning(
         metrics=metrics
     )
 
+    # 3. Setup Callbacks
+    viz_dir = os.path.join(results_dir, "seg_viz")
+
     callbacks = [
         keras.callbacks.ModelCheckpoint(
             os.path.join(results_dir, "best_seg_model.keras"),
@@ -548,6 +594,12 @@ def run_segmentation_finetuning(
         ),
         keras.callbacks.CSVLogger(os.path.join(results_dir, "seg_history.csv")),
         keras.callbacks.EarlyStopping(patience=args.patience, restore_best_weights=True),
+        # New visualization callback
+        MultiScaleSegmentationCallback(
+            val_batch=viz_batch,
+            save_dir=viz_dir,
+            num_classes=args.num_classes
+        ),
         ProgressLoggingCallback()
     ]
 
@@ -567,52 +619,31 @@ def transfer_model_weights(
     source_model: ConvUNextModel,
     target_model: ConvUNextModel
 ) -> None:
-    """
-    Transfer weights from source to target model, excluding the final heads.
-    Correctly handles nested list structures of ConvUNext blocks.
-    """
+    """Transfer weights from source to target model."""
     logger.info("Transferring pretrained weights (Backbone + Decoder)...")
 
-    # 1. Stem (Layer)
     target_model.stem.set_weights(source_model.stem.get_weights())
 
-    # 2. Encoder Stages (List[List[Layer]])
     for src_stage, tgt_stage in zip(source_model.encoder_stages, target_model.encoder_stages):
-        # Iterate blocks in stage
         for src_block, tgt_block in zip(src_stage, tgt_stage):
             tgt_block.set_weights(src_block.get_weights())
 
-    # 2b. Encoder Downsamples (List[Layer])
-    # Note: len(downsamples) is depth-1, so checking index safe
     for i, (src_ds, tgt_ds) in enumerate(zip(source_model.encoder_downsamples, target_model.encoder_downsamples)):
         tgt_ds.set_weights(src_ds.get_weights())
 
-    # 3. Bottleneck
     target_model.bottleneck_entry.set_weights(source_model.bottleneck_entry.get_weights())
 
     for src_block, tgt_block in zip(source_model.bottleneck_blocks, target_model.bottleneck_blocks):
         tgt_block.set_weights(src_block.get_weights())
 
-    # 4. Decoder
-    # Decoder Blocks is List[List[Layer]]
-    # Decoder Upsamples is List[Layer]
     for i in range(len(source_model.decoder_blocks)):
-        # Upsample
         target_model.decoder_upsamples[i].set_weights(
             source_model.decoder_upsamples[i].get_weights()
         )
-
-        # Blocks (List)
         src_stage = source_model.decoder_blocks[i]
         tgt_stage = target_model.decoder_blocks[i]
-
         for src_block, tgt_block in zip(src_stage, tgt_stage):
             tgt_block.set_weights(src_block.get_weights())
-
-    # NOTE: Deep Supervision Heads and Final Output Layer are intentionally SKIPPED.
-    # MAE Heads: Output 3 channels (RGB)
-    # Seg Heads: Output N channels (Classes)
-    # They are incompatible in shape.
 
     logger.info("Weight transfer complete.")
 
@@ -628,20 +659,20 @@ def main():
     # Dataset
     parser.add_argument("--data-dir", type=str, default=None)
     parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=32)
 
     # Model
     parser.add_argument("--variant", type=str, default="tiny")
     parser.add_argument("--num-classes", type=int, default=80)
 
     # MAE
-    parser.add_argument("--mae-epochs", type=int, default=10)
+    parser.add_argument("--mae-epochs", type=int, default=20)
     parser.add_argument("--mae-lr", type=float, default=2e-4)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--mask-ratio", type=float, default=0.75)
 
     # Fine-tuning
-    parser.add_argument("--finetune-epochs", type=int, default=10)
+    parser.add_argument("--finetune-epochs", type=int, default=20)
     parser.add_argument("--finetune-lr", type=float, default=1e-4)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
@@ -664,18 +695,18 @@ def main():
     dummy_in = ops.zeros((1, args.image_size, args.image_size, 3))
 
     # -----------------------------------------------------------
-    # 1. Instantiate MAE Model (Outputs RGB, Deep Sup Enabled)
+    # 1. Instantiate MAE Backbone
     # -----------------------------------------------------------
     logger.info(f"Instantiating MAE Backbone ({args.variant}) - Outputs RGB...")
     mae_backbone = ConvUNextModel.from_variant(
         args.variant,
         input_shape=(args.image_size, args.image_size, 3),
         output_channels=3,
-        enable_deep_supervision=True, # Critical
-        final_activation="sigmoid",   # 0-1 for pixels
+        enable_deep_supervision=True,
+        final_activation="sigmoid",
         use_bias=True
     )
-    mae_backbone(dummy_in) # Build
+    mae_backbone(dummy_in)
 
     # -----------------------------------------------------------
     # 2. Stage 1: MAE Pretraining
@@ -700,7 +731,6 @@ def main():
 
     logger.info(f"Creating Segmentation Model ({args.num_classes} classes)...")
 
-    # Target model also has Deep Supervision enabled (architecture match)
     seg_model = ConvUNextModel.from_variant(
         args.variant,
         input_shape=(args.image_size, args.image_size, 3),
@@ -709,9 +739,8 @@ def main():
         final_activation="softmax" if args.num_classes > 1 else "sigmoid",
         use_bias=True
     )
-    seg_model(dummy_in) # Build
+    seg_model(dummy_in)
 
-    # Transfer Weights (Manually handling lists)
     if not args.skip_mae:
         transfer_model_weights(mae_backbone, seg_model)
 
