@@ -16,7 +16,8 @@ Key features:
 
 import os
 import keras
-from keras import ops, layers, initializers, regularizers
+import numpy as np
+from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -116,7 +117,7 @@ class ConvUNextStem(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
         # Create sub-layers in __init__ (Golden Rule #1)
-        self.conv = layers.Conv2D(
+        self.conv = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
             padding='same',
@@ -127,7 +128,7 @@ class ConvUNextStem(keras.layers.Layer):
         )
 
         # Use LayerNorm for stem (standard ConvNeXt design)
-        self.norm = layers.LayerNormalization(
+        self.norm = keras.layers.LayerNormalization(
             epsilon=1e-6,
             name='stem_norm'
         )
@@ -510,7 +511,7 @@ class ConvUNextModel(keras.Model):
             self._build_deep_supervision()
 
         # Final output projection
-        self.final_output_layer = layers.Conv2D(
+        self.final_output_layer = keras.layers.Conv2D(
             filters=self.output_channels,
             kernel_size=1,
             activation=self.final_activation,
@@ -568,7 +569,7 @@ class ConvUNextModel(keras.Model):
 
                 # Spatial downsampling via max pooling
                 downsample_ops.append(
-                    layers.MaxPooling2D(
+                    keras.layers.MaxPooling2D(
                         pool_size=(2, 2),
                         name=f'enc_down_{level}'
                     )
@@ -578,7 +579,7 @@ class ConvUNextModel(keras.Model):
                 next_filters = self.filter_sizes[level + 1]
                 if current_filters != next_filters:
                     downsample_ops.append(
-                        layers.Conv2D(
+                        keras.layers.Conv2D(
                             filters=next_filters,
                             kernel_size=1,
                             use_bias=self.use_bias,
@@ -603,12 +604,12 @@ class ConvUNextModel(keras.Model):
         # Entry to bottleneck: downsample + channel adjust
         bn_ops = []
         bn_ops.append(
-            layers.MaxPooling2D(pool_size=(2, 2), name='bn_down')
+            keras.layers.MaxPooling2D(pool_size=(2, 2), name='bn_down')
         )
 
         if prev_filters != bottleneck_filters:
             bn_ops.append(
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=bottleneck_filters,
                     kernel_size=1,
                     use_bias=self.use_bias,
@@ -644,7 +645,7 @@ class ConvUNextModel(keras.Model):
 
             # Upsampling layer
             self.decoder_upsamples.append(
-                layers.UpSampling2D(
+                keras.layers.UpSampling2D(
                     size=(2, 2),
                     interpolation='bilinear',
                     name=f'dec_up_{level}'
@@ -656,7 +657,7 @@ class ConvUNextModel(keras.Model):
 
             # Channel adjustment after concatenation
             stage_blocks.append(
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=current_filters,
                     kernel_size=1,
                     use_bias=self.use_bias,
@@ -672,7 +673,7 @@ class ConvUNextModel(keras.Model):
                 current_drop_path = (
                     self.drop_path_rate
                     * (level * self.blocks_per_level + block_idx)
-                    / (self.depth * self.blocks_per_level)
+                    / np.max(self.depth * self.blocks_per_level, 1)
                 )
 
                 stage_blocks.append(
@@ -695,18 +696,18 @@ class ConvUNextModel(keras.Model):
         # Create supervision heads for all but the final (highest resolution) level
         for level in range(self.depth - 1, 0, -1):
             head = keras.Sequential([
-                layers.Conv2D(
-                    self.filter_sizes[level] // 2,
-                    1,
+                keras.layers.Conv2D(
+                    filters=self.filter_sizes[level] // 2,
+                    kernel_size=1,
                     use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer
                 ),
                 GlobalResponseNormalization(),
-                layers.Activation('gelu'),
-                layers.Conv2D(
-                    self.output_channels,
-                    1,
+                keras.layers.Activation('gelu'),
+                keras.layers.Conv2D(
+                    filters=self.output_channels,
+                    kernel_size=1,
                     activation=self.final_activation,
                     use_bias=self.use_bias,
                     kernel_initializer=self.kernel_initializer,
@@ -891,7 +892,7 @@ class ConvUNextModel(keras.Model):
             x = ops.cond(needs_resize, resize_fn, identity_fn)
 
             # Concatenate with skip connection
-            x = layers.Concatenate(axis=-1)([skip, x])
+            x = keras.layers.Concatenate(axis=-1)([skip, x])
 
             # Process through decoder blocks
             for layer in self.decoder_blocks[idx]:

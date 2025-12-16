@@ -4,6 +4,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from typing import Tuple, Optional
 
+# ---------------------------------------------------------------------
 
 def load_imagenet(
         split: str = "train",
@@ -87,3 +88,4 @@ def load_imagenet(
 
     return dataset
 
+# ---------------------------------------------------------------------

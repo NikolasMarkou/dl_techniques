@@ -8,12 +8,10 @@ Supports patch-based masking and works seamlessly with ConvNeXt V2, ViT, and Res
 Key Features:
 - Asymmetric Encoder-Decoder architecture
 - Efficient masked training (loss computed only on masked patches)
-- Fully Keras 3 compliant (backend-agnostic logic)
 - Mixed Precision compatible (explicit casting in loss)
 """
 
 import keras
-from keras import ops, metrics
 import numpy as np
 from typing import Optional, Tuple, Union, List, Dict, Any
 
@@ -42,6 +40,7 @@ class MaskedAutoencoder(keras.Model):
         norm_pix_loss: Boolean, whether to normalize pixel values for loss.
         mask_value: "learnable", "zero", "noise", or float.
         input_shape: Tuple, input image shape (H, W, C).
+        non_mask_value: Float, small value weight to apply to non-masked patches
     """
 
     def __init__(
@@ -54,6 +53,7 @@ class MaskedAutoencoder(keras.Model):
         norm_pix_loss: bool = False,
         mask_value: Union[str, float] = "learnable",
         input_shape: Tuple[int, int, int] = (224, 224, 3),
+        non_mask_value: float = 0.0,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -70,6 +70,7 @@ class MaskedAutoencoder(keras.Model):
         self.norm_pix_loss = norm_pix_loss
         self.mask_value = mask_value
         self.input_shape_config = input_shape
+        self.non_mask_value = non_mask_value
 
         # Ensure encoder is built to determine shapes
         if not self.encoder.built:
@@ -94,7 +95,7 @@ class MaskedAutoencoder(keras.Model):
         self.decoder = self._create_decoder()
 
         # Metrics
-        self.reconstruction_loss_tracker = metrics.Mean(name="reconstruction_loss")
+        self.reconstruction_loss_tracker = keras.metrics.Mean(name="reconstruction_loss")
 
     def _create_decoder(self) -> ConvDecoder:
         """Create or configure the decoder."""
@@ -166,81 +167,82 @@ class MaskedAutoencoder(keras.Model):
     ) -> keras.KerasTensor:
         """Compute reconstruction loss only on masked patches."""
         if y_pred is None:
-            return ops.convert_to_tensor(0.0)
+            return keras.ops.convert_to_tensor(0.0)
 
         # CRITICAL: Cast inputs and outputs to float32 for loss stability
         # This resolves Mixed Precision mismatches (float16 output vs float32 input)
-        target = ops.cast(x, "float32")
-        reconstruction = ops.cast(y_pred["reconstruction"], "float32")
-        mask = ops.cast(y_pred["mask"], "float32")
+        target = keras.ops.cast(x, "float32")
+        reconstruction = keras.ops.cast(y_pred["reconstruction"], "float32")
+        mask = keras.ops.cast(y_pred["mask"], "float32")
 
         # Pixel Normalization (optional per-patch normalization for loss targets)
         if self.norm_pix_loss:
             target_patches = self._extract_patches_for_loss(target)
-            mean = ops.mean(target_patches, axis=-1, keepdims=True)
-            var = ops.var(target_patches, axis=-1, keepdims=True)
-            target_normalized = (target_patches - mean) / ops.sqrt(var + 1e-6)
+            mean = keras.ops.mean(target_patches, axis=-1, keepdims=True)
+            var = keras.ops.var(target_patches, axis=-1, keepdims=True)
+            target_normalized = (target_patches - mean) / keras.ops.sqrt(var + 1e-6)
             target = self._reconstruct_patches_for_loss(target_normalized)
 
         # MSE Loss
-        loss = ops.square(target - reconstruction)
-        loss = ops.mean(loss, axis=-1)  # [batch, H, W]
+        loss = keras.ops.square(target - reconstruction)
+        loss = keras.ops.mean(loss, axis=-1)  # [batch, H, W]
 
         # Reshape mask to match spatial dimensions
         mask_img = self._reshape_mask_for_loss(mask, target)
+        mask_img = keras.ops.maximum(mask_img, self.non_mask_value)
 
         # Apply mask: Loss = 0 for unmasked pixels
         loss = loss * mask_img
 
         # Normalize by number of masked elements
-        num_masked = ops.sum(mask, axis=-1) + 1e-6  # [batch]
+        num_masked = keras.ops.sum(mask, axis=-1) + 1e-6  # [batch]
 
         # Sum over spatial dims, then divide by num_masked patches * patch_pixels
         # Note: mask_img is 1s and 0s.
-        loss_sum = ops.sum(loss, axis=[1, 2]) # [batch]
+        loss_sum = keras.ops.sum(loss, axis=[1, 2]) # [batch]
 
         # Adjust denominator: num_masked is patches, we need pixels
         pixels_per_patch = self.patch_size * self.patch_size
         loss = loss_sum / (num_masked * pixels_per_patch)
 
-        return ops.mean(loss) # Global mean
+        return keras.ops.mean(loss) # Global mean
 
     def _extract_patches_for_loss(self, images: keras.KerasTensor) -> keras.KerasTensor:
         """Helper to extract patches for pixel normalization."""
         # Implementation assumes fixed patch size logic
-        B = ops.shape(images)[0]
+        B = keras.ops.shape(images)[0]
         H, W, C = self.input_shape_config
         P = self.patch_size
 
         # [B, H//P, P, W//P, P, C]
-        patches = ops.reshape(images, (B, H // P, P, W // P, P, C))
+        patches = keras.ops.reshape(images, (B, H // P, P, W // P, P, C))
         # [B, H//P, W//P, P, P, C] -> [B, N_patches, P*P*C]
-        patches = ops.transpose(patches, (0, 1, 3, 2, 4, 5))
-        return ops.reshape(patches, (B, -1, P * P * C))
+        patches = keras.ops.transpose(patches, (0, 1, 3, 2, 4, 5))
+        return keras.ops.reshape(patches, (B, -1, P * P * C))
 
     def _reconstruct_patches_for_loss(self, patches: keras.KerasTensor) -> keras.KerasTensor:
         """Helper to reverse patch extraction."""
-        B = ops.shape(patches)[0]
+        B = keras.ops.shape(patches)[0]
         H, W, C = self.input_shape_config
         P = self.patch_size
 
         # [B, H//P, W//P, P, P, C]
-        patches = ops.reshape(patches, (B, H//P, W//P, P, P, C))
-        patches = ops.transpose(patches, (0, 1, 3, 2, 4, 5))
-        return ops.reshape(patches, (B, H, W, C))
+        patches = keras.ops.reshape(patches, (B, H//P, W//P, P, P, C))
+        patches = keras.ops.transpose(patches, (0, 1, 3, 2, 4, 5))
+        return keras.ops.reshape(patches, (B, H, W, C))
 
     def _reshape_mask_for_loss(self, mask: keras.KerasTensor, target: keras.KerasTensor) -> keras.KerasTensor:
         """Expands (B, NumPatches) mask to (B, H, W)."""
-        B = ops.shape(mask)[0]
-        H, W = ops.shape(target)[1], ops.shape(target)[2]
+        B = keras.ops.shape(mask)[0]
+        H, W = keras.ops.shape(target)[1], keras.ops.shape(target)[2]
         P = self.patch_size
 
         # [B, H//P, W//P]
-        mask_grid = ops.reshape(mask, (B, H // P, W // P))
+        mask_grid = keras.ops.reshape(mask, (B, H // P, W // P))
 
         # Upsample nearest neighbor to patch size
-        mask_img = ops.repeat(mask_grid, P, axis=1)
-        mask_img = ops.repeat(mask_img, P, axis=2)
+        mask_img = keras.ops.repeat(mask_grid, P, axis=1)
+        mask_img = keras.ops.repeat(mask_img, P, axis=2)
 
         return mask_img
 
@@ -283,7 +285,7 @@ class MaskedAutoencoder(keras.Model):
         }
 
     @property
-    def metrics(self) -> List[metrics.Metric]:
+    def metrics(self) -> List[keras.metrics.Metric]:
         return [self.reconstruction_loss_tracker]
 
     def visualize(self, image: np.ndarray, return_arrays: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -296,9 +298,9 @@ class MaskedAutoencoder(keras.Model):
         reconstructed = outputs["reconstruction"]
 
         if return_arrays:
-            image = ops.convert_to_numpy(image[0])
-            masked = ops.convert_to_numpy(masked[0])
-            reconstructed = ops.convert_to_numpy(reconstructed[0])
+            image = keras.ops.convert_to_numpy(image[0])
+            masked = keras.ops.convert_to_numpy(masked[0])
+            reconstructed = keras.ops.convert_to_numpy(reconstructed[0])
 
         return image, masked, reconstructed
 
@@ -313,6 +315,7 @@ class MaskedAutoencoder(keras.Model):
             "norm_pix_loss": self.norm_pix_loss,
             "mask_value": self.mask_value,
             "input_shape": self.input_shape_config,
+            "non_mask_value": self.non_mask_value
         })
         return config
 

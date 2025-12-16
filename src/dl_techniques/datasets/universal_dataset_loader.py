@@ -50,7 +50,14 @@ from typing import (
 
 import datasets
 import tensorflow as tf
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 class UniversalDatasetLoader:
     """
@@ -544,3 +551,5 @@ class UniversalDatasetLoader:
         config = self.name if self.name else "default"
         mode = "streaming" if self.streaming else "downloaded"
         return f"DatasetLoader({self.path}/{config}, {self.split}, {mode})"
+
+# ---------------------------------------------------------------------

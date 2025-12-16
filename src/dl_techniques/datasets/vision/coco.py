@@ -352,7 +352,7 @@ class COCODatasetBuilder:
                 f"Ensure your configuration is correct."
             )
 
-        logger.info("✅ Configuration validation passed")
+        logger.info("Configuration validation passed")
 
     def _load_tfds_dataset(self) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
         """
@@ -380,8 +380,8 @@ class COCODatasetBuilder:
             return train_ds, val_ds
 
         except Exception as e:
-            logger.error(f"❌ Failed to load COCO dataset: {e}")
-            logger.info("🔄 Creating dummy dataset for testing...")
+            logger.error(f"Failed to load COCO dataset: {e}")
+            logger.info("Creating dummy dataset for testing...")
 
             # Set flag to indicate we're using dummy data
             self.using_dummy_data = True
@@ -873,28 +873,28 @@ class COCODatasetBuilder:
             Tuple of (train_dataset, validation_dataset).
         """
         try:
-            logger.info("🏗️ Creating COCO datasets...")
+            logger.info("Creating COCO datasets...")
 
             # Load datasets with proper splits
             train_raw, val_raw = self._load_tfds_dataset()
 
             # Filter valid examples
-            logger.info("🔍 Filtering valid examples...")
+            logger.info("Filtering valid examples...")
             train_raw = train_raw.filter(self._filter_valid_examples)
             val_raw = val_raw.filter(self._filter_valid_examples)
 
             # Process datasets
-            logger.info("🏋️ Processing training dataset...")
+            logger.info("Processing training dataset...")
             train_ds = self._process_dataset(train_raw, is_training=True)
 
-            logger.info("🧪 Processing validation dataset...")
+            logger.info("Processing validation dataset...")
             val_ds = self._process_dataset(val_raw, is_training=False)
 
-            logger.info("✅ Datasets created successfully!")
+            logger.info("Datasets created successfully!")
             return train_ds, val_ds
 
         except Exception as e:
-            logger.error(f"❌ Failed to create datasets: {e}")
+            logger.error(f"Failed to create datasets: {e}")
             raise
 
     def get_dataset_info(self) -> Dict[str, Any]:
