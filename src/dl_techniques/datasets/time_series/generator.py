@@ -1164,6 +1164,9 @@ class TimeSeriesGenerator:
         except ImportError:
             raise ImportError("scipy is required for time warping. Please install it with 'pip install scipy'")
 
+        if n_knots < 2:
+            raise ValueError("n_knots must be greater than 1")
+
         n_samples = len(series)
         x_original = np.arange(n_samples)
 
