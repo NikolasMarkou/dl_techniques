@@ -4,10 +4,12 @@ A patch-based random masking strategy for self-supervised learning.
 
 import keras
 from keras import ops, layers, random
-from typing import Optional, Tuple, Union, Dict, Any
+from typing import Optional, Tuple, Union, Any, Dict
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class PatchMasking(layers.Layer):
+class PatchMasking(keras.layers.Layer):
     """Layer for creating patches and applying random masking.
 
     Attributes:
@@ -110,7 +112,7 @@ class PatchMasking(layers.Layer):
         # Reshape mask to broadcast: (B, num_h, num_w, 1, 1, 1)
         mask_reshaped = ops.reshape(mask, (batch_size, num_patches_h, num_patches_w, 1, 1, 1))
 
-        # CRITICAL FIX: Cast mask to input dtype (e.g., float16) to allow mixed precision multiplication
+        # Cast mask to input dtype (e.g., float16) to allow mixed precision multiplication
         mask_reshaped = ops.cast(mask_reshaped, inputs.dtype)
 
         if self.mask_value == "learnable":
@@ -141,3 +143,5 @@ class PatchMasking(layers.Layer):
             "mask_value": self.mask_value,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -673,7 +673,7 @@ class ConvUNextModel(keras.Model):
                 current_drop_path = (
                     self.drop_path_rate
                     * (level * self.blocks_per_level + block_idx)
-                    / np.max(self.depth * self.blocks_per_level, 1)
+                    / (self.depth * self.blocks_per_level)
                 )
 
                 stage_blocks.append(
@@ -805,6 +805,71 @@ class ConvUNextModel(keras.Model):
 
         # Mark model as built
         super().build(input_shape)
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
+        """
+        Compute output shape(s) for the model.
+
+        Parameters
+        ----------
+        input_shape : tuple of int or None
+            Shape of input tensor (batch_size, height, width, channels).
+
+        Returns
+        -------
+        tuple or list of tuples
+            If enable_deep_supervision=False:
+                Single tuple (batch_size, height, width, output_channels).
+            If enable_deep_supervision=True:
+                List of tuples [main_shape, aux_shape_1, ..., aux_shape_n].
+                Ordered from finest resolution (main) to coarsest.
+        """
+        # Parse input shape
+        if len(input_shape) == 4:
+            batch_size, h, w, c = input_shape
+        else:
+            # Handle cases where input_shape might not include batch dimension explicitly
+            # though Keras layers usually receive inputs with batch dim
+            batch_size = input_shape[0] if len(input_shape) > 0 else None
+            h, w = self.input_shape_config[0], self.input_shape_config[1]
+
+        # Helper to compute spatial dimension at specific level
+        def get_dim_at_level(dim: Optional[int], level: int) -> Optional[int]:
+            if dim is None:
+                return None
+            # Each level represents a factor of 2 downsampling relative to input
+            return dim // (2 ** level)
+
+        # Main output is at level 0 (full resolution)
+        main_output_shape = (
+            batch_size,
+            h,
+            w,
+            self.output_channels
+        )
+
+        if not self.enable_deep_supervision:
+            return main_output_shape
+
+        # Calculate auxiliary shapes for deep supervision
+        # Corresponds to levels: depth-1 (coarsest) down to 1 (finest aux)
+        aux_output_shapes = []
+        for level in range(self.depth - 1, 0, -1):
+            shape = (
+                batch_size,
+                get_dim_at_level(h, level),
+                get_dim_at_level(w, level),
+                self.output_channels
+            )
+            aux_output_shapes.append(shape)
+
+        # The call() method returns: [main] + list(reversed(aux_outputs))
+        # aux_outputs are collected from coarse (level depth-1) to fine (level 1)
+        # Reversing them puts them in order: Level 1 (fine) -> Level depth-1 (coarse)
+        return [main_output_shape] + list(reversed(aux_output_shapes))
 
     def call(
         self,

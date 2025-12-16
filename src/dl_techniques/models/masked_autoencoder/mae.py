@@ -9,6 +9,7 @@ Key Features:
 - Asymmetric Encoder-Decoder architecture
 - Efficient masked training (loss computed only on masked patches)
 - Mixed Precision compatible (explicit casting in loss)
+- **Deep Supervision Support**: Handles encoders returning lists of outputs.
 """
 
 import keras
@@ -19,8 +20,8 @@ from typing import Optional, Tuple, Union, List, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from .patch_masking import PatchMasking
 from .conv_decoder import ConvDecoder
+from .patch_masking import PatchMasking
 
 # ---------------------------------------------------------------------
 
@@ -76,12 +77,24 @@ class MaskedAutoencoder(keras.Model):
         if not self.encoder.built:
             self.encoder.build((None,) + input_shape)
 
+        # Compute output shape to determine channels
         encoder_output_shape = self.encoder.compute_output_shape((None,) + input_shape)
-        if len(encoder_output_shape) != 4:
-             # Fallback for flattened outputs, though ConvDecoder expects 4D
-            raise ValueError(f"Encoder must return 4D tensor, got {encoder_output_shape}")
 
-        self.encoder_channels = encoder_output_shape[-1]
+        # Handle Deep Supervision (List of shapes)
+        # We assume the first output is the main feature map for the default decoder
+        if isinstance(encoder_output_shape, list):
+            main_shape = encoder_output_shape[0]
+        else:
+            main_shape = encoder_output_shape
+
+        if len(main_shape) != 4:
+             # Fallback for flattened outputs, though ConvDecoder expects 4D
+            raise ValueError(
+                f"Encoder main output must be 4D tensor (B, H, W, C). "
+                f"Got: {main_shape} (Full output: {encoder_output_shape})"
+            )
+
+        self.encoder_channels = main_shape[-1]
 
         # 1. Masking Layer
         self.masking = PatchMasking(
@@ -143,6 +156,16 @@ class MaskedAutoencoder(keras.Model):
         """Forward pass: Mask -> Encode -> Decode."""
         # Masking
         masked_images, mask, _ = self.masking(inputs, training=training)
+
+        # CRITICAL FIX for Mixed Precision:
+        # PatchMasking often returns float32 (due to scatter ops).
+        # We must cast it to float16 if the global policy mandates it,
+        # otherwise it propagates float32 into the encoder, causing mismatch errors.
+        policy = keras.mixed_precision.dtype_policy()
+        if getattr(policy, "name", "") == "mixed_float16":
+             masked_images = keras.ops.cast(masked_images, "float16")
+        elif self.compute_dtype:
+             masked_images = keras.ops.cast(masked_images, self.compute_dtype)
 
         # Encoding
         encoded = self.encoder(masked_images, training=training)

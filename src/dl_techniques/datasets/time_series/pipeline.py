@@ -5,6 +5,9 @@ This module provides utilities for converting time series data into
 TensorFlow data pipelines suitable for Keras model training, with
 support for windowing, batching, and preprocessing.
 
+Refactored to improve memory efficiency using generators and stride views,
+avoiding the creation of massive intermediate arrays.
+
 Example:
     >>> from dl_techniques.datasets.time_series.pipeline import (
     ...     make_tf_dataset, create_sliding_windows
@@ -18,7 +21,7 @@ import logging
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Generator
 
 # ---------------------------------------------------------------------
 # local imports
@@ -36,10 +39,12 @@ def create_sliding_windows(
     stride: int = 1
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Create sliding windows from a numpy array.
+    Create sliding windows from a numpy array using efficient memory views.
 
     Generates input-output window pairs for sequence-to-sequence
-    forecasting tasks using an efficient NumPy implementation.
+    forecasting tasks. Uses numpy sliding_window_view to create virtual
+    views rather than copying data, significantly reducing memory usage
+    before the data is consumed.
 
     :param data: Input array of shape (timesteps, features).
     :type data: np.ndarray
@@ -61,28 +66,119 @@ def create_sliding_windows(
         >>> print(x.shape, y.shape)
         (881, 96, 7) (881, 24, 7)
     """
-    n_samples = (len(data) - window_size - horizon) // stride + 1
-
-    if n_samples <= 0:
-        raise ValueError(
-            f"Data length ({len(data)}) is too short for "
-            f"window_size={window_size}, horizon={horizon}, stride={stride}. "
-            f"Need at least {window_size + horizon} timesteps."
-        )
-
-    # Pre-allocate arrays for efficiency
-    n_features = data.shape[1] if data.ndim > 1 else 1
+    # Ensure data is 2D
     if data.ndim == 1:
         data = data.reshape(-1, 1)
 
-    x = np.zeros((n_samples, window_size, n_features), dtype=data.dtype)
-    y = np.zeros((n_samples, horizon, n_features), dtype=data.dtype)
+    n_timesteps, n_features = data.shape
 
-    for idx, i in enumerate(range(0, n_samples * stride, stride)):
-        x[idx] = data[i:i + window_size]
-        y[idx] = data[i + window_size:i + window_size + horizon]
+    # Calculate total sequence length needed for one sample (input + target)
+    total_len = window_size + horizon
 
-    return x, y
+    if n_timesteps < total_len:
+        raise ValueError(
+            f"Data length ({len(data)}) is too short for "
+            f"window_size={window_size}, horizon={horizon}. "
+            f"Need at least {total_len} timesteps."
+        )
+
+    # Use sliding_window_view for memory efficiency.
+    # This creates a view (N, window_len, features) without copying.
+    # We create a window of size (window_size + horizon) to capture both X and y.
+    try:
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        # window_shape specifies the size of the window in each dimension.
+        # We want to window over the time dimension (axis 0) with size total_len.
+        # We don't want to window over features, so we don't specify axis 1 or set it to full size.
+        # However, sliding_window_view appends the window dimensions at the end.
+
+        # Shape: (n_windows, features, total_len) if we window over axis 0
+        windows = sliding_window_view(data, window_shape=total_len, axis=0)[::stride]
+
+        # sliding_window_view output shape for axis=0 is (n_windows, n_features, total_len)
+        # We need (n_windows, total_len, n_features).
+        # Note: The behavior of axis parameter puts window dim at the end.
+        # Let's verify shape: (N - total_len + 1, features, total_len)
+
+        # Swap axes to get (n_windows, total_len, n_features)
+        windows = windows.transpose(0, 2, 1)
+
+        # Split into inputs and targets
+        # Note: These are still views into the original array (mostly)
+        x = windows[:, :window_size, :]
+        y = windows[:, window_size:, :]
+
+        return x, y
+
+    except (ImportError, AttributeError):
+        # Fallback for older numpy versions or if stride_tricks fails
+        logger.debug("numpy.lib.stride_tricks.sliding_window_view not available, using manual striding")
+        n_samples = (n_timesteps - total_len) // stride + 1
+
+        # Calculate strides
+        # data.strides is (bytes_per_step, bytes_per_feature)
+        step_bytes = data.strides[0]
+
+        new_shape = (n_samples, total_len, n_features)
+        new_strides = (step_bytes * stride, step_bytes, data.strides[1])
+
+        # Create view
+        combined = np.lib.stride_tricks.as_strided(
+            data, shape=new_shape, strides=new_strides, writeable=False
+        )
+
+        x = combined[:, :window_size, :]
+        y = combined[:, window_size:, :]
+
+        return x, y
+
+
+def _data_generator(
+    df: pd.DataFrame,
+    id_col: str,
+    time_col: str,
+    cols_to_use: List[str],
+    target_idx: int,
+    window_size: int,
+    horizon: int,
+    stride: int
+) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+    """
+    Internal generator that yields single window tuples (x, y).
+
+    Used by make_tf_dataset to stream data into tf.data.Dataset
+    without loading everything into memory at once.
+    """
+    # Group by series ID
+    grouped = df.groupby(id_col)
+
+    for series_id, group in grouped:
+        # Sort by time to ensure temporal order
+        if time_col in group.columns:
+            # We use values directly for speed, assuming caller handled basic sort if needed,
+            # but sorting here is safer for the generator contract.
+            series_data = group.sort_values(time_col)[cols_to_use].values.astype(np.float32)
+        else:
+            series_data = group[cols_to_use].values.astype(np.float32)
+
+        n_timesteps = len(series_data)
+        total_len = window_size + horizon
+
+        # Skip if too short
+        if n_timesteps < total_len:
+            continue
+
+        # Use stride tricks locally to generate windows efficiently
+        # We manually iterate indices to yield one by one to keep memory low
+        # and compatible with from_generator signature constraints
+        for i in range(0, n_timesteps - total_len + 1, stride):
+            window_data = series_data[i : i + total_len]
+            x_window = window_data[:window_size]
+            # Target is just the target column(s) in the horizon
+            y_window = window_data[window_size:, target_idx:target_idx + 1]
+
+            yield x_window, y_window
 
 
 def make_tf_dataset(
@@ -98,11 +194,11 @@ def make_tf_dataset(
     pipeline_config: Optional[PipelineConfig] = None
 ) -> tf.data.Dataset:
     """
-    Convert a pandas DataFrame to a tf.data.Dataset for time series forecasting.
+    Convert a pandas DataFrame to a tf.data.Dataset using a memory-efficient generator.
 
-    Creates sliding windows from multiple time series, handling each series
-    independently to prevent cross-series contamination. Supports various
-    batching and shuffling configurations.
+    This method handles multiple time series by processing them sequentially
+    and streaming windows, avoiding the creation of massive intermediate arrays
+    that can cause OOM errors on large datasets.
 
     :param df: DataFrame with columns [id_col, time_col, target_col, ...].
     :type df: pd.DataFrame
@@ -128,17 +224,6 @@ def make_tf_dataset(
     :return: A tf.data.Dataset yielding (batch_x, batch_y) tuples.
     :rtype: tf.data.Dataset
     :raises ValueError: If the DataFrame is empty or missing required columns.
-
-    Example:
-        >>> dataset = make_tf_dataset(
-        ...     df,
-        ...     window_size=96,
-        ...     horizon=24,
-        ...     batch_size=32,
-        ...     target_col='OT'
-        ... )
-        >>> for x, y in dataset.take(1):
-        ...     print(f"Input: {x.shape}, Target: {y.shape}")
     """
     if pipeline_config is None:
         pipeline_config = PipelineConfig(
@@ -161,68 +246,39 @@ def make_tf_dataset(
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         cols_to_use = [c for c in numeric_cols if c not in exclude_cols]
 
-    # Ensure target is included in features
+    # Ensure target is included in features (standard for AR models)
     if target_col not in cols_to_use:
         cols_to_use = [target_col] + cols_to_use
 
     target_idx = cols_to_use.index(target_col)
+    n_features = len(cols_to_use)
 
-    all_x = []
-    all_y = []
-
-    # Process each series independently
-    for series_id, group in df.groupby(id_col):
-        # Sort by time
-        if time_col in group.columns:
-            group = group.sort_values(time_col)
-
-        # Extract feature values
-        series_data = group[cols_to_use].values.astype(np.float32)
-
-        # Check if series is long enough
-        min_length = window_size + horizon
-        if len(series_data) < min_length:
-            logger.warning(
-                f"Series '{series_id}' has only {len(series_data)} timesteps, "
-                f"need at least {min_length}. Skipping."
-            )
-            continue
-
-        # Create sliding windows
-        try:
-            x_windows, y_windows = create_sliding_windows(
-                series_data, window_size, horizon
-            )
-        except ValueError as e:
-            logger.warning(f"Could not create windows for series '{series_id}': {e}")
-            continue
-
-        # Extract only target column for y
-        y_windows = y_windows[:, :, target_idx:target_idx + 1]
-
-        all_x.append(x_windows)
-        all_y.append(y_windows)
-
-    if not all_x:
-        raise ValueError(
-            "No valid windows could be generated from the DataFrame. "
-            "Check that series are long enough for the given window_size and horizon."
-        )
-
-    # Concatenate all windows
-    x_data = np.concatenate(all_x, axis=0)
-    y_data = np.concatenate(all_y, axis=0)
-
-    logger.info(
-        f"Created dataset with {len(x_data)} windows, "
-        f"input shape: {x_data.shape[1:]}, target shape: {y_data.shape[1:]}"
+    # Define output signature for the generator
+    output_signature = (
+        tf.TensorSpec(shape=(window_size, n_features), dtype=tf.float32),
+        tf.TensorSpec(shape=(horizon, 1), dtype=tf.float32)
     )
 
-    # Create tf.data.Dataset
-    dataset = tf.data.Dataset.from_tensor_slices((x_data, y_data))
+    # We use a generator to stream data into the dataset.
+    # This avoids the "2GB graph limit" of from_tensor_slices and RAM spikes.
+    dataset = tf.data.Dataset.from_generator(
+        generator=lambda: _data_generator(
+            df=df,
+            id_col=id_col,
+            time_col=time_col,
+            cols_to_use=cols_to_use,
+            target_idx=target_idx,
+            window_size=window_size,
+            horizon=horizon,
+            stride=1  # Assuming stride 1 for basic usage
+        ),
+        output_signature=output_signature
+    )
 
     # Apply pipeline configuration
     if pipeline_config.cache:
+        # Warning: Caching a massive dataset might still OOM.
+        # Use with caution or provide a filename to cache() for disk caching.
         dataset = dataset.cache()
 
     if pipeline_config.shuffle:
@@ -244,6 +300,10 @@ def make_tf_dataset(
         prefetch = tf.data.AUTOTUNE
     dataset = dataset.prefetch(prefetch)
 
+    logger.info(
+        f"Created streamed tf.data.Dataset (window={window_size}, horizon={horizon})"
+    )
+
     return dataset
 
 
@@ -255,8 +315,8 @@ def make_tf_dataset_from_arrays(
     """
     Create a tf.data.Dataset from pre-computed arrays.
 
-    Convenient wrapper for creating datasets from arrays already
-    processed by other utilities.
+    Uses `from_tensor_slices` for smaller datasets and `from_generator`
+    for large datasets to avoid the TensorFlow Graph 2GB protobuf limit.
 
     :param x_data: Input array of shape (n_samples, window_size, n_features).
     :type x_data: np.ndarray
@@ -266,19 +326,35 @@ def make_tf_dataset_from_arrays(
     :type pipeline_config: Optional[PipelineConfig]
     :return: A tf.data.Dataset yielding (batch_x, batch_y) tuples.
     :rtype: tf.data.Dataset
-
-    Example:
-        >>> x = np.random.randn(1000, 96, 7).astype(np.float32)
-        >>> y = np.random.randn(1000, 24, 1).astype(np.float32)
-        >>> dataset = make_tf_dataset_from_arrays(x, y)
     """
     if pipeline_config is None:
         pipeline_config = PipelineConfig()
 
-    dataset = tf.data.Dataset.from_tensor_slices((
-        x_data.astype(np.float32),
-        y_data.astype(np.float32)
-    ))
+    # Heuristic for using generator vs tensor_slices
+    # 2GB limit is approx 500M floats.
+    # Safe threshold: 250M elements to be sure.
+    is_large_dataset = x_data.size > 250_000_000
+
+    if is_large_dataset:
+        logger.info("Large dataset detected, using generator to avoid Graph limits.")
+
+        def gen():
+            for i in range(len(x_data)):
+                yield x_data[i], y_data[i]
+
+        dataset = tf.data.Dataset.from_generator(
+            gen,
+            output_signature=(
+                tf.TensorSpec(shape=x_data.shape[1:], dtype=tf.float32),
+                tf.TensorSpec(shape=y_data.shape[1:], dtype=tf.float32)
+            )
+        )
+    else:
+        # Efficient for small/medium datasets
+        dataset = tf.data.Dataset.from_tensor_slices((
+            x_data.astype(np.float32),
+            y_data.astype(np.float32)
+        ))
 
     if pipeline_config.cache:
         dataset = dataset.cache()
@@ -329,12 +405,6 @@ def create_train_val_test_datasets(
     :type pipeline_config: Optional[PipelineConfig]
     :return: Tuple of (train_dataset, val_dataset, test_dataset).
     :rtype: Tuple[tf.data.Dataset, Optional[tf.data.Dataset], tf.data.Dataset]
-
-    Example:
-        >>> train_ds, val_ds, test_ds = create_train_val_test_datasets(
-        ...     train_df, val_df, test_df,
-        ...     window_config=WindowConfig(window_size=96, horizon=24)
-        ... )
     """
     if pipeline_config is None:
         pipeline_config = PipelineConfig()
@@ -401,6 +471,9 @@ def add_time_features(
     Extracts temporal features (e.g., hour of day, day of week) and
     concatenates them to the input features.
 
+    Note: This assumes the dataset yields (x, y) tuples where x
+    aligns sequentially with time_indices.
+
     :param dataset: Existing tf.data.Dataset.
     :type dataset: tf.data.Dataset
     :param time_indices: Array of time indices corresponding to each window.
@@ -410,9 +483,6 @@ def add_time_features(
     :type feature_extractors: Optional[List[Callable[[int], float]]]
     :return: Dataset with time features added to inputs.
     :rtype: tf.data.Dataset
-
-    Example:
-        >>> dataset = add_time_features(dataset, time_indices)
     """
     if feature_extractors is None:
         # Default: hour of day (assuming hourly data starting at index 0)
@@ -436,6 +506,15 @@ def add_time_features(
     def add_features(inputs_targets, time_feat):
         x, y = inputs_targets
         # Broadcast time features across the sequence dimension
+        # Shape of time_feat is (n_features,)
+        # Shape of x is (batch, time, features) if batched, or (time, features) if not
+
+        # NOTE: This function's implementation depends on whether the dataset
+        # was already batched or not. Assuming element-wise operation (unbatched)
+        # based on from_tensor_slices usage.
+
+        # If unbatched x: (time, feat)
+        # We want to append time_feat to every time step
         time_feat_expanded = tf.tile(
             tf.expand_dims(time_feat, 0),
             [tf.shape(x)[0], 1]
@@ -457,10 +536,6 @@ def get_dataset_info(dataset: tf.data.Dataset) -> Dict[str, Any]:
     :type dataset: tf.data.Dataset
     :return: Dictionary with dataset information.
     :rtype: Dict[str, Any]
-
-    Example:
-        >>> info = get_dataset_info(dataset)
-        >>> print(info['input_shape'], info['output_shape'])
     """
     # Get element spec
     element_spec = dataset.element_spec
@@ -472,9 +547,14 @@ def get_dataset_info(dataset: tf.data.Dataset) -> Dict[str, Any]:
         input_dtype = input_spec.dtype.name
         output_dtype = output_spec.dtype.name
     else:
-        input_shape = element_spec.shape.as_list()
+        # Handle cases with dictionary inputs or other structures
+        if hasattr(element_spec, 'shape'):
+             input_shape = element_spec.shape.as_list()
+             input_dtype = element_spec.dtype.name
+        else:
+             input_shape = "complex_structure"
+             input_dtype = "mixed"
         output_shape = None
-        input_dtype = element_spec.dtype.name
         output_dtype = None
 
     # Estimate cardinality
