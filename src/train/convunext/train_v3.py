@@ -15,7 +15,6 @@ import keras
 from keras import ops
 import numpy as np
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import tensorflow as tf
@@ -66,10 +65,10 @@ def setup_environment():
 # ---------------------------------------------------------------------
 
 def get_imagenet_dataset(
-        split: str,
-        image_size: int,
-        batch_size: int,
-        data_dir: Optional[str] = None
+    split: str,
+    image_size: int,
+    batch_size: int,
+    data_dir: Optional[str] = None
 ) -> tf.data.Dataset:
     """Load ImageNet dataset for MAE pretraining."""
     try:
@@ -112,13 +111,13 @@ def get_imagenet_dataset(
 
 
 def get_coco_segmentation_dataset(
-        image_size: int,
-        batch_size: int,
-        num_classes: int,
-        cache_dir: Optional[str] = None,
-        shuffle_buffer_size: int = 100,
-        limit_train_samples: Optional[int] = None,
-        augment_data: bool = True
+    image_size: int,
+    batch_size: int,
+    num_classes: int,
+    cache_dir: Optional[str] = None,
+    shuffle_buffer_size: int = 100,
+    limit_train_samples: Optional[int] = None,
+    augment_data: bool = True
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, Dict[str, Any]]:
     """Load COCO dataset for semantic segmentation."""
     logger.info("Creating COCO segmentation dataset via COCODatasetBuilder...")
@@ -166,10 +165,9 @@ class ConvUNextWrapper(keras.Model):
     """
     Wraps ConvUNextModel to act as an MAE 'Encoder'.
 
-    This wrapper ensures the ConvUNextModel outputs features (not predictions)
-    for MAE training by using include_top=False.
+    For MAE pretraining, the wrapped model should have include_top=True
+    to output RGB predictions (3 channels) for reconstruction.
     """
-
     def __init__(self, convunext_model: ConvUNextModel, **kwargs):
         super().__init__(**kwargs)
         self.convunext_model = convunext_model
@@ -196,7 +194,6 @@ class ConvUNextWrapper(keras.Model):
 @keras.saving.register_keras_serializable()
 class MultiScaleIdentityDecoder(keras.layers.Layer):
     """Pass-through decoder for MAE deep supervision."""
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -207,7 +204,6 @@ class MultiScaleIdentityDecoder(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class DeepSupervisionMAE(MaskedAutoencoder):
     """MAE that calculates loss across multiple scales."""
-
     def __init__(self, loss_weights: Optional[List[float]] = None, **kwargs):
         super().__init__(**kwargs)
         self.loss_weights = loss_weights
@@ -218,11 +214,11 @@ class DeepSupervisionMAE(MaskedAutoencoder):
         return MultiScaleIdentityDecoder(name="identity_decoder")
 
     def compute_loss(
-            self,
-            x: keras.KerasTensor,
-            y: Optional[keras.KerasTensor] = None,
-            y_pred: Optional[Dict[str, Union[keras.KerasTensor, List[keras.KerasTensor]]]] = None,
-            **kwargs: Any
+        self,
+        x: keras.KerasTensor,
+        y: Optional[keras.KerasTensor] = None,
+        y_pred: Optional[Dict[str, Union[keras.KerasTensor, List[keras.KerasTensor]]]] = None,
+        **kwargs: Any
     ) -> keras.KerasTensor:
         reconstructions = y_pred["reconstruction"]
         mask = y_pred["mask"]
@@ -234,7 +230,7 @@ class DeepSupervisionMAE(MaskedAutoencoder):
             reconstructions = [reconstructions]
 
         if self.loss_weights is None:
-            weights = [1.0 / (2 ** i) for i in range(len(reconstructions))]
+            weights = [1.0 / (2**i) for i in range(len(reconstructions))]
         elif len(self.loss_weights) != len(reconstructions):
             raise ValueError(
                 f"loss_weights length {len(self.loss_weights)} != "
@@ -293,11 +289,11 @@ class DeepSupervisionMAE(MaskedAutoencoder):
         return total_loss
 
     def _reshape_mask_for_loss_scaled(
-            self,
-            mask: keras.KerasTensor,
-            target: keras.KerasTensor,
-            scale_h: keras.KerasTensor,
-            scale_w: keras.KerasTensor
+        self,
+        mask: keras.KerasTensor,
+        target: keras.KerasTensor,
+        scale_h: keras.KerasTensor,
+        scale_w: keras.KerasTensor
     ) -> keras.KerasTensor:
         B = ops.shape(mask)[0]
         H, W = ops.shape(target)[1], ops.shape(target)[2]
@@ -328,7 +324,6 @@ class DeepSupervisionMAE(MaskedAutoencoder):
 
 class MAEVisualizationCallback(keras.callbacks.Callback):
     """Callback to visualize MAE reconstructions during training."""
-
     def __init__(self, val_batch: Tuple, save_dir: str, frequency: int = 5):
         super().__init__()
         self.val_batch = val_batch
@@ -365,7 +360,7 @@ class MAEVisualizationCallback(keras.callbacks.Callback):
             axes[i, 2].axis('off')
 
         plt.tight_layout()
-        save_path = os.path.join(self.save_dir, f"mae_epoch_{epoch + 1:03d}.png")
+        save_path = os.path.join(self.save_dir, f"mae_epoch_{epoch+1:03d}.png")
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         logger.info(f"Saved MAE visualization: {save_path}")
@@ -373,7 +368,6 @@ class MAEVisualizationCallback(keras.callbacks.Callback):
 
 class MultiScaleSegmentationCallback(keras.callbacks.Callback):
     """Callback to visualize segmentation at multiple scales."""
-
     def __init__(self, val_batch: Tuple, save_dir: str, num_classes: int, frequency: int = 5):
         super().__init__()
         self.val_batch = val_batch
@@ -421,7 +415,7 @@ class MultiScaleSegmentationCallback(keras.callbacks.Callback):
                 axes[i, 2 + j].axis('off')
 
         plt.tight_layout()
-        save_path = os.path.join(self.save_dir, f"seg_epoch_{epoch + 1:03d}.png")
+        save_path = os.path.join(self.save_dir, f"seg_epoch_{epoch+1:03d}.png")
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         logger.info(f"Saved segmentation visualization: {save_path}")
@@ -429,7 +423,6 @@ class MultiScaleSegmentationCallback(keras.callbacks.Callback):
 
 class ProgressLoggingCallback(keras.callbacks.Callback):
     """Callback to log training progress."""
-
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
         log_str = f"Epoch {epoch + 1}"
@@ -439,19 +432,18 @@ class ProgressLoggingCallback(keras.callbacks.Callback):
 
 
 def run_mae_pretraining(
-        mae_backbone: ConvUNextModel,
-        train_ds: tf.data.Dataset,
-        val_ds: tf.data.Dataset,
-        args: argparse.Namespace,
-        results_dir: str
+    mae_backbone: ConvUNextModel,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    args: argparse.Namespace,
+    results_dir: str
 ) -> None:
     """
     Run MAE pretraining on the backbone.
 
-    The backbone should be configured with include_top=False to output features.
-    CRITICAL: output_channels=3 must be specified to create RGB prediction layers
-    (even though include_top=False means they won't be used in forward pass).
-    This ensures weight compatibility for later transfer.
+    The backbone should be configured with include_top=True and output_channels=3
+    to output RGB predictions for reconstruction. Later, these weights can be loaded
+    into models with different include_top settings or output_channels.
     """
     logger.info("Starting MAE Pretraining...")
 
@@ -486,7 +478,7 @@ def run_mae_pretraining(
     # Compile
     lr_schedule = learning_rate_schedule_builder({
         'type': 'cosine_decay',
-        'learning_rate': args.mae_lr,
+        'learning_rate': args.mae_lr,  # Fixed parameter name
         'decay_steps': args.mae_epochs * 1000,
         'alpha': 0.0
     })
@@ -495,7 +487,7 @@ def run_mae_pretraining(
         'type': 'adamw',
         'learning_rate': args.mae_lr,
         'weight_decay': 0.05,
-        'gradient_clipping_by_norm': 1.0
+        'clipnorm': 1.0
     }, lr_schedule)
 
     mae_model.compile(optimizer=optimizer)
@@ -529,12 +521,12 @@ def run_mae_pretraining(
 
 
 def run_segmentation_finetuning(
-        convunext_model: ConvUNextModel,
-        train_ds: tf.data.Dataset,
-        val_ds: tf.data.Dataset,
-        args: argparse.Namespace,
-        results_dir: str,
-        dataset_info: Dict[str, Any]
+    convunext_model: ConvUNextModel,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    args: argparse.Namespace,
+    results_dir: str,
+    dataset_info: Dict[str, Any]
 ) -> ConvUNextModel:
     """
     Fine-tune the model for segmentation.
@@ -558,7 +550,7 @@ def run_segmentation_finetuning(
     # 1. Configure optimizer
     lr_schedule = learning_rate_schedule_builder({
         'type': 'cosine_decay',
-        'initial_learning_rate': args.finetune_lr,
+        'learning_rate': args.finetune_lr,  # Fixed parameter name
         'decay_steps': args.finetune_epochs * (steps_per_epoch or 1000),
         'alpha': 0.0
     })
@@ -697,18 +689,16 @@ def main():
     # -----------------------------------------------------------
     # 1. Instantiate MAE Backbone
     # -----------------------------------------------------------
-    # CRITICAL FOR WEIGHT COMPATIBILITY:
-    # - include_top=False: use features in forward pass, not predictions
-    # - output_channels=3: create RGB prediction layers (for weight compatibility)
-    # - enable_deep_supervision=True: multi-scale feature learning
+    # CRITICAL FOR MAE: Must use include_top=True to output RGB predictions
+    # MAE reconstructs RGB images, so it needs the final projection layer
+    # Later we can load these weights into include_top=False models for feature extraction
     logger.info(f"Instantiating MAE Backbone ({args.variant})...")
-    logger.info("Configuration: include_top=False, output_channels=3 (for weight compatibility)")
-    logger.info("Note: RGB layers created but not used (include_top=False)")
+    logger.info("Configuration: include_top=True, output_channels=3 (RGB reconstruction)")
     mae_backbone = ConvUNextModel.from_variant(
         args.variant,
         input_shape=(args.image_size, args.image_size, 3),
-        output_channels=3,  # CRITICAL: Create RGB layers for weight compatibility
-        include_top=False,  # Don't use them in forward pass
+        output_channels=3,  # RGB for reconstruction
+        include_top=True,  # Use RGB prediction layers for MAE
         enable_deep_supervision=True,
         use_bias=True
     )
@@ -755,11 +745,11 @@ def main():
 
     # Transfer weights from MAE backbone to segmentation model
     # CRITICAL: Only backbone weights transfer (encoder, decoder)
-    # Prediction heads are NOT transferred (different output_channels)
+    # Prediction heads are NOT transferred (different output_channels: 3 vs num_classes)
     if not args.skip_mae:
         logger.info("Transferring weights from MAE to Segmentation model...")
-        logger.info("Note: Only backbone weights transferred (stem, encoder, decoder)")
-        logger.info(f"Prediction heads NOT transferred (3 RGB channels vs {args.num_classes} classes)")
+        logger.info("Note: Backbone weights transferred (stem, encoder, decoder)")
+        logger.info(f"Prediction heads NOT transferred (3 RGB vs {args.num_classes} classes)")
 
         # Use skip_mismatch=True to handle different output channels
         import tempfile
@@ -786,7 +776,6 @@ def main():
     final_path = os.path.join(results_dir, "final_seg_model.keras")
     seg_model.save(final_path)
     logger.info(f"Pipeline complete. Saved to {final_path}")
-
 
 if __name__ == "__main__":
     try:
