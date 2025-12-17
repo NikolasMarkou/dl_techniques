@@ -486,7 +486,7 @@ def run_mae_pretraining(
     # Compile
     lr_schedule = learning_rate_schedule_builder({
         'type': 'cosine_decay',
-        'initial_learning_rate': args.mae_lr,
+        'learning_rate': args.mae_lr,
         'decay_steps': args.mae_epochs * 1000,
         'alpha': 0.0
     })
@@ -495,7 +495,7 @@ def run_mae_pretraining(
         'type': 'adamw',
         'learning_rate': args.mae_lr,
         'weight_decay': 0.05,
-        'clipnorm': 1.0
+        'gradient_clipping_by_norm': 1.0
     }, lr_schedule)
 
     mae_model.compile(optimizer=optimizer)
