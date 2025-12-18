@@ -34,7 +34,7 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     SAVING (.keras format)                      │
+│                     SAVING (.keras format)                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Keras calls get_config() on each layer                      │
 │  2. Config dict is serialized to JSON                           │
@@ -43,9 +43,9 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                    LOADING (.keras format)                      │
+│                    LOADING (.keras format)                       │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. Parse JSON config                                           │
+│  1. Parse JSON config                                            │
 │  2. For each layer class (using registry):                      │
 │     a. Call __init__(**config) → Creates UNBUILT layer          │
 │  3. Call build() to create weight variables                     │
@@ -60,6 +60,13 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 | `__init__` | Once at instantiation | CREATE all sub-layers, store ALL configuration |
 | `build` | Once when shapes known | CREATE weights via `add_weight()`, BUILD sub-layers |
 | `call` | Every batch | **Must remain symbolic** - only `ops` operations |
+| `compute_output_shape` | Shape inference | Return output shape given input shape (REQUIRED) |
+
+**CRITICAL**: Every custom layer MUST implement `compute_output_shape()`. This method:
+- Enables Keras to infer shapes without running forward pass
+- Is essential for building sub-layers with correct shapes
+- Required for functional API model construction
+- Must work without the layer being built
 
 **NEVER** in `__init__`:
 - Create weights directly (`self.add_weight`)
@@ -69,6 +76,11 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 - Create layer's own weights
 - Explicitly call `build()` on each sub-layer for robust serialization
 - Call `super().build(input_shape)` at the end
+
+**ALWAYS** implement `compute_output_shape`:
+- Return the correct output shape tuple given input shape
+- Must work even before the layer is built
+- Use stored configuration (e.g., `self.units`) not weight shapes
 
 ### 1.2 Separation of Layer Creation vs. Layer Usage
 
@@ -493,6 +505,109 @@ class HierarchicalModel(keras.Model):
                 x = self.encoder_downsamples[level](x, training=training)
         
         return x, skip_connections
+```
+
+### 3.4 Implementing compute_output_shape
+
+**CRITICAL**: Every custom layer MUST implement `compute_output_shape()`. This enables shape inference, sub-layer building, and functional API compatibility.
+
+**Pattern 1: Simple Output Shape**
+
+```python
+def compute_output_shape(
+    self, 
+    input_shape: Tuple[Optional[int], ...]
+) -> Tuple[Optional[int], ...]:
+    """
+    Compute output shape from input shape.
+    
+    Args:
+        input_shape: Shape tuple, may contain None for dynamic dimensions.
+    
+    Returns:
+        Output shape tuple.
+    """
+    # For layers that change the last dimension
+    output_shape = list(input_shape)
+    output_shape[-1] = self.units
+    return tuple(output_shape)
+```
+
+**Pattern 2: Multiple Inputs**
+
+```python
+def compute_output_shape(
+    self, 
+    input_shape: Union[Tuple, List[Tuple]]
+) -> Tuple[Optional[int], ...]:
+    """Handle layers with multiple inputs."""
+    if isinstance(input_shape, list):
+        # Multiple inputs - use the first one as reference
+        primary_shape = input_shape[0]
+    else:
+        primary_shape = input_shape
+    
+    output_shape = list(primary_shape)
+    output_shape[-1] = self.output_dim
+    return tuple(output_shape)
+```
+
+**Pattern 3: Shape-Changing Operations**
+
+```python
+def compute_output_shape(
+    self, 
+    input_shape: Tuple[Optional[int], ...]
+) -> Tuple[Optional[int], ...]:
+    """For layers that reshape or pool."""
+    batch, height, width, channels = input_shape
+    
+    # Example: 2x downsampling
+    new_height = height // 2 if height is not None else None
+    new_width = width // 2 if width is not None else None
+    
+    return (batch, new_height, new_width, self.filters)
+```
+
+**Pattern 4: Using Sub-layer Shapes**
+
+```python
+def compute_output_shape(
+    self, 
+    input_shape: Tuple[Optional[int], ...]
+) -> Tuple[Optional[int], ...]:
+    """Delegate to sub-layers for complex compositions."""
+    shape = self.dense1.compute_output_shape(input_shape)
+    shape = self.dense2.compute_output_shape(shape)
+    return shape
+```
+
+**Pattern 5: Multiple Outputs**
+
+```python
+def compute_output_shape(
+    self, 
+    input_shape: Tuple[Optional[int], ...]
+) -> List[Tuple[Optional[int], ...]]:
+    """For layers returning multiple tensors."""
+    batch = input_shape[0]
+    
+    main_shape = (batch, self.main_units)
+    aux_shape = (batch, self.aux_units)
+    
+    return [main_shape, aux_shape]
+```
+
+**Common Mistakes to Avoid:**
+
+```python
+# ❌ WRONG: Accessing weight shapes (layer may not be built)
+def compute_output_shape(self, input_shape):
+    return (input_shape[0], self.kernel.shape[-1])  # FAILS if not built!
+
+# ✅ CORRECT: Use stored configuration
+def compute_output_shape(self, input_shape):
+    return (input_shape[0], self.units)  # Works always
 ```
 
 ---
@@ -1605,6 +1720,16 @@ class TestCustomLayer:
         
         assert computed_shape == actual_output.shape
     
+    def test_compute_output_shape_before_build(self, layer_config):
+        """Test compute_output_shape works before layer is built."""
+        layer = SimpleCustomLayer(**layer_config)
+        
+        # Should work even without calling layer
+        input_shape = (None, 32)
+        computed_shape = layer.compute_output_shape(input_shape)
+        
+        assert computed_shape == (None, layer_config['units'])
+    
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
     def test_variable_batch_size(self, layer_config, batch_size):
         """Test layer handles various batch sizes."""
@@ -1841,6 +1966,56 @@ for i in range(depth):
     # Consistent across configurations
 ```
 
+### Pitfall 11: Missing compute_output_shape
+
+**❌ WRONG:**
+```python
+class MyLayer(keras.layers.Layer):
+    def __init__(self, units, **kwargs):
+        super().__init__(**kwargs)
+        self.units = units
+        self.dense = layers.Dense(units)
+    
+    def call(self, inputs):
+        return self.dense(inputs)
+    
+    # Missing compute_output_shape!
+    # Breaks functional API and sub-layer building
+```
+
+**✅ CORRECT:**
+```python
+class MyLayer(keras.layers.Layer):
+    def __init__(self, units, **kwargs):
+        super().__init__(**kwargs)
+        self.units = units
+        self.dense = layers.Dense(units)
+    
+    def call(self, inputs):
+        return self.dense(inputs)
+    
+    def compute_output_shape(self, input_shape):
+        output_shape = list(input_shape)
+        output_shape[-1] = self.units
+        return tuple(output_shape)
+```
+
+### Pitfall 12: Accessing Weights in compute_output_shape
+
+**❌ WRONG:**
+```python
+def compute_output_shape(self, input_shape):
+    # Fails if layer not built yet!
+    return (input_shape[0], self.kernel.shape[-1])
+```
+
+**✅ CORRECT:**
+```python
+def compute_output_shape(self, input_shape):
+    # Use stored config, works before build
+    return (input_shape[0], self.units)
+```
+
 ---
 
 ## 14. Troubleshooting Guide
@@ -1853,8 +2028,9 @@ When encountering issues, verify in this order:
 2. **✅ Sub-layer Creation**: All sub-layers created in `__init__()`?
 3. **✅ Configuration**: `get_config()` returns ALL `__init__` parameters?
 4. **✅ Build Logic**: `build()` method handles sub-layer building if needed?
-5. **✅ Graph Safety**: `call()` uses only `ops` functions, no Python primitives on tensors?
-6. **✅ Serialization**: Full save/load test passes?
+5. **✅ Output Shape**: `compute_output_shape()` implemented and uses config (not weights)?
+6. **✅ Graph Safety**: `call()` uses only `ops` functions, no Python primitives on tensors?
+7. **✅ Serialization**: Full save/load test passes?
 
 ### Common Errors and Solutions
 
@@ -1865,6 +2041,8 @@ When encountering issues, verify in this order:
 | `RecursionError during serialization` | Circular references in configuration | Store config parameters explicitly, not as `locals()` |
 | `Cannot convert symbolic tensor to numpy` | Using `.numpy()` or Python type conversions in `call()` | Use `ops` functions only; keep all operations symbolic |
 | `Graph execution error` / `InaccessibleTensorError` | Python conditionals on tensor values in `call()` | Use `ops.where()` or `ops.cond()` for runtime conditionals |
+| `Could not compute output shape` | Missing or broken `compute_output_shape()` | Implement method using stored config, not weight shapes |
+| `AttributeError: 'NoneType' has no attribute 'shape'` | Accessing weights in `compute_output_shape()` before build | Use `self.units` etc. instead of `self.kernel.shape` |
 
 ### Debug Helper
 
@@ -2215,8 +2393,14 @@ When designing custom Keras components:
 **Layer Creation**
 - [ ] All layers created in `__init__` (not conditionally)
 - [ ] Systematic, consistent layer naming
-- [ ] Explicit `build()` method
+- [ ] Explicit `build()` method with sub-layer building
 - [ ] Usage flags separate from creation
+
+**Shape Handling**
+- [ ] `compute_output_shape()` implemented for ALL custom layers
+- [ ] Uses stored config (e.g., `self.units`), not weight shapes
+- [ ] Works before layer is built
+- [ ] Handles `None` dimensions correctly
 
 **Serialization**
 - [ ] `@keras.saving.register_keras_serializable()` decorator
@@ -2237,6 +2421,7 @@ When designing custom Keras components:
 **Testing**
 - [ ] Unit tests for creation, forward pass, shapes
 - [ ] Serialization tests
+- [ ] `compute_output_shape()` matches actual output
 - [ ] Weight compatibility tests
 - [ ] Integration tests
 

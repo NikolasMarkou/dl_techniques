@@ -640,6 +640,14 @@ class GraphSafeLayer(keras.layers.Layer):
         
         return x
     
+    def compute_output_shape(
+        self, 
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        output_shape = list(input_shape)
+        output_shape[-1] = self.units
+        return tuple(output_shape)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({'units': self.units, 'use_scaling': self.use_scaling})
@@ -1983,6 +1991,12 @@ class ProductionLayer(keras.layers.Layer):
         x = self.norm2(x + ffn_out)
         
         return x
+
+    def compute_output_shape(
+        self, 
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        return input_shape  # Output shape matches input shape
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
