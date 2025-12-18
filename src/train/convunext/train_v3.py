@@ -475,6 +475,13 @@ def run_mae_pretraining(
     dummy_in = keras.ops.zeros((1, args.image_size, args.image_size, 3))
     mae_model(dummy_in, training=True)
 
+    # Log model summary
+    logger.info("=" * 80)
+    logger.info("MAE Model Architecture Summary")
+    logger.info("=" * 80)
+    mae_model.summary(print_fn=lambda x: logger.info(x))
+    logger.info("=" * 80)
+
     # Compile
     lr_schedule = learning_rate_schedule_builder({
         'type': 'cosine_decay',
@@ -708,6 +715,13 @@ def main():
     # 2. Stage 1: MAE Pretraining
     # -----------------------------------------------------------
     if not args.skip_mae:
+        # Log backbone architecture
+        logger.info("=" * 80)
+        logger.info("MAE Backbone (ConvUNext Encoder) Architecture Summary")
+        logger.info("=" * 80)
+        mae_backbone.summary(print_fn=lambda x: logger.info(x))
+        logger.info("=" * 80)
+
         train_ds_mae = get_imagenet_dataset('train', args.image_size, args.batch_size, args.data_dir)
         val_ds_mae = get_imagenet_dataset('validation', args.image_size, args.batch_size, args.data_dir)
 
@@ -742,6 +756,13 @@ def main():
         use_bias=True
     )
     seg_model(dummy_in)
+
+    # Log segmentation model architecture
+    logger.info("=" * 80)
+    logger.info("Segmentation Model Architecture Summary")
+    logger.info("=" * 80)
+    seg_model.summary(print_fn=lambda x: logger.info(x))
+    logger.info("=" * 80)
 
     # Transfer weights from MAE backbone to segmentation model
     # CRITICAL: Only backbone weights transfer (encoder, decoder)
