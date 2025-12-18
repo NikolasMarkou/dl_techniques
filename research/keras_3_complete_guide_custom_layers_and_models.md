@@ -1,6 +1,6 @@
 # Complete Guide to Keras 3 Custom Layers and Models
 
-A comprehensive, authoritative guide for creating robust, serializable, and production-ready custom Layers and Models in Keras 3 for the dl-techniques framework.
+A comprehensive, authoritative guide for creating robust, serializable, and production-ready custom Layers and Models in Keras 3.
 
 ---
 
@@ -171,9 +171,6 @@ import numpy as np
 
 # For testing (backend-specific)
 import tensorflow as tf
-
-# DL-Techniques framework imports
-from dl_techniques.utils.logger import logger
 ```
 
 ### 2.2 Registration Decorator
@@ -1124,7 +1121,7 @@ def test_serialization_cycle(layer_class, layer_config, sample_input):
         err_msg="Outputs should match after serialization"
     )
     
-    logger.info("Serialization cycle test passed")
+    print("Serialization cycle test passed")
 ```
 
 ---
@@ -1224,11 +1221,11 @@ def transfer_weights_layerwise(
             
             if source_shapes == target_shapes:
                 target_layer.set_weights(source_weights)
-                logger.info(f"Transferred: {source_name} -> {target_name}")
+                print(f"Transferred: {source_name} -> {target_name}")
             else:
-                logger.warning(f"Shape mismatch for {source_name}")
+                print(f"Shape mismatch for {source_name}")
         except ValueError as e:
-            logger.warning(f"Failed to transfer {source_name}: {e}")
+            print(f"Failed to transfer {source_name}: {e}")
 
 
 def transfer_backbone_weights(
@@ -1242,7 +1239,7 @@ def transfer_backbone_weights(
     if freeze_backbone:
         target_model.backbone.trainable = False
     
-    logger.info("Backbone weights transferred")
+    print("Backbone weights transferred")
 ```
 
 ---
@@ -1874,10 +1871,10 @@ def debug_layer_serialization(layer_class, layer_config, sample_input):
     try:
         layer = layer_class(**layer_config)
         output = layer(sample_input)
-        logger.info(f"Forward pass successful: {output.shape}")
+        print(f"Forward pass successful: {output.shape}")
         
         config = layer.get_config()
-        logger.info(f"Configuration keys: {list(config.keys())}")
+        print(f"Configuration keys: {list(config.keys())}")
         
         inputs = keras.Input(shape=sample_input.shape[1:])
         outputs = layer_class(**layer_config)(inputs)
@@ -1886,10 +1883,10 @@ def debug_layer_serialization(layer_class, layer_config, sample_input):
         with tempfile.TemporaryDirectory() as tmpdir:
             model.save(os.path.join(tmpdir, 'test.keras'))
             loaded = keras.models.load_model(os.path.join(tmpdir, 'test.keras'))
-            logger.info("Serialization test passed")
+            print("Serialization test passed")
             
     except Exception as e:
-        logger.error(f"Error: {e}")
+        print(f"Error: {e}")
         raise
 ```
 
@@ -1897,18 +1894,19 @@ def debug_layer_serialization(layer_class, layer_config, sample_input):
 
 ## 15. Complete Examples
 
-### 15.1 Framework-Integrated Layer
+### 15.1 Production-Ready Custom Layer
 
 ```python
 @keras.saving.register_keras_serializable()
-class FrameworkIntegratedLayer(keras.layers.Layer):
+class ProductionLayer(keras.layers.Layer):
     """
-    Custom layer demonstrating integration with dl-techniques framework.
+    Production-ready custom layer with transformer-style processing.
     
     Args:
         hidden_size: Dimensionality of the model.
         num_heads: Number of attention heads.
-        use_transformer: Whether to include transformer processing.
+        use_attention: Whether to include attention processing.
+        dropout_rate: Dropout rate for regularization.
         **kwargs: Additional arguments for Layer base class.
     """
     
@@ -1916,7 +1914,8 @@ class FrameworkIntegratedLayer(keras.layers.Layer):
         self,
         hidden_size: int,
         num_heads: int = 8,
-        use_transformer: bool = True,
+        use_attention: bool = True,
+        dropout_rate: float = 0.1,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -1932,40 +1931,66 @@ class FrameworkIntegratedLayer(keras.layers.Layer):
         
         self.hidden_size = hidden_size
         self.num_heads = num_heads
-        self.use_transformer = use_transformer
+        self.use_attention = use_attention
+        self.dropout_rate = dropout_rate
         
-        # Use framework components
-        if use_transformer:
-            from dl_techniques.layers.transformer import TransformerLayer
-            self.transformer = TransformerLayer(
-                hidden_size=hidden_size,
+        # Always create all layers
+        if use_attention:
+            self.attention = layers.MultiHeadAttention(
                 num_heads=num_heads,
-                intermediate_size=hidden_size * 4
+                key_dim=hidden_size // num_heads,
+                name='attention'
             )
         else:
-            self.transformer = None
+            self.attention = None
         
-        from dl_techniques.layers.norms.rms_norm import RMSNorm
-        self.norm = RMSNorm()
+        self.ffn = layers.Dense(hidden_size * 4, activation='gelu', name='ffn_expand')
+        self.ffn_project = layers.Dense(hidden_size, name='ffn_project')
+        self.norm1 = layers.LayerNormalization(name='norm1')
+        self.norm2 = layers.LayerNormalization(name='norm2')
+        self.dropout = layers.Dropout(dropout_rate, name='dropout')
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.attention is not None:
+            self.attention.build(input_shape, input_shape)
+        self.norm1.build(input_shape)
+        self.ffn.build(input_shape)
+        ffn_shape = list(input_shape)
+        ffn_shape[-1] = self.hidden_size * 4
+        self.ffn_project.build(tuple(ffn_shape))
+        self.norm2.build(input_shape)
+        super().build(input_shape)
 
     def call(
         self, 
         inputs: keras.KerasTensor, 
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        if self.transformer is not None:
-            x = self.transformer(inputs, training=training)
+        x = inputs
+        
+        # Attention block (if enabled)
+        if self.attention is not None:
+            attn_out = self.attention(x, x, training=training)
+            attn_out = self.dropout(attn_out, training=training)
+            x = self.norm1(x + attn_out)
         else:
-            x = inputs
-            
-        return self.norm(x, training=training)
+            x = self.norm1(x)
+        
+        # FFN block
+        ffn_out = self.ffn(x)
+        ffn_out = self.ffn_project(ffn_out)
+        ffn_out = self.dropout(ffn_out, training=training)
+        x = self.norm2(x + ffn_out)
+        
+        return x
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             'hidden_size': self.hidden_size,
             'num_heads': self.num_heads,
-            'use_transformer': self.use_transformer,
+            'use_attention': self.use_attention,
+            'dropout_rate': self.dropout_rate,
         })
         return config
 ```
@@ -1973,7 +1998,7 @@ class FrameworkIntegratedLayer(keras.layers.Layer):
 ### 15.2 Complete Reusable Model
 
 ```python
-@keras.saving.register_keras_serializable(package='DLTechniques')
+@keras.saving.register_keras_serializable(package='MyModels')
 class WellStructuredModel(keras.Model):
     """
     Complete example of a well-structured, reusable model.
@@ -2037,7 +2062,7 @@ class WellStructuredModel(keras.Model):
         # Build architecture (all layers always created)
         self._build_architecture()
         
-        logger.info(f"Model created: depth={depth}, filters={initial_filters}")
+        print(f"Model created: depth={depth}, filters={initial_filters}")
     
     def _validate_config(self, depth, initial_filters, blocks_per_stage):
         if depth < 2:
@@ -2242,4 +2267,4 @@ When designing custom Keras components:
 
 ---
 
-This guide provides a complete framework for building maintainable, reusable Keras components that integrate seamlessly with the dl-techniques framework. The modern approach is actually simpler than outdated patterns - let Keras handle the complexity while you focus on the layer logic.
+This guide provides a complete framework for building maintainable, reusable Keras components. The modern approach is actually simpler than outdated patterns - let Keras handle the complexity while you focus on the layer logic.
