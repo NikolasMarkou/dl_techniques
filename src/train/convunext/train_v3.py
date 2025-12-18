@@ -658,13 +658,13 @@ def main():
     parser.add_argument("--num-classes", type=int, default=80)
 
     # MAE
-    parser.add_argument("--mae-epochs", type=int, default=3)
+    parser.add_argument("--mae-epochs", type=int, default=10)
     parser.add_argument("--mae-lr", type=float, default=2e-4)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--mask-ratio", type=float, default=0.75)
 
     # Fine-tuning
-    parser.add_argument("--finetune-epochs", type=int, default=3)
+    parser.add_argument("--finetune-epochs", type=int, default=10)
     parser.add_argument("--finetune-lr", type=float, default=1e-4)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
