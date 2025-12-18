@@ -533,40 +533,33 @@ def run_segmentation_finetuning(
     val_ds: tf.data.Dataset,
     args: argparse.Namespace,
     results_dir: str,
-    dataset_info: Dict[str, Any]
-) -> ConvUNextModel:
-    """
-    Fine-tune the model for segmentation.
+    dataset_info: Dict
+) -> keras.Model:
+    """Stage 2: Segmentation Fine-tuning with Multi-Scale Monitoring."""
+    logger.info("=" * 60)
+    logger.info(f"STAGE 2: SEGMENTATION FINE-TUNING")
+    logger.info("=" * 60)
 
-    The model should be configured with include_top=True to output predictions.
-    """
-    logger.info("Starting Segmentation Fine-tuning...")
+    # 1. Extract Visualization Batch BEFORE deep supervision mapping
+    # This ensures we have a clean (Image, Mask) tuple for the callback
+    viz_batch = next(iter(val_ds))
+    # viz_batch is (Batch_Images, Batch_Masks)
+    # Ensure they are numpy/tensor and unmapped
 
-    # Get visualization batch
-    viz_batch = next(iter(val_ds.take(1)))
+    steps_per_epoch = args.steps_per_epoch or 500
+    total_steps = args.finetune_epochs * steps_per_epoch
 
-    # Determine steps per epoch
-    if args.steps_per_epoch is None:
-        try:
-            steps_per_epoch = dataset_info.get('train_steps', None)
-        except:
-            steps_per_epoch = None
-    else:
-        steps_per_epoch = args.steps_per_epoch
-
-    # 1. Configure optimizer
     lr_schedule = learning_rate_schedule_builder({
-        'type': 'cosine_decay',
-        'learning_rate': args.finetune_lr,  # Fixed parameter name
-        'decay_steps': args.finetune_epochs * (steps_per_epoch or 1000),
-        'alpha': 0.0
+        "type": "cosine_decay",
+        "learning_rate": args.finetune_lr,
+        "decay_steps": total_steps,
+        "warmup_steps": 500
     })
 
     optimizer = optimizer_builder({
-        'type': 'adamw',
-        'learning_rate': args.finetune_lr,
-        'weight_decay': 0.01,
-        'clipnorm': 1.0
+        "type": "adamw",
+        "weight_decay": 0.05,
+        "gradient_clipping_by_norm": 1.0
     }, lr_schedule)
 
     # 2. Configure loss for Deep Supervision
