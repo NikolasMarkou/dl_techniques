@@ -718,7 +718,8 @@ def run_mae_pretraining(
         mask_ratio=args.mask_ratio,
         norm_pix_loss=False,
         input_shape=(args.image_size, args.image_size, 3),
-        loss_weights=loss_weights
+        loss_weights=loss_weights,
+        non_mask_value=0.1 # so it doesn't produce artifacts on masks
     )
 
     # Build the model
