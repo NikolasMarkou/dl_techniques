@@ -739,7 +739,7 @@ def run_mae_pretraining(
     optimizer = optimizer_builder({
         'type': 'adamw',
         'learning_rate': args.mae_lr,
-        'weight_decay': 0.05,
+        'weight_decay': 0.01,
         'clipnorm': 1.0
     }, lr_schedule)
 
@@ -806,11 +806,13 @@ def run_segmentation_finetuning(
         "warmup_steps": 500
     })
 
-    optimizer = optimizer_builder({
-        "type": "adamw",
-        "weight_decay": 0.05,
-        "gradient_clipping_by_norm": 1.0
-    }, lr_schedule)
+    optimizer = optimizer_builder(
+        config={
+            "type": "adamw",
+            "weight_decay": 0.05,
+            "gradient_clipping_by_norm": 1.0
+        },
+        lr_schedule=lr_schedule)
 
     # Configure loss for Deep Supervision with Per-Channel Focal Loss
     if convunext_model.enable_deep_supervision:
