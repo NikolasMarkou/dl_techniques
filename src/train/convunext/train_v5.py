@@ -817,16 +817,8 @@ def run_segmentation_finetuning(
         num_outputs = 1 + (convunext_model.depth - 1)
         loss_weights = base_weights[:num_outputs]
 
-        # CRITICAL: Per-channel focal loss for multi-label segmentation
-        # Each of the 80 channels is treated as independent binary problem
-        focal_loss = create_multilabel_segmentation_loss(
-            loss_type='focal',
-            alpha=0.75,  # 75% weight on positive class (objects)
-            gamma=2.0  # Focus on hard examples (down-weight easy background)
-        )
-
-        # Apply to all scales
-        loss = [focal_loss] * num_outputs
+        dice_loss = create_multilabel_segmentation_loss('dice', smooth=1.0)
+        loss = [dice_loss] * num_outputs  # or just dice_loss for single scale
 
         # Multi-label metrics (keep these)
         metrics = [
@@ -875,11 +867,7 @@ def run_segmentation_finetuning(
 
     else:
         # Single scale with per-channel focal loss
-        loss = create_multilabel_segmentation_loss(
-            loss_type='focal',
-            alpha=0.75,
-            gamma=2.0
-        )
+        loss = create_multilabel_segmentation_loss('dice', smooth=1.0)
         loss_weights = None
 
         metrics = [
