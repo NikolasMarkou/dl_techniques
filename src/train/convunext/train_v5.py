@@ -712,7 +712,8 @@ def run_mae_pretraining(
         mask_ratio=args.mask_ratio,
         norm_pix_loss=False,
         input_shape=(args.image_size, args.image_size, 3),
-        loss_weights=loss_weights
+        loss_weights=loss_weights,
+        non_mask_value=0.1
     )
 
     # Build the model
@@ -829,14 +830,6 @@ def run_segmentation_finetuning(
             for i in range(num_outputs)
         ]
 
-        logger.info(f"Deep Supervision enabled: {num_outputs} heads.")
-        logger.info(f"Loss: Per-Channel Binary Focal Loss")
-        logger.info(f"  - alpha=0.75 (75% weight on objects)")
-        logger.info(f"  - gamma=2.0 (focus on hard examples)")
-        logger.info(f"  - Applied to each of {args.num_classes} channels independently")
-        logger.info(f"  - This is CRITICAL for multi-label segmentation")
-        logger.info(f"Loss weights per scale: {loss_weights}")
-
         def multiscale_target_map(image, mask):
             """
             Maps (B,H,W,C), (B,H,W,num_classes) -> (B,H,W,C), [Target1, Target2...]
@@ -944,13 +937,13 @@ def main():
                        help="Number of classes (for COCO: 80 categories, background handled separately)")
 
     # MAE
-    parser.add_argument("--mae-epochs", type=int, default=2)
+    parser.add_argument("--mae-epochs", type=int, default=100)
     parser.add_argument("--mae-lr", type=float, default=2e-4)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--mask-ratio", type=float, default=0.75)
 
     # Fine-tuning
-    parser.add_argument("--finetune-epochs", type=int, default=2)
+    parser.add_argument("--finetune-epochs", type=int, default=100)
     parser.add_argument("--finetune-lr", type=float, default=1e-4)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
