@@ -9,8 +9,7 @@ binary classification problem.
 """
 
 import keras
-from keras import ops
-from typing import Optional, List
+from typing import Optional, List, Union
 import tensorflow as tf
 
 
@@ -20,43 +19,31 @@ class PerChannelBinaryLoss(keras.losses.Loss):
     Wrapper that applies a binary loss function independently per channel.
 
     For multi-label segmentation with C channels, this:
-    1. Splits predictions and targets into C separate channels
-    2. Applies the binary loss to each channel independently
-    3. Averages (or weights) the per-channel losses
+    1. Computes binary loss for all channels (vectorized)
+    2. Applies optional per-channel weights
+    3. Averages the result
 
-    This is critical for multi-label tasks where each channel is an
-    independent binary classification problem.
+    This avoids implicit averaging over channels that standard losses might do,
+    and allows for specific per-channel weighting.
 
     Parameters
     ----------
     base_loss : keras.losses.Loss or str
         The binary loss to apply per channel.
         Can be 'binary_crossentropy', 'binary_focal_crossentropy', etc.
+        Note: If passing a custom Loss instance, ensure it returns element-wise
+        losses or per-sample losses, not a scalar.
     channel_weights : Optional[List[float]]
         Optional weights for each channel. If None, all channels weighted equally.
     reduction : str
         Reduction method ('sum_over_batch_size', 'sum', 'none')
     name : str
         Name for this loss
-
-    Examples
-    --------
-    >>> # Binary cross-entropy per channel
-    >>> loss = PerChannelBinaryLoss('binary_crossentropy')
-    >>>
-    >>> # Focal loss per channel
-    >>> focal = tf.keras.losses.BinaryFocalCrossentropy(gamma=2.0)
-    >>> loss = PerChannelBinaryLoss(focal)
-    >>>
-    >>> # With channel weights (e.g., weight rare classes more)
-    >>> weights = [1.0] * 80
-    >>> weights[rare_class_idx] = 5.0
-    >>> loss = PerChannelBinaryLoss('binary_crossentropy', channel_weights=weights)
     """
 
     def __init__(
             self,
-            base_loss='binary_crossentropy',
+            base_loss: Union[keras.losses.Loss, str] = 'binary_crossentropy',
             channel_weights: Optional[List[float]] = None,
             reduction: str = 'sum_over_batch_size',
             name: str = 'per_channel_loss',
@@ -66,8 +53,10 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
         # Get the base loss
         if isinstance(base_loss, str):
-            self.base_loss = keras.losses.get(base_loss)
             self.base_loss_name = base_loss
+            # We don't instantiate the string loss here to allow for
+            # specific functional implementations in call()
+            self.base_loss = None
         else:
             self.base_loss = base_loss
             self.base_loss_name = base_loss.__class__.__name__
@@ -87,49 +76,80 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
         Returns
         -------
-        tensor, scalar
-            Average loss across all channels
+        tensor
+            Loss tensor. Shape depends on reduction, usually scalar if
+            sum_over_batch_size.
         """
-        # Get number of channels
-        num_channels = tf.shape(y_pred)[-1]
+        y_true = tf.cast(y_true, y_pred.dtype)
 
-        # Split into per-channel tensors
-        y_true_channels = tf.unstack(y_true, axis=-1)
-        y_pred_channels = tf.unstack(y_pred, axis=-1)
+        # 1. Compute Element-wise Loss (B, H, W, C)
+        # -----------------------------------------
+        if self.base_loss_name == 'binary_crossentropy':
+            # Manual element-wise BCE to ensure no implicit reduction over channels
+            # Standard keras.losses.binary_crossentropy averages over the last dim
+            epsilon = keras.backend.epsilon()
+            y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+            
+            bce = y_true * tf.math.log(y_pred) + (1 - y_true) * tf.math.log(1 - y_pred)
+            loss = -bce
 
-        # Compute loss per channel
-        channel_losses = []
-        for c, (y_t, y_p) in enumerate(zip(y_true_channels, y_pred_channels)):
-            # Ensure shapes are correct (B, H, W) -> (B, H, W, 1)
-            y_t = tf.expand_dims(y_t, axis=-1)
-            y_p = tf.expand_dims(y_p, axis=-1)
+        elif isinstance(self.base_loss, keras.losses.Loss):
+            # If it's a Loss instance, we call its call() method directly.
+            # This bypasses the wrapper's __call__ reduction logic, assuming
+            # the subclass's call() returns element-wise or per-sample data.
+            # Our WeightedBinaryFocalLoss below is designed for this.
+            loss = self.base_loss.call(y_true, y_pred)
+            
+        elif callable(self.base_loss):
+            # For functional losses (like the custom weighted_bce in factory)
+            loss = self.base_loss(y_true, y_pred)
+            
+        else:
+            # Fallback for string names (e.g. using backend functions)
+            fn = keras.losses.get(self.base_loss_name)
+            loss = fn(y_true, y_pred)
 
-            # Compute loss for this channel
-            loss_c = self.base_loss(y_t, y_p)
+        # 2. Apply Per-Channel Weights
+        # ----------------------------
+        if self.channel_weights is not None:
+            # weights: (C,)
+            weights = tf.convert_to_tensor(self.channel_weights, dtype=loss.dtype)
+            # Broadcast: (B, H, W, C) * (C,) -> (B, H, W, C)
+            loss = loss * weights
 
-            # Apply channel weight if provided
-            if self.channel_weights is not None:
-                weight = self.channel_weights[c]
-                loss_c = loss_c * weight
-
-            channel_losses.append(loss_c)
-
-        # Average across channels
-        total_loss = tf.reduce_mean(tf.stack(channel_losses))
-
-        return total_loss
+        # 3. Return Element-wise Loss
+        # ---------------------------
+        # We return the full map (or per-sample map). 
+        # The Keras Loss wrapper (super().__call__) handles the final reduction
+        # (e.g. averaging over batch) based on self.reduction.
+        # However, we want to ensure we average over H, W, and C here if we want
+        # "per-channel" semantics compressed into the standard Keras contract,
+        # OR we leave it to Keras. 
+        
+        # Typically, Keras expects losses of shape (Batch,) or (Batch, d0, ..).
+        # It then averages. 
+        # Since we want to normalize by the number of pixels AND channels, 
+        # we can just return the map. Keras will mean() it.
+        
+        return loss
 
     def get_config(self):
         config = super().get_config()
+        # Serialize base_loss if it's an object, otherwise store name
+        base_loss_config = (
+            keras.saving.serialize_keras_object(self.base_loss)
+            if self.base_loss is not None else self.base_loss_name
+        )
         config.update({
-            'base_loss': keras.saving.serialize_keras_object(self.base_loss),
+            'base_loss': base_loss_config,
             'channel_weights': self.channel_weights
         })
         return config
 
     @classmethod
     def from_config(cls, config):
-        config['base_loss'] = keras.saving.deserialize_keras_object(config['base_loss'])
+        if 'base_loss' in config and isinstance(config['base_loss'], dict):
+            config['base_loss'] = keras.saving.deserialize_keras_object(config['base_loss'])
         return cls(**config)
 
 
@@ -140,34 +160,8 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
 
     Focal Loss: FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
 
-    Where:
-    - alpha: Weight for positive class (higher = focus more on positive examples)
-    - gamma: Focusing parameter (higher = focus more on hard examples)
-    - p_t: Predicted probability for true class
-
-    Parameters
-    ----------
-    alpha : float, default=0.25
-        Weight for positive class. Use 0.25-0.75 for imbalanced data.
-    gamma : float, default=2.0
-        Focusing parameter. Higher values (2-5) focus more on hard examples.
-    from_logits : bool, default=False
-        Whether predictions are logits or probabilities
-    reduction : str
-        Reduction method
-    name : str
-        Loss name
-
-    Examples
-    --------
-    >>> # Standard focal loss
-    >>> loss = WeightedBinaryFocalLoss(alpha=0.25, gamma=2.0)
-    >>>
-    >>> # Strong focus on hard examples
-    >>> loss = WeightedBinaryFocalLoss(alpha=0.25, gamma=5.0)
-    >>>
-    >>> # More weight to positive class (rare objects)
-    >>> loss = WeightedBinaryFocalLoss(alpha=0.75, gamma=2.0)
+    Returns element-wise loss (no reduction) to allow for external
+    weighting and flexible reduction strategies.
     """
 
     def __init__(
@@ -186,7 +180,7 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
 
     def call(self, y_true, y_pred):
         """
-        Compute focal loss.
+        Compute focal loss element-wise.
 
         Parameters
         ----------
@@ -198,7 +192,7 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
         Returns
         -------
         tensor
-            Focal loss value
+            Focal loss value (element-wise), same shape as input
         """
         # Convert to probabilities if needed
         if self.from_logits:
@@ -208,15 +202,16 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
         epsilon = tf.keras.backend.epsilon()
         y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
 
-        # Compute focal loss
-        y_true = tf.cast(y_true, tf.float32)
+        y_true = tf.cast(y_true, y_pred.dtype)
 
         # For positive examples
+        # loss_pos = -alpha * (1 - p)^gamma * log(p)
         p_t_pos = y_pred
         alpha_t_pos = self.alpha
         loss_pos = -alpha_t_pos * tf.pow(1.0 - p_t_pos, self.gamma) * tf.math.log(p_t_pos)
 
         # For negative examples
+        # loss_neg = -(1-alpha) * p^gamma * log(1-p)
         p_t_neg = 1.0 - y_pred
         alpha_t_neg = 1.0 - self.alpha
         loss_neg = -alpha_t_neg * tf.pow(1.0 - p_t_neg, self.gamma) * tf.math.log(p_t_neg)
@@ -224,7 +219,8 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
         # Combine based on ground truth
         loss = y_true * loss_pos + (1.0 - y_true) * loss_neg
 
-        return tf.reduce_mean(loss)
+        # Return element-wise loss (no reduce_mean)
+        return loss
 
     def get_config(self):
         config = super().get_config()
@@ -245,35 +241,9 @@ def create_multilabel_segmentation_loss(
 ):
     """
     Factory function to create appropriate loss for multi-label segmentation.
-
-    Parameters
-    ----------
-    loss_type : str
-        Type of loss: 'focal', 'bce', 'weighted_bce'
-    alpha : float
-        For focal loss, weight for positive class (0.5-0.9 for rare objects)
-    gamma : float
-        For focal loss, focusing parameter (2-5 for hard examples)
-    channel_weights : Optional[List[float]]
-        Per-channel weights (e.g., weight rare classes more)
-
-    Returns
-    -------
-    loss : keras.losses.Loss
-        Configured loss function
-
-    Examples
-    --------
-    >>> # Focal loss per channel (RECOMMENDED for class imbalance)
-    >>> loss = create_multilabel_segmentation_loss('focal', alpha=0.75, gamma=2.0)
-    >>>
-    >>> # Weighted BCE per channel
-    >>> loss = create_multilabel_segmentation_loss('bce', channel_weights=weights)
-    >>>
-    >>> # Strong focal loss for severe imbalance
-    >>> loss = create_multilabel_segmentation_loss('focal', alpha=0.9, gamma=5.0)
     """
     if loss_type == 'focal':
+        # from_logits=False because model ends with sigmoid
         base_loss = WeightedBinaryFocalLoss(alpha=alpha, gamma=gamma, from_logits=False)
         return PerChannelBinaryLoss(base_loss, channel_weights=channel_weights)
 
@@ -284,10 +254,21 @@ def create_multilabel_segmentation_loss(
         # Use tensorflow's built-in weighted BCE
         def weighted_bce(y_true, y_pred):
             # Compute pos_weight from alpha
-            pos_weight = alpha / (1.0 - alpha) if alpha != 1.0 else 10.0
-            return tf.nn.weighted_cross_entropy_with_logits(
-                y_true, tf.math.log(y_pred / (1.0 - y_pred + 1e-7)), pos_weight
-            )
+            # alpha is "balance" -> pos_weight adjusts trade-off
+            # if alpha=0.75 (3x weight on pos), pos_weight approx 3.0
+            pos_weight = alpha / (1.0 - alpha) if alpha != 1.0 else 1.0
+            
+            # This function expects logits, but model outputs sigmoid.
+            # We must inverse sigmoid or use standard BCE if inputs are probs.
+            # However, standard weighted_cross_entropy_with_logits is numerically stable.
+            # Since model has sigmoid, we can use epsilon inverse? 
+            # Or better: implement weighted BCE for probabilities.
+            
+            y_pred = tf.clip_by_value(y_pred, keras.backend.epsilon(), 1.0 - keras.backend.epsilon())
+            
+            # Loss = -pos_w * y_true * log(y_pred) - (1-y_true) * log(1-y_pred)
+            loss = -pos_weight * y_true * tf.math.log(y_pred) - (1.0 - y_true) * tf.math.log(1.0 - y_pred)
+            return loss
 
         return PerChannelBinaryLoss(weighted_bce, channel_weights=channel_weights)
 
@@ -295,25 +276,3 @@ def create_multilabel_segmentation_loss(
         raise ValueError(f"Unknown loss_type: {loss_type}")
 
 
-if __name__ == '__main__':
-    # Example usage
-    import numpy as np
-
-    # Create dummy data: 4 samples, 32x32, 3 classes
-    y_true = np.random.randint(0, 2, (4, 32, 32, 3)).astype('float32')
-    y_pred = np.random.rand(4, 32, 32, 3).astype('float32')
-
-    # Test focal loss
-    print("Testing Focal Loss per channel...")
-    loss_fn = create_multilabel_segmentation_loss('focal', alpha=0.75, gamma=2.0)
-    loss_value = loss_fn(y_true, y_pred)
-    print(f"Loss value: {loss_value:.4f}")
-
-    # Test with channel weights
-    print("\nTesting with channel weights...")
-    weights = [1.0, 2.0, 5.0]  # Weight class 2 heavily
-    loss_fn = create_multilabel_segmentation_loss('focal', alpha=0.75, gamma=2.0, channel_weights=weights)
-    loss_value = loss_fn(y_true, y_pred)
-    print(f"Loss value: {loss_value:.4f}")
-
-    print("\nAll tests passed!")
