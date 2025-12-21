@@ -11,10 +11,11 @@ Multi-Label Segmentation Pipeline with Sigmoid Activation:
 """
 
 import os
-import argparse
 import keras
-from keras import ops
+import tempfile
+import argparse
 import numpy as np
+from keras import ops
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -1034,7 +1035,7 @@ def main():
         logger.info("Note: Backbone weights transferred (stem, encoder, decoder)")
         logger.info(f"Prediction heads NOT transferred (3 RGB vs {args.num_classes} classes)")
 
-        import tempfile
+
         with tempfile.NamedTemporaryFile(suffix='.weights.h5', delete=False) as f:
             temp_path = f.name
 
