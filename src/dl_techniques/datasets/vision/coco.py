@@ -71,6 +71,7 @@ INVALID_BBOX_VALUE = -1.0
 
 # ---------------------------------------------------------------------
 
+
 @dataclass
 class AugmentationConfig:
     """Configuration for data augmentation parameters."""
@@ -85,7 +86,6 @@ class AugmentationConfig:
     cutmix_alpha: float = 0.0        # Disabled by default
     mosaic_prob: float = 0.0         # Disabled by default
 
-# ---------------------------------------------------------------------
 
 @dataclass
 class DatasetConfig:
@@ -110,13 +110,14 @@ class DatasetConfig:
 
 # ---------------------------------------------------------------------
 
+
 def create_dummy_coco_dataset(
     num_samples: int,
     img_size: int,
     num_classes: int = 80,
     max_boxes: int = 20,
     min_boxes: int = 1,
-    segmentation_classes: int = 80  # NEW: Configurable segmentation classes
+    segmentation_classes: int = 80
 ) -> tf.data.Dataset:
     """
     Create a dummy COCO-style dataset for testing and development.
@@ -131,7 +132,6 @@ def create_dummy_coco_dataset(
 
     Returns:
         TensorFlow dataset with COCO-style dictionary format.
-        Compatible with the COCODatasetBuilder pipeline.
     """
     def generator():
         for _ in range(num_samples):
@@ -164,19 +164,20 @@ def create_dummy_coco_dataset(
             labels = np.array(labels, dtype=np.int64)
 
             # Generate dummy segmentation mask based on segmentation_classes
+            # NOTE: We must generate the exact shape expected by the output signature
             if segmentation_classes == 1:
-                # Binary segmentation - generate random binary mask
-                seg_mask = np.random.randint(0, 2, (img_size, img_size, 1), dtype=np.float32)
+                # Binary segmentation (H, W, 1) float32
+                seg_mask = np.random.randint(0, 2, (img_size, img_size, 1)).astype(np.float32)
             else:
-                # Multi-class segmentation - generate random multi-class mask
-                seg_mask = np.random.randint(0, segmentation_classes, (img_size, img_size), dtype=np.int32)
-                seg_mask = np.eye(segmentation_classes)[seg_mask].astype(np.float32)  # Convert to one-hot
+                # Multi-class segmentation (H, W, Classes) float32
+                # Generate indices first
+                seg_indices = np.random.randint(0, segmentation_classes, (img_size, img_size))
+                # Convert to one-hot and ensure float32
+                seg_mask = np.eye(segmentation_classes)[seg_indices].astype(np.float32)
 
             # Create dummy segmentation data that indicates presence
-            # This ensures the dummy data passes the filter
             dummy_segmentation = tf.constant(['dummy_segmentation'] * num_boxes, dtype=tf.string)
 
-            # Create COCO-style example dictionary
             example = {
                 'image': img,
                 'objects': {
@@ -184,13 +185,12 @@ def create_dummy_coco_dataset(
                     'label': labels,
                     'segmentation': dummy_segmentation
                 },
-                # Add the segmentation mask directly for easier processing
                 '_segmentation_mask': seg_mask
             }
 
             yield example
 
-    # Define output signature for COCO-style format
+    # Define output signature matching the generator outputs exactly
     output_signature = {
         'image': tf.TensorSpec(shape=(img_size, img_size, 3), dtype=tf.uint8),
         'objects': {
@@ -209,6 +209,7 @@ def create_dummy_coco_dataset(
     return dataset
 
 # ---------------------------------------------------------------------
+
 
 class COCODatasetBuilder:
     """
@@ -237,10 +238,8 @@ class COCODatasetBuilder:
         class_names: Optional[List[str]] = None,
         dataset_config: Optional[DatasetConfig] = None,
         data_dir: Optional[str] = None,
-        # NEW: Configurable segmentation classes
         segmentation_classes: int = 80,
-        # NEW: Memory management options
-        shuffle_buffer_size: int = 100,
+        shuffle_buffer_size: int = 1000,  # Default increased for better mixing
         limit_train_samples: Optional[int] = None,
         **kwargs
     ):
@@ -261,7 +260,7 @@ class COCODatasetBuilder:
             dataset_config: Custom dataset configuration.
             data_dir: Directory where COCO data is stored.
             segmentation_classes: Number of segmentation classes (80 for COCO, 1 for binary).
-            shuffle_buffer_size: Size of shuffle buffer (reduce if out of memory).
+            shuffle_buffer_size: Size of shuffle buffer.
             limit_train_samples: Limit training samples for memory efficiency.
             **kwargs: Additional configuration options.
         """
@@ -276,14 +275,14 @@ class COCODatasetBuilder:
         self.min_bbox_area = min_bbox_area
         self.data_dir = data_dir
 
-        # NEW: Segmentation configuration
+        # Segmentation configuration
         self.segmentation_classes = segmentation_classes
 
-        # NEW: Memory management
+        # Memory management
         self.shuffle_buffer_size = shuffle_buffer_size
         self.limit_train_samples = limit_train_samples
 
-        # NEW: Track if using dummy data
+        # Track if using dummy data
         self.using_dummy_data = False
 
         # Configure class setup
@@ -309,10 +308,6 @@ class COCODatasetBuilder:
         logger.info(f"  - Segmentation: {self.use_segmentation}")
         logger.info(f"  - Augmentation: {self.augment_data}")
         logger.info(f"  - Shuffle buffer size: {self.shuffle_buffer_size}")
-        if self.limit_train_samples:
-            logger.info(f"  - Train sample limit: {self.limit_train_samples}")
-        else:
-            logger.info(f"  - Train sample limit: None (full dataset)")
 
     def _validate_configuration(self) -> None:
         """Validate configuration parameters."""
@@ -333,13 +328,11 @@ class COCODatasetBuilder:
 
         # Warn about non-standard class count
         if (self.dataset_config.num_classes != 80 and
-            self.dataset_config.class_names == COCO_CLASSES):
+                self.dataset_config.class_names == COCO_CLASSES):
             logger.warning(
                 f"Using {self.dataset_config.num_classes} classes but COCO has 80. "
                 f"Ensure your configuration is correct."
             )
-
-        logger.info("Configuration validation passed")
 
     def _load_tfds_dataset(self) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
         """
@@ -370,12 +363,9 @@ class COCODatasetBuilder:
             logger.error(f"Failed to load COCO dataset: {e}")
             logger.info("Creating dummy dataset for testing...")
 
-            # Set flag to indicate we're using dummy data
             self.using_dummy_data = True
-
-            # Create larger dummy dataset for proper training simulation
             # Generate enough samples for multiple epochs
-            samples_needed = max(10000, self.batch_size * 100)  # At least 100 batches worth
+            samples_needed = max(10000, self.batch_size * 100)
 
             dummy_ds = create_dummy_coco_dataset(
                 num_samples=samples_needed,
@@ -388,15 +378,12 @@ class COCODatasetBuilder:
             train_ds = dummy_ds.take(train_size)
             val_ds = dummy_ds.skip(train_size).take(int(samples_needed * 0.2))
 
-            logger.info(f"Created dummy dataset with {train_size} training and {int(samples_needed * 0.2)} validation samples")
+            logger.info(f"Created dummy dataset with {train_size} training samples")
             return train_ds, val_ds
 
     def _filter_valid_examples(self, example: Dict[str, tf.Tensor]) -> tf.Tensor:
         """
         Filter examples that have valid annotations for enabled tasks.
-
-        Now only requires the presence of objects/labels, not both detection and segmentation.
-        Since we create synthetic segmentation masks from bounding boxes, we only need objects.
 
         Args:
             example: COCO example from tfds.
@@ -406,20 +393,15 @@ class COCODatasetBuilder:
         """
         try:
             objects = example['objects']
-
-            # Simplified filter - only check for presence of objects/labels
-            # Since we create synthetic segmentation from detection, we only need objects
             labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
             has_objects = tf.greater(tf.shape(labels)[0], 0)
 
-            # Optional: Additional validation for detection if enabled
             if self.use_detection:
                 bboxes = objects.get('bbox', tf.zeros((0, 4)))
                 has_valid_bboxes = tf.greater(tf.shape(bboxes)[0], 0)
                 has_objects = tf.logical_and(has_objects, has_valid_bboxes)
 
             return has_objects
-
         except Exception as e:
             logger.debug(f"Error filtering example: {e}")
             return tf.constant(False, dtype=tf.bool)
@@ -429,11 +411,13 @@ class COCODatasetBuilder:
         Validate bounding boxes for correctness.
 
         Args:
-            bbox: Bounding boxes [N, 4] in format [ymin, xmin, ymax, xmax] (normalized).
+            bbox: Bounding boxes [N, 4] in format [ymin, xmin, ymax, xmax].
 
         Returns:
             Boolean mask indicating valid bounding boxes.
         """
+        # Ensure float32 for calculations
+        bbox = tf.cast(bbox, tf.float32)
         ymin, xmin, ymax, xmax = bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3]
 
         # Check coordinate bounds
@@ -463,13 +447,12 @@ class COCODatasetBuilder:
 
         Args:
             objects: Objects dictionary from COCO example.
-            image_shape: Original image shape [height, width, channels].
+            image_shape: Original image shape.
 
         Returns:
             Detection targets [max_boxes, 5] in format [class_id, x1, y1, x2, y2].
         """
         try:
-            # Get bounding boxes and labels
             bboxes = objects.get('bbox', tf.zeros((0, 4)))  # [ymin, xmin, ymax, xmax]
             labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
 
@@ -482,35 +465,32 @@ class COCODatasetBuilder:
             ymin, xmin, ymax, xmax = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
             converted_bboxes = tf.stack([xmin, ymin, xmax, ymax], axis=1)
 
-            # Create detection targets [class_id, x1, y1, x2, y2]
-            num_objects = tf.shape(labels)[0]
+            # Create detection targets
             detection_targets = tf.concat([
                 tf.cast(tf.expand_dims(labels, 1), tf.float32),
                 converted_bboxes
             ], axis=1)
 
-            # Truncate if we have too many boxes, then pad to exact size
+            # Truncate and pad
             current_boxes = tf.shape(detection_targets)[0]
-
-            # Truncate to max_boxes if necessary
             detection_targets = detection_targets[:self.max_boxes_per_image]
 
-            # Calculate padding needed (ensure non-negative)
             actual_boxes = tf.minimum(current_boxes, self.max_boxes_per_image)
             pad_size = self.max_boxes_per_image - actual_boxes
+            pad_size = tf.maximum(pad_size, 0)
 
-            # Use sentinel values for padding
             padding = tf.fill((pad_size, 5), INVALID_BBOX_VALUE)
             detection_targets = tf.concat([detection_targets, padding], axis=0)
 
-            # Ensure exact size (should be guaranteed now, but safety check)
-            detection_targets = detection_targets[:self.max_boxes_per_image]
+            # Ensure exact static shape for graph mode if possible
+            detection_targets = tf.ensure_shape(
+                detection_targets, [self.max_boxes_per_image, 5]
+            )
 
             return detection_targets
 
         except Exception as e:
             logger.debug(f"Error preprocessing detection targets: {e}")
-            # Return all invalid boxes as fallback
             return tf.fill((self.max_boxes_per_image, 5), INVALID_BBOX_VALUE)
 
     def _preprocess_segmentation_targets(
@@ -520,25 +500,20 @@ class COCODatasetBuilder:
             example: Optional[Dict[str, tf.Tensor]] = None
     ) -> tf.Tensor:
         """
-        Preprocess segmentation targets.
-
-        Uses a robust, vectorized method to create masks from bounding boxes,
-        avoiding fragile loops and graph-mode errors with `tf.tensor_scatter_nd_update`.
-        This version correctly handles the background class to prevent class ID collisions.
+        Preprocess segmentation targets using vectorized mask generation.
 
         Args:
             objects: Objects dictionary from COCO example.
-            image_shape: Original image shape [height, width, channels].
+            image_shape: Original image shape.
             example: Full example dictionary (for dummy data).
 
         Returns:
-            Segmentation masks [img_size, img_size, segmentation_classes].
+            Segmentation masks [img_size, img_size, channels].
         """
         try:
-            # Check if we have dummy data with a pre-generated mask. This logic is unchanged.
+            # Handle dummy data path
             if example is not None and '_segmentation_mask' in example:
                 mask = example['_segmentation_mask']
-                # Resize to target size if needed
                 if tf.shape(mask)[0] != self.img_size or tf.shape(mask)[1] != self.img_size:
                     mask = tf.image.resize(
                         mask,
@@ -547,149 +522,115 @@ class COCODatasetBuilder:
                     )
                 return mask
 
-            # Get bounding boxes and labels for real data.
-            bboxes = objects.get('bbox', tf.zeros((0, 4)))  # [ymin, xmin, ymax, xmax]
+            # Real data path
+            bboxes = objects.get('bbox', tf.zeros((0, 4)))
             labels = objects.get('label', tf.zeros((0,), dtype=tf.int64))
 
-            # Initialize an integer mask for class indices. Class 0 is reserved for the background.
+            # Initialize canvas (class 0 is background)
             final_mask = tf.zeros((self.img_size, self.img_size), dtype=tf.int32)
 
-            # Only proceed if there are any bounding boxes to process.
-            # This 'if' is safe for graph mode as it checks the tensor shape.
             if tf.shape(bboxes)[0] > 0:
-                # Convert normalized bbox coordinates [0, 1] to absolute pixel coordinates.
+                # Convert normalized coordinates to pixels
                 bboxes_px = bboxes * tf.cast(tf.stack(
                     [self.img_size, self.img_size, self.img_size, self.img_size]
                 ), dtype=tf.float32)
                 ymin, xmin, ymax, xmax = tf.unstack(bboxes_px, axis=1)
 
-                # Create coordinate grids for vectorized operations.
-                # y_coords shape: (img_size, 1), x_coords shape: (1, img_size)
-                # This allows broadcasting to efficiently create boolean masks for each box.
+                # Create coordinate grids
                 y_coords = tf.cast(tf.range(self.img_size)[:, tf.newaxis], tf.float32)
                 x_coords = tf.cast(tf.range(self.img_size)[tf.newaxis, :], tf.float32)
 
-                # Iterate through boxes from back to front.
-                # This ensures smaller objects (often listed later) are drawn on top of larger ones.
-                # Using tf.range makes the loop compatible with graph execution.
+                # Iterate boxes backwards so later boxes overwrite earlier ones
+                # Using tf.range makes this a graph-compatible loop
                 for i in tf.range(tf.shape(bboxes)[0] - 1, -1, -1):
-                    # Add 1 to the class ID to avoid collision with background (class 0).
-                    # Now, 'person' (original ID 0) becomes 1, and so on.
+                    # Shift class ID by 1 to reserve 0 for background
                     box_class_id = tf.cast(labels[i], tf.int32) + 1
-
-                    # Get pixel coordinates for the current box.
                     by, bx, bh, bw = ymin[i], xmin[i], ymax[i], xmax[i]
 
-                    # Create a boolean mask for the current box using vectorized comparison.
-                    # This is the graph-safe replacement for the fragile Python 'if' statement.
-                    box_mask = (y_coords >= by) & (y_coords < bh) & (x_coords >= bx) & (x_coords < bw)
+                    box_mask = (y_coords >= by) & (y_coords < bh) & \
+                               (x_coords >= bx) & (x_coords < bw)
 
-                    # Use tf.where to "paint" the class ID onto the final_mask.
-                    # This is a robust, graph-safe conditional assignment.
-                    # Where box_mask is True, use the new class_id; otherwise, keep the existing value.
+                    # Update mask only where box_mask is True
                     final_mask = tf.where(box_mask, box_class_id, final_mask)
 
-            # Convert the final integer mask into the format expected by the loss function.
+            # Format output based on task type
             if self.segmentation_classes == 1:
-                # For binary segmentation, any non-zero pixel is considered part of the mask.
-                # Add a channel dimension at the end.
+                # Binary: Any non-zero class is foreground
                 return tf.cast(final_mask > 0, tf.float32)[..., tf.newaxis]
             else:
-                # For multi-class, one-hot encode the integer mask.
-                # The depth must be num_classes + 1 to account for our background class (0).
-                # Our mask now has values from 0 (background) to 80.
-                one_hot_mask = tf.one_hot(final_mask, depth=self.segmentation_classes + 1, dtype=tf.float32)
-
-                # Slice off the background channel (channel 0) to match the model's output.
-                # The model predicts 80 channels, not 81.
-                return one_hot_mask[:, :, 1:]
+                # Multi-class: One-hot encode
+                # depth = classes + 1 (for background)
+                one_hot = tf.one_hot(
+                    final_mask,
+                    depth=self.segmentation_classes + 1,
+                    dtype=tf.float32
+                )
+                # Remove background channel to match model output (usually softmax across classes)
+                return one_hot[:, :, 1:]
 
         except Exception as e:
-            # This error handling logic is unchanged and remains robust.
             logger.debug(f"Error preprocessing segmentation targets: {e}")
-            # Return appropriate fallback shape
-            if self.segmentation_classes == 1:
-                return tf.zeros((self.img_size, self.img_size, 1), dtype=tf.float32)
-            else:
-                return tf.zeros((self.img_size, self.img_size, self.segmentation_classes), dtype=tf.float32)
+            channels = 1 if self.segmentation_classes == 1 else self.segmentation_classes
+            return tf.zeros((self.img_size, self.img_size, channels), dtype=tf.float32)
 
     def _apply_color_augmentation(self, image: tf.Tensor) -> tf.Tensor:
-        """Apply color-based augmentations using tf.image.random_* functions."""
+        """Apply color-based augmentations."""
         if not self.augment_data:
             return image
 
-        def augment_color(img):
-            config = self.augmentation_config
+        config = self.augmentation_config
 
-            if config.brightness_delta > 0:
-                img = tf.image.random_brightness(img, max_delta=config.brightness_delta)
+        # Random brightness
+        if config.brightness_delta > 0:
+            image = tf.image.random_brightness(image, max_delta=config.brightness_delta)
 
-            if config.contrast_delta > 0:
-                img = tf.image.random_contrast(
-                    img,
-                    lower=1.0 - config.contrast_delta,
-                    upper=1.0 + config.contrast_delta
-                )
+        # Random contrast
+        if config.contrast_delta > 0:
+            image = tf.image.random_contrast(
+                image,
+                lower=1.0 - config.contrast_delta,
+                upper=1.0 + config.contrast_delta
+            )
 
-            if config.saturation_delta > 0:
-                img = tf.image.random_saturation(
-                    img,
-                    lower=1.0 - config.saturation_delta,
-                    upper=1.0 + config.saturation_delta
-                )
+        # Random saturation
+        if config.saturation_delta > 0:
+            image = tf.image.random_saturation(
+                image,
+                lower=1.0 - config.saturation_delta,
+                upper=1.0 + config.saturation_delta
+            )
 
-            if config.hue_delta > 0:
-                img = tf.image.random_hue(img, max_delta=config.hue_delta)
+        # Random hue
+        if config.hue_delta > 0:
+            image = tf.image.random_hue(image, max_delta=config.hue_delta)
 
-            return img
-
-        # Just wrap in identity check if no augmentation needed, though the outer guard handles it.
-        # This is safe for graph mode.
-        image = augment_color(image)
-
-        # Ensure values stay in valid range
-        image = tf.clip_by_value(image, 0.0, 1.0)
-        return image
+        return tf.clip_by_value(image, 0.0, 1.0)
 
     def _apply_horizontal_flip(
         self,
         image: tf.Tensor,
         targets: Dict[str, tf.Tensor]
     ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
-        """
-        Apply horizontal flip augmentation.
-
-        Uses tf.cond to prevent AutoGraph from lifting dictionary keys from dead branches
-        as state variables (e.g. preventing 'targets["detection"]' errors when use_detection=False).
-        """
+        """Apply horizontal flip augmentation using tf.cond."""
         if not self.augment_data:
             return image, targets
 
         do_flip = tf.random.uniform([]) < self.augmentation_config.horizontal_flip_prob
 
         def flip_fn():
-            # Flip image
             new_image = tf.image.flip_left_right(image)
-
-            # Create a shallow copy to modify
             new_targets = targets.copy()
 
-            # Flip detection boxes if present.
-            # Since self.use_detection is a static Python bool, this block is not traced if False.
             if self.use_detection:
                 bboxes = new_targets['detection']
-                # Convert x coordinates: new_x = 1.0 - old_x
                 class_ids = bboxes[:, 0:1]
                 x1, y1, x2, y2 = bboxes[:, 1], bboxes[:, 2], bboxes[:, 3], bboxes[:, 4]
-
-                # Flip x coordinates
+                # Flip x: new_x = 1 - old_x
                 new_x1 = 1.0 - x2
                 new_x2 = 1.0 - x1
-
                 flipped_bboxes = tf.stack([new_x1, y1, new_x2, y2], axis=1)
                 new_targets['detection'] = tf.concat([class_ids, flipped_bboxes], axis=1)
 
-            # Flip segmentation masks if present.
             if self.use_segmentation:
                 new_targets['segmentation'] = tf.image.flip_left_right(new_targets['segmentation'])
 
@@ -698,7 +639,6 @@ class COCODatasetBuilder:
         def no_flip_fn():
             return image, targets
 
-        # Explicit tf.cond avoids implicit AutoGraph variable lifting
         return tf.cond(do_flip, flip_fn, no_flip_fn)
 
     def _apply_vertical_flip(
@@ -706,40 +646,26 @@ class COCODatasetBuilder:
         image: tf.Tensor,
         targets: Dict[str, tf.Tensor]
     ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
-        """
-        Apply vertical flip augmentation.
-
-        Uses tf.cond to prevent AutoGraph from lifting dictionary keys from dead branches
-        as state variables.
-        """
+        """Apply vertical flip augmentation using tf.cond."""
         if not self.augment_data:
             return image, targets
 
         do_flip = tf.random.uniform([]) < self.augmentation_config.vertical_flip_prob
 
         def flip_fn():
-            # Flip image
             new_image = tf.image.flip_up_down(image)
-
-            # Create a shallow copy to modify
             new_targets = targets.copy()
 
-            # Flip detection boxes if present.
-            # Since self.use_detection is a static Python bool, this block is not traced if False.
             if self.use_detection:
                 bboxes = new_targets['detection']
-                # Convert y coordinates: new_y = 1.0 - old_y
                 class_ids = bboxes[:, 0:1]
                 x1, y1, x2, y2 = bboxes[:, 1], bboxes[:, 2], bboxes[:, 3], bboxes[:, 4]
-
-                # Flip y coordinates
+                # Flip y: new_y = 1 - old_y
                 new_y1 = 1.0 - y2
                 new_y2 = 1.0 - y1
-
                 flipped_bboxes = tf.stack([x1, new_y1, x2, new_y2], axis=1)
                 new_targets['detection'] = tf.concat([class_ids, flipped_bboxes], axis=1)
 
-            # Flip segmentation masks if present.
             if self.use_segmentation:
                 new_targets['segmentation'] = tf.image.flip_up_down(new_targets['segmentation'])
 
@@ -748,28 +674,7 @@ class COCODatasetBuilder:
         def no_flip_fn():
             return image, targets
 
-        # Explicit tf.cond avoids implicit AutoGraph variable lifting
         return tf.cond(do_flip, flip_fn, no_flip_fn)
-
-    def _apply_geometric_augmentations(
-        self,
-        image: tf.Tensor,
-        targets: Dict[str, tf.Tensor]
-    ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
-        """Apply geometric augmentations."""
-        if not self.augment_data:
-            return image, targets
-
-        # Apply horizontal flip
-        image, targets = self._apply_horizontal_flip(image, targets)
-
-        # Apply vertical flip
-        image, targets = self._apply_vertical_flip(image, targets)
-
-        # Note: Rotation is disabled by default due to complexity
-        # Would require careful implementation of bbox coordinate transformation
-
-        return image, targets
 
     def _preprocess_example(
         self,
@@ -777,39 +682,29 @@ class COCODatasetBuilder:
         is_training: bool = True
     ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
         """
-        Preprocess a single example.
-
-        Args:
-            example: COCO example from tfds.
-            is_training: Whether this is for training (enables augmentation).
-
-        Returns:
-            Tuple of (processed_image, targets_dict).
+        Preprocess a single example. Resizes, generates targets, and augments.
         """
         # Get image and resize
         image = example['image']
         image = tf.cast(image, tf.float32) / 255.0
         image = tf.image.resize(image, [self.img_size, self.img_size])
 
-        # Initialize targets dictionary
         targets = {}
 
-        # Process detection targets
         if self.use_detection:
             targets['detection'] = self._preprocess_detection_targets(
                 example['objects'], tf.shape(image)
             )
 
-        # Process segmentation targets
         if self.use_segmentation:
             targets['segmentation'] = self._preprocess_segmentation_targets(
                 example['objects'], tf.shape(image), example
             )
 
-        # Apply augmentations during training
         if is_training:
             image = self._apply_color_augmentation(image)
-            image, targets = self._apply_geometric_augmentations(image, targets)
+            image, targets = self._apply_horizontal_flip(image, targets)
+            image, targets = self._apply_vertical_flip(image, targets)
 
         return image, targets
 
@@ -819,69 +714,57 @@ class COCODatasetBuilder:
         is_training: bool = True
     ) -> tf.data.Dataset:
         """
-        Process dataset with preprocessing and efficient batching using padded_batch.
-
-        Args:
-            dataset: Input dataset.
-            is_training: Whether this is training dataset.
-
-        Returns:
-            Processed and batched dataset.
+        Process dataset with optimized pipeline order for efficiency and correctness.
         """
-        # Apply filtering first to reduce data volume
+        # 1. Filter and limit first (works on raw data, low cost)
         if is_training and self.limit_train_samples is not None:
-            # Take a subset for memory efficiency during development
             dataset = dataset.take(self.limit_train_samples)
-            logger.info(f"Limited training dataset to {self.limit_train_samples} samples for memory efficiency")
+            logger.info(f"Limited training dataset to {self.limit_train_samples} samples")
 
-        # Preprocess examples
+        # 2. Caching Strategy
+        # We cache the raw/filtered data BEFORE augmentation to avoid freezing random augmentations.
+        # However, since TFDS reads from disk are reasonably fast and raw images are compressed,
+        # caching decoded images (float32) uses massive RAM.
+        # We optionally cache here if specifically requested, but it's often better to stream.
+        if self.cache_dir and is_training:
+            cache_path = os.path.join(self.cache_dir, "coco_filtered_raw")
+            # dataset = dataset.cache(cache_path) # Uncomment if disk I/O is the bottleneck
+            pass
+
+        # 3. Shuffle (CRITICAL: Shuffle before mapping/augmentation)
+        # Shuffling here involves raw records (small), not decoded images (huge).
+        if is_training:
+            logger.info(f"Shuffling dataset with buffer size: {self.shuffle_buffer_size}")
+            dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
+
+        # 4. Repeat (Must happen before map to allow unique augmentations per epoch)
+        if is_training:
+            dataset = dataset.repeat()
+
+        # 5. Map (Preprocess + Augment)
+        # Now applied dynamically to the shuffled, repeated stream
         dataset = dataset.map(
             lambda x: self._preprocess_example(x, is_training),
             num_parallel_calls=tf.data.AUTOTUNE
         )
 
-        if is_training:
-            # IMPORTANT: The order of `shuffle`, `cache`, and `repeat` is critical
-            # for both correctness and performance.
-
-            # 1. Shuffle the entire dataset. This is the most important step for ensuring
-            #    the model sees a different order of examples in each epoch.
-            logger.info(f"Shuffling training dataset with buffer size: {self.shuffle_buffer_size}")
-            dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
-
-            # 2. Cache the result of the mapping and shuffling. Caching after shuffling
-            #    is often a good tradeoff, as shuffling can be I/O intensive.
-            #    The first epoch will be slow as it builds the cache. Subsequent epochs
-            #    will be much faster as they read from the pre-shuffled, pre-processed cache.
-            if self.cache_dir:
-                cache_path = os.path.join(self.cache_dir, f"coco_train_{self.img_size}_{self.segmentation_classes}")
-                dataset = dataset.cache(cache_path)
-                logger.info(f"Training dataset will be cached at: {cache_path}")
-
-            # 3. Repeat the dataset for multiple epochs. Since the dataset is already
-            #    shuffled, Keras will just pull from this infinite stream of data.
-            #    A re-shuffling will happen when the original dataset is fully iterated through.
-            dataset = dataset.repeat()
-        else:
-            # For validation, do NOT repeat.
-            # Keras fits/evaluates expect validation data to be finite unless validation_steps is set.
-            # Repeating here without validation_steps causes an infinite loop at the end of the first epoch.
-            pass
-
-        # Define shapes and padding values for efficient padded_batch
+        # 6. Batching
         image_shape = [self.img_size, self.img_size, 3]
         targets_shapes = {}
-        padding_values = (0.0, {})  # 0.0 for images, dict for targets
+        padding_values = (0.0, {})
 
         if self.use_detection:
             targets_shapes['detection'] = [self.max_boxes_per_image, 5]
             padding_values[1]['detection'] = INVALID_BBOX_VALUE
 
         if self.use_segmentation:
-            targets_shapes['segmentation'] = [self.img_size, self.img_size, self.segmentation_classes]
+            targets_shapes['segmentation'] = [
+                self.img_size,
+                self.img_size,
+                1 if self.segmentation_classes == 1 else self.segmentation_classes
+            ]
             padding_values[1]['segmentation'] = 0.0
 
-        # Use efficient padded_batch instead of batch + map
         dataset = dataset.padded_batch(
             batch_size=self.batch_size,
             padded_shapes=(image_shape, targets_shapes),
@@ -889,37 +772,28 @@ class COCODatasetBuilder:
             drop_remainder=is_training
         )
 
-        # Prefetch for performance
+        # 7. Prefetch
         dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
         return dataset
 
     def create_datasets(self) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
-        """
-        Create training and validation datasets.
-
-        Returns:
-            Tuple of (train_dataset, validation_dataset).
-        """
+        """Create training and validation datasets."""
         try:
             logger.info("Creating COCO datasets...")
 
-            # Load datasets with proper splits
             train_raw, val_raw = self._load_tfds_dataset()
 
-            # Filter valid examples
             logger.info("Filtering valid examples...")
             train_raw = train_raw.filter(self._filter_valid_examples)
             val_raw = val_raw.filter(self._filter_valid_examples)
 
-            # Process datasets
             logger.info("Processing training dataset...")
             train_ds = self._process_dataset(train_raw, is_training=True)
 
             logger.info("Processing validation dataset...")
             val_ds = self._process_dataset(val_raw, is_training=False)
 
-            logger.info("Datasets created successfully!")
             return train_ds, val_ds
 
         except Exception as e:
@@ -934,71 +808,30 @@ class COCODatasetBuilder:
             'max_boxes_per_image': self.max_boxes_per_image,
             'use_detection': self.use_detection,
             'use_segmentation': self.use_segmentation,
-            'segmentation_classes': self.segmentation_classes,  # NEW
-            'using_dummy_data': self.using_dummy_data,  # NEW
+            'segmentation_classes': self.segmentation_classes,
+            'using_dummy_data': self.using_dummy_data,
             'augment_data': self.augment_data,
-            'min_bbox_area': self.min_bbox_area,
-            'cache_dir': self.cache_dir,
-            'invalid_bbox_value': INVALID_BBOX_VALUE,  # Important for loss calculation
             'num_classes': self.dataset_config.num_classes,
-            'class_names': self.dataset_config.class_names[:5] + ['...']
-                          if len(self.dataset_config.class_names) > 5
-                          else self.dataset_config.class_names,
-            'total_classes': len(self.dataset_config.class_names),
-            'augmentation_config': {
-                'brightness_delta': self.augmentation_config.brightness_delta,
-                'contrast_delta': self.augmentation_config.contrast_delta,
-                'saturation_delta': self.augmentation_config.saturation_delta,
-                'hue_delta': self.augmentation_config.hue_delta,
-                'horizontal_flip_prob': self.augmentation_config.horizontal_flip_prob,
-                'vertical_flip_prob': self.augmentation_config.vertical_flip_prob,
-                'rotation_degrees': self.augmentation_config.rotation_degrees,
-            },
-            'pipeline_optimizations': [
-                'Uses tf.data.padded_batch for efficient batching',
-                'Sentinel value padding prevents false positives',
-                'tf.image.random_* functions for optimized augmentation',
-                'Proper train/validation splits from tfds',
-                'Dataset repeats for multiple epochs',
-                f'Fallback to dummy dataset: {"Yes" if self.using_dummy_data else "No"}',
-                f'Configurable segmentation classes: {self.segmentation_classes}',
-                'Relaxed filtering only requires object presence',
-                f'Memory-efficient shuffle buffer: {self.shuffle_buffer_size}',
-                f'Sample limit: {self.limit_train_samples or "None"}'
-            ]
+            'pipeline_order': 'Shuffle -> Repeat -> Map(Augment) -> Batch',
         }
 
 # ---------------------------------------------------------------------
+
 
 def create_coco_dataset(
     img_size: int = 640,
     batch_size: int = 32,
     use_detection: bool = True,
     use_segmentation: bool = False,
-    segmentation_classes: int = 80,  # NEW: Configurable segmentation classes
+    segmentation_classes: int = 80,
     augment_data: bool = True,
     class_names: Optional[List[str]] = None,
-    shuffle_buffer_size: int = 100,  # NEW: Memory management
-    limit_train_samples: Optional[int] = None,  # NEW: Memory management
+    shuffle_buffer_size: int = 1000,
+    limit_train_samples: Optional[int] = None,
     **kwargs
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """
     Convenience function to create COCO datasets.
-
-    Args:
-        img_size: Target image size.
-        batch_size: Batch size for training.
-        use_detection: Enable detection task.
-        use_segmentation: Enable segmentation task.
-        segmentation_classes: Number of segmentation classes (80 for COCO, 1 for binary).
-        augment_data: Enable data augmentation.
-        class_names: Custom class names (optional).
-        shuffle_buffer_size: Size of shuffle buffer (reduce if out of memory).
-        limit_train_samples: Limit training samples for memory efficiency.
-        **kwargs: Additional configuration options.
-
-    Returns:
-        Tuple of (train_dataset, validation_dataset).
     """
     logger.info("🚀 Creating COCO dataset with enhanced preprocessor")
 
@@ -1017,7 +850,6 @@ def create_coco_dataset(
 
     train_ds, val_ds = builder.create_datasets()
 
-    # Log dataset information
     info = builder.get_dataset_info()
     logger.info("📋 Dataset configuration:")
     for key, value in info.items():
@@ -1030,8 +862,6 @@ def create_coco_dataset(
 
     return train_ds, val_ds
 
-# ---------------------------------------------------------------------
-
 
 def create_coco_pretraining_dataset(
     img_size: int = 640,
@@ -1040,21 +870,13 @@ def create_coco_pretraining_dataset(
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """
     Create COCO dataset specifically configured for pretraining.
-
-    Args:
-        img_size: Target image size.
-        batch_size: Batch size for training.
-        **kwargs: Additional configuration options.
-
-    Returns:
-        Tuple of (train_dataset, validation_dataset).
     """
     return create_coco_dataset(
         img_size=img_size,
         batch_size=batch_size,
         use_detection=True,
         use_segmentation=True,
-        segmentation_classes=80,  # COCO has 80 classes for segmentation
+        segmentation_classes=80,
         augment_data=True,
         **kwargs
     )
