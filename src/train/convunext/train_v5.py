@@ -39,12 +39,8 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder
 )
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder
-from dl_techniques.losses.any_loss import (
-    TverskyLoss,
-    FocalTverskyLoss,
-    DiceLoss,
-    WeightedCrossEntropyWithAnyLoss
-)
+
+from dl_techniques.losses.multi_labels_loss import create_multilabel_segmentation_loss
 
 
 # ---------------------------------------------------------------------
@@ -814,33 +810,25 @@ def run_segmentation_finetuning(
         "gradient_clipping_by_norm": 1.0
     }, lr_schedule)
 
-    # Configure loss for Deep Supervision with FocalTverskyLoss
-    # This addresses severe class imbalance (95%+ background pixels)
+    # Configure loss for Deep Supervision with Per-Channel Focal Loss
     if convunext_model.enable_deep_supervision:
         # Weights for [Main, Aux1, Aux2...]
         base_weights = [1.0, 0.4, 0.2, 0.1]
         num_outputs = 1 + (convunext_model.depth - 1)
         loss_weights = base_weights[:num_outputs]
 
-        # CRITICAL: FocalTverskyLoss for imbalanced multi-label segmentation
-        # - alpha=0.3: Low weight on FP (less penalty for false alarms)
-        # - beta=0.7: High weight on FN (strong penalty for missing objects)
-        # - gamma=1.5: Focus on hard examples (objects vs background)
-        #
-        # Why this works:
-        # 1. Tversky allows asymmetric FP/FN penalties (beta>alpha = recall-focused)
-        # 2. Focal (gamma) down-weights easy examples (background pixels)
-        # 3. Result: Model forced to detect objects instead of predicting all background
-        focal_tversky = FocalTverskyLoss(
-            alpha=0.3,
-            beta=0.7,
-            gamma=1.5,
-            from_logits=False
+        # CRITICAL: Per-channel focal loss for multi-label segmentation
+        # Each of the 80 channels is treated as independent binary problem
+        focal_loss = create_multilabel_segmentation_loss(
+            loss_type='focal',
+            alpha=0.75,  # 75% weight on positive class (objects)
+            gamma=2.0  # Focus on hard examples (down-weight easy background)
         )
 
-        loss = [focal_tversky] * num_outputs
+        # Apply to all scales
+        loss = [focal_loss] * num_outputs
 
-        # Multi-label metrics
+        # Multi-label metrics (keep these)
         metrics = [
             [
                 "binary_accuracy",
@@ -850,12 +838,12 @@ def run_segmentation_finetuning(
         ]
 
         logger.info(f"Deep Supervision enabled: {num_outputs} heads.")
-        logger.info(f"Loss: FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=1.5)")
-        logger.info(f"Rationale: Severe class imbalance (background >> objects)")
-        logger.info(f"  - alpha=0.3: Low penalty for false positives")
-        logger.info(f"  - beta=0.7: High penalty for false negatives (missed objects)")
-        logger.info(f"  - gamma=1.5: Focus on hard examples (down-weight easy background)")
-        logger.info(f"Loss weights: {loss_weights}")
+        logger.info(f"Loss: Per-Channel Binary Focal Loss")
+        logger.info(f"  - alpha=0.75 (75% weight on objects)")
+        logger.info(f"  - gamma=2.0 (focus on hard examples)")
+        logger.info(f"  - Applied to each of {args.num_classes} channels independently")
+        logger.info(f"  - This is CRITICAL for multi-label segmentation")
+        logger.info(f"Loss weights per scale: {loss_weights}")
 
         def multiscale_target_map(image, mask):
             """
@@ -886,12 +874,11 @@ def run_segmentation_finetuning(
         val_ds = val_ds.map(multiscale_target_map, num_parallel_calls=tf.data.AUTOTUNE)
 
     else:
-        # Single scale with FocalTverskyLoss
-        loss = FocalTverskyLoss(
-            alpha=0.3,
-            beta=0.7,
-            gamma=1.5,
-            from_logits=False
+        # Single scale with per-channel focal loss
+        loss = create_multilabel_segmentation_loss(
+            loss_type='focal',
+            alpha=0.75,
+            gamma=2.0
         )
         loss_weights = None
 
@@ -901,8 +888,10 @@ def run_segmentation_finetuning(
         ]
 
         logger.info("Single scale mode")
-        logger.info("Loss: FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=1.5)")
+        logger.info("Loss: Per-Channel Binary Focal Loss")
+        logger.info("  alpha=0.75, gamma=2.0, per-channel application")
 
+    # Compile (no changes here)
     convunext_model.compile(
         optimizer=optimizer,
         loss=loss,
