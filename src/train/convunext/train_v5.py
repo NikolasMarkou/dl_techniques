@@ -40,7 +40,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder
 )
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder
-
+from dl_techniques.metrics.multi_label_metrics import MultiLabelMetrics
 from dl_techniques.losses.multi_labels_loss import create_multilabel_segmentation_loss
 
 
@@ -62,86 +62,6 @@ def setup_environment():
             logger.error(f"GPU setup error: {e}")
     else:
         logger.info("No GPUs found, using CPU")
-
-
-# ---------------------------------------------------------------------
-# Multi-Label Metrics
-# ---------------------------------------------------------------------
-
-@keras.saving.register_keras_serializable()
-class MultiLabelMetrics(keras.metrics.Metric):
-    """
-    Comprehensive multi-label metrics: precision, recall, F1.
-
-    Computes metrics across all classes and provides mean values.
-    Handles background class (channel 0) separately.
-    """
-
-    def __init__(self, num_classes: int, threshold: float = 0.5, name='multilabel_metrics', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.num_classes = num_classes
-        self.threshold = threshold
-
-        # Per-class metrics
-        self.true_positives = self.add_weight(
-            name='tp',
-            shape=(num_classes,),
-            initializer='zeros'
-        )
-        self.false_positives = self.add_weight(
-            name='fp',
-            shape=(num_classes,),
-            initializer='zeros'
-        )
-        self.false_negatives = self.add_weight(
-            name='fn',
-            shape=(num_classes,),
-            initializer='zeros'
-        )
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        """
-        Update metric state.
-
-        Args:
-            y_true: Ground truth, shape (B, H, W, num_classes), binary
-            y_pred: Predictions, shape (B, H, W, num_classes), probabilities
-        """
-        # Threshold predictions
-        y_pred_binary = ops.cast(y_pred >= self.threshold, 'float32')
-        y_true = ops.cast(y_true, 'float32')
-
-        # Flatten spatial dimensions: (B, H, W, C) -> (B*H*W, C)
-        y_true_flat = ops.reshape(y_true, (-1, self.num_classes))
-        y_pred_flat = ops.reshape(y_pred_binary, (-1, self.num_classes))
-
-        # Compute TP, FP, FN per class
-        tp = ops.sum(y_true_flat * y_pred_flat, axis=0)
-        fp = ops.sum((1 - y_true_flat) * y_pred_flat, axis=0)
-        fn = ops.sum(y_true_flat * (1 - y_pred_flat), axis=0)
-
-        self.true_positives.assign_add(tp)
-        self.false_positives.assign_add(fp)
-        self.false_negatives.assign_add(fn)
-
-    def result(self):
-        """Compute mean F1 score across all classes."""
-        precision = self.true_positives / (
-                self.true_positives + self.false_positives + 1e-7
-        )
-        recall = self.true_positives / (
-                self.true_positives + self.false_negatives + 1e-7
-        )
-        f1 = 2 * precision * recall / (precision + recall + 1e-7)
-
-        # Return mean F1 (excluding background if it's all zeros)
-        return ops.mean(f1)
-
-    def reset_state(self):
-        """Reset all metric accumulators."""
-        self.true_positives.assign(ops.zeros_like(self.true_positives))
-        self.false_positives.assign(ops.zeros_like(self.false_positives))
-        self.false_negatives.assign(ops.zeros_like(self.false_negatives))
 
 # ---------------------------------------------------------------------
 # Data Pipelines
