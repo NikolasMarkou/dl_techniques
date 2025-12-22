@@ -18,7 +18,6 @@ Key features:
 
 import os
 import keras
-import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
@@ -599,27 +598,19 @@ class ConvUNextModel(keras.Model):
             if level < self.depth - 1:
                 downsample_ops = []
 
-                # Spatial downsampling via max pooling
+                # Spatial downsampling via striding
+                next_filters = self.filter_sizes[level + 1]
                 downsample_ops.append(
-                    keras.layers.MaxPooling2D(
-                        pool_size=(2, 2),
+                    keras.layers.Conv2D(
+                        filters=next_filters,
+                        kernel_size=2,
+                        strides=2,
+                        use_bias=self.use_bias,
+                        kernel_initializer=self.kernel_initializer,
+                        kernel_regularizer=self.kernel_regularizer,
                         name=f'enc_down_{level}'
                     )
                 )
-
-                # Channel adjustment if needed
-                next_filters = self.filter_sizes[level + 1]
-                if current_filters != next_filters:
-                    downsample_ops.append(
-                        keras.layers.Conv2D(
-                            filters=next_filters,
-                            kernel_size=1,
-                            use_bias=self.use_bias,
-                            kernel_initializer=self.kernel_initializer,
-                            kernel_regularizer=self.kernel_regularizer,
-                            name=f'enc_down_adjust_{level}'
-                        )
-                    )
 
                 self.encoder_downsamples.append(
                     keras.Sequential(
@@ -636,20 +627,16 @@ class ConvUNextModel(keras.Model):
         # Entry to bottleneck: downsample + channel adjust
         bn_ops = []
         bn_ops.append(
-            keras.layers.MaxPooling2D(pool_size=(2, 2), name='bn_down')
-        )
-
-        if prev_filters != bottleneck_filters:
-            bn_ops.append(
-                keras.layers.Conv2D(
-                    filters=bottleneck_filters,
-                    kernel_size=1,
-                    use_bias=self.use_bias,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name='bn_adjust'
-                )
+            keras.layers.Conv2D(
+                filters=bottleneck_filters,
+                kernel_size=2,
+                strides=2,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name='bn_down'
             )
+        )
 
         self.bottleneck_entry = keras.Sequential(bn_ops, name='bottleneck_entry')
 
