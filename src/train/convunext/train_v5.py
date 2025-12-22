@@ -1,55 +1,83 @@
 """
-ConvUNext MAE Deep Supervision Training Pipeline (ImageNet + COCO)
-==================================================================
+ConvUNext MAE & Deep Supervision Training Pipeline
+==================================================
 
-Multi-Label Segmentation Pipeline with Sigmoid Activation:
-1. Supports overlapping classes (multiple objects per pixel)
-2. Careful background handling (background = all classes inactive)
-3. Multi-Scale Visualization with per-class predictions
-4. Binary metrics (precision, recall, F1) per scale
-5. Weight compatibility: Train with include_top=True, reuse with include_top=False
+A production-grade training script for the ConvUNext architecture, featuring:
+
+1.  **Two-Stage Training**:
+    -   Stage 1: Masked Autoencoder (MAE) Pre-training on ImageNet.
+    -   Stage 2: Multi-Label Segmentation Fine-tuning on COCO.
+
+2.  **Advanced Data Pipelines**:
+    -   Utilizes ``dl_techniques.utils.datasets.coco.COCODatasetBuilder``.
+    -   Handles multi-scale target generation for deep supervision.
+    -   Efficient tf.data processing with prefetching and parallel mapping.
+
+3.  **Deep Supervision**:
+    -   Aligns dataset targets with ConvUNext's multi-scale outputs.
+    -   Output order: [Full Res, 1/2 Res, 1/4 Res, 1/8 Res, ...].
+
+4.  **Serialization & Resumption**:
+    -   Saves/Loads weights compatible between ``include_top=True`` (training)
+        and ``include_top=False`` (inference) modes.
+
+Usage:
+    .. code-block:: bash
+
+        python train_v5.py --variant base --batch-size 32 --mae-epochs 50 --finetune-epochs 100
+
 """
 
 import os
 import keras
-import tempfile
 import argparse
 import numpy as np
-from keras import ops
 import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from keras import ops
 from datetime import datetime
-from typing import Tuple, Optional, Dict, Any, List, Union
+from typing import Tuple, Optional, Dict, Any, List
 from dotenv import load_dotenv
 
+# Set backend-agnostic matplotlib backend
+matplotlib.use('Agg')
+
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convunext.model import ConvUNextModel
-from dl_techniques.models.masked_autoencoder import (
-    MaskedAutoencoder,
-    visualize_reconstruction
-)
+from dl_techniques.datasets.vision.coco import COCODatasetBuilder
+
+# Optimization & Loss Factories
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder
 )
-from dl_techniques.datasets.vision.coco import COCODatasetBuilder
-from dl_techniques.metrics.multi_label_metrics import MultiLabelMetrics
 from dl_techniques.losses.multi_labels_loss import create_multilabel_segmentation_loss
+from dl_techniques.metrics.multi_label_metrics import MultiLabelMetrics
+
+# MAE Specifics (Assumed to be in local package)
+from dl_techniques.models.masked_autoencoder import (
+    MaskedAutoencoder,
+    visualize_reconstruction
+)
 
 
 # ---------------------------------------------------------------------
-# Utilities
+# Environment Setup
 # ---------------------------------------------------------------------
 
-def setup_environment():
-    """Configure GPU settings, precision, and load environment variables."""
+def setup_environment() -> None:
+    """
+    Configure GPU settings, precision policies, and load environment variables.
+
+    Sets memory growth to True to prevent TensorFlow from allocating all GPU
+    memory at startup, allowing for better resource sharing.
+    """
     load_dotenv()
 
     gpus = tf.config.list_physical_devices('GPU')
@@ -57,14 +85,18 @@ def setup_environment():
         try:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
+            logger.info(f"✅ Found {len(gpus)} GPU(s), memory growth enabled")
         except RuntimeError as e:
-            logger.error(f"GPU setup error: {e}")
+            logger.error(f"❌ GPU setup error: {e}")
     else:
-        logger.info("No GPUs found, using CPU")
+        logger.warning("⚠️ No GPUs found, using CPU")
+
+    # Optional: Set mixed precision policy if hardware supports it
+    # keras.mixed_precision.set_global_policy("mixed_float16")
+
 
 # ---------------------------------------------------------------------
-# Data Pipelines
+# Data Pipeline: ImageNet (MAE Pre-training)
 # ---------------------------------------------------------------------
 
 def get_imagenet_dataset(
@@ -73,9 +105,20 @@ def get_imagenet_dataset(
     batch_size: int,
     data_dir: Optional[str] = None
 ) -> tf.data.Dataset:
-    """Load ImageNet dataset for MAE pretraining."""
+    """
+    Load and preprocess ImageNet (or fallback) for MAE pre-training.
+
+    The MAE task requires the input image to serve as both the input (x)
+    and the reconstruction target (y).
+
+    :param split: Dataset split ('train', 'validation').
+    :param image_size: Target resolution for resizing.
+    :param batch_size: Batch size.
+    :param data_dir: Directory for TFDS data.
+    :return: ``tf.data.Dataset`` yielding ``(image, image)``.
+    """
+    dataset_name = "imagenet2012"
     try:
-        dataset_name = "imagenet2012"
         ds, info = tfds.load(
             dataset_name,
             split=split,
@@ -85,9 +128,7 @@ def get_imagenet_dataset(
         )
         logger.info(f"Loaded {dataset_name} ({split})")
     except Exception as e:
-        logger.warning(
-            f"ImageNet load failed: {e}. Falling back to 'imagenette'."
-        )
+        logger.warning(f"ImageNet load failed: {e}. Falling back to 'imagenette'.")
         dataset_name = "imagenette/320px-v2"
         ds, info = tfds.load(
             dataset_name,
@@ -97,173 +138,111 @@ def get_imagenet_dataset(
             as_supervised=True
         )
 
-    def preprocess_mae(image, label):
-        """Prepare image for MAE: Resize -> Scale -> Return (x, x)."""
+    def preprocess_mae(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        Resize, normalize, and format for Autoencoder.
+
+        :param image: Raw uint8 image.
+        :param label: Ignored for MAE.
+        :return: (normalized_image, normalized_image).
+        """
         image = tf.image.resize(image, (image_size, image_size))
         image = tf.cast(image, tf.float32) / 255.0
         return image, image
 
-    ds = ds.map(preprocess_mae, num_parallel_calls=tf.data.AUTOTUNE)
-
+    # Optimization pipeline
     if split == 'train':
-        ds = ds.shuffle(10000)
+        ds = ds.shuffle(buffer_size=10000)
 
+    ds = ds.map(preprocess_mae, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=True)
     ds = ds.prefetch(tf.data.AUTOTUNE)
+
     return ds
 
+
+# ---------------------------------------------------------------------
+# Data Pipeline: COCO (Segmentation Fine-tuning)
+# ---------------------------------------------------------------------
 
 def get_coco_segmentation_dataset(
     image_size: int,
     batch_size: int,
     num_classes: int,
-    cache_dir: Optional[str] = None,
-    shuffle_buffer_size: int = 100,
-    limit_train_samples: Optional[int] = None,
-    augment_data: bool = True
+    augment_data: bool = True,
+    limit_train_samples: Optional[int] = None
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, Dict[str, Any]]:
     """
-    Load COCO dataset for multi-label semantic segmentation.
+    Create COCO datasets for Multi-Label Semantic Segmentation.
 
-    COCO has 80 object categories. We output 80 channels (one per object).
-    Background is NOT a separate channel - it's represented by all 80 channels = 0.
+    Utilizes ``COCODatasetBuilder`` to generate aligned image/mask pairs.
+    Handles the unpacking of the builder's dictionary format into the tuple
+    format required by Keras models ``(x, y)``.
 
-    Multi-label approach:
-    - Each pixel can belong to multiple classes (overlapping instances)
-    - Background = all 80 object channels are 0 (no foreground classes present)
-    - Output shape: (B, H, W, 80) with binary indicators for each COCO category
+    **Format Note**:
+    The builder returns masks of shape ``(H, W, num_classes)``. The background
+    class (index 0) is stripped by the builder configuration, meaning a pixel
+    with all zeros is background.
 
-    Args:
-        num_classes: Should be 80 for COCO (number of object categories)
-
-    Returns:
-        train_ds, val_ds, dataset_info
-        Each sample: (image, mask) where mask is (B, H, W, 80)
+    :param image_size: Target height/width.
+    :param batch_size: Batch size.
+    :param num_classes: Number of object classes (e.g., 80 for COCO).
+    :param augment_data: Apply data augmentation to training set.
+    :param limit_train_samples: Cap training data size (for debugging).
+    :return: (train_ds, val_ds, dataset_info_dict).
     """
-    logger.info("Creating COCO multi-label segmentation dataset via COCODatasetBuilder...")
+    logger.info("Initializing COCO Segmentation Pipeline...")
 
+    # 1. Initialize Builder
+    # We use the factory function or class directly. The builder handles
+    # loading, filtering, and basic augmentation internally.
     builder = COCODatasetBuilder(
         img_size=image_size,
         batch_size=batch_size,
-        max_boxes_per_image=100,
-        cache_dir=cache_dir,
+        max_boxes_per_image=100,  # Required for internal graph logic, though unused for seg output
         use_detection=False,
         use_segmentation=True,
         segmentation_classes=num_classes,
         augment_data=augment_data,
-        shuffle_buffer_size=shuffle_buffer_size,
         limit_train_samples=limit_train_samples
     )
 
+    # 2. Create raw datasets (Yields: (image, targets_dict))
     train_ds_raw, val_ds_raw = builder.create_datasets()
     dataset_info = builder.get_dataset_info()
 
-    def adapt_for_multilabel_segmentation(image, targets):
+    # 3. Adapter: Convert Dict -> Tuple (x, y)
+    def unpack_targets(image: tf.Tensor, targets: Dict[str, tf.Tensor]) -> Tuple[tf.Tensor, tf.Tensor]:
         """
-        Convert from categorical segmentation to multi-label format.
+        Extract segmentation mask from targets dictionary.
 
-        COCO Convention:
-        - COCO has 80 object categories
-        - Input may have 81 channels: [background, object1, object2, ..., object80]
-        - Output should have 80 channels: [object1, object2, ..., object80]
-        - Background = all 80 object channels are 0
-
-        Input:
-            image: (B, H, W, 3)
-            targets['segmentation']:
-                - (B, H, W, 81) if includes background at channel 0
-                - (B, H, W, 80) if only objects
-
-        Output:
-            image: (B, H, W, 3)
-            mask: (B, H, W, 80) - binary multi-hot for 80 COCO objects
-                  Background pixels have all 80 channels = 0
+        Input targets['segmentation'] is (B, H, W, num_classes).
+        Values are 0.0 or 1.0 (float32).
         """
-        seg_mask = targets['segmentation']
-        seg_mask = tf.cast(seg_mask, tf.float32)
-
-        num_channels = tf.shape(seg_mask)[-1]
-
-        # Determine if background channel is present
-        # If we have 81 channels, assume channel 0 is background
-        has_background_channel = num_channels > num_classes
-
-        if num_classes == 1:
-            # Binary segmentation: foreground vs background
-            mask = tf.cast(seg_mask > 0.5, tf.float32)
-        else:
-            # Check if one-hot encoded (mutually exclusive classes)
-            mask_sum = tf.reduce_sum(seg_mask, axis=-1, keepdims=True)
-            is_one_hot = tf.reduce_all(
-                tf.abs(mask_sum - 1.0) < 0.1
-            )
-
-            def process_one_hot():
-                """
-                Convert one-hot to multi-hot, removing background.
-
-                If input has 81 channels: remove channel 0 (background)
-                If input has 80 channels: keep all (assuming background already handled)
-                """
-                if has_background_channel:
-                    # Remove background channel (channel 0)
-                    # Keep channels 1 to 80 (the COCO objects)
-                    foreground_mask = seg_mask[..., 1:]  # (B, H, W, 80)
-                else:
-                    # Already 80 channels, keep as is
-                    foreground_mask = seg_mask
-
-                # Ensure binary
-                return tf.cast(foreground_mask > 0.5, tf.float32)
-
-            def process_multi_hot():
-                """
-                Already multi-hot, remove background if present.
-                """
-                if has_background_channel:
-                    # Remove background channel
-                    return tf.cast(seg_mask[..., 1:] > 0.5, tf.float32)
-                else:
-                    # Already correct format
-                    return tf.cast(seg_mask > 0.5, tf.float32)
-
-            # Process based on encoding type
-            mask = tf.cond(
-                is_one_hot,
-                process_one_hot,
-                process_multi_hot
-            )
-
+        mask = targets['segmentation']
+        # Builder guarantees float32 and correct shape (B, H, W, C)
         return image, mask
 
-    train_ds = train_ds_raw.map(
-        adapt_for_multilabel_segmentation,
-        num_parallel_calls=tf.data.AUTOTUNE
-    )
-    val_ds = val_ds_raw.map(
-        adapt_for_multilabel_segmentation,
-        num_parallel_calls=tf.data.AUTOTUNE
-    )
+    train_ds = train_ds_raw.map(unpack_targets, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds_raw.map(unpack_targets, num_parallel_calls=tf.data.AUTOTUNE)
 
-    logger.info("Multi-label segmentation dataset created")
-    logger.info(f"Output format: (image, mask) where mask shape = (B, H, W, {num_classes})")
-    logger.info(f"COCO has {num_classes} object categories (no separate background channel)")
-    logger.info("Background handling: background pixels have all channels = 0")
+    logger.info(f"✅ Dataset Ready: (B, {image_size}, {image_size}, 3) -> (B, {image_size}, {image_size}, {num_classes})")
 
     return train_ds, val_ds, dataset_info
 
 
 # ---------------------------------------------------------------------
-# MAE Components
+# MAE Wrappers & Logic
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ConvUNextWrapper(keras.Model):
     """
-    Wraps ConvUNextModel to act as an MAE 'Encoder'.
+    Wrapper to treat ConvUNextModel as a pure Encoder for MAE.
 
-    For MAE pretraining, the wrapped model should have include_top=True
-    to output RGB predictions (3 channels) for reconstruction.
+    Necessary because MAE expects an 'encoder' attribute that takes inputs
+    and returns features. While ConvUNextModel is a Model, wrapping it
+    ensures clean serialization of the 'encoder' slot in the MAE class.
     """
     def __init__(self, convunext_model: ConvUNextModel, **kwargs):
         super().__init__(**kwargs)
@@ -276,31 +255,29 @@ class ConvUNextWrapper(keras.Model):
         return self.convunext_model.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        return {
-            "convunext_model": keras.saving.serialize_keras_object(self.convunext_model)
-        }
+        return {"convunext_model": keras.saving.serialize_keras_object(self.convunext_model)}
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ConvUNextWrapper":
-        config["convunext_model"] = keras.saving.deserialize_keras_object(
-            config["convunext_model"]
-        )
+        config["convunext_model"] = keras.saving.deserialize_keras_object(config["convunext_model"])
         return cls(**config)
 
 
 @keras.saving.register_keras_serializable()
 class MultiScaleIdentityDecoder(keras.layers.Layer):
-    """Pass-through decoder for MAE deep supervision."""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
+    """Pass-through decoder that allows MAE to calculate loss on encoder outputs directly."""
     def call(self, inputs, training=None):
         return inputs
 
 
 @keras.saving.register_keras_serializable()
 class DeepSupervisionMAE(MaskedAutoencoder):
-    """MAE that calculates loss across multiple scales."""
+    """
+    Extended Masked Autoencoder that calculates reconstruction loss across multiple scales.
+
+    Used when the backbone (ConvUNext) outputs a list of features [Full, 1/2, 1/4...]
+    due to deep supervision being enabled.
+    """
     def __init__(self, loss_weights: Optional[List[float]] = None, **kwargs):
         super().__init__(**kwargs)
         self.loss_weights = loss_weights
@@ -308,178 +285,102 @@ class DeepSupervisionMAE(MaskedAutoencoder):
         self.loss_tracker_aux = keras.metrics.Mean(name="loss_aux_avg")
 
     def _create_decoder(self):
+        # ConvUNext include_top=True essentially acts as the decoder for reconstruction
         return MultiScaleIdentityDecoder(name="identity_decoder")
 
-    def compute_loss(
-        self,
-        x: keras.KerasTensor,
-        y: Optional[keras.KerasTensor] = None,
-        y_pred: Optional[Dict[str, Union[keras.KerasTensor, List[keras.KerasTensor]]]] = None,
-        **kwargs: Any
-    ) -> keras.KerasTensor:
+    def compute_loss(self, x, y=None, y_pred=None, **kwargs):
+        """
+        Calculate MSE loss weighted across multiple scales.
+        """
         reconstructions = y_pred["reconstruction"]
         mask = y_pred["mask"]
 
-        target_full = ops.cast(x, "float32")
-        mask_float = ops.cast(mask, "float32")
-
+        # Ensure reconstructions is a list
         if not isinstance(reconstructions, list):
             reconstructions = [reconstructions]
 
+        # Default weights: decay by factor of 2 for each smaller scale
         if self.loss_weights is None:
             weights = [1.0 / (2**i) for i in range(len(reconstructions))]
-        elif len(self.loss_weights) != len(reconstructions):
-            raise ValueError(
-                f"loss_weights length {len(self.loss_weights)} != "
-                f"reconstructions length {len(reconstructions)}"
-            )
         else:
             weights = self.loss_weights
 
         total_loss = ops.convert_to_tensor(0.0)
+        target_full = ops.cast(x, "float32")
+        mask_float = ops.cast(mask, "float32")
 
         for i, (recon, weight) in enumerate(zip(reconstructions, weights)):
-            recon_shape = ops.shape(recon)
+            # Resize target to match current reconstruction scale
+            recon_shape = ops.shape(recon) # (B, H_s, W_s, C)
             target_resized = ops.image.resize(
                 target_full,
                 size=(recon_shape[1], recon_shape[2]),
                 interpolation='bilinear'
             )
-            target_resized = ops.cast(target_resized, "float32")
-            recon = ops.cast(recon, "float32")
 
+            # Standard MSE per pixel
             loss_per_pixel = ops.square(target_resized - recon)
-            loss_per_pixel = ops.mean(loss_per_pixel, axis=-1)
+            loss_per_pixel = ops.mean(loss_per_pixel, axis=-1)  # (B, H_s, W_s)
 
-            H, W = recon_shape[1], recon_shape[2]
-            h_patch = ops.cast(self.input_shape_config[0], "int32") // self.patch_size
-            w_patch = ops.cast(self.input_shape_config[1], "int32") // self.patch_size
-
-            scale_h = ops.cast(H, "float32") / ops.cast(h_patch * self.patch_size, "float32")
-            scale_w = ops.cast(W, "float32") / ops.cast(w_patch * self.patch_size, "float32")
-
+            # Reshape mask to match current scale (using Nearest Neighbor)
             mask_scaled = self._reshape_mask_for_loss_scaled(
-                mask_float,
-                target_resized,
-                scale_h,
-                scale_w
+                mask_float, recon_shape[1], recon_shape[2]
             )
-            mask_scaled = ops.maximum(mask_scaled, self.non_mask_value)
 
+            # Apply mask (learn on masked patches)
+            # MAE typically computes loss on invisible patches
             loss_masked = loss_per_pixel * mask_scaled
-            num_masked = ops.sum(mask_float, axis=-1) + 1e-6
-            pixels_per_patch = self.patch_size * self.patch_size
 
-            scale_factor = (scale_h * scale_w)
-            adjusted_pixels = ops.cast(pixels_per_patch, "float32") * scale_factor
+            # Normalize loss
+            sum_loss = ops.sum(loss_masked)
+            sum_mask = ops.sum(mask_scaled) + 1e-6
+            scale_loss = sum_loss / sum_mask
 
-            loss_sum = ops.sum(loss_masked, axis=[1, 2])
-            scale_loss = loss_sum / (num_masked * adjusted_pixels)
+            total_loss = total_loss + (weight * scale_loss)
 
-            total_loss = total_loss + (weight * ops.mean(scale_loss))
-
+            # Metrics
             if i == 0:
-                self.loss_tracker_main.update_state(ops.mean(scale_loss))
+                self.loss_tracker_main.update_state(scale_loss)
             else:
-                self.loss_tracker_aux.update_state(ops.mean(scale_loss))
+                self.loss_tracker_aux.update_state(scale_loss)
 
         return total_loss
 
-    def _reshape_mask_for_loss_scaled(
-        self,
-        mask: keras.KerasTensor,
-        target: keras.KerasTensor,
-        scale_h: keras.KerasTensor,
-        scale_w: keras.KerasTensor
-    ) -> keras.KerasTensor:
+    def _reshape_mask_for_loss_scaled(self, mask, height, width):
+        """
+        Reshape the (B, num_patches) mask to (B, height, width) spatial map.
+        """
         B = ops.shape(mask)[0]
-        H, W = ops.shape(target)[1], ops.shape(target)[2]
+        # Get patch grid dims from config
+        h_grid = self.input_shape_config[0] // self.patch_size
+        w_grid = self.input_shape_config[1] // self.patch_size
 
-        h_patch = ops.cast(self.input_shape_config[0], "int32") // self.patch_size
-        w_patch = ops.cast(self.input_shape_config[1], "int32") // self.patch_size
-
-        mask_grid = ops.reshape(mask, (B, h_patch, w_patch))
+        mask_grid = ops.reshape(mask, (B, h_grid, w_grid))
+        # Upsample grid to current feature map resolution
         mask_img = ops.image.resize(
-            ops.expand_dims(mask_grid, axis=-1),
-            size=(H, W),
+            ops.expand_dims(mask_grid, -1),
+            size=(height, width),
             interpolation='nearest'
         )
-        return ops.squeeze(mask_img, axis=-1)
+        return ops.squeeze(mask_img, -1)
 
     @property
     def metrics(self):
-        return [
-            self.reconstruction_loss_tracker,
-            self.loss_tracker_main,
-            self.loss_tracker_aux
-        ]
+        return [self.loss_tracker_main, self.loss_tracker_aux]
 
 
 # ---------------------------------------------------------------------
-# Training Callbacks
+# Callbacks
 # ---------------------------------------------------------------------
-
-class MAEVisualizationCallback(keras.callbacks.Callback):
-    """Callback to visualize MAE reconstructions during training."""
-    def __init__(self, val_batch: Tuple, save_dir: str, frequency: int = 5):
-        super().__init__()
-        self.val_batch = val_batch
-        self.save_dir = save_dir
-        self.frequency = frequency
-        os.makedirs(save_dir, exist_ok=True)
-
-    def on_epoch_end(self, epoch, logs=None):
-        if (epoch + 1) % self.frequency != 0:
-            return
-
-        images, _ = self.val_batch
-        sample = images[:4]
-
-        outputs = self.model(sample, training=True)
-        masked = outputs["masked_input"]
-        if isinstance(outputs["reconstruction"], list):
-            reconstructed = outputs["reconstruction"][0]
-        else:
-            reconstructed = outputs["reconstruction"]
-
-        fig, axes = plt.subplots(4, 3, figsize=(12, 16))
-        for i in range(min(4, len(sample))):
-            axes[i, 0].imshow(keras.ops.convert_to_numpy(sample[i]))
-            axes[i, 0].set_title("Original")
-            axes[i, 0].axis('off')
-
-            axes[i, 1].imshow(keras.ops.convert_to_numpy(masked[i]))
-            axes[i, 1].set_title("Masked")
-            axes[i, 1].axis('off')
-
-            axes[i, 2].imshow(keras.ops.convert_to_numpy(reconstructed[i]))
-            axes[i, 2].set_title("Reconstructed")
-            axes[i, 2].axis('off')
-
-        plt.tight_layout()
-        save_path = os.path.join(self.save_dir, f"mae_epoch_{epoch+1:03d}.png")
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        logger.info(f"Saved MAE visualization: {save_path}")
-
 
 class MultiLabelSegmentationCallback(keras.callbacks.Callback):
     """
-    Callback to visualize multi-label segmentation at multiple scales.
+    Callback to visualize multi-label segmentation predictions during training.
 
-    Shows:
-    - Input image
-    - Ground truth multi-label mask (composite visualization)
-    - Predictions at each scale with class overlays
+    Generates composite images overlaying predicted masks on input images
+    to debug model performance visually.
     """
-    def __init__(
-        self,
-        val_batch: Tuple,
-        save_dir: str,
-        num_classes: int,
-        threshold: float = 0.5,
-        frequency: int = 5
-    ):
+    def __init__(self, val_batch, save_dir, num_classes, threshold=0.5, frequency=5):
         super().__init__()
         self.val_batch = val_batch
         self.save_dir = save_dir
@@ -492,233 +393,174 @@ class MultiLabelSegmentationCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.frequency != 0:
             return
 
-        images, masks = self.val_batch
-        sample_images = images[:2]
-        sample_masks = masks[0][:2] if isinstance(masks, tuple) else masks[:2]
+        # Unpack data: val_batch might be mapped to (x, (y1, y2...))
+        images, targets = self.val_batch
 
-        predictions = self.model.predict(sample_images, verbose=0)
-        if not isinstance(predictions, list):
-            predictions = [predictions]
+        # If tuple (deep supervision), take main target
+        if isinstance(targets, (list, tuple)):
+            main_mask = targets[0]
+        else:
+            main_mask = targets
 
-        num_scales = len(predictions)
-        fig, axes = plt.subplots(2, 2 + num_scales, figsize=(4 * (2 + num_scales), 8))
+        # Predict
+        preds = self.model.predict(images[:4], verbose=0)
 
-        for i in range(2):
-            # Input image
-            axes[i, 0].imshow(keras.ops.convert_to_numpy(sample_images[i]))
+        # Handle list output (deep supervision)
+        if isinstance(preds, list):
+            preds = preds[0] # Take main output
+
+        fig, axes = plt.subplots(4, 3, figsize=(12, 16))
+
+        for i in range(min(4, len(images))):
+            # 1. Original
+            axes[i, 0].imshow(keras.ops.convert_to_numpy(images[i]))
             axes[i, 0].set_title("Input")
             axes[i, 0].axis('off')
 
-            # Ground truth - composite visualization
-            mask_gt = keras.ops.convert_to_numpy(sample_masks[i])
-            mask_gt_composite = self._create_composite_mask(mask_gt)
-            axes[i, 1].imshow(mask_gt_composite)
-            axes[i, 1].set_title(f"GT ({self._count_active_classes(mask_gt)} classes)")
+            # 2. GT
+            gt = keras.ops.convert_to_numpy(main_mask[i])
+            axes[i, 1].imshow(self._make_composite(gt))
+            axes[i, 1].set_title("Ground Truth")
             axes[i, 1].axis('off')
 
-            # Predictions at each scale
-            for j, pred in enumerate(predictions):
-                pred_mask = keras.ops.convert_to_numpy(pred[i])
-                # Threshold predictions
-                pred_binary = (pred_mask >= self.threshold).astype(np.float32)
-                pred_composite = self._create_composite_mask(pred_binary)
-                axes[i, 2 + j].imshow(pred_composite)
-                axes[i, 2 + j].set_title(
-                    f"Pred Scale {j} ({self._count_active_classes(pred_binary)} classes)"
-                )
-                axes[i, 2 + j].axis('off')
+            # 3. Pred
+            pr = keras.ops.convert_to_numpy(preds[i])
+            axes[i, 2].imshow(self._make_composite(pr > self.threshold))
+            axes[i, 2].set_title("Prediction")
+            axes[i, 2].axis('off')
 
         plt.tight_layout()
-        save_path = os.path.join(self.save_dir, f"seg_epoch_{epoch+1:03d}.png")
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        path = os.path.join(self.save_dir, f"epoch_{epoch+1}.png")
+        plt.savefig(path)
         plt.close()
-        logger.info(f"Saved multi-label segmentation visualization: {save_path}")
 
-    def _create_composite_mask(self, mask: np.ndarray) -> np.ndarray:
-        """
-        Create composite visualization of multi-label mask.
+    def _make_composite(self, mask):
+        """Simple strategy: collapse channels to color map."""
+        # mask: (H, W, C)
+        if mask.shape[-1] == 1:
+            return mask[:, :, 0]
 
-        Args:
-            mask: (H, W, num_classes) binary mask where num_classes = 80 (COCO objects)
-                  All channels represent object categories (no background channel)
+        # Collapse to RGB via simple linear projection for visualization
+        h, w, c = mask.shape
+        composite = np.zeros((h, w, 3))
+        colors = plt.cm.jet(np.linspace(0, 1, c))[:, :3]
 
-        Returns:
-            RGB image showing class overlays with transparency
-        """
-        H, W, C = mask.shape
+        for ch in range(c):
+            # Add color weighted by mask presence
+            composite += mask[:, :, ch:ch+1] * colors[ch]
 
-        # Create RGB canvas
-        composite = np.zeros((H, W, 3), dtype=np.float32)
-
-        # Color map for all object classes
-        colors = plt.cm.tab20(np.linspace(0, 1, max(C, 20)))[:, :3]
-
-        # Overlay each object class with blending
-        for c in range(C):
-            class_mask = mask[..., c]
-            if class_mask.sum() > 0:  # Only if class is present
-                color = colors[c % len(colors)]
-                for ch in range(3):
-                    composite[..., ch] += class_mask * color[ch]
-
-        # Normalize to [0, 1]
-        composite = np.clip(composite, 0, 1)
-
-        return composite
-
-    def _count_active_classes(self, mask: np.ndarray) -> int:
-        """
-        Count number of active object classes.
-
-        Args:
-            mask: (H, W, num_classes) where num_classes = 80 for COCO
-
-        Returns:
-            Number of object classes present (not counting background)
-        """
-        # Sum over spatial dimensions, check which classes are present
-        class_present = (mask.sum(axis=(0, 1)) > 0)
-        # All channels represent objects, so just count how many are present
-        return int(class_present.sum())
-
-
-class ProgressLoggingCallback(keras.callbacks.Callback):
-    """Callback to log training progress."""
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        log_str = f"Epoch {epoch + 1}"
-        for key, value in logs.items():
-            log_str += f" - {key}: {value:.4f}"
-        logger.info(log_str)
+        return np.clip(composite, 0, 1)
 
 
 # ---------------------------------------------------------------------
-# Training Functions
+# Training Stages
 # ---------------------------------------------------------------------
 
 def run_mae_pretraining(
-    mae_backbone: ConvUNextModel,
+    backbone: ConvUNextModel,
     train_ds: tf.data.Dataset,
     val_ds: tf.data.Dataset,
     args: argparse.Namespace,
     results_dir: str
 ) -> None:
     """
-    Run MAE pretraining on the backbone.
-
-    The backbone should be configured with include_top=True and output_channels=3
-    to output RGB predictions for reconstruction. Later, these weights can be loaded
-    into models with different include_top settings or output_channels.
+    Stage 1: Pre-train ConvUNext as a Masked Autoencoder.
     """
-    logger.info("Starting MAE Pretraining...")
+    logger.info("🚀 Starting Stage 1: MAE Pre-training")
 
-    # Wrap backbone as encoder
-    encoder_wrapper = ConvUNextWrapper(mae_backbone)
+    # Wrap model (ConvUNext acts as encoder and projection head)
+    encoder = ConvUNextWrapper(backbone)
 
-    # Determine loss weights for deep supervision
-    if mae_backbone.enable_deep_supervision:
-        num_outputs = mae_backbone.depth
-        base_weights = [1.0, 0.4, 0.2, 0.1]
-        loss_weights = base_weights[:num_outputs]
-        logger.info(f"Deep Supervision MAE with {num_outputs} scales")
-        logger.info(f"Loss weights: {loss_weights}")
-    else:
-        loss_weights = None
-        logger.info("Single-scale MAE")
+    # Calculate Deep Supervision weights if enabled
+    loss_weights = None
+    if backbone.enable_deep_supervision:
+        # Weights for [Level 0, Level 1, Level 2, Level 3]
+        # Level 0 is main output (highest res), others are aux
+        loss_weights = [1.0, 0.5, 0.25, 0.125][:backbone.depth]
+        logger.info(f"Using Deep Supervision loss weights: {loss_weights}")
 
-    # Create MAE model
-    mae_model = DeepSupervisionMAE(
-        encoder=encoder_wrapper,
+    mae = DeepSupervisionMAE(
+        encoder=encoder,
         patch_size=args.patch_size,
         mask_ratio=args.mask_ratio,
-        norm_pix_loss=False,
         input_shape=(args.image_size, args.image_size, 3),
         loss_weights=loss_weights,
-        non_mask_value=0.1
+        norm_pix_loss=True  # Normalize pixel target
     )
-
-    # Build the model
-    dummy_in = keras.ops.zeros((1, args.image_size, args.image_size, 3))
-    mae_model(dummy_in, training=True)
-
-    # Log model summary
-    logger.info("=" * 80)
-    logger.info("MAE Model Architecture Summary")
-    logger.info("=" * 80)
-    mae_model.summary(print_fn=lambda x: logger.info(x))
-    logger.info("=" * 80)
 
     # Compile
     lr_schedule = learning_rate_schedule_builder({
         'type': 'cosine_decay',
         'learning_rate': args.mae_lr,
         'decay_steps': args.mae_epochs * 1000,
-        'alpha': 0.0
+        'warmup_steps': 1000
     })
 
     optimizer = optimizer_builder({
         'type': 'adamw',
-        'learning_rate': args.mae_lr,
-        'weight_decay': 0.01,
+        'weight_decay': 0.05,
         'clipnorm': 1.0
     }, lr_schedule)
 
-    mae_model.compile(optimizer=optimizer)
+    mae.compile(optimizer=optimizer)
 
-    # Get validation batch for visualization
-    viz_batch = next(iter(val_ds.take(1)))
-
-    # Callbacks
-    mae_viz_dir = os.path.join(results_dir, "mae_viz")
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, "best_mae_model.keras"),
-            save_best_only=True,
-            monitor="val_loss"
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, "mae_history.csv")),
-        keras.callbacks.EarlyStopping(patience=args.patience, restore_best_weights=True),
-        MAEVisualizationCallback(viz_batch, mae_viz_dir, frequency=5),
-        ProgressLoggingCallback()
-    ]
+    # Build
+    mae(keras.ops.zeros((1, args.image_size, args.image_size, 3)))
 
     # Train
-    mae_model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=args.mae_epochs,
-        callbacks=callbacks
-    )
+    callbacks = [
+        keras.callbacks.ModelCheckpoint(
+            os.path.join(results_dir, "mae_best.keras"),
+            save_best_only=True, monitor="val_loss"
+        ),
+        keras.callbacks.CSVLogger(os.path.join(results_dir, "mae_log.csv"))
+    ]
 
-    logger.info("MAE Pretraining complete.")
+    mae.fit(train_ds, validation_data=val_ds, epochs=args.mae_epochs, callbacks=callbacks)
+    logger.info("✅ MAE Pre-training Complete")
 
 
 def run_segmentation_finetuning(
-    convunext_model: ConvUNextModel,
+    model: ConvUNextModel,
     train_ds: tf.data.Dataset,
     val_ds: tf.data.Dataset,
     args: argparse.Namespace,
-    results_dir: str,
-    dataset_info: Dict
-) -> keras.Model:
+    results_dir: str
+) -> None:
     """
-    Stage 2: Multi-Label Segmentation Fine-tuning.
-
-    Uses sigmoid activation for overlapping classes.
-    Background is handled as "no foreground classes present".
+    Stage 2: Fine-tune for Multi-Label Segmentation.
     """
-    logger.info("=" * 60)
-    logger.info(f"STAGE 2: MULTI-LABEL SEGMENTATION FINE-TUNING")
-    logger.info("=" * 60)
-    logger.info(f"Activation: sigmoid (allows overlapping classes)")
-    logger.info(f"Background handling: all classes = 0")
+    logger.info("🚀 Starting Stage 2: Segmentation Fine-tuning")
 
-    # Extract visualization batch BEFORE deep supervision mapping
-    viz_batch = next(iter(val_ds.take(1)))
+    # 1. Deep Supervision Data Mapping
+    if model.enable_deep_supervision:
+        logger.info("Configuring Deep Supervision targets...")
+        # ConvUNext returns [Main, Aux1, Aux2, Aux3]
+        # Aux1 is scale 1/2, Aux2 is scale 1/4, etc.
+        num_aux = model.depth - 1
 
-    steps_per_epoch = args.steps_per_epoch or 500
-    total_steps = args.finetune_epochs * steps_per_epoch
+        def multiscale_mapper(img, mask):
+            targets = [mask]
+            h, w = args.image_size, args.image_size
 
+            for i in range(num_aux):
+                factor = 2 ** (i + 1) # 2, 4, 8...
+                # Nearest neighbor for masks to preserve binary values
+                scaled = tf.image.resize(mask, (h // factor, w // factor), method='nearest')
+                targets.append(scaled)
+
+            return img, tuple(targets)
+
+        train_ds = train_ds.map(multiscale_mapper, num_parallel_calls=tf.data.AUTOTUNE)
+        val_ds = val_ds.map(multiscale_mapper, num_parallel_calls=tf.data.AUTOTUNE)
+
+        # Loss weights
+        loss_weights = [1.0] + [0.5 / (2**i) for i in range(num_aux)]
+    else:
+        loss_weights = None # Single output
+
+    # 2. Optimization
+    total_steps = args.finetune_epochs * (args.steps_per_epoch or 1000)
     lr_schedule = learning_rate_schedule_builder({
         "type": "cosine_decay",
         "learning_rate": args.finetune_lr,
@@ -726,119 +568,56 @@ def run_segmentation_finetuning(
         "warmup_steps": 500
     })
 
-    optimizer = optimizer_builder(
-        config={
-            "type": "adamw",
-            "weight_decay": 0.05,
-            "gradient_clipping_by_norm": 1.0
-        },
-        lr_schedule=lr_schedule)
+    optimizer = optimizer_builder({
+        "type": "adamw",
+        "weight_decay": 0.01
+    }, lr_schedule)
 
-    # Configure loss for Deep Supervision with Per-Channel Focal Loss
-    if convunext_model.enable_deep_supervision:
-        # Weights for [Main, Aux1, Aux2...]
-        base_weights = [1.0, 0.4, 0.2, 0.1]
-        num_outputs = 1 + (convunext_model.depth - 1)
-        loss_weights = base_weights[:num_outputs]
+    # 3. Loss & Metrics
+    # Soft Dice Loss is standard for segmentation
+    loss_fn = create_multilabel_segmentation_loss('dice', smooth=1.0)
 
-        dice_loss = create_multilabel_segmentation_loss('dice', smooth=1.0)
-        loss = [dice_loss] * num_outputs  # or just dice_loss for single scale
-
-        # Multi-label metrics (keep these)
-        metrics = [
-            [
-                "binary_accuracy",
-                MultiLabelMetrics(num_classes=args.num_classes, name=f"f1_scale_{i}")
-            ]
-            for i in range(num_outputs)
-        ]
-
-        def multiscale_target_map(image, mask):
-            """
-            Maps (B,H,W,C), (B,H,W,num_classes) -> (B,H,W,C), [Target1, Target2...]
-
-            Creates downsampled versions of multi-label mask for each scale.
-            """
-            targets = [mask]
-            h = tf.shape(image)[1]
-            w = tf.shape(image)[2]
-
-            for i in range(num_outputs - 1):
-                factor = 2 ** (i + 1)
-                # Resize multi-label mask
-                # Use 'nearest' to preserve binary nature
-                m_resized = tf.image.resize(
-                    mask,
-                    (h // factor, w // factor),
-                    method='nearest'
-                )
-                # Ensure still binary after resize
-                m_resized = tf.cast(m_resized > 0.5, tf.float32)
-                targets.append(m_resized)
-
-            return image, tuple(targets)
-
-        train_ds = train_ds.map(multiscale_target_map, num_parallel_calls=tf.data.AUTOTUNE)
-        val_ds = val_ds.map(multiscale_target_map, num_parallel_calls=tf.data.AUTOTUNE)
-
-    else:
-        # Single scale with per-channel focal loss
-        loss = create_multilabel_segmentation_loss('dice', smooth=1.0)
-        loss_weights = None
-
-        metrics = [
+    # Keras automatically applies list of losses to list of outputs if single loss obj provided?
+    # No, usually need list if multiple outputs.
+    if model.enable_deep_supervision:
+        losses = [loss_fn] * (1 + num_aux)
+        metrics = [[
             "binary_accuracy",
-            MultiLabelMetrics(num_classes=args.num_classes, name='f1')
-        ]
+            MultiLabelMetrics(num_classes=args.num_classes, name=f"f1_L{i}")
+        ] for i in range(1 + num_aux)]
+    else:
+        losses = loss_fn
+        metrics = ["binary_accuracy", MultiLabelMetrics(num_classes=args.num_classes, name="f1")]
 
-        logger.info("Single scale mode")
-        logger.info("Loss: Per-Channel Binary Focal Loss")
-        logger.info("  alpha=0.75, gamma=2.0, per-channel application")
-
-    # Compile (no changes here)
-    convunext_model.compile(
+    model.compile(
         optimizer=optimizer,
-        loss=loss,
+        loss=losses,
         loss_weights=loss_weights,
         metrics=metrics
     )
 
-    # Setup Callbacks
-    viz_dir = os.path.join(results_dir, "seg_viz")
-
+    # 4. Callbacks
+    viz_batch = next(iter(val_ds.take(1)))
     callbacks = [
         keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, "best_seg_model.keras"),
-            save_best_only=True,
-            monitor="val_f1_scale_0" if convunext_model.enable_deep_supervision else "val_f1",
-            mode='max'  # Higher F1 is better
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, "seg_history.csv")),
-        keras.callbacks.EarlyStopping(
-            patience=args.patience,
-            restore_best_weights=True,
-            monitor="val_dice_0" if convunext_model.enable_deep_supervision else "val_dice",
-            mode='max'
+            os.path.join(results_dir, "seg_best.keras"),
+            save_best_only=True, monitor="val_loss"
         ),
         MultiLabelSegmentationCallback(
-            val_batch=viz_batch,
-            save_dir=viz_dir,
-            num_classes=args.num_classes,
-            threshold=0.5
+            viz_batch, os.path.join(results_dir, "viz"), args.num_classes
         ),
-        ProgressLoggingCallback()
+        keras.callbacks.CSVLogger(os.path.join(results_dir, "seg_log.csv")),
+        keras.callbacks.EarlyStopping(patience=args.patience, restore_best_weights=True)
     ]
 
-    convunext_model.fit(
+    model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=args.finetune_epochs,
-        steps_per_epoch=steps_per_epoch,
+        steps_per_epoch=args.steps_per_epoch,
         validation_steps=args.validation_steps,
         callbacks=callbacks
     )
-
-    return convunext_model
 
 
 # ---------------------------------------------------------------------
@@ -847,143 +626,116 @@ def run_segmentation_finetuning(
 
 def main():
     setup_environment()
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # Dataset
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    # Data Config
     parser.add_argument("--data-dir", type=str, default=None)
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-classes", type=int, default=80)
 
-    # Model
-    parser.add_argument("--variant", type=str, default="tiny")
-    parser.add_argument("--num-classes", type=int, default=80,
-                       help="Number of classes (for COCO: 80 categories, background handled separately)")
+    # Model Config
+    parser.add_argument("--variant", type=str, default="base", choices=['tiny', 'small', 'base', 'large'])
 
-    # MAE
-    parser.add_argument("--mae-epochs", type=int, default=100)
+    # Training Config
+    parser.add_argument("--mae-epochs", type=int, default=50)
     parser.add_argument("--mae-lr", type=float, default=2e-4)
     parser.add_argument("--patch-size", type=int, default=16)
     parser.add_argument("--mask-ratio", type=float, default=0.75)
 
-    # Fine-tuning
-    parser.add_argument("--finetune-epochs", type=int, default=100)
+    parser.add_argument("--finetune-epochs", type=int, default=50)
     parser.add_argument("--finetune-lr", type=float, default=1e-4)
-    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
     parser.add_argument("--validation-steps", type=int, default=None)
+    parser.add_argument("--patience", type=int, default=10)
 
-    # Misc
     parser.add_argument("--skip-mae", action="store_true")
-    parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
-    keras.utils.set_random_seed(args.random_seed)
+    keras.utils.set_random_seed(args.seed)
 
-    if args.data_dir is None:
-        args.data_dir = os.getenv("TFDS_DATA_DIR", "~/tensorflow_datasets/")
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"convunext_multilabel_{args.variant}_{timestamp}")
+    # Directory Setup
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = os.path.join("results", f"convunext_{args.variant}_{ts}")
     os.makedirs(results_dir, exist_ok=True)
 
+    # -----------------------------------------------------------------
+    # 1. Instantiate Backbone
+    # -----------------------------------------------------------------
+    # We use include_top=True with output_channels=3 for MAE (reconstructing RGB)
+    # For Segmentation, we will create a new model and load weights.
     dummy_in = ops.zeros((1, args.image_size, args.image_size, 3))
 
-    # -----------------------------------------------------------
-    # 1. Instantiate MAE Backbone
-    # -----------------------------------------------------------
-    logger.info(f"Instantiating MAE Backbone ({args.variant})...")
-    logger.info("Configuration: include_top=True, output_channels=3 (RGB reconstruction)")
+    logger.info("Initializing MAE Backbone...")
     mae_backbone = ConvUNextModel.from_variant(
         args.variant,
         input_shape=(args.image_size, args.image_size, 3),
-        output_channels=3,
+        output_channels=3, # RGB Reconstruction
         include_top=True,
-        enable_deep_supervision=True,
+        enable_deep_supervision=True, # MAE uses multi-scale loss
         use_bias=True
     )
-    mae_backbone(dummy_in)
+    mae_backbone(dummy_in) # Build
 
-    # -----------------------------------------------------------
-    # 2. Stage 1: MAE Pretraining
-    # -----------------------------------------------------------
+    # -----------------------------------------------------------------
+    # 2. Stage 1: MAE
+    # -----------------------------------------------------------------
     if not args.skip_mae:
-        logger.info("=" * 80)
-        logger.info("MAE Backbone (ConvUNext Encoder) Architecture Summary")
-        logger.info("=" * 80)
-        mae_backbone.summary(print_fn=lambda x: logger.info(x))
-        logger.info("=" * 80)
-
         train_ds_mae = get_imagenet_dataset('train', args.image_size, args.batch_size, args.data_dir)
         val_ds_mae = get_imagenet_dataset('validation', args.image_size, args.batch_size, args.data_dir)
 
         run_mae_pretraining(mae_backbone, train_ds_mae, val_ds_mae, args, results_dir)
-    else:
-        logger.info("Skipping MAE pretraining...")
 
-    # -----------------------------------------------------------
-    # 3. Stage 2: Multi-Label Segmentation Fine-tuning
-    # -----------------------------------------------------------
-    train_ds_seg, val_ds_seg, dataset_info = get_coco_segmentation_dataset(
-        image_size=args.image_size,
-        batch_size=args.batch_size,
-        num_classes=args.num_classes,
+        # Save MAE weights
+        mae_weights_path = os.path.join(results_dir, "mae_weights_transfer.weights.h5")
+        mae_backbone.save_weights(mae_weights_path)
+    else:
+        logger.warning("Skipping MAE pre-training")
+        mae_weights_path = None
+
+    # -----------------------------------------------------------------
+    # 3. Stage 2: Segmentation
+    # -----------------------------------------------------------------
+    # COCO Data
+    train_ds_seg, val_ds_seg, _ = get_coco_segmentation_dataset(
+        args.image_size, args.batch_size, args.num_classes,
         limit_train_samples=args.steps_per_epoch * args.finetune_epochs if args.steps_per_epoch else None
     )
 
-    logger.info(f"Creating Multi-Label Segmentation Model ({args.num_classes} classes)...")
-    logger.info("Configuration: include_top=True, activation=sigmoid (multi-label)")
-
-    # CRITICAL: Use sigmoid for multi-label classification
+    # Create Segmentation Model
+    # Note: We must enable deep supervision here if we want to use the transferred weights
+    # structure correctly, though we could disable it if transferring only encoder.
+    # To keep things simple and robust, we match the architecture.
+    logger.info("Initializing Segmentation Model...")
     seg_model = ConvUNextModel.from_variant(
         args.variant,
         input_shape=(args.image_size, args.image_size, 3),
-        output_channels=args.num_classes,
+        output_channels=args.num_classes, # COCO Classes
         include_top=True,
         enable_deep_supervision=True,
-        final_activation="sigmoid",  # CRITICAL: sigmoid for multi-label
+        final_activation='sigmoid', # Multi-label
         use_bias=True
     )
-    seg_model(dummy_in)
+    seg_model(dummy_in) # Build
 
-    logger.info("=" * 80)
-    logger.info("Multi-Label Segmentation Model Architecture Summary")
-    logger.info("=" * 80)
-    seg_model.summary(print_fn=lambda x: logger.info(x))
-    logger.info("=" * 80)
+    # Weight Transfer
+    if mae_weights_path and os.path.exists(mae_weights_path):
+        logger.info("Transffering MAE weights...")
+        # skip_mismatch=True allows loading backbone weights while ignoring
+        # the shape mismatch in the final classification/projection heads
+        # (3 channels vs 80 channels)
+        seg_model.load_weights(mae_weights_path, skip_mismatch=True)
 
-    # Transfer weights from MAE
-    if not args.skip_mae:
-        logger.info("Transferring weights from MAE to Segmentation model...")
-        logger.info("Note: Backbone weights transferred (stem, encoder, decoder)")
-        logger.info(f"Prediction heads NOT transferred (3 RGB vs {args.num_classes} classes)")
+    run_segmentation_finetuning(seg_model, train_ds_seg, val_ds_seg, args, results_dir)
 
+    # Final Save
+    seg_model.save(os.path.join(results_dir, "final_model.keras"))
+    logger.info("✅ Pipeline Completed Successfully")
 
-        with tempfile.NamedTemporaryFile(suffix='.weights.h5', delete=False) as f:
-            temp_path = f.name
-
-        try:
-            mae_backbone.save_weights(temp_path)
-            seg_model.load_weights(temp_path, skip_mismatch=True)
-            logger.info("Weight transfer complete.")
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-    run_segmentation_finetuning(
-        seg_model,
-        train_ds_seg,
-        val_ds_seg,
-        args,
-        results_dir,
-        dataset_info
-    )
-
-    final_path = os.path.join(results_dir, "final_multilabel_seg_model.keras")
-    seg_model.save(final_path)
-    logger.info(f"Pipeline complete. Saved to {final_path}")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"Fatal Pipeline Error: {e}", exc_info=True)
