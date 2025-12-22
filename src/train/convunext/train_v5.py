@@ -91,9 +91,6 @@ def setup_environment() -> None:
     else:
         logger.warning("⚠️ No GPUs found, using CPU")
 
-    # Optional: Set mixed precision policy if hardware supports it
-    # keras.mixed_precision.set_global_policy("mixed_float16")
-
 
 # ---------------------------------------------------------------------
 # Data Pipeline: ImageNet (MAE Pre-training)
@@ -635,7 +632,7 @@ def main():
     parser.add_argument("--num-classes", type=int, default=80)
 
     # Model Config
-    parser.add_argument("--variant", type=str, default="base", choices=['tiny', 'small', 'base', 'large'])
+    parser.add_argument("--variant", type=str, default="tiny", choices=['tiny', 'small', 'base', 'large'])
 
     # Training Config
     parser.add_argument("--mae-epochs", type=int, default=50)
