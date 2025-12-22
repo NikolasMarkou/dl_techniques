@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.convunext.model_v2 import ConvUNextModel
+from dl_techniques.models.convunext.model import ConvUNextModel
 from dl_techniques.models.masked_autoencoder import (
     MaskedAutoencoder,
     visualize_reconstruction

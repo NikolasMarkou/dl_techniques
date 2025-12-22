@@ -12,11 +12,12 @@ Key features:
 - Graph-safe operations in call()
 - Full serialization support
 - Configurable bias for standard or restoration tasks
+- include_top parameter for feature extraction vs full model
+- **Weight compatibility: train with include_top=True, reuse with include_top=False**
 """
 
 import os
 import keras
-import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
@@ -81,13 +82,13 @@ class ConvUNextStem(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        filters: int,
-        kernel_size: Union[int, Tuple[int, int]] = 7,
-        use_bias: bool = True,
-        kernel_initializer: str = 'he_normal',
-        kernel_regularizer: Optional[str] = None,
-        **kwargs: Any
+            self,
+            filters: int,
+            kernel_size: Union[int, Tuple[int, int]] = 7,
+            use_bias: bool = True,
+            kernel_initializer: str = 'he_normal',
+            kernel_regularizer: Optional[str] = None,
+            **kwargs: Any
     ) -> None:
         """
         Initialize ConvUNextStem layer.
@@ -151,9 +152,9 @@ class ConvUNextStem(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Forward pass of the stem layer.
@@ -175,8 +176,8 @@ class ConvUNextStem(keras.layers.Layer):
         return x
 
     def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
+            self,
+            input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape for given input shape.
@@ -251,7 +252,12 @@ class ConvUNextModel(keras.Model):
     This model implements a U-Net-style encoder-decoder architecture using ConvNeXt
     blocks for feature extraction and transformation. It supports multiple model
     variants (tiny to xlarge), optional deep supervision for multi-scale training,
-    and flexible architecture configuration including bias control.
+    flexible architecture configuration including bias control, and can be used
+    as a feature extractor with include_top=False.
+
+    **Weight Compatibility**: Models are designed so that weights trained with
+    include_top=True can be loaded into models with include_top=False. All layers
+    are created with identical names regardless of include_top setting.
 
     **Intent**: Provide a modern, efficient U-Net-style architecture for dense
     prediction tasks (segmentation, super-resolution, etc.) with state-of-the-art
@@ -269,9 +275,9 @@ class ConvUNextModel(keras.Model):
            ↓
     Decoder: [Upsample + Concat + ConvNeXt Blocks] × depth
            ↓ (optional deep supervision)
-    Output: Conv2D(output_channels, 1×1)
+    Output: Conv2D(output_channels, 1×1) [only used if include_top=True]
            ↓
-    Output(shape=[batch, H, W, output_channels])
+    Output(shape=[batch, H, W, output_channels or filters])
     ```
 
     The model uses stochastic depth (drop path) for regularization and supports
@@ -300,18 +306,26 @@ class ConvUNextModel(keras.Model):
             depth. Linearly increases with depth. Defaults to 0.1.
         final_activation: String or callable, activation for final output layer.
             Common choices: 'sigmoid' (binary), 'softmax' (multi-class),
-            'linear' (regression). Defaults to 'linear'.
+            'linear' (regression). Only used if include_top=True. Defaults to 'linear'.
         use_bias: Boolean, whether to use bias in convolutions. Defaults to True.
             Set to False for bias-free restoration tasks.
         kernel_initializer: String or initializer instance for convolution weights.
             Defaults to 'he_normal'.
         kernel_regularizer: Optional string or regularizer instance for convolution
             weights. Defaults to None.
-        enable_deep_supervision: Boolean, whether to output predictions at multiple
-            scales for deep supervision training. When True, returns list of
-            outputs. Defaults to False.
-        output_channels: Optional integer, number of output channels. If None,
-            uses same as input_channels. Defaults to None.
+        include_top: Boolean, whether to include the final classification/prediction
+            head in forward pass. If False, returns feature maps from decoder.
+            If True, returns predictions with output_channels.
+            **Important**: All layers are always created, but include_top controls
+            which ones are used in the forward pass. This ensures weight compatibility.
+            Defaults to True.
+        enable_deep_supervision: Boolean, whether to output predictions/features at
+            multiple scales for deep supervision training. When True, returns list of
+            outputs. Works with both include_top=True and include_top=False.
+            Defaults to False.
+        output_channels: Optional integer, number of output channels. If None and
+            include_top=True, uses same as input_channels. Required when creating
+            models for training. Defaults to None.
         **kwargs: Additional arguments for Model base class.
 
     Input shape:
@@ -319,11 +333,16 @@ class ConvUNextModel(keras.Model):
         Height and width can be variable if specified as None in input_shape.
 
     Output shape:
-        If enable_deep_supervision=False:
+        If include_top=True and enable_deep_supervision=False:
             4D tensor with shape: `(batch_size, height, width, output_channels)`.
-        If enable_deep_supervision=True:
+        If include_top=True and enable_deep_supervision=True:
             List of 4D tensors, with primary output first followed by
             intermediate supervision outputs at decreasing resolutions.
+        If include_top=False and enable_deep_supervision=False:
+            4D tensor with shape: `(batch_size, height, width, filters)`.
+            Returns decoder features without final projection.
+        If include_top=False and enable_deep_supervision=True:
+            List of 4D tensors with decoder features at multiple scales.
 
     Attributes:
         MODEL_VARIANTS: Dictionary mapping variant names to configurations.
@@ -331,21 +350,26 @@ class ConvUNextModel(keras.Model):
 
     Example:
         ```python
-        # Create base model (default use_bias=True)
-        model = ConvUNextModel(
-            input_shape=(256, 256, 3),
-            depth=4,
-            initial_filters=64,
-            output_channels=1,
-            final_activation='sigmoid'
-        )
-
-        # Create bias-free model for restoration
+        # Train with predictions
         model = ConvUNextModel.from_variant(
             'base',
             input_shape=(256, 256, 3),
-            use_bias=False
+            output_channels=10,
+            include_top=True
         )
+        model.compile(...)
+        model.fit(...)
+        model.save('trained.keras')
+
+        # Reuse as feature extractor
+        encoder = ConvUNextModel.from_variant(
+            'base',
+            input_shape=(256, 256, 3),
+            output_channels=10,  # Must match for weight loading
+            include_top=False
+        )
+        encoder.load_weights('trained.keras')
+        features = encoder(inputs)
         ```
     """
 
@@ -401,23 +425,24 @@ class ConvUNextModel(keras.Model):
     }
 
     def __init__(
-        self,
-        input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
-        depth: int = 4,
-        initial_filters: int = 64,
-        filter_multiplier: int = 2,
-        blocks_per_level: int = 2,
-        convnext_version: str = 'v2',
-        stem_kernel_size: Union[int, Tuple[int, int]] = 7,
-        block_kernel_size: Union[int, Tuple[int, int]] = 7,
-        drop_path_rate: float = 0.1,
-        final_activation: str = 'linear',
-        use_bias: bool = True,
-        kernel_initializer: str = 'he_normal',
-        kernel_regularizer: Optional[str] = None,
-        enable_deep_supervision: bool = False,
-        output_channels: Optional[int] = None,
-        **kwargs: Any
+            self,
+            input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
+            depth: int = 4,
+            initial_filters: int = 64,
+            filter_multiplier: int = 2,
+            blocks_per_level: int = 2,
+            convnext_version: str = 'v2',
+            stem_kernel_size: Union[int, Tuple[int, int]] = 7,
+            block_kernel_size: Union[int, Tuple[int, int]] = 7,
+            drop_path_rate: float = 0.1,
+            final_activation: str = 'linear',
+            use_bias: bool = True,
+            kernel_initializer: str = 'he_normal',
+            kernel_regularizer: Optional[str] = None,
+            include_top: bool = True,
+            enable_deep_supervision: bool = False,
+            output_channels: Optional[int] = None,
+            **kwargs: Any
     ) -> None:
         """
         Initialize ConvUNextModel.
@@ -443,17 +468,20 @@ class ConvUNextModel(keras.Model):
         drop_path_rate : float, optional
             Maximum drop path rate for stochastic depth, by default 0.1.
         final_activation : str, optional
-            Activation for output layer, by default 'linear'.
+            Activation for output layer (only applied if include_top=True), by default 'linear'.
         use_bias : bool, optional
             Whether to use bias in convolutions, by default True.
         kernel_initializer : str, optional
             Kernel weight initializer, by default 'he_normal'.
         kernel_regularizer : str or None, optional
             Kernel weight regularizer, by default None.
+        include_top : bool, optional
+            Whether to use final prediction head in forward pass, by default True.
         enable_deep_supervision : bool, optional
             Whether to enable deep supervision outputs, by default False.
         output_channels : int or None, optional
-            Number of output channels (None = same as input), by default None.
+            Number of output channels (None = same as input, required for training),
+            by default None.
         **kwargs : Any
             Additional keyword arguments for Model base class.
 
@@ -482,6 +510,7 @@ class ConvUNextModel(keras.Model):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.include_top = include_top
         self.enable_deep_supervision = enable_deep_supervision
 
         # Parse input shape
@@ -502,6 +531,7 @@ class ConvUNextModel(keras.Model):
         )
 
         # Build model architecture (Golden Rule #1: Create in __init__)
+        # CRITICAL: Always create all layers to ensure weight compatibility
         self._build_stem()
         self._build_encoder()
         self._build_bottleneck()
@@ -510,7 +540,8 @@ class ConvUNextModel(keras.Model):
         if self.enable_deep_supervision:
             self._build_deep_supervision()
 
-        # Final output projection
+        # CRITICAL: Always create final output layer for weight compatibility
+        # Whether it's used depends on include_top in call()
         self.final_output_layer = keras.layers.Conv2D(
             filters=self.output_channels,
             kernel_size=1,
@@ -545,9 +576,9 @@ class ConvUNextModel(keras.Model):
             for block_idx in range(self.blocks_per_level):
                 # Compute drop path rate (increases with depth)
                 current_drop_path = (
-                    self.drop_path_rate
-                    * (level * self.blocks_per_level + block_idx)
-                    / (self.depth * self.blocks_per_level)
+                        self.drop_path_rate
+                        * (level * self.blocks_per_level + block_idx)
+                        / (self.depth * self.blocks_per_level)
                 )
 
                 block = self.ConvNextBlock(
@@ -567,27 +598,19 @@ class ConvUNextModel(keras.Model):
             if level < self.depth - 1:
                 downsample_ops = []
 
-                # Spatial downsampling via max pooling
+                # Spatial downsampling via striding
+                next_filters = self.filter_sizes[level + 1]
                 downsample_ops.append(
-                    keras.layers.MaxPooling2D(
-                        pool_size=(2, 2),
+                    keras.layers.Conv2D(
+                        filters=next_filters,
+                        kernel_size=2,
+                        strides=2,
+                        use_bias=self.use_bias,
+                        kernel_initializer=self.kernel_initializer,
+                        kernel_regularizer=self.kernel_regularizer,
                         name=f'enc_down_{level}'
                     )
                 )
-
-                # Channel adjustment if needed
-                next_filters = self.filter_sizes[level + 1]
-                if current_filters != next_filters:
-                    downsample_ops.append(
-                        keras.layers.Conv2D(
-                            filters=next_filters,
-                            kernel_size=1,
-                            use_bias=self.use_bias,
-                            kernel_initializer=self.kernel_initializer,
-                            kernel_regularizer=self.kernel_regularizer,
-                            name=f'enc_down_adjust_{level}'
-                        )
-                    )
 
                 self.encoder_downsamples.append(
                     keras.Sequential(
@@ -604,20 +627,16 @@ class ConvUNextModel(keras.Model):
         # Entry to bottleneck: downsample + channel adjust
         bn_ops = []
         bn_ops.append(
-            keras.layers.MaxPooling2D(pool_size=(2, 2), name='bn_down')
-        )
-
-        if prev_filters != bottleneck_filters:
-            bn_ops.append(
-                keras.layers.Conv2D(
-                    filters=bottleneck_filters,
-                    kernel_size=1,
-                    use_bias=self.use_bias,
-                    kernel_initializer=self.kernel_initializer,
-                    kernel_regularizer=self.kernel_regularizer,
-                    name='bn_adjust'
-                )
+            keras.layers.Conv2D(
+                filters=bottleneck_filters,
+                kernel_size=2,
+                strides=2,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name='bn_down'
             )
+        )
 
         self.bottleneck_entry = keras.Sequential(bn_ops, name='bottleneck_entry')
 
@@ -671,9 +690,9 @@ class ConvUNextModel(keras.Model):
             for block_idx in range(self.blocks_per_level):
                 # Compute drop path rate (mirrors encoder)
                 current_drop_path = (
-                    self.drop_path_rate
-                    * (level * self.blocks_per_level + block_idx)
-                    / (self.depth * self.blocks_per_level)
+                        self.drop_path_rate
+                        * (level * self.blocks_per_level + block_idx)
+                        / (self.depth * self.blocks_per_level)
                 )
 
                 stage_blocks.append(
@@ -690,11 +709,18 @@ class ConvUNextModel(keras.Model):
             self.decoder_blocks.append(stage_blocks)
 
     def _build_deep_supervision(self) -> None:
-        """Create deep supervision output heads at intermediate decoder stages."""
+        """
+        Create deep supervision output heads at intermediate decoder stages.
+
+        CRITICAL: Always creates prediction heads with output_channels to ensure
+        weight compatibility between include_top=True and include_top=False modes.
+        The include_top flag controls whether these are used in forward pass.
+        """
         self.supervision_heads = []
 
         # Create supervision heads for all but the final (highest resolution) level
         for level in range(self.depth - 1, 0, -1):
+            # Always create prediction heads for weight compatibility
             head = keras.Sequential([
                 keras.layers.Conv2D(
                     filters=self.filter_sizes[level] // 2,
@@ -714,6 +740,7 @@ class ConvUNextModel(keras.Model):
                     kernel_regularizer=self.kernel_regularizer
                 )
             ], name=f'deep_sup_L{level}')
+
             self.supervision_heads.append(head)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -800,7 +827,7 @@ class ConvUNextModel(keras.Model):
             if self.enable_deep_supervision and idx < len(self.supervision_heads):
                 self.supervision_heads[idx].build(current_shape)
 
-        # Build final output layer
+        # CRITICAL: Always build final output layer for weight compatibility
         self.final_output_layer.build(current_shape)
 
         # Mark model as built
@@ -821,11 +848,14 @@ class ConvUNextModel(keras.Model):
         Returns
         -------
         tuple or list of tuples
-            If enable_deep_supervision=False:
+            If include_top=True and enable_deep_supervision=False:
                 Single tuple (batch_size, height, width, output_channels).
-            If enable_deep_supervision=True:
+            If include_top=True and enable_deep_supervision=True:
                 List of tuples [main_shape, aux_shape_1, ..., aux_shape_n].
-                Ordered from finest resolution (main) to coarsest.
+            If include_top=False and enable_deep_supervision=False:
+                Single tuple (batch_size, height, width, decoder_filters).
+            If include_top=False and enable_deep_supervision=True:
+                List of tuples with feature shapes at multiple scales.
         """
         # Parse input shape
         if len(input_shape) == 4:
@@ -843,12 +873,19 @@ class ConvUNextModel(keras.Model):
             # Each level represents a factor of 2 downsampling relative to input
             return dim // (2 ** level)
 
+        # Determine output channels based on include_top
+        if self.include_top:
+            out_channels = self.output_channels
+        else:
+            # Output decoder features (highest resolution decoder features)
+            out_channels = self.filter_sizes[0]
+
         # Main output is at level 0 (full resolution)
         main_output_shape = (
             batch_size,
             h,
             w,
-            self.output_channels
+            out_channels
         )
 
         if not self.enable_deep_supervision:
@@ -858,11 +895,16 @@ class ConvUNextModel(keras.Model):
         # Corresponds to levels: depth-1 (coarsest) down to 1 (finest aux)
         aux_output_shapes = []
         for level in range(self.depth - 1, 0, -1):
+            if self.include_top:
+                aux_channels = self.output_channels
+            else:
+                aux_channels = self.filter_sizes[level]
+
             shape = (
                 batch_size,
                 get_dim_at_level(h, level),
                 get_dim_at_level(w, level),
-                self.output_channels
+                aux_channels
             )
             aux_output_shapes.append(shape)
 
@@ -872,15 +914,16 @@ class ConvUNextModel(keras.Model):
         return [main_output_shape] + list(reversed(aux_output_shapes))
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, List[keras.KerasTensor]]:
         """
         Forward pass of ConvUNext model.
 
         Implements U-Net-style encoder-decoder with skip connections. If deep
         supervision is enabled, returns multiple outputs at different scales.
+        The include_top parameter controls whether final prediction layers are applied.
 
         Parameters
         ----------
@@ -892,12 +935,14 @@ class ConvUNextModel(keras.Model):
         Returns
         -------
         keras.KerasTensor or list of keras.KerasTensor
-            If enable_deep_supervision=False:
-                Single output tensor of shape (batch_size, height, width, output_channels).
-            If enable_deep_supervision=True:
-                List of output tensors: [main_output, supervision_output_1, ...].
-                Main output has full resolution, supervision outputs are at
-                intermediate resolutions (ordered from coarse to fine).
+            If include_top=True and enable_deep_supervision=False:
+                Single prediction tensor.
+            If include_top=True and enable_deep_supervision=True:
+                List of prediction tensors at multiple scales.
+            If include_top=False and enable_deep_supervision=False:
+                Single feature tensor from decoder.
+            If include_top=False and enable_deep_supervision=True:
+                List of feature tensors at multiple scales.
         """
         skip_connections = []
         deep_supervision_outputs = []
@@ -965,11 +1010,20 @@ class ConvUNextModel(keras.Model):
 
             # Deep supervision output (if enabled and not final level)
             if self.enable_deep_supervision and idx < len(self.supervision_heads):
-                ds_out = self.supervision_heads[idx](x, training=training)
+                # Apply supervision head if include_top=True
+                if self.include_top:
+                    ds_out = self.supervision_heads[idx](x, training=training)
+                else:
+                    # Return features without supervision head for include_top=False
+                    ds_out = x
                 deep_supervision_outputs.append(ds_out)
 
-        # Final output projection
-        final_output = self.final_output_layer(x)
+        # Final output: apply projection head if include_top=True
+        if self.include_top:
+            final_output = self.final_output_layer(x)
+        else:
+            # Return decoder features without projection
+            final_output = x
 
         # Return outputs
         if self.enable_deep_supervision:
@@ -1003,6 +1057,7 @@ class ConvUNextModel(keras.Model):
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'include_top': self.include_top,
             'enable_deep_supervision': self.enable_deep_supervision,
             'output_channels': self.output_channels
         })
@@ -1036,9 +1091,9 @@ class ConvUNextModel(keras.Model):
 
     @staticmethod
     def _download_weights(
-        variant: str,
-        dataset: str = 'imagenet',
-        cache_dir: Optional[str] = None
+            variant: str,
+            dataset: str = 'imagenet',
+            cache_dir: Optional[str] = None
     ) -> str:
         """
         Download pretrained weights for a model variant.
@@ -1074,13 +1129,14 @@ class ConvUNextModel(keras.Model):
 
     @classmethod
     def from_variant(
-        cls,
-        variant: str,
-        input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
-        enable_deep_supervision: bool = False,
-        output_channels: Optional[int] = None,
-        use_bias: bool = True,
-        **kwargs: Any
+            cls,
+            variant: str,
+            input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
+            include_top: bool = True,
+            enable_deep_supervision: bool = False,
+            output_channels: Optional[int] = None,
+            use_bias: bool = True,
+            **kwargs: Any
     ) -> 'ConvUNextModel':
         """
         Create model from predefined variant configuration.
@@ -1092,10 +1148,13 @@ class ConvUNextModel(keras.Model):
             'large', 'xlarge'.
         input_shape : tuple of int, optional
             Input shape (height, width, channels), by default (None, None, 3).
+        include_top : bool, optional
+            Whether to use final prediction head in forward pass, by default True.
         enable_deep_supervision : bool, optional
             Whether to enable deep supervision, by default False.
         output_channels : int or None, optional
-            Number of output channels, by default None.
+            Number of output channels (required when include_top=True for training),
+            by default None.
         use_bias : bool, optional
             Whether to use bias in convolutions, by default True.
         **kwargs : Any
@@ -1114,16 +1173,24 @@ class ConvUNextModel(keras.Model):
         Example
         -------
         ```python
-        # Create a base model
-        model = ConvUNextModel.from_variant('base', input_shape=(256, 256, 3))
-
-        # Create a small model with custom output channels and bias-free mode
+        # Train model with predictions
         model = ConvUNextModel.from_variant(
-            'small',
-            input_shape=(512, 512, 3),
-            output_channels=5,
-            use_bias=False
+            'base',
+            input_shape=(256, 256, 3),
+            output_channels=10,
+            include_top=True
         )
+        model.fit(...)
+        model.save('trained.keras')
+
+        # Reuse as feature extractor (same output_channels for weight loading)
+        encoder = ConvUNextModel.from_variant(
+            'base',
+            input_shape=(256, 256, 3),
+            output_channels=10,
+            include_top=False
+        )
+        encoder.load_weights('trained.keras')
         ```
         """
         if variant not in cls.MODEL_VARIANTS:
@@ -1139,7 +1206,8 @@ class ConvUNextModel(keras.Model):
         # Override with user-provided kwargs
         config.update(kwargs)
 
-        # Set deep supervision and output channels
+        # Set critical parameters
+        config['include_top'] = include_top
         config['enable_deep_supervision'] = enable_deep_supervision
         config['use_bias'] = use_bias
 
@@ -1156,12 +1224,13 @@ class ConvUNextModel(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_convunext_variant(
-    variant: str,
-    input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
-    enable_deep_supervision: bool = False,
-    output_channels: Optional[int] = None,
-    use_bias: bool = True,
-    **kwargs: Any
+        variant: str,
+        input_shape: Tuple[Optional[int], Optional[int], int] = (None, None, 3),
+        include_top: bool = True,
+        enable_deep_supervision: bool = False,
+        output_channels: Optional[int] = None,
+        use_bias: bool = True,
+        **kwargs: Any
 ) -> ConvUNextModel:
     """
     Factory function to create ConvUNext model from variant name.
@@ -1174,6 +1243,8 @@ def create_convunext_variant(
         Model variant name ('tiny', 'small', 'base', 'large', 'xlarge').
     input_shape : tuple of int, optional
         Input shape (height, width, channels), by default (None, None, 3).
+    include_top : bool, optional
+        Whether to use final prediction head in forward pass, by default True.
     enable_deep_supervision : bool, optional
         Whether to enable deep supervision, by default False.
     output_channels : int or None, optional
@@ -1191,6 +1262,7 @@ def create_convunext_variant(
     Example
     -------
     ```python
+    # Create full model for segmentation
     model = create_convunext_variant(
         'base',
         input_shape=(256, 256, 3),
@@ -1198,41 +1270,57 @@ def create_convunext_variant(
         final_activation='sigmoid',
         use_bias=True
     )
+
+    # Create feature extractor
+    encoder = create_convunext_variant(
+        'base',
+        input_shape=(256, 256, 3),
+        output_channels=1,  # Must match for weight loading
+        include_top=False
+    )
     ```
     """
     return ConvUNextModel.from_variant(
         variant=variant,
         input_shape=input_shape,
+        include_top=include_top,
         enable_deep_supervision=enable_deep_supervision,
         output_channels=output_channels,
         use_bias=use_bias,
         **kwargs
     )
 
+
 # ---------------------------------------------------------------------
 
 def create_inference_model_from_training_model(
-    training_model: ConvUNextModel
+        training_model: ConvUNextModel,
+        disable_deep_supervision: bool = True
 ) -> ConvUNextModel:
     """
-    Create inference model from training model with deep supervision.
+    Create inference model from training model.
 
-    This function converts a training model (with deep supervision enabled)
-    to an inference model (with deep supervision disabled) by:
-    1. Extracting the configuration
-    2. Creating a new model without deep supervision
-    3. Transferring weights (skipping deep supervision heads)
+    This function converts a training model to an inference model by:
+    1. Optionally disabling deep supervision
+    2. Extracting the configuration
+    3. Creating a new model
+    4. Transferring weights
+
+    IMPORTANT: For weight compatibility, output_channels must match between
+    training and inference models.
 
     Parameters
     ----------
     training_model : ConvUNextModel
-        Training model with enable_deep_supervision=True.
+        Training model (potentially with enable_deep_supervision=True).
+    disable_deep_supervision : bool, optional
+        Whether to disable deep supervision in inference model, by default True.
 
     Returns
     -------
     ConvUNextModel
-        Inference model with enable_deep_supervision=False and transferred weights.
-        If training_model already has deep supervision disabled, returns it unchanged.
+        Inference model with transferred weights.
+        If training_model already has the desired configuration, returns it unchanged.
 
     Example
     -------
@@ -1246,19 +1334,25 @@ def create_inference_model_from_training_model(
     train_model.compile(...)
     train_model.fit(...)
 
-    # Convert to inference model
+    # Convert to inference model (no deep supervision)
     inference_model = create_inference_model_from_training_model(train_model)
     inference_model.save('final_model.keras')
     ```
     """
-    # If already an inference model, return as-is
-    if not training_model.enable_deep_supervision:
+    # If already in desired configuration, return as-is
+    if disable_deep_supervision and not training_model.enable_deep_supervision:
         logger.info("Model already has deep supervision disabled")
         return training_model
 
-    # Extract configuration and disable deep supervision
+    if not disable_deep_supervision:
+        logger.info("Model configuration unchanged")
+        return training_model
+
+    # Extract configuration and modify as needed
     config = training_model.get_config()
-    config['enable_deep_supervision'] = False
+
+    if disable_deep_supervision:
+        config['enable_deep_supervision'] = False
 
     # Create new inference model
     inference_model = ConvUNextModel.from_config(config)
