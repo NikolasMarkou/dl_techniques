@@ -32,8 +32,7 @@ from dotenv import load_dotenv
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convunext.model import ConvUNextModel
 from dl_techniques.models.masked_autoencoder import (
-    MaskedAutoencoder,
-    visualize_reconstruction
+    MaskedAutoencoder
 )
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -719,12 +718,14 @@ def run_segmentation_finetuning(
     steps_per_epoch = args.steps_per_epoch or 500
     total_steps = args.finetune_epochs * steps_per_epoch
 
-    lr_schedule = learning_rate_schedule_builder({
-        "type": "cosine_decay",
-        "learning_rate": args.finetune_lr,
-        "decay_steps": total_steps,
-        "warmup_steps": 500
-    })
+    lr_schedule = learning_rate_schedule_builder(
+        config={
+            "type": "cosine_decay",
+            "learning_rate": args.finetune_lr,
+            "decay_steps": total_steps,
+            "warmup_steps": 500
+        }
+    )
 
     optimizer = optimizer_builder(
         config={
@@ -732,7 +733,8 @@ def run_segmentation_finetuning(
             "weight_decay": 0.05,
             "gradient_clipping_by_norm": 1.0
         },
-        lr_schedule=lr_schedule)
+        lr_schedule=lr_schedule
+    )
 
     # Configure loss for Deep Supervision with Per-Channel Focal Loss
     if convunext_model.enable_deep_supervision:
@@ -753,13 +755,13 @@ def run_segmentation_finetuning(
             for i in range(num_outputs)
         ]
 
-        def multiscale_target_map(image, mask):
+        def multiscale_target_map(image, labels):
             """
             Maps (B,H,W,C), (B,H,W,num_classes) -> (B,H,W,C), [Target1, Target2...]
 
             Creates downsampled versions of multi-label mask for each scale.
             """
-            targets = [mask]
+            targets = [labels]
             h = tf.shape(image)[1]
             w = tf.shape(image)[2]
 
@@ -768,7 +770,7 @@ def run_segmentation_finetuning(
                 # Resize multi-label mask
                 # Use 'nearest' to preserve binary nature
                 m_resized = tf.image.resize(
-                    mask,
+                    labels,
                     (h // factor, w // factor),
                     method='nearest'
                 )

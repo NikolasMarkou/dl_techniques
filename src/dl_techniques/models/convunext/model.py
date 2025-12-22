@@ -1368,7 +1368,10 @@ def create_inference_model_from_training_model(
 
     try:
         training_model.save_weights(temp_path)
-        inference_model.load_weights(temp_path, by_name=True, skip_mismatch=True)
+        inference_model.load_weights(
+            filepath=temp_path,
+            skip_mismatch=True
+        )
         logger.info("Successfully transferred weights to inference model")
     finally:
         # Clean up temporary file
