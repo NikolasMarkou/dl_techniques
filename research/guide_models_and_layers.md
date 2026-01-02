@@ -34,7 +34,7 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     SAVING (.keras format)                       │
+│                     SAVING (.keras format)                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  1. Keras calls get_config() on each layer                      │
 │  2. Config dict is serialized to JSON                           │
@@ -43,9 +43,9 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                    LOADING (.keras format)                       │
+│                    LOADING (.keras format)                      │
 ├─────────────────────────────────────────────────────────────────┤
-│  1. Parse JSON config                                            │
+│  1. Parse JSON config                                           │
 │  2. For each layer class (using registry):                      │
 │     a. Call __init__(**config) → Creates UNBUILT layer          │
 │  3. Call build() to create weight variables                     │
@@ -260,6 +260,22 @@ class SimpleCustomLayer(keras.layers.Layer):
     """
     Custom linear transformation layer with optional bias and activation.
     
+    **Intent**: Provide a basic building block demonstrating proper weight
+    creation and serialization patterns for layers with trainable parameters.
+    
+    **Architecture**:
+    ```
+    Input(shape=[batch, ..., input_dim])
+           ↓
+    MatMul with kernel: [input_dim, units]
+           ↓
+    (optional) Add bias: [units]
+           ↓
+    (optional) Activation function
+           ↓
+    Output(shape=[batch, ..., units])
+    ```
+    
     Args:
         units: Dimensionality of the output space.
         activation: Activation function. Defaults to None.
@@ -372,9 +388,22 @@ class CompositeLayer(keras.layers.Layer):
     """
     Multi-stage neural network block with sub-layer composition.
     
+    **Intent**: Demonstrate proper composition of multiple Keras layers with
+    explicit build patterns for robust serialization and shape inference.
+    
     **Architecture**:
     ```
-    Input → Dense₁(hidden_dim, 'gelu') → Dropout → LayerNorm → Dense₂(output_dim) → Output
+    Input(shape=[batch, ..., input_dim])
+           ↓
+    Dense₁(hidden_dim, activation='gelu')
+           ↓
+    Dropout(dropout_rate)
+           ↓
+    (optional) LayerNormalization
+           ↓
+    Dense₂(output_dim, activation=None)
+           ↓
+    Output(shape=[batch, ..., output_dim])
     ```
     
     Args:
@@ -383,6 +412,12 @@ class CompositeLayer(keras.layers.Layer):
         dropout_rate: Dropout rate. Defaults to 0.1.
         use_norm: Whether to apply layer normalization. Defaults to True.
         **kwargs: Additional arguments for Layer base class.
+    
+    Input shape:
+        N-D tensor: `(batch_size, ..., input_dim)`.
+    
+    Output shape:
+        N-D tensor: `(batch_size, ..., output_dim)`.
     """
     
     def __init__(
@@ -472,6 +507,34 @@ class CompositeLayer(keras.layers.Layer):
 
 ```python
 class HierarchicalModel(keras.Model):
+    """
+    Multi-level encoder with nested block structure.
+    
+    **Intent**: Demonstrate hierarchical organization of layers using nested
+    lists for encoder stages with multiple blocks per level.
+    
+    **Architecture**:
+    ```
+    Input(shape=[batch, H, W, C])
+           ↓
+    ┌───────────────────────────────────┐
+    │ Level 0: blocks_per_level × Block │ → skip_0
+    └───────────────────────────────────┘
+           ↓ MaxPool2D
+    ┌───────────────────────────────────┐
+    │ Level 1: blocks_per_level × Block │ → skip_1
+    └───────────────────────────────────┘
+           ↓ MaxPool2D
+           ...
+           ↓
+    ┌───────────────────────────────────┐
+    │ Level N: blocks_per_level × Block │ → skip_N
+    └───────────────────────────────────┘
+           ↓
+    Output: (features, [skip_0, skip_1, ..., skip_N])
+    ```
+    """
+    
     def __init__(self, depth: int, blocks_per_level: int, **kwargs):
         super().__init__(**kwargs)
         self.depth = depth
@@ -712,7 +775,32 @@ def call(self, inputs):
 ```python
 @keras.saving.register_keras_serializable()
 class GraphSafeLayer(keras.layers.Layer):
-    """Demonstrates graph-safe patterns for dynamic shape handling."""
+    """
+    Demonstrates graph-safe patterns for dynamic shape handling.
+    
+    **Intent**: Show correct patterns for working with dynamic tensor shapes
+    while maintaining graph compatibility for compiled execution.
+    
+    **Architecture**:
+    ```
+    Input(shape=[batch, ..., input_dim])
+           ↓
+    Dense(units)
+           ↓
+    (if use_scaling) Multiply by learnable scale: [units]
+           ↓
+    ops.where: Conditional shift based on mean value
+           ↓
+    Flatten → Reshape back (dynamic shape handling demo)
+           ↓
+    Output(shape=[batch, units])
+    ```
+    
+    Args:
+        units: Output dimensionality.
+        use_scaling: Whether to apply learnable scaling. Defaults to True.
+        **kwargs: Additional arguments for Layer base class.
+    """
     
     def __init__(self, units: int, use_scaling: bool = True, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -758,6 +846,12 @@ class GraphSafeLayer(keras.layers.Layer):
         
         return x
     
+    def compute_output_shape(
+        self, 
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        return (input_shape[0], self.units)
+    
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({'units': self.units, 'use_scaling': self.use_scaling})
@@ -775,6 +869,22 @@ class GraphSafeLayer(keras.layers.Layer):
 class CustomModel(keras.Model):
     """
     Multi-component model demonstrating proper composition and serialization.
+    
+    **Intent**: Show how to compose multiple sub-models/layers into a single
+    model with proper configuration management and serialization support.
+    
+    **Architecture**:
+    ```
+    Input(shape=[batch, input_dim])
+           ↓
+    Encoder: Dense(hidden_dim, activation='relu')
+           ↓
+    (optional) Processor: CompositeLayer(hidden_dim*2 → hidden_dim)
+           ↓
+    Decoder: Dense(output_dim)
+           ↓
+    Output(shape=[batch, output_dim])
+    ```
     
     Args:
         hidden_dim: Dimensionality of the encoder's output space.
@@ -847,6 +957,20 @@ def create_model(
     """
     Factory function creating a functional API model.
     
+    **Architecture**:
+    ```
+    Input(shape=input_shape)
+           ↓
+    ┌─────────────────────────────────────┐
+    │ num_layers × CustomLayer/Dense      │
+    │   (hidden_dim, activation='relu')   │
+    └─────────────────────────────────────┘
+           ↓
+    Dense(output_dim, activation='softmax')
+           ↓
+    Output(shape=[batch, output_dim])
+    ```
+    
     Args:
         input_shape: Tuple specifying input dimensions (excluding batch).
         hidden_dim: Dimensionality of hidden layers.
@@ -881,6 +1005,44 @@ Build complex models in logical stages:
 
 ```python
 class StagedModel(keras.Model):
+    """
+    Complex model with staged construction pattern.
+    
+    **Intent**: Demonstrate organizing complex architectures into logical
+    build stages for maintainability and extensibility.
+    
+    **Architecture**:
+    ```
+    Input(shape=input_shape_config)
+           ↓
+    ┌─────────────────────────────────────┐
+    │ STEM: Initial feature extraction    │
+    └─────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────┐
+    │ ENCODER: depth × EncoderStage       │
+    │   (progressive downsampling)        │
+    └─────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────┐
+    │ BOTTLENECK: Central processing      │
+    └─────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────┐
+    │ DECODER: depth × DecoderStage       │
+    │   (progressive upsampling)          │
+    └─────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────┐
+    │ HEADS: Output predictions           │
+    │   - main_head                       │
+    │   - (optional) aux_heads            │
+    └─────────────────────────────────────┘
+           ↓
+    Output(s)
+    ```
+    """
+    
     def __init__(self, input_shape_config, depth, **kwargs):
         super().__init__(**kwargs)
         
@@ -929,6 +1091,34 @@ class StagedModel(keras.Model):
 class ConfigurableModel(keras.Model):
     """
     Model architecture driven by configuration dictionary.
+    
+    **Intent**: Enable flexible architecture composition through configuration
+    rather than code changes, supporting easy experimentation.
+    
+    **Architecture**:
+    ```
+    Input(shape=[batch, H, W, C])
+           ↓
+    ┌─────────────────────────────────────┐
+    │ ENCODER (configurable type):        │
+    │   - 'resnet': ResNetEncoder         │
+    │   - 'efficientnet': EfficientNet    │
+    └─────────────────────────────────────┘
+           ↓ Multi-scale features
+    ┌─────────────────────────────────────┐
+    │ DECODER (configurable type):        │
+    │   - 'unet': UNetDecoder             │
+    │   - 'fpn': FPNDecoder               │
+    └─────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────┐
+    │ HEADS (configurable):               │
+    │   - main: required                  │
+    │   - auxiliary: optional list        │
+    └─────────────────────────────────────┘
+           ↓
+    Output(s)
+    ```
     
     Example:
         config = {
@@ -989,7 +1179,38 @@ class ConfigurableModel(keras.Model):
 ```python
 @keras.saving.register_keras_serializable()
 class WellConfiguredModel(keras.Model):
-    """Model with comprehensive configuration management."""
+    """
+    Model with comprehensive configuration management.
+    
+    **Intent**: Demonstrate complete configuration schema covering all
+    architectural decisions with proper validation and serialization.
+    
+    **Architecture**:
+    ```
+    Input(shape=input_shape)
+           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │ depth × encoder levels:                             │
+    │   blocks_per_level × Block(block_type, activation)  │
+    │   + normalization(normalization_type)               │
+    │   + dropout(dropout_rate)                           │
+    │   + (optional) drop_path(drop_path_rate)            │
+    └─────────────────────────────────────────────────────┘
+           ↓
+    (if include_top)
+    ┌─────────────────────────────────────────────────────┐
+    │ Output head:                                        │
+    │   Conv/Dense(output_channels, final_activation)     │
+    └─────────────────────────────────────────────────────┘
+           ↓
+    (if enable_deep_supervision)
+    ┌─────────────────────────────────────────────────────┐
+    │ Auxiliary outputs from intermediate levels          │
+    └─────────────────────────────────────────────────────┘
+           ↓
+    Output(s)
+    ```
+    """
     
     def __init__(
         self,
@@ -1093,7 +1314,23 @@ class WellConfiguredModel(keras.Model):
 
 ```python
 class ModelWithPresets(keras.Model):
-    """Model with predefined configuration presets."""
+    """
+    Model with predefined configuration presets.
+    
+    **Intent**: Provide convenient factory methods for common model
+    configurations while maintaining full customization capability.
+    
+    **Presets**:
+    ```
+    ┌──────────┬───────┬─────────────────┬─────────────────┬────────────────┐
+    │ Preset   │ Depth │ Initial Filters │ Blocks/Level    │ Drop Path Rate │
+    ├──────────┼───────┼─────────────────┼─────────────────┼────────────────┤
+    │ tiny     │   3   │       32        │        2        │      0.0       │
+    │ base     │   4   │       64        │        3        │      0.1       │
+    │ large    │   4   │       96        │        4        │      0.2       │
+    └──────────┴───────┴─────────────────┴─────────────────┴────────────────┘
+    ```
+    """
     
     PRESETS = {
         'tiny': {
@@ -1147,6 +1384,32 @@ class ModelWithPresets(keras.Model):
 class SerializableModel(keras.Model):
     """
     Model with complete serialization support.
+    
+    **Intent**: Demonstrate all serialization patterns including full model
+    save/load, weights-only save/load, and configuration export/import.
+    
+    **Serialization Formats**:
+    ```
+    ┌─────────────────────────────────────────────────────────────┐
+    │ FULL MODEL (.keras)                                         │
+    │   - Architecture (JSON config)                              │
+    │   - Weights (HDF5/SafeTensors)                              │
+    │   - Optimizer state                                         │
+    │   - Training config                                         │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ WEIGHTS ONLY (.h5 / .weights.h5)                            │
+    │   - Layer weights keyed by name                             │
+    │   - No architecture info                                    │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ CONFIGURATION (JSON)                                        │
+    │   - All __init__ parameters                                 │
+    │   - Serialized complex objects (regularizers, initializers) │
+    └─────────────────────────────────────────────────────────────┘
+    ```
     
     Supports:
     1. Full model (.keras)
@@ -1208,6 +1471,23 @@ def test_serialization_cycle(layer_class, layer_config, sample_input):
     """
     Comprehensive serialization test.
     
+    **Test Flow**:
+    ```
+    layer_class(**config)
+           ↓
+    Forward pass → original_output
+           ↓
+    Wrap in keras.Model
+           ↓
+    model.save('test.keras')
+           ↓
+    keras.models.load_model('test.keras')
+           ↓
+    Forward pass → loaded_output
+           ↓
+    Assert: original_output ≈ loaded_output
+    ```
+    
     Verifies:
     1. Instantiation and forward pass
     2. Serialization to .keras format
@@ -1255,7 +1535,41 @@ class WeightCompatibleModel(keras.Model):
     """
     Model designed for weight compatibility across configurations.
     
-    Key principle: Always create all layers, control usage via flags.
+    **Intent**: Enable weight transfer between models with different
+    configurations by ensuring consistent layer creation and naming.
+    
+    **Key Principle**:
+    ```
+    ┌─────────────────────────────────────────────────────────────┐
+    │ ALWAYS CREATE                    CONDITIONALLY USE          │
+    ├─────────────────────────────────────────────────────────────┤
+    │                                                             │
+    │  __init__():                     call():                    │
+    │    self.backbone = Backbone()      x = self.backbone(x)     │
+    │    self.main_head = Head()         if self.include_top:     │
+    │    self.aux_heads = [...]            x = self.main_head(x)  │
+    │                                    if self.enable_aux:      │
+    │  All layers exist with               for h in aux_heads:    │
+    │  consistent names regardless           out.append(h(x))     │
+    │  of configuration                                           │
+    │                                                             │
+    └─────────────────────────────────────────────────────────────┘
+    ```
+    
+    **Weight Loading Compatibility**:
+    ```
+    Model A (include_top=True, enable_aux=True)
+           ↓ save weights
+    weights.h5:
+      - backbone/*
+      - main_head/*
+      - aux_head_0/*, aux_head_1/*, aux_head_2/*
+           ↓ load weights (skip_mismatch=True)
+    Model B (include_top=True, enable_aux=False)
+      - backbone/* ✓ loaded
+      - main_head/* ✓ loaded
+      - aux_head_*/* (layers don't exist, skipped)
+    ```
     """
     
     def __init__(
@@ -1324,7 +1638,25 @@ def transfer_weights_layerwise(
     target_model: keras.Model,
     layer_mapping: Optional[Dict[str, str]] = None
 ):
-    """Transfer weights layer by layer."""
+    """
+    Transfer weights layer by layer.
+    
+    **Transfer Flow**:
+    ```
+    source_model                    target_model
+    ┌────────────────┐              ┌────────────────┐
+    │ layer_a        │ ──────────→  │ layer_a        │
+    │ layer_b        │ ──────────→  │ layer_b        │
+    │ layer_c        │ ─── X ───→   │ (different)    │
+    └────────────────┘              └────────────────┘
+           ↓
+    For each mapping:
+      1. Get source weights
+      2. Check shape compatibility
+      3. Set target weights (if compatible)
+      4. Log warnings for mismatches
+    ```
+    """
     if layer_mapping is None:
         layer_mapping = {layer.name: layer.name for layer in source_model.layers}
     
@@ -1351,7 +1683,18 @@ def transfer_backbone_weights(
     target_model: keras.Model,
     freeze_backbone: bool = True
 ):
-    """Transfer only backbone weights."""
+    """
+    Transfer only backbone weights.
+    
+    **Use Case**:
+    ```
+    Pretrained Model              New Task Model
+    ┌────────────────┐            ┌────────────────┐
+    │ backbone       │ ────────→  │ backbone       │ (frozen)
+    │ imagenet_head  │            │ new_task_head  │ (trainable)
+    └────────────────┘            └────────────────┘
+    ```
+    """
     target_model.backbone.set_weights(source_model.backbone.get_weights())
     
     if freeze_backbone:
@@ -1368,7 +1711,42 @@ def transfer_backbone_weights(
 
 ```python
 class ExtensibleModel(keras.Model):
-    """Model with extension points via hook methods."""
+    """
+    Model with extension points via hook methods.
+    
+    **Intent**: Provide clear extension points that subclasses can override
+    to customize specific components without modifying the base class.
+    
+    **Extension Points**:
+    ```
+    ┌─────────────────────────────────────────────────────────────┐
+    │ ExtensibleModel (base)                                      │
+    ├─────────────────────────────────────────────────────────────┤
+    │                                                             │
+    │  _build_stem()      → Override for custom input processing  │
+    │        ↓                                                    │
+    │  _build_encoder()   → Override for custom encoder           │
+    │        ↓                                                    │
+    │  _build_bottleneck()→ Override for custom bottleneck        │
+    │        ↓                                                    │
+    │  _build_decoder()   → Override for custom decoder           │
+    │        ↓                                                    │
+    │  _build_heads()     → Override for custom output heads      │
+    │                                                             │
+    └─────────────────────────────────────────────────────────────┘
+                              ↓
+    ┌─────────────────────────────────────────────────────────────┐
+    │ CustomModel(ExtensibleModel)                                │
+    ├─────────────────────────────────────────────────────────────┤
+    │                                                             │
+    │  _build_encoder():  # Override only encoder                 │
+    │      self.encoder = EfficientNetEncoder(...)                │
+    │                                                             │
+    │  (Other hooks use default implementations)                  │
+    │                                                             │
+    └─────────────────────────────────────────────────────────────┘
+    ```
+    """
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1409,7 +1787,42 @@ class CustomModel(ExtensibleModel):
 
 ```python
 class PluggableModel(keras.Model):
-    """Model with plugin system for components."""
+    """
+    Model with plugin system for components.
+    
+    **Intent**: Enable runtime component selection through a registry
+    system, allowing new components to be added without modifying the model.
+    
+    **Plugin Registry**:
+    ```
+    ┌─────────────────────────────────────────────────────────────┐
+    │ STEM_PLUGINS                                                │
+    ├──────────────┬──────────────────────────────────────────────┤
+    │ 'conv'       │ ConvStem                                     │
+    │ 'vit'        │ ViTStem                                      │
+    │ 'patch'      │ PatchEmbedStem                               │
+    └──────────────┴──────────────────────────────────────────────┘
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ ENCODER_PLUGINS                                             │
+    ├──────────────┬──────────────────────────────────────────────┤
+    │ 'resnet'     │ ResNetEncoder                                │
+    │ 'efficient'  │ EfficientNetEncoder                          │
+    │ 'convnext'   │ ConvNeXtEncoder                              │
+    └──────────────┴──────────────────────────────────────────────┘
+    ```
+    
+    **Usage**:
+    ```python
+    # Register new plugin
+    @PluggableModel.register_stem('my_stem')
+    class MyStem(keras.layers.Layer):
+        ...
+    
+    # Use plugin
+    model = PluggableModel(stem_type='my_stem', encoder_type='resnet')
+    ```
+    """
     
     STEM_PLUGINS = {}
     ENCODER_PLUGINS = {}
@@ -1465,7 +1878,18 @@ model = PluggableModel(stem_type='conv', encoder_type='resnet')
 
 ```python
 class AttentionMixin:
-    """Mixin to add attention mechanisms."""
+    """
+    Mixin to add attention mechanisms.
+    
+    **Provides**:
+    ```
+    _add_attention(features, name_prefix)
+           ↓
+    SelfAttention layer applied to features
+           ↓
+    Returns attended features
+    ```
+    """
     
     def _add_attention(self, features, name_prefix=''):
         if not hasattr(self, '_attention_modules'):
@@ -1477,7 +1901,18 @@ class AttentionMixin:
 
 
 class DropoutMixin:
-    """Mixin to add dropout layers."""
+    """
+    Mixin to add dropout layers.
+    
+    **Provides**:
+    ```
+    _add_dropout(features, rate, spatial, name_prefix)
+           ↓
+    Dropout/SpatialDropout2D layer
+           ↓
+    Returns regularized features
+    ```
+    """
     
     def _add_dropout(self, features, rate=0.5, spatial=False, name_prefix=''):
         if spatial:
@@ -1488,7 +1923,24 @@ class DropoutMixin:
 
 
 class EnhancedModel(AttentionMixin, DropoutMixin, keras.Model):
-    """Model with attention and dropout features."""
+    """
+    Model with attention and dropout features.
+    
+    **Architecture**:
+    ```
+    Input
+       ↓
+    Encoder
+       ↓
+    _add_attention (from AttentionMixin)
+       ↓
+    _add_dropout (from DropoutMixin)
+       ↓
+    Decoder
+       ↓
+    Output
+    ```
+    """
     
     def call(self, inputs, training=None):
         x = self.encoder(inputs)
@@ -1513,6 +1965,33 @@ def create_model(
 ) -> keras.Model:
     """
     Factory function to create models.
+    
+    **Variant Configurations**:
+    ```
+    ┌──────────┬───────┬─────────┐
+    │ Variant  │ Depth │ Filters │
+    ├──────────┼───────┼─────────┤
+    │ tiny     │   3   │   32    │
+    │ small    │   3   │   48    │
+    │ base     │   4   │   64    │
+    │ large    │   4   │   96    │
+    └──────────┴───────┴─────────┘
+    ```
+    
+    **Factory Flow**:
+    ```
+    variant='base', pretrained=True
+           ↓
+    Look up config: {depth: 4, filters: 64}
+           ↓
+    Merge with **kwargs
+           ↓
+    Model(input_shape, num_classes, **config)
+           ↓
+    (if pretrained) download_weights() → load_weights()
+           ↓
+    Return configured model
+    ```
     
     Args:
         variant: Model variant ('tiny', 'small', 'base', 'large')
@@ -1552,6 +2031,36 @@ def create_model(
 class ModelBuilder:
     """
     Builder pattern for complex model construction.
+    
+    **Intent**: Provide fluent API for constructing complex models with
+    multiple configurable components.
+    
+    **Builder Flow**:
+    ```
+    ModelBuilder()
+         │
+         ├─→ .set_backbone('resnet50')
+         │         ↓
+         │   _config['backbone'] = {'type': 'resnet50'}
+         │
+         ├─→ .set_decoder('fpn')
+         │         ↓
+         │   _config['decoder'] = {'type': 'fpn'}
+         │
+         ├─→ .add_attention('se')
+         │         ↓
+         │   _config['attention'].append({'type': 'se'})
+         │
+         ├─→ .add_head('segmentation', num_classes=21)
+         │         ↓
+         │   _config['heads'].append({...})
+         │
+         └─→ .build()
+                   ↓
+             ConfigurableModel(_config)
+                   ↓
+             Return model
+    ```
     
     Example:
         model = (ModelBuilder()
@@ -1614,7 +2123,43 @@ from keras import ops
 
 
 class TestCustomLayer:
-    """Comprehensive test suite for custom Keras layers."""
+    """
+    Comprehensive test suite for custom Keras layers.
+    
+    **Test Coverage**:
+    ```
+    ┌─────────────────────────────────────────────────────────────┐
+    │ INSTANTIATION TESTS                                         │
+    ├─────────────────────────────────────────────────────────────┤
+    │ • Valid config creates layer                                │
+    │ • Invalid config raises ValueError                          │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ FORWARD PASS TESTS                                          │
+    ├─────────────────────────────────────────────────────────────┤
+    │ • Output shape matches expected                             │
+    │ • Training vs inference mode                                │
+    │ • Variable batch sizes                                      │
+    │ • Different activations                                     │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ SERIALIZATION TESTS                                         │
+    ├─────────────────────────────────────────────────────────────┤
+    │ • get_config() complete                                     │
+    │ • from_config() reconstruction                              │
+    │ • Full save/load cycle                                      │
+    └─────────────────────────────────────────────────────────────┘
+    
+    ┌─────────────────────────────────────────────────────────────┐
+    │ SHAPE INFERENCE TESTS                                       │
+    ├─────────────────────────────────────────────────────────────┤
+    │ • compute_output_shape matches actual                       │
+    │ • Works before layer is built                               │
+    └─────────────────────────────────────────────────────────────┘
+    ```
+    """
     
     @pytest.fixture
     def layer_config(self):
@@ -1753,7 +2298,24 @@ class TestCustomLayer:
 
 ```python
 def test_complete_pipeline():
-    """Test complete training pipeline."""
+    """
+    Test complete training pipeline.
+    
+    **Pipeline Flow**:
+    ```
+    create_model('base', num_classes=10)
+           ↓
+    model.compile(optimizer, loss, metrics)
+           ↓
+    model.fit(x_train, y_train, epochs=2)
+           ↓
+    model.save('test_model.keras')
+           ↓
+    keras.models.load_model('test_model.keras')
+           ↓
+    Assert: predictions match before/after save
+    ```
+    """
     model = create_model('base', num_classes=10)
     
     model.compile(
@@ -2024,13 +2586,34 @@ def compute_output_shape(self, input_shape):
 
 When encountering issues, verify in this order:
 
-1. **✅ Registration**: `@keras.saving.register_keras_serializable()` decorator present?
-2. **✅ Sub-layer Creation**: All sub-layers created in `__init__()`?
-3. **✅ Configuration**: `get_config()` returns ALL `__init__` parameters?
-4. **✅ Build Logic**: `build()` method handles sub-layer building if needed?
-5. **✅ Output Shape**: `compute_output_shape()` implemented and uses config (not weights)?
-6. **✅ Graph Safety**: `call()` uses only `ops` functions, no Python primitives on tensors?
-7. **✅ Serialization**: Full save/load test passes?
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ DEBUG CHECKLIST                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│ 1. ✅ Registration                                              │
+│    @keras.saving.register_keras_serializable() present?         │
+│                                                                 │
+│ 2. ✅ Sub-layer Creation                                        │
+│    All sub-layers created in __init__()?                        │
+│                                                                 │
+│ 3. ✅ Configuration                                             │
+│    get_config() returns ALL __init__ parameters?                │
+│                                                                 │
+│ 4. ✅ Build Logic                                               │
+│    build() handles sub-layer building if needed?                │
+│                                                                 │
+│ 5. ✅ Output Shape                                              │
+│    compute_output_shape() implemented using config?             │
+│                                                                 │
+│ 6. ✅ Graph Safety                                              │
+│    call() uses only ops functions?                              │
+│                                                                 │
+│ 7. ✅ Serialization                                             │
+│    Full save/load test passes?                                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ### Common Errors and Solutions
 
@@ -2048,7 +2631,22 @@ When encountering issues, verify in this order:
 
 ```python
 def debug_layer_serialization(layer_class, layer_config, sample_input):
-    """Debug helper for layer serialization issues."""
+    """
+    Debug helper for layer serialization issues.
+    
+    **Debug Flow**:
+    ```
+    Try instantiation
+         ↓ success?
+    Try forward pass
+         ↓ success?
+    Check get_config() keys
+         ↓ complete?
+    Try save/load cycle
+         ↓ success?
+    ✓ All checks passed
+    ```
+    """
     try:
         layer = layer_class(**layer_config)
         output = layer(sample_input)
@@ -2082,6 +2680,25 @@ def debug_layer_serialization(layer_class, layer_config, sample_input):
 class FrameworkIntegratedLayer(keras.layers.Layer):
     """
     Custom layer demonstrating integration with dl-techniques framework.
+    
+    **Intent**: Show how to integrate custom layers with framework components
+    like TransformerLayer and RMSNorm while maintaining serialization support.
+    
+    **Architecture**:
+    ```
+    Input(shape=[batch, seq_len, hidden_size])
+           ↓
+    (if use_transformer)
+    ┌─────────────────────────────────────────────────────┐
+    │ TransformerLayer                                    │
+    │   - Multi-head self-attention (num_heads)           │
+    │   - FFN (intermediate_size = hidden_size * 4)       │
+    └─────────────────────────────────────────────────────┘
+           ↓
+    RMSNorm (Root Mean Square Layer Normalization)
+           ↓
+    Output(shape=[batch, seq_len, hidden_size])
+    ```
     
     Args:
         hidden_size: Dimensionality of the model.
@@ -2138,6 +2755,13 @@ class FrameworkIntegratedLayer(keras.layers.Layer):
             
         return self.norm(x, training=training)
 
+    def compute_output_shape(
+        self, 
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        # Output shape same as input for this layer
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -2156,11 +2780,65 @@ class WellStructuredModel(keras.Model):
     """
     Complete example of a well-structured, reusable model.
     
-    Demonstrates:
-    - Comprehensive configuration management
-    - Complete serialization support
-    - Weight compatibility across configurations
-    - Clear extension points
+    **Intent**: Demonstrate all best practices including comprehensive
+    configuration management, complete serialization support, weight
+    compatibility across configurations, and clear extension points.
+    
+    **Architecture**:
+    ```
+    Input(shape=input_shape)
+           ↓
+    ┌─────────────────────────────────────────────────────────────┐
+    │ ENCODER PATH                                                │
+    ├─────────────────────────────────────────────────────────────┤
+    │                                                             │
+    │  Level 0: blocks_per_stage × Conv2D(initial_filters)        │
+    │           ↓                                                 │
+    │  Level 1: blocks_per_stage × Conv2D(initial_filters * 2)    │
+    │           ↓                                                 │
+    │  ...                                                        │
+    │           ↓                                                 │
+    │  Level N: blocks_per_stage × Conv2D(initial_filters * 2^N)  │
+    │                                                             │
+    └─────────────────────────────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────────────────────────────┐
+    │ DECODER PATH                                                │
+    ├─────────────────────────────────────────────────────────────┤
+    │                                                             │
+    │  Level N: blocks_per_stage × Conv2D(initial_filters * 2^N)  │
+    │           ↓ (+ aux_head if enable_deep_supervision)         │
+    │  ...                                                        │
+    │           ↓                                                 │
+    │  Level 0: blocks_per_stage × Conv2D(initial_filters)        │
+    │                                                             │
+    └─────────────────────────────────────────────────────────────┘
+           ↓
+    ┌─────────────────────────────────────────────────────────────┐
+    │ OUTPUT HEAD(S)                                              │
+    ├─────────────────────────────────────────────────────────────┤
+    │                                                             │
+    │  (if include_top)                                           │
+    │    main_head: Conv2D(output_channels, kernel_size=1)        │
+    │                                                             │
+    │  (if enable_deep_supervision)                               │
+    │    aux_head_0, aux_head_1, ... from intermediate levels     │
+    │                                                             │
+    └─────────────────────────────────────────────────────────────┘
+           ↓
+    Output: main_output (or [main, aux_0, aux_1, ...])
+    ```
+    
+    **Presets**:
+    ```
+    ┌──────────┬───────┬─────────────────┬─────────────────┐
+    │ Preset   │ Depth │ Initial Filters │ Blocks/Stage    │
+    ├──────────┼───────┼─────────────────┼─────────────────┤
+    │ tiny     │   3   │       32        │        2        │
+    │ base     │   4   │       64        │        3        │
+    │ large    │   5   │       96        │        4        │
+    └──────────┴───────┴─────────────────┴─────────────────┘
+    ```
     
     Args:
         input_shape: Input dimensions (height, width, channels)
@@ -2426,5 +3104,3 @@ When designing custom Keras components:
 - [ ] Integration tests
 
 ---
-
-This guide provides a complete framework for building maintainable, reusable Keras components that integrate seamlessly with the dl-techniques framework. The modern approach is actually simpler than outdated patterns - let Keras handle the complexity while you focus on the layer logic.
