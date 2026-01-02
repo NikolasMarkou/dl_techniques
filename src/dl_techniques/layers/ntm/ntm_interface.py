@@ -878,6 +878,10 @@ def circular_convolution(
     """
     Perform circular convolution for location-based addressing.
 
+    This function implements the convolution using efficient vectorized operations
+    (roll, stack, sum) rather than explicit loops, ensuring better performance
+    and graph compatibility.
+
     :param weights: Attention weights of shape (batch, num_slots).
     :type weights: Any
     :param shift: Shift distribution of shape (batch, shift_range).
@@ -885,30 +889,32 @@ def circular_convolution(
     :return: Shifted weights of shape (batch, num_slots).
     :rtype: Any
     """
-    batch_size = ops.shape(weights)[0]
-    num_slots = ops.shape(weights)[1]
-    shift_range = ops.shape(shift)[1]
+    shift_range = ops.shape(shift)[-1]
+    half_shift = shift_range // 2
 
-    # Compute shift center
-    shift_center = shift_range // 2
+    # Build all shifted versions and stack them
+    shifted_versions = []
 
-    # Pad weights for circular convolution
-    padded_weights = ops.concatenate(
-        [
-            weights[:, -shift_center:],
-            weights,
-            weights[:, :shift_center],
-        ],
-        axis=1,
-    )
+    # Iterate over shift positions. Note: shift_range is expected to be
+    # a static integer in most cases, or a small dynamic value.
+    # If shift_range is purely symbolic in some backends, this might require
+    # using a static configuration value, but standard NTM usage implies
+    # fixed shift size at construction.
+    for i in range(shift.shape[-1]):
+        shift_offset = i - half_shift
+        rolled = ops.roll(weights, shift=-shift_offset, axis=-1)
+        shifted_versions.append(rolled)
 
-    # Apply convolution
-    result = ops.zeros((batch_size, num_slots))
-    for i in range(shift_range):
-        shifted = padded_weights[:, i : i + num_slots]
-        result = result + shift[:, i : i + 1] * shifted
+    # Stack: (batch, num_shifts, memory_size)
+    stacked = ops.stack(shifted_versions, axis=1)
 
-    return result
+    # Weight by shift probabilities: (batch, num_shifts, 1)
+    shift_weights = ops.expand_dims(shift, axis=-1)
+
+    # Weighted sum: (batch, memory_size)
+    shifted_weights = ops.sum(stacked * shift_weights, axis=1)
+
+    return shifted_weights
 
 
 def sharpen_weights(

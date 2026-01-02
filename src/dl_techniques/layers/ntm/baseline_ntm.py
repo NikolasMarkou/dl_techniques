@@ -1189,7 +1189,7 @@ class NTMCell(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="NTM")
+@keras.saving.register_keras_serializable()
 class NeuralTuringMachine(BaseNTM):
     """
     Complete Neural Turing Machine Layer.

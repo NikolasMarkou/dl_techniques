@@ -22,6 +22,11 @@ import keras
 from keras import ops
 from typing import Any
 
+from .ntm_interface import (
+    cosine_similarity,
+    circular_convolution,
+)
+
 
 # ---------------------------------------------------------------------
 # DifferentiableAddressingHead
@@ -212,64 +217,6 @@ class DifferentiableAddressingHead(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _cosine_similarity(
-        self,
-        query: keras.KerasTensor,
-        keys: keras.KerasTensor,
-        eps: float = 1e-8,
-    ) -> keras.KerasTensor:
-        """
-        Compute cosine similarity between query and keys.
-
-        :param query: Query tensor of shape (batch, content_dim).
-        :type query: keras.KerasTensor
-        :param keys: Keys tensor of shape (batch, memory_size, content_dim).
-        :type keys: keras.KerasTensor
-        :param eps: Small constant for numerical stability.
-        :type eps: float
-        :return: Similarity scores of shape (batch, memory_size).
-        :rtype: keras.KerasTensor
-        """
-        query_norm = query / (ops.norm(query, axis=-1, keepdims=True) + eps)
-        keys_norm = keys / (ops.norm(keys, axis=-1, keepdims=True) + eps)
-        similarity = ops.einsum("bd,bmd->bm", query_norm, keys_norm)
-        return similarity
-
-    def _circular_convolve(
-        self,
-        weights: keras.KerasTensor,
-        shift_kernel: keras.KerasTensor,
-    ) -> keras.KerasTensor:
-        """
-        Apply circular convolution for location-based shifting.
-
-        :param weights: Attention weights of shape (batch, memory_size).
-        :type weights: keras.KerasTensor
-        :param shift_kernel: Shift distribution of shape (batch, num_shifts).
-        :type shift_kernel: keras.KerasTensor
-        :return: Shifted weights of shape (batch, memory_size).
-        :rtype: keras.KerasTensor
-        """
-        half_shift = self.num_shifts // 2
-
-        # Build all shifted versions and stack them
-        shifted_versions = []
-        for i in range(self.num_shifts):
-            shift_offset = i - half_shift
-            rolled = ops.roll(weights, shift=-shift_offset, axis=-1)
-            shifted_versions.append(rolled)
-
-        # Stack: (batch, num_shifts, memory_size)
-        stacked = ops.stack(shifted_versions, axis=1)
-
-        # Weight by shift probabilities: (batch, num_shifts, 1)
-        shift_weights = ops.expand_dims(shift_kernel, axis=-1)
-
-        # Weighted sum: (batch, memory_size)
-        shifted_weights = ops.sum(stacked * shift_weights, axis=1)
-
-        return shifted_weights
-
     def call(
         self,
         memory: keras.KerasTensor,
@@ -304,7 +251,8 @@ class DifferentiableAddressingHead(keras.layers.Layer):
             key = self.key_proj(controller_state)
             beta = self.beta_proj(controller_state) + 1.0
 
-            similarity = self._cosine_similarity(key, memory)
+            # Use shared utility instead of internal helper
+            similarity = cosine_similarity(key, memory)
             content_weights = ops.softmax(beta * similarity, axis=-1)
         else:
             content_weights = previous_weights
@@ -321,7 +269,8 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         # Step 3: Location-based shift convolution
         if self.use_location_addressing:
             shift_kernel = self.shift_proj(controller_state)
-            shifted_weights = self._circular_convolve(gated_weights, shift_kernel)
+            # Use shared optimized utility instead of internal helper
+            shifted_weights = circular_convolution(gated_weights, shift_kernel)
         else:
             shifted_weights = gated_weights
 
