@@ -375,7 +375,9 @@ class NTMCell(keras.layers.Layer):
 
     @property
     def output_size(self):
-        return self.config.controller_dim
+        # Cell output = Concat(Controller Output, All Read Vectors)
+        # This allows direct pass-through from memory to final projection
+        return self.config.controller_dim + (self.config.num_read_heads * self.config.memory_dim)
 
     def call(self, inputs, states, training=None):
         # Unpack states
@@ -488,8 +490,11 @@ class NTMCell(keras.layers.Layer):
         # Read Vectors
         new_states.extend(new_read_vectors_list)
 
-        # Output of the cell is the controller output (will be projected by NTM layer)
-        return controller_output, new_states
+        # Output of the cell includes both controller output and read vectors
+        flat_new_read_vectors = ops.concatenate(new_read_vectors_list, axis=-1)
+        cell_output = ops.concatenate([controller_output, flat_new_read_vectors], axis=-1)
+
+        return cell_output, new_states
 
     def get_initial_state(self, inputs=None, batch_size=None, dtype=None):
         # Helper to create initial zero tensors
@@ -556,8 +561,9 @@ class NeuralTuringMachine(BaseNTM):
         self.rnn.build(input_shape)
 
         # Build projection
-        # Input to projection is controller output dim
-        self.output_projection.build((None, self.config.controller_dim))
+        # Input to projection is cell output size (controller + read vectors)
+        out_dim = self.ntm_cell.output_size
+        self.output_projection.build((None, out_dim))
 
         self.built = True
 
@@ -580,7 +586,7 @@ class NeuralTuringMachine(BaseNTM):
         # inputs: (batch, seq_len, features)
 
         # 1. Run RNN
-        # rnn_output: (batch, seq_len, controller_dim)
+        # rnn_output: (batch, seq_len, cell_output_size)
         # final_states: list of tensors
         rnn_result = self.rnn(inputs, initial_state=initial_state, training=training)
 

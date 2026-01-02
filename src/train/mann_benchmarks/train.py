@@ -14,16 +14,17 @@ from . import CopyTaskGenerator, CopyTaskConfig
 
 def main():
     # 1. Generate copy task data
+    # Increase samples to allow convergence
     config = CopyTaskConfig(
-        sequence_length=5,  # Short sequences for quick test
-        vector_size=4,  # Small vectors
-        num_samples=1000,
+        sequence_length=5,
+        vector_size=4,
+        num_samples=10000,
     )
     generator = CopyTaskGenerator(config)
     data = generator.generate()
 
-    print(f"Input shape:  {data.inputs.shape}")  # (1000, 13, 6)
-    print(f"Target shape: {data.targets.shape}")  # (1000, 13, 4)
+    print(f"Input shape:  {data.inputs.shape}")
+    print(f"Target shape: {data.targets.shape}")
 
     # 2. Create NTM model
     seq_len = data.inputs.shape[1]
@@ -41,10 +42,12 @@ def main():
     outputs = keras.layers.Activation('sigmoid')(x)
 
     model = keras.Model(inputs, outputs)
+
+    # Lower learning rate and keep clipping
     model.compile(
-        optimizer=keras.optimizers.Adam(1e-3),
+        optimizer=keras.optimizers.Adam(learning_rate=5e-4, clipnorm=10.0),
         loss='binary_crossentropy',
-        metrics=['accuracy'],
+        metrics=[keras.metrics.BinaryAccuracy(name="acc")],
     )
 
     print(f"\nModel parameters: {model.count_params():,}")
@@ -55,20 +58,42 @@ def main():
         data.inputs,
         data.targets,
         sample_weight=data.masks,
-        batch_size=32,
-        epochs=20,
+        batch_size=64,
+        epochs=30,
         validation_split=0.1,
         verbose=1,
     )
 
     # 4. Evaluate
     print("\nEvaluating...")
-    preds = model.predict(data.inputs[:10], verbose=0)
+    num_eval = 20
+    eval_inputs = data.inputs[:num_eval]
+    eval_targets = data.targets[:num_eval]
+    eval_masks = data.masks[:num_eval]
+
+    preds = model.predict(eval_inputs, verbose=0)
     preds_binary = (preds > 0.5).astype(float)
 
-    # Check sequence accuracy
-    correct = np.all(np.isclose(preds_binary, data.targets[:10], atol=0.1), axis=(1, 2))
-    print(f"Sequence accuracy (10 samples): {correct.mean():.2%}")
+    seq_accs = []
+    bit_accs = []
+
+    for i in range(num_eval):
+        # Only evaluate on the output sequence part (where mask is 1)
+        mask = eval_masks[i] == 1
+        p = preds_binary[i][mask]
+        t = eval_targets[i][mask]
+
+        # Sequence accuracy (all bits match)
+        if np.array_equal(p, t):
+            seq_accs.append(1)
+        else:
+            seq_accs.append(0)
+
+        # Bit accuracy (fraction of bits matching)
+        bit_accs.append(np.mean(p == t))
+
+    print(f"Mean Bit Accuracy (masked): {np.mean(bit_accs):.2%}")
+    print(f"Sequence Accuracy (masked): {np.mean(seq_accs):.2%}")
 
 
 if __name__ == '__main__':
