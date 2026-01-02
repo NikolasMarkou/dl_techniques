@@ -17,9 +17,8 @@ Associative Recall, etc., based on a task-specific control input.
 import os
 import keras
 import numpy as np
-import tensorflow as tf
+from typing import Dict, List, Tuple
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # Local Imports
@@ -84,10 +83,10 @@ class MultitaskNTMConfig:
     # Training Hyperparameters
     batch_size: int = 64
     num_epochs: int = 100
-    steps_per_epoch: int = 100
+    steps_per_epoch: int = 1000
     validation_steps: int = 20
     learning_rate: float = 1e-4
-    clip_norm: float = 10.0
+    clip_norm: float = 1.0
 
     # Paths
     save_dir: str = "results/multitask_ntm"
@@ -95,7 +94,7 @@ class MultitaskNTMConfig:
     log_dir: str = "results/multitask_ntm/logs"
 
     # Evaluation
-    num_eval_samples: int = 100
+    num_eval_samples: int = 1000
 
     # Task Registry
     task_map: Dict[str, int] = field(default_factory=lambda: {
