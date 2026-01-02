@@ -9,6 +9,10 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .ntm_interface import (
     BaseMemory,
     BaseHead,
@@ -22,6 +26,7 @@ from .ntm_interface import (
     sharpen_weights,
 )
 
+# ---------------------------------------------------------------------
 
 class NTMMemory(BaseMemory):
     """
@@ -85,6 +90,7 @@ class NTMMemory(BaseMemory):
             precedence=memory_state.precedence
         )
 
+# ---------------------------------------------------------------------
 
 class NTMReadHead(BaseHead):
     """
@@ -157,6 +163,7 @@ class NTMReadHead(BaseHead):
 
         return final_weights, new_state
 
+# ---------------------------------------------------------------------
 
 class NTMWriteHead(BaseHead):
     """
@@ -222,6 +229,7 @@ class NTMWriteHead(BaseHead):
 
         return final_weights, new_state
 
+# ---------------------------------------------------------------------
 
 class NTMController(BaseController):
     """
@@ -532,6 +540,7 @@ class NTMCell(keras.layers.Layer):
 
         return states
 
+# ---------------------------------------------------------------------
 
 class NeuralTuringMachine(BaseNTM):
     """
@@ -612,6 +621,10 @@ class NeuralTuringMachine(BaseNTM):
     def reset_memory(self, batch_size):
         pass
 
+# ---------------------------------------------------------------------
+# utility functions
+# ---------------------------------------------------------------------
+
 def create_ntm(
     memory_size: int = 128,
     memory_dim: int = 64,
@@ -634,3 +647,5 @@ def create_ntm(
 
     layer = NeuralTuringMachine(config, output_dim=output_dim)
     return layer
+
+# ---------------------------------------------------------------------
