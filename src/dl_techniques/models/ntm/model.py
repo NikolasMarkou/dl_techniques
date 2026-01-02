@@ -30,7 +30,7 @@ from dl_techniques.layers.ntm import NTMCell, NTMConfig
 # NTM Model
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="DLTechniques")
+@keras.saving.register_keras_serializable()
 class NTMModel(keras.Model):
     """
     Neural Turing Machine Model.
