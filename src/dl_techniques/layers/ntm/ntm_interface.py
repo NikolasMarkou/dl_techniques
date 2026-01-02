@@ -32,7 +32,6 @@ from typing import (
     List, 
     Literal,
     TypeVar,
-    Generic,
 )
 
 

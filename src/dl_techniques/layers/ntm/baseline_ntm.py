@@ -7,8 +7,7 @@ Graves et al., 2014, updated for Keras 3 compatibility.
 
 import keras
 from keras import ops
-import numpy as np
-from typing import Optional, Tuple, List, Any, Dict
+from typing import Optional, Tuple, Any
 
 from .ntm_interface import (
     BaseMemory,
@@ -17,9 +16,7 @@ from .ntm_interface import (
     BaseNTM,
     MemoryState,
     HeadState,
-    NTMOutput,
     NTMConfig,
-    AddressingMode,
     cosine_similarity,
     circular_convolution,
     sharpen_weights,

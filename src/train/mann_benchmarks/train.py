@@ -1,16 +1,15 @@
-"""
-Minimal NTM Quick Start Example.
-
-Run: python quick_start_ntm.py
-"""
-
 import keras
 import numpy as np
 
-# Imports - adjust paths based on your project structure
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ntm import create_ntm
 from . import CopyTaskGenerator, CopyTaskConfig
 
+# ---------------------------------------------------------------------
 
 def main():
     # 1. Generate copy task data
@@ -23,8 +22,8 @@ def main():
     generator = CopyTaskGenerator(config)
     data = generator.generate()
 
-    print(f"Input shape:  {data.inputs.shape}")
-    print(f"Target shape: {data.targets.shape}")
+    logger.info(f"Input shape:  {data.inputs.shape}")
+    logger.info(f"Target shape: {data.targets.shape}")
 
     # 2. Create NTM model
     seq_len = data.inputs.shape[1]
@@ -50,22 +49,22 @@ def main():
         metrics=[keras.metrics.BinaryAccuracy(name="acc")],
     )
 
-    print(f"\nModel parameters: {model.count_params():,}")
+    logger.info(f"Model parameters: {model.count_params():,}")
 
     # 3. Train
-    print("\nTraining...")
+    logger.info("Training...")
     model.fit(
         data.inputs,
         data.targets,
         sample_weight=data.masks,
         batch_size=64,
-        epochs=30,
+        epochs=100,
         validation_split=0.1,
         verbose=1,
     )
 
     # 4. Evaluate
-    print("\nEvaluating...")
+    logger.info("Evaluating...")
     num_eval = 20
     eval_inputs = data.inputs[:num_eval]
     eval_targets = data.targets[:num_eval]
@@ -92,9 +91,10 @@ def main():
         # Bit accuracy (fraction of bits matching)
         bit_accs.append(np.mean(p == t))
 
-    print(f"Mean Bit Accuracy (masked): {np.mean(bit_accs):.2%}")
-    print(f"Sequence Accuracy (masked): {np.mean(seq_accs):.2%}")
+    logger.info(f"Mean Bit Accuracy (masked): {np.mean(bit_accs):.2%}")
+    logger.info(f"Sequence Accuracy (masked): {np.mean(seq_accs):.2%}")
 
+# ---------------------------------------------------------------------
 
 if __name__ == '__main__':
     main()
