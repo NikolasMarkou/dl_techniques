@@ -5,11 +5,11 @@ This module provides metrics for evaluating MANN performance including
 accuracy metrics, generalization metrics, memory-specific metrics, and
 efficiency metrics.
 """
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import keras
 import numpy as np
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 @dataclass

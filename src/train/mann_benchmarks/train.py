@@ -22,8 +22,8 @@ def main():
     generator = CopyTaskGenerator(config)
     data = generator.generate()
 
-    print(f"Input shape:  {data.inputs.shape}")  # (1000, 11, 6)
-    print(f"Target shape: {data.targets.shape}")  # (1000, 11, 4)
+    print(f"Input shape:  {data.inputs.shape}")  # (1000, 13, 6)
+    print(f"Target shape: {data.targets.shape}")  # (1000, 13, 4)
 
     # 2. Create NTM model
     seq_len = data.inputs.shape[1]
@@ -54,6 +54,7 @@ def main():
     model.fit(
         data.inputs,
         data.targets,
+        sample_weight=data.masks,
         batch_size=32,
         epochs=20,
         validation_split=0.1,

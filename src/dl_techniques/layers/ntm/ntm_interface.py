@@ -502,33 +502,37 @@ class BaseNTM(keras.layers.Layer, ABC):
     
     Attributes:
         config: NTM configuration object.
+        output_dim: Dimension of the output vector.
         memory: Memory module.
         controller: Controller network.
         read_heads: List of read heads.
         write_heads: List of write heads.
     """
-    
+
     def __init__(
         self,
         config: NTMConfig,
+        output_dim: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         """
         Initialize the NTM.
-        
+
         Args:
             config: NTM configuration object.
+            output_dim: Dimension of the output vector.
             **kwargs: Additional arguments for keras.layers.Layer.
         """
         super().__init__(**kwargs)
         self.config = config
-        
+        self.output_dim = output_dim
+
         # Subclasses must initialize these
         self.memory: Optional[BaseMemory] = None
         self.controller: Optional[BaseController] = None
         self.read_heads: List[BaseHead] = []
         self.write_heads: List[BaseHead] = []
-    
+
     @abstractmethod
     def initialize_state(
         self,
@@ -536,10 +540,10 @@ class BaseNTM(keras.layers.Layer, ABC):
     ) -> Tuple[MemoryState, List[HeadState], Optional[Any]]:
         """
         Initialize all states for a new sequence.
-        
+
         Args:
             batch_size: Number of sequences in the batch.
-            
+
         Returns:
             Tuple of:
                 - Initial memory state.
@@ -547,7 +551,7 @@ class BaseNTM(keras.layers.Layer, ABC):
                 - Initial controller state.
         """
         pass
-    
+
     @abstractmethod
     def step(
         self,
@@ -559,19 +563,19 @@ class BaseNTM(keras.layers.Layer, ABC):
     ) -> NTMOutput:
         """
         Perform a single timestep of the NTM.
-        
+
         Args:
             inputs: Input at current timestep, shape (batch, input_dim).
             memory_state: Current memory state.
             head_states: Current head states.
             controller_state: Current controller state.
             training: Whether in training mode.
-            
+
         Returns:
             NTMOutput containing all outputs and updated states.
         """
         pass
-    
+
     def call(
         self,
         inputs: Any,
@@ -582,20 +586,20 @@ class BaseNTM(keras.layers.Layer, ABC):
     ) -> Union[Any, Tuple[Any, ...]]:
         """
         Process a sequence through the NTM.
-        
+
         Args:
             inputs: Input sequence of shape (batch, seq_len, input_dim).
             initial_state: Optional tuple of initial states.
             training: Whether in training mode.
             return_sequences: Whether to return outputs at all timesteps.
             return_state: Whether to return final states.
-            
+
         Returns:
             Output tensor(s) and optionally final states.
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
-        
+
         # Initialize states
         if initial_state is None:
             memory_state, head_states, controller_state = self.initialize_state(
@@ -603,7 +607,7 @@ class BaseNTM(keras.layers.Layer, ABC):
             )
         else:
             memory_state, head_states, controller_state = initial_state
-        
+
         # Process sequence
         outputs = []
         for t in range(seq_len):
@@ -615,46 +619,68 @@ class BaseNTM(keras.layers.Layer, ABC):
                 controller_state,
                 training=training,
             )
-            
+
             outputs.append(ntm_output.output)
             memory_state = ntm_output.memory_state
             head_states = ntm_output.head_states
             controller_state = ntm_output.controller_state
-        
+
         # Stack outputs
         if return_sequences:
             output = ops.stack(outputs, axis=1)  # (batch, seq_len, output_dim)
         else:
             output = outputs[-1]  # (batch, output_dim)
-        
+
         if return_state:
             return output, (memory_state, head_states, controller_state)
         return output
-    
+
     @abstractmethod
     def get_memory_state(self) -> Optional[MemoryState]:
         """
         Get the current memory state.
-        
+
         Returns:
             Current memory state or None if not initialized.
         """
         pass
-    
+
     @abstractmethod
     def reset_memory(self, batch_size: int) -> None:
         """
         Reset memory to initial state.
-        
+
         Args:
             batch_size: Number of sequences in the batch.
         """
         pass
-    
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        """
+        Compute output shape of the NTM layer.
+
+        Args:
+            input_shape: Shape of the input tensor (batch, seq_len, input_dim).
+
+        Returns:
+            Output shape (batch, seq_len, output_dim) assuming return_sequences=True.
+        """
+        if self.output_dim is None:
+            raise ValueError(
+                "output_dim must be provided in __init__ for compute_output_shape."
+            )
+
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
+
+        # Assuming return_sequences=True as per call() default
+        return (batch_size, seq_len, self.output_dim)
+
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
         config.update({
+            'output_dim': self.output_dim,
             'config': {
                 'memory_size': self.config.memory_size,
                 'memory_dim': self.config.memory_dim,
@@ -670,16 +696,18 @@ class BaseNTM(keras.layers.Layer, ABC):
             }
         })
         return config
-    
+
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'BaseNTM':
         """Create layer from configuration."""
-        ntm_config_dict = config.pop('config')
-        ntm_config_dict['addressing_mode'] = AddressingMode[
-            ntm_config_dict['addressing_mode']
-        ]
-        ntm_config = NTMConfig(**ntm_config_dict)
-        return cls(config=ntm_config, **config)
+        if 'config' in config:
+            ntm_config_dict = config.pop('config')
+            ntm_config_dict['addressing_mode'] = AddressingMode[
+                ntm_config_dict['addressing_mode']
+            ]
+            ntm_config = NTMConfig(**ntm_config_dict)
+            return cls(config=ntm_config, **config)
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -693,21 +721,21 @@ def cosine_similarity(
 ) -> Any:
     """
     Compute cosine similarity between two tensors.
-    
+
     Args:
         a: First tensor of shape (..., dim).
         b: Second tensor of shape (..., dim).
         epsilon: Small constant for numerical stability.
-        
+
     Returns:
         Cosine similarity of shape (...,).
     """
     a_norm = ops.sqrt(ops.sum(ops.square(a), axis=-1, keepdims=True) + epsilon)
     b_norm = ops.sqrt(ops.sum(ops.square(b), axis=-1, keepdims=True) + epsilon)
-    
+
     a_normalized = a / a_norm
     b_normalized = b / b_norm
-    
+
     return ops.sum(a_normalized * b_normalized, axis=-1)
 
 
@@ -717,34 +745,34 @@ def circular_convolution(
 ) -> Any:
     """
     Perform circular convolution for location-based addressing.
-    
+
     Args:
         weights: Attention weights of shape (batch, num_slots).
         shift: Shift distribution of shape (batch, shift_range).
-        
+
     Returns:
         Shifted weights of shape (batch, num_slots).
     """
     batch_size = ops.shape(weights)[0]
     num_slots = ops.shape(weights)[1]
     shift_range = ops.shape(shift)[1]
-    
+
     # Compute shift center
     shift_center = shift_range // 2
-    
+
     # Pad weights for circular convolution
     padded_weights = ops.concatenate([
         weights[:, -shift_center:],
         weights,
         weights[:, :shift_center],
     ], axis=1)
-    
+
     # Apply convolution
     result = ops.zeros((batch_size, num_slots))
     for i in range(shift_range):
         shifted = padded_weights[:, i:i + num_slots]
         result = result + shift[:, i:i+1] * shifted
-    
+
     return result
 
 
@@ -755,18 +783,18 @@ def sharpen_weights(
 ) -> Any:
     """
     Sharpen attention weights using gamma parameter.
-    
+
     Args:
         weights: Attention weights of shape (batch, num_slots).
         gamma: Sharpening factor of shape (batch, 1), >= 1.
         epsilon: Small constant for numerical stability.
-        
+
     Returns:
         Sharpened weights of shape (batch, num_slots).
     """
     # Ensure gamma >= 1
     gamma = ops.maximum(gamma, 1.0)
-    
+
     # Raise to power and normalize
     sharpened = ops.power(weights + epsilon, gamma)
     return sharpened / (ops.sum(sharpened, axis=-1, keepdims=True) + epsilon)
