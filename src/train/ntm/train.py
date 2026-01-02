@@ -64,13 +64,13 @@ VECTOR_SIZE = 8
 
 # NUM_SAMPLES: Total number of training samples to generate.
 #              NTM requires many samples to converge properly.
-NUM_SAMPLES = 50000
+NUM_SAMPLES = 100000
 
 # ---------------------------------------------------------------------
 # Training Hyperparameters
 # ---------------------------------------------------------------------
 # BATCH_SIZE: Number of samples per gradient update.
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
 # LEARNING_RATE: Initial learning rate for the optimizer.
 #                NTM is sensitive to learning rate; smaller is often better.
@@ -78,7 +78,7 @@ LEARNING_RATE = 1e-4
 
 # CLIP_NORM: Maximum gradient norm for gradient clipping.
 #            Crucial for NTM stability due to complex gradient flow.
-CLIP_NORM = 10.0
+CLIP_NORM = 1.0
 
 # EPOCHS: Maximum number of training epochs.
 EPOCHS = 100
@@ -93,7 +93,7 @@ VALIDATION_SPLIT = 0.1
 LR_REDUCE_FACTOR = 0.5
 
 # LR_REDUCE_PATIENCE: Number of epochs with no improvement before reducing LR.
-LR_REDUCE_PATIENCE = 5
+LR_REDUCE_PATIENCE = 25
 
 # MIN_LEARNING_RATE: Minimum learning rate after reductions.
 MIN_LEARNING_RATE = 1e-6
