@@ -2,12 +2,14 @@
 Baseline Neural Turing Machine Implementation.
 
 This module provides a reference implementation of the NTM described in
-Graves et al., 2014, updated for Keras 3 compatibility.
+Graves et al., 2014, updated for Keras 3 compatibility with robust serialization
+and graph-safe operations.
 """
 
 import keras
 from keras import ops
-from typing import Optional, Tuple, Any
+from keras import layers
+from typing import Optional, Tuple, Any, Dict, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -28,17 +30,20 @@ from .ntm_interface import (
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class NTMMemory(BaseMemory):
     """
-    Standard NTM Memory Matrix.
+    Standard NTM Memory Matrix utility.
+
+    Manages read/write operations on the memory matrix.
     """
+
+    def __init__(self, memory_size: int, memory_dim: int, **kwargs):
+        super().__init__(memory_size=memory_size, memory_dim=memory_dim, **kwargs)
 
     def initialize_state(self, batch_size: int) -> MemoryState:
         # Initialize memory with small random values or learned initialization
-        # Here we use constant initialization for simplicity/stability
         memory = ops.ones((batch_size, self.memory_size, self.memory_dim)) * 1e-6
-
-        # Usage not used in standard NTM, but part of interface
         usage = ops.zeros((batch_size, self.memory_size))
 
         return MemoryState(memory=memory, usage=usage)
@@ -46,12 +51,11 @@ class NTMMemory(BaseMemory):
     def read(self, memory_state: MemoryState, read_weights: Any) -> Any:
         # read_weights: (batch, num_slots)
         # memory: (batch, num_slots, memory_dim)
-        # output: (batch, memory_dim)
 
         # Expand weights for broadcasting: (batch, num_slots, 1)
         weights_expanded = ops.expand_dims(read_weights, axis=-1)
 
-        # Weighted sum over memory slots
+        # Weighted sum over memory slots -> (batch, memory_dim)
         read_vector = ops.sum(memory_state.memory * weights_expanded, axis=1)
         return read_vector
 
@@ -62,10 +66,6 @@ class NTMMemory(BaseMemory):
         erase_vector: Any,
         add_vector: Any,
     ) -> MemoryState:
-        # write_weights: (batch, num_slots)
-        # erase_vector: (batch, memory_dim)
-        # add_vector: (batch, memory_dim)
-
         prev_memory = memory_state.memory
 
         # Expand dims for broadcasting
@@ -90,30 +90,50 @@ class NTMMemory(BaseMemory):
             precedence=memory_state.precedence
         )
 
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        # BaseMemory stores memory_size/dim, ensuring they are in config
+        return config
+
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class NTMReadHead(BaseHead):
     """
     Standard NTM Read Head.
+    Projects controller output to addressing parameters and reads from memory.
     """
 
+    def __init__(
+        self,
+        memory_size: int,
+        memory_dim: int,
+        addressing_mode: str = 'content_and_location',
+        shift_range: int = 3,
+        **kwargs
+    ):
+        super().__init__(
+            memory_size=memory_size,
+            memory_dim=memory_dim,
+            addressing_mode=addressing_mode,
+            shift_range=shift_range,
+            **kwargs
+        )
+
+        # Create sub-layers in __init__ (Golden Rule)
+        self.key_dense = layers.Dense(memory_dim, name="key")
+        self.beta_dense = layers.Dense(1, activation="softplus", name="beta")
+        self.gate_dense = layers.Dense(1, activation="sigmoid", name="gate")
+        self.shift_dense = layers.Dense(shift_range, activation="softmax", name="shift")
+        self.gamma_dense = layers.Dense(1, activation="softplus", name="gamma")
+
     def build(self, input_shape):
-        # input_shape comes from controller output
-        # We need dense layers to project controller output to head parameters
-
-        # Parameters needed:
-        # k (key): memory_dim
-        # beta (strength): 1
-        # g (gate): 1
-        # s (shift): shift_range
-        # gamma (sharpening): 1
-
-        self.key_dense = keras.layers.Dense(self.memory_dim, name="key")
-        self.beta_dense = keras.layers.Dense(1, activation="softplus", name="beta")
-        self.gate_dense = keras.layers.Dense(1, activation="sigmoid", name="gate")
-        self.shift_dense = keras.layers.Dense(self.shift_range, activation="softmax", name="shift")
-        self.gamma_dense = keras.layers.Dense(1, activation="softplus", name="gamma")
-
+        """Build sub-layers explicitly."""
+        self.key_dense.build(input_shape)
+        self.beta_dense.build(input_shape)
+        self.gate_dense.build(input_shape)
+        self.shift_dense.build(input_shape)
+        self.gamma_dense.build(input_shape)
         super().build(input_shape)
 
     def content_addressing(self, key: Any, beta: Any, memory: Any) -> Any:
@@ -134,22 +154,16 @@ class NTMReadHead(BaseHead):
         gamma = self.gamma_dense(controller_output) + 1.0 # (batch, 1), gamma >= 1
 
         # 2. Content Addressing
-        # w_c = softmax(beta * cosine_sim(k, M))
-        # memory_state.memory: (batch, slots, mem_dim)
-        # key: (batch, mem_dim) -> expand to (batch, 1, mem_dim)
         key_expanded = ops.expand_dims(key, axis=1)
         content_weights = self.content_addressing(key_expanded, beta, memory_state.memory)
 
         # 3. Interpolation (Gating)
-        # w_g = g * w_c + (1 - g) * w_{t-1}
         gated_weights = gate * content_weights + (1.0 - gate) * prev_weights
 
         # 4. Convolutional Shift
-        # w_tilde = conv(w_g, s)
         shifted_weights = circular_convolution(gated_weights, shift)
 
         # 5. Sharpening
-        # w = w_tilde ^ gamma / sum(...)
         final_weights = sharpen_weights(shifted_weights, gamma)
 
         new_state = HeadState(
@@ -163,23 +177,66 @@ class NTMReadHead(BaseHead):
 
         return final_weights, new_state
 
+    def call(self, inputs, **kwargs):
+        # BaseHead doesn't strictly define call since it's used imperatively in Cell,
+        # but implementing it enables standard layer checks.
+        # This is a placeholder as Heads are typically called via compute_addressing.
+        return inputs
+
+    def compute_output_shape(self, input_shape):
+        # Input: Controller output (Batch, Ctrl_Dim)
+        # Output: Weights (Batch, Memory_Size)
+        return (input_shape[0], self.memory_size)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        # BaseHead config should handle init params
+        return config
+
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class NTMWriteHead(BaseHead):
     """
     Standard NTM Write Head.
+    Includes erase and add vectors for memory modification.
     """
 
-    def build(self, input_shape):
-        # Same addressing params as ReadHead, plus erase and add vectors
-        self.key_dense = keras.layers.Dense(self.memory_dim, name="key")
-        self.beta_dense = keras.layers.Dense(1, activation="softplus", name="beta")
-        self.gate_dense = keras.layers.Dense(1, activation="sigmoid", name="gate")
-        self.shift_dense = keras.layers.Dense(self.shift_range, activation="softmax", name="shift")
-        self.gamma_dense = keras.layers.Dense(1, activation="softplus", name="gamma")
+    def __init__(
+        self,
+        memory_size: int,
+        memory_dim: int,
+        addressing_mode: str = 'content_and_location',
+        shift_range: int = 3,
+        **kwargs
+    ):
+        super().__init__(
+            memory_size=memory_size,
+            memory_dim=memory_dim,
+            addressing_mode=addressing_mode,
+            shift_range=shift_range,
+            **kwargs
+        )
 
-        self.erase_dense = keras.layers.Dense(self.memory_dim, activation="sigmoid", name="erase")
-        self.add_dense = keras.layers.Dense(self.memory_dim, activation="tanh", name="add") # or sigmoid/linear
+        # Create sub-layers in __init__
+        self.key_dense = layers.Dense(memory_dim, name="key")
+        self.beta_dense = layers.Dense(1, activation="softplus", name="beta")
+        self.gate_dense = layers.Dense(1, activation="sigmoid", name="gate")
+        self.shift_dense = layers.Dense(shift_range, activation="softmax", name="shift")
+        self.gamma_dense = layers.Dense(1, activation="softplus", name="gamma")
+
+        self.erase_dense = layers.Dense(memory_dim, activation="sigmoid", name="erase")
+        self.add_dense = layers.Dense(memory_dim, activation="tanh", name="add")
+
+    def build(self, input_shape):
+        self.key_dense.build(input_shape)
+        self.beta_dense.build(input_shape)
+        self.gate_dense.build(input_shape)
+        self.shift_dense.build(input_shape)
+        self.gamma_dense.build(input_shape)
+
+        self.erase_dense.build(input_shape)
+        self.add_dense.build(input_shape)
 
         super().build(input_shape)
 
@@ -229,46 +286,47 @@ class NTMWriteHead(BaseHead):
 
         return final_weights, new_state
 
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.memory_size)
+
+    def get_config(self) -> Dict[str, Any]:
+        return super().get_config()
+
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class NTMController(BaseController):
     """
     Standard NTM Controller (LSTM/FeedForward).
     """
 
-    def __init__(self, controller_dim, controller_type='lstm', **kwargs):
-        super().__init__(controller_dim, controller_type, **kwargs)
-        self.cell = None
+    def __init__(self, controller_dim: int, controller_type: str = 'lstm', **kwargs):
+        super().__init__(controller_dim=controller_dim, controller_type=controller_type, **kwargs)
+
+        # Create cell in __init__ (Golden Rule)
+        if self.controller_type == 'lstm':
+            self.cell = layers.LSTMCell(self.controller_dim)
+        elif self.controller_type == 'gru':
+            self.cell = layers.GRUCell(self.controller_dim)
+        else:
+            self.cell = layers.Dense(self.controller_dim, activation='relu')
 
     def build(self, input_shape):
         """
         Explicitly build the internal cell based on input shape.
-        input_shape: (batch_size, input_dim + total_read_dim)
         """
-        # Ensure input_shape is a tuple of integers/None
         if isinstance(input_shape, (list, tuple)):
-             # Handle case where input_shape might be a list of shapes if called incorrectly
              if len(input_shape) > 0 and isinstance(input_shape[0], (list, tuple)):
                  input_shape = input_shape[0]
-
-        if self.controller_type == 'lstm':
-            self.cell = keras.layers.LSTMCell(self.controller_dim)
-        elif self.controller_type == 'gru':
-            self.cell = keras.layers.GRUCell(self.controller_dim)
-        else:
-            self.cell = keras.layers.Dense(self.controller_dim, activation='relu')
 
         # Manually trigger build on the cell
         if hasattr(self.cell, 'build'):
              self.cell.build(input_shape)
 
-        self.built = True
+        super().build(input_shape)
 
     def initialize_state(self, batch_size: int) -> Optional[Any]:
         if self.controller_type in ['lstm', 'gru']:
-            # Get initial state from the cell
-            # Keras cells usually take (batch_size, dtype) for get_initial_state
-            # But we might need to construct it manually if using raw cells outside RNN
             return self.cell.get_initial_state(batch_size=batch_size, dtype="float32")
         return None
 
@@ -286,36 +344,56 @@ class NTMController(BaseController):
             output = self.cell(inputs, training=training)
             return output, None
 
+    def compute_output_shape(self, input_shape):
+        # Input: (Batch, Input_Dim)
+        # Output: (Batch, Controller_Dim)
+        return (input_shape[0], self.controller_dim)
 
-class NTMCell(keras.layers.Layer):
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        # BaseController adds controller_dim, controller_type
+        return config
+
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class NTMCell(layers.Layer):
     """
     NTM Cell processing a single timestep.
     Combines Controller, Memory, and Heads.
     """
 
-    def __init__(self, config: NTMConfig, **kwargs):
+    def __init__(self, config: Union[NTMConfig, Dict[str, Any]], **kwargs):
         super().__init__(**kwargs)
-        self.config = config
 
-        self.memory = NTMMemory(config.memory_size, config.memory_dim)
-        self.controller = NTMController(config.controller_dim, config.controller_type)
+        # Handle reconstruction from dict (deserialization) or NTMConfig object
+        if isinstance(config, dict):
+            # Check if this is a serialized NTMConfig
+            self.config = NTMConfig(**config)
+        else:
+            self.config = config
+
+        self.memory = NTMMemory(self.config.memory_size, self.config.memory_dim)
+        self.controller = NTMController(self.config.controller_dim, self.config.controller_type)
 
         self.read_heads = [
             NTMReadHead(
-                config.memory_size,
-                config.memory_dim,
-                config.addressing_mode,
-                config.shift_range
-            ) for _ in range(config.num_read_heads)
+                self.config.memory_size,
+                self.config.memory_dim,
+                self.config.addressing_mode,
+                self.config.shift_range,
+                name=f"read_head_{i}"
+            ) for i in range(self.config.num_read_heads)
         ]
 
         self.write_heads = [
             NTMWriteHead(
-                config.memory_size,
-                config.memory_dim,
-                config.addressing_mode,
-                config.shift_range
-            ) for _ in range(config.num_write_heads)
+                self.config.memory_size,
+                self.config.memory_dim,
+                self.config.addressing_mode,
+                self.config.shift_range,
+                name=f"write_head_{i}"
+            ) for i in range(self.config.num_write_heads)
         ]
 
     def build(self, input_shape):
@@ -324,7 +402,6 @@ class NTMCell(keras.layers.Layer):
         input_shape: (batch, feature_dim)
         """
         # Calculate controller input dimension
-        # Input to controller = External Input + All Read Vectors
         feature_dim = input_shape[-1]
         total_read_dim = self.config.num_read_heads * self.config.memory_dim
         controller_input_shape = (None, feature_dim + total_read_dim)
@@ -334,25 +411,17 @@ class NTMCell(keras.layers.Layer):
 
         # Build Heads (input is controller output)
         controller_output_shape = (None, self.config.controller_dim)
+
         for head in self.read_heads:
             head.build(controller_output_shape)
+
         for head in self.write_heads:
             head.build(controller_output_shape)
 
-        self.built = True
+        super().build(input_shape)
 
     @property
     def state_size(self):
-        # Return state sizes for RNN wrapper
-        # 1. Controller State (list for LSTM)
-        # 2. Memory State (tensor)
-        # 3. Read Weights (tensor per head)
-        # 4. Write Weights (tensor per head)
-        # 5. Read Vectors (tensor per head)
-
-        # Note: Keras RNN expects structure matching state tuple
-        # We flatten complex states into a list of tensors for compatibility
-
         sizes = []
 
         # Controller state
@@ -372,7 +441,7 @@ class NTMCell(keras.layers.Layer):
         for _ in range(self.config.num_write_heads):
             sizes.append(self.config.memory_size)
 
-        # Read Vectors (needed for next step's input)
+        # Read Vectors
         for _ in range(self.config.num_read_heads):
             sizes.append(self.config.memory_dim)
 
@@ -380,15 +449,10 @@ class NTMCell(keras.layers.Layer):
 
     @property
     def output_size(self):
-        # Cell output = Concat(Controller Output, All Read Vectors)
-        # This allows direct pass-through from memory to final projection
         return self.config.controller_dim + (self.config.num_read_heads * self.config.memory_dim)
 
     def call(self, inputs, states, training=None):
-        # Unpack states
-        # The order must match state_size property and get_initial_state
-
-        # 1. Controller State
+        # 1. Unpack states
         if self.config.controller_type == 'lstm':
             controller_state = (states[0], states[1])
             idx = 2
@@ -399,51 +463,42 @@ class NTMCell(keras.layers.Layer):
             controller_state = None
             idx = 0
 
-        # 2. Memory State
         memory_val = states[idx]
         idx += 1
 
-        # 3. Read Weights
         prev_read_weights = []
         for _ in range(self.config.num_read_heads):
             prev_read_weights.append(states[idx])
             idx += 1
 
-        # 4. Write Weights
         prev_write_weights = []
         for _ in range(self.config.num_write_heads):
             prev_write_weights.append(states[idx])
             idx += 1
 
-        # 5. Read Vectors
         prev_read_vectors = []
         for _ in range(self.config.num_read_heads):
             prev_read_vectors.append(states[idx])
             idx += 1
 
-        # Reconstruct high-level state objects
         memory_state = MemoryState(memory=memory_val)
 
-        # --- Step Execution ---
-
-        # 1. Prepare Controller Input
-        # Concat external input + previous read vectors
+        # 2. Prepare Controller Input
         flat_read_vectors = ops.concatenate(prev_read_vectors, axis=-1)
         controller_input = ops.concatenate([inputs, flat_read_vectors], axis=-1)
 
-        # 2. Run Controller
+        # 3. Run Controller
         controller_output, new_controller_state = self.controller(
             controller_input,
             state=controller_state,
             training=training
         )
 
-        # 3. Write Heads
+        # 4. Write Heads
         current_memory_state = memory_state
         new_write_weights_list = []
 
         for i, head in enumerate(self.write_heads):
-            # Compute addressing
             weights, head_state = head.compute_addressing(
                 controller_output,
                 current_memory_state,
@@ -451,7 +506,6 @@ class NTMCell(keras.layers.Layer):
             )
             new_write_weights_list.append(weights)
 
-            # Perform Write
             current_memory_state = self.memory.write(
                 current_memory_state,
                 weights,
@@ -459,12 +513,11 @@ class NTMCell(keras.layers.Layer):
                 head_state.add_vector
             )
 
-        # 4. Read Heads
+        # 5. Read Heads
         new_read_weights_list = []
         new_read_vectors_list = []
 
         for i, head in enumerate(self.read_heads):
-            # Compute addressing (using UPDATED memory)
             weights, head_state = head.compute_addressing(
                 controller_output,
                 current_memory_state,
@@ -472,38 +525,33 @@ class NTMCell(keras.layers.Layer):
             )
             new_read_weights_list.append(weights)
 
-            # Perform Read
             read_vec = self.memory.read(current_memory_state, weights)
             new_read_vectors_list.append(read_vec)
 
-        # 5. Pack Output State
+        # 6. Pack Output State
         new_states = []
 
-        # Controller
         if self.config.controller_type == 'lstm':
             new_states.extend([new_controller_state[0], new_controller_state[1]])
         elif self.config.controller_type == 'gru':
             new_states.append(new_controller_state)
 
-        # Memory
         new_states.append(current_memory_state.memory)
-
-        # Weights
         new_states.extend(new_read_weights_list)
         new_states.extend(new_write_weights_list)
-
-        # Read Vectors
         new_states.extend(new_read_vectors_list)
 
-        # Output of the cell includes both controller output and read vectors
         flat_new_read_vectors = ops.concatenate(new_read_vectors_list, axis=-1)
         cell_output = ops.concatenate([controller_output, flat_new_read_vectors], axis=-1)
 
         return cell_output, new_states
 
-    def get_initial_state(self, inputs=None, batch_size=None, dtype=None):
-        # Helper to create initial zero tensors
+    def compute_output_shape(self, input_shape):
+        # input_shape: (batch, input_dim)
+        # output: (batch, output_size)
+        return (input_shape[0], self.output_size)
 
+    def get_initial_state(self, inputs=None, batch_size=None, dtype=None):
         states = []
 
         # Controller
@@ -516,13 +564,10 @@ class NTMCell(keras.layers.Layer):
             states.append(ops.zeros((batch_size, self.config.controller_dim), dtype=dtype))
 
         # Memory
-        # Call memory module to get initial state
         mem_state = self.memory.initialize_state(batch_size)
         states.append(mem_state.memory)
 
-        # Read Weights (Init to uniform or one-hot)
-        # Using one-hot at index 0 is common, or small random
-        # Here: One-hot start
+        # Read Weights
         one_hot_weight = ops.one_hot(
             ops.zeros((batch_size,), dtype="int32"),
             self.config.memory_size
@@ -534,66 +579,69 @@ class NTMCell(keras.layers.Layer):
         for _ in range(self.config.num_write_heads):
             states.append(one_hot_weight)
 
-        # Read Vectors (Init to zeros)
+        # Read Vectors
         for _ in range(self.config.num_read_heads):
             states.append(ops.zeros((batch_size, self.config.memory_dim), dtype=dtype))
 
         return states
 
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        # Serialize the config dataclass to a dict
+        config.update({'config': vars(self.config)})
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'NTMCell':
+        # Reconstructs the NTMConfig object in __init__
+        return cls(**config)
+
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class NeuralTuringMachine(BaseNTM):
     """
     Complete Neural Turing Machine Layer.
     Wraps NTMCell in an RNN layer.
     """
 
-    def __init__(self, config: NTMConfig, output_dim: int, **kwargs):
-        super().__init__(config, output_dim=output_dim, **kwargs)
-        self.ntm_cell = NTMCell(config)
-        self.rnn = keras.layers.RNN(
+    def __init__(self, config: Union[NTMConfig, Dict[str, Any]], output_dim: int, **kwargs):
+        super().__init__(config=config, output_dim=output_dim, **kwargs)
+
+        # Handle reconstruction
+        if isinstance(config, dict):
+            self.config = NTMConfig(**config)
+        else:
+            self.config = config
+
+        self.ntm_cell = NTMCell(self.config)
+        self.rnn = layers.RNN(
             self.ntm_cell,
             return_sequences=True,
             return_state=True,
             name="ntm_rnn"
         )
-        self.output_projection = keras.layers.Dense(output_dim, name="output_projection")
+        self.output_projection = layers.Dense(output_dim, name="output_projection")
 
     def build(self, input_shape):
         # input_shape: (batch, seq_len, input_dim)
 
-        # Build RNN
-        # Pass shape (batch, seq_len, input_dim) -> RNN builds cell with (batch, input_dim)
         self.rnn.build(input_shape)
 
-        # Build projection
         # Input to projection is cell output size (controller + read vectors)
         out_dim = self.ntm_cell.output_size
         self.output_projection.build((None, out_dim))
 
-        self.built = True
+        super().build(input_shape)
 
     def initialize_state(self, batch_size: int):
-        # This implementation delegates state management to the RNN layer's logic
-        # But required by abstract base class.
-        # We can reconstruct high-level objects from the cell's initial state
-        raw_states = self.ntm_cell.get_initial_state(batch_size=batch_size, dtype="float32")
-
-        # Manual reconstruction logic would go here if needed for step()
-        # For standard usage, the RNN layer handles this.
         return None, None, None
 
     def step(self, inputs, memory_state, head_states, controller_state, training=None):
-        # Direct step execution, bypassing RNN layer logic
-        # Useful for custom loops, but typically we use call()
         pass
 
     def call(self, inputs, initial_state=None, training=None, return_sequences=True, return_state=False):
-        # inputs: (batch, seq_len, features)
-
         # 1. Run RNN
-        # rnn_output: (batch, seq_len, cell_output_size)
-        # final_states: list of tensors
         rnn_result = self.rnn(inputs, initial_state=initial_state, training=training)
 
         if self.rnn.return_state:
@@ -606,7 +654,6 @@ class NeuralTuringMachine(BaseNTM):
         # 2. Project Output
         output = self.output_projection(rnn_output)
 
-        # Handle return sequences (Dense applies to all steps automatically)
         if not return_sequences:
             output = output[:, -1, :]
 
@@ -614,12 +661,38 @@ class NeuralTuringMachine(BaseNTM):
             return output, final_states
         return output
 
+    def compute_output_shape(self, input_shape):
+        # input_shape: (batch, seq_len, features)
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
+
+        output_shape = (batch_size, seq_len, self.output_dim)
+
+        # If return_sequences is False (handled via slicing in call,
+        # but pure shape inference might need explicit handling if we exposed that arg)
+        # Note: call argument return_sequences logic is runtime branching.
+        # Standard layer practice assumes configuration state.
+        # Since rnn.return_sequences is fixed at init in this wrapper:
+        return output_shape
+
     def get_memory_state(self):
-        # Not easily accessible via standard Keras RNN without keeping history
         return None
 
     def reset_memory(self, batch_size):
         pass
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        # Serialize nested config
+        config.update({
+            'config': vars(self.config),
+            'output_dim': self.output_dim
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'NeuralTuringMachine':
+        return cls(**config)
 
 # ---------------------------------------------------------------------
 # utility functions
@@ -647,5 +720,3 @@ def create_ntm(
 
     layer = NeuralTuringMachine(config, output_dim=output_dim)
     return layer
-
-# ---------------------------------------------------------------------
