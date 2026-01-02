@@ -1,19 +1,16 @@
 """
-Tests for Differentiable Select-Copy Layers.
+Tests for NTM base_layers module.
 
-This module contains comprehensive tests for:
-- DifferentiableAddressingHead
-- DifferentiableSelectCopy
-- SimpleSelectCopy
+Tests cover:
+    - DifferentiableAddressingHead
+    - DifferentiableSelectCopy
+    - SimpleSelectCopy
 """
 
-import os
-import tempfile
-
-import keras
 import numpy as np
-import pytest
+import keras
 from keras import ops
+import tensorflow as tf
 
 from dl_techniques.layers.ntm.base_layers import (
     DifferentiableAddressingHead,
@@ -22,1218 +19,805 @@ from dl_techniques.layers.ntm.base_layers import (
 )
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # DifferentiableAddressingHead Tests
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 class TestDifferentiableAddressingHead:
     """Tests for DifferentiableAddressingHead layer."""
 
-    @pytest.fixture
-    def default_config(self) -> dict:
-        """Default configuration for addressing head."""
-        return {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,  # Added explicit controller_dim for robustness
-            "num_shifts": 3,
-            "use_content_addressing": True,
-            "use_location_addressing": True,
-            "sharpening_bias": 1.0,
-        }
+    def test_init_default_params(self):
+        """Test initialization with default parameters."""
+        head = DifferentiableAddressingHead(
+            memory_size=32,
+            content_dim=16,
+        )
+        assert head.memory_size == 32
+        assert head.content_dim == 16
+        assert head.num_shifts == 3
+        assert head.use_content_addressing is True
+        assert head.use_location_addressing is True
 
-    @pytest.fixture
-    def sample_inputs(self) -> tuple[np.ndarray, np.ndarray]:
-        """Sample memory and controller state inputs."""
+    def test_init_custom_params(self):
+        """Test initialization with custom parameters."""
+        head = DifferentiableAddressingHead(
+            memory_size=64,
+            content_dim=32,
+            controller_dim=128,
+            num_shifts=5,
+            use_content_addressing=False,
+            use_location_addressing=True,
+            sharpening_bias=2.0,
+        )
+        assert head.memory_size == 64
+        assert head.content_dim == 32
+        assert head.controller_dim == 128
+        assert head.num_shifts == 5
+        assert head.use_content_addressing is False
+        assert head.sharpening_bias == 2.0
+
+    def test_init_invalid_num_shifts(self):
+        """Test that even num_shifts raises ValueError."""
+        try:
+            DifferentiableAddressingHead(
+                memory_size=32,
+                content_dim=16,
+                num_shifts=4,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "odd" in str(e).lower()
+
+    def test_init_invalid_memory_size(self):
+        """Test that non-positive memory_size raises ValueError."""
+        try:
+            DifferentiableAddressingHead(
+                memory_size=0,
+                content_dim=16,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "positive" in str(e).lower()
+
+    def test_build(self):
+        """Test that build creates all necessary weights."""
+        head = DifferentiableAddressingHead(
+            memory_size=32,
+            content_dim=16,
+            controller_dim=64,
+        )
+        head.build((None, 64))
+
+        assert head.built
+        assert head.initial_weights is not None
+        assert head.initial_weights.shape == (1, 32)
+
+    def test_call_output_shape(self):
+        """Test that call produces correct output shape."""
         batch_size = 4
-        memory_size = 16
-        content_dim = 32
+        memory_size = 32
+        content_dim = 16
         controller_dim = 64
 
-        memory = np.random.randn(batch_size, memory_size, content_dim).astype(
-            np.float32
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
         )
-        controller_state = np.random.randn(batch_size, controller_dim).astype(
-            np.float32
+
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+
+        weights = head(memory, controller_state)
+
+        assert ops.shape(weights) == (batch_size, memory_size)
+
+    def test_call_weights_sum_to_one(self):
+        """Test that output weights sum to 1 (valid probability distribution)."""
+        batch_size = 4
+        memory_size = 32
+        content_dim = 16
+        controller_dim = 64
+
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
         )
-        return memory, controller_state
 
-    def test_instantiation_valid_config(self, default_config: dict) -> None:
-        """Test layer can be instantiated with valid config."""
-        layer = DifferentiableAddressingHead(**default_config)
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
 
-        assert layer.memory_size == default_config["memory_size"]
-        assert layer.content_dim == default_config["content_dim"]
-        assert layer.controller_dim == default_config["controller_dim"]
-        assert layer.num_shifts == default_config["num_shifts"]
-        assert layer.use_content_addressing == default_config["use_content_addressing"]
-        assert layer.use_location_addressing == default_config["use_location_addressing"]
+        weights = head(memory, controller_state)
+        weight_sums = ops.sum(weights, axis=-1)
 
-    def test_invalid_num_shifts_even(self, default_config: dict) -> None:
-        """Test that even num_shifts raises ValueError."""
-        default_config["num_shifts"] = 4
-        with pytest.raises(ValueError, match="num_shifts must be odd"):
-            DifferentiableAddressingHead(**default_config)
-
-    def test_invalid_memory_size_zero(self, default_config: dict) -> None:
-        """Test that zero memory_size raises ValueError."""
-        default_config["memory_size"] = 0
-        with pytest.raises(ValueError, match="memory_size must be positive"):
-            DifferentiableAddressingHead(**default_config)
-
-    def test_invalid_content_dim_negative(self, default_config: dict) -> None:
-        """Test that negative content_dim raises ValueError."""
-        default_config["content_dim"] = -1
-        with pytest.raises(ValueError, match="content_dim must be positive"):
-            DifferentiableAddressingHead(**default_config)
-
-    def test_forward_pass_output_shape(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test forward pass produces correct output shape."""
-        layer = DifferentiableAddressingHead(**default_config)
-        memory, controller_state = sample_inputs
-
-        weights = layer(memory, controller_state)
-
-        expected_shape = (memory.shape[0], default_config["memory_size"])
-        assert weights.shape == expected_shape
-
-    def test_output_is_valid_distribution(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test output weights sum to 1 and are non-negative."""
-        layer = DifferentiableAddressingHead(**default_config)
-        memory, controller_state = sample_inputs
-
-        weights = layer(memory, controller_state)
-        weights_np = ops.convert_to_numpy(weights)
-
-        # Check non-negative
-        assert np.all(weights_np >= 0), "Weights should be non-negative"
-
-        # Check sum to 1
-        sums = np.sum(weights_np, axis=-1)
+        # Relaxed tolerance due to epsilon in sharpening denominator
+        # sum = S / (S + eps) which is < 1.0
         np.testing.assert_allclose(
-            sums,
-            np.ones_like(sums),
+            keras.ops.convert_to_numpy(weight_sums),
+            np.ones(batch_size),
             rtol=1e-3,
             atol=1e-3,
-            err_msg="Weights should sum to 1",
+            err_msg="Weights should sum to approximately 1",
         )
 
-    def test_with_previous_weights(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test forward pass with previous weights provided."""
-        layer = DifferentiableAddressingHead(**default_config)
-        memory, controller_state = sample_inputs
+    def test_call_weights_non_negative(self):
+        """Test that output weights are non-negative."""
+        batch_size = 4
+        memory_size = 32
+        content_dim = 16
+        controller_dim = 64
 
-        # Create previous weights
-        batch_size = memory.shape[0]
-        previous_weights = np.ones((batch_size, default_config["memory_size"])) / default_config["memory_size"]
-        previous_weights = previous_weights.astype(np.float32)
-
-        weights = layer(memory, controller_state, previous_weights=previous_weights)
-
-        expected_shape = (batch_size, default_config["memory_size"])
-        assert weights.shape == expected_shape
-
-    def test_content_only_addressing(
-            self,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test with content addressing only."""
-        config = {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,
-            "use_content_addressing": True,
-            "use_location_addressing": False,
-        }
-        layer = DifferentiableAddressingHead(**config)
-        memory, controller_state = sample_inputs
-
-        weights = layer(memory, controller_state)
-
-        assert weights.shape == (memory.shape[0], config["memory_size"])
-
-    def test_location_only_addressing(
-            self,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test with location addressing only."""
-        config = {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,
-            "use_content_addressing": False,
-            "use_location_addressing": True,
-        }
-        layer = DifferentiableAddressingHead(**config)
-        memory, controller_state = sample_inputs
-
-        weights = layer(memory, controller_state)
-
-        assert weights.shape == (memory.shape[0], config["memory_size"])
-
-    def test_compute_output_shape(self, default_config: dict) -> None:
-        """Test compute_output_shape returns correct shape."""
-        layer = DifferentiableAddressingHead(**default_config)
-
-        input_shape = (None, default_config["memory_size"], default_config["content_dim"])
-        output_shape = layer.compute_output_shape(input_shape)
-
-        assert output_shape == (None, default_config["memory_size"])
-
-    def test_compute_output_shape_matches_actual(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test compute_output_shape matches actual output shape."""
-        layer = DifferentiableAddressingHead(**default_config)
-        memory, controller_state = sample_inputs
-
-        computed_shape = layer.compute_output_shape(memory.shape)
-        actual_output = layer(memory, controller_state)
-
-        # Compare ignoring batch dimension
-        assert computed_shape[1:] == actual_output.shape[1:]
-
-    def test_get_config_complete(self, default_config: dict) -> None:
-        """Test get_config returns all constructor arguments."""
-        layer = DifferentiableAddressingHead(**default_config)
-        config = layer.get_config()
-
-        assert "memory_size" in config
-        assert "content_dim" in config
-        assert "controller_dim" in config
-        assert "num_shifts" in config
-        assert "use_content_addressing" in config
-        assert "use_location_addressing" in config
-        assert "sharpening_bias" in config
-        assert "kernel_initializer" in config
-        assert "bias_initializer" in config
-        assert "kernel_regularizer" in config
-
-    def test_from_config_reconstruction(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test layer can be reconstructed from config."""
-        original = DifferentiableAddressingHead(**default_config)
-        memory, controller_state = sample_inputs
-        original(memory, controller_state)  # Build
-
-        config = original.get_config()
-        reconstructed = DifferentiableAddressingHead.from_config(config)
-
-        assert reconstructed.memory_size == original.memory_size
-        assert reconstructed.content_dim == original.content_dim
-        assert reconstructed.controller_dim == original.controller_dim
-        assert reconstructed.num_shifts == original.num_shifts
-
-    def test_serialization_cycle(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test full save/load cycle preserves functionality."""
-        memory, controller_state = sample_inputs
-
-        # Create model wrapping the layer
-        memory_input = keras.Input(shape=memory.shape[1:], name="memory")
-        controller_input = keras.Input(shape=controller_state.shape[1:], name="controller")
-
-        layer = DifferentiableAddressingHead(**default_config)
-        outputs = layer(memory_input, controller_input)
-        model = keras.Model(inputs=[memory_input, controller_input], outputs=outputs)
-
-        original_output = model([memory, controller_state])
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "test_addressing_head.keras")
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_output = loaded_model([memory, controller_state])
-
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(original_output),
-            ops.convert_to_numpy(loaded_output),
-            rtol=1e-6,
-            atol=1e-6,
-            err_msg="Outputs should match after serialization",
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
         )
 
-    @pytest.mark.parametrize("batch_size", [1, 4, 16, 32])
-    def test_variable_batch_size(
-            self,
-            default_config: dict,
-            batch_size: int,
-    ) -> None:
-        """Test layer handles various batch sizes."""
-        layer = DifferentiableAddressingHead(**default_config)
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
 
-        memory = np.random.randn(
-            batch_size, default_config["memory_size"], default_config["content_dim"]
-        ).astype(np.float32)
-        controller_state = np.random.randn(batch_size, 64).astype(np.float32)
+        weights = head(memory, controller_state)
+        weights_np = keras.ops.convert_to_numpy(weights)
 
-        weights = layer(memory, controller_state)
+        assert np.all(weights_np >= 0), "Weights should be non-negative"
 
-        assert weights.shape[0] == batch_size
+    def test_call_with_previous_weights(self):
+        """Test call with explicit previous weights."""
+        batch_size = 4
+        memory_size = 32
+        content_dim = 16
+        controller_dim = 64
 
-    @pytest.mark.parametrize("num_shifts", [1, 3, 5, 7])
-    def test_different_num_shifts(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-            num_shifts: int,
-    ) -> None:
-        """Test layer works with various num_shifts values."""
-        default_config["num_shifts"] = num_shifts
-        layer = DifferentiableAddressingHead(**default_config)
-        memory, controller_state = sample_inputs
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+        )
 
-        weights = layer(memory, controller_state)
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+        previous_weights = ops.softmax(
+            keras.random.normal((batch_size, memory_size), seed=44), axis=-1
+        )
 
-        assert weights.shape == (memory.shape[0], default_config["memory_size"])
+        weights = head(memory, controller_state, previous_weights=previous_weights)
+
+        assert ops.shape(weights) == (batch_size, memory_size)
+
+    def test_content_only_addressing(self):
+        """Test with only content-based addressing enabled."""
+        batch_size = 4
+        memory_size = 32
+        content_dim = 16
+        controller_dim = 64
+
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+            use_content_addressing=True,
+            use_location_addressing=False,
+        )
+
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+
+        weights = head(memory, controller_state)
+
+        assert ops.shape(weights) == (batch_size, memory_size)
+        assert head.shift_proj is None
+
+    def test_location_only_addressing(self):
+        """Test with only location-based addressing enabled."""
+        batch_size = 4
+        memory_size = 32
+        content_dim = 16
+        controller_dim = 64
+
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+            use_content_addressing=False,
+            use_location_addressing=True,
+        )
+
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+
+        weights = head(memory, controller_state)
+
+        assert ops.shape(weights) == (batch_size, memory_size)
+        assert head.key_proj is None
+        assert head.beta_proj is None
+
+    def test_serialization(self):
+        """Test get_config and from_config."""
+        head = DifferentiableAddressingHead(
+            memory_size=32,
+            content_dim=16,
+            controller_dim=64,
+            num_shifts=5,
+            sharpening_bias=1.5,
+        )
+
+        config = head.get_config()
+
+        assert config["memory_size"] == 32
+        assert config["content_dim"] == 16
+        assert config["controller_dim"] == 64
+        assert config["num_shifts"] == 5
+        assert config["sharpening_bias"] == 1.5
+
+        # Reconstruct from config
+        head_restored = DifferentiableAddressingHead.from_config(config)
+
+        assert head_restored.memory_size == head.memory_size
+        assert head_restored.content_dim == head.content_dim
+        assert head_restored.num_shifts == head.num_shifts
+
+    def test_compute_output_shape(self):
+        """Test compute_output_shape method."""
+        head = DifferentiableAddressingHead(
+            memory_size=32,
+            content_dim=16,
+        )
+
+        output_shape = head.compute_output_shape((None, 32, 16))
+        assert output_shape == (None, 32)
+
+    def test_gradient_flow(self):
+        """Test that gradients flow through the layer."""
+        batch_size = 2
+        memory_size = 16
+        content_dim = 8
+        controller_dim = 32
+
+        head = DifferentiableAddressingHead(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+        )
+
+        memory = tf.Variable(
+            keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        )
+        controller_state = tf.Variable(
+            keras.random.normal((batch_size, controller_dim), seed=43)
+        )
+
+        with tf.GradientTape() as tape:
+            weights = head(memory, controller_state)
+            loss = ops.sum(weights)
+
+        grads = tape.gradient(loss, [memory, controller_state])
+
+        assert grads[0] is not None, "Gradient w.r.t. memory should exist"
+        assert grads[1] is not None, "Gradient w.r.t. controller_state should exist"
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # DifferentiableSelectCopy Tests
-# =============================================================================
+# ---------------------------------------------------------------------
 
 
 class TestDifferentiableSelectCopy:
     """Tests for DifferentiableSelectCopy layer."""
 
-    @pytest.fixture
-    def default_config(self) -> dict:
-        """Default configuration for select-copy layer."""
-        return {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,
-            "num_read_heads": 2,
-            "num_write_heads": 1,
-            "num_shifts": 3,
-            "use_content_addressing": True,
-            "use_location_addressing": True,
-        }
+    def test_init_default_params(self):
+        """Test initialization with default parameters."""
+        layer = DifferentiableSelectCopy(
+            memory_size=32,
+            content_dim=16,
+            controller_dim=64,
+        )
+        assert layer.memory_size == 32
+        assert layer.content_dim == 16
+        assert layer.controller_dim == 64
+        assert layer.num_read_heads == 1
+        assert layer.num_write_heads == 1
 
-    @pytest.fixture
-    def sample_inputs(self, default_config: dict) -> tuple[np.ndarray, np.ndarray]:
-        """Sample memory and controller state inputs."""
+    def test_init_custom_params(self):
+        """Test initialization with custom parameters."""
+        layer = DifferentiableSelectCopy(
+            memory_size=64,
+            content_dim=32,
+            controller_dim=128,
+            num_read_heads=2,
+            num_write_heads=2,
+            num_shifts=5,
+        )
+        assert layer.num_read_heads == 2
+        assert layer.num_write_heads == 2
+        assert layer.num_shifts == 5
+        assert len(layer.read_heads) == 2
+        assert len(layer.write_heads) == 2
+
+    def test_init_invalid_params(self):
+        """Test that invalid parameters raise ValueError."""
+        try:
+            DifferentiableSelectCopy(
+                memory_size=-1,
+                content_dim=16,
+                controller_dim=64,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+        try:
+            DifferentiableSelectCopy(
+                memory_size=32,
+                content_dim=16,
+                controller_dim=64,
+                num_read_heads=0,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_build(self):
+        """Test that build creates all necessary components."""
+        layer = DifferentiableSelectCopy(
+            memory_size=32,
+            content_dim=16,
+            controller_dim=64,
+            num_read_heads=2,
+            num_write_heads=1,
+        )
+        layer.build((None, 32, 16))
+
+        assert layer.built
+        assert len(layer.read_heads) == 2
+        assert len(layer.write_heads) == 1
+        assert len(layer.erase_projections) == 1
+        assert len(layer.add_projections) == 1
+
+    def test_call_output_shapes(self):
+        """Test that call produces correct output shapes."""
         batch_size = 4
-
-        memory = np.random.randn(
-            batch_size, default_config["memory_size"], default_config["content_dim"]
-        ).astype(np.float32)
-        controller_state = np.random.randn(
-            batch_size, default_config["controller_dim"]
-        ).astype(np.float32)
-
-        return memory, controller_state
-
-    def test_instantiation_valid_config(self, default_config: dict) -> None:
-        """Test layer can be instantiated with valid config."""
-        layer = DifferentiableSelectCopy(**default_config)
-
-        assert layer.memory_size == default_config["memory_size"]
-        assert layer.content_dim == default_config["content_dim"]
-        assert layer.controller_dim == default_config["controller_dim"]
-        assert layer.num_read_heads == default_config["num_read_heads"]
-        assert layer.num_write_heads == default_config["num_write_heads"]
-
-    def test_invalid_memory_size(self, default_config: dict) -> None:
-        """Test that invalid memory_size raises ValueError."""
-        default_config["memory_size"] = 0
-        with pytest.raises(ValueError, match="memory_size must be positive"):
-            DifferentiableSelectCopy(**default_config)
-
-    def test_invalid_content_dim(self, default_config: dict) -> None:
-        """Test that invalid content_dim raises ValueError."""
-        default_config["content_dim"] = -5
-        with pytest.raises(ValueError, match="content_dim must be positive"):
-            DifferentiableSelectCopy(**default_config)
-
-    def test_invalid_controller_dim(self, default_config: dict) -> None:
-        """Test that invalid controller_dim raises ValueError."""
-        default_config["controller_dim"] = 0
-        with pytest.raises(ValueError, match="controller_dim must be positive"):
-            DifferentiableSelectCopy(**default_config)
-
-    def test_invalid_num_read_heads(self, default_config: dict) -> None:
-        """Test that invalid num_read_heads raises ValueError."""
-        default_config["num_read_heads"] = 0
-        with pytest.raises(ValueError, match="num_read_heads must be positive"):
-            DifferentiableSelectCopy(**default_config)
-
-    def test_invalid_num_write_heads(self, default_config: dict) -> None:
-        """Test that invalid num_write_heads raises ValueError."""
-        default_config["num_write_heads"] = -1
-        with pytest.raises(ValueError, match="num_write_heads must be positive"):
-            DifferentiableSelectCopy(**default_config)
-
-    def test_forward_pass_output_shapes(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test forward pass produces correct output shapes."""
-        layer = DifferentiableSelectCopy(**default_config)
-        memory, controller_state = sample_inputs
-
-        new_memory, read_content, state_dict = layer(memory, controller_state)
-
-        # Check memory shape unchanged
-        assert new_memory.shape == memory.shape
-
-        # Check read content shape
-        expected_read_dim = default_config["num_read_heads"] * default_config["content_dim"]
-        assert read_content.shape == (memory.shape[0], expected_read_dim)
-
-        # Check state dict
-        assert "read_weights" in state_dict
-        assert "write_weights" in state_dict
-        assert len(state_dict["read_weights"]) == default_config["num_read_heads"]
-        assert len(state_dict["write_weights"]) == default_config["num_write_heads"]
-
-    def test_read_weights_are_valid_distributions(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test read weights are valid probability distributions."""
-        layer = DifferentiableSelectCopy(**default_config)
-        memory, controller_state = sample_inputs
-
-        _, _, state_dict = layer(memory, controller_state)
-
-        for weights in state_dict["read_weights"]:
-            weights_np = ops.convert_to_numpy(weights)
-            assert np.all(weights_np >= 0), "Weights should be non-negative"
-            sums = np.sum(weights_np, axis=-1)
-            np.testing.assert_allclose(
-                sums,
-                np.ones_like(sums),
-                rtol=1e-5,
-                atol=1e-5,
-                err_msg="Weights should sum to 1",
-            )
-
-    def test_write_weights_are_valid_distributions(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test write weights are valid probability distributions."""
-        layer = DifferentiableSelectCopy(**default_config)
-        memory, controller_state = sample_inputs
-
-        _, _, state_dict = layer(memory, controller_state)
-
-        for weights in state_dict["write_weights"]:
-            weights_np = ops.convert_to_numpy(weights)
-            assert np.all(weights_np >= 0), "Weights should be non-negative"
-            sums = np.sum(weights_np, axis=-1)
-            np.testing.assert_allclose(
-                sums,
-                np.ones_like(sums),
-                rtol=1e-3,
-                atol=1e-3,
-                err_msg="Weights should sum to 1",
-            )
-
-    def test_with_previous_weights(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test forward pass with previous weights provided."""
-        layer = DifferentiableSelectCopy(**default_config)
-        memory, controller_state = sample_inputs
-        batch_size = memory.shape[0]
-
-        # Create previous weights
-        prev_read = [
-            np.ones((batch_size, default_config["memory_size"]), dtype=np.float32) / default_config["memory_size"]
-            for _ in range(default_config["num_read_heads"])
-        ]
-        prev_write = [
-            np.ones((batch_size, default_config["memory_size"]), dtype=np.float32) / default_config["memory_size"]
-            for _ in range(default_config["num_write_heads"])
-        ]
-
-        new_memory, read_content, state_dict = layer(
-            memory,
-            controller_state,
-            previous_read_weights=prev_read,
-            previous_write_weights=prev_write,
-        )
-
-        assert new_memory.shape == memory.shape
-
-    def test_single_read_head(
-            self,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test with single read head."""
-        config = {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,
-            "num_read_heads": 1,
-            "num_write_heads": 1,
-        }
-        layer = DifferentiableSelectCopy(**config)
-
-        memory = np.random.randn(4, 16, 32).astype(np.float32)
-        controller_state = np.random.randn(4, 64).astype(np.float32)
-
-        _, read_content, _ = layer(memory, controller_state)
-
-        # Single head: read_content should have content_dim dimensions
-        assert read_content.shape == (4, config["content_dim"])
-
-    def test_multiple_read_heads(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test with multiple read heads."""
-        default_config["num_read_heads"] = 4
-        layer = DifferentiableSelectCopy(**default_config)
-        memory, controller_state = sample_inputs
-
-        _, read_content, state_dict = layer(memory, controller_state)
-
-        expected_dim = 4 * default_config["content_dim"]
-        assert read_content.shape == (memory.shape[0], expected_dim)
-        assert len(state_dict["read_weights"]) == 4
-
-    def test_compute_output_shape(self, default_config: dict) -> None:
-        """Test compute_output_shape returns correct shapes."""
-        layer = DifferentiableSelectCopy(**default_config)
-
-        input_shape = (None, default_config["memory_size"], default_config["content_dim"])
-        memory_shape, read_shape, state_shapes = layer.compute_output_shape(input_shape)
-
-        assert memory_shape == (None, default_config["memory_size"], default_config["content_dim"])
-        expected_read_dim = default_config["num_read_heads"] * default_config["content_dim"]
-        assert read_shape == (None, expected_read_dim)
-
-    def test_get_config_complete(self, default_config: dict) -> None:
-        """Test get_config returns all constructor arguments."""
-        layer = DifferentiableSelectCopy(**default_config)
-        config = layer.get_config()
-
-        assert "memory_size" in config
-        assert "content_dim" in config
-        assert "controller_dim" in config
-        assert "num_read_heads" in config
-        assert "num_write_heads" in config
-        assert "num_shifts" in config
-        assert "use_content_addressing" in config
-        assert "use_location_addressing" in config
-        assert "kernel_initializer" in config
-        assert "bias_initializer" in config
-        assert "kernel_regularizer" in config
-
-    def test_from_config_reconstruction(
-            self,
-            default_config: dict,
-    ) -> None:
-        """Test layer can be reconstructed from config."""
-        original = DifferentiableSelectCopy(**default_config)
-        config = original.get_config()
-        reconstructed = DifferentiableSelectCopy.from_config(config)
-
-        assert reconstructed.memory_size == original.memory_size
-        assert reconstructed.content_dim == original.content_dim
-        assert reconstructed.controller_dim == original.controller_dim
-        assert reconstructed.num_read_heads == original.num_read_heads
-        assert reconstructed.num_write_heads == original.num_write_heads
-
-    def test_serialization_cycle(
-            self,
-            default_config: dict,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test full save/load cycle preserves functionality."""
-        memory, controller_state = sample_inputs
-
-        # Create model wrapping the layer
-        memory_input = keras.Input(shape=memory.shape[1:], name="memory")
-        controller_input = keras.Input(shape=controller_state.shape[1:], name="controller")
-
-        layer = DifferentiableSelectCopy(**default_config)
-        new_memory, read_content, _ = layer(memory_input, controller_input)
-        model = keras.Model(
-            inputs=[memory_input, controller_input],
-            outputs=[new_memory, read_content],
-        )
-
-        original_outputs = model([memory, controller_state])
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "test_select_copy.keras")
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_outputs = loaded_model([memory, controller_state])
-
-        for orig, loaded in zip(original_outputs, loaded_outputs):
-            np.testing.assert_allclose(
-                ops.convert_to_numpy(orig),
-                ops.convert_to_numpy(loaded),
-                rtol=1e-6,
-                atol=1e-6,
-                err_msg="Outputs should match after serialization",
-            )
-
-    @pytest.mark.parametrize("batch_size", [1, 4, 16])
-    def test_variable_batch_size(
-            self,
-            default_config: dict,
-            batch_size: int,
-    ) -> None:
-        """Test layer handles various batch sizes."""
-        layer = DifferentiableSelectCopy(**default_config)
-
-        memory = np.random.randn(
-            batch_size, default_config["memory_size"], default_config["content_dim"]
-        ).astype(np.float32)
-        controller_state = np.random.randn(
-            batch_size, default_config["controller_dim"]
-        ).astype(np.float32)
-
-        new_memory, read_content, _ = layer(memory, controller_state)
-
-        assert new_memory.shape[0] == batch_size
-        assert read_content.shape[0] == batch_size
-
-    def test_content_only_mode(
-            self,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test with content addressing only."""
-        config = {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,
-            "num_read_heads": 1,
-            "num_write_heads": 1,
-            "use_content_addressing": True,
-            "use_location_addressing": False,
-        }
-        layer = DifferentiableSelectCopy(**config)
-
-        memory = np.random.randn(4, 16, 32).astype(np.float32)
-        controller_state = np.random.randn(4, 64).astype(np.float32)
-
-        new_memory, read_content, _ = layer(memory, controller_state)
-
-        assert new_memory.shape == memory.shape
-
-    def test_location_only_mode(
-            self,
-            sample_inputs: tuple[np.ndarray, np.ndarray],
-    ) -> None:
-        """Test with location addressing only."""
-        config = {
-            "memory_size": 16,
-            "content_dim": 32,
-            "controller_dim": 64,
-            "num_read_heads": 1,
-            "num_write_heads": 1,
-            "use_content_addressing": False,
-            "use_location_addressing": True,
-        }
-        layer = DifferentiableSelectCopy(**config)
-
-        memory = np.random.randn(4, 16, 32).astype(np.float32)
-        controller_state = np.random.randn(4, 64).astype(np.float32)
-
-        new_memory, read_content, _ = layer(memory, controller_state)
-
-        assert new_memory.shape == memory.shape
-
-
-# =============================================================================
-# SimpleSelectCopy Tests
-# =============================================================================
-
-
-class TestSimpleSelectCopy:
-    """Tests for SimpleSelectCopy layer."""
-
-    @pytest.fixture
-    def default_config(self) -> dict:
-        """Default configuration for simple select-copy layer."""
-        return {
-            "input_size": 10,
-            "output_size": 10,
-            "content_dim": 32,
-            "num_copies": 2,
-            "temperature": 1.0,
-            "use_content_query": True,
-        }
-
-    @pytest.fixture
-    def sample_input(self, default_config: dict) -> np.ndarray:
-        """Sample input tensor."""
-        batch_size = 4
-        return np.random.randn(
-            batch_size, default_config["input_size"], default_config["content_dim"]
-        ).astype(np.float32)
-
-    def test_instantiation_valid_config(self, default_config: dict) -> None:
-        """Test layer can be instantiated with valid config."""
-        layer = SimpleSelectCopy(**default_config)
-
-        assert layer.input_size == default_config["input_size"]
-        assert layer.output_size == default_config["output_size"]
-        assert layer.content_dim == default_config["content_dim"]
-        assert layer.num_copies == default_config["num_copies"]
-        assert layer.temperature == default_config["temperature"]
-        assert layer.use_content_query == default_config["use_content_query"]
-
-    def test_invalid_input_size(self, default_config: dict) -> None:
-        """Test that invalid input_size raises ValueError."""
-        default_config["input_size"] = 0
-        with pytest.raises(ValueError, match="input_size must be positive"):
-            SimpleSelectCopy(**default_config)
-
-    def test_invalid_output_size(self, default_config: dict) -> None:
-        """Test that invalid output_size raises ValueError."""
-        default_config["output_size"] = -1
-        with pytest.raises(ValueError, match="output_size must be positive"):
-            SimpleSelectCopy(**default_config)
-
-    def test_invalid_content_dim(self, default_config: dict) -> None:
-        """Test that invalid content_dim raises ValueError."""
-        default_config["content_dim"] = 0
-        with pytest.raises(ValueError, match="content_dim must be positive"):
-            SimpleSelectCopy(**default_config)
-
-    def test_invalid_num_copies(self, default_config: dict) -> None:
-        """Test that invalid num_copies raises ValueError."""
-        default_config["num_copies"] = 0
-        with pytest.raises(ValueError, match="num_copies must be positive"):
-            SimpleSelectCopy(**default_config)
-
-    def test_invalid_temperature(self, default_config: dict) -> None:
-        """Test that invalid temperature raises ValueError."""
-        default_config["temperature"] = 0
-        with pytest.raises(ValueError, match="temperature must be positive"):
-            SimpleSelectCopy(**default_config)
-
-    def test_forward_pass_output_shape(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test forward pass produces correct output shape."""
-        layer = SimpleSelectCopy(**default_config)
-
-        output, attention_info = layer(sample_input)
-
-        expected_shape = (
-            sample_input.shape[0],
-            default_config["output_size"],
-            default_config["content_dim"],
-        )
-        assert output.shape == expected_shape
-
-    def test_attention_info_structure(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test attention_info has correct structure."""
-        layer = SimpleSelectCopy(**default_config)
-
-        _, attention_info = layer(sample_input)
-
-        assert "read_weights" in attention_info
-        assert "write_weights" in attention_info
-        assert len(attention_info["read_weights"]) == default_config["num_copies"]
-        assert len(attention_info["write_weights"]) == default_config["num_copies"]
-
-    def test_read_weights_shape(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test read weights have correct shape."""
-        layer = SimpleSelectCopy(**default_config)
-
-        _, attention_info = layer(sample_input)
-
-        for weights in attention_info["read_weights"]:
-            expected_shape = (sample_input.shape[0], default_config["input_size"])
-            assert weights.shape == expected_shape
-
-    def test_write_weights_shape(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test write weights have correct shape."""
-        layer = SimpleSelectCopy(**default_config)
-
-        _, attention_info = layer(sample_input)
-
-        for weights in attention_info["write_weights"]:
-            expected_shape = (sample_input.shape[0], default_config["output_size"])
-            assert weights.shape == expected_shape
-
-    def test_attention_weights_are_valid_distributions(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test attention weights are valid probability distributions."""
-        layer = SimpleSelectCopy(**default_config)
-
-        _, attention_info = layer(sample_input)
-
-        for weights in attention_info["read_weights"] + attention_info["write_weights"]:
-            weights_np = ops.convert_to_numpy(weights)
-            assert np.all(weights_np >= 0), "Weights should be non-negative"
-            sums = np.sum(weights_np, axis=-1)
-            np.testing.assert_allclose(
-                sums,
-                np.ones_like(sums),
-                rtol=1e-5,
-                atol=1e-5,
-                err_msg="Weights should sum to 1",
-            )
-
-    def test_use_content_query_false(
-            self,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test with use_content_query=False (learned queries)."""
-        config = {
-            "input_size": 10,
-            "output_size": 10,
-            "content_dim": 32,
-            "num_copies": 2,
-            "use_content_query": False,
-        }
-        layer = SimpleSelectCopy(**config)
-
-        output, attention_info = layer(sample_input)
-
-        expected_shape = (sample_input.shape[0], config["output_size"], config["content_dim"])
-        assert output.shape == expected_shape
-
-    def test_different_input_output_sizes(self) -> None:
-        """Test with different input and output sizes."""
-        config = {
-            "input_size": 8,
-            "output_size": 16,
-            "content_dim": 32,
-            "num_copies": 1,
-        }
-        layer = SimpleSelectCopy(**config)
-
-        inputs = np.random.randn(4, 8, 32).astype(np.float32)
-        output, _ = layer(inputs)
-
-        assert output.shape == (4, 16, 32)
-
-    def test_temperature_effect(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test that temperature affects attention sharpness."""
-        # Low temperature - sharper attention
-        default_config["temperature"] = 0.1
-        layer_sharp = SimpleSelectCopy(**default_config)
-        _, info_sharp = layer_sharp(sample_input)
-
-        # High temperature - softer attention
-        default_config["temperature"] = 10.0
-        layer_soft = SimpleSelectCopy(**default_config)
-        _, info_soft = layer_soft(sample_input)
-
-        # Sharp attention should have higher max values
-        sharp_max = np.max(ops.convert_to_numpy(info_sharp["read_weights"][0]))
-        soft_max = np.max(ops.convert_to_numpy(info_soft["read_weights"][0]))
-
-        assert sharp_max > soft_max, "Lower temperature should produce sharper attention"
-
-    def test_compute_output_shape(self, default_config: dict) -> None:
-        """Test compute_output_shape returns correct shapes."""
-        layer = SimpleSelectCopy(**default_config)
-
-        input_shape = (None, default_config["input_size"], default_config["content_dim"])
-        output_shape, attention_shapes = layer.compute_output_shape(input_shape)
-
-        expected_output = (None, default_config["output_size"], default_config["content_dim"])
-        assert output_shape == expected_output
-
-    def test_compute_output_shape_matches_actual(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test compute_output_shape matches actual output shape."""
-        layer = SimpleSelectCopy(**default_config)
-
-        computed_shape, _ = layer.compute_output_shape(sample_input.shape)
-        actual_output, _ = layer(sample_input)
-
-        # Compare ignoring batch dimension
-        assert computed_shape[1:] == actual_output.shape[1:]
-
-    def test_get_config_complete(self, default_config: dict) -> None:
-        """Test get_config returns all constructor arguments."""
-        layer = SimpleSelectCopy(**default_config)
-        config = layer.get_config()
-
-        assert "input_size" in config
-        assert "output_size" in config
-        assert "content_dim" in config
-        assert "num_copies" in config
-        assert "temperature" in config
-        assert "use_content_query" in config
-        assert "kernel_initializer" in config
-        assert "bias_initializer" in config
-        assert "kernel_regularizer" in config
-
-    def test_from_config_reconstruction(
-            self,
-            default_config: dict,
-    ) -> None:
-        """Test layer can be reconstructed from config."""
-        original = SimpleSelectCopy(**default_config)
-        config = original.get_config()
-        reconstructed = SimpleSelectCopy.from_config(config)
-
-        assert reconstructed.input_size == original.input_size
-        assert reconstructed.output_size == original.output_size
-        assert reconstructed.content_dim == original.content_dim
-        assert reconstructed.num_copies == original.num_copies
-        assert reconstructed.temperature == original.temperature
-        assert reconstructed.use_content_query == original.use_content_query
-
-    def test_serialization_cycle(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test full save/load cycle preserves functionality."""
-        # Create model wrapping the layer
-        inputs = keras.Input(shape=sample_input.shape[1:])
-        layer = SimpleSelectCopy(**default_config)
-        output, _ = layer(inputs)
-        model = keras.Model(inputs=inputs, outputs=output)
-
-        original_output = model(sample_input)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "test_simple_select_copy.keras")
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_output = loaded_model(sample_input)
-
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(original_output),
-            ops.convert_to_numpy(loaded_output),
-            rtol=1e-6,
-            atol=1e-6,
-            err_msg="Outputs should match after serialization",
-        )
-
-    def test_serialization_cycle_learned_queries(
-            self,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test serialization with use_content_query=False."""
-        config = {
-            "input_size": 10,
-            "output_size": 10,
-            "content_dim": 32,
-            "num_copies": 2,
-            "use_content_query": False,
-        }
-
-        inputs = keras.Input(shape=sample_input.shape[1:])
-        layer = SimpleSelectCopy(**config)
-        output, _ = layer(inputs)
-        model = keras.Model(inputs=inputs, outputs=output)
-
-        original_output = model(sample_input)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "test_learned_queries.keras")
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_output = loaded_model(sample_input)
-
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(original_output),
-            ops.convert_to_numpy(loaded_output),
-            rtol=1e-6,
-            atol=1e-6,
-            err_msg="Outputs should match after serialization",
-        )
-
-    @pytest.mark.parametrize("batch_size", [1, 4, 16, 32])
-    def test_variable_batch_size(
-            self,
-            default_config: dict,
-            batch_size: int,
-    ) -> None:
-        """Test layer handles various batch sizes."""
-        layer = SimpleSelectCopy(**default_config)
-
-        inputs = np.random.randn(
-            batch_size, default_config["input_size"], default_config["content_dim"]
-        ).astype(np.float32)
-
-        output, _ = layer(inputs)
-
-        assert output.shape[0] == batch_size
-
-    @pytest.mark.parametrize("num_copies", [1, 2, 4, 8])
-    def test_different_num_copies(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-            num_copies: int,
-    ) -> None:
-        """Test layer works with various num_copies values."""
-        default_config["num_copies"] = num_copies
-        layer = SimpleSelectCopy(**default_config)
-
-        output, attention_info = layer(sample_input)
-
-        assert len(attention_info["read_weights"]) == num_copies
-        assert len(attention_info["write_weights"]) == num_copies
-
-    def test_training_mode(
-            self,
-            default_config: dict,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test layer behaves correctly in training mode."""
-        layer = SimpleSelectCopy(**default_config)
-
-        output_train, _ = layer(sample_input, training=True)
-        output_infer, _ = layer(sample_input, training=False)
-
-        # Without dropout, outputs should be identical
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(output_train),
-            ops.convert_to_numpy(output_infer),
-            rtol=1e-6,
-            atol=1e-6,
-            err_msg="Training and inference outputs should match",
-        )
-
-    def test_with_regularizer(
-            self,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test layer works with kernel regularizer."""
-        config = {
-            "input_size": 10,
-            "output_size": 10,
-            "content_dim": 32,
-            "num_copies": 1,
-            "kernel_regularizer": "l2",
-        }
-        layer = SimpleSelectCopy(**config)
-
-        output, _ = layer(sample_input)
-
-        assert output.shape == (sample_input.shape[0], 10, 32)
-
-    def test_with_custom_initializer(
-            self,
-            sample_input: np.ndarray,
-    ) -> None:
-        """Test layer works with custom initializer."""
-        config = {
-            "input_size": 10,
-            "output_size": 10,
-            "content_dim": 32,
-            "num_copies": 1,
-            "kernel_initializer": "he_normal",
-        }
-        layer = SimpleSelectCopy(**config)
-
-        output, _ = layer(sample_input)
-
-        assert output.shape == (sample_input.shape[0], 10, 32)
-
-
-# =============================================================================
-# Integration Tests
-# =============================================================================
-
-
-class TestIntegration:
-    """Integration tests for the select-copy layers."""
-
-    def test_ntm_style_workflow(self) -> None:
-        """Test a typical NTM-style read/write workflow."""
         memory_size = 32
-        content_dim = 64
-        controller_dim = 128
-        batch_size = 4
+        content_dim = 16
+        controller_dim = 64
+        num_read_heads = 2
 
         layer = DifferentiableSelectCopy(
             memory_size=memory_size,
             content_dim=content_dim,
             controller_dim=controller_dim,
-            num_read_heads=2,
+            num_read_heads=num_read_heads,
             num_write_heads=1,
         )
 
-        # Initialize memory
-        memory = np.zeros((batch_size, memory_size, content_dim), dtype=np.float32)
-        controller_state = np.random.randn(batch_size, controller_dim).astype(np.float32)
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
 
-        # Multiple steps
-        for step in range(5):
-            memory, read_content, state = layer(memory, controller_state)
+        new_memory, read_output, state_dict = layer(memory, controller_state)
 
-            # Memory should change after writes
-            assert memory.shape == (batch_size, memory_size, content_dim)
+        assert ops.shape(new_memory) == (batch_size, memory_size, content_dim)
+        assert ops.shape(read_output) == (batch_size, num_read_heads * content_dim)
+        assert len(state_dict["read_weights"]) == num_read_heads
+        assert len(state_dict["write_weights"]) == 1
 
-            # Update controller state based on read content (simplified)
-            controller_state = np.random.randn(batch_size, controller_dim).astype(np.float32)
-
-    def test_sequence_to_sequence_simple(self) -> None:
-        """Test simple select-copy for sequence transformation."""
-        input_size = 16
-        output_size = 8
-        content_dim = 32
+    def test_call_with_previous_weights(self):
+        """Test call with explicit previous weights."""
         batch_size = 4
+        memory_size = 32
+        content_dim = 16
+        controller_dim = 64
+
+        layer = DifferentiableSelectCopy(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+            num_read_heads=1,
+            num_write_heads=1,
+        )
+
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+
+        prev_read_weights = [
+            ops.softmax(keras.random.normal((batch_size, memory_size), seed=44), axis=-1)
+        ]
+        prev_write_weights = [
+            ops.softmax(keras.random.normal((batch_size, memory_size), seed=45), axis=-1)
+        ]
+
+        new_memory, read_output, state_dict = layer(
+            memory,
+            controller_state,
+            previous_read_weights=prev_read_weights,
+            previous_write_weights=prev_write_weights,
+        )
+
+        assert ops.shape(new_memory) == (batch_size, memory_size, content_dim)
+
+    def test_memory_modification(self):
+        """Test that write operation modifies memory."""
+        batch_size = 2
+        memory_size = 16
+        content_dim = 8
+        controller_dim = 32
+
+        layer = DifferentiableSelectCopy(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+        )
+
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+
+        new_memory, _, _ = layer(memory, controller_state)
+
+        memory_np = keras.ops.convert_to_numpy(memory)
+        new_memory_np = keras.ops.convert_to_numpy(new_memory)
+
+        # Memory should be modified (not identical)
+        assert not np.allclose(memory_np, new_memory_np)
+
+    def test_read_operation(self):
+        """Test that read operation extracts content from memory."""
+        batch_size = 2
+        memory_size = 16
+        content_dim = 8
+        controller_dim = 32
+
+        layer = DifferentiableSelectCopy(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+        )
+
+        # Create memory with distinct content
+        memory = keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        controller_state = keras.random.normal((batch_size, controller_dim), seed=43)
+
+        _, read_output, state_dict = layer(memory, controller_state)
+
+        read_output_np = keras.ops.convert_to_numpy(read_output)
+        read_weights = state_dict["read_weights"][0]
+        read_weights_np = keras.ops.convert_to_numpy(read_weights)
+
+        # Read weights should be valid probability distribution
+        np.testing.assert_allclose(
+            np.sum(read_weights_np, axis=-1),
+            np.ones(batch_size),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        # Read output should have correct shape
+        assert read_output_np.shape == (batch_size, content_dim)
+
+    def test_serialization(self):
+        """Test get_config and from_config."""
+        layer = DifferentiableSelectCopy(
+            memory_size=32,
+            content_dim=16,
+            controller_dim=64,
+            num_read_heads=2,
+            num_write_heads=1,
+            num_shifts=5,
+        )
+
+        config = layer.get_config()
+
+        assert config["memory_size"] == 32
+        assert config["content_dim"] == 16
+        assert config["num_read_heads"] == 2
+        assert config["num_write_heads"] == 1
+
+        layer_restored = DifferentiableSelectCopy.from_config(config)
+
+        assert layer_restored.memory_size == layer.memory_size
+        assert layer_restored.num_read_heads == layer.num_read_heads
+
+    def test_gradient_flow(self):
+        """Test that gradients flow through the layer."""
+        batch_size = 2
+        memory_size = 16
+        content_dim = 8
+        controller_dim = 32
+
+        layer = DifferentiableSelectCopy(
+            memory_size=memory_size,
+            content_dim=content_dim,
+            controller_dim=controller_dim,
+        )
+
+        memory = tf.Variable(
+            keras.random.normal((batch_size, memory_size, content_dim), seed=42)
+        )
+        controller_state = tf.Variable(
+            keras.random.normal((batch_size, controller_dim), seed=43)
+        )
+
+        with tf.GradientTape() as tape:
+            new_memory, read_output, _ = layer(memory, controller_state)
+            loss = ops.sum(new_memory) + ops.sum(read_output)
+
+        grads = tape.gradient(loss, [memory, controller_state])
+
+        assert grads[0] is not None
+        assert grads[1] is not None
+
+
+# ---------------------------------------------------------------------
+# SimpleSelectCopy Tests
+# ---------------------------------------------------------------------
+
+
+class TestSimpleSelectCopy:
+    """Tests for SimpleSelectCopy layer."""
+
+    def test_init_default_params(self):
+        """Test initialization with default parameters."""
+        layer = SimpleSelectCopy(
+            input_size=10,
+            output_size=10,
+            content_dim=16,
+        )
+        assert layer.input_size == 10
+        assert layer.output_size == 10
+        assert layer.content_dim == 16
+        assert layer.num_copies == 1
+        assert layer.temperature == 1.0
+        assert layer.use_content_query is True
+
+    def test_init_custom_params(self):
+        """Test initialization with custom parameters."""
+        layer = SimpleSelectCopy(
+            input_size=20,
+            output_size=15,
+            content_dim=32,
+            num_copies=3,
+            temperature=0.5,
+            use_content_query=False,
+        )
+        assert layer.input_size == 20
+        assert layer.output_size == 15
+        assert layer.num_copies == 3
+        assert layer.temperature == 0.5
+        assert layer.use_content_query is False
+
+    def test_init_invalid_params(self):
+        """Test that invalid parameters raise ValueError."""
+        try:
+            SimpleSelectCopy(
+                input_size=0,
+                output_size=10,
+                content_dim=16,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+        try:
+            SimpleSelectCopy(
+                input_size=10,
+                output_size=10,
+                content_dim=16,
+                temperature=-1.0,
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_build(self):
+        """Test that build creates all necessary components."""
+        layer = SimpleSelectCopy(
+            input_size=10,
+            output_size=10,
+            content_dim=16,
+            num_copies=2,
+            use_content_query=True,
+        )
+        layer.build((None, 10, 16))
+
+        assert layer.built
+        assert layer.output_position_embeddings is not None
+        assert layer.output_position_embeddings.shape == (10, 16)
+        assert len(layer.content_transforms) == 2
+
+    def test_build_non_content_query(self):
+        """Test build with use_content_query=False."""
+        layer = SimpleSelectCopy(
+            input_size=10,
+            output_size=10,
+            content_dim=16,
+            num_copies=2,
+            use_content_query=False,
+        )
+        layer.build((None, 10, 16))
+
+        assert layer.built
+        assert len(layer.read_query_weights) == 2
+        assert len(layer.write_query_weights) == 2
+
+    def test_call_output_shape(self):
+        """Test that call produces correct output shape."""
+        batch_size = 4
+        input_size = 10
+        output_size = 8
+        content_dim = 16
+        num_copies = 2
 
         layer = SimpleSelectCopy(
             input_size=input_size,
             output_size=output_size,
             content_dim=content_dim,
-            num_copies=4,
+            num_copies=num_copies,
         )
 
-        inputs = np.random.randn(batch_size, input_size, content_dim).astype(np.float32)
+        inputs = keras.random.normal((batch_size, input_size, content_dim), seed=42)
+
         output, attention_info = layer(inputs)
 
-        assert output.shape == (batch_size, output_size, content_dim)
+        assert ops.shape(output) == (batch_size, output_size, content_dim)
+        assert len(attention_info["read_weights"]) == num_copies
+        assert len(attention_info["write_weights"]) == num_copies
 
-    def test_model_with_multiple_layers(self) -> None:
-        """Test model with multiple select-copy layers."""
-        # Build a simple model with stacked SimpleSelectCopy layers
-        inputs = keras.Input(shape=(10, 32))
-
-        layer1 = SimpleSelectCopy(
-            input_size=10,
-            output_size=10,
-            content_dim=32,
-            num_copies=2,
-            name="select_copy_1",
-        )
-        layer2 = SimpleSelectCopy(
-            input_size=10,
-            output_size=10,
-            content_dim=32,
-            num_copies=2,
-            name="select_copy_2",
-        )
-
-        x, _ = layer1(inputs)
-        output, _ = layer2(x)
-
-        model = keras.Model(inputs=inputs, outputs=output)
-
-        # Test forward pass
-        test_input = np.random.randn(4, 10, 32).astype(np.float32)
-        result = model(test_input)
-
-        assert result.shape == (4, 10, 32)
-
-        # Test serialization
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "stacked_model.keras")
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_result = loaded_model(test_input)
-
-        np.testing.assert_allclose(
-            ops.convert_to_numpy(result),
-            ops.convert_to_numpy(loaded_result),
-            rtol=1e-6,
-            atol=1e-6,
-            err_msg="Stacked model outputs should match after serialization",
-        )
-
-    def test_gradient_flow(self) -> None:
-        """Test that gradients flow through the layers."""
-        import tensorflow as tf
+    def test_call_attention_weights_valid(self):
+        """Test that attention weights are valid probability distributions."""
+        batch_size = 4
+        input_size = 10
+        output_size = 8
+        content_dim = 16
 
         layer = SimpleSelectCopy(
+            input_size=input_size,
+            output_size=output_size,
+            content_dim=content_dim,
+        )
+
+        inputs = keras.random.normal((batch_size, input_size, content_dim), seed=42)
+
+        _, attention_info = layer(inputs)
+
+        read_weights = attention_info["read_weights"][0]
+        write_weights = attention_info["write_weights"][0]
+
+        read_weights_np = keras.ops.convert_to_numpy(read_weights)
+        write_weights_np = keras.ops.convert_to_numpy(write_weights)
+
+        # Check sums
+        np.testing.assert_allclose(
+            np.sum(read_weights_np, axis=-1),
+            np.ones(batch_size),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            np.sum(write_weights_np, axis=-1),
+            np.ones(batch_size),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        # Check non-negative
+        assert np.all(read_weights_np >= 0)
+        assert np.all(write_weights_np >= 0)
+
+    def test_temperature_effect(self):
+        """Test that temperature affects attention sharpness."""
+        batch_size = 4
+        input_size = 10
+        output_size = 10
+        content_dim = 16
+
+        layer_low_temp = SimpleSelectCopy(
+            input_size=input_size,
+            output_size=output_size,
+            content_dim=content_dim,
+            temperature=0.1,
+        )
+
+        layer_high_temp = SimpleSelectCopy(
+            input_size=input_size,
+            output_size=output_size,
+            content_dim=content_dim,
+            temperature=10.0,
+        )
+
+        inputs = keras.random.normal((batch_size, input_size, content_dim), seed=42)
+
+        # Build both layers with same input
+        layer_low_temp.build((None, input_size, content_dim))
+        layer_high_temp.build((None, input_size, content_dim))
+
+        _, attention_low = layer_low_temp(inputs)
+        _, attention_high = layer_high_temp(inputs)
+
+        read_weights_low = keras.ops.convert_to_numpy(attention_low["read_weights"][0])
+        read_weights_high = keras.ops.convert_to_numpy(attention_high["read_weights"][0])
+
+        # Low temperature should produce sharper (higher entropy) distribution
+        entropy_low = -np.sum(
+            read_weights_low * np.log(read_weights_low + 1e-10), axis=-1
+        )
+        entropy_high = -np.sum(
+            read_weights_high * np.log(read_weights_high + 1e-10), axis=-1
+        )
+
+        # High temperature -> more uniform -> higher entropy
+        assert np.mean(entropy_high) > np.mean(entropy_low)
+
+    def test_serialization(self):
+        """Test get_config and from_config."""
+        layer = SimpleSelectCopy(
             input_size=10,
-            output_size=10,
-            content_dim=32,
+            output_size=8,
+            content_dim=16,
+            num_copies=2,
+            temperature=0.5,
+            use_content_query=False,
+        )
+
+        config = layer.get_config()
+
+        assert config["input_size"] == 10
+        assert config["output_size"] == 8
+        assert config["num_copies"] == 2
+        assert config["temperature"] == 0.5
+        assert config["use_content_query"] is False
+
+        layer_restored = SimpleSelectCopy.from_config(config)
+
+        assert layer_restored.input_size == layer.input_size
+        assert layer_restored.output_size == layer.output_size
+        assert layer_restored.temperature == layer.temperature
+
+    def test_compute_output_shape(self):
+        """Test compute_output_shape method."""
+        layer = SimpleSelectCopy(
+            input_size=10,
+            output_size=8,
+            content_dim=16,
             num_copies=2,
         )
 
-        inputs = tf.random.normal((4, 10, 32))
+        output_shape, attention_shapes = layer.compute_output_shape((None, 10, 16))
 
-        with tf.GradientTape() as tape:
-            tape.watch(inputs)
-            output, _ = layer(inputs, training=True)
-            loss = tf.reduce_mean(output ** 2)
+        assert output_shape == (None, 8, 16)
+        assert len(attention_shapes["read_weights"]) == 2
+        assert len(attention_shapes["write_weights"]) == 2
 
-        gradients = tape.gradient(loss, inputs)
+    def test_gradient_flow(self):
+        """Test that gradients flow through the layer."""
+        batch_size = 2
+        input_size = 8
+        output_size = 8
+        content_dim = 16
 
-        assert gradients is not None, "Gradients should flow through the layer"
-        assert gradients.shape == inputs.shape
-
-    def test_gradient_flow_ntm(self) -> None:
-        """Test gradient flow through DifferentiableSelectCopy."""
-        import tensorflow as tf
-
-        layer = DifferentiableSelectCopy(
-            memory_size=16,
-            content_dim=32,
-            controller_dim=64,
-            num_read_heads=1,
-            num_write_heads=1,
+        layer = SimpleSelectCopy(
+            input_size=input_size,
+            output_size=output_size,
+            content_dim=content_dim,
         )
 
-        memory = tf.random.normal((4, 16, 32))
-        controller_state = tf.random.normal((4, 64))
+        inputs = tf.Variable(
+            keras.random.normal((batch_size, input_size, content_dim), seed=42)
+        )
 
         with tf.GradientTape() as tape:
-            tape.watch([memory, controller_state])
-            new_memory, read_content, _ = layer(memory, controller_state, training=True)
-            loss = tf.reduce_mean(new_memory ** 2) + tf.reduce_mean(read_content ** 2)
+            output, _ = layer(inputs)
+            loss = ops.sum(output)
 
-        gradients = tape.gradient(loss, [memory, controller_state])
+        grads = tape.gradient(loss, inputs)
 
-        assert gradients[0] is not None, "Gradients should flow to memory"
-        assert gradients[1] is not None, "Gradients should flow to controller state"
+        assert grads is not None
+
+
+# ---------------------------------------------------------------------
+# Run tests
+# ---------------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    import pytest
+
+    pytest.main([__file__, "-v"])

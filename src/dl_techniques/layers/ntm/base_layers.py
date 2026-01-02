@@ -1,55 +1,63 @@
 """
-Differentiable Select-Copy Layer for Neural Turing Machine Foundation.
+Differentiable Addressing and Memory Layers for Neural Turing Machines.
 
-This module implements a fully differentiable layer that can:
-1. Select (read) content from an arbitrary position in input memory
-2. Copy (write) that content to a learnable position in output memory
+This module implements the core differentiable addressing mechanisms that form
+the foundation for memory-augmented neural networks.
 
 The addressing mechanism combines:
-- Content-based addressing via cosine similarity
-- Location-based addressing via shift convolution
-- Interpolation gating between content and location modes
-- Sharpening to focus attention distributions
+    - Content-based addressing via cosine similarity
+    - Location-based addressing via shift convolution
+    - Interpolation gating between content and location modes
+    - Sharpening to focus attention distributions
 
 Based on: "Neural Turing Machines" (Graves et al., 2014)
+
+Classes:
+    DifferentiableAddressingHead: NTM-style addressing head.
+    DifferentiableSelectCopy: Read/write operations with multiple heads.
+    SimpleSelectCopy: Simplified select-copy mechanism.
 """
 
 import keras
 from keras import ops
 from typing import Any
 
+
 # ---------------------------------------------------------------------
+# DifferentiableAddressingHead
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class DifferentiableAddressingHead(keras.layers.Layer):
     """
     Differentiable addressing head implementing NTM-style memory addressing.
 
-    This head computes attention weights over memory locations using a combination
-    of content-based and location-based addressing mechanisms.
+    This head computes attention weights over memory locations using a
+    combination of content-based and location-based addressing mechanisms.
 
     **Architecture**::
 
         controller_state (batch, controller_dim)
-               │
-               ├─→ key_proj → key (batch, content_dim)
-               │                    ↓
-               │              cosine_similarity(key, memory)
-               │                    ↓
-               ├─→ beta_proj → beta × similarity → softmax → content_weights
-               │
-               ├─→ gate_proj → gate
-               │                 ↓
-               │         gate * content_weights + (1-gate) * prev_weights
-               │                 ↓
-               ├─→ shift_proj → shift_kernel
-               │                    ↓
-               │            circular_convolve(gated_weights, shift_kernel)
-               │                    ↓
-               └─→ gamma_proj → gamma
-                                  ↓
+               |
+               +-> key_proj -> key (batch, content_dim)
+               |                    |
+               |              cosine_similarity(key, memory)
+               |                    |
+               +-> beta_proj -> beta * similarity -> softmax -> content_weights
+               |
+               +-> gate_proj -> gate
+               |                 |
+               |         gate * content_weights + (1-gate) * prev_weights
+               |                 |
+               +-> shift_proj -> shift_kernel
+               |                    |
+               |            circular_convolve(gated_weights, shift_kernel)
+               |                    |
+               +-> gamma_proj -> gamma
+                                  |
                            weights^gamma / sum(weights^gamma)
-                                  ↓
+                                  |
                            output_weights (batch, memory_size)
 
     :param memory_size: Number of memory slots to address.
@@ -57,8 +65,7 @@ class DifferentiableAddressingHead(keras.layers.Layer):
     :param content_dim: Dimensionality of memory content vectors.
     :type content_dim: int
     :param controller_dim: Dimensionality of the controller state.
-        If None, it will be inferred from input shape in build(), but this may fail
-        if build is triggered by the memory tensor (3D). Providing this is recommended.
+        If None, inferred from input shape in build().
     :type controller_dim: int | None
     :param num_shifts: Number of shift positions for location-based addressing.
         Must be odd (e.g., 3 for shifts of -1, 0, +1). Defaults to 3.
@@ -66,21 +73,18 @@ class DifferentiableAddressingHead(keras.layers.Layer):
     :param use_content_addressing: Whether to use content-based addressing.
         Defaults to True.
     :type use_content_addressing: bool
-    :param use_location_addressing: Whether to use location-based addressing
-        (shift convolution). Defaults to True.
+    :param use_location_addressing: Whether to use location-based addressing.
+        Defaults to True.
     :type use_location_addressing: bool
     :param sharpening_bias: Initial bias for sharpening parameter gamma.
-        Higher values produce sharper attention. Defaults to 1.0.
+        Defaults to 1.0.
     :type sharpening_bias: float
     :param kernel_initializer: Initializer for dense layer kernels.
-        Defaults to "glorot_uniform".
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :type kernel_initializer: str | keras.initializers.Initializer
     :param bias_initializer: Initializer for dense layer biases.
-        Defaults to "zeros".
-    :type bias_initializer: str or keras.initializers.Initializer
+    :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer for dense layer kernels.
-        Defaults to None.
-    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
     :param kwargs: Additional layer arguments.
     """
 
@@ -120,7 +124,7 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Create all sub-layers in __init__
+        # Create sub-layers in __init__ (Golden Rule)
         self.key_proj: keras.layers.Dense | None = None
         self.beta_proj: keras.layers.Dense | None = None
         self.gate_proj: keras.layers.Dense | None = None
@@ -171,20 +175,23 @@ class DifferentiableAddressingHead(keras.layers.Layer):
             name="sharpening_gamma",
         )
 
+        # Learnable initial weights (created in build)
+        self.initial_weights: keras.Variable | None = None
+
     def build(self, input_shape: tuple) -> None:
         """
         Build the addressing head components.
 
-        :param input_shape: Shape of input tensor (batch, memory_size, content_dim).
+        :param input_shape: Shape of input tensor.
         :type input_shape: tuple
         """
-        # Determine controller dim: prefer explicit, then infer from 2D input
+        # Determine controller dim
         if self.controller_dim is not None:
             controller_dim = self.controller_dim
         else:
-            # Fallback: if input is 2D, assume it's controller state.
-            # If input is 3D (memory), we might default incorrectly to content_dim if controller_dim wasn't provided.
-            controller_dim = input_shape[-1] if len(input_shape) == 2 else self.content_dim
+            controller_dim = (
+                input_shape[-1] if len(input_shape) == 2 else self.content_dim
+            )
 
         if self.key_proj is not None:
             self.key_proj.build((None, controller_dim))
@@ -236,8 +243,6 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         """
         Apply circular convolution for location-based shifting.
 
-        Uses a vectorized approach for graph compatibility.
-
         :param weights: Attention weights of shape (batch, memory_size).
         :type weights: keras.KerasTensor
         :param shift_kernel: Shift distribution of shape (batch, num_shifts).
@@ -248,7 +253,6 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         half_shift = self.num_shifts // 2
 
         # Build all shifted versions and stack them
-        # This is graph-safe as num_shifts is a static Python int
         shifted_versions = []
         for i in range(self.num_shifts):
             shift_offset = i - half_shift
@@ -281,10 +285,10 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         :param controller_state: Controller output of shape (batch, controller_dim).
         :type controller_state: keras.KerasTensor
         :param previous_weights: Previous attention weights for location addressing.
-            Shape (batch, memory_size). Defaults to uniform or learned initial weights.
-        :type previous_weights: keras.KerasTensor or None
+            Shape (batch, memory_size). Defaults to learned initial weights.
+        :type previous_weights: keras.KerasTensor | None
         :param training: Training mode flag.
-        :type training: bool or None
+        :type training: bool | None
         :return: Attention weights of shape (batch, memory_size).
         :rtype: keras.KerasTensor
         """
@@ -345,7 +349,12 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         return (input_shape[0], self.memory_size)
 
     def get_config(self) -> dict[str, Any]:
-        """Return layer configuration for serialization."""
+        """
+        Return layer configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -367,7 +376,11 @@ class DifferentiableAddressingHead(keras.layers.Layer):
         )
         return config
 
+
 # ---------------------------------------------------------------------
+# DifferentiableSelectCopy
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class DifferentiableSelectCopy(keras.layers.Layer):
@@ -383,20 +396,7 @@ class DifferentiableSelectCopy(keras.layers.Layer):
 
     **Write Operation**::
 
-        memory_new = memory * (1 - w ⊗ erase) + w ⊗ add
-
-    **Architecture**::
-
-        memory (batch, memory_size, content_dim)
-        controller_state (batch, controller_dim)
-               │
-               ├─→ read_heads[i] → read_weights → weighted_sum(memory) → read_content
-               │
-               └─→ write_heads[i] → write_weights
-                        │
-                        ├─→ erase_proj → erase_vector ─┐
-                        │                              ↓
-                        └─→ add_proj → add_vector ─→ erase_then_add → new_memory
+        memory_new = memory * (1 - w @ erase) + w @ add
 
     :param memory_size: Number of memory slots.
     :type memory_size: int
@@ -415,28 +415,13 @@ class DifferentiableSelectCopy(keras.layers.Layer):
     :type use_content_addressing: bool
     :param use_location_addressing: Enable location-based addressing. Defaults to True.
     :type use_location_addressing: bool
-    :param kernel_initializer: Initializer for dense layers. Defaults to "glorot_uniform".
-    :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases. Defaults to "zeros".
-    :type bias_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers. Defaults to None.
-    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param kernel_initializer: Initializer for dense layers.
+    :type kernel_initializer: str | keras.initializers.Initializer
+    :param bias_initializer: Initializer for dense layer biases.
+    :type bias_initializer: str | keras.initializers.Initializer
+    :param kernel_regularizer: Regularizer for dense layers.
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
     :param kwargs: Additional layer arguments.
-
-    Example::
-
-        layer = DifferentiableSelectCopy(
-            memory_size=128,
-            content_dim=64,
-            controller_dim=256,
-            num_read_heads=1,
-            num_write_heads=1,
-        )
-
-        memory = keras.random.normal((batch, 128, 64))
-        controller_state = keras.random.normal((batch, 256))
-
-        new_memory, read_content, state_dict = layer(memory, controller_state)
     """
 
     def __init__(
@@ -481,7 +466,7 @@ class DifferentiableSelectCopy(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Create all sub-layers in __init__
+        # Create read heads
         self.read_heads: list[DifferentiableAddressingHead] = []
         for i in range(self.num_read_heads):
             head = DifferentiableAddressingHead(
@@ -498,6 +483,7 @@ class DifferentiableSelectCopy(keras.layers.Layer):
             )
             self.read_heads.append(head)
 
+        # Create write heads with erase/add projections
         self.write_heads: list[DifferentiableAddressingHead] = []
         self.erase_projections: list[keras.layers.Dense] = []
         self.add_projections: list[keras.layers.Dense] = []
@@ -615,17 +601,12 @@ class DifferentiableSelectCopy(keras.layers.Layer):
         :param controller_state: Controller output of shape (batch, controller_dim).
         :type controller_state: keras.KerasTensor
         :param previous_read_weights: Previous read attention weights per head.
-            List of tensors with shape (batch, memory_size). Defaults to None.
-        :type previous_read_weights: list[keras.KerasTensor] or None
+        :type previous_read_weights: list[keras.KerasTensor] | None
         :param previous_write_weights: Previous write attention weights per head.
-            List of tensors with shape (batch, memory_size). Defaults to None.
-        :type previous_write_weights: list[keras.KerasTensor] or None
+        :type previous_write_weights: list[keras.KerasTensor] | None
         :param training: Training mode flag.
-        :type training: bool or None
-        :return: Tuple of (new_memory, read_contents, state_dict) where:
-            - new_memory: Modified memory (batch, memory_size, content_dim)
-            - read_contents: Concatenated read vectors (batch, num_read_heads * content_dim)
-            - state_dict: Dictionary with 'read_weights' and 'write_weights' lists
+        :type training: bool | None
+        :return: Tuple of (new_memory, read_contents, state_dict).
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor, dict]
         """
         if previous_read_weights is None:
@@ -679,11 +660,7 @@ class DifferentiableSelectCopy(keras.layers.Layer):
     def compute_output_shape(
         self,
         input_shape: tuple[int | None, ...],
-    ) -> tuple[
-        tuple[int | None, ...],
-        tuple[int | None, ...],
-        dict,
-    ]:
+    ) -> tuple[tuple[int | None, ...], tuple[int | None, ...], dict]:
         """
         Compute output shapes.
 
@@ -708,7 +685,12 @@ class DifferentiableSelectCopy(keras.layers.Layer):
         return memory_shape, read_output_shape, state_dict_shapes
 
     def get_config(self) -> dict[str, Any]:
-        """Return layer configuration for serialization."""
+        """
+        Return layer configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -731,7 +713,11 @@ class DifferentiableSelectCopy(keras.layers.Layer):
         )
         return config
 
+
 # ---------------------------------------------------------------------
+# SimpleSelectCopy
+# ---------------------------------------------------------------------
+
 
 @keras.saving.register_keras_serializable()
 class SimpleSelectCopy(keras.layers.Layer):
@@ -739,33 +725,11 @@ class SimpleSelectCopy(keras.layers.Layer):
     Simplified differentiable select-copy layer for learning input-output mappings.
 
     This is a minimal version that learns to:
-    1. Select one position from input via soft attention
-    2. Copy the content to one position in output via soft attention
+        1. Select one position from input via soft attention
+        2. Copy the content to one position in output via soft attention
 
     Unlike the full DifferentiableSelectCopy, this layer uses simple learned
     query vectors without the full NTM addressing machinery.
-
-    **Architecture**::
-
-        inputs (batch, input_size, content_dim)
-               │
-               ├─→ read_key_proj → input_keys (batch, input_size, content_dim)
-               │
-               └─→ output_position_embeddings (output_size, content_dim)
-
-        For each copy operation i:
-               │
-               ├─→ pooled_input → read_query[i] → dot(input_keys) → read_weights
-               │                                                        │
-               │                                      weighted_sum(inputs) → read_content
-               │                                                                    │
-               │                                        content_transform[i] → transformed
-               │
-               └─→ pooled_input → write_query[i] → dot(output_keys) → write_weights
-                                                                           │
-                                              outer_product(write_weights, transformed)
-                                                           │
-                                                   output += write_term
 
     :param input_size: Number of input positions to select from.
     :type input_size: int
@@ -775,32 +739,17 @@ class SimpleSelectCopy(keras.layers.Layer):
     :type content_dim: int
     :param num_copies: Number of parallel select-copy operations. Defaults to 1.
     :type num_copies: int
-    :param temperature: Softmax temperature for attention sharpness.
-        Lower values produce sharper attention. Defaults to 1.0.
+    :param temperature: Softmax temperature for attention sharpness. Defaults to 1.0.
     :type temperature: float
     :param use_content_query: If True, use input content to generate queries.
-        If False, use purely learned position queries. Defaults to True.
     :type use_content_query: bool
-    :param kernel_initializer: Initializer for dense layers. Defaults to "glorot_uniform".
-    :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases. Defaults to "zeros".
-    :type bias_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers. Defaults to None.
-    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param kernel_initializer: Initializer for dense layers.
+    :type kernel_initializer: str | keras.initializers.Initializer
+    :param bias_initializer: Initializer for dense layer biases.
+    :type bias_initializer: str | keras.initializers.Initializer
+    :param kernel_regularizer: Regularizer for dense layers.
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
     :param kwargs: Additional layer arguments.
-
-    Example::
-
-        layer = SimpleSelectCopy(
-            input_size=10,
-            output_size=10,
-            content_dim=32,
-            num_copies=2,
-        )
-
-        x = keras.random.normal((batch, 10, 32))
-
-        output, attention_info = layer(x)
     """
 
     def __init__(
@@ -839,7 +788,7 @@ class SimpleSelectCopy(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Create all sub-layers in __init__
+        # Create sub-layers
         self.read_query_layers: list[keras.layers.Dense] = []
         self.write_query_layers: list[keras.layers.Dense] = []
         self.content_transforms: list[keras.layers.Dense] = []
@@ -880,6 +829,11 @@ class SimpleSelectCopy(keras.layers.Layer):
             name="read_key_projection",
         )
 
+        # Learned query weights (for non-content-query mode) - created in build
+        self.read_query_weights: list[keras.Variable] = []
+        self.write_query_weights: list[keras.Variable] = []
+        self.output_position_embeddings: keras.Variable | None = None
+
     def build(self, input_shape: tuple) -> None:
         """
         Build selection and placement mechanisms.
@@ -908,8 +862,6 @@ class SimpleSelectCopy(keras.layers.Layer):
 
         # Learned query weights (for non-content-query mode)
         if not self.use_content_query:
-            self.read_query_weights: list[keras.Variable] = []
-            self.write_query_weights: list[keras.Variable] = []
             for i in range(self.num_copies):
                 read_q = self.add_weight(
                     name=f"read_query_weight_{i}",
@@ -939,10 +891,8 @@ class SimpleSelectCopy(keras.layers.Layer):
         :param inputs: Input tensor of shape (batch, input_size, content_dim).
         :type inputs: keras.KerasTensor
         :param training: Training mode flag.
-        :type training: bool or None
-        :return: Tuple of (output, attention_info) where:
-            - output: Output tensor (batch, output_size, content_dim)
-            - attention_info: Dict with 'read_weights' and 'write_weights' lists
+        :type training: bool | None
+        :return: Tuple of (output, attention_info).
         :rtype: tuple[keras.KerasTensor, dict]
         """
         batch_size = ops.shape(inputs)[0]
@@ -1031,7 +981,12 @@ class SimpleSelectCopy(keras.layers.Layer):
         return output_shape, attention_info_shapes
 
     def get_config(self) -> dict[str, Any]:
-        """Return layer configuration for serialization."""
+        """
+        Return layer configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -1051,5 +1006,3 @@ class SimpleSelectCopy(keras.layers.Layer):
             }
         )
         return config
-
-# ---------------------------------------------------------------------

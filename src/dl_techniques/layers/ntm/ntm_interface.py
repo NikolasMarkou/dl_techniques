@@ -1,17 +1,19 @@
 """
 Neural Turing Machine (NTM) Interface Module.
 
-This module defines the abstract base classes for all NTM variants, establishing
-a consistent interface for memory-augmented neural network implementations.
+This module defines the abstract base classes and data structures for all NTM
+variants, establishing a consistent interface for memory-augmented neural
+network implementations.
 
-The interface is designed based on the original NTM paper (Graves et al., 2014)
-and extended to accommodate modern variants like DNC, SANTM, and Titans.
+Based on: "Neural Turing Machines" (Graves et al., 2014)
 
 Classes:
-    MemoryState: Dataclass representing the state of external memory.
-    HeadState: Dataclass representing the state of read/write heads.
-    NTMOutput: Dataclass for NTM forward pass outputs.
     AddressingMode: Enum for addressing mechanism types.
+    MemoryAccessType: Enum for memory access types.
+    MemoryState: Dataclass representing memory state.
+    HeadState: Dataclass representing head state.
+    NTMOutput: Dataclass for NTM forward pass outputs.
+    NTMConfig: Configuration dataclass for NTM architectures.
     BaseMemory: Abstract base class for memory modules.
     BaseHead: Abstract base class for read/write heads.
     BaseController: Abstract base class for controller networks.
@@ -23,43 +25,26 @@ from keras import ops
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import (
-    Optional, 
-    Union, 
-    Any, 
-    Dict, 
-    Tuple, 
-    List, 
-    Literal,
-    TypeVar,
-)
-
-
-# ---------------------------------------------------------------------
-# Type Variables
-# ---------------------------------------------------------------------
-
-T = TypeVar('T')
-MemoryStateT = TypeVar('MemoryStateT', bound='MemoryState')
-HeadStateT = TypeVar('HeadStateT', bound='HeadState')
+from typing import Any, Literal
 
 
 # ---------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------
 
+
 class AddressingMode(Enum):
     """
     Enumeration of addressing mechanism types.
-    
-    Attributes:
-        CONTENT: Content-based addressing using similarity measures.
-        LOCATION: Location-based addressing using shifts and interpolation.
-        HYBRID: Combined content and location addressing (original NTM).
-        SPARSE: Sparse attention-based addressing (SANTM).
-        TEMPORAL: Temporal link-based addressing (DNC).
-        LEARNED: Fully learned addressing (Titans).
+
+    :cvar CONTENT: Content-based addressing using similarity measures.
+    :cvar LOCATION: Location-based addressing using shifts and interpolation.
+    :cvar HYBRID: Combined content and location addressing (original NTM).
+    :cvar SPARSE: Sparse attention-based addressing (SANTM).
+    :cvar TEMPORAL: Temporal link-based addressing (DNC).
+    :cvar LEARNED: Fully learned addressing (Titans).
     """
+
     CONTENT = auto()
     LOCATION = auto()
     HYBRID = auto()
@@ -71,12 +56,12 @@ class AddressingMode(Enum):
 class MemoryAccessType(Enum):
     """
     Enumeration of memory access types.
-    
-    Attributes:
-        READ: Read-only memory access.
-        WRITE: Write-only memory access.
-        READ_WRITE: Combined read and write access.
+
+    :cvar READ: Read-only memory access.
+    :cvar WRITE: Write-only memory access.
+    :cvar READ_WRITE: Combined read and write access.
     """
+
     READ = auto()
     WRITE = auto()
     READ_WRITE = auto()
@@ -86,37 +71,47 @@ class MemoryAccessType(Enum):
 # State Dataclasses
 # ---------------------------------------------------------------------
 
+
 @dataclass
 class MemoryState:
     """
     Represents the state of external memory.
-    
+
     This dataclass encapsulates all information needed to describe
     the current state of the memory matrix and associated metadata.
-    
-    Attributes:
-        memory: The memory matrix of shape (batch, num_slots, memory_dim).
-        usage: Memory usage vector of shape (batch, num_slots).
-        write_weights: Most recent write weights of shape (batch, num_heads, num_slots).
-        read_weights: Most recent read weights of shape (batch, num_heads, num_slots).
-        temporal_links: Optional temporal link matrix for DNC-style memory.
-        precedence: Optional precedence weights for temporal ordering.
-        metadata: Optional dictionary for variant-specific state.
+
+    :param memory: Memory matrix of shape (batch, num_slots, memory_dim).
+    :type memory: Any
+    :param usage: Memory usage vector of shape (batch, num_slots).
+    :type usage: Any | None
+    :param write_weights: Most recent write weights of shape
+        (batch, num_heads, num_slots).
+    :type write_weights: Any | None
+    :param read_weights: Most recent read weights of shape
+        (batch, num_heads, num_slots).
+    :type read_weights: Any | None
+    :param temporal_links: Optional temporal link matrix for DNC-style memory.
+    :type temporal_links: Any | None
+    :param precedence: Optional precedence weights for temporal ordering.
+    :type precedence: Any | None
+    :param metadata: Optional dictionary for variant-specific state.
+    :type metadata: dict[str, Any]
     """
-    memory: Any  # (batch, num_slots, memory_dim)
-    usage: Optional[Any] = None  # (batch, num_slots)
-    write_weights: Optional[Any] = None  # (batch, num_write_heads, num_slots)
-    read_weights: Optional[Any] = None  # (batch, num_read_heads, num_slots)
-    temporal_links: Optional[Any] = None  # (batch, num_slots, num_slots)
-    precedence: Optional[Any] = None  # (batch, num_slots)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def clone(self) -> 'MemoryState':
+
+    memory: Any
+    usage: Any | None = None
+    write_weights: Any | None = None
+    read_weights: Any | None = None
+    temporal_links: Any | None = None
+    precedence: Any | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def clone(self) -> "MemoryState":
         """
         Create a shallow copy of the memory state.
-        
-        Returns:
-            MemoryState: A new MemoryState with copied references.
+
+        :return: A new MemoryState with copied references.
+        :rtype: MemoryState
         """
         return MemoryState(
             memory=self.memory,
@@ -133,107 +128,201 @@ class MemoryState:
 class HeadState:
     """
     Represents the state of a read or write head.
-    
-    Attributes:
-        weights: Attention weights over memory slots, shape (batch, num_slots).
-        read_vector: Last read vector for read heads, shape (batch, memory_dim).
-        key: Key vector used for content addressing.
-        beta: Key strength (sharpening factor).
-        gate: Interpolation gate between content and location addressing.
-        shift: Shift distribution for location addressing.
-        gamma: Sharpening factor for final weights.
-        erase_vector: Erase vector for write heads.
-        add_vector: Add vector for write heads.
-        metadata: Optional dictionary for variant-specific state.
+
+    :param weights: Attention weights over memory slots, shape (batch, num_slots).
+    :type weights: Any
+    :param read_vector: Last read vector for read heads, shape (batch, memory_dim).
+    :type read_vector: Any | None
+    :param key: Key vector used for content addressing.
+    :type key: Any | None
+    :param beta: Key strength (sharpening factor).
+    :type beta: Any | None
+    :param gate: Interpolation gate between content and location addressing.
+    :type gate: Any | None
+    :param shift: Shift distribution for location addressing.
+    :type shift: Any | None
+    :param gamma: Sharpening factor for final weights.
+    :type gamma: Any | None
+    :param erase_vector: Erase vector for write heads.
+    :type erase_vector: Any | None
+    :param add_vector: Add vector for write heads.
+    :type add_vector: Any | None
+    :param metadata: Optional dictionary for variant-specific state.
+    :type metadata: dict[str, Any]
     """
-    weights: Any  # (batch, num_slots)
-    read_vector: Optional[Any] = None  # (batch, memory_dim)
-    key: Optional[Any] = None  # (batch, memory_dim)
-    beta: Optional[Any] = None  # (batch, 1)
-    gate: Optional[Any] = None  # (batch, 1)
-    shift: Optional[Any] = None  # (batch, shift_range)
-    gamma: Optional[Any] = None  # (batch, 1)
-    erase_vector: Optional[Any] = None  # (batch, memory_dim)
-    add_vector: Optional[Any] = None  # (batch, memory_dim)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    weights: Any
+    read_vector: Any | None = None
+    key: Any | None = None
+    beta: Any | None = None
+    gate: Any | None = None
+    shift: Any | None = None
+    gamma: Any | None = None
+    erase_vector: Any | None = None
+    add_vector: Any | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class NTMOutput:
     """
     Output structure for NTM forward pass.
-    
-    Attributes:
-        output: The network output, shape (batch, output_dim).
-        memory_state: Updated memory state after the forward pass.
-        head_states: List of updated head states.
-        read_vectors: Read vectors from all read heads.
-        controller_state: Controller hidden state (for recurrent controllers).
-        attention_weights: Attention weights for visualization/analysis.
-        auxiliary_losses: Optional auxiliary losses (e.g., regularization).
-        metadata: Optional dictionary for additional outputs.
+
+    :param output: The network output, shape (batch, output_dim).
+    :type output: Any
+    :param memory_state: Updated memory state after the forward pass.
+    :type memory_state: MemoryState
+    :param head_states: List of updated head states.
+    :type head_states: list[HeadState]
+    :param read_vectors: Read vectors from all read heads.
+    :type read_vectors: Any
+    :param controller_state: Controller hidden state (for recurrent controllers).
+    :type controller_state: Any | None
+    :param attention_weights: Attention weights for visualization/analysis.
+    :type attention_weights: dict[str, Any] | None
+    :param auxiliary_losses: Optional auxiliary losses (e.g., regularization).
+    :type auxiliary_losses: dict[str, Any] | None
+    :param metadata: Optional dictionary for additional outputs.
+    :type metadata: dict[str, Any]
     """
-    output: Any  # (batch, output_dim)
+
+    output: Any
     memory_state: MemoryState
-    head_states: List[HeadState]
-    read_vectors: Any  # (batch, num_read_heads, memory_dim)
-    controller_state: Optional[Any] = None
-    attention_weights: Optional[Dict[str, Any]] = None
-    auxiliary_losses: Optional[Dict[str, Any]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    head_states: list[HeadState]
+    read_vectors: Any
+    controller_state: Any | None = None
+    attention_weights: dict[str, Any] | None = None
+    auxiliary_losses: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class NTMConfig:
     """
     Configuration for NTM architectures.
-    
-    Attributes:
-        memory_size: Number of memory slots (N).
-        memory_dim: Dimension of each memory slot (M).
-        num_read_heads: Number of read heads.
-        num_write_heads: Number of write heads.
-        controller_dim: Dimension of controller hidden state.
-        controller_type: Type of controller ('lstm', 'gru', 'feedforward').
-        addressing_mode: Type of addressing mechanism.
-        shift_range: Range of allowed shifts for location addressing.
-        use_memory_init: Whether to learn initial memory state.
-        clip_value: Gradient clipping value for stability.
-        epsilon: Small constant for numerical stability.
+
+    :param memory_size: Number of memory slots (N).
+    :type memory_size: int
+    :param memory_dim: Dimension of each memory slot (M).
+    :type memory_dim: int
+    :param num_read_heads: Number of read heads.
+    :type num_read_heads: int
+    :param num_write_heads: Number of write heads.
+    :type num_write_heads: int
+    :param controller_dim: Dimension of controller hidden state.
+    :type controller_dim: int
+    :param controller_type: Type of controller ('lstm', 'gru', 'feedforward').
+    :type controller_type: str
+    :param addressing_mode: Type of addressing mechanism.
+    :type addressing_mode: AddressingMode
+    :param shift_range: Range of allowed shifts for location addressing.
+    :type shift_range: int
+    :param use_memory_init: Whether to learn initial memory state.
+    :type use_memory_init: bool
+    :param clip_value: Gradient clipping value for stability.
+    :type clip_value: float
+    :param epsilon: Small constant for numerical stability.
+    :type epsilon: float
     """
+
     memory_size: int = 128
     memory_dim: int = 64
     num_read_heads: int = 1
     num_write_heads: int = 1
     controller_dim: int = 256
-    controller_type: Literal['lstm', 'gru', 'feedforward'] = 'lstm'
+    controller_type: Literal["lstm", "gru", "feedforward"] = "lstm"
     addressing_mode: AddressingMode = AddressingMode.HYBRID
     shift_range: int = 3
     use_memory_init: bool = True
     clip_value: float = 10.0
     epsilon: float = 1e-6
 
+    def __post_init__(self) -> None:
+        """Validate configuration parameters."""
+        if self.memory_size <= 0:
+            raise ValueError(f"memory_size must be positive, got {self.memory_size}")
+        if self.memory_dim <= 0:
+            raise ValueError(f"memory_dim must be positive, got {self.memory_dim}")
+        if self.num_read_heads <= 0:
+            raise ValueError(
+                f"num_read_heads must be positive, got {self.num_read_heads}"
+            )
+        if self.num_write_heads <= 0:
+            raise ValueError(
+                f"num_write_heads must be positive, got {self.num_write_heads}"
+            )
+        if self.controller_dim <= 0:
+            raise ValueError(
+                f"controller_dim must be positive, got {self.controller_dim}"
+            )
+        if self.controller_type not in ["lstm", "gru", "feedforward"]:
+            raise ValueError(
+                f"controller_type must be 'lstm', 'gru', or 'feedforward', "
+                f"got {self.controller_type}"
+            )
+        if self.shift_range <= 0 or self.shift_range % 2 == 0:
+            raise ValueError(
+                f"shift_range must be a positive odd integer, got {self.shift_range}"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Convert configuration to dictionary for serialization.
+
+        :return: Configuration as dictionary.
+        :rtype: dict[str, Any]
+        """
+        return {
+            "memory_size": self.memory_size,
+            "memory_dim": self.memory_dim,
+            "num_read_heads": self.num_read_heads,
+            "num_write_heads": self.num_write_heads,
+            "controller_dim": self.controller_dim,
+            "controller_type": self.controller_type,
+            "addressing_mode": self.addressing_mode.name,
+            "shift_range": self.shift_range,
+            "use_memory_init": self.use_memory_init,
+            "clip_value": self.clip_value,
+            "epsilon": self.epsilon,
+        }
+
+    @classmethod
+    def from_dict(cls, config_dict: dict[str, Any]) -> "NTMConfig":
+        """
+        Create configuration from dictionary.
+
+        :param config_dict: Configuration dictionary.
+        :type config_dict: dict[str, Any]
+        :return: NTMConfig instance.
+        :rtype: NTMConfig
+        """
+        config = config_dict.copy()
+        if "addressing_mode" in config and isinstance(config["addressing_mode"], str):
+            config["addressing_mode"] = AddressingMode[config["addressing_mode"]]
+        return cls(**config)
+
 
 # ---------------------------------------------------------------------
 # Abstract Base Classes
 # ---------------------------------------------------------------------
 
+
 class BaseMemory(keras.layers.Layer, ABC):
     """
     Abstract base class for memory modules.
-    
+
     This class defines the interface for memory operations including
     initialization, reading, writing, and state management.
-    
-    All memory implementations must inherit from this class and implement
-    the abstract methods.
-    
-    Attributes:
-        memory_size: Number of memory slots.
-        memory_dim: Dimension of each memory slot.
-        epsilon: Small constant for numerical stability.
+
+    :param memory_size: Number of memory slots.
+    :type memory_size: int
+    :param memory_dim: Dimension of each memory slot.
+    :type memory_dim: int
+    :param epsilon: Small constant for numerical stability.
+    :type epsilon: float
+    :param kwargs: Additional arguments for keras.layers.Layer.
     """
-    
+
     def __init__(
         self,
         memory_size: int,
@@ -243,31 +332,32 @@ class BaseMemory(keras.layers.Layer, ABC):
     ) -> None:
         """
         Initialize the memory module.
-        
-        Args:
-            memory_size: Number of memory slots.
-            memory_dim: Dimension of each memory slot.
-            epsilon: Small constant for numerical stability.
-            **kwargs: Additional arguments for keras.layers.Layer.
+
+        :param memory_size: Number of memory slots.
+        :type memory_size: int
+        :param memory_dim: Dimension of each memory slot.
+        :type memory_dim: int
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
+        :param kwargs: Additional arguments for keras.layers.Layer.
         """
         super().__init__(**kwargs)
         self.memory_size = memory_size
         self.memory_dim = memory_dim
         self.epsilon = epsilon
-    
+
     @abstractmethod
     def initialize_state(self, batch_size: int) -> MemoryState:
         """
         Initialize memory state for a new sequence.
-        
-        Args:
-            batch_size: Number of sequences in the batch.
-            
-        Returns:
-            MemoryState: Initial memory state.
+
+        :param batch_size: Number of sequences in the batch.
+        :type batch_size: int
+        :return: Initial memory state.
+        :rtype: MemoryState
         """
         pass
-    
+
     @abstractmethod
     def read(
         self,
@@ -276,16 +366,16 @@ class BaseMemory(keras.layers.Layer, ABC):
     ) -> Any:
         """
         Read from memory using attention weights.
-        
-        Args:
-            memory_state: Current memory state.
-            read_weights: Attention weights of shape (batch, num_slots).
-            
-        Returns:
-            Read vector of shape (batch, memory_dim).
+
+        :param memory_state: Current memory state.
+        :type memory_state: MemoryState
+        :param read_weights: Attention weights of shape (batch, num_slots).
+        :type read_weights: Any
+        :return: Read vector of shape (batch, memory_dim).
+        :rtype: Any
         """
         pass
-    
+
     @abstractmethod
     def write(
         self,
@@ -296,43 +386,58 @@ class BaseMemory(keras.layers.Layer, ABC):
     ) -> MemoryState:
         """
         Write to memory using erase and add operations.
-        
-        Args:
-            memory_state: Current memory state.
-            write_weights: Write attention weights of shape (batch, num_slots).
-            erase_vector: Erase vector of shape (batch, memory_dim).
-            add_vector: Add vector of shape (batch, memory_dim).
-            
-        Returns:
-            MemoryState: Updated memory state.
+
+        :param memory_state: Current memory state.
+        :type memory_state: MemoryState
+        :param write_weights: Write attention weights of shape (batch, num_slots).
+        :type write_weights: Any
+        :param erase_vector: Erase vector of shape (batch, memory_dim).
+        :type erase_vector: Any
+        :param add_vector: Add vector of shape (batch, memory_dim).
+        :type add_vector: Any
+        :return: Updated memory state.
+        :rtype: MemoryState
         """
         pass
-    
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Get layer configuration.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
-        config.update({
-            'memory_size': self.memory_size,
-            'memory_dim': self.memory_dim,
-            'epsilon': self.epsilon,
-        })
+        config.update(
+            {
+                "memory_size": self.memory_size,
+                "memory_dim": self.memory_dim,
+                "epsilon": self.epsilon,
+            }
+        )
         return config
 
 
 class BaseHead(keras.layers.Layer, ABC):
     """
     Abstract base class for read and write heads.
-    
+
     Heads are responsible for computing attention weights over memory
     using various addressing mechanisms.
-    
-    Attributes:
-        memory_size: Number of memory slots.
-        memory_dim: Dimension of each memory slot.
-        addressing_mode: Type of addressing mechanism.
-        shift_range: Range of allowed shifts for location addressing.
+
+    :param memory_size: Number of memory slots.
+    :type memory_size: int
+    :param memory_dim: Dimension of each memory slot.
+    :type memory_dim: int
+    :param addressing_mode: Type of addressing mechanism.
+    :type addressing_mode: AddressingMode
+    :param shift_range: Range of allowed shifts for location addressing.
+    :type shift_range: int
+    :param epsilon: Small constant for numerical stability.
+    :type epsilon: float
+    :param kwargs: Additional arguments for keras.layers.Layer.
     """
-    
+
     def __init__(
         self,
         memory_size: int,
@@ -344,14 +449,18 @@ class BaseHead(keras.layers.Layer, ABC):
     ) -> None:
         """
         Initialize the head.
-        
-        Args:
-            memory_size: Number of memory slots.
-            memory_dim: Dimension of each memory slot.
-            addressing_mode: Type of addressing mechanism.
-            shift_range: Range of allowed shifts for location addressing.
-            epsilon: Small constant for numerical stability.
-            **kwargs: Additional arguments for keras.layers.Layer.
+
+        :param memory_size: Number of memory slots.
+        :type memory_size: int
+        :param memory_dim: Dimension of each memory slot.
+        :type memory_dim: int
+        :param addressing_mode: Type of addressing mechanism.
+        :type addressing_mode: AddressingMode
+        :param shift_range: Range of allowed shifts for location addressing.
+        :type shift_range: int
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
+        :param kwargs: Additional arguments for keras.layers.Layer.
         """
         super().__init__(**kwargs)
         self.memory_size = memory_size
@@ -359,29 +468,28 @@ class BaseHead(keras.layers.Layer, ABC):
         self.addressing_mode = addressing_mode
         self.shift_range = shift_range
         self.epsilon = epsilon
-    
+
     @abstractmethod
     def compute_addressing(
         self,
         controller_output: Any,
         memory_state: MemoryState,
         prev_weights: Any,
-    ) -> Tuple[Any, HeadState]:
+    ) -> tuple[Any, HeadState]:
         """
         Compute attention weights using the addressing mechanism.
-        
-        Args:
-            controller_output: Output from the controller network.
-            memory_state: Current memory state.
-            prev_weights: Previous attention weights.
-            
-        Returns:
-            Tuple of:
-                - New attention weights of shape (batch, num_slots).
-                - Updated head state.
+
+        :param controller_output: Output from the controller network.
+        :type controller_output: Any
+        :param memory_state: Current memory state.
+        :type memory_state: MemoryState
+        :param prev_weights: Previous attention weights.
+        :type prev_weights: Any
+        :return: Tuple of (new_weights, head_state).
+        :rtype: tuple[Any, HeadState]
         """
         pass
-    
+
     @abstractmethod
     def content_addressing(
         self,
@@ -391,163 +499,172 @@ class BaseHead(keras.layers.Layer, ABC):
     ) -> Any:
         """
         Compute content-based attention weights.
-        
-        Args:
-            key: Key vector of shape (batch, memory_dim).
-            beta: Key strength of shape (batch, 1).
-            memory: Memory matrix of shape (batch, num_slots, memory_dim).
-            
-        Returns:
-            Content weights of shape (batch, num_slots).
+
+        :param key: Key vector of shape (batch, memory_dim).
+        :type key: Any
+        :param beta: Key strength of shape (batch, 1).
+        :type beta: Any
+        :param memory: Memory matrix of shape (batch, num_slots, memory_dim).
+        :type memory: Any
+        :return: Content weights of shape (batch, num_slots).
+        :rtype: Any
         """
         pass
-    
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Get layer configuration.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
-        config.update({
-            'memory_size': self.memory_size,
-            'memory_dim': self.memory_dim,
-            'addressing_mode': self.addressing_mode.name,
-            'shift_range': self.shift_range,
-            'epsilon': self.epsilon,
-        })
+        config.update(
+            {
+                "memory_size": self.memory_size,
+                "memory_dim": self.memory_dim,
+                "addressing_mode": self.addressing_mode.name,
+                "shift_range": self.shift_range,
+                "epsilon": self.epsilon,
+            }
+        )
         return config
 
 
 class BaseController(keras.layers.Layer, ABC):
     """
     Abstract base class for controller networks.
-    
+
     The controller processes inputs concatenated with read vectors
     and produces outputs that parameterize the memory operations.
-    
-    Attributes:
-        controller_dim: Dimension of controller hidden state.
-        controller_type: Type of controller architecture.
+
+    :param controller_dim: Dimension of controller hidden state.
+    :type controller_dim: int
+    :param controller_type: Type of controller architecture.
+    :type controller_type: str
+    :param kwargs: Additional arguments for keras.layers.Layer.
     """
-    
+
     def __init__(
         self,
         controller_dim: int,
-        controller_type: Literal['lstm', 'gru', 'feedforward'] = 'lstm',
+        controller_type: Literal["lstm", "gru", "feedforward"] = "lstm",
         **kwargs: Any,
     ) -> None:
         """
         Initialize the controller.
-        
-        Args:
-            controller_dim: Dimension of controller hidden state.
-            controller_type: Type of controller architecture.
-            **kwargs: Additional arguments for keras.layers.Layer.
+
+        :param controller_dim: Dimension of controller hidden state.
+        :type controller_dim: int
+        :param controller_type: Type of controller architecture.
+        :type controller_type: str
+        :param kwargs: Additional arguments for keras.layers.Layer.
         """
         super().__init__(**kwargs)
         self.controller_dim = controller_dim
         self.controller_type = controller_type
-    
+
     @abstractmethod
-    def initialize_state(self, batch_size: int) -> Optional[Any]:
+    def initialize_state(self, batch_size: int) -> Any | None:
         """
         Initialize controller state for a new sequence.
-        
-        Args:
-            batch_size: Number of sequences in the batch.
-            
-        Returns:
-            Initial controller state, or None for feedforward controllers.
+
+        :param batch_size: Number of sequences in the batch.
+        :type batch_size: int
+        :return: Initial controller state, or None for feedforward controllers.
+        :rtype: Any | None
         """
         pass
-    
+
     @abstractmethod
     def call(
         self,
         inputs: Any,
-        state: Optional[Any] = None,
-        training: Optional[bool] = None,
-    ) -> Tuple[Any, Optional[Any]]:
+        state: Any | None = None,
+        training: bool | None = None,
+    ) -> tuple[Any, Any | None]:
         """
         Process inputs through the controller.
-        
-        Args:
-            inputs: Input tensor concatenated with read vectors.
-            state: Previous controller state.
-            training: Whether in training mode.
-            
-        Returns:
-            Tuple of:
-                - Controller output.
-                - Updated controller state.
+
+        :param inputs: Input tensor concatenated with read vectors.
+        :type inputs: Any
+        :param state: Previous controller state.
+        :type state: Any | None
+        :param training: Whether in training mode.
+        :type training: bool | None
+        :return: Tuple of (controller_output, new_state).
+        :rtype: tuple[Any, Any | None]
         """
         pass
-    
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+
+    def get_config(self) -> dict[str, Any]:
+        """
+        Get layer configuration.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
-        config.update({
-            'controller_dim': self.controller_dim,
-            'controller_type': self.controller_type,
-        })
+        config.update(
+            {
+                "controller_dim": self.controller_dim,
+                "controller_type": self.controller_type,
+            }
+        )
         return config
 
 
 class BaseNTM(keras.layers.Layer, ABC):
     """
     Abstract base class for Neural Turing Machine architectures.
-    
+
     This class defines the complete interface for NTM variants,
     including initialization, forward pass, and state management.
-    
-    All NTM implementations must inherit from this class.
-    
-    Attributes:
-        config: NTM configuration object.
-        output_dim: Dimension of the output vector.
-        memory: Memory module.
-        controller: Controller network.
-        read_heads: List of read heads.
-        write_heads: List of write heads.
+
+    :param config: NTM configuration object.
+    :type config: NTMConfig
+    :param output_dim: Dimension of the output vector.
+    :type output_dim: int | None
+    :param kwargs: Additional arguments for keras.layers.Layer.
     """
 
     def __init__(
         self,
         config: NTMConfig,
-        output_dim: Optional[int] = None,
+        output_dim: int | None = None,
         **kwargs: Any,
     ) -> None:
         """
         Initialize the NTM.
 
-        Args:
-            config: NTM configuration object.
-            output_dim: Dimension of the output vector.
-            **kwargs: Additional arguments for keras.layers.Layer.
+        :param config: NTM configuration object.
+        :type config: NTMConfig
+        :param output_dim: Dimension of the output vector.
+        :type output_dim: int | None
+        :param kwargs: Additional arguments for keras.layers.Layer.
         """
         super().__init__(**kwargs)
         self.config = config
         self.output_dim = output_dim
 
         # Subclasses must initialize these
-        self.memory: Optional[BaseMemory] = None
-        self.controller: Optional[BaseController] = None
-        self.read_heads: List[BaseHead] = []
-        self.write_heads: List[BaseHead] = []
+        self.memory: BaseMemory | None = None
+        self.controller: BaseController | None = None
+        self.read_heads: list[BaseHead] = []
+        self.write_heads: list[BaseHead] = []
 
     @abstractmethod
     def initialize_state(
         self,
         batch_size: int,
-    ) -> Tuple[MemoryState, List[HeadState], Optional[Any]]:
+    ) -> tuple[MemoryState, list[HeadState], Any | None]:
         """
         Initialize all states for a new sequence.
 
-        Args:
-            batch_size: Number of sequences in the batch.
-
-        Returns:
-            Tuple of:
-                - Initial memory state.
-                - List of initial head states.
-                - Initial controller state.
+        :param batch_size: Number of sequences in the batch.
+        :type batch_size: int
+        :return: Tuple of (memory_state, head_states, controller_state).
+        :rtype: tuple[MemoryState, list[HeadState], Any | None]
         """
         pass
 
@@ -556,45 +673,51 @@ class BaseNTM(keras.layers.Layer, ABC):
         self,
         inputs: Any,
         memory_state: MemoryState,
-        head_states: List[HeadState],
-        controller_state: Optional[Any],
-        training: Optional[bool] = None,
+        head_states: list[HeadState],
+        controller_state: Any | None,
+        training: bool | None = None,
     ) -> NTMOutput:
         """
         Perform a single timestep of the NTM.
 
-        Args:
-            inputs: Input at current timestep, shape (batch, input_dim).
-            memory_state: Current memory state.
-            head_states: Current head states.
-            controller_state: Current controller state.
-            training: Whether in training mode.
-
-        Returns:
-            NTMOutput containing all outputs and updated states.
+        :param inputs: Input at current timestep, shape (batch, input_dim).
+        :type inputs: Any
+        :param memory_state: Current memory state.
+        :type memory_state: MemoryState
+        :param head_states: Current head states.
+        :type head_states: list[HeadState]
+        :param controller_state: Current controller state.
+        :type controller_state: Any | None
+        :param training: Whether in training mode.
+        :type training: bool | None
+        :return: NTMOutput containing all outputs and updated states.
+        :rtype: NTMOutput
         """
         pass
 
     def call(
         self,
         inputs: Any,
-        initial_state: Optional[Tuple[MemoryState, List[HeadState], Any]] = None,
-        training: Optional[bool] = None,
+        initial_state: tuple[MemoryState, list[HeadState], Any] | None = None,
+        training: bool | None = None,
         return_sequences: bool = True,
         return_state: bool = False,
-    ) -> Union[Any, Tuple[Any, ...]]:
+    ) -> Any | tuple[Any, ...]:
         """
         Process a sequence through the NTM.
 
-        Args:
-            inputs: Input sequence of shape (batch, seq_len, input_dim).
-            initial_state: Optional tuple of initial states.
-            training: Whether in training mode.
-            return_sequences: Whether to return outputs at all timesteps.
-            return_state: Whether to return final states.
-
-        Returns:
-            Output tensor(s) and optionally final states.
+        :param inputs: Input sequence of shape (batch, seq_len, input_dim).
+        :type inputs: Any
+        :param initial_state: Optional tuple of initial states.
+        :type initial_state: tuple[MemoryState, list[HeadState], Any] | None
+        :param training: Whether in training mode.
+        :type training: bool | None
+        :param return_sequences: Whether to return outputs at all timesteps.
+        :type return_sequences: bool
+        :param return_state: Whether to return final states.
+        :type return_state: bool
+        :return: Output tensor(s) and optionally final states.
+        :rtype: Any | tuple[Any, ...]
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -626,21 +749,21 @@ class BaseNTM(keras.layers.Layer, ABC):
 
         # Stack outputs
         if return_sequences:
-            output = ops.stack(outputs, axis=1)  # (batch, seq_len, output_dim)
+            output = ops.stack(outputs, axis=1)
         else:
-            output = outputs[-1]  # (batch, output_dim)
+            output = outputs[-1]
 
         if return_state:
             return output, (memory_state, head_states, controller_state)
         return output
 
     @abstractmethod
-    def get_memory_state(self) -> Optional[MemoryState]:
+    def get_memory_state(self) -> MemoryState | None:
         """
         Get the current memory state.
 
-        Returns:
-            Current memory state or None if not initialized.
+        :return: Current memory state or None if not initialized.
+        :rtype: MemoryState | None
         """
         pass
 
@@ -649,8 +772,8 @@ class BaseNTM(keras.layers.Layer, ABC):
         """
         Reset memory to initial state.
 
-        Args:
-            batch_size: Number of sequences in the batch.
+        :param batch_size: Number of sequences in the batch.
+        :type batch_size: int
         """
         pass
 
@@ -658,11 +781,10 @@ class BaseNTM(keras.layers.Layer, ABC):
         """
         Compute output shape of the NTM layer.
 
-        Args:
-            input_shape: Shape of the input tensor (batch, seq_len, input_dim).
-
-        Returns:
-            Output shape (batch, seq_len, output_dim) assuming return_sequences=True.
+        :param input_shape: Shape of the input tensor (batch, seq_len, input_dim).
+        :type input_shape: Any
+        :return: Output shape (batch, seq_len, output_dim).
+        :rtype: Any
         """
         if self.output_dim is None:
             raise ValueError(
@@ -671,40 +793,37 @@ class BaseNTM(keras.layers.Layer, ABC):
 
         batch_size = input_shape[0]
         seq_len = input_shape[1]
-
-        # Assuming return_sequences=True as per call() default
         return (batch_size, seq_len, self.output_dim)
 
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+    def get_config(self) -> dict[str, Any]:
+        """
+        Get layer configuration.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
-        config.update({
-            'output_dim': self.output_dim,
-            'config': {
-                'memory_size': self.config.memory_size,
-                'memory_dim': self.config.memory_dim,
-                'num_read_heads': self.config.num_read_heads,
-                'num_write_heads': self.config.num_write_heads,
-                'controller_dim': self.config.controller_dim,
-                'controller_type': self.config.controller_type,
-                'addressing_mode': self.config.addressing_mode.name,
-                'shift_range': self.config.shift_range,
-                'use_memory_init': self.config.use_memory_init,
-                'clip_value': self.config.clip_value,
-                'epsilon': self.config.epsilon,
+        config.update(
+            {
+                "output_dim": self.output_dim,
+                "config": self.config.to_dict(),
             }
-        })
+        )
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BaseNTM':
-        """Create layer from configuration."""
-        if 'config' in config:
-            ntm_config_dict = config.pop('config')
-            ntm_config_dict['addressing_mode'] = AddressingMode[
-                ntm_config_dict['addressing_mode']
-            ]
-            ntm_config = NTMConfig(**ntm_config_dict)
+    def from_config(cls, config: dict[str, Any]) -> "BaseNTM":
+        """
+        Create layer from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: dict[str, Any]
+        :return: BaseNTM instance.
+        :rtype: BaseNTM
+        """
+        if "config" in config:
+            ntm_config_dict = config.pop("config")
+            ntm_config = NTMConfig.from_dict(ntm_config_dict)
             return cls(config=ntm_config, **config)
         return cls(**config)
 
@@ -713,29 +832,43 @@ class BaseNTM(keras.layers.Layer, ABC):
 # Utility Functions
 # ---------------------------------------------------------------------
 
+
 def cosine_similarity(
-    a: Any,
-    b: Any,
+    query: Any,
+    keys: Any,
     epsilon: float = 1e-6,
 ) -> Any:
     """
-    Compute cosine similarity between two tensors.
+    Compute cosine similarity between query and keys.
 
-    Args:
-        a: First tensor of shape (..., dim).
-        b: Second tensor of shape (..., dim).
-        epsilon: Small constant for numerical stability.
-
-    Returns:
-        Cosine similarity of shape (...,).
+    :param query: Query tensor of shape (batch, 1, dim) or (batch, dim).
+    :type query: Any
+    :param keys: Keys tensor of shape (batch, num_slots, dim).
+    :type keys: Any
+    :param epsilon: Small constant for numerical stability.
+    :type epsilon: float
+    :return: Cosine similarity of shape (batch, num_slots).
+    :rtype: Any
     """
-    a_norm = ops.sqrt(ops.sum(ops.square(a), axis=-1, keepdims=True) + epsilon)
-    b_norm = ops.sqrt(ops.sum(ops.square(b), axis=-1, keepdims=True) + epsilon)
+    # Ensure query has 3 dimensions for broadcasting
+    if len(ops.shape(query)) == 2:
+        query = ops.expand_dims(query, axis=1)
 
-    a_normalized = a / a_norm
-    b_normalized = b / b_norm
+    # Normalize query and keys
+    query_norm = ops.sqrt(ops.sum(ops.square(query), axis=-1, keepdims=True) + epsilon)
+    keys_norm = ops.sqrt(ops.sum(ops.square(keys), axis=-1, keepdims=True) + epsilon)
 
-    return ops.sum(a_normalized * b_normalized, axis=-1)
+    query_normalized = query / query_norm
+    keys_normalized = keys / keys_norm
+
+    # Compute similarity
+    similarity = ops.sum(query_normalized * keys_normalized, axis=-1)
+
+    # Squeeze if query was 2D
+    if len(ops.shape(similarity)) == 2 and ops.shape(similarity)[1] == 1:
+        similarity = ops.squeeze(similarity, axis=1)
+
+    return similarity
 
 
 def circular_convolution(
@@ -745,12 +878,12 @@ def circular_convolution(
     """
     Perform circular convolution for location-based addressing.
 
-    Args:
-        weights: Attention weights of shape (batch, num_slots).
-        shift: Shift distribution of shape (batch, shift_range).
-
-    Returns:
-        Shifted weights of shape (batch, num_slots).
+    :param weights: Attention weights of shape (batch, num_slots).
+    :type weights: Any
+    :param shift: Shift distribution of shape (batch, shift_range).
+    :type shift: Any
+    :return: Shifted weights of shape (batch, num_slots).
+    :rtype: Any
     """
     batch_size = ops.shape(weights)[0]
     num_slots = ops.shape(weights)[1]
@@ -760,17 +893,20 @@ def circular_convolution(
     shift_center = shift_range // 2
 
     # Pad weights for circular convolution
-    padded_weights = ops.concatenate([
-        weights[:, -shift_center:],
-        weights,
-        weights[:, :shift_center],
-    ], axis=1)
+    padded_weights = ops.concatenate(
+        [
+            weights[:, -shift_center:],
+            weights,
+            weights[:, :shift_center],
+        ],
+        axis=1,
+    )
 
     # Apply convolution
     result = ops.zeros((batch_size, num_slots))
     for i in range(shift_range):
-        shifted = padded_weights[:, i:i + num_slots]
-        result = result + shift[:, i:i+1] * shifted
+        shifted = padded_weights[:, i : i + num_slots]
+        result = result + shift[:, i : i + 1] * shifted
 
     return result
 
@@ -783,13 +919,14 @@ def sharpen_weights(
     """
     Sharpen attention weights using gamma parameter.
 
-    Args:
-        weights: Attention weights of shape (batch, num_slots).
-        gamma: Sharpening factor of shape (batch, 1), >= 1.
-        epsilon: Small constant for numerical stability.
-
-    Returns:
-        Sharpened weights of shape (batch, num_slots).
+    :param weights: Attention weights of shape (batch, num_slots).
+    :type weights: Any
+    :param gamma: Sharpening factor of shape (batch, 1), >= 1.
+    :type gamma: Any
+    :param epsilon: Small constant for numerical stability.
+    :type epsilon: float
+    :return: Sharpened weights of shape (batch, num_slots).
+    :rtype: Any
     """
     # Ensure gamma >= 1
     gamma = ops.maximum(gamma, 1.0)

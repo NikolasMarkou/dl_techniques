@@ -1,43 +1,41 @@
 """
-Neural Turing Machine (NTM) Model.
+Neural Turing Machine (NTM) Model Wrapper.
 
-A robust, production-ready implementation of the Neural Turing Machine architecture
-adhering to Keras 3 strict serialization and explicit build patterns.
+This module provides a high-level `NTMModel` class that wraps the low-level
+`NTMCell` into a standard Keras Model, complete with variant presets (tiny, base, large)
+and optional output projection.
 
-This module integrates the differentiable addressing mechanisms from `base_layers.py`
-into a complete, trainable model structure. It features:
+It serves as the primary entry point for instantiating trainable NTMs in
+application code.
 
-1.  **Modular Controller**: configurable LSTM, GRU, or FeedForward controllers.
-2.  **Explicit State Management**: Handles the complex state tuple (Controller, Memory,
-    Weights, Read Vectors) required for stable RNN execution.
-3.  **Variant Configuration**: Pre-defined configurations (tiny, small, base, etc.)
-    similar to modern Transformer/ConvNet implementations.
-4.  **Weight Compatibility**: Explicit layer creation ensures weights can be loaded
-    even if auxiliary features (like return_sequences) change.
+Classes:
+    NTMModel: Configurable NTM model with presets.
 
-Based on: "Neural Turing Machines" (Graves et al., 2014)
+Functions:
+    create_ntm_variant: Factory function for easy instantiation.
 """
 
 import keras
 from keras import layers
+import dataclasses
 from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.ntm.ntm_controller import NTMCell, NTMConfig
+from dl_techniques.layers.ntm import NTMCell, NTMConfig
 
 # ---------------------------------------------------------------------
 # NTM Model
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package='DLTechniques')
+@keras.saving.register_keras_serializable(package="DLTechniques")
 class NTMModel(keras.Model):
     """
     Neural Turing Machine Model.
 
-    A wrapper around the NTM Cell that creates a fully unrolled Recurrent Neural Network.
+    A wrapper around the `NTMCell` that creates a fully unrolled Recurrent Neural Network.
     This model provides a sequence-to-sequence or sequence-to-vector interface
     compatible with standard Keras workflows.
 
@@ -47,14 +45,15 @@ class NTMModel(keras.Model):
            ↓
     RNN(NTMCell) -> Unrolls over sequence
            ↓
-    OutputProjection(output_dim)
+    (Optional) Dense(output_dim)
            ↓
-    Output(shape=[batch, seq_len, output_dim])
+    Output
     ```
 
-    **Weight Compatibility**:
-    The internal RNN and Projection layers are always built. Statefulness
-    is managed by the `NTMCell`.
+    **Presets**:
+    - **tiny**: Small memory (32x16), simple controller, good for unit tests.
+    - **base**: Standard NTM (128x32), LSTM controller, robust baseline.
+    - **large**: Large memory (256x64), deep controller, for complex tasks.
 
     Args:
         input_shape: Tuple (seq_len, input_dim). seq_len can be None.
@@ -113,23 +112,25 @@ class NTMModel(keras.Model):
 
         # Configuration handling
         if isinstance(config, dict):
-            self.config_obj = NTMConfig(**config)
+            self.config_obj = NTMConfig.from_dict(config)
             self.config_dict = config
         else:
             self.config_obj = config
-            self.config_dict = vars(config)
+            self.config_dict = config.to_dict()
 
         # Create Layers (Golden Rule: Create all layers in __init__)
 
         # 1. NTM Cell
-        self.cell = NTMCell(self.config_obj)
+        self.cell = NTMCell(self.config_obj, name="ntm_cell")
 
         # 2. RNN Wrapper
         # We wrap the cell in an RNN layer to handle unrolling
+        # return_state=False because we usually don't need raw NTM internal states
+        # in the high-level model output
         self.rnn = layers.RNN(
             self.cell,
             return_sequences=return_sequences,
-            return_state=False,  # We usually don't need raw NTM states outside
+            return_state=False,
             name="ntm_rnn"
         )
 
@@ -142,24 +143,29 @@ class NTMModel(keras.Model):
         else:
             self.projection = None
 
+        # Build the model if input shape is provided (optional but good for summary())
+        # Note: Keras 3 models often defer build, but we can hint it here.
+        # We generally avoid calling self.build() in __init__ to allow flexibility,
+        # but we can set the input spec.
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the model.
+        Build the model layers with explicit shapes.
 
-        Explicitly builds the RNN and Projection layers.
+        Args:
+            input_shape: Shape of the input tensor (batch, seq_len, dim).
         """
-        # Build RNN
-        # Input shape to RNN is (batch, seq_len, input_dim)
+        # 1. Build RNN
         self.rnn.build(input_shape)
 
-        # Calculate RNN output shape
+        # 2. Build Projection
         # The cell output size is defined in NTMCell.output_size
         rnn_output_dim = self.cell.output_size
 
         if self.use_projection:
-            # If return_sequences, input to dense is (batch, seq_len, rnn_out)
-            # else (batch, rnn_out)
-            # Dense layer builds on last dimension regardless
+            # If return_sequences: (batch, seq_len, rnn_out)
+            # Else: (batch, rnn_out)
+            # Dense builds on the last dimension
             self.projection.build((None, rnn_output_dim))
 
         super().build(input_shape)
@@ -167,6 +173,13 @@ class NTMModel(keras.Model):
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """
         Forward pass.
+
+        Args:
+            inputs: Input tensor (batch, seq_len, input_dim).
+            training: Whether to run in training mode (affects Dropout/RNN).
+
+        Returns:
+            Output tensor.
         """
         x = self.rnn(inputs, training=training)
 
@@ -176,6 +189,7 @@ class NTMModel(keras.Model):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Compute output shape based on configuration."""
         batch_size = input_shape[0]
         seq_len = input_shape[1]
 
@@ -187,6 +201,7 @@ class NTMModel(keras.Model):
             return (batch_size, last_dim)
 
     def get_config(self) -> Dict[str, Any]:
+        """Serialize configuration."""
         config = super().get_config()
         config.update({
             'input_shape': self.input_shape_config,
@@ -199,9 +214,10 @@ class NTMModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'NTMModel':
-        # Reconstruct NTMConfig from dict inside config
-        ntm_config_dict = config['config']
-        # Note: We pass the dict directly as the constructor handles Union
+        """Deserialize configuration."""
+        # NTMConfig reconstruction happens in __init__ via dict check
+        # We copy to avoid modifying the original config dict
+        config = config.copy()
         return cls(**config)
 
     @classmethod
@@ -221,23 +237,23 @@ class NTMModel(keras.Model):
             input_shape: Input sequence shape (seq_len, dim).
             output_dim: Output dimension.
             return_sequences: Whether to output full sequence.
-            **kwargs: Overrides for specific config parameters.
+            **kwargs: Overrides for specific config parameters (e.g., controller_type).
 
         Returns:
-            Configured NTMModel.
+            Configured NTMModel instance.
         """
         if variant not in cls.NTM_VARIANTS:
             raise ValueError(f"Unknown variant '{variant}'. Available: {list(cls.NTM_VARIANTS.keys())}")
 
         variant_config = cls.NTM_VARIANTS[variant].copy()
 
-        # Allow kwargs to override variant config (e.g. controller_type)
-        # Separate model args from NTMConfig args
-        ntm_keys = NTMConfig.__annotations__.keys()
+        # Separate model arguments from NTMConfig arguments
+        ntm_field_names = {f.name for f in dataclasses.fields(NTMConfig)}
 
-        config_overrides = {k: v for k, v in kwargs.items() if k in ntm_keys}
-        model_kwargs = {k: v for k, v in kwargs.items() if k not in ntm_keys}
+        config_overrides = {k: v for k, v in kwargs.items() if k in ntm_field_names}
+        model_kwargs = {k: v for k, v in kwargs.items() if k not in ntm_field_names}
 
+        # Update variant defaults with overrides
         variant_config.update(config_overrides)
 
         ntm_config = NTMConfig(**variant_config)
@@ -263,7 +279,7 @@ def create_ntm_variant(
         **kwargs: Any
 ) -> NTMModel:
     """
-    Factory function to create an NTM model.
+    Factory function to create an NTM model variant.
 
     Args:
         variant: One of 'tiny', 'base', 'large'.
