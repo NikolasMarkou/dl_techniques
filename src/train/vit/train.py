@@ -13,7 +13,7 @@ import tensorflow as tf
 from typing import Tuple, Optional, List
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.models.vit.model import ViT, create_vision_transformer
 
 from dl_techniques.optimization.train_vision import (
