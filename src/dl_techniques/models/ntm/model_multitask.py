@@ -24,17 +24,13 @@ class NTMMultiTask(keras.Model):
     **Architecture**:
     ```
     Inputs: [Sequence(batch, seq, dim), TaskID(batch, tasks)]
-             |
-             v
+             ↓
     Broadcast TaskID -> (batch, seq, tasks)
-             |
-             v
+             ↓
     Concatenate [Sequence, TaskID] -> (batch, seq, dim + tasks)
-             |
-             v
+             ↓
     NeuralTuringMachine
-             |
-             v
+             ↓
     Output (batch, seq, output_dim)
     ```
 

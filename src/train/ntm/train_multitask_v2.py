@@ -84,7 +84,7 @@ class MultitaskNTMConfig:
     batch_size: int = 64
     num_epochs: int = 100
     steps_per_epoch: int = 1000
-    validation_steps: int = 20
+    validation_steps: int = 100
     learning_rate: float = 1e-4
     clip_norm: float = 1.0
 
