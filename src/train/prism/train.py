@@ -31,6 +31,7 @@ import json
 import math
 import random
 import argparse
+import sys
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Tuple
@@ -50,13 +51,11 @@ import tensorflow as tf
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
 
-# Model Imports
 from dl_techniques.models.prism.model import PRISMModel
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
-# New Dataset Module Imports
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
@@ -969,12 +968,10 @@ def main() -> None:
         default_noise_level=0.1
     )
 
-    try:
-        trainer = PRISMTrainer(config, generator_config)
-        results = trainer.run_experiment()
-        logger.info(f"Completed. Results: {results['results_dir']}")
-    except Exception as e:
-        logger.error(f"Failed: {e}", exc_info=True)
+    trainer = PRISMTrainer(config, generator_config)
+    results = trainer.run_experiment()
+    logger.info(f"Completed. Results: {results['results_dir']}")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

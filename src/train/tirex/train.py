@@ -27,28 +27,10 @@ while maintaining computational efficiency. The architecture consists of three d
         cross-attention (or interactions within the sequence). This allows the model to
         selectively extract historical information relevant to specific future time steps.
 
-Foundational Mathematics
-------------------------
-Given an input series $\mathbf{x} \in \mathbb{R}^{L}$ and a target quantile $q \in (0, 1)$,
-the model minimizes the Quantile Loss (Pinball Loss).
-
-**1. Patching Operation:**
-The input is reshaped into $N$ patches of size $P$:
-.. math::
-    \mathbf{X}_p = \text{Unfold}(\mathbf{x}) \in \mathbb{R}^{N \times P}, \quad \text{where } N = \lfloor \frac{L-P}{S} \rfloor + 2
-
-**2. Probabilistic Objective:**
-The network outputs a forecast $\hat{y}^{(q)}_t$ for each quantile level $q$. The
-objective function sums the asymmetric loss over all time steps $t$ and quantiles $q$:
-.. math::
-    \mathcal{L}(\Omega) = \sum_{t} \sum_{q} \rho_q(y_t - \hat{y}^{(q)}_t)
-
-Where $\rho_q$ is the check function:
-.. math::
-    \rho_q(u) = u(q - \mathbb{I}(u < 0)) = \max(qu, (q-1)u)
-
-This ensures that the predicted quantiles satisfy the property $P(y_t \le \hat{y}^{(q)}_t) = q$,
-providing calibrated uncertainty intervals rather than point estimates.
+Integration
+-----------
+Updated to use the unified `dl_techniques.datasets.time_series` module for
+synthetic data generation and normalization.
 
 References
 ----------
@@ -63,6 +45,7 @@ References
 """
 
 import os
+import sys
 import json
 import math
 import random
@@ -80,7 +63,7 @@ import seaborn as sns
 import tensorflow as tf
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -88,7 +71,13 @@ from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
 from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiRexExtended
-from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator, TimeSeriesGeneratorConfig
+
+from dl_techniques.datasets.time_series import (
+    TimeSeriesGenerator,
+    TimeSeriesGeneratorConfig,
+    TimeSeriesNormalizer,
+    NormalizationMethod
+)
 
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -161,7 +150,7 @@ class TiRexTrainingConfig:
     max_patterns: Optional[int] = None
     max_patterns_per_category: int = 10
     min_data_length: int = 2000
-    normalize_per_instance: bool = False
+    normalize_per_instance: bool = True
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -185,40 +174,62 @@ class TiRexTrainingConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
-        # Validate model type
         if self.model_type not in ['core', 'extended']:
             raise ValueError(
                 f"model_type must be 'core' or 'extended', got '{self.model_type}'"
             )
 
-        # Validate data ratios
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
             raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
 
-        # Validate lengths
         if self.input_length <= 0 or self.prediction_length <= 0:
             raise ValueError("input_length and prediction_length must be positive")
 
-        # Check quantile levels
         if 0.5 not in self.quantile_levels:
-            logger.warning("Recommended to include 0.5 (median) in quantile_levels.")
+            logger.warning(
+                "Recommended to include 0.5 (median) in quantile_levels."
+            )
+
+
+def _fill_nans(data: np.ndarray) -> np.ndarray:
+    """
+    Forward fill NaNs in numpy array.
+
+    :param data: Input array potentially containing NaNs.
+    :return: Array with NaNs forward-filled.
+    """
+    mask = np.isnan(data)
+    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
+    np.maximum.accumulate(idx, axis=0, out=idx)
+    out = data[idx]
+    out[np.isnan(out)] = 0
+    return out
 
 
 class TiRexDataProcessor:
-    """Streams multi-pattern time series data using Python generators."""
+    """
+    Robust data processor for TiRex using the unified TimeSeriesGenerator and Normalizer.
+
+    Features:
+    - Infinite streaming generator for Training (maximum diversity).
+    - Pre-computed in-memory arrays for Validation/Test (eliminates end-of-epoch lag).
+    - Robust per-instance normalization using TimeSeriesNormalizer.
+    """
 
     def __init__(
             self,
             config: TiRexTrainingConfig,
             generator: TimeSeriesGenerator,
             selected_patterns: List[str],
-            pattern_to_category: Dict[str, str]
+            pattern_to_category: Dict[str, str],
+            num_features: int = 1
     ):
         self.config = config
         self.ts_generator = generator
         self.selected_patterns = selected_patterns
         self.pattern_to_category = pattern_to_category
+        self.num_features = num_features
         self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
 
     def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
@@ -238,166 +249,197 @@ class TiRexDataProcessor:
             normalized_weights = [1.0 / num_patterns] * num_patterns
         return patterns, normalized_weights
 
+    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
+        """
+        Normalize series instance using TimeSeriesNormalizer.
+        Includes clipping to prevent extreme outliers from destabilizing training.
+
+        :param series: Input numpy array (n_timesteps, features) or (n_timesteps,).
+        :return: Normalized array as float32.
+        """
+        series = np.clip(series, -1e6, 1e6)
+
+        if self.config.normalize_per_instance:
+            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
+            if np.isnan(series).any():
+                series = _fill_nans(series)
+            series = normalizer.fit_transform(series)
+
+        series = np.clip(series, -10.0, 10.0)
+        return series.astype(np.float32)
+
     def _training_generator(
         self
     ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
         """
-        Create an infinite generator for training data with high diversity.
-        Strategy: Select patterns -> Extract windows -> Shuffle -> Yield.
+        Infinite generator for training data with high diversity.
+        Uses a buffer to mix patterns and reduce generator overhead.
         """
         patterns_to_mix = 50
         windows_per_pattern = 5
-        buffer = []
+        buffer: List[Tuple[np.ndarray, np.ndarray]] = []
+
+        total_window_len = self.config.input_length + self.config.prediction_length
 
         while True:
             if not buffer:
-                # Select a large mix of patterns based on weights
                 selected_patterns = random.choices(
                     self.weighted_patterns, self.weights, k=patterns_to_mix
                 )
-                new_samples = []
 
                 for pattern_name in selected_patterns:
                     data = self.ts_generator.generate_task_data(pattern_name)
+
+                    if len(data) < total_window_len or not np.isfinite(data).all():
+                        continue
+
                     train_size = int(self.config.train_ratio * len(data))
                     train_data = data[:train_size]
 
-                    max_start_idx = max(
-                        len(train_data) - self.config.input_length - self.config.prediction_length, 0
-                    )
-
+                    max_start_idx = len(train_data) - total_window_len
                     if max_start_idx <= 0:
                         continue
 
                     for _ in range(windows_per_pattern):
                         start_idx = random.randint(0, max_start_idx)
+                        window = train_data[start_idx: start_idx + total_window_len]
 
-                        # Inputs: (input_length, 1)
-                        inputs = train_data[
-                            start_idx: start_idx + self.config.input_length
-                        ].astype(np.float32).reshape(-1, 1)
+                        window = self._safe_normalize(window)
 
-                        # Targets: (prediction_length,) -> Flat vector for QuantileLoss
-                        targets = train_data[
-                            start_idx + self.config.input_length:
-                            start_idx + self.config.input_length + self.config.prediction_length
-                        ].astype(np.float32).flatten()
+                        context = window[:self.config.input_length].reshape(
+                            -1, self.num_features
+                        )
+                        # Target: (prediction_length,) flat for QuantileLoss
+                        target = window[self.config.input_length:].flatten()
 
-                        new_samples.append((inputs, targets))
+                        buffer.append((context, target))
 
-                # Shuffle and fill buffer
-                random.shuffle(new_samples)
-                buffer = new_samples
+                random.shuffle(buffer)
 
-            # Yield from buffer
-            sample = buffer.pop()
-            yield sample
+            if buffer:
+                yield buffer.pop()
 
-    def _validation_generator(
-        self
-    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Create validation data generator with deterministic pattern cycling."""
+    def _generate_fixed_dataset(
+        self, split: str, num_samples: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Pre-generate a fixed dataset in memory to prevent generator lag.
+
+        :param split: 'val' or 'test'.
+        :param num_samples: Total number of samples to generate.
+        :return: Tuple of (Contexts, Targets) as numpy arrays.
+        """
+        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)...")
+
+        contexts: List[np.ndarray] = []
+        targets: List[np.ndarray] = []
+
+        total_window_len = self.config.input_length + self.config.prediction_length
+        samples_collected = 0
         pattern_cycle = 0
-        while True:
+
+        while samples_collected < num_samples:
             pattern_idx = pattern_cycle % len(self.selected_patterns)
             pattern_name = self.selected_patterns[pattern_idx]
             pattern_cycle += 1
 
             data = self.ts_generator.generate_task_data(pattern_name)
-            train_size = int(self.config.train_ratio * len(data))
-            val_size = int(self.config.val_ratio * len(data))
-            val_data = data[train_size: train_size + val_size]
 
-            max_start_idx = max(
-                len(val_data) - self.config.input_length - self.config.prediction_length, 0
-            )
+            if len(data) < total_window_len or not np.isfinite(data).all():
+                continue
 
+            train_end = int(self.config.train_ratio * len(data))
+            val_end = train_end + int(self.config.val_ratio * len(data))
+
+            if split == 'val':
+                split_data = data[train_end:val_end]
+            else:
+                split_data = data[val_end:]
+
+            max_start_idx = len(split_data) - total_window_len
             if max_start_idx <= 0:
                 continue
 
             start_idx = random.randint(0, max_start_idx)
-            inputs = val_data[
-                start_idx: start_idx + self.config.input_length
-            ].astype(np.float32).reshape(-1, 1)
+            window = split_data[start_idx: start_idx + total_window_len]
+            window = self._safe_normalize(window)
 
-            targets = val_data[
-                start_idx + self.config.input_length:
-                start_idx + self.config.input_length + self.config.prediction_length
-            ].astype(np.float32).flatten()
+            ctx = window[:self.config.input_length].reshape(-1, self.num_features)
+            tgt = window[self.config.input_length:].flatten()
 
-            yield inputs, targets
+            contexts.append(ctx)
+            targets.append(tgt)
+            samples_collected += 1
 
-    def _test_generator(
+        return np.array(contexts, dtype=np.float32), np.array(targets, dtype=np.float32)
+
+    def _test_generator_raw(
         self
     ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Create test data generator that exhaustively samples test splits."""
-        for pattern_name in self.selected_patterns:
+        """
+        Helper specifically for visualization callback to pull fresh test samples.
+        """
+        total_window_len = self.config.input_length + self.config.prediction_length
+
+        viz_patterns = self.selected_patterns.copy()
+        random.shuffle(viz_patterns)
+
+        for pattern_name in viz_patterns:
             data = self.ts_generator.generate_task_data(pattern_name)
-            train_size = int(self.config.train_ratio * len(data))
-            val_size = int(self.config.val_ratio * len(data))
-            test_data = data[train_size + val_size:]
 
-            max_start_idx = max(
-                len(test_data) - self.config.input_length - self.config.prediction_length, 0
-            )
-
-            if max_start_idx <= 0:
+            if len(data) < total_window_len or not np.isfinite(data).all():
                 continue
 
-            # Sample multiple windows from test split
-            num_windows = min(5, max_start_idx + 1)
-            for _ in range(num_windows):
-                start_idx = random.randint(0, max_start_idx)
-                inputs = test_data[
-                    start_idx: start_idx + self.config.input_length
-                ].astype(np.float32).reshape(-1, 1)
+            start_test = int(
+                (self.config.train_ratio + self.config.val_ratio) * len(data)
+            )
+            test_data = data[start_test:]
 
-                targets = test_data[
-                    start_idx + self.config.input_length:
-                    start_idx + self.config.input_length + self.config.prediction_length
-                ].astype(np.float32).flatten()
+            if len(test_data) < total_window_len:
+                continue
 
-                yield inputs, targets
+            max_start_idx = len(test_data) - total_window_len
+            start_idx = random.randint(0, max_start_idx)
+
+            window = test_data[start_idx: start_idx + total_window_len]
+            window = self._safe_normalize(window)
+
+            yield (
+                window[:self.config.input_length].reshape(-1, self.num_features),
+                window[self.config.input_length:].flatten()
+            )
 
     def prepare_datasets(self) -> Dict[str, Any]:
-        """Prepare training, validation, and test datasets."""
-        train_dataset = tf.data.Dataset.from_generator(
-            self._training_generator,
-            output_signature=(
-                tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
-            )
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        val_dataset = tf.data.Dataset.from_generator(
-            self._validation_generator,
-            output_signature=(
-                tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
-            )
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        test_dataset = tf.data.Dataset.from_generator(
-            self._test_generator,
-            output_signature=(
-                tf.TensorSpec(shape=(self.config.input_length, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
-            )
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        # Compute validation and test steps
-        validation_steps = max(50, len(self.selected_patterns) * 2)
-        test_steps = len(self.selected_patterns) * 5
-
-        logger.info(
-            f"Dataset prepared: train (infinite), val ({validation_steps} steps), "
-            f"test ({test_steps} steps)"
+        """Create tf.data.Datasets."""
+        output_sig = (
+            tf.TensorSpec(
+                shape=(self.config.input_length, self.num_features), dtype=tf.float32
+            ),
+            tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
         )
 
+        train_ds = tf.data.Dataset.from_generator(
+            self._training_generator, output_signature=output_sig
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+
+        validation_steps = max(50, len(self.selected_patterns))
+        test_steps = max(20, len(self.selected_patterns))
+
+        num_val_samples = validation_steps * self.config.batch_size
+        num_test_samples = test_steps * self.config.batch_size
+
+        val_x, val_y = self._generate_fixed_dataset('val', num_val_samples)
+        val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y))
+        val_ds = val_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
+
+        test_x, test_y = self._generate_fixed_dataset('test', num_test_samples)
+        test_ds = tf.data.Dataset.from_tensor_slices((test_x, test_y))
+        test_ds = test_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
+
         return {
-            'train_ds': train_dataset,
-            'val_ds': val_dataset,
-            'test_ds': test_dataset,
+            'train_ds': train_ds,
+            'val_ds': val_ds,
+            'test_ds': test_ds,
             'validation_steps': validation_steps,
             'test_steps': test_steps
         }
@@ -421,11 +463,9 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
 
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Prepare fixed test data for visualization
         self.viz_test_data = self._prepare_viz_data()
 
-        # Track metrics across epochs
-        self.training_history = {
+        self.training_history: Dict[str, List[float]] = {
             'loss': [], 'val_loss': [],
             'mae_median': [], 'val_mae_median': [],
             'lr': []
@@ -433,13 +473,20 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
 
     def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
         """Prepare a fixed batch of test samples for consistent visualization."""
-        viz_samples_x, viz_samples_y = [], []
-        test_gen = self.processor._test_generator()
+        viz_samples_x: List[np.ndarray] = []
+        viz_samples_y: List[np.ndarray] = []
+        test_gen = self.processor._test_generator_raw()
 
         for _ in range(self.config.plot_top_k_patterns):
-            x, y = next(test_gen)
-            viz_samples_x.append(x)
-            viz_samples_y.append(y)
+            try:
+                x, y = next(test_gen)
+                viz_samples_x.append(x)
+                viz_samples_y.append(y)
+            except StopIteration:
+                break
+
+        if not viz_samples_x:
+            return np.array([]), np.array([])
 
         return np.array(viz_samples_x), np.array(viz_samples_y)
 
@@ -447,13 +494,11 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
         """Track metrics and create visualizations at epoch end."""
         logs = logs or {}
 
-        # Track history
         self.training_history['loss'].append(logs.get('loss', 0))
         self.training_history['val_loss'].append(logs.get('val_loss', 0))
         self.training_history['mae_median'].append(logs.get('mae_of_median', 0))
         self.training_history['val_mae_median'].append(logs.get('val_mae_of_median', 0))
 
-        # Track learning rate
         lr = float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
         if hasattr(self.model.optimizer.learning_rate, '__call__'):
             lr = float(keras.ops.convert_to_numpy(
@@ -461,7 +506,6 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
             ))
         self.training_history['lr'].append(lr)
 
-        # Visualize every N epochs
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
             logger.info(f"Creating visualizations for epoch {epoch + 1}...")
             if self.config.create_learning_curves:
@@ -474,32 +518,37 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
         fig, axes = plt.subplots(1, 3, figsize=(18, 4))
         epochs_range = range(1, len(self.training_history['loss']) + 1)
 
-        # Quantile Loss
         axes[0].plot(epochs_range, self.training_history['loss'], label='Train')
         axes[0].plot(epochs_range, self.training_history['val_loss'], label='Val')
         axes[0].set_title('Quantile Loss')
         axes[0].set_ylabel('Loss')
         axes[0].legend()
 
-        # MAE Median
         if self.training_history['mae_median']:
             axes[1].plot(epochs_range, self.training_history['mae_median'], label='Train')
-            axes[1].plot(epochs_range, self.training_history['val_mae_median'], label='Val')
+            axes[1].plot(
+                epochs_range, self.training_history['val_mae_median'], label='Val'
+            )
             axes[1].set_title('MAE (Median Forecast)')
         axes[1].set_ylabel('MAE')
         axes[1].legend()
 
-        # Learning Rate
         axes[2].plot(epochs_range, self.training_history['lr'])
         axes[2].set_title('Learning Rate')
         axes[2].set_yscale('log')
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'))
+        plt.savefig(
+            os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png')
+        )
         plt.close()
 
     def _plot_prediction_samples(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data
+
+        if len(test_x) == 0:
+            return
+
         # Predictions shape: (batch, prediction_length, num_quantiles)
         preds = self.model(test_x, training=False)
         if not isinstance(preds, np.ndarray):
@@ -511,13 +560,8 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
         except ValueError:
             median_idx = len(quantiles) // 2
 
-        # Get bounds for 80% confidence interval (0.1 to 0.9 typically)
         low_idx = 0
-        high_idx = -1
-        if len(quantiles) >= 3:
-             # Assuming sorted quantiles like [0.1, ... 0.9]
-            low_idx = 0
-            high_idx = len(quantiles) - 1
+        high_idx = len(quantiles) - 1 if len(quantiles) >= 3 else -1
 
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
         n_cols = 3
@@ -530,16 +574,20 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
             input_x = np.arange(-self.config.input_length, 0)
             pred_x = np.arange(0, self.config.prediction_length)
 
-            # Input history
-            ax.plot(input_x, test_x[i].flatten(), label='Input', color='blue', alpha=0.7)
+            ax.plot(
+                input_x, test_x[i].flatten(),
+                label='Input', color='blue', alpha=0.7
+            )
+            ax.plot(
+                pred_x, test_y[i].flatten(),
+                label='True', color='green', linewidth=2
+            )
 
-            # True Future
-            ax.plot(pred_x, test_y[i].flatten(), label='True', color='green', linewidth=2)
+            ax.plot(
+                pred_x, preds[i, :, median_idx],
+                label='Median', color='red', linestyle='--'
+            )
 
-            # Median Prediction - Shape: [batch, time, quantiles]
-            ax.plot(pred_x, preds[i, :, median_idx], label='Median', color='red', linestyle='--')
-
-            # Uncertainty Interval
             ax.fill_between(
                 pred_x,
                 preds[i, :, low_idx],
@@ -557,7 +605,9 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
 
         plt.suptitle(f'Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
+        plt.savefig(
+            os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png')
+        )
         plt.close()
 
 
@@ -565,11 +615,14 @@ class TiRexTrainer:
     """Orchestrates TiRex training with Quantile Loss."""
 
     def __init__(
-            self, config: TiRexTrainingConfig, ts_config: TimeSeriesConfig
+            self,
+            config: TiRexTrainingConfig,
+            generator_config: TimeSeriesGeneratorConfig
     ) -> None:
         self.config = config
-        self.ts_config = ts_config
-        self.generator = TimeSeriesGenerator(ts_config)
+        self.generator_config = generator_config
+        self.generator = TimeSeriesGenerator(generator_config)
+
         self.all_patterns = self.generator.get_task_names()
         self.pattern_categories = self.generator.get_task_categories()
         self.pattern_to_category = {
@@ -578,9 +631,13 @@ class TiRexTrainer:
             for task in self.generator.get_tasks_by_category(cat)
         }
         self.selected_patterns = self._select_patterns()
+
         self.processor = TiRexDataProcessor(
             config, self.generator, self.selected_patterns, self.pattern_to_category
         )
+
+        self.model: Optional[Union[TiRexCore, TiRexExtended]] = None
+        self.exp_dir: Optional[str] = None
 
     def _select_patterns(self) -> List[str]:
         if self.config.target_categories:
@@ -591,7 +648,9 @@ class TiRexTrainer:
         else:
             patterns_to_consider = self.all_patterns
 
-        selected, category_counts = [], {}
+        selected: List[str] = []
+        category_counts: Dict[str, int] = {}
+
         for pattern in sorted(patterns_to_consider):
             category = self.pattern_to_category.get(pattern)
             if (category and
@@ -608,7 +667,6 @@ class TiRexTrainer:
 
     def create_model(self) -> Union[TiRexCore, TiRexExtended]:
         """Create and compile the TiRex model based on configuration."""
-        # Select model factory based on model_type
         if self.config.model_type == 'core':
             logger.info(f"Creating TiRexCore ({self.config.variant}) model...")
             model = create_tirex_by_variant(
@@ -635,12 +693,14 @@ class TiRexTrainer:
                 f"Expected 'core' or 'extended'."
             )
 
-        # Learning Rate Schedule
         if self.config.use_warmup:
+            total_steps = self.config.epochs * self.config.steps_per_epoch
+            primary_steps = max(1, total_steps - self.config.warmup_steps)
+
             primary_schedule = keras.optimizers.schedules.CosineDecay(
                 initial_learning_rate=self.config.learning_rate,
-                decay_steps=self.config.steps_per_epoch * self.config.epochs,
-                alpha=0.1
+                decay_steps=primary_steps,
+                alpha=0.01
             )
             lr_schedule = WarmupSchedule(
                 warmup_steps=self.config.warmup_steps,
@@ -656,15 +716,15 @@ class TiRexTrainer:
         if self.config.gradient_clip_norm:
             optimizer.clipnorm = self.config.gradient_clip_norm
 
-        # Loss and Metrics
         loss = QuantileLoss(quantiles=self.config.quantile_levels)
 
         metrics = []
         if 0.5 in self.config.quantile_levels:
             median_idx = self.config.quantile_levels.index(0.5)
+
             def mae_of_median(y_true, y_pred):
                 # y_true: (batch, horizon)
-                # y_pred: (batch, horizon, quantiles) - Adjusted for new shape
+                # y_pred: (batch, horizon, quantiles)
                 return keras.metrics.mean_absolute_error(
                     y_true, y_pred[:, :, median_idx]
                 )
@@ -680,25 +740,44 @@ class TiRexTrainer:
         return model
 
     def run_experiment(self) -> Dict[str, Any]:
-        exp_dir = os.path.join(
-            self.config.result_dir,
-            f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-        os.makedirs(exp_dir, exist_ok=True)
-        logger.info(f"Starting TiRex Experiment: {exp_dir}")
+        """Run the complete training experiment."""
+        logger.info("Starting TiRex training experiment")
+        self.exp_dir = self._create_experiment_dir()
+        logger.info(f"Results will be saved to: {self.exp_dir}")
 
-        results = self._train_model(exp_dir)
-        self._save_results(results, exp_dir)
-        return {"results_dir": exp_dir, "results": results}
-
-    def _train_model(self, exp_dir: str) -> Dict[str, Any]:
         data_pipeline = self.processor.prepare_datasets()
-        model = self.create_model()
 
-        # Build explicitly
-        dummy_in = np.zeros((1, self.config.input_length, 1), dtype='float32')
-        model(dummy_in)
-        model.summary(print_fn=logger.info)
+        self.model = self.create_model()
+
+        dummy_in = np.zeros(
+            (1, self.config.input_length, 1), dtype='float32'
+        )
+        self.model(dummy_in)
+        logger.info("Model created successfully")
+        logger.info(f"Model parameters: {self.model.count_params():,}")
+        self.model.summary(print_fn=logger.info)
+
+        training_results = self._train_model(data_pipeline, self.exp_dir)
+
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir)
+
+        return {
+            'config': self.config,
+            'experiment_dir': self.exp_dir,
+            'training_results': training_results,
+            'results_dir': self.exp_dir
+        }
+
+    def _create_experiment_dir(self) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_name = f"{self.config.experiment_name}_{self.config.model_type}_{timestamp}"
+        exp_dir = os.path.join(self.config.result_dir, exp_name)
+        os.makedirs(exp_dir, exist_ok=True)
+        return exp_dir
+
+    def _train_model(self, data_pipeline: Dict, exp_dir: str) -> Dict[str, Any]:
+        logger.info("Starting model training...")
 
         viz_dir = os.path.join(exp_dir, 'visualizations')
         callbacks = [
@@ -713,15 +792,18 @@ class TiRexTrainer:
             keras.callbacks.TerminateOnNaN()
         ]
 
-        # Add Deep Model Analysis Callback if enabled
-        if self.config.perform_deep_analysis:
-            logger.info("Adding Deep Model Analysis (Weights/Spectral) callback.")
+        if not self.config.use_warmup:
+            callbacks.append(keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7
+            ))
 
-            # Configure analysis (Data-free for speed during training loops)
+        if self.config.perform_deep_analysis:
+            logger.info("Adding Deep Model Analysis callback.")
+
             analysis_config = AnalysisConfig(
                 analyze_weights=True,
-                analyze_spectral=True, # Spectral analysis (WeightWatcher)
-                analyze_calibration=False, # Skip data-dependent analyses
+                analyze_spectral=True,
+                analyze_calibration=False,
                 analyze_information_flow=False,
                 analyze_training_dynamics=False,
                 verbose=False
@@ -738,7 +820,7 @@ class TiRexTrainer:
             )
             callbacks.append(analyzer_cb)
 
-        history = model.fit(
+        history = self.model.fit(
             data_pipeline['train_ds'],
             validation_data=data_pipeline['val_ds'],
             epochs=self.config.epochs,
@@ -749,7 +831,7 @@ class TiRexTrainer:
         )
 
         logger.info("Evaluating on test set...")
-        test_metrics = model.evaluate(
+        test_metrics = self.model.evaluate(
             data_pipeline['test_ds'],
             steps=data_pipeline['test_steps'],
             verbose=1,
@@ -758,21 +840,21 @@ class TiRexTrainer:
 
         return {
             'history': history.history,
-            'test_metrics': test_metrics,
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
             'final_epoch': len(history.history['loss'])
         }
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
         serializable = {
             'history': results['history'],
-            'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
+            'test_metrics': results['test_metrics'],
             'final_epoch': results['final_epoch'],
             'config': self.config.__dict__
         }
 
-        # Helper for JSON serialization
-        def json_convert(o):
-            if isinstance(o, (np.floating, np.integer)): return str(o)
+        def json_convert(o: Any) -> str:
+            if isinstance(o, (np.floating, np.integer)):
+                return str(o)
             return str(o)
 
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
@@ -781,82 +863,69 @@ class TiRexTrainer:
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments for TiRex training configuration."""
-    parser = argparse.ArgumentParser(description="TiRex Training Framework (Unified)")
+    parser = argparse.ArgumentParser(
+        description="TiRex Training Framework (Unified TimeSeriesGenerator)"
+    )
 
-    # General experiment settings
-    parser.add_argument("--experiment_name", type=str, default="tirex",
-                        help="Name of the experiment for logging.")
+    parser.add_argument(
+        "--experiment_name", type=str, default="tirex",
+        help="Name of the experiment for logging."
+    )
 
-    # Model type selection
-    parser.add_argument("--model_type", type=str, default="core",
-                        choices=['core', 'extended'],
-                        help="Model architecture type: 'core' (mean pooling) or "
-                             "'extended' (query tokens).")
+    parser.add_argument(
+        "--model_type", type=str, default="core",
+        choices=['core', 'extended'],
+        help="Model architecture type: 'core' (mean pooling) or 'extended' (query tokens)."
+    )
 
-    # Model architecture settings
-    parser.add_argument("--variant", type=str, default="small",
-                        choices=['tiny', 'small', 'medium', 'large'],
-                        help="Model variant/size.")
-    parser.add_argument("--input_length", type=int, default=256,
-                        help="Length of input time series sequence.")
-    parser.add_argument("--prediction_length", type=int, default=24,
-                        help="Forecasting horizon length.")
-    parser.add_argument("--patch_size", type=int, default=4,
-                        help="Size of patches for tokenization.")
+    parser.add_argument(
+        "--variant", type=str, default="small",
+        choices=['tiny', 'small', 'medium', 'large'],
+        help="Model variant/size."
+    )
+    parser.add_argument("--input_length", type=int, default=256)
+    parser.add_argument("--prediction_length", type=int, default=24)
+    parser.add_argument("--patch_size", type=int, default=4)
 
-    # Training loop settings
-    parser.add_argument("--epochs", type=int, default=200,
-                        help="Maximum number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=128,
-                        help="Training batch size.")
-    parser.add_argument("--steps_per_epoch", type=int, default=1000,
-                        help="Number of steps (batches) per epoch.")
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--steps_per_epoch", type=int, default=1000)
 
-    # Optimization settings
-    parser.add_argument("--learning_rate", type=float, default=1e-4,
-                        help="Initial learning rate.")
-    parser.add_argument("--gradient_clip_norm", type=float, default=1.0,
-                        help="Gradient clipping norm value.")
-    parser.add_argument("--optimizer", type=str, default="adamw",
-                        help="Optimizer to use (e.g., adamw, adam).")
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
+    parser.add_argument("--optimizer", type=str, default="adamw")
 
-    # Warmup schedule
-    # Defaults to True, can be disabled with --no-warmup
-    parser.add_argument("--no-warmup", dest="use_warmup", action="store_false",
-                        help="Disable learning rate warmup.")
+    parser.add_argument(
+        "--no-warmup", dest="use_warmup", action="store_false",
+        help="Disable learning rate warmup."
+    )
     parser.set_defaults(use_warmup=True)
-    parser.add_argument("--warmup_steps", type=int, default=5000,
-                        help="Number of warmup steps.")
-    parser.add_argument("--warmup_start_lr", type=float, default=1e-6,
-                        help="Starting learning rate for warmup.")
+    parser.add_argument("--warmup_steps", type=int, default=1000)
+    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
 
-    # Data processing
-    # Defaults to True, can be disabled with --no-normalize
-    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false",
-                        help="Disable per-instance normalization.")
+    parser.add_argument(
+        "--no-normalize", dest="normalize_per_instance", action="store_false",
+        help="Disable per-instance normalization."
+    )
     parser.set_defaults(normalize_per_instance=True)
-    parser.add_argument("--max_patterns_per_category", type=int, default=100,
-                        help="Maximum number of patterns to sample per category.")
+    parser.add_argument("--max_patterns_per_category", type=int, default=100)
 
-    # Visualization
-    parser.add_argument("--visualize_every_n_epochs", type=int, default=5,
-                        help="Frequency of generating visualization plots in epochs.")
-    parser.add_argument("--plot_top_k_patterns", type=int, default=12,
-                        help="Number of patterns to plot in visualizations.")
+    parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
+    parser.add_argument("--plot_top_k_patterns", type=int, default=12)
 
-    # Deep Analysis (ModelAnalyzer)
-    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false",
-                        help="Disable periodic deep model analysis (WeightWatcher, etc).")
+    parser.add_argument(
+        "--no-deep-analysis", dest="perform_deep_analysis", action="store_false",
+        help="Disable periodic deep model analysis."
+    )
     parser.set_defaults(perform_deep_analysis=True)
-    parser.add_argument("--analysis_frequency", type=int, default=10,
-                        help="Frequency (in epochs) to run deep model analysis.")
-    parser.add_argument("--analysis_start_epoch", type=int, default=1,
-                        help="Epoch to start running deep model analysis.")
+    parser.add_argument("--analysis_frequency", type=int, default=10)
+    parser.add_argument("--analysis_start_epoch", type=int, default=1)
 
     return parser.parse_args()
 
 
 def main() -> None:
+    """Main function to configure and run the TiRex training experiment."""
     args = parse_args()
 
     config = TiRexTrainingConfig(
@@ -866,7 +935,6 @@ def main() -> None:
         input_length=args.input_length,
         prediction_length=args.prediction_length,
         patch_size=args.patch_size,
-        # Quantile levels are kept as list defaults in code
         quantile_levels=[0.1, 0.25, 0.5, 0.75, 0.9],
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -881,20 +949,22 @@ def main() -> None:
         max_patterns_per_category=args.max_patterns_per_category,
         visualize_every_n_epochs=args.visualize_every_n_epochs,
         plot_top_k_patterns=args.plot_top_k_patterns,
-        # Analysis config
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch
     )
 
-    ts_config = TimeSeriesGeneratorConfig(n_samples=5000, random_seed=42)
+    generator_config = TimeSeriesGeneratorConfig(
+        n_samples=10000,
+        random_seed=42,
+        default_noise_level=0.1
+    )
 
-    try:
-        trainer = TiRexTrainer(config, ts_config)
-        results = trainer.run_experiment()
-        logger.info(f"Completed. Results: {results['results_dir']}")
-    except Exception as e:
-        logger.error(f"Failed: {e}", exc_info=True)
+    trainer = TiRexTrainer(config, generator_config)
+    results = trainer.run_experiment()
+    logger.info(f"Completed. Results: {results['results_dir']}")
+    sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

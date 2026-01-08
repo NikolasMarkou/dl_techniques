@@ -21,32 +21,10 @@ global model on diverse synthetic patterns (e.g., Trend, Seasonality, Volatility
 instance-wise normalization. It supports both "Generic" stacks (fully learnable basis)
 and "Interpretable" stacks (fixed functional forms) to separate trend and seasonality.
 
-Foundational Mathematics
-------------------------
-Let $\mathbf{x} \in \mathbb{R}^{H}$ be the input history window (backcast length) and
-$\mathbf{y} \in \mathbb{R}^{T}$ be the forecast horizon. The network produces the
-final forecast $\hat{\mathbf{y}}$ by aggregating outputs from $L$ blocks.
-
-For the $l$-th block, the residual data flow is defined as:
-
-.. math::
-    \mathbf{x}_{l} = \mathbf{x}_{l-1} - \hat{\mathbf{x}}_{l-1} \quad \text{(Residual Input for next block)} \\
-    \hat{\mathbf{y}} = \sum_{l=1}^{L} \hat{\mathbf{y}}_l \quad \text{(Hierarchical Sum)}
-
-Internally, each block projects the input via a multilayer perceptron (MLP) to produce
-expansion coefficients $\mathbf{\theta}_l$. These coefficients generate the backcast
-and forecast vectors via basis functions $g$:
-
-.. math::
-    \hat{\mathbf{y}}_l = \mathbf{V}_l \cdot g^f(\mathbf{\theta}_l^f, t), \quad
-    \hat{\mathbf{x}}_l = \mathbf{U}_l \cdot g^b(\mathbf{\theta}_l^b, t)
-
-Where:
-- For **Trend Stacks**: Basis functions $g$ are polynomials of small degree $p$ (modeling
-  slowly varying components).
-- For **Seasonality Stacks**: Basis functions $g$ are Fourier series (modeling cyclical
-  components).
-- For **Generic Stacks**: The functions are learned directly from the data.
+Integration
+-----------
+Updated to use the unified `dl_techniques.datasets.time_series` module for
+synthetic data generation and normalization.
 
 References
 ----------
@@ -60,6 +38,7 @@ import json
 import math
 import random
 import argparse
+import sys
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
@@ -73,14 +52,20 @@ import seaborn as sns
 import tensorflow as tf
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.nbeats import create_nbeats_model
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
-from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
+
+from dl_techniques.datasets.time_series import (
+    TimeSeriesGenerator,
+    TimeSeriesGeneratorConfig,
+    TimeSeriesNormalizer,
+    NormalizationMethod
+)
 
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -132,7 +117,7 @@ class NBeatsTrainingConfig:
     )
     nb_blocks_per_stack: int = 3
     hidden_layer_units: int = 128
-    use_normalization: bool = True  # Model internal normalization layers
+    use_normalization: bool = True
     use_bias: bool = True
     activation: str = "gelu"
 
@@ -159,7 +144,7 @@ class NBeatsTrainingConfig:
     # Pattern selection & Data Processing
     max_patterns: Optional[int] = None
     max_patterns_per_category: int = 100
-    normalize_per_instance: bool = True  # Enforce [-1, 1] scaling
+    normalize_per_instance: bool = True
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -176,7 +161,7 @@ class NBeatsTrainingConfig:
     create_learning_curves: bool = True
     create_prediction_plots: bool = True
 
-    # DEEP ANALYSIS CONFIGURATION
+    # Deep Analysis Configuration
     perform_deep_analysis: bool = True
     analysis_frequency: int = 10
     analysis_start_epoch: int = 1
@@ -190,20 +175,44 @@ class NBeatsTrainingConfig:
             raise ValueError("backcast_length and forecast_length must be positive")
 
 
+def _fill_nans(data: np.ndarray) -> np.ndarray:
+    """
+    Forward fill NaNs in numpy array.
+
+    :param data: Input array potentially containing NaNs.
+    :return: Array with NaNs forward-filled.
+    """
+    mask = np.isnan(data)
+    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
+    np.maximum.accumulate(idx, axis=0, out=idx)
+    out = data[idx]
+    out[np.isnan(out)] = 0
+    return out
+
+
 class MultiPatternDataProcessor:
-    """Streams multi-pattern time series data using Python generators."""
+    """
+    Robust data processor for N-BEATS using the unified TimeSeriesGenerator and Normalizer.
+
+    Features:
+    - Infinite streaming generator for Training (maximum diversity).
+    - Pre-computed in-memory arrays for Validation/Test (eliminates end-of-epoch lag).
+    - Robust per-instance normalization using TimeSeriesNormalizer.
+    """
 
     def __init__(
             self,
             config: NBeatsTrainingConfig,
             generator: TimeSeriesGenerator,
             selected_patterns: List[str],
-            pattern_to_category: Dict[str, str]
+            pattern_to_category: Dict[str, str],
+            num_features: int = 1
     ):
         self.config = config
         self.ts_generator = generator
         self.selected_patterns = selected_patterns
         self.pattern_to_category = pattern_to_category
+        self.num_features = num_features
         self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
 
     def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
@@ -223,167 +232,194 @@ class MultiPatternDataProcessor:
             normalized_weights = [1.0 / num_patterns] * num_patterns
         return patterns, normalized_weights
 
-    def _normalize_window(
-        self, backcast: np.ndarray, forecast: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
         """
-        Normalize the instance to the range [-1, +1] using Backcast statistics.
-        Formula: X_norm = (X - min) / (max - min) * 2 - 1
+        Normalize series instance using TimeSeriesNormalizer.
+        Includes clipping to prevent extreme outliers from destabilizing training.
+
+        :param series: Input numpy array (n_timesteps, features) or (n_timesteps,).
+        :return: Normalized array as float32.
         """
-        if not self.config.normalize_per_instance:
-            return backcast, forecast
+        series = np.clip(series, -1e6, 1e6)
 
-        # Calculate statistics from the backcast (history) ONLY
-        min_val = np.min(backcast)
-        max_val = np.max(backcast)
-        scale = max_val - min_val
+        if self.config.normalize_per_instance:
+            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
+            if np.isnan(series).any():
+                series = _fill_nans(series)
+            series = normalizer.fit_transform(series)
 
-        # Avoid division by zero
-        if scale < 1e-7:
-            scale = 1.0
-
-        # Apply normalization to match range [-1, +1]
-        backcast_norm = ((backcast - min_val) / scale) * 2.0 - 1.0
-        forecast_norm = ((forecast - min_val) / scale) * 2.0 - 1.0
-
-        return backcast_norm.astype(np.float32), forecast_norm.astype(np.float32)
+        series = np.clip(series, -10.0, 10.0)
+        return series.astype(np.float32)
 
     def _training_generator(
         self
     ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
         """
-        Create an infinite generator for training data with high diversity.
+        Infinite generator for training data with high diversity.
+        Uses a buffer to mix patterns and reduce generator overhead.
         """
         patterns_to_mix = 50
         windows_per_pattern = 5
-        buffer = []
+        buffer: List[Tuple[np.ndarray, Union[np.ndarray, Tuple]]] = []
+
+        total_window_len = self.config.backcast_length + self.config.forecast_length
 
         while True:
             if not buffer:
-                # 1. Select a mix of patterns
-                try:
-                    selected_patterns = random.choices(
-                        self.weighted_patterns, self.weights, k=patterns_to_mix
-                    )
-                except IndexError:
-                    selected_patterns = self.selected_patterns
-
-                new_samples = []
+                selected_patterns = random.choices(
+                    self.weighted_patterns, self.weights, k=patterns_to_mix
+                )
 
                 for pattern_name in selected_patterns:
                     data = self.ts_generator.generate_task_data(pattern_name)
+
+                    if len(data) < total_window_len or not np.isfinite(data).all():
+                        continue
+
                     train_size = int(self.config.train_ratio * len(data))
                     train_data = data[:train_size]
 
-                    total_len = self.config.backcast_length + self.config.forecast_length
-                    max_start_idx = len(train_data) - total_len
-
+                    max_start_idx = len(train_data) - total_window_len
                     if max_start_idx <= 0:
                         continue
 
-                    # 2. Extract random windows
                     for _ in range(windows_per_pattern):
                         start_idx = random.randint(0, max_start_idx)
+                        window = train_data[start_idx: start_idx + total_window_len]
 
-                        backcast_raw = train_data[
-                            start_idx : start_idx + self.config.backcast_length
-                        ].reshape(-1, 1)
+                        window = self._safe_normalize(window)
 
-                        forecast_raw = train_data[
-                            start_idx + self.config.backcast_length :
-                            start_idx + total_len
-                        ].reshape(-1, 1)
-
-                        # 3. Apply Instance Normalization [-1, 1]
-                        x, y = self._normalize_window(backcast_raw, forecast_raw)
+                        backcast = window[:self.config.backcast_length].reshape(
+                            -1, self.num_features
+                        )
+                        forecast = window[self.config.backcast_length:].reshape(
+                            -1, self.num_features
+                        )
 
                         if self.config.reconstruction_loss_weight > 0.0:
-                            residual_target = x.flatten()
-                            new_samples.append((x, (y, residual_target)))
+                            residual_target = backcast.flatten()
+                            buffer.append((backcast, (forecast, residual_target)))
                         else:
-                            new_samples.append((x, y))
+                            buffer.append((backcast, forecast))
 
-                if not new_samples:
-                    continue
+                random.shuffle(buffer)
 
-                # 4. Shuffle the refill batch thoroughly
-                random.shuffle(new_samples)
-                buffer.extend(new_samples)
+            if buffer:
+                yield buffer.pop()
 
-            yield buffer.pop(0)
-
-    def _evaluation_generator(
-            self, split: str
-    ) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
+    def _generate_fixed_dataset(
+        self, split: str, num_samples: int
+    ) -> Tuple[np.ndarray, Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]]:
         """
-        Create an INFINITE generator for validation or test data.
+        Pre-generate a fixed dataset in memory to prevent generator lag.
+
+        :param split: 'val' or 'test'.
+        :param num_samples: Total number of samples to generate.
+        :return: Tuple of (Inputs, Targets) as numpy arrays.
         """
-        if split == 'val':
-            start_ratio = self.config.train_ratio
-            end_ratio = self.config.train_ratio + self.config.val_ratio
-        elif split == 'test':
-            start_ratio = self.config.train_ratio + self.config.val_ratio
-            end_ratio = 1.0
-        else:
-            raise ValueError("Split must be 'val' or 'test'")
+        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)...")
 
-        task_list = self.selected_patterns.copy()
+        backcasts: List[np.ndarray] = []
+        forecasts: List[np.ndarray] = []
+        residuals: List[np.ndarray] = []
 
-        while True:
-            # Shuffle tasks every pass for validation to keep batches statistically consistent
+        total_window_len = self.config.backcast_length + self.config.forecast_length
+        samples_collected = 0
+        pattern_cycle = 0
+
+        while samples_collected < num_samples:
+            pattern_idx = pattern_cycle % len(self.selected_patterns)
+            pattern_name = self.selected_patterns[pattern_idx]
+            pattern_cycle += 1
+
+            data = self.ts_generator.generate_task_data(pattern_name)
+
+            if len(data) < total_window_len or not np.isfinite(data).all():
+                continue
+
+            train_end = int(self.config.train_ratio * len(data))
+            val_end = train_end + int(self.config.val_ratio * len(data))
+
             if split == 'val':
-                random.shuffle(task_list)
+                split_data = data[train_end:val_end]
+            else:
+                split_data = data[val_end:]
 
-            samples_yielded_in_pass = 0
+            max_start_idx = len(split_data) - total_window_len
+            if max_start_idx <= 0:
+                continue
 
-            for pattern_name in task_list:
-                data = self.ts_generator.generate_task_data(pattern_name)
-                start_idx = int(start_ratio * len(data))
-                end_idx = int(end_ratio * len(data))
-                split_data = data[start_idx:end_idx]
+            start_idx = random.randint(0, max_start_idx)
+            window = split_data[start_idx: start_idx + total_window_len]
+            window = self._safe_normalize(window)
 
-                total_len = self.config.backcast_length + self.config.forecast_length
-                stride = self.config.forecast_length // 2
-                if stride < 1: stride = 1
+            backcast = window[:self.config.backcast_length].reshape(
+                -1, self.num_features
+            )
+            forecast = window[self.config.backcast_length:].reshape(
+                -1, self.num_features
+            )
 
-                max_start = len(split_data) - total_len
+            backcasts.append(backcast)
+            forecasts.append(forecast)
 
-                if max_start <= 0:
-                    continue
+            if self.config.reconstruction_loss_weight > 0.0:
+                residuals.append(backcast.flatten())
 
-                for i in range(0, max_start + 1, stride):
-                    backcast_raw = split_data[i : i + self.config.backcast_length].reshape(-1, 1)
-                    forecast_raw = split_data[
-                        i + self.config.backcast_length : i + total_len
-                    ].reshape(-1, 1)
+            samples_collected += 1
 
-                    x, y = self._normalize_window(backcast_raw, forecast_raw)
-
-                    samples_yielded_in_pass += 1
-                    if self.config.reconstruction_loss_weight > 0.0:
-                        yield x, (y, x.flatten())
-                    else:
-                        yield x, y
-
-            if samples_yielded_in_pass == 0:
-                logger.warning(f"No samples found for {split} split. Yielding zero-sample.")
-                x_dummy = np.zeros((self.config.backcast_length, 1), dtype=np.float32)
-                y_dummy = np.zeros((self.config.forecast_length, 1), dtype=np.float32)
-                if self.config.reconstruction_loss_weight > 0.0:
-                    yield x_dummy, (y_dummy, x_dummy.flatten())
-                else:
-                    yield x_dummy, y_dummy
-
-    def get_evaluation_steps(self, split: str) -> int:
-        return max(10, len(self.selected_patterns) * 5)
-
-    def prepare_datasets(self) -> Dict[str, Any]:
-        """Create the complete tf.data pipeline."""
-        x_shape = (self.config.backcast_length, 1)
-        y_shape = (self.config.forecast_length, 1)
+        x = np.array(backcasts, dtype=np.float32)
+        y_forecast = np.array(forecasts, dtype=np.float32)
 
         if self.config.reconstruction_loss_weight > 0.0:
-            rec_shape = (self.config.backcast_length * self.config.input_dim,)
+            y_residual = np.array(residuals, dtype=np.float32)
+            return x, (y_forecast, y_residual)
+
+        return x, y_forecast
+
+    def _test_generator_raw(
+        self
+    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """
+        Helper specifically for visualization callback to pull fresh test samples.
+        """
+        total_window_len = self.config.backcast_length + self.config.forecast_length
+
+        viz_patterns = self.selected_patterns.copy()
+        random.shuffle(viz_patterns)
+
+        for pattern_name in viz_patterns:
+            data = self.ts_generator.generate_task_data(pattern_name)
+
+            if len(data) < total_window_len or not np.isfinite(data).all():
+                continue
+
+            start_test = int(
+                (self.config.train_ratio + self.config.val_ratio) * len(data)
+            )
+            test_data = data[start_test:]
+
+            if len(test_data) < total_window_len:
+                continue
+
+            max_start_idx = len(test_data) - total_window_len
+            start_idx = random.randint(0, max_start_idx)
+
+            window = test_data[start_idx: start_idx + total_window_len]
+            window = self._safe_normalize(window)
+
+            yield (
+                window[:self.config.backcast_length].reshape(-1, self.num_features),
+                window[self.config.backcast_length:].reshape(-1, self.num_features)
+            )
+
+    def prepare_datasets(self) -> Dict[str, Any]:
+        """Create tf.data.Datasets."""
+        x_shape = (self.config.backcast_length, self.num_features)
+        y_shape = (self.config.forecast_length, self.num_features)
+
+        if self.config.reconstruction_loss_weight > 0.0:
+            rec_shape = (self.config.backcast_length * self.num_features,)
             output_signature = (
                 tf.TensorSpec(shape=x_shape, dtype=tf.float32),
                 (
@@ -399,22 +435,42 @@ class MultiPatternDataProcessor:
 
         train_ds = tf.data.Dataset.from_generator(
             self._training_generator, output_signature=output_signature
-        ).repeat().shuffle(1603).batch(self.config.batch_size).shuffle(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
-        val_ds = tf.data.Dataset.from_generator(
-            lambda: self._evaluation_generator('val'), output_signature=output_signature
-        ).repeat().batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        validation_steps = max(50, len(self.selected_patterns))
+        test_steps = max(20, len(self.selected_patterns))
 
-        test_ds = tf.data.Dataset.from_generator(
-            lambda: self._evaluation_generator('test'), output_signature=output_signature
-        ).repeat().batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        num_val_samples = validation_steps * self.config.batch_size
+        num_test_samples = test_steps * self.config.batch_size
+
+        val_data = self._generate_fixed_dataset('val', num_val_samples)
+        if self.config.reconstruction_loss_weight > 0.0:
+            val_x, (val_y_forecast, val_y_residual) = val_data
+            val_ds = tf.data.Dataset.from_tensor_slices(
+                (val_x, (val_y_forecast, val_y_residual))
+            )
+        else:
+            val_x, val_y = val_data
+            val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y))
+        val_ds = val_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
+
+        test_data = self._generate_fixed_dataset('test', num_test_samples)
+        if self.config.reconstruction_loss_weight > 0.0:
+            test_x, (test_y_forecast, test_y_residual) = test_data
+            test_ds = tf.data.Dataset.from_tensor_slices(
+                (test_x, (test_y_forecast, test_y_residual))
+            )
+        else:
+            test_x, test_y = test_data
+            test_ds = tf.data.Dataset.from_tensor_slices((test_x, test_y))
+        test_ds = test_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
 
         return {
             'train_ds': train_ds,
             'val_ds': val_ds,
             'test_ds': test_ds,
-            'validation_steps': self.get_evaluation_steps('val'),
-            'test_steps': self.get_evaluation_steps('test')
+            'validation_steps': validation_steps,
+            'test_steps': test_steps
         }
 
 
@@ -433,59 +489,28 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         self.data_processor = data_processor
         self.save_dir = save_dir
         self.model_name = model_name
-        self.training_history = {
+        self.training_history: Dict[str, List[float]] = {
             'loss': [], 'val_loss': [], 'forecast_mae': [], 'val_forecast_mae': []
         }
         os.makedirs(save_dir, exist_ok=True)
         self.viz_test_data = self._create_viz_test_set()
 
     def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Generates a GUARANTEED DIVERSE visualization test set.
-        Instead of using the sequential generator, we pick 1 sample from N different patterns.
-        """
+        """Generate a diverse visualization test set."""
         logger.info("Creating a diverse, fixed visualization test set...")
 
-        x_list, y_list = [], []
+        x_list: List[np.ndarray] = []
+        y_list: List[np.ndarray] = []
 
-        # Get list of patterns and shuffle them to pick random ones
-        available_patterns = self.data_processor.selected_patterns.copy()
-        random.shuffle(available_patterns)
+        test_gen = self.data_processor._test_generator_raw()
 
-        # Ratio for test split
-        start_ratio = self.config.train_ratio + self.config.val_ratio
-
-        # Iterate through distinct patterns to ensure variety
-        for pattern_name in available_patterns:
-            if len(x_list) >= self.config.plot_top_k_patterns:
+        for _ in range(self.config.plot_top_k_patterns):
+            try:
+                x, y = next(test_gen)
+                x_list.append(x)
+                y_list.append(y)
+            except StopIteration:
                 break
-
-            data = self.data_processor.ts_generator.generate_task_data(pattern_name)
-
-            # Slice test split
-            start_idx_split = int(start_ratio * len(data))
-            test_data = data[start_idx_split:]
-
-            total_len = self.config.backcast_length + self.config.forecast_length
-            max_start = len(test_data) - total_len
-
-            if max_start <= 0:
-                continue
-
-            # Pick a random window within this specific pattern's test data
-            rand_idx = random.randint(0, max_start)
-
-            backcast_raw = test_data[rand_idx : rand_idx + self.config.backcast_length].reshape(-1, 1)
-            forecast_raw = test_data[
-                rand_idx + self.config.backcast_length :
-                rand_idx + total_len
-            ].reshape(-1, 1)
-
-            # Normalize
-            x, y = self.data_processor._normalize_window(backcast_raw, forecast_raw)
-
-            x_list.append(x)
-            y_list.append(y)
 
         if not x_list:
             logger.warning("Could not generate viz samples.")
@@ -525,7 +550,9 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         axes[1].grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch+1:03d}.png'))
+        plt.savefig(
+            os.path.join(self.save_dir, f'learning_curves_epoch_{epoch+1:03d}.png')
+        )
         plt.close()
 
     def _plot_prediction_samples(self, epoch: int) -> None:
@@ -551,12 +578,22 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             backcast_steps = np.arange(-self.config.backcast_length, 0)
             forecast_steps = np.arange(0, self.config.forecast_length)
 
-            ax.plot(backcast_steps, test_x[i].flatten(), label='Backcast', color='blue', alpha=0.6)
-            ax.plot(forecast_steps, test_y[i].flatten(), label='True Future', color='green')
-            ax.plot(forecast_steps, predictions[i].flatten(), label='Pred Future', color='red', linestyle='--')
+            ax.plot(
+                backcast_steps, test_x[i].flatten(),
+                label='Backcast', color='blue', alpha=0.6
+            )
+            ax.plot(
+                forecast_steps, test_y[i].flatten(),
+                label='True Future', color='green'
+            )
+            ax.plot(
+                forecast_steps, predictions[i].flatten(),
+                label='Pred Future', color='red', linestyle='--'
+            )
 
             ax.set_title(f'Sample {i+1}')
-            if i == 0: ax.legend()
+            if i == 0:
+                ax.legend()
             ax.grid(True, alpha=0.3)
 
         for j in range(num_plots, len(axes)):
@@ -564,7 +601,9 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 
         plt.suptitle(f'N-BEATS Predictions (Epoch {epoch + 1})', fontsize=14)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
+        plt.savefig(
+            os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png')
+        )
         plt.close()
 
 
@@ -572,11 +611,12 @@ class NBeatsTrainer:
     """Orchestrates the training, evaluation, and reporting of N-BEATS models."""
 
     def __init__(
-            self, config: NBeatsTrainingConfig, ts_config: TimeSeriesConfig
+            self, config: NBeatsTrainingConfig, generator_config: TimeSeriesGeneratorConfig
     ) -> None:
         self.config = config
-        self.ts_config = ts_config
-        self.generator = TimeSeriesGenerator(ts_config)
+        self.generator_config = generator_config
+        self.generator = TimeSeriesGenerator(generator_config)
+
         self.all_patterns = self.generator.get_task_names()
         self.pattern_categories = self.generator.get_task_categories()
         self.pattern_to_category = {
@@ -585,9 +625,13 @@ class NBeatsTrainer:
             for task in self.generator.get_tasks_by_category(cat)
         }
         self.selected_patterns = self._select_patterns()
+
         self.processor = MultiPatternDataProcessor(
             config, self.generator, self.selected_patterns, self.pattern_to_category
         )
+
+        self.model: Optional[keras.Model] = None
+        self.exp_dir: Optional[str] = None
 
     def _select_patterns(self) -> List[str]:
         if self.config.target_categories:
@@ -598,7 +642,9 @@ class NBeatsTrainer:
         else:
             patterns_to_consider = self.all_patterns
 
-        selected, category_counts = [], {}
+        selected: List[str] = []
+        category_counts: Dict[str, int] = {}
+
         for pattern in sorted(patterns_to_consider):
             category = self.pattern_to_category.get(pattern)
             if (category and
@@ -621,7 +667,6 @@ class NBeatsTrainer:
                 self.config.kernel_regularizer_l2
             )
 
-        # Instantiate the base N-BEATS architecture
         base_model = create_nbeats_model(
             backcast_length=self.config.backcast_length,
             forecast_length=self.config.forecast_length,
@@ -637,12 +682,14 @@ class NBeatsTrainer:
             output_dim=1
         )
 
-        # Configure Learning Rate
         if self.config.use_warmup:
+            total_steps = self.config.epochs * self.config.steps_per_epoch
+            primary_steps = max(1, total_steps - self.config.warmup_steps)
+
             primary_schedule = keras.optimizers.schedules.CosineDecay(
                 initial_learning_rate=self.config.learning_rate,
-                decay_steps=self.config.steps_per_epoch * self.config.epochs,
-                alpha=0.1
+                decay_steps=primary_steps,
+                alpha=0.01
             )
             lr_schedule = WarmupSchedule(
                 warmup_steps=self.config.warmup_steps,
@@ -652,20 +699,18 @@ class NBeatsTrainer:
         else:
             lr_schedule = self.config.learning_rate
 
-        # Configure Optimizer
-        optimizer_cls = keras.optimizers.get(self.config.optimizer).__class__
-        optimizer = optimizer_cls(
-            learning_rate=lr_schedule,
-            clipnorm=self.config.gradient_clip_norm
-        )
+        optimizer = keras.optimizers.get(self.config.optimizer)
+        optimizer.learning_rate = lr_schedule
+        if self.config.gradient_clip_norm:
+            optimizer.clipnorm = self.config.gradient_clip_norm
 
-        # Prepare Loss Functions and Model Wrapping
         if self.config.reconstruction_loss_weight > 0.0:
-            # Case A: Reconstruction Enabled
             model = base_model
 
             if self.config.primary_loss == 'mase_loss':
-                forecast_loss = MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
+                forecast_loss = MASELoss(
+                    seasonal_periods=self.config.mase_seasonal_periods
+                )
             else:
                 forecast_loss = keras.losses.get(self.config.primary_loss)
 
@@ -679,8 +724,9 @@ class NBeatsTrainer:
                 [keras.metrics.MeanAbsoluteError(name="residual_mae")]
             ]
         else:
-            # Case B: Forecast Only - Wrap base_model to select first output
-            inputs = keras.Input(shape=(self.config.backcast_length, self.config.input_dim))
+            inputs = keras.Input(
+                shape=(self.config.backcast_length, self.config.input_dim)
+            )
             raw_output = base_model(inputs)
 
             if isinstance(raw_output, (list, tuple)):
@@ -688,7 +734,9 @@ class NBeatsTrainer:
             else:
                 forecast = raw_output
 
-            model = keras.Model(inputs=inputs, outputs=forecast, name="nbeats_forecast_only")
+            model = keras.Model(
+                inputs=inputs, outputs=forecast, name="nbeats_forecast_only"
+            )
 
             if self.config.primary_loss == 'mase_loss':
                 losses = MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
@@ -708,24 +756,40 @@ class NBeatsTrainer:
         return model
 
     def run_experiment(self) -> Dict[str, Any]:
-        exp_dir = os.path.join(
-            self.config.result_dir,
-            f"{self.config.experiment_name}_"
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-        os.makedirs(exp_dir, exist_ok=True)
-        logger.info(f"Starting N-BEATS Experiment: {exp_dir}")
+        """Run the complete training experiment."""
+        logger.info("Starting N-BEATS training experiment")
+        self.exp_dir = self._create_experiment_dir()
+        logger.info(f"Results will be saved to: {self.exp_dir}")
 
         data_pipeline = self.processor.prepare_datasets()
-        results = self._train_model(data_pipeline, exp_dir)
 
-        self._save_results(results, exp_dir)
-        return {"results_dir": exp_dir, "results": results}
+        self.model = self.create_model()
+        self.model.build((None, self.config.backcast_length, self.config.input_dim))
+        logger.info("Model created successfully")
+        logger.info(f"Model parameters: {self.model.count_params():,}")
+        self.model.summary(print_fn=logger.info)
+
+        training_results = self._train_model(data_pipeline, self.exp_dir)
+
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir)
+
+        return {
+            'config': self.config,
+            'experiment_dir': self.exp_dir,
+            'training_results': training_results,
+            'results_dir': self.exp_dir
+        }
+
+    def _create_experiment_dir(self) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_name = f"{self.config.experiment_name}_{timestamp}"
+        exp_dir = os.path.join(self.config.result_dir, exp_name)
+        os.makedirs(exp_dir, exist_ok=True)
+        return exp_dir
 
     def _train_model(self, data_pipeline: Dict, exp_dir: str) -> Dict[str, Any]:
-        model = self.create_model()
-        model.build((None, self.config.backcast_length, self.config.input_dim))
-        model.summary(print_fn=logger.info)
+        logger.info("Starting model training...")
 
         viz_dir = os.path.join(exp_dir, 'visualizations')
         performance_cb = PatternPerformanceCallback(
@@ -745,15 +809,18 @@ class NBeatsTrainer:
             keras.callbacks.TerminateOnNaN()
         ]
 
-        # --- DEEP MODEL ANALYSIS CALLBACK ---
-        if self.config.perform_deep_analysis:
-            logger.info("Adding Deep Model Analysis (Weights/Spectral) callback.")
+        if not self.config.use_warmup:
+            callbacks.append(keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7
+            ))
 
-            # Configure analysis (Data-free for speed during training loops)
+        if self.config.perform_deep_analysis:
+            logger.info("Adding Deep Model Analysis callback.")
+
             analysis_config = AnalysisConfig(
                 analyze_weights=True,
-                analyze_spectral=True, # Spectral analysis (WeightWatcher)
-                analyze_calibration=False, # Skip data-dependent analyses
+                analyze_spectral=True,
+                analyze_calibration=False,
                 analyze_information_flow=False,
                 analyze_training_dynamics=False,
                 verbose=False
@@ -770,7 +837,7 @@ class NBeatsTrainer:
             )
             callbacks.append(analyzer_cb)
 
-        history = model.fit(
+        history = self.model.fit(
             data_pipeline['train_ds'],
             validation_data=data_pipeline['val_ds'],
             epochs=self.config.epochs,
@@ -781,7 +848,7 @@ class NBeatsTrainer:
         )
 
         logger.info("Evaluating on test set...")
-        test_results = model.evaluate(
+        test_results = self.model.evaluate(
             data_pipeline['test_ds'],
             steps=data_pipeline['test_steps'],
             verbose=1,
@@ -802,7 +869,7 @@ class NBeatsTrainer:
             'config': self.config.__dict__
         }
 
-        def default(o):
+        def default(o: Any) -> str:
             if isinstance(o, (np.integer, np.floating)):
                 return float(o)
             return str(o)
@@ -813,42 +880,54 @@ class NBeatsTrainer:
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments for N-BEATS training."""
-    parser = argparse.ArgumentParser(description="N-BEATS Training (Normalized & Unified)")
+    parser = argparse.ArgumentParser(
+        description="N-BEATS Training (Unified TimeSeriesGenerator)"
+    )
 
-    parser.add_argument("--experiment_name", type=str, default="nbeats",
-                        help="Name for logging.")
+    parser.add_argument(
+        "--experiment_name", type=str, default="nbeats", help="Name for logging."
+    )
     parser.add_argument("--backcast_length", type=int, default=168)
     parser.add_argument("--forecast_length", type=int, default=24)
 
-    # Training Loop
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--steps_per_epoch", type=int, default=1000)
 
-    # Optimizer
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--optimizer", type=str, default="adamw")
     parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
 
-    # Data Processing
-    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false",
-                        help="Disable [-1, 1] normalization.")
+    parser.add_argument(
+        "--no-normalize", dest="normalize_per_instance", action="store_false",
+        help="Disable per-instance normalization."
+    )
     parser.set_defaults(normalize_per_instance=True)
 
-    # N-BEATS Structure
-    parser.add_argument("--stack_types", nargs='+', default=["trend", "seasonality", "generic"])
+    parser.add_argument(
+        "--stack_types", nargs='+', default=["trend", "seasonality", "generic"]
+    )
     parser.add_argument("--hidden_layer_units", type=int, default=256)
-    parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5,
-                        help="Weight for backcast reconstruction loss (default: 0.5)")
+    parser.add_argument(
+        "--reconstruction_loss_weight", type=float, default=0.5,
+        help="Weight for backcast reconstruction loss."
+    )
 
-    # Deep Analysis (ModelAnalyzer)
-    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false",
-                        help="Disable periodic deep model analysis (WeightWatcher, etc).")
+    parser.add_argument(
+        "--no-warmup", dest="use_warmup", action="store_false",
+        help="Disable learning rate warmup."
+    )
+    parser.set_defaults(use_warmup=True)
+    parser.add_argument("--warmup_steps", type=int, default=1000)
+    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
+
+    parser.add_argument(
+        "--no-deep-analysis", dest="perform_deep_analysis", action="store_false",
+        help="Disable periodic deep model analysis."
+    )
     parser.set_defaults(perform_deep_analysis=True)
-    parser.add_argument("--analysis_frequency", type=int, default=10,
-                        help="Frequency (in epochs) to run deep model analysis.")
-    parser.add_argument("--analysis_start_epoch", type=int, default=1,
-                        help="Epoch to start running deep model analysis.")
+    parser.add_argument("--analysis_frequency", type=int, default=10)
+    parser.add_argument("--analysis_start_epoch", type=int, default=1)
 
     return parser.parse_args()
 
@@ -863,34 +942,32 @@ def main() -> None:
         forecast_length=args.forecast_length,
         stack_types=args.stack_types,
         hidden_layer_units=args.hidden_layer_units,
-        # Training
         epochs=args.epochs,
         batch_size=args.batch_size,
         steps_per_epoch=args.steps_per_epoch,
         learning_rate=args.learning_rate,
         optimizer=args.optimizer,
         gradient_clip_norm=args.gradient_clip_norm,
-        # Data
         normalize_per_instance=args.normalize_per_instance,
         reconstruction_loss_weight=args.reconstruction_loss_weight,
-        # Analysis config
+        use_warmup=args.use_warmup,
+        warmup_steps=args.warmup_steps,
+        warmup_start_lr=args.warmup_start_lr,
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch
     )
 
-    ts_config = TimeSeriesConfig(
-        n_samples=5000,
-        random_seed=42
+    generator_config = TimeSeriesGeneratorConfig(
+        n_samples=10000,
+        random_seed=42,
+        default_noise_level=0.1
     )
 
-    try:
-        trainer = NBeatsTrainer(config, ts_config)
-        results = trainer.run_experiment()
-        logger.info(f"Experiment completed! Results saved to: {results['results_dir']}")
-    except Exception as e:
-        logger.error(f"Experiment failed: {e}", exc_info=True)
-        raise
+    trainer = NBeatsTrainer(config, generator_config)
+    results = trainer.run_experiment()
+    logger.info(f"Experiment completed! Results saved to: {results['results_dir']}")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
