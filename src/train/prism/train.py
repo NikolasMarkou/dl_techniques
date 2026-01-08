@@ -7,8 +7,9 @@ The PRISM (Progressive Refinement via Integrated Segmentation and Mixing) framew
 implements hierarchical time-frequency decomposition with routing mechanisms designed
 to capture both local patterns and long-range dependencies.
 
-This script implements a robust training pipeline using tf.data.Dataset generators
-modeled after the stable TiRex framework to prevent numerical instability (NaNs).
+This script implements a robust training pipeline supporting both:
+1. Point Forecasting (MSE Loss)
+2. Probabilistic Forecasting (Quantile Loss)
 
 References
 ----------
@@ -24,7 +25,7 @@ import random
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
@@ -42,6 +43,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 from dl_techniques.models.prism.model import PRISMModel
+from dl_techniques.losses.quantile_loss import QuantileLoss
 
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -97,6 +99,13 @@ class PRISMTrainingConfig:
     dropout_rate: float = 0.1
     ffn_expansion: int = 4
 
+    # Probabilistic / Quantile Configuration
+    use_quantile_head: bool = False
+    enforce_monotonicity: bool = True
+    quantile_levels: List[float] = field(
+        default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    )
+
     # Training configuration
     epochs: int = 150
     batch_size: int = 64
@@ -144,6 +153,9 @@ class PRISMTrainingConfig:
 
         if self.context_len <= 0 or self.forecast_len <= 0:
             raise ValueError("context_len and forecast_len must be positive")
+        
+        if self.use_quantile_head and 0.5 not in self.quantile_levels:
+            logger.warning("Recommended to include 0.5 (median) in quantile_levels for evaluation.")
 
 
 class PRISMDataProcessor:
@@ -200,7 +212,7 @@ class PRISMDataProcessor:
             else:
                 series = (series - mean) / std
 
-        # Clip extreme outliers that destabilize MSE loss
+        # Clip extreme outliers that destabilize MSE/Quantile loss
         # Using [-10, 10] which is sufficient for z-scores (approx 10 sigma)
         series = np.clip(series, -10.0, 10.0)
         return series.astype(np.float32)
@@ -378,7 +390,7 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
         # Track metrics across epochs
         self.training_history = {
             'loss': [], 'val_loss': [],
-            'mae': [], 'val_mae': [],
+            'metric': [], 'val_metric': [],
             'lr': []
         }
 
@@ -405,8 +417,16 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
         # Track history
         self.training_history['loss'].append(logs.get('loss', 0))
         self.training_history['val_loss'].append(logs.get('val_loss', 0))
-        self.training_history['mae'].append(logs.get('mae', 0))
-        self.training_history['val_mae'].append(logs.get('val_mae', 0))
+
+        # Handle different metrics for Point vs Quantile
+        if self.config.use_quantile_head:
+            self.training_history['metric'].append(logs.get('mae_of_median', 0))
+            self.training_history['val_metric'].append(logs.get('val_mae_of_median', 0))
+            metric_name = "MAE (Median)"
+        else:
+            self.training_history['metric'].append(logs.get('mae', 0))
+            self.training_history['val_metric'].append(logs.get('val_mae', 0))
+            metric_name = "MAE"
 
         # Track learning rate
         lr = float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
@@ -420,27 +440,27 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
         if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
             logger.info(f"Creating visualizations for epoch {epoch + 1}...")
             if self.config.create_learning_curves:
-                self._plot_learning_curves(epoch)
+                self._plot_learning_curves(epoch, metric_name)
             if self.config.create_prediction_plots:
                 self._plot_prediction_samples(epoch)
 
-    def _plot_learning_curves(self, epoch: int) -> None:
+    def _plot_learning_curves(self, epoch: int, metric_name: str) -> None:
         """Plot training and validation metrics."""
         fig, axes = plt.subplots(1, 3, figsize=(18, 4))
         epochs_range = range(1, len(self.training_history['loss']) + 1)
 
-        # MSE Loss
+        # Loss
         axes[0].plot(epochs_range, self.training_history['loss'], label='Train')
         axes[0].plot(epochs_range, self.training_history['val_loss'], label='Val')
-        axes[0].set_title('MSE Loss')
+        axes[0].set_title('Loss')
         axes[0].set_ylabel('Loss')
         axes[0].legend()
 
-        # MAE
-        axes[1].plot(epochs_range, self.training_history['mae'], label='Train')
-        axes[1].plot(epochs_range, self.training_history['val_mae'], label='Val')
-        axes[1].set_title('MAE')
-        axes[1].set_ylabel('MAE')
+        # Metric
+        axes[1].plot(epochs_range, self.training_history['metric'], label='Train')
+        axes[1].plot(epochs_range, self.training_history['val_metric'], label='Val')
+        axes[1].set_title(metric_name)
+        axes[1].set_ylabel(metric_name)
         axes[1].legend()
 
         # Learning Rate
@@ -457,33 +477,64 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
 
         # Make predictions
         predictions = self.model.predict(context, verbose=0)
+        # predictions shape: 
+        # Point: (batch, forecast_len, num_features)
+        # Quantile: (batch, forecast_len, num_features, num_quantiles)
 
         num_samples = min(self.config.plot_top_k_patterns, len(context))
         n_cols = 3
         n_rows = math.ceil(num_samples / n_cols)
 
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
-        # Ensure axes is always iterable even if n_rows=1
         if n_rows == 1 and n_cols == 1:
             axes = [axes]
         axes = np.array(axes).flatten()
 
+        # Setup quantile indices if needed
+        if self.config.use_quantile_head:
+            quantiles = self.config.quantile_levels
+            try:
+                median_idx = quantiles.index(0.5)
+            except ValueError:
+                # Fallback to middle index if exact 0.5 not found
+                median_idx = len(quantiles) // 2
+            
+            # Use outer quantiles for confidence interval (e.g., 10th and 90th)
+            low_idx = 0
+            high_idx = -1
+
         for i in range(num_samples):
             ax = axes[i]
+            
             # Flatten to 1D for plotting (assuming 1 feature or taking 0-th feature)
-            ctx_data = context[i].flatten()
-            tgt_data = target[i].flatten()
-            pred_data = predictions[i].flatten()
-
+            ctx_data = context[i, :, 0].flatten()
+            tgt_data = target[i, :, 0].flatten()
+            
             x_ctx = np.arange(len(ctx_data))
             x_tgt = np.arange(len(ctx_data), len(ctx_data) + len(tgt_data))
 
             ax.plot(x_ctx, ctx_data, label='Context', color='blue')
             ax.plot(x_tgt, tgt_data, label='Target', color='green', linestyle='--')
-            ax.plot(x_tgt, pred_data, label='Pred', color='red', alpha=0.7)
+
+            if self.config.use_quantile_head:
+                # Quantile Plotting
+                pred_median = predictions[i, :, 0, median_idx].flatten()
+                pred_low = predictions[i, :, 0, low_idx].flatten()
+                pred_high = predictions[i, :, 0, high_idx].flatten()
+                
+                ax.plot(x_tgt, pred_median, label='Median', color='red', alpha=0.9)
+                ax.fill_between(
+                    x_tgt, pred_low, pred_high, 
+                    color='red', alpha=0.2, 
+                    label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q'
+                )
+            else:
+                # Point Plotting
+                pred_data = predictions[i, :, 0].flatten()
+                ax.plot(x_tgt, pred_data, label='Pred', color='red', alpha=0.7)
 
             if i == 0:
-                ax.legend()
+                ax.legend(loc='upper left', fontsize='small')
             ax.set_title(f'Sample {i}')
 
         for j in range(num_samples, len(axes)):
@@ -581,7 +632,8 @@ class PRISMTrainer:
 
     def _create_experiment_dir(self) -> str:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        exp_name = f"{self.config.experiment_name}_{self.config.preset}_{timestamp}"
+        mode = "quantile" if self.config.use_quantile_head else "point"
+        exp_name = f"{self.config.experiment_name}_{self.config.preset}_{mode}_{timestamp}"
         exp_dir = os.path.join(self.config.result_dir, exp_name)
         os.makedirs(exp_dir, exist_ok=True)
         return exp_dir
@@ -601,7 +653,13 @@ class PRISMTrainer:
             "router_hidden_dim": self.config.router_hidden_dim,
             "router_temperature": self.config.router_temperature,
             "dropout_rate": self.config.dropout_rate,
-            "ffn_expansion": self.config.ffn_expansion
+            "ffn_expansion": self.config.ffn_expansion,
+            
+            # Quantile/Probabilistic arguments
+            "use_quantile_head": self.config.use_quantile_head,
+            "num_quantiles": len(self.config.quantile_levels) if self.config.use_quantile_head else 3,
+            "quantile_levels": self.config.quantile_levels if self.config.use_quantile_head else None,
+            "enforce_monotonicity": self.config.enforce_monotonicity
         }
 
         if self.config.hidden_dim is not None:
@@ -635,11 +693,36 @@ class PRISMTrainer:
         # Explicit Build
         model.build((None, self.config.context_len, num_features))
 
-        # Compile WITHOUT jit_compile for PRISM stability
+        # ---------------------------------------------------------------------
+        # Compilation: Switch between Point (MSE) and Quantile Loss
+        # ---------------------------------------------------------------------
+        if self.config.use_quantile_head:
+            logger.info("Compiling with QuantileLoss")
+            loss = QuantileLoss(quantiles=self.config.quantile_levels)
+            
+            # Custom metric to track MAE of the Median (0.5 quantile)
+            if 0.5 in self.config.quantile_levels:
+                median_idx = self.config.quantile_levels.index(0.5)
+                
+                def mae_of_median(y_true, y_pred):
+                    # y_true: (batch, forecast_len, num_features)
+                    # y_pred: (batch, forecast_len, num_features, quantiles)
+                    return keras.metrics.mean_absolute_error(
+                        y_true, y_pred[:, :, :, median_idx]
+                    )
+                mae_of_median.__name__ = 'mae_of_median'
+                metrics = [mae_of_median]
+            else:
+                metrics = []
+        else:
+            logger.info("Compiling with MSE Loss")
+            loss = 'mse'
+            metrics = ['mae', 'mse']
+
         model.compile(
             optimizer=optimizer,
-            loss='mse',
-            metrics=['mae', 'mse']
+            loss=loss,
+            metrics=metrics
             # jit_compile=True  <-- REMOVED TO PREVENT NANs IN ROUTER/WAVELET
         )
 
@@ -734,6 +817,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tree_depth", type=int, default=2)
     parser.add_argument("--num_wavelet_levels", type=int, default=3)
 
+    # Probabilistic args
+    parser.add_argument("--use_quantile_head", action="store_true", help="Enable probabilistic forecasting")
+    parser.add_argument("--no_monotonicity", dest="enforce_monotonicity", action="store_false")
+    parser.set_defaults(enforce_monotonicity=True)
+
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--steps_per_epoch", type=int, default=500)
@@ -789,10 +877,14 @@ def main() -> None:
         plot_top_k_patterns=args.plot_top_k_patterns,
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
-        analysis_start_epoch=args.analysis_start_epoch
+        analysis_start_epoch=args.analysis_start_epoch,
+        
+        # Quantile config
+        use_quantile_head=args.use_quantile_head,
+        enforce_monotonicity=args.enforce_monotonicity
     )
 
-    generator_config = TimeSeriesGeneratorConfig(n_samples=5000, random_seed=42)
+    generator_config = TimeSeriesGeneratorConfig(n_samples=50000, random_seed=42)
 
     try:
         trainer = PRISMTrainer(config, generator_config)
