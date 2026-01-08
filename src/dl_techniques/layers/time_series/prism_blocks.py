@@ -10,10 +10,7 @@ recursively to capture both global trends and local fine-grained structures.
 """
 
 import keras
-from keras import ops
-from keras import layers
-from keras import initializers
-from keras import regularizers
+from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -21,144 +18,7 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn import create_ffn_layer
-
-
-# ---------------------------------------------------------------------
-# Haar Wavelet Decomposition Layer
-# ---------------------------------------------------------------------
-
-@keras.saving.register_keras_serializable()
-class HaarWaveletDecomposition(keras.layers.Layer):
-    """
-    Performs Haar Discrete Wavelet Transform (DWT) decomposition.
-
-    Decomposes an input signal into multiple frequency bands using the Haar
-    wavelet basis. The Haar wavelet is the simplest wavelet and computes
-    averages (approximation) and differences (detail) coefficients.
-
-    **Architecture**::
-
-        Input(shape=[batch, seq_len, channels])
-               ↓
-        For each decomposition level:
-               ↓
-          +----+----+
-          ↓         ↓
-        Low-pass  High-pass
-        (approx)  (detail)
-          ↓         ↓
-          +----+----+
-               ↓
-        Output: List of [approx, detail_1, ..., detail_K]
-
-    :param num_levels: Number of decomposition levels. Each level halves
-        the temporal resolution. Defaults to 3.
-    :type num_levels: int
-    :param kwargs: Additional arguments for the Layer base class.
-    """
-
-    def __init__(
-        self,
-        num_levels: int = 3,
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if num_levels < 1:
-            raise ValueError(
-                f"num_levels must be >= 1, got {num_levels}"
-            )
-
-        self.num_levels = num_levels
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> List[keras.KerasTensor]:
-        """
-        Apply Haar DWT decomposition.
-
-        :param inputs: Input tensor of shape [batch, seq_len, channels].
-        :type inputs: keras.KerasTensor
-        :param training: Training mode flag (unused).
-        :type training: Optional[bool]
-        :return: List of frequency bands [approx, detail_1, ..., detail_K].
-        :rtype: List[keras.KerasTensor]
-        """
-        details = []
-        approximation = inputs
-
-        for _ in range(self.num_levels):
-            seq_len = ops.shape(approximation)[1]
-            # Ensure even length by truncating if necessary
-            even_len = (seq_len // 2) * 2
-
-            # Slice to even length
-            x = approximation[:, :even_len, :]
-
-            # Reshape for pairwise operations: [batch, seq_len//2, 2, channels]
-            x_reshaped = ops.reshape(
-                x,
-                (ops.shape(x)[0], even_len // 2, 2, ops.shape(x)[-1])
-            )
-
-            # Haar wavelet coefficients (normalized)
-            # Low-pass (approximation): (x[2k] + x[2k+1]) / sqrt(2)
-            # High-pass (detail): (x[2k] - x[2k+1]) / sqrt(2)
-            sqrt2 = ops.sqrt(ops.cast(2.0, x.dtype))
-            low_pass = (x_reshaped[:, :, 0, :] + x_reshaped[:, :, 1, :]) / sqrt2
-            high_pass = (x_reshaped[:, :, 0, :] - x_reshaped[:, :, 1, :]) / sqrt2
-
-            details.append(high_pass)
-            approximation = low_pass
-
-        # Return [approximation, detail_L, detail_L-1, ..., detail_1]
-        # Reverse details so coarsest detail is first
-        return [approximation] + details[::-1]
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> List[Tuple[Optional[int], ...]]:
-        """
-        Compute output shapes for all frequency bands.
-
-        :param input_shape: Input shape tuple.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: List of output shapes for each band.
-        :rtype: List[Tuple[Optional[int], ...]]
-        """
-        batch_size = input_shape[0]
-        seq_len = input_shape[1]
-        channels = input_shape[2]
-
-        shapes = []
-        current_len = seq_len
-
-        for _ in range(self.num_levels):
-            if current_len is not None:
-                current_len = (current_len // 2) * 2 // 2
-
-        # Approximation shape
-        shapes.append((batch_size, current_len, channels))
-
-        # Detail shapes (from coarsest to finest)
-        detail_len = current_len
-        for _ in range(self.num_levels):
-            shapes.append((batch_size, detail_len, channels))
-            if detail_len is not None:
-                detail_len = detail_len * 2
-
-        return shapes
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "num_levels": self.num_levels,
-        })
-        return config
+from dl_techniques.layers.haar_wavelet_decomposition import HaarWaveletDecomposition
 
 
 # ---------------------------------------------------------------------
@@ -177,9 +37,9 @@ class FrequencyBandStatistics(keras.layers.Layer):
     **Architecture**::
 
         Input: frequency band [batch, seq_len, channels]
-               |
+               ↓
         Compute: mean, std, min, max, diff_mean, diff_std
-               |
+               ↓
         Output: statistics [batch, channels, num_stats]
 
     :param epsilon: Small constant for numerical stability.
@@ -189,18 +49,18 @@ class FrequencyBandStatistics(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        epsilon: float = 1e-6,
-        **kwargs: Any
+            self,
+            epsilon: float = 1e-6,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.epsilon = epsilon
         self._num_stats = 6  # mean, std, min, max, diff_mean, diff_std
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Compute statistics for the input frequency band.
@@ -231,8 +91,8 @@ class FrequencyBandStatistics(keras.layers.Layer):
         return stats
 
     def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
+            self,
+            input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape.
@@ -271,13 +131,13 @@ class FrequencyBandRouter(keras.layers.Layer):
     **Architecture**::
 
         Input: List of frequency bands [band_1, ..., band_K]
-               |
+               ↓
         For each band: compute statistics
-               |
+               ↓
         For each band: MLP(statistics) -> score
-               |
+               ↓
         Softmax(scores / temperature) -> weights
-               |
+               ↓
         Output: weights [batch, channels, num_bands]
 
     :param hidden_dim: Hidden dimension of the router MLP.
@@ -298,13 +158,13 @@ class FrequencyBandRouter(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        hidden_dim: int = 64,
-        temperature: float = 1.0,
-        dropout_rate: float = 0.1,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        **kwargs: Any
+            self,
+            hidden_dim: int = 64,
+            temperature: float = 1.0,
+            dropout_rate: float = 0.1,
+            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -358,9 +218,9 @@ class FrequencyBandRouter(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-        self,
-        inputs: List[keras.KerasTensor],
-        training: Optional[bool] = None
+            self,
+            inputs: List[keras.KerasTensor],
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Compute importance weights for frequency bands.
@@ -389,8 +249,8 @@ class FrequencyBandRouter(keras.layers.Layer):
         return weights
 
     def compute_output_shape(
-        self,
-        input_shape: List[Tuple[Optional[int], ...]]
+            self,
+            input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape.
@@ -435,13 +295,13 @@ class PRISMNode(keras.layers.Layer):
     **Architecture**::
 
         Input: time segment [batch, seq_len, channels]
-               |
+               ↓
         HaarWaveletDecomposition -> [approx, detail_1, ..., detail_K]
-               |
+               ↓
         FrequencyBandRouter -> weights [batch, channels, K+1]
-               |
+               ↓
         Weighted sum of bands (interpolated to common length)
-               |
+               ↓
         Output: processed segment [batch, seq_len, channels]
 
     :param num_wavelet_levels: Number of Haar DWT decomposition levels.
@@ -465,14 +325,14 @@ class PRISMNode(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        num_wavelet_levels: int = 3,
-        router_hidden_dim: int = 64,
-        router_temperature: float = 1.0,
-        dropout_rate: float = 0.1,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        **kwargs: Any
+            self,
+            num_wavelet_levels: int = 3,
+            router_hidden_dim: int = 64,
+            router_temperature: float = 1.0,
+            dropout_rate: float = 0.1,
+            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -515,9 +375,9 @@ class PRISMNode(keras.layers.Layer):
         super().build(input_shape)
 
     def _interpolate_band(
-        self,
-        band: keras.KerasTensor,
-        target_len: int
+            self,
+            band: keras.KerasTensor,
+            target_len: int
     ) -> keras.KerasTensor:
         """
         Interpolate a frequency band to target length using linear interpolation.
@@ -570,9 +430,9 @@ class PRISMNode(keras.layers.Layer):
         )
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Process input through wavelet decomposition and weighted reconstruction.
@@ -608,8 +468,8 @@ class PRISMNode(keras.layers.Layer):
         return weighted_sum
 
     def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
+            self,
+            input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape.
@@ -651,17 +511,17 @@ class PRISMTimeTree(keras.layers.Layer):
     **Architecture**::
 
         Input: [batch, T, channels]
-               |
+               ↓
         Level 0: Full sequence -> PRISMNode
-               |
+               ↓
         Level 1: Split into 2 overlapping segments -> 2x PRISMNode
-               |
+               ↓
         Level 2: Split into 4 overlapping segments -> 4x PRISMNode
-               |
+               ↓
         ... (up to tree_depth levels)
-               |
+               ↓
         Stitch segments back with cross-fade
-               |
+               ↓
         Output: [batch, T, channels]
 
     :param tree_depth: Depth of the binary time tree. Depth 0 means single
@@ -691,16 +551,16 @@ class PRISMTimeTree(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        tree_depth: int = 2,
-        overlap_ratio: float = 0.25,
-        num_wavelet_levels: int = 3,
-        router_hidden_dim: int = 64,
-        router_temperature: float = 1.0,
-        dropout_rate: float = 0.1,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        **kwargs: Any
+            self,
+            tree_depth: int = 2,
+            overlap_ratio: float = 0.25,
+            num_wavelet_levels: int = 3,
+            router_hidden_dim: int = 64,
+            router_temperature: float = 1.0,
+            dropout_rate: float = 0.1,
+            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -721,11 +581,11 @@ class PRISMTimeTree(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
         # Create PRISM nodes for each level of the tree
-        # Level l has 2^l nodes
-        self.prism_nodes: List[List[PRISMNode]] = []
+        # Use a flat list so Keras tracks all layers properly for serialization
+        self.all_nodes: List[PRISMNode] = []
+
         for level in range(tree_depth + 1):
             num_nodes = 2 ** level
-            level_nodes = []
             for node_idx in range(num_nodes):
                 node = PRISMNode(
                     num_wavelet_levels=num_wavelet_levels,
@@ -736,8 +596,7 @@ class PRISMTimeTree(keras.layers.Layer):
                     kernel_regularizer=kernel_regularizer,
                     name=f"{self.name}_level{level}_node{node_idx}"
                 )
-                level_nodes.append(node)
-            self.prism_nodes.append(level_nodes)
+                self.all_nodes.append(node)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -750,26 +609,35 @@ class PRISMTimeTree(keras.layers.Layer):
         batch_size = input_shape[0]
         channels = input_shape[2]
 
-        # Build nodes for each level
-        for level, level_nodes in enumerate(self.prism_nodes):
-            num_segments = 2 ** level
+        node_idx_counter = 0
+
+        # Build nodes level by level
+        for level in range(self.tree_depth + 1):
+            num_nodes = 2 ** level
+
+            # Determine segment shape for this level
             if seq_len is not None:
-                # Compute segment length with overlap
-                overlap_size = int(seq_len * self.overlap_ratio / num_segments)
-                segment_len = (seq_len + overlap_size * (num_segments - 1)) // num_segments
-                segment_shape = (batch_size, segment_len, channels)
+                if num_nodes > 1:
+                    # Compute segment length with overlap
+                    overlap_size = int(seq_len * self.overlap_ratio / num_nodes)
+                    segment_len = (seq_len + overlap_size * (num_nodes - 1)) // num_nodes
+                    segment_shape = (batch_size, segment_len, channels)
+                else:
+                    segment_shape = (batch_size, seq_len, channels)
             else:
                 segment_shape = (batch_size, None, channels)
 
-            for node in level_nodes:
-                node.build(segment_shape)
+            # Build all nodes in this level
+            for _ in range(num_nodes):
+                self.all_nodes[node_idx_counter].build(segment_shape)
+                node_idx_counter += 1
 
         super().build(input_shape)
 
     def _split_with_overlap(
-        self,
-        x: keras.KerasTensor,
-        num_segments: int
+            self,
+            x: keras.KerasTensor,
+            num_segments: int
     ) -> List[keras.KerasTensor]:
         """
         Split input into overlapping segments.
@@ -807,9 +675,9 @@ class PRISMTimeTree(keras.layers.Layer):
         return segments
 
     def _stitch_with_crossfade(
-        self,
-        segments: List[keras.KerasTensor],
-        target_len: int
+            self,
+            segments: List[keras.KerasTensor],
+            target_len: int
     ) -> keras.KerasTensor:
         """
         Stitch segments back together using linear cross-fade.
@@ -828,6 +696,7 @@ class PRISMTimeTree(keras.layers.Layer):
         seq_len_float = ops.cast(target_len, segments[0].dtype)
 
         # Calculate overlap parameters
+        # Use cast to ensure we have integer overlap_size for shape logic
         overlap_size = ops.cast(
             seq_len_float * self.overlap_ratio / ops.cast(num_segments, segments[0].dtype),
             "int32"
@@ -848,41 +717,81 @@ class PRISMTimeTree(keras.layers.Layer):
 
             # Fade in at start (except first segment)
             if i > 0:
-                fade_in = ops.linspace(0.0, 1.0, overlap_size)
+                # Use arange instead of linspace to avoid symbolic tensor issues with 'num'
+                indices = ops.cast(ops.arange(overlap_size), segment.dtype)
+                steps = ops.cast(overlap_size - 1, segment.dtype)
+                # Avoid division by zero if overlap_size is 1
+                steps = ops.maximum(steps, 1.0)
+                fade_in = indices / steps
+
                 fade_in = ops.reshape(fade_in, (1, overlap_size, 1))
+
                 # Apply fade in to first overlap_size positions
-                mask_before = ops.zeros((1, overlap_size, 1), dtype=segment.dtype)
                 mask_after = ops.ones((1, seg_len - overlap_size, 1), dtype=segment.dtype)
                 fade_mask = ops.concatenate([fade_in, mask_after], axis=1)
                 weights = weights * fade_mask
 
             # Fade out at end (except last segment)
             if i < num_segments - 1:
-                fade_out = ops.linspace(1.0, 0.0, overlap_size)
+                # Use arange manually
+                indices = ops.cast(ops.arange(overlap_size), segment.dtype)
+                steps = ops.cast(overlap_size - 1, segment.dtype)
+                steps = ops.maximum(steps, 1.0)
+                # fade out is 1.0 -> 0.0
+                fade_out = 1.0 - (indices / steps)
+
                 fade_out = ops.reshape(fade_out, (1, overlap_size, 1))
+
                 mask_before = ops.ones((1, seg_len - overlap_size, 1), dtype=segment.dtype)
                 fade_mask = ops.concatenate([mask_before, fade_out], axis=1)
                 weights = weights * fade_mask
 
             # Add weighted segment to output
             weighted_segment = segment * weights
-            indices = ops.arange(start_idx, start_idx + seg_len)
-            indices = ops.expand_dims(indices, 0)
-            indices = ops.broadcast_to(indices, (batch_size, seg_len))
 
-            # Use scatter_update pattern
-            output = ops.slice_update(
-                output,
-                [0, start_idx, 0],
-                output[:, start_idx:start_idx + seg_len, :] + weighted_segment
+            # Slice update with symbolic indices requires explicit tensor construction
+            start_indices = ops.stack([0, start_idx, 0])
+
+            # Note: slice_update requires the update to have same rank
+            # We add input segment to existing output at specific location
+            # To simulate x[start:end] += val, we slice, add, and update
+
+            # Extract current values at destination
+            # This is complex in graph mode if we want in-place addition behavior via scatter
+            # Instead, we construct the update tensor and insert it
+
+            # Since we initialized output with zeros, and segments overlap, 
+            # we can't just use simple slice_update because it overwrites.
+            # However, for non-overlapping parts it's overwrite.
+            # For overlapping parts, we need to accumulate.
+            # ops.scatter_update does overwrite. ops.scatter_add might be needed but isn't standard in keras.ops
+
+            # Alternative: Construct a full-size tensor for this segment padded with zeros and add
+
+            # Construct padding
+            pad_left = start_idx
+            pad_right = target_len - (start_idx + seg_len)
+
+            # Pad segment to full length
+            # padding argument for pad is [[top, bottom], [left, right], ...]
+            # batch dim: [0, 0], time dim: [pad_left, pad_right], channel dim: [0, 0]
+
+            # We need pad_left/pad_right to be integers or tensors
+            # ops.pad expects standard list of lists. If tensors, TF handles it.
+
+            padded_segment = ops.pad(
+                weighted_segment,
+                [[0, 0], [pad_left, pad_right], [0, 0]]
             )
+
+            output = output + padded_segment
 
         return output
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Process input through the hierarchical time tree.
@@ -897,16 +806,22 @@ class PRISMTimeTree(keras.layers.Layer):
         target_len = ops.shape(inputs)[1]
         current = inputs
 
+        node_idx_counter = 0
+
         # Process through each level of the tree
-        for level, level_nodes in enumerate(self.prism_nodes):
+        for level in range(self.tree_depth + 1):
             num_segments = 2 ** level
+
+            # Get nodes for this level
+            level_nodes = self.all_nodes[node_idx_counter: node_idx_counter + num_segments]
+            node_idx_counter += num_segments
 
             # Split into segments
             segments = self._split_with_overlap(current, num_segments)
 
             # Process each segment with its corresponding node
             processed_segments = []
-            for seg_idx, (segment, node) in enumerate(zip(segments, level_nodes)):
+            for segment, node in zip(segments, level_nodes):
                 processed = node(segment, training=training)
                 processed_segments.append(processed)
 
@@ -916,8 +831,8 @@ class PRISMTimeTree(keras.layers.Layer):
         return current
 
     def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
+            self,
+            input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape.
@@ -960,15 +875,15 @@ class PRISMLayer(keras.layers.Layer):
     **Architecture**::
 
         Input: [batch, context_len, channels]
-               |
+               ↓
         (optional) Input projection: Linear -> channels
-               |
+               ↓
         PRISMTimeTree: hierarchical wavelet processing
-               |
+               ↓
         (optional) Residual connection: output + input
-               |
+               ↓
         (optional) Output normalization
-               |
+               ↓
         Output: [batch, context_len, channels]
 
     :param tree_depth: Depth of the binary time tree.
@@ -1004,18 +919,18 @@ class PRISMLayer(keras.layers.Layer):
     """
 
     def __init__(
-        self,
-        tree_depth: int = 2,
-        overlap_ratio: float = 0.25,
-        num_wavelet_levels: int = 3,
-        router_hidden_dim: int = 64,
-        router_temperature: float = 1.0,
-        dropout_rate: float = 0.1,
-        use_residual: bool = True,
-        use_output_norm: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        **kwargs: Any
+            self,
+            tree_depth: int = 2,
+            overlap_ratio: float = 0.25,
+            num_wavelet_levels: int = 3,
+            router_hidden_dim: int = 64,
+            router_temperature: float = 1.0,
+            dropout_rate: float = 0.1,
+            use_residual: bool = True,
+            use_output_norm: bool = True,
+            kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
@@ -1067,9 +982,9 @@ class PRISMLayer(keras.layers.Layer):
         super().build(input_shape)
 
     def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
         Apply PRISM processing.
@@ -1098,8 +1013,8 @@ class PRISMLayer(keras.layers.Layer):
         return x
 
     def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
+            self,
+            input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
         Compute output shape.
@@ -1127,354 +1042,3 @@ class PRISMLayer(keras.layers.Layer):
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-
-# ---------------------------------------------------------------------
-# PRISM Forecasting Model
-# ---------------------------------------------------------------------
-
-@keras.saving.register_keras_serializable()
-class PRISMModel(keras.Model):
-    """
-    Complete PRISM model for time series forecasting.
-
-    Combines hierarchical time-frequency decomposition with a forecasting
-    head to predict future values of a time series.
-
-    **Architecture**::
-
-        Input: context window [batch, context_len, num_features]
-               |
-        (optional) Input embedding: Linear -> hidden_dim
-               |
-        num_layers × PRISMLayer (stacked)
-               |
-        Flatten: [batch, context_len * hidden_dim]
-               |
-        Forecasting MLP: hidden -> output
-               |
-        Reshape: [batch, forecast_len, num_features]
-               |
-        Output: forecast [batch, forecast_len, num_features]
-
-    :param context_len: Length of input context window.
-    :type context_len: int
-    :param forecast_len: Length of forecast horizon.
-    :type forecast_len: int
-    :param num_features: Number of input/output features (channels).
-    :type num_features: int
-    :param hidden_dim: Hidden dimension for processing. If None, uses
-        num_features. Defaults to None.
-    :type hidden_dim: Optional[int]
-    :param num_layers: Number of stacked PRISM layers.
-        Defaults to 2.
-    :type num_layers: int
-    :param tree_depth: Depth of time tree in each PRISM layer.
-        Defaults to 2.
-    :type tree_depth: int
-    :param overlap_ratio: Overlap ratio for segment splitting.
-        Defaults to 0.25.
-    :type overlap_ratio: float
-    :param num_wavelet_levels: Number of Haar DWT levels.
-        Defaults to 3.
-    :type num_wavelet_levels: int
-    :param router_hidden_dim: Hidden dimension for routers.
-        Defaults to 64.
-    :type router_hidden_dim: int
-    :param router_temperature: Temperature for router softmax.
-        Defaults to 1.0.
-    :type router_temperature: float
-    :param dropout_rate: Dropout rate.
-        Defaults to 0.1.
-    :type dropout_rate: float
-    :param ffn_expansion: Expansion factor for forecasting head FFN.
-        Defaults to 4.
-    :type ffn_expansion: int
-    :param kernel_initializer: Initializer for kernel weights.
-        Defaults to "glorot_uniform".
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for kernel weights.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional arguments for the Model base class.
-    """
-
-    # Presets for common configurations
-    PRESETS: Dict[str, Dict[str, Any]] = {
-        "tiny": {
-            "hidden_dim": 32,
-            "num_layers": 1,
-            "tree_depth": 1,
-            "num_wavelet_levels": 2,
-            "router_hidden_dim": 32,
-            "ffn_expansion": 2,
-        },
-        "small": {
-            "hidden_dim": 64,
-            "num_layers": 2,
-            "tree_depth": 2,
-            "num_wavelet_levels": 3,
-            "router_hidden_dim": 64,
-            "ffn_expansion": 4,
-        },
-        "base": {
-            "hidden_dim": 128,
-            "num_layers": 3,
-            "tree_depth": 2,
-            "num_wavelet_levels": 3,
-            "router_hidden_dim": 128,
-            "ffn_expansion": 4,
-        },
-        "large": {
-            "hidden_dim": 256,
-            "num_layers": 4,
-            "tree_depth": 2,
-            "num_wavelet_levels": 4,
-            "router_hidden_dim": 256,
-            "ffn_expansion": 4,
-        },
-    }
-
-    def __init__(
-        self,
-        context_len: int,
-        forecast_len: int,
-        num_features: int,
-        hidden_dim: Optional[int] = None,
-        num_layers: int = 2,
-        tree_depth: int = 2,
-        overlap_ratio: float = 0.25,
-        num_wavelet_levels: int = 3,
-        router_hidden_dim: int = 64,
-        router_temperature: float = 1.0,
-        dropout_rate: float = 0.1,
-        ffn_expansion: int = 4,
-        kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if context_len <= 0:
-            raise ValueError(f"context_len must be > 0, got {context_len}")
-        if forecast_len <= 0:
-            raise ValueError(f"forecast_len must be > 0, got {forecast_len}")
-        if num_features <= 0:
-            raise ValueError(f"num_features must be > 0, got {num_features}")
-
-        self.context_len = context_len
-        self.forecast_len = forecast_len
-        self.num_features = num_features
-        self.hidden_dim = hidden_dim if hidden_dim is not None else num_features
-        self.num_layers = num_layers
-        self.tree_depth = tree_depth
-        self.overlap_ratio = overlap_ratio
-        self.num_wavelet_levels = num_wavelet_levels
-        self.router_hidden_dim = router_hidden_dim
-        self.router_temperature = router_temperature
-        self.dropout_rate = dropout_rate
-        self.ffn_expansion = ffn_expansion
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-
-        # Input projection (if hidden_dim != num_features)
-        self.input_projection = layers.Dense(
-            self.hidden_dim,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name="input_projection"
-        )
-
-        # Stacked PRISM layers
-        self.prism_layers: List[PRISMLayer] = []
-        for i in range(num_layers):
-            layer = PRISMLayer(
-                tree_depth=tree_depth,
-                overlap_ratio=overlap_ratio,
-                num_wavelet_levels=num_wavelet_levels,
-                router_hidden_dim=router_hidden_dim,
-                router_temperature=router_temperature,
-                dropout_rate=dropout_rate,
-                use_residual=True,
-                use_output_norm=True,
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                name=f"prism_layer_{i}"
-            )
-            self.prism_layers.append(layer)
-
-        # Flatten layer
-        self.flatten = layers.Flatten(name="flatten")
-
-        # Forecasting head
-        head_hidden_dim = self.hidden_dim * ffn_expansion
-        self.forecast_head = create_ffn_layer(
-            "mlp",
-            hidden_dim=head_hidden_dim,
-            output_dim=forecast_len * num_features,
-            activation="gelu",
-            dropout_rate=dropout_rate,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name="forecast_head"
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build all model components.
-
-        :param input_shape: Input shape tuple.
-        :type input_shape: Tuple[Optional[int], ...]
-        """
-        batch_size = input_shape[0]
-
-        # Build input projection
-        self.input_projection.build(input_shape)
-
-        # Projected shape
-        projected_shape = (batch_size, self.context_len, self.hidden_dim)
-
-        # Build PRISM layers
-        current_shape = projected_shape
-        for layer in self.prism_layers:
-            layer.build(current_shape)
-
-        # Build flatten
-        self.flatten.build(current_shape)
-
-        # Build forecast head
-        flat_dim = self.context_len * self.hidden_dim
-        self.forecast_head.build((batch_size, flat_dim))
-
-        super().build(input_shape)
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Generate forecasts from context window.
-
-        :param inputs: Input tensor of shape [batch, context_len, num_features].
-        :type inputs: keras.KerasTensor
-        :param training: Training mode flag.
-        :type training: Optional[bool]
-        :return: Forecast tensor of shape [batch, forecast_len, num_features].
-        :rtype: keras.KerasTensor
-        """
-        # Project input to hidden dimension
-        x = self.input_projection(inputs)
-
-        # Process through PRISM layers
-        for layer in self.prism_layers:
-            x = layer(x, training=training)
-
-        # Flatten
-        x = self.flatten(x)
-
-        # Generate forecast
-        x = self.forecast_head(x, training=training)
-
-        # Reshape to [batch, forecast_len, num_features]
-        x = ops.reshape(x, (-1, self.forecast_len, self.num_features))
-
-        return x
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
-
-        :param input_shape: Input shape tuple.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple.
-        :rtype: Tuple[Optional[int], ...]
-        """
-        batch_size = input_shape[0]
-        return (batch_size, self.forecast_len, self.num_features)
-
-    @classmethod
-    def from_preset(
-        cls,
-        preset: str,
-        context_len: int,
-        forecast_len: int,
-        num_features: int,
-        **kwargs: Any
-    ) -> "PRISMModel":
-        """
-        Create model from a predefined preset.
-
-        :param preset: Preset name ("tiny", "small", "base", "large").
-        :type preset: str
-        :param context_len: Length of input context window.
-        :type context_len: int
-        :param forecast_len: Length of forecast horizon.
-        :type forecast_len: int
-        :param num_features: Number of input/output features.
-        :type num_features: int
-        :param kwargs: Override parameters from preset.
-        :type kwargs: Any
-        :return: Configured model instance.
-        :rtype: PRISMModel
-        """
-        if preset not in cls.PRESETS:
-            raise ValueError(
-                f"Unknown preset '{preset}'. "
-                f"Available: {list(cls.PRESETS.keys())}"
-            )
-
-        config = cls.PRESETS[preset].copy()
-        config.update(kwargs)
-
-        return cls(
-            context_len=context_len,
-            forecast_len=forecast_len,
-            num_features=num_features,
-            **config
-        )
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            "context_len": self.context_len,
-            "forecast_len": self.forecast_len,
-            "num_features": self.num_features,
-            "hidden_dim": self.hidden_dim,
-            "num_layers": self.num_layers,
-            "tree_depth": self.tree_depth,
-            "overlap_ratio": self.overlap_ratio,
-            "num_wavelet_levels": self.num_wavelet_levels,
-            "router_hidden_dim": self.router_hidden_dim,
-            "router_temperature": self.router_temperature,
-            "dropout_rate": self.dropout_rate,
-            "ffn_expansion": self.ffn_expansion,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "PRISMModel":
-        """
-        Create model from configuration dictionary.
-
-        :param config: Configuration dictionary.
-        :type config: Dict[str, Any]
-        :return: Model instance.
-        :rtype: PRISMModel
-        """
-        # Deserialize initializers and regularizers
-        config = config.copy()
-        if "kernel_initializer" in config:
-            config["kernel_initializer"] = initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        if "kernel_regularizer" in config:
-            config["kernel_regularizer"] = regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        return cls(**config)

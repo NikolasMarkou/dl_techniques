@@ -1,8 +1,15 @@
 import keras
 from keras import initializers, regularizers, layers, ops
 from typing import Dict, Any, Optional, Union, List, Tuple
-from dl_techniques.layers.time_series.prism_blocks import PRISMLayer
+
+# ---------------------------------------------------------------------
+# Local Imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.time_series.prism_blocks import PRISMLayer
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PRISMModel(keras.Model):
@@ -15,17 +22,17 @@ class PRISMModel(keras.Model):
     **Architecture**::
 
         Input: context window [batch, context_len, num_features]
-               |
+               ↓
         (optional) Input embedding: Linear -> hidden_dim
-               |
+               ↓
         num_layers × PRISMLayer (stacked)
-               |
+               ↓
         Flatten: [batch, context_len * hidden_dim]
-               |
+               ↓
         Forecasting MLP: hidden -> output
-               |
+               ↓
         Reshape: [batch, forecast_len, num_features]
-               |
+               ↓
         Output: forecast [batch, forecast_len, num_features]
 
     :param context_len: Length of input context window.
