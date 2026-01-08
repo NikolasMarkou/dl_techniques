@@ -16,12 +16,16 @@ from keras import initializers
 from keras import regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.ffn import create_ffn_layer
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Haar Wavelet Decomposition Layer
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class HaarWaveletDecomposition(keras.layers.Layer):
@@ -35,16 +39,16 @@ class HaarWaveletDecomposition(keras.layers.Layer):
     **Architecture**::
 
         Input(shape=[batch, seq_len, channels])
-               |
+               ↓
         For each decomposition level:
-               |
+               ↓
           +----+----+
-          |         |
+          ↓         ↓
         Low-pass  High-pass
         (approx)  (detail)
-          |         |
+          ↓         ↓
           +----+----+
-               |
+               ↓
         Output: List of [approx, detail_1, ..., detail_K]
 
     :param num_levels: Number of decomposition levels. Each level halves
@@ -157,9 +161,9 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Frequency Band Statistics Layer
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FrequencyBandStatistics(keras.layers.Layer):
@@ -251,9 +255,9 @@ class FrequencyBandStatistics(keras.layers.Layer):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # Frequency Band Router Layer
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class FrequencyBandRouter(keras.layers.Layer):
@@ -414,9 +418,9 @@ class FrequencyBandRouter(keras.layers.Layer):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # PRISM Node Layer
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PRISMNode(keras.layers.Layer):
@@ -631,9 +635,9 @@ class PRISMNode(keras.layers.Layer):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # PRISM Time Tree Layer
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PRISMTimeTree(keras.layers.Layer):
@@ -941,9 +945,9 @@ class PRISMTimeTree(keras.layers.Layer):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # PRISM Layer (Main Interface)
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PRISMLayer(keras.layers.Layer):
@@ -1125,9 +1129,9 @@ class PRISMLayer(keras.layers.Layer):
         return config
 
 
-# =============================================================================
+# ---------------------------------------------------------------------
 # PRISM Forecasting Model
-# =============================================================================
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PRISMModel(keras.Model):
