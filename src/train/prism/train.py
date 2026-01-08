@@ -11,6 +11,9 @@ This script implements a robust training pipeline supporting both:
 1. Point Forecasting (MSE Loss)
 2. Probabilistic Forecasting (Quantile Loss)
 
+It uses pre-computed in-memory validation datasets to prevent CPU-bound generation
+lags at the end of epochs.
+
 References
 ----------
 1.  Time Series Decomposition Methods in Deep Learning: A Review
@@ -25,7 +28,7 @@ import random
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import keras
 import matplotlib
@@ -40,13 +43,12 @@ import tensorflow as tf
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
-from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesGeneratorConfig
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.prism.model import PRISMModel
 from dl_techniques.losses.quantile_loss import QuantileLoss
-
-from dl_techniques.analyzer import AnalysisConfig
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
+from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 
 # ---------------------------------------------------------------------
 
@@ -153,7 +155,7 @@ class PRISMTrainingConfig:
 
         if self.context_len <= 0 or self.forecast_len <= 0:
             raise ValueError("context_len and forecast_len must be positive")
-        
+
         if self.use_quantile_head and 0.5 not in self.quantile_levels:
             logger.warning("Recommended to include 0.5 (median) in quantile_levels for evaluation.")
 
@@ -161,7 +163,11 @@ class PRISMTrainingConfig:
 class PRISMDataProcessor:
     """
     Robust data processor for PRISM.
-    Implements buffer-based generation and strict normalization to prevent NaNs.
+
+    Features:
+    - Infinite streaming generator for Training (maximum diversity).
+    - Pre-computed in-memory arrays for Validation/Test (eliminates end-of-epoch lag).
+    - Strict normalization and NaN handling.
     """
 
     def __init__(
@@ -207,13 +213,11 @@ class PRISMDataProcessor:
 
             # Avoid division by near-zero std for constant sequences
             if std < 1e-5:
-                # If std is 0, the series is constant. Centering it makes it all 0s.
                 series = series - mean
             else:
                 series = (series - mean) / std
 
         # Clip extreme outliers that destabilize MSE/Quantile loss
-        # Using [-10, 10] which is sufficient for z-scores (approx 10 sigma)
         series = np.clip(series, -10.0, 10.0)
         return series.astype(np.float32)
 
@@ -239,7 +243,7 @@ class PRISMDataProcessor:
                     # 2. Generate full series
                     data = self.ts_generator.generate_task_data(pattern_name)
 
-                    # Safety Check for Generator output: must be valid floats and long enough
+                    # Safety Check
                     if len(data) < total_window_len or not np.isfinite(data).all():
                         continue
 
@@ -269,74 +273,104 @@ class PRISMDataProcessor:
             if buffer:
                 yield buffer.pop()
 
-    def _validation_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Deterministic validation generator."""
+    def _generate_fixed_dataset(self, split: str, num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Pre-generate a fixed dataset in memory to prevent generator lag during validation/test.
+
+        Args:
+            split: 'val' or 'test'
+            num_samples: Total number of samples to generate
+
+        Returns:
+            Tuple of (Contexts, Targets) as numpy arrays
+        """
+        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)...")
+
+        contexts = []
+        targets = []
         total_window_len = self.config.context_len + self.config.forecast_len
 
-        # Cycle through patterns
+        samples_collected = 0
         pattern_cycle = 0
-        while True:
+
+        while samples_collected < num_samples:
+            # Deterministic cycling through patterns for fair representation
             pattern_idx = pattern_cycle % len(self.selected_patterns)
             pattern_name = self.selected_patterns[pattern_idx]
             pattern_cycle += 1
 
+            # Generate full series
             data = self.ts_generator.generate_task_data(pattern_name)
 
             if len(data) < total_window_len or not np.isfinite(data).all():
                 continue
 
-            train_size = int(self.config.train_ratio * len(data))
-            val_size = int(self.config.val_ratio * len(data))
-            val_data = data[train_size : train_size + val_size]
+            # Slice based on split
+            train_end = int(self.config.train_ratio * len(data))
+            val_end = train_end + int(self.config.val_ratio * len(data))
 
-            max_start_idx = len(val_data) - total_window_len
+            if split == 'val':
+                split_data = data[train_end:val_end]
+            else: # test
+                split_data = data[val_end:]
+
+            max_start_idx = len(split_data) - total_window_len
             if max_start_idx <= 0:
                 continue
 
+            # Grab one random window from this pattern's split
             start_idx = random.randint(0, max_start_idx)
-            window = val_data[start_idx : start_idx + total_window_len]
-
+            window = split_data[start_idx : start_idx + total_window_len]
             window = self._safe_normalize(window)
 
-            context = window[:self.config.context_len].reshape(-1, self.num_features)
-            target = window[self.config.context_len:].reshape(-1, self.num_features)
+            ctx = window[:self.config.context_len].reshape(-1, self.num_features)
+            tgt = window[self.config.context_len:].reshape(-1, self.num_features)
 
-            yield context, target
+            contexts.append(ctx)
+            targets.append(tgt)
+            samples_collected += 1
 
-    def _test_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Test set generator."""
+        return np.array(contexts, dtype=np.float32), np.array(targets, dtype=np.float32)
+
+    def _test_generator_raw(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """
+        Helper specifically for the visualization callback to pull fresh test samples
+        on demand without affecting the main pipeline.
+        """
         total_window_len = self.config.context_len + self.config.forecast_len
 
-        for pattern_name in self.selected_patterns:
+        # Shuffle patterns for viz variety
+        viz_patterns = self.selected_patterns.copy()
+        random.shuffle(viz_patterns)
+
+        for pattern_name in viz_patterns:
             data = self.ts_generator.generate_task_data(pattern_name)
 
             if len(data) < total_window_len or not np.isfinite(data).all():
                 continue
 
-            train_size = int(self.config.train_ratio * len(data))
-            val_size = int(self.config.val_ratio * len(data))
-            test_data = data[train_size + val_size:]
+            # Use test split
+            start_test = int((self.config.train_ratio + self.config.val_ratio) * len(data))
+            test_data = data[start_test:]
 
-            max_start_idx = len(test_data) - total_window_len
-            if max_start_idx <= 0:
+            if len(test_data) < total_window_len:
                 continue
 
-            # Take a few samples per pattern for test
-            num_samples = min(5, max_start_idx + 1)
-            for _ in range(num_samples):
-                start_idx = random.randint(0, max_start_idx)
-                window = test_data[start_idx : start_idx + total_window_len]
+            max_start_idx = len(test_data) - total_window_len
+            start_idx = random.randint(0, max_start_idx)
 
-                window = self._safe_normalize(window)
+            window = test_data[start_idx : start_idx + total_window_len]
+            window = self._safe_normalize(window)
 
-                context = window[:self.config.context_len].reshape(-1, self.num_features)
-                target = window[self.config.context_len:].reshape(-1, self.num_features)
-
-                yield context, target
+            yield (
+                window[:self.config.context_len].reshape(-1, self.num_features),
+                window[self.config.context_len:].reshape(-1, self.num_features)
+            )
 
     def prepare_datasets(self) -> Dict[str, Any]:
         """Create tf.data.Datasets."""
-        # Define strict output signature
+
+        # 1. Training Dataset (Infinite Stream)
         output_sig = (
             tf.TensorSpec(shape=(self.config.context_len, self.num_features), dtype=tf.float32),
             tf.TensorSpec(shape=(self.config.forecast_len, self.num_features), dtype=tf.float32)
@@ -346,16 +380,23 @@ class PRISMDataProcessor:
             self._training_generator, output_signature=output_sig
         ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
-        val_ds = tf.data.Dataset.from_generator(
-            self._validation_generator, output_signature=output_sig
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        # 2. Calculate sizes for Val/Test
+        # We ensure enough steps to cover all patterns at least once or twice
+        validation_steps = max(50, len(self.selected_patterns))
+        test_steps = max(20, len(self.selected_patterns))
 
-        test_ds = tf.data.Dataset.from_generator(
-            self._test_generator, output_signature=output_sig
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+        num_val_samples = validation_steps * self.config.batch_size
+        num_test_samples = test_steps * self.config.batch_size
 
-        validation_steps = max(50, len(self.selected_patterns) * 2)
-        test_steps = len(self.selected_patterns) * 5
+        # 3. Validation Dataset (Pre-computed Memory Cache)
+        val_x, val_y = self._generate_fixed_dataset('val', num_val_samples)
+        val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y))
+        val_ds = val_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
+
+        # 4. Test Dataset (Pre-computed Memory Cache)
+        test_x, test_y = self._generate_fixed_dataset('test', num_test_samples)
+        test_ds = tf.data.Dataset.from_tensor_slices((test_x, test_y))
+        test_ds = test_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
 
         return {
             'train_ds': train_ds,
@@ -397,8 +438,8 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
     def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
         """Prepare a fixed batch of test samples for consistent visualization."""
         viz_samples_x, viz_samples_y = [], []
-        # Use the internal python generator to get raw numpy arrays
-        test_gen = self.processor._test_generator()
+        # Use the specialized raw generator for viz samples
+        test_gen = self.processor._test_generator_raw()
 
         for _ in range(self.config.plot_top_k_patterns):
             try:
@@ -407,6 +448,9 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
                 viz_samples_y.append(y)
             except StopIteration:
                 break
+
+        if not viz_samples_x:
+            return np.zeros((0, self.config.context_len, 1)), np.zeros((0, self.config.forecast_len, 1))
 
         return np.array(viz_samples_x), np.array(viz_samples_y)
 
@@ -475,9 +519,12 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
     def _plot_prediction_samples(self, epoch: int) -> None:
         context, target = self.viz_test_data
 
+        if len(context) == 0:
+            return
+
         # Make predictions
         predictions = self.model.predict(context, verbose=0)
-        # predictions shape: 
+        # predictions shape:
         # Point: (batch, forecast_len, num_features)
         # Quantile: (batch, forecast_len, num_features, num_quantiles)
 
@@ -496,20 +543,19 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
             try:
                 median_idx = quantiles.index(0.5)
             except ValueError:
-                # Fallback to middle index if exact 0.5 not found
                 median_idx = len(quantiles) // 2
-            
+
             # Use outer quantiles for confidence interval (e.g., 10th and 90th)
             low_idx = 0
             high_idx = -1
 
         for i in range(num_samples):
             ax = axes[i]
-            
+
             # Flatten to 1D for plotting (assuming 1 feature or taking 0-th feature)
             ctx_data = context[i, :, 0].flatten()
             tgt_data = target[i, :, 0].flatten()
-            
+
             x_ctx = np.arange(len(ctx_data))
             x_tgt = np.arange(len(ctx_data), len(ctx_data) + len(tgt_data))
 
@@ -521,11 +567,11 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
                 pred_median = predictions[i, :, 0, median_idx].flatten()
                 pred_low = predictions[i, :, 0, low_idx].flatten()
                 pred_high = predictions[i, :, 0, high_idx].flatten()
-                
+
                 ax.plot(x_tgt, pred_median, label='Median', color='red', alpha=0.9)
                 ax.fill_between(
-                    x_tgt, pred_low, pred_high, 
-                    color='red', alpha=0.2, 
+                    x_tgt, pred_low, pred_high,
+                    color='red', alpha=0.2,
                     label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q'
                 )
             else:
@@ -654,7 +700,7 @@ class PRISMTrainer:
             "router_temperature": self.config.router_temperature,
             "dropout_rate": self.config.dropout_rate,
             "ffn_expansion": self.config.ffn_expansion,
-            
+
             # Quantile/Probabilistic arguments
             "use_quantile_head": self.config.use_quantile_head,
             "num_quantiles": len(self.config.quantile_levels) if self.config.use_quantile_head else 3,
@@ -699,11 +745,11 @@ class PRISMTrainer:
         if self.config.use_quantile_head:
             logger.info("Compiling with QuantileLoss")
             loss = QuantileLoss(quantiles=self.config.quantile_levels)
-            
+
             # Custom metric to track MAE of the Median (0.5 quantile)
             if 0.5 in self.config.quantile_levels:
                 median_idx = self.config.quantile_levels.index(0.5)
-                
+
                 def mae_of_median(y_true, y_pred):
                     # y_true: (batch, forecast_len, num_features)
                     # y_pred: (batch, forecast_len, num_features, quantiles)
@@ -878,7 +924,7 @@ def main() -> None:
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch,
-        
+
         # Quantile config
         use_quantile_head=args.use_quantile_head,
         enforce_monotonicity=args.enforce_monotonicity
