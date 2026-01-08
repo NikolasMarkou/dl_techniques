@@ -24,7 +24,7 @@ import random
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import keras
 import matplotlib
@@ -354,6 +354,147 @@ class PRISMDataProcessor:
         }
 
 
+class PRISMPerformanceCallback(keras.callbacks.Callback):
+    """Custom callback for tracking and visualizing PRISM performance."""
+
+    def __init__(
+            self,
+            config: PRISMTrainingConfig,
+            processor: PRISMDataProcessor,
+            save_dir: str,
+            model_name: str = "prism"
+    ):
+        super().__init__()
+        self.config = config
+        self.processor = processor
+        self.save_dir = save_dir
+        self.model_name = model_name
+
+        os.makedirs(self.save_dir, exist_ok=True)
+
+        # Prepare fixed test data for visualization
+        self.viz_test_data = self._prepare_viz_data()
+
+        # Track metrics across epochs
+        self.training_history = {
+            'loss': [], 'val_loss': [],
+            'mae': [], 'val_mae': [],
+            'lr': []
+        }
+
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare a fixed batch of test samples for consistent visualization."""
+        viz_samples_x, viz_samples_y = [], []
+        # Use the internal python generator to get raw numpy arrays
+        test_gen = self.processor._test_generator()
+
+        for _ in range(self.config.plot_top_k_patterns):
+            try:
+                x, y = next(test_gen)
+                viz_samples_x.append(x)
+                viz_samples_y.append(y)
+            except StopIteration:
+                break
+
+        return np.array(viz_samples_x), np.array(viz_samples_y)
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
+        """Track metrics and create visualizations at epoch end."""
+        logs = logs or {}
+
+        # Track history
+        self.training_history['loss'].append(logs.get('loss', 0))
+        self.training_history['val_loss'].append(logs.get('val_loss', 0))
+        self.training_history['mae'].append(logs.get('mae', 0))
+        self.training_history['val_mae'].append(logs.get('val_mae', 0))
+
+        # Track learning rate
+        lr = float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
+        if hasattr(self.model.optimizer.learning_rate, '__call__'):
+            lr = float(keras.ops.convert_to_numpy(
+                self.model.optimizer.learning_rate(self.model.optimizer.iterations)
+            ))
+        self.training_history['lr'].append(lr)
+
+        # Visualize every N epochs
+        if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
+            logger.info(f"Creating visualizations for epoch {epoch + 1}...")
+            if self.config.create_learning_curves:
+                self._plot_learning_curves(epoch)
+            if self.config.create_prediction_plots:
+                self._plot_prediction_samples(epoch)
+
+    def _plot_learning_curves(self, epoch: int) -> None:
+        """Plot training and validation metrics."""
+        fig, axes = plt.subplots(1, 3, figsize=(18, 4))
+        epochs_range = range(1, len(self.training_history['loss']) + 1)
+
+        # MSE Loss
+        axes[0].plot(epochs_range, self.training_history['loss'], label='Train')
+        axes[0].plot(epochs_range, self.training_history['val_loss'], label='Val')
+        axes[0].set_title('MSE Loss')
+        axes[0].set_ylabel('Loss')
+        axes[0].legend()
+
+        # MAE
+        axes[1].plot(epochs_range, self.training_history['mae'], label='Train')
+        axes[1].plot(epochs_range, self.training_history['val_mae'], label='Val')
+        axes[1].set_title('MAE')
+        axes[1].set_ylabel('MAE')
+        axes[1].legend()
+
+        # Learning Rate
+        axes[2].plot(epochs_range, self.training_history['lr'])
+        axes[2].set_title('Learning Rate')
+        axes[2].set_yscale('log')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'))
+        plt.close()
+
+    def _plot_prediction_samples(self, epoch: int) -> None:
+        context, target = self.viz_test_data
+
+        # Make predictions
+        predictions = self.model.predict(context, verbose=0)
+
+        num_samples = min(self.config.plot_top_k_patterns, len(context))
+        n_cols = 3
+        n_rows = math.ceil(num_samples / n_cols)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+        # Ensure axes is always iterable even if n_rows=1
+        if n_rows == 1 and n_cols == 1:
+            axes = [axes]
+        axes = np.array(axes).flatten()
+
+        for i in range(num_samples):
+            ax = axes[i]
+            # Flatten to 1D for plotting (assuming 1 feature or taking 0-th feature)
+            ctx_data = context[i].flatten()
+            tgt_data = target[i].flatten()
+            pred_data = predictions[i].flatten()
+
+            x_ctx = np.arange(len(ctx_data))
+            x_tgt = np.arange(len(ctx_data), len(ctx_data) + len(tgt_data))
+
+            ax.plot(x_ctx, ctx_data, label='Context', color='blue')
+            ax.plot(x_tgt, tgt_data, label='Target', color='green', linestyle='--')
+            ax.plot(x_tgt, pred_data, label='Pred', color='red', alpha=0.7)
+
+            if i == 0:
+                ax.legend()
+            ax.set_title(f'Sample {i}')
+
+        for j in range(num_samples, len(axes)):
+            axes[j].axis('off')
+
+        plt.suptitle(f'PRISM Forecasts (Epoch {epoch + 1})', fontsize=16)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
+        plt.close()
+
+
 class PRISMTrainer:
     """Trainer for PRISM using robust data handling."""
 
@@ -427,12 +568,6 @@ class PRISMTrainer:
 
         # Train
         training_results = self._train_model(data_pipeline, self.exp_dir)
-
-        # Viz
-        if self.config.create_learning_curves:
-            self._plot_learning_curves(training_results['history'], self.exp_dir)
-        if self.config.create_prediction_plots:
-            self._plot_predictions(data_pipeline, self.exp_dir)
 
         if self.config.save_results:
             self._save_results(training_results, self.exp_dir)
@@ -513,7 +648,9 @@ class PRISMTrainer:
     def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
         logger.info("Starting model training...")
 
+        viz_dir = os.path.join(exp_dir, 'visualizations')
         callbacks = [
+            PRISMPerformanceCallback(self.config, self.processor, viz_dir, "prism"),
             keras.callbacks.EarlyStopping(
                 monitor='val_loss', patience=30, restore_best_weights=True, verbose=1
             ),
@@ -568,60 +705,6 @@ class PRISMTrainer:
             'test_metrics': test_metrics,
             'final_epoch': len(history.history['loss'])
         }
-
-    def _plot_learning_curves(self, history: Dict, exp_dir: str) -> None:
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-
-        for i, metric in enumerate(['loss', 'mae']):
-            axes[i].plot(history[metric], label=f'Train {metric.upper()}')
-            val_key = f'val_{metric}'
-            if val_key in history:
-                axes[i].plot(history[val_key], label=f'Val {metric.upper()}')
-            axes[i].set_title(f'{metric.upper()} over Epochs')
-            axes[i].legend()
-            axes[i].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(exp_dir, 'learning_curves.png'))
-        plt.close()
-
-    def _plot_predictions(self, data_pipeline: Dict, exp_dir: str) -> None:
-        logger.info("Generating prediction plots...")
-
-        # Take a batch
-        test_iter = iter(data_pipeline['test_ds'])
-        context, target = next(test_iter)
-
-        predictions = self.model.predict(context, verbose=0)
-
-        num_samples = min(self.config.plot_top_k_patterns, len(context))
-        n_cols = 3
-        n_rows = math.ceil(num_samples / n_cols)
-
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
-        axes = axes.flatten() if n_rows > 1 else [axes] if n_rows == 0 else axes.reshape(-1)
-
-        for i in range(num_samples):
-            ax = axes[i]
-            ctx_data = context[i].numpy().flatten()
-            tgt_data = target[i].numpy().flatten()
-            pred_data = predictions[i].flatten()
-
-            x_ctx = np.arange(len(ctx_data))
-            x_tgt = np.arange(len(ctx_data), len(ctx_data) + len(tgt_data))
-
-            ax.plot(x_ctx, ctx_data, label='Context', color='blue')
-            ax.plot(x_tgt, tgt_data, label='Target', color='green', linestyle='--')
-            ax.plot(x_tgt, pred_data, label='Pred', color='red', alpha=0.7)
-            ax.legend()
-            ax.set_title(f'Sample {i}')
-
-        for j in range(num_samples, len(axes)):
-            axes[j].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(exp_dir, 'predictions.png'))
-        plt.close()
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
         def json_convert(o):
