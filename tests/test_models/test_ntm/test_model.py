@@ -9,6 +9,7 @@ Tests cover:
     - Serialization and model saving
 """
 
+import pytest
 import numpy as np
 import keras
 from keras import ops
@@ -921,6 +922,4 @@ class TestNTMModelEdgeCases:
 
 
 if __name__ == "__main__":
-    import pytest
-
     pytest.main([__file__, "-v"])

@@ -7,7 +7,7 @@ from typing import Dict, Any
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.trm import TRM, TRMInner, TRMReasoningModule
+from dl_techniques.models.tiny_recursive_model import TRM, TRMInner, TRMReasoningModule
 
 
 class TestTRMModelBasic:

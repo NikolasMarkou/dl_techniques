@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.trm.components import TRMReasoningModule, TRMInner
+from dl_techniques.models.tiny_recursive_model.components import TRMReasoningModule, TRMInner
 
 
 @pytest.fixture(scope="module")

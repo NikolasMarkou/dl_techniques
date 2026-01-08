@@ -254,7 +254,7 @@ import tensorflow as tf
 import numpy as np
 
 # Local imports from your project structure
-from dl_techniques.models.trm.model import TRM
+from dl_techniques.models.tiny_recursive_model.model import TRM
 
 # 1. Create a TRM model
 model = TRM(
@@ -322,25 +322,25 @@ TRM does not have named variants like "base" or "large." Instead, its architectu
 ### Example: LLaMA-Style Variant (Pre-Norm, RMSNorm, SwiGLU)
 
 ```python
-from dl_techniques.models.trm.model import TRM
+from dl_techniques.models.tiny_recursive_model.model import TRM
 
 # This configuration mimics modern LLM architectures
 llama_style_trm = TRM(
     vocab_size=32000,
     hidden_size=512,
     num_heads=8,
-    expansion=2.66, # Common in LLaMA-style models
+    expansion=2.66,  # Common in LLaMA-style models
     seq_len=1024,
     normalization_position='pre',  # Pre-normalization
-    normalization_type='rms_norm', # RMS Normalization
-    ffn_type='swiglu',             # SwiGLU FFN
+    normalization_type='rms_norm',  # RMS Normalization
+    ffn_type='swiglu',  # SwiGLU FFN
 )
 ```
 
 ### Example: Classic Transformer Variant (Post-Norm, LayerNorm, ReLU/GELU)
 
 ```python
-from dl_techniques.models.trm.model import TRM
+from dl_techniques.models.tiny_recursive_model.model import TRM
 
 # This configuration is closer to the original "Attention Is All You Need" paper
 classic_trm = TRM(
@@ -349,9 +349,9 @@ classic_trm = TRM(
     num_heads=8,
     expansion=4.0,
     seq_len=1024,
-    normalization_position='post', # Post-normalization
-    normalization_type='layer_norm',# Standard LayerNorm
-    ffn_type='mlp',                # Standard MLP FFN
+    normalization_position='post',  # Post-normalization
+    normalization_type='layer_norm',  # Standard LayerNorm
+    ffn_type='mlp',  # Standard MLP FFN
     # The TransformerLayer's default activation is 'gelu'
 )
 ```
@@ -521,7 +521,7 @@ You can validate the implementation with simple tests to ensure model creation a
 ```python
 import keras
 import tensorflow as tf
-from dl_techniques.models.trm.model import TRM
+from dl_techniques.models.tiny_recursive_model.model import TRM
 
 
 def test_model_creation():
