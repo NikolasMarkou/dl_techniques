@@ -34,6 +34,11 @@ class FrequencyBandStatistics(keras.layers.Layer):
     standard deviation, min, max, and temporal derivatives. These statistics
     serve as input to the importance router.
 
+    **Numerical Stability**:
+    Calculates standard deviation using `sqrt(var + epsilon)` to prevent
+    gradient explosion (division by zero) when processing constant sequences
+    or zero-padded regions.
+
     **Architecture**::
 
         Input: frequency band [batch, seq_len, channels]
@@ -60,7 +65,8 @@ class FrequencyBandStatistics(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+            training: Optional[bool] = None,
+            mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
         Compute statistics for the input frequency band.
@@ -69,19 +75,30 @@ class FrequencyBandStatistics(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Training mode flag (unused).
         :type training: Optional[bool]
+        :param mask: Optional mask tensor (unused in calculation, rely on
+            numerical stability fixes for padded zeros).
+        :type mask: Optional[keras.KerasTensor]
         :return: Statistics tensor of shape [batch, channels, num_stats].
         :rtype: keras.KerasTensor
         """
         # Basic statistics along time axis
         mean = ops.mean(inputs, axis=1)  # [batch, channels]
-        std = ops.std(inputs, axis=1) + self.epsilon
+
+        # FIX: Calculate std via sqrt(var + epsilon) to prevent gradient explosion
+        # ops.std() gradients involve 1/(2*std), which explodes if std=0.
+        variance = ops.var(inputs, axis=1)
+        std = ops.sqrt(variance + self.epsilon)
+
         min_val = ops.min(inputs, axis=1)
         max_val = ops.max(inputs, axis=1)
 
         # Temporal derivatives (first difference)
         diff = inputs[:, 1:, :] - inputs[:, :-1, :]
         diff_mean = ops.mean(diff, axis=1)
-        diff_std = ops.std(diff, axis=1) + self.epsilon
+
+        # FIX: Apply same stability fix to diff_std
+        diff_variance = ops.var(diff, axis=1)
+        diff_std = ops.sqrt(diff_variance + self.epsilon)
 
         # Stack statistics: [batch, channels, num_stats]
         stats = ops.stack(
@@ -134,6 +151,8 @@ class FrequencyBandRouter(keras.layers.Layer):
                ↓
         For each band: compute statistics
                ↓
+        LayerNorm(statistics)  <-- Added for stability
+               ↓
         For each band: MLP(statistics) -> score
                ↓
         Softmax(scores / temperature) -> weights
@@ -182,6 +201,13 @@ class FrequencyBandRouter(keras.layers.Layer):
         # Statistics extractor
         self.stats_layer = FrequencyBandStatistics(name=f"{self.name}_stats")
 
+        # FIX: Normalize statistics before MLP to prevent softmax overflow
+        # and handle varying scales of inputs (e.g. padded zeros vs real data).
+        self.stats_norm = layers.LayerNormalization(
+            name=f"{self.name}_stats_norm",
+            axis=-1
+        )
+
         # Router MLP (shared across bands)
         self.router_mlp = create_ffn_layer(
             "mlp",
@@ -210,9 +236,11 @@ class FrequencyBandRouter(keras.layers.Layer):
         first_band_shape = input_shape[0]
         self.stats_layer.build(first_band_shape)
 
-        # Build router MLP
+        # Build norm and router MLP
         channels = first_band_shape[-1]
         stats_shape = (first_band_shape[0], channels, 6)
+
+        self.stats_norm.build(stats_shape)
         self.router_mlp.build(stats_shape)
 
         super().build(input_shape)
@@ -236,6 +264,10 @@ class FrequencyBandRouter(keras.layers.Layer):
         for band in inputs:
             # Compute statistics for this band
             stats = self.stats_layer(band, training=training)
+
+            # FIX: Normalize statistics
+            stats = self.stats_norm(stats)
+
             # Get raw score from MLP
             score = self.router_mlp(stats, training=training)
             # score shape: [batch, channels, 1]
@@ -358,6 +390,7 @@ class PRISMNode(keras.layers.Layer):
             kernel_regularizer=kernel_regularizer,
             name=f"{self.name}_router"
         )
+        self.supports_masking = True
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -392,7 +425,6 @@ class PRISMNode(keras.layers.Layer):
         band_len = ops.shape(band)[1]
 
         # If already target length, return as-is
-        # Use ops.cond for graph-safe conditional
         def do_interpolate():
             # Linear indices for target positions
             # Map [0, target_len-1] -> [0, band_len-1]
@@ -400,6 +432,7 @@ class PRISMNode(keras.layers.Layer):
                 ops.arange(target_len),
                 band.dtype
             )
+            # Safe division: max(..., 1) ensures no divide-by-zero
             scale = ops.cast(band_len - 1, band.dtype) / ops.cast(
                 ops.maximum(target_len - 1, 1),
                 band.dtype
@@ -432,7 +465,8 @@ class PRISMNode(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+            training: Optional[bool] = None,
+            mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
         Process input through wavelet decomposition and weighted reconstruction.
@@ -441,6 +475,8 @@ class PRISMNode(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Training mode flag.
         :type training: Optional[bool]
+        :param mask: Optional mask.
+        :type mask: Optional[keras.KerasTensor]
         :return: Processed tensor of shape [batch, seq_len, channels].
         :rtype: keras.KerasTensor
         """
@@ -450,6 +486,9 @@ class PRISMNode(keras.layers.Layer):
         bands = self.wavelet(inputs, training=training)
 
         # Compute importance weights
+        # Note: Mask is not passed to wavelet bands as they are downsampled,
+        # but FrequencyBandStatistics handles potential padding stability issues
+        # internally via the std calculation fix.
         weights = self.router(bands, training=training)
         # weights shape: [batch, channels, num_bands]
 
@@ -579,6 +618,7 @@ class PRISMTimeTree(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.supports_masking = True
 
         # Create PRISM nodes for each level of the tree
         # Use a flat list so Keras tracks all layers properly for serialization
@@ -749,25 +789,6 @@ class PRISMTimeTree(keras.layers.Layer):
             # Add weighted segment to output
             weighted_segment = segment * weights
 
-            # Slice update with symbolic indices requires explicit tensor construction
-            start_indices = ops.stack([0, start_idx, 0])
-
-            # Note: slice_update requires the update to have same rank
-            # We add input segment to existing output at specific location
-            # To simulate x[start:end] += val, we slice, add, and update
-
-            # Extract current values at destination
-            # This is complex in graph mode if we want in-place addition behavior via scatter
-            # Instead, we construct the update tensor and insert it
-
-            # Since we initialized output with zeros, and segments overlap, 
-            # we can't just use simple slice_update because it overwrites.
-            # However, for non-overlapping parts it's overwrite.
-            # For overlapping parts, we need to accumulate.
-            # ops.scatter_update does overwrite. ops.scatter_add might be needed but isn't standard in keras.ops
-
-            # Alternative: Construct a full-size tensor for this segment padded with zeros and add
-
             # Construct padding
             pad_left = start_idx
             pad_right = target_len - (start_idx + seg_len)
@@ -775,9 +796,6 @@ class PRISMTimeTree(keras.layers.Layer):
             # Pad segment to full length
             # padding argument for pad is [[top, bottom], [left, right], ...]
             # batch dim: [0, 0], time dim: [pad_left, pad_right], channel dim: [0, 0]
-
-            # We need pad_left/pad_right to be integers or tensors
-            # ops.pad expects standard list of lists. If tensors, TF handles it.
 
             padded_segment = ops.pad(
                 weighted_segment,
@@ -791,7 +809,8 @@ class PRISMTimeTree(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+            training: Optional[bool] = None,
+            mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
         Process input through the hierarchical time tree.
@@ -800,6 +819,8 @@ class PRISMTimeTree(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Training mode flag.
         :type training: Optional[bool]
+        :param mask: Optional mask.
+        :type mask: Optional[keras.KerasTensor]
         :return: Processed tensor of shape [batch, seq_len, channels].
         :rtype: keras.KerasTensor
         """
@@ -818,6 +839,12 @@ class PRISMTimeTree(keras.layers.Layer):
 
             # Split into segments
             segments = self._split_with_overlap(current, num_segments)
+
+            # Split masks if present
+            # Note: We don't propagate mask logic deeply into splitting because
+            # re-stitching masks with crossfade is ambiguous.
+            # We rely on PRISMNode's internal stability fixes (safe std) to handle
+            # zero-padded segments that might result from splitting.
 
             # Process each segment with its corresponding node
             processed_segments = []
@@ -944,6 +971,7 @@ class PRISMLayer(keras.layers.Layer):
         self.use_output_norm = use_output_norm
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.supports_masking = True
 
         # Time tree processing
         self.time_tree = PRISMTimeTree(
@@ -984,7 +1012,8 @@ class PRISMLayer(keras.layers.Layer):
     def call(
             self,
             inputs: keras.KerasTensor,
-            training: Optional[bool] = None
+            training: Optional[bool] = None,
+            mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
         Apply PRISM processing.
@@ -993,11 +1022,13 @@ class PRISMLayer(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Training mode flag.
         :type training: Optional[bool]
+        :param mask: Optional mask.
+        :type mask: Optional[keras.KerasTensor]
         :return: Processed tensor of shape [batch, seq_len, channels].
         :rtype: keras.KerasTensor
         """
         # Process through time tree
-        x = self.time_tree(inputs, training=training)
+        x = self.time_tree(inputs, training=training, mask=mask)
 
         # Apply dropout
         x = self.dropout(x, training=training)

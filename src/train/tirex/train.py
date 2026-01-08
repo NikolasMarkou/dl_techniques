@@ -88,7 +88,7 @@ from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
 from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiRexExtended
-from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
+from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator, TimeSeriesGeneratorConfig
 
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -887,7 +887,7 @@ def main() -> None:
         analysis_start_epoch=args.analysis_start_epoch
     )
 
-    ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)
+    ts_config = TimeSeriesGeneratorConfig(n_samples=5000, random_seed=42)
 
     try:
         trainer = TiRexTrainer(config, ts_config)

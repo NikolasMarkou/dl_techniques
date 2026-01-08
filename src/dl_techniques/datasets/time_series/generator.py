@@ -70,7 +70,7 @@ Basic Usage:
     >>> from dl_techniques.datasets.time_series import (
     ...     TimeSeriesGenerator, TimeSeriesConfig
     ... )
-    >>> config = TimeSeriesConfig(n_samples=1000, random_seed=42)
+    >>> config = TimeSeriesGeneratorConfig(n_samples=1000, random_seed=42)
     >>> generator = TimeSeriesGenerator(config)
     >>>
     >>> # Generate specific pattern
@@ -118,7 +118,7 @@ Multi-Task Dataset Creation:
     >>> for task_name in selected_tasks:
     ...     task_data = []
     ...     for i in range(100):  # 100 series per task
-    ...         config = TimeSeriesConfig(n_samples=200, random_seed=42 + i)
+    ...         config = TimeSeriesGeneratorConfig(n_samples=200, random_seed=42 + i)
     ...         gen = TimeSeriesGenerator(config)
     ...         series = gen.generate_task_data(task_name)
     ...         task_data.append(series)
@@ -231,7 +231,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 @dataclass
-class TimeSeriesConfig:
+class TimeSeriesGeneratorConfig:
     """Configuration class for time series generation.
 
     This configuration class contains all parameters needed for generating
@@ -300,7 +300,7 @@ class TimeSeriesGenerator:
         random_state: Random state for reproducible generation.
 
     Example:
-        >>> config = TimeSeriesConfig(n_samples=500, random_seed=42)
+        >>> config = TimeSeriesGeneratorConfig(n_samples=500, random_seed=42)
         >>> generator = TimeSeriesGenerator(config)
         >>>
         >>> # Generate a specific pattern
@@ -313,7 +313,7 @@ class TimeSeriesGenerator:
         >>> categories = generator.get_task_categories()
     """
 
-    def __init__(self, config: TimeSeriesConfig) -> None:
+    def __init__(self, config: TimeSeriesGeneratorConfig) -> None:
         self.config = config
         self.task_definitions = self._define_tasks()
         self.random_state = np.random.RandomState(config.random_seed)

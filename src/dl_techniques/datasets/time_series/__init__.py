@@ -53,6 +53,7 @@ from .pipeline import (
 
 # Synthetic Data Generation
 from .generator import (
+    TimeSeriesGeneratorConfig,
     TimeSeriesGenerator,
 )
 
@@ -93,6 +94,7 @@ __all__ = [
     'TimeSeriesNormalizer',
     'NormalizationMethod',
     'TimeSeriesGenerator',
+    'TimeSeriesGeneratorConfig',
 
     # Utilities
     'download_file',

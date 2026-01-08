@@ -1,0 +1,723 @@
+"""
+Orchestrate end-to-end training and evaluation of the PRISM forecasting framework.
+
+Architecture
+------------
+The PRISM (Progressive Refinement via Integrated Segmentation and Mixing) framework
+implements hierarchical time-frequency decomposition with routing mechanisms designed
+to capture both local patterns and long-range dependencies.
+
+This script implements a robust training pipeline using tf.data.Dataset generators
+modeled after the stable TiRex framework to prevent numerical instability (NaNs).
+
+References
+----------
+1.  Time Series Decomposition Methods in Deep Learning: A Review
+2.  Hierarchical Temporal Modeling with Wavelet Transforms
+3.  Router Networks for Mixture-of-Experts in Time Series Forecasting
+"""
+
+import os
+import json
+import math
+import random
+import argparse
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+
+import keras
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import tensorflow as tf
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesGeneratorConfig
+from dl_techniques.models.prism.model import PRISMModel
+
+from dl_techniques.analyzer import AnalysisConfig
+from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
+
+# ---------------------------------------------------------------------
+
+plt.style.use('default')
+sns.set_palette("husl")
+
+
+def set_random_seeds(seed: int = 42) -> None:
+    """Set random seeds for major libraries to ensure reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    keras.utils.set_random_seed(seed)
+    tf.random.set_seed(seed)
+
+
+set_random_seeds(42)
+
+# ---------------------------------------------------------------------
+
+
+@dataclass
+class PRISMTrainingConfig:
+    """Configuration dataclass for PRISM training."""
+    # General experiment configuration
+    result_dir: str = "results"
+    save_results: bool = True
+    experiment_name: str = "prism_forecasting"
+
+    # Pattern selection configuration
+    target_categories: Optional[List[str]] = None
+
+    # Data configuration
+    train_ratio: float = 0.7
+    val_ratio: float = 0.15
+    test_ratio: float = 0.15
+
+    # PRISM specific configuration
+    context_len: int = 168
+    forecast_len: int = 24
+
+    # Model Architecture
+    preset: str = "small"  # 'tiny', 'small', 'base', 'large'
+    hidden_dim: Optional[int] = None  # If None, uses num_features
+    num_layers: int = 2
+    tree_depth: int = 2
+    overlap_ratio: float = 0.25
+    num_wavelet_levels: int = 3
+    router_hidden_dim: int = 64
+    router_temperature: float = 1.0
+    dropout_rate: float = 0.1
+    ffn_expansion: int = 4
+
+    # Training configuration
+    epochs: int = 150
+    batch_size: int = 64
+    steps_per_epoch: int = 500
+    learning_rate: float = 1e-4
+    gradient_clip_norm: float = 1.0
+    optimizer: str = 'adamw'
+
+    # Learning rate schedule with warmup
+    use_warmup: bool = True
+    warmup_steps: int = 1000
+    warmup_start_lr: float = 1e-6
+
+    # Pattern selection and Normalization
+    max_patterns: Optional[int] = None
+    max_patterns_per_category: int = 10
+    min_data_length: int = 2000
+    normalize_per_instance: bool = True
+
+    # Category weights for balanced sampling
+    category_weights: Dict[str, float] = field(default_factory=lambda: {
+        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
+        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
+        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
+        "regime": 1.2, "structural": 1.1
+    })
+
+    # Visualization configuration
+    visualize_every_n_epochs: int = 5
+    save_interim_plots: bool = True
+    plot_top_k_patterns: int = 12
+    create_learning_curves: bool = True
+    create_prediction_plots: bool = True
+
+    # Deep Analysis Configuration
+    perform_deep_analysis: bool = True
+    analysis_frequency: int = 10
+    analysis_start_epoch: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate configuration."""
+        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
+        if not np.isclose(total_ratio, 1.0, atol=1e-6):
+            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+
+        if self.context_len <= 0 or self.forecast_len <= 0:
+            raise ValueError("context_len and forecast_len must be positive")
+
+
+class PRISMDataProcessor:
+    """
+    Robust data processor for PRISM.
+    Implements buffer-based generation and strict normalization to prevent NaNs.
+    """
+
+    def __init__(
+            self,
+            config: PRISMTrainingConfig,
+            generator: TimeSeriesGenerator,
+            selected_patterns: List[str],
+            pattern_to_category: Dict[str, str],
+            num_features: int = 1
+    ):
+        self.config = config
+        self.ts_generator = generator
+        self.selected_patterns = selected_patterns
+        self.pattern_to_category = pattern_to_category
+        self.num_features = num_features
+        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
+
+    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
+        """Prepare lists for weighted random pattern selection."""
+        patterns, weights = [], []
+        for pattern_name in self.selected_patterns:
+            category = self.pattern_to_category.get(pattern_name, "unknown")
+            weight = self.config.category_weights.get(category, 1.0)
+            patterns.append(pattern_name)
+            weights.append(weight)
+
+        total_weight = sum(weights)
+        if total_weight > 0:
+            normalized_weights = [w / total_weight for w in weights]
+        else:
+            num_patterns = len(patterns)
+            normalized_weights = [1.0 / num_patterns] * num_patterns
+        return patterns, normalized_weights
+
+    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
+        """
+        Normalize series instance with checks for constant values and outliers.
+        Returns clipped, normalized data as float32.
+        """
+        if self.config.normalize_per_instance:
+            mean = np.mean(series)
+            std = np.std(series)
+
+            # Avoid division by near-zero std for constant sequences
+            if std < 1e-5:
+                # If std is 0, the series is constant. Centering it makes it all 0s.
+                series = series - mean
+            else:
+                series = (series - mean) / std
+
+        # Clip extreme outliers that destabilize MSE loss
+        # Using [-10, 10] which is sufficient for z-scores (approx 10 sigma)
+        series = np.clip(series, -10.0, 10.0)
+        return series.astype(np.float32)
+
+    def _training_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """
+        Infinite generator for training data.
+        Uses a buffer to mix patterns and reduce generator overhead.
+        """
+        patterns_to_mix = 50
+        windows_per_pattern = 5
+        buffer = []
+
+        total_window_len = self.config.context_len + self.config.forecast_len
+
+        while True:
+            if not buffer:
+                # 1. Select a mix of patterns
+                selected_patterns = random.choices(
+                    self.weighted_patterns, self.weights, k=patterns_to_mix
+                )
+
+                for pattern_name in selected_patterns:
+                    # 2. Generate full series
+                    data = self.ts_generator.generate_task_data(pattern_name)
+
+                    # Safety Check for Generator output: must be valid floats and long enough
+                    if len(data) < total_window_len or not np.isfinite(data).all():
+                        continue
+
+                    train_size = int(self.config.train_ratio * len(data))
+                    train_data = data[:train_size]
+
+                    max_start_idx = len(train_data) - total_window_len
+                    if max_start_idx <= 0:
+                        continue
+
+                    # 3. Extract multiple windows from this series
+                    for _ in range(windows_per_pattern):
+                        start_idx = random.randint(0, max_start_idx)
+                        window = train_data[start_idx : start_idx + total_window_len]
+
+                        # 4. Normalize and Clip
+                        window = self._safe_normalize(window)
+
+                        # 5. Split Context/Target
+                        context = window[:self.config.context_len].reshape(-1, self.num_features)
+                        target = window[self.config.context_len:].reshape(-1, self.num_features)
+
+                        buffer.append((context, target))
+
+                random.shuffle(buffer)
+
+            if buffer:
+                yield buffer.pop()
+
+    def _validation_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """Deterministic validation generator."""
+        total_window_len = self.config.context_len + self.config.forecast_len
+
+        # Cycle through patterns
+        pattern_cycle = 0
+        while True:
+            pattern_idx = pattern_cycle % len(self.selected_patterns)
+            pattern_name = self.selected_patterns[pattern_idx]
+            pattern_cycle += 1
+
+            data = self.ts_generator.generate_task_data(pattern_name)
+
+            if len(data) < total_window_len or not np.isfinite(data).all():
+                continue
+
+            train_size = int(self.config.train_ratio * len(data))
+            val_size = int(self.config.val_ratio * len(data))
+            val_data = data[train_size : train_size + val_size]
+
+            max_start_idx = len(val_data) - total_window_len
+            if max_start_idx <= 0:
+                continue
+
+            start_idx = random.randint(0, max_start_idx)
+            window = val_data[start_idx : start_idx + total_window_len]
+
+            window = self._safe_normalize(window)
+
+            context = window[:self.config.context_len].reshape(-1, self.num_features)
+            target = window[self.config.context_len:].reshape(-1, self.num_features)
+
+            yield context, target
+
+    def _test_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+        """Test set generator."""
+        total_window_len = self.config.context_len + self.config.forecast_len
+
+        for pattern_name in self.selected_patterns:
+            data = self.ts_generator.generate_task_data(pattern_name)
+
+            if len(data) < total_window_len or not np.isfinite(data).all():
+                continue
+
+            train_size = int(self.config.train_ratio * len(data))
+            val_size = int(self.config.val_ratio * len(data))
+            test_data = data[train_size + val_size:]
+
+            max_start_idx = len(test_data) - total_window_len
+            if max_start_idx <= 0:
+                continue
+
+            # Take a few samples per pattern for test
+            num_samples = min(5, max_start_idx + 1)
+            for _ in range(num_samples):
+                start_idx = random.randint(0, max_start_idx)
+                window = test_data[start_idx : start_idx + total_window_len]
+
+                window = self._safe_normalize(window)
+
+                context = window[:self.config.context_len].reshape(-1, self.num_features)
+                target = window[self.config.context_len:].reshape(-1, self.num_features)
+
+                yield context, target
+
+    def prepare_datasets(self) -> Dict[str, Any]:
+        """Create tf.data.Datasets."""
+        # Define strict output signature
+        output_sig = (
+            tf.TensorSpec(shape=(self.config.context_len, self.num_features), dtype=tf.float32),
+            tf.TensorSpec(shape=(self.config.forecast_len, self.num_features), dtype=tf.float32)
+        )
+
+        train_ds = tf.data.Dataset.from_generator(
+            self._training_generator, output_signature=output_sig
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+
+        val_ds = tf.data.Dataset.from_generator(
+            self._validation_generator, output_signature=output_sig
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+
+        test_ds = tf.data.Dataset.from_generator(
+            self._test_generator, output_signature=output_sig
+        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
+
+        validation_steps = max(50, len(self.selected_patterns) * 2)
+        test_steps = len(self.selected_patterns) * 5
+
+        return {
+            'train_ds': train_ds,
+            'val_ds': val_ds,
+            'test_ds': test_ds,
+            'validation_steps': validation_steps,
+            'test_steps': test_steps
+        }
+
+
+class PRISMTrainer:
+    """Trainer for PRISM using robust data handling."""
+
+    def __init__(
+        self,
+        config: PRISMTrainingConfig,
+        generator_config: TimeSeriesGeneratorConfig
+    ) -> None:
+        self.config = config
+        self.generator_config = generator_config
+        self.generator = TimeSeriesGenerator(generator_config)
+
+        self.all_patterns = self.generator.get_task_names()
+        self.pattern_categories = self.generator.get_task_categories()
+        self.pattern_to_category = {
+            task: cat
+            for cat in self.pattern_categories
+            for task in self.generator.get_tasks_by_category(cat)
+        }
+        self.selected_patterns = self._select_patterns()
+
+        # Initialize Data Processor
+        self.processor = PRISMDataProcessor(
+            config, self.generator, self.selected_patterns, self.pattern_to_category
+        )
+
+        self.model: Optional[keras.Model] = None
+        self.exp_dir: Optional[str] = None
+
+    def _select_patterns(self) -> List[str]:
+        if self.config.target_categories:
+            patterns_to_consider = {
+                p for c in self.config.target_categories
+                for p in self.generator.get_tasks_by_category(c)
+            }
+        else:
+            patterns_to_consider = self.all_patterns
+
+        selected, category_counts = [], {}
+        for pattern in sorted(patterns_to_consider):
+            category = self.pattern_to_category.get(pattern)
+            if (category and
+                    category_counts.get(category, 0) <
+                    self.config.max_patterns_per_category):
+                selected.append(pattern)
+                category_counts[category] = category_counts.get(category, 0) + 1
+
+        if self.config.max_patterns and len(selected) > self.config.max_patterns:
+            selected = random.sample(selected, self.config.max_patterns)
+
+        logger.info(f"Selected {len(selected)} patterns for training.")
+        return selected
+
+    def run_experiment(self) -> Dict[str, Any]:
+        logger.info("Starting PRISM training experiment")
+        self.exp_dir = self._create_experiment_dir()
+        logger.info(f"Results will be saved to: {self.exp_dir}")
+
+        # Data Pipeline
+        data_pipeline = self.processor.prepare_datasets()
+
+        # Build Model
+        num_features = 1
+        self.model = self._build_model(num_features)
+
+        # Test build/summary
+        dummy_input = np.zeros((1, self.config.context_len, num_features), dtype='float32')
+        self.model(dummy_input)
+        logger.info("Model created successfully")
+        logger.info(f"Model parameters: {self.model.count_params():,}")
+
+        # Train
+        training_results = self._train_model(data_pipeline, self.exp_dir)
+
+        # Viz
+        if self.config.create_learning_curves:
+            self._plot_learning_curves(training_results['history'], self.exp_dir)
+        if self.config.create_prediction_plots:
+            self._plot_predictions(data_pipeline, self.exp_dir)
+
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir)
+
+        return {
+            'config': self.config,
+            'experiment_dir': self.exp_dir,
+            'training_results': training_results,
+            'results_dir': self.exp_dir
+        }
+
+    def _create_experiment_dir(self) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_name = f"{self.config.experiment_name}_{self.config.preset}_{timestamp}"
+        exp_dir = os.path.join(self.config.result_dir, exp_name)
+        os.makedirs(exp_dir, exist_ok=True)
+        return exp_dir
+
+    def _build_model(self, num_features: int) -> keras.Model:
+        logger.info(f"Building PRISM model (preset={self.config.preset})")
+
+        model_kwargs = {
+            "preset": self.config.preset,
+            "context_len": self.config.context_len,
+            "forecast_len": self.config.forecast_len,
+            "num_features": num_features,
+            "num_layers": self.config.num_layers,
+            "tree_depth": self.config.tree_depth,
+            "overlap_ratio": self.config.overlap_ratio,
+            "num_wavelet_levels": self.config.num_wavelet_levels,
+            "router_hidden_dim": self.config.router_hidden_dim,
+            "router_temperature": self.config.router_temperature,
+            "dropout_rate": self.config.dropout_rate,
+            "ffn_expansion": self.config.ffn_expansion
+        }
+
+        if self.config.hidden_dim is not None:
+            model_kwargs["hidden_dim"] = self.config.hidden_dim
+
+        model = PRISMModel.from_preset(**model_kwargs)
+
+        # Optimizer & Schedule
+        if self.config.use_warmup:
+            total_steps = self.config.epochs * self.config.steps_per_epoch
+            primary_steps = max(1, total_steps - self.config.warmup_steps)
+
+            primary_schedule = keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=self.config.learning_rate,
+                decay_steps=primary_steps,
+                alpha=0.01
+            )
+            lr_schedule = WarmupSchedule(
+                warmup_steps=self.config.warmup_steps,
+                warmup_start_lr=self.config.warmup_start_lr,
+                primary_schedule=primary_schedule
+            )
+        else:
+            lr_schedule = self.config.learning_rate
+
+        optimizer = keras.optimizers.get(self.config.optimizer)
+        optimizer.learning_rate = lr_schedule
+        if self.config.gradient_clip_norm:
+            optimizer.clipnorm = self.config.gradient_clip_norm
+
+        # Explicit Build
+        model.build((None, self.config.context_len, num_features))
+
+        # Compile WITHOUT jit_compile for PRISM stability
+        model.compile(
+            optimizer=optimizer,
+            loss='mse',
+            metrics=['mae', 'mse']
+            # jit_compile=True  <-- REMOVED TO PREVENT NANs IN ROUTER/WAVELET
+        )
+
+        return model
+
+    def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
+        logger.info("Starting model training...")
+
+        callbacks = [
+            keras.callbacks.EarlyStopping(
+                monitor='val_loss', patience=30, restore_best_weights=True, verbose=1
+            ),
+            keras.callbacks.ModelCheckpoint(
+                os.path.join(exp_dir, 'best_model.keras'),
+                monitor='val_loss', save_best_only=True, verbose=1
+            ),
+            keras.callbacks.TerminateOnNaN()
+        ]
+
+        if not self.config.use_warmup:
+            callbacks.append(keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7
+            ))
+
+        if self.config.perform_deep_analysis:
+            logger.info("Adding Deep Model Analysis callback.")
+            analysis_config = AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False
+            )
+            analyzer_cb = EpochAnalyzerCallback(
+                output_dir=os.path.join(exp_dir, 'deep_analysis'),
+                analysis_config=analysis_config,
+                start_epoch=self.config.analysis_start_epoch,
+                epoch_frequency=self.config.analysis_frequency,
+                model_name="PRISM"
+            )
+            callbacks.append(analyzer_cb)
+
+        history = self.model.fit(
+            data_pipeline['train_ds'],
+            validation_data=data_pipeline['val_ds'],
+            epochs=self.config.epochs,
+            steps_per_epoch=self.config.steps_per_epoch,
+            validation_steps=data_pipeline['validation_steps'],
+            callbacks=callbacks,
+            verbose=1
+        )
+
+        logger.info("Evaluating on test set...")
+        test_metrics = self.model.evaluate(
+            data_pipeline['test_ds'],
+            steps=data_pipeline['test_steps'],
+            verbose=1,
+            return_dict=True
+        )
+
+        return {
+            'history': history.history,
+            'test_metrics': test_metrics,
+            'final_epoch': len(history.history['loss'])
+        }
+
+    def _plot_learning_curves(self, history: Dict, exp_dir: str) -> None:
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+        for i, metric in enumerate(['loss', 'mae']):
+            axes[i].plot(history[metric], label=f'Train {metric.upper()}')
+            val_key = f'val_{metric}'
+            if val_key in history:
+                axes[i].plot(history[val_key], label=f'Val {metric.upper()}')
+            axes[i].set_title(f'{metric.upper()} over Epochs')
+            axes[i].legend()
+            axes[i].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(exp_dir, 'learning_curves.png'))
+        plt.close()
+
+    def _plot_predictions(self, data_pipeline: Dict, exp_dir: str) -> None:
+        logger.info("Generating prediction plots...")
+
+        # Take a batch
+        test_iter = iter(data_pipeline['test_ds'])
+        context, target = next(test_iter)
+
+        predictions = self.model.predict(context, verbose=0)
+
+        num_samples = min(self.config.plot_top_k_patterns, len(context))
+        n_cols = 3
+        n_rows = math.ceil(num_samples / n_cols)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+        axes = axes.flatten() if n_rows > 1 else [axes] if n_rows == 0 else axes.reshape(-1)
+
+        for i in range(num_samples):
+            ax = axes[i]
+            ctx_data = context[i].numpy().flatten()
+            tgt_data = target[i].numpy().flatten()
+            pred_data = predictions[i].flatten()
+
+            x_ctx = np.arange(len(ctx_data))
+            x_tgt = np.arange(len(ctx_data), len(ctx_data) + len(tgt_data))
+
+            ax.plot(x_ctx, ctx_data, label='Context', color='blue')
+            ax.plot(x_tgt, tgt_data, label='Target', color='green', linestyle='--')
+            ax.plot(x_tgt, pred_data, label='Pred', color='red', alpha=0.7)
+            ax.legend()
+            ax.set_title(f'Sample {i}')
+
+        for j in range(num_samples, len(axes)):
+            axes[j].axis('off')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(exp_dir, 'predictions.png'))
+        plt.close()
+
+    def _save_results(self, results: Dict, exp_dir: str) -> None:
+        def json_convert(o):
+            if isinstance(o, (np.floating, np.integer)): return str(o)
+            return str(o)
+
+        serializable = {
+            'history': results['history'],
+            'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
+            'config': self.config.__dict__
+        }
+
+        with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
+            json.dump(serializable, f, indent=4, default=json_convert)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="PRISM Training Framework")
+
+    parser.add_argument("--experiment_name", type=str, default="prism", help="Exp name")
+    parser.add_argument("--preset", type=str, default="small", choices=['tiny', 'small', 'base', 'large'])
+    parser.add_argument("--context_len", type=int, default=168)
+    parser.add_argument("--forecast_len", type=int, default=24)
+    parser.add_argument("--hidden_dim", type=int, default=None)
+    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--tree_depth", type=int, default=2)
+    parser.add_argument("--num_wavelet_levels", type=int, default=3)
+
+    parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--steps_per_epoch", type=int, default=500)
+
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
+    parser.add_argument("--optimizer", type=str, default="adamw")
+
+    parser.add_argument("--no-warmup", dest="use_warmup", action="store_false")
+    parser.set_defaults(use_warmup=True)
+    parser.add_argument("--warmup_steps", type=int, default=1000)
+    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
+
+    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
+    parser.set_defaults(normalize_per_instance=True)
+    parser.add_argument("--max_patterns_per_category", type=int, default=10)
+
+    parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
+    parser.add_argument("--plot_top_k_patterns", type=int, default=12)
+
+    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false")
+    parser.set_defaults(perform_deep_analysis=True)
+    parser.add_argument("--analysis_frequency", type=int, default=10)
+    parser.add_argument("--analysis_start_epoch", type=int, default=1)
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    config = PRISMTrainingConfig(
+        experiment_name=args.experiment_name,
+        preset=args.preset,
+        context_len=args.context_len,
+        forecast_len=args.forecast_len,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        tree_depth=args.tree_depth,
+        num_wavelet_levels=args.num_wavelet_levels,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        steps_per_epoch=args.steps_per_epoch,
+        learning_rate=args.learning_rate,
+        use_warmup=args.use_warmup,
+        warmup_steps=args.warmup_steps,
+        warmup_start_lr=args.warmup_start_lr,
+        gradient_clip_norm=args.gradient_clip_norm,
+        optimizer=args.optimizer,
+        normalize_per_instance=args.normalize_per_instance,
+        max_patterns_per_category=args.max_patterns_per_category,
+        visualize_every_n_epochs=args.visualize_every_n_epochs,
+        plot_top_k_patterns=args.plot_top_k_patterns,
+        perform_deep_analysis=args.perform_deep_analysis,
+        analysis_frequency=args.analysis_frequency,
+        analysis_start_epoch=args.analysis_start_epoch
+    )
+
+    generator_config = TimeSeriesGeneratorConfig(n_samples=5000, random_seed=42)
+
+    try:
+        trainer = PRISMTrainer(config, generator_config)
+        results = trainer.run_experiment()
+        logger.info(f"Completed. Results: {results['results_dir']}")
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -8,8 +8,8 @@ A production-ready module for the `dl_techniques` framework that provides end-to
 dl_techniques/datasets/time_series/
 ├── __init__.py       # Exports
 ├── base.py           # Abstract base classes
-├── config.py         # Configuration dataclasses
-├── generator.py      # Synthetic data generator (80+ patterns)
+├── config.py         # Configuration dataclasses (Benchmarks & Pipelines)
+├── generator.py      # Synthetic data generator & GeneratorConfig
 ├── normalizer.py     # Advanced reversible normalization
 ├── pipeline.py       # tf.data pipeline utilities
 ├── utils.py          # Download/extraction helpers
@@ -35,6 +35,7 @@ from dl_techniques.datasets.time_series import (
 
 # Option 1: Direct Loader
 dataset = LongHorizonDataset(root_dir='./data')
+# Returns: Y_df (targets), X_df (exogenous), S_df (static - None for ETT)
 y_df, x_df, _ = dataset.load('ETTh1', multivariate=True)
 
 # Option 2: Convenience Function
@@ -53,6 +54,7 @@ Standard univariate forecasting benchmark.
 from dl_techniques.datasets.time_series import load_m4, get_m4_horizon
 
 # Load Monthly data
+# Returns: Y_df, None (no exogenous), S_df (static metadata)
 y_df, _, s_df = load_m4('Monthly')
 horizon = get_m4_horizon('Monthly')
 
@@ -64,14 +66,17 @@ print(f"Forecast Horizon: {horizon}")
 
 Generate diverse, realistic time series patterns for pre-training, stress testing, or research. Supports over 80 patterns across financial, weather, industrial, and chaotic domains.
 
+> **Note:** The generator uses its own configuration class defined in `generator.py`.
+
 ```python
-from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesConfig
+from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 
 # Configure
-config = TimeSeriesConfig(
-    n_samples=5000, 
+config = TimeSeriesGeneratorConfig(
+    n_samples=5000,
     random_seed=42,
-    default_noise_level=0.1
+    default_noise_level=0.1,
+    seasonal_periods=[24, 168]
 )
 gen = TimeSeriesGenerator(config)
 
@@ -89,7 +94,7 @@ custom_ar = gen.generate_custom_pattern(
 )
 
 # Augmentation (Time Warping)
-aug_series = gen.augment_series(trend, [{"name": "time_warp", "strength": 0.1}])
+aug_series = gen.augment_series(trend, [{"name": "time_warp", "strength": 0.1, "n_knots": 4}])
 ```
 
 ## 3. Advanced Normalization
@@ -107,13 +112,13 @@ train_norm = scaler.fit_transform(train_data)
 test_norm = scaler.transform(test_data)
 
 # ... Train Model ...
-predictions_norm = model.predict(test_norm)
+# predictions_norm = model.predict(test_norm)
 
 # Inverse Transform for metrics
-predictions_original = scaler.inverse_transform(predictions_norm)
+# predictions_original = scaler.inverse_transform(predictions_norm)
 ```
 
-**Available Methods:** `minmax`, `standard`, `robust` (IQR), `max_abs`, `quantile_uniform`, `quantile_normal`, `tanh`, `log`, `power`.
+**Available Methods:** `minmax`, `standard`, `robust` (IQR), `max_abs`, `quantile_uniform`, `quantile_normal`, `tanh`, `power`, `decimal`.
 
 ## 4. TensorFlow Data Pipelines
 
@@ -124,7 +129,7 @@ Convert DataFrames or Arrays into production-ready `tf.data.Dataset` objects wit
 ```python
 from dl_techniques.datasets.time_series import make_tf_dataset, PipelineConfig
 
-# Configuration
+# Configuration for batching and shuffling
 pipeline_config = PipelineConfig(
     batch_size=32,
     shuffle=True,
@@ -141,8 +146,8 @@ train_ds = make_tf_dataset(
     pipeline_config=pipeline_config
 )
 
-# Use in Keras 3
-model.fit(train_ds, epochs=10)
+# Use in Keras
+# model.fit(train_ds, epochs=10)
 ```
 
 ### Complete Train/Val/Test Split
@@ -150,7 +155,11 @@ model.fit(train_ds, epochs=10)
 ```python
 from dl_techniques.datasets.time_series import create_train_val_test_datasets, WindowConfig
 
-window_config = WindowConfig(window_size=96, horizon=24)
+window_config = WindowConfig(
+    window_size=96, 
+    horizon=24, 
+    target_col='y'
+)
 
 train_ds, val_ds, test_ds = create_train_val_test_datasets(
     train_df, val_df, test_df,
@@ -160,7 +169,8 @@ train_ds, val_ds, test_ds = create_train_val_test_datasets(
 
 ## Configuration Reference
 
-### PipelineConfig
+### 1. Pipeline Config
+Used for `make_tf_dataset` and pipeline creation.
 ```python
 @dataclass
 class PipelineConfig:
@@ -172,12 +182,30 @@ class PipelineConfig:
     cache: bool = False
 ```
 
-### TimeSeriesConfig (Generator)
+### 2. Generator Config
+Used specifically for `TimeSeriesGenerator` (import from `generator.py`).
 ```python
 @dataclass
 class TimeSeriesConfig:
     n_samples: int = 5000
     random_seed: int = 42
-    seasonal_periods: List[int] = [12, 24, 168]
-    # ... plus domain specific params
+    default_noise_level: float = 0.1
+    trend_strengths: Tuple[float, float] = (0.00005, 0.01)
+    seasonal_periods: List[int] = [12, 24, 48, 60, 96, 168, 336, 720, 8760]
+    # ... plus domain specific params (ar_coeffs, volatility_range, etc.)
+```
+
+### 3. Benchmark Config
+Used for defining properties of loaded datasets (ETT, M4, etc.).
+```python
+@dataclass
+class TimeSeriesConfig:
+    name: str
+    freq: str
+    seasonality: int
+    horizon: int
+    n_ts: int
+    test_size: int
+    val_size: Optional[int]
+    # ...
 ```
