@@ -1,27 +1,19 @@
 """
 Time Series Dataset Utilities.
 
-This module provides utility functions for downloading, extracting,
-and managing time series dataset files with progress tracking.
-
-Example:
-    >>> from dl_techniques.datasets.time_series.utils import (
-    ...     download_file, extract_file
-    ... )
-    >>> filepath = download_file('./data', 'https://example.com/data.zip')
-    >>> extract_file(filepath, './data/extracted')
+This module provides utility functions for downloading, extraction, and cache management.
 """
 
-import logging
 import shutil
 import zipfile
 import requests
+import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
-from typing import Optional, Union, Callable
+from typing import Callable, Optional, Union
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -36,23 +28,10 @@ def extract_file(
     """
     Extract a compressed archive to a specified directory.
 
-    Supports zip files natively and delegates other formats to
-    shutil.unpack_archive for broader compatibility.
-
-    :param filepath: Path to the compressed archive file.
-    :type filepath: Union[str, Path]
-    :param directory: Target directory for extraction.
-    :type directory: Union[str, Path]
-    :param remove_archive: Whether to delete the archive after extraction.
-    :type remove_archive: bool
-    :return: Path to the extraction directory.
-    :rtype: Path
-    :raises FileNotFoundError: If the archive file does not exist.
-    :raises zipfile.BadZipFile: If the zip file is corrupted.
-
-    Example:
-        >>> extract_file('./data/dataset.zip', './data/extracted')
-        PosixPath('./data/extracted')
+    :param filepath: Archive path.
+    :param directory: Target directory.
+    :param remove_archive: Delete archive after extraction.
+    :return: Target directory path.
     """
     filepath = Path(filepath)
     directory = Path(directory)
@@ -91,32 +70,10 @@ def download_file(
     """
     Download a file from a URL with progress tracking.
 
-    Downloads a file to the specified directory with optional automatic
-    decompression. Skips download if the file already exists.
-
-    :param directory: Target directory for the downloaded file.
-    :type directory: Union[str, Path]
-    :param source_url: URL to download from.
-    :type source_url: str
-    :param decompress: Whether to extract the file after downloading.
-    :type decompress: bool
-    :param filename: Optional filename override. If None, extracted from URL.
-    :type filename: Optional[str]
-    :param chunk_size: Size of download chunks in bytes.
-    :type chunk_size: int
-    :param timeout: Request timeout in seconds.
-    :type timeout: int
-    :param progress_callback: Optional callback function receiving
-        (bytes_downloaded, total_bytes).
-    :type progress_callback: Optional[Callable[[int, int], None]]
-    :return: Path to the downloaded file.
-    :rtype: Path
-    :raises requests.RequestException: If the download fails.
-    :raises ValueError: If the URL is invalid or inaccessible.
-
-    Example:
-        >>> download_file('./data', 'https://example.com/dataset.zip', decompress=True)
-        PosixPath('./data/dataset.zip')
+    :param directory: Target directory.
+    :param source_url: Download URL.
+    :param decompress: Auto-extract after download.
+    :return: Path to downloaded file.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -124,7 +81,6 @@ def download_file(
     if filename:
         fname = filename
     else:
-        # Extract filename from URL, handling query parameters
         fname = source_url.split('/')[-1].split('?')[0]
 
     filepath = directory / fname
@@ -171,18 +127,7 @@ def download_file(
 
 
 def ensure_directory(path: Union[str, Path]) -> Path:
-    """
-    Ensure a directory exists, creating it if necessary.
-
-    :param path: Path to the directory.
-    :type path: Union[str, Path]
-    :return: Path object for the directory.
-    :rtype: Path
-
-    Example:
-        >>> ensure_directory('./data/cache')
-        PosixPath('./data/cache')
-    """
+    """Ensure directory exists."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -193,22 +138,7 @@ def get_cache_path(
     dataset_name: str,
     filename: str
 ) -> Path:
-    """
-    Get the standardized cache file path for a dataset.
-
-    :param root_dir: Root data directory.
-    :type root_dir: Union[str, Path]
-    :param dataset_name: Name of the dataset.
-    :type dataset_name: str
-    :param filename: Cache filename (e.g., 'ETTh1.pkl').
-    :type filename: str
-    :return: Full path to the cache file.
-    :rtype: Path
-
-    Example:
-        >>> get_cache_path('./data', 'longhorizon', 'ETTh1.pkl')
-        PosixPath('./data/longhorizon/cache/ETTh1.pkl')
-    """
+    """Get standardized cache path."""
     cache_dir = Path(root_dir) / dataset_name / 'cache'
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / filename
@@ -219,20 +149,20 @@ def clean_cache(
     dataset_name: Optional[str] = None
 ) -> int:
     """
-    Remove cached files for a dataset or all datasets.
+    Remove cached files.
 
-    :param root_dir: Root data directory.
-    :type root_dir: Union[str, Path]
-    :param dataset_name: Specific dataset to clean. If None, cleans all.
-    :type dataset_name: Optional[str]
-    :return: Number of files removed.
-    :rtype: int
+    Includes safety checks to avoid deleting system files.
 
-    Example:
-        >>> clean_cache('./data', 'longhorizon')
-        5
+    :param root_dir: Base data directory.
+    :param dataset_name: Specific dataset name (optional).
+    :return: Count of removed files.
     """
-    root_dir = Path(root_dir)
+    root_dir = Path(root_dir).resolve()
+
+    # Safety Check: Prevent deletion of root/system dirs
+    if len(root_dir.parts) < 2:
+        raise ValueError(f"Root directory {root_dir} seems unsafe to clean. Please specify a deeper path.")
+
     files_removed = 0
 
     if dataset_name:
@@ -253,27 +183,11 @@ def clean_cache(
 
 
 def validate_dataframe_schema(
-    df,
+    df: pd.DataFrame,
     required_columns: list,
     dataset_name: str = 'dataset'
 ) -> bool:
-    """
-    Validate that a DataFrame contains required columns.
-
-    :param df: DataFrame to validate.
-    :type df: pandas.DataFrame
-    :param required_columns: List of required column names.
-    :type required_columns: list
-    :param dataset_name: Name for error messages.
-    :type dataset_name: str
-    :return: True if validation passes.
-    :rtype: bool
-    :raises ValueError: If required columns are missing.
-
-    Example:
-        >>> validate_dataframe_schema(df, ['unique_id', 'ds', 'y'], 'ETTh1')
-        True
-    """
+    """Check if DataFrame contains required columns."""
     missing_cols = set(required_columns) - set(df.columns)
     if missing_cols:
         raise ValueError(

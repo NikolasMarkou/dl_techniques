@@ -14,6 +14,11 @@ This script implements a robust training pipeline supporting both:
 It uses pre-computed in-memory validation datasets to prevent CPU-bound generation
 lags at the end of epochs.
 
+Integration
+-----------
+Updated to use the unified `dl_techniques.datasets.time_series` module for
+synthetic data generation and normalization.
+
 References
 ----------
 1.  Time Series Decomposition Methods in Deep Learning: A Review
@@ -39,16 +44,25 @@ import seaborn as sns
 import tensorflow as tf
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
+
+# Model Imports
 from dl_techniques.models.prism.model import PRISMModel
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
-from dl_techniques.datasets.time_series import TimeSeriesGenerator, TimeSeriesGeneratorConfig
+
+# New Dataset Module Imports
+from dl_techniques.datasets.time_series import (
+    TimeSeriesGenerator,
+    TimeSeriesGeneratorConfig,
+    TimeSeriesNormalizer,
+    NormalizationMethod
+)
 
 # ---------------------------------------------------------------------
 
@@ -162,12 +176,12 @@ class PRISMTrainingConfig:
 
 class PRISMDataProcessor:
     """
-    Robust data processor for PRISM.
+    Robust data processor for PRISM using the new TimeSeriesGenerator and Normalizer.
 
     Features:
     - Infinite streaming generator for Training (maximum diversity).
     - Pre-computed in-memory arrays for Validation/Test (eliminates end-of-epoch lag).
-    - Strict normalization and NaN handling.
+    - Robust per-instance normalization using TimeSeriesNormalizer.
     """
 
     def __init__(
@@ -204,21 +218,28 @@ class PRISMDataProcessor:
 
     def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
         """
-        Normalize series instance with checks for constant values and outliers.
-        Returns clipped, normalized data as float32.
+        Normalize series instance using TimeSeriesNormalizer.
+        Includes clipping to prevent extreme outliers from destabilizing training.
+
+        :param series: Input numpy array (n_timesteps, features) or (n_timesteps,)
+        :return: Normalized array as float32
         """
+        # 1. Clip extreme outliers first (stability)
+        series = np.clip(series, -1e6, 1e6) # clip infinities
+
         if self.config.normalize_per_instance:
-            mean = np.mean(series)
-            std = np.std(series)
+            # Use the module's Normalizer for robust standard scaling
+            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
+            # Check for NaNs before fitting
+            if np.isnan(series).any():
+                # Simple forward fill for safety inside generator
+                series = _fill_nans(series)
 
-            # Avoid division by near-zero std for constant sequences
-            if std < 1e-5:
-                series = series - mean
-            else:
-                series = (series - mean) / std
+            series = normalizer.fit_transform(series)
 
-        # Clip extreme outliers that destabilize MSE/Quantile loss
+        # 2. Hard Clip for neural network stability (-10 to 10 sigmas is usually plenty)
         series = np.clip(series, -10.0, 10.0)
+
         return series.astype(np.float32)
 
     def _training_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
@@ -240,7 +261,8 @@ class PRISMDataProcessor:
                 )
 
                 for pattern_name in selected_patterns:
-                    # 2. Generate full series
+                    # 2. Generate full series using the new TimeSeriesGenerator API
+                    # Note: Returns (n_samples, 1)
                     data = self.ts_generator.generate_task_data(pattern_name)
 
                     # Safety Check
@@ -405,6 +427,16 @@ class PRISMDataProcessor:
             'validation_steps': validation_steps,
             'test_steps': test_steps
         }
+
+def _fill_nans(data: np.ndarray) -> np.ndarray:
+    """Helper to forward fill NaNs in numpy array."""
+    mask = np.isnan(data)
+    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
+    np.maximum.accumulate(idx, axis=0, out=idx)
+    out = data[idx]
+    # If leading NaNs, fill with 0
+    out[np.isnan(out)] = 0
+    return out
 
 
 class PRISMPerformanceCallback(keras.callbacks.Callback):
@@ -930,7 +962,12 @@ def main() -> None:
         enforce_monotonicity=args.enforce_monotonicity
     )
 
-    generator_config = TimeSeriesGeneratorConfig(n_samples=50000, random_seed=42)
+    # Use the new config dataclass from the generator module
+    generator_config = TimeSeriesGeneratorConfig(
+        n_samples=10000,
+        random_seed=42,
+        default_noise_level=0.1
+    )
 
     try:
         trainer = PRISMTrainer(config, generator_config)

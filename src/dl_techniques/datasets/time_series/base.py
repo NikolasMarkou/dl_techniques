@@ -3,6 +3,8 @@ Time Series Dataset Base Classes.
 
 This module provides abstract base classes for time series dataset loaders,
 defining a consistent interface for downloading, loading, and splitting data.
+It enforces strict separation of concerns between data fetching, loading,
+and preprocessing.
 
 Example:
     >>> from dl_techniques.datasets.time_series.base import BaseTimeSeriesDataset
@@ -22,15 +24,17 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
-# local imports
+# Local Imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from .config import (
     DatasetSplits,
     NormalizationConfig,
     TimeSeriesConfig,
     WindowConfig,
 )
+from .normalizer import TimeSeriesNormalizer
 
 # ---------------------------------------------------------------------
 
@@ -40,21 +44,13 @@ class BaseTimeSeriesDataset(ABC):
 
     This class defines the interface for loading and preprocessing
     time series forecasting datasets. Subclasses must implement
-    the download() and load() methods.
+    the `download()` and `load()` methods.
 
-    :param root_dir: Root directory for storing downloaded data.
-    :type root_dir: str
-    :param verbose: Whether to enable verbose logging.
-    :type verbose: bool
-
-    Example:
-        >>> class ETTDataset(BaseTimeSeriesDataset):
-        ...     def download(self):
-        ...         # Implementation
-        ...         pass
-        ...     def load(self, group):
-        ...         # Implementation
-        ...         pass
+    Attributes:
+        CONFIGS (Dict[str, TimeSeriesConfig]): Registry of dataset configurations.
+        SOURCE_URL (str): Default URL for data download.
+        root_dir (Path): Base directory for data storage.
+        verbose (bool): Whether to log detailed operations.
     """
 
     # Default configuration for the dataset (override in subclasses)
@@ -78,13 +74,14 @@ class BaseTimeSeriesDataset(ABC):
         self.verbose = verbose
 
     @abstractmethod
-    def download(self, **kwargs) -> None:
+    def download(self, **kwargs: Any) -> None:
         """
         Download the raw dataset files.
 
         Subclasses must implement this method to download dataset files
         from their source URLs.
 
+        :param kwargs: Additional download parameters (e.g., specific group).
         :raises NotImplementedError: If not implemented by subclass.
         """
         raise NotImplementedError("Subclasses must implement download()")
@@ -120,11 +117,6 @@ class BaseTimeSeriesDataset(ABC):
         :return: Configuration dataclass for the group.
         :rtype: TimeSeriesConfig
         :raises ValueError: If the group is not found.
-
-        Example:
-            >>> config = dataset.get_config('ETTh1')
-            >>> print(config.horizon)
-            96
         """
         if group not in self.CONFIGS:
             raise ValueError(
@@ -139,10 +131,6 @@ class BaseTimeSeriesDataset(ABC):
 
         :return: List of group names.
         :rtype: List[str]
-
-        Example:
-            >>> dataset.list_groups()
-            ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2']
         """
         return list(self.CONFIGS.keys())
 
@@ -156,8 +144,9 @@ class BaseTimeSeriesDataset(ABC):
         """
         Split a DataFrame into train/validation/test sets.
 
-        Uses the test_size and val_size from the configuration to perform
-        a temporal split, ensuring no data leakage from future to past.
+        This method performs a temporal split per 'unique_id' group to ensure
+        data integrity across multiple time series. It prevents future leakage
+        between train/test splits even when series are stacked.
 
         :param df: DataFrame with time series data.
         :type df: pd.DataFrame
@@ -165,59 +154,84 @@ class BaseTimeSeriesDataset(ABC):
         :type config: TimeSeriesConfig
         :param normalize: Whether to apply normalization.
         :type normalize: bool
-        :param norm_config: Normalization configuration. If None, uses
-            standard normalization.
+        :param norm_config: Normalization configuration.
         :type norm_config: Optional[NormalizationConfig]
         :return: DatasetSplits containing train, val, test data.
         :rtype: DatasetSplits
-
-        Example:
-            >>> splits = dataset.split_data(df, config, normalize=True)
-            >>> print(len(splits.train), len(splits.test))
         """
         if norm_config is None:
             norm_config = NormalizationConfig()
 
-        # Sort by time within each series
-        df = df.sort_values(['unique_id', 'ds']).reset_index(drop=True)
+        # Sort by time within each series to ensure correct temporal splitting
+        df = df.sort_values(['unique_id', 'ds'])
 
-        # Calculate split boundaries
-        n_total = len(df)
-        test_size = config.test_size
-        val_size = config.val_size or 0
+        train_dfs: List[pd.DataFrame] = []
+        val_dfs: List[pd.DataFrame] = []
+        test_dfs: List[pd.DataFrame] = []
 
-        train_end = n_total - test_size - val_size
-        val_end = n_total - test_size if val_size > 0 else train_end
+        # Process each series independently to prevent leakage
+        for _, group in df.groupby('unique_id'):
+            n_total = len(group)
+            test_size = config.test_size
+            val_size = config.val_size or 0
 
-        # Perform splits
-        train_df = df.iloc[:train_end].copy()
-        val_df = df.iloc[train_end:val_end].copy() if val_size > 0 else None
-        test_df = df.iloc[val_end:].copy()
+            train_end = n_total - test_size - val_size
+            val_end = n_total - test_size if val_size > 0 else train_end
 
-        # Compute normalization statistics from training data
-        train_mean = None
-        train_std = None
+            # Check for insufficient data
+            if train_end <= 0:
+                logger.warning(
+                    f"Series {group['unique_id'].iloc[0]} too short for requested split. "
+                    f"Length: {n_total}, Req: {test_size + val_size}"
+                )
+                continue
+
+            train_dfs.append(group.iloc[:train_end])
+            if val_size > 0:
+                val_dfs.append(group.iloc[train_end:val_end])
+            test_dfs.append(group.iloc[val_end:])
+
+        # Concatenate results
+        train_df = pd.concat(train_dfs, ignore_index=True)
+        val_df = pd.concat(val_dfs, ignore_index=True) if val_dfs else None
+        test_df = pd.concat(test_dfs, ignore_index=True)
+
+        # Handle Normalization
+        train_mean: Optional[np.ndarray] = None
+        train_std: Optional[np.ndarray] = None
 
         if normalize and norm_config.method != 'none':
             numeric_cols = df.select_dtypes(include=[np.number]).columns
-            numeric_cols = [c for c in numeric_cols if c not in ['unique_id', 'ds']]
+            # Exclude ID and likely Time/DS columns if they are numeric
+            cols_to_norm = [c for c in numeric_cols if c not in ['unique_id', 'ds', 'date']]
 
-            train_mean = train_df[numeric_cols].mean().values
-            train_std = train_df[numeric_cols].std().values + norm_config.epsilon
+            if not cols_to_norm:
+                logger.warning("No numeric columns found to normalize.")
+            else:
+                # Initialize Normalizer
+                normalizer = TimeSeriesNormalizer(
+                    method=norm_config.method,
+                    epsilon=norm_config.epsilon,
+                    feature_range=(-1, 1) if norm_config.method == 'minmax' else (0, 1)
+                )
 
-            # Apply normalization
-            train_df[numeric_cols] = (
-                train_df[numeric_cols] - train_mean
-            ) / train_std
+                # Fit on Training Data ONLY to prevent leakage
+                train_data = train_df[cols_to_norm].values
+                normalizer.fit(train_data)
 
-            if val_df is not None:
-                val_df[numeric_cols] = (
-                    val_df[numeric_cols] - train_mean
-                ) / train_std
+                # Transform all sets
+                train_df[cols_to_norm] = normalizer.transform(train_data)
 
-            test_df[numeric_cols] = (
-                test_df[numeric_cols] - train_mean
-            ) / train_std
+                if val_df is not None:
+                    val_df[cols_to_norm] = normalizer.transform(val_df[cols_to_norm].values)
+
+                test_df[cols_to_norm] = normalizer.transform(test_df[cols_to_norm].values)
+
+                # Extract statistics for backward compatibility with DatasetSplits
+                stats = normalizer.get_statistics()
+                if norm_config.method == 'standard':
+                    train_mean = np.array(stats.get('mean_val'))
+                    train_std = np.array(stats.get('std_val'))
 
         return DatasetSplits(
             train=train_df,
@@ -246,12 +260,11 @@ class BaseTimeSeriesDataset(ABC):
             - X: Input windows of shape (n_windows, window_size, n_features)
             - y: Target windows of shape (n_windows, horizon, n_targets)
         :rtype: Tuple[np.ndarray, np.ndarray]
-
-        Example:
-            >>> X, y = dataset.prepare_arrays(df, window_config)
-            >>> print(X.shape, y.shape)
-            (1000, 96, 7) (1000, 24, 1)
+        :raises ValueError: If no windows can be generated.
         """
+        # Lazy import to avoid circular dependencies
+        from .pipeline import create_sliding_windows as pipeline_create_windows
+
         # Determine feature columns
         exclude_cols = {window_config.id_col, window_config.time_col}
         if window_config.feature_cols is not None:
@@ -264,81 +277,46 @@ class BaseTimeSeriesDataset(ABC):
                 window_config.target_col not in feature_cols):
             feature_cols.append(window_config.target_col)
 
-        all_x = []
-        all_y = []
+        target_idx = feature_cols.index(window_config.target_col)
+
+        all_x: List[np.ndarray] = []
+        all_y: List[np.ndarray] = []
 
         # Process each series independently
         for _, group in df.groupby(window_config.id_col):
             series_data = group[feature_cols].values.astype(np.float32)
 
-            # Find target column index
-            target_idx = feature_cols.index(window_config.target_col)
+            # Use pipeline logic for efficient windowing
+            try:
+                x_win, y_win_full = pipeline_create_windows(
+                    data=series_data,
+                    window_size=window_config.window_size,
+                    horizon=window_config.horizon,
+                    stride=window_config.stride
+                )
 
-            # Create sliding windows
-            x_windows, y_windows = self._create_sliding_windows(
-                data=series_data,
-                window_size=window_config.window_size,
-                horizon=window_config.horizon,
-                stride=window_config.stride,
-                target_idx=target_idx
-            )
+                # Slice Y to get only the target index (pipeline returns full features)
+                # Shape: (n_windows, horizon, 1)
+                y_win = y_win_full[:, :, target_idx:target_idx + 1]
 
-            if len(x_windows) > 0:
-                all_x.append(x_windows)
-                all_y.append(y_windows)
+                if len(x_win) > 0:
+                    all_x.append(x_win)
+                    all_y.append(y_win)
+
+            except ValueError:
+                # Skip series that are too short
+                continue
 
         if not all_x:
             raise ValueError(
                 "No data windows generated. Check that DataFrame has enough "
-                f"rows (>= window_size + horizon = "
-                f"{window_config.window_size + window_config.horizon})"
+                f"rows (>= {window_config.window_size + window_config.horizon})"
             )
 
         X = np.concatenate(all_x, axis=0)
         y = np.concatenate(all_y, axis=0)
 
         return X, y
-
-    @staticmethod
-    def _create_sliding_windows(
-        data: np.ndarray,
-        window_size: int,
-        horizon: int,
-        stride: int = 1,
-        target_idx: int = 0
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Create sliding windows from a numpy array.
-
-        Internal method for generating input-output window pairs.
-
-        :param data: Input array of shape (timesteps, features).
-        :type data: np.ndarray
-        :param window_size: Length of input sequence.
-        :type window_size: int
-        :param horizon: Length of target sequence.
-        :type horizon: int
-        :param stride: Step size between windows.
-        :type stride: int
-        :param target_idx: Index of the target column in features.
-        :type target_idx: int
-        :return: Tuple of (inputs, targets) arrays.
-        :rtype: Tuple[np.ndarray, np.ndarray]
-        """
-        n_samples = (len(data) - window_size - horizon) // stride + 1
-
-        if n_samples <= 0:
-            return np.array([]), np.array([])
-
-        x_list = []
-        y_list = []
-
-        for i in range(0, n_samples * stride, stride):
-            x_list.append(data[i:i + window_size])
-            # Extract only target column for y
-            y_list.append(data[i + window_size:i + window_size + horizon, target_idx:target_idx + 1])
-
-        return np.array(x_list), np.array(y_list)
 
     def get_info(self, group: str) -> Dict[str, Any]:
         """
@@ -348,11 +326,6 @@ class BaseTimeSeriesDataset(ABC):
         :type group: str
         :return: Dictionary with dataset metadata and statistics.
         :rtype: Dict[str, Any]
-
-        Example:
-            >>> info = dataset.get_info('ETTh1')
-            >>> print(info['horizon'], info['seasonality'])
-            96 24
         """
         config = self.get_config(group)
         return {
