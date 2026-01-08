@@ -1,0 +1,1859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Keras 3 Mastery: Building Production-Grade Custom Layers and Models</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 2.5cm 2cm 2.5cm 2cm;
+            @bottom-center {
+                content: counter(page);
+                font-size: 10pt;
+                color: #666;
+            }
+        }
+        
+        @page:first {
+            @bottom-center { content: none; }
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-size: 11pt;
+            line-height: 1.6;
+            color: #1a1a1a;
+            text-align: justify;
+            hyphens: auto;
+        }
+        
+        /* Title Page */
+        .title-page {
+            page-break-after: always;
+            text-align: center;
+            padding-top: 30%;
+        }
+        
+        .title-page h1 {
+            font-size: 28pt;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 0.5em;
+            line-height: 1.2;
+        }
+        
+        .title-page .subtitle {
+            font-size: 14pt;
+            color: #7f8c8d;
+            margin-bottom: 3em;
+        }
+        
+        .title-page .author {
+            font-size: 14pt;
+            font-style: italic;
+            color: #34495e;
+        }
+        
+        /* Table of Contents */
+        .toc {
+            page-break-after: always;
+        }
+        
+        .toc h2 {
+            font-size: 18pt;
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 0.3em;
+            margin-bottom: 1em;
+        }
+        
+        .toc ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        
+        .toc > ul > li {
+            margin-bottom: 0.8em;
+        }
+        
+        .toc > ul > li > a {
+            font-weight: bold;
+            font-size: 12pt;
+            color: #2c3e50;
+            text-decoration: none;
+        }
+        
+        .toc ul ul {
+            margin-left: 1.5em;
+            margin-top: 0.3em;
+        }
+        
+        .toc ul ul li {
+            margin-bottom: 0.3em;
+        }
+        
+        .toc ul ul li a {
+            font-weight: normal;
+            font-size: 10pt;
+            color: #555;
+            text-decoration: none;
+        }
+        
+        /* Chapter headings */
+        h1.chapter {
+            page-break-before: always;
+            font-size: 24pt;
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 0.3em;
+            margin-top: 0;
+            margin-bottom: 1em;
+        }
+        
+        h2 {
+            font-size: 16pt;
+            color: #2c3e50;
+            margin-top: 1.5em;
+            margin-bottom: 0.8em;
+            page-break-after: avoid;
+        }
+        
+        h3 {
+            font-size: 13pt;
+            color: #34495e;
+            margin-top: 1.2em;
+            margin-bottom: 0.6em;
+            page-break-after: avoid;
+        }
+        
+        h4 {
+            font-size: 11pt;
+            color: #34495e;
+            font-weight: bold;
+            margin-top: 1em;
+            margin-bottom: 0.5em;
+            page-break-after: avoid;
+        }
+        
+        /* Paragraphs */
+        p {
+            margin-bottom: 0.8em;
+            orphans: 3;
+            widows: 3;
+        }
+        
+        /* Code blocks */
+        pre {
+            background-color: #f8f9fa;
+            border: 1px solid #e1e4e8;
+            border-left: 4px solid #3498db;
+            border-radius: 4px;
+            padding: 1em;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 9pt;
+            line-height: 1.4;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin: 1em 0;
+            page-break-inside: avoid;
+        }
+        
+        code {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 9.5pt;
+            background-color: #f0f0f0;
+            padding: 0.1em 0.3em;
+            border-radius: 3px;
+        }
+        
+        pre code {
+            background: none;
+            padding: 0;
+            font-size: inherit;
+        }
+        
+        /* Lists */
+        ul, ol {
+            margin-bottom: 1em;
+            padding-left: 1.5em;
+        }
+        
+        li {
+            margin-bottom: 0.3em;
+        }
+        
+        /* Intro section styling */
+        .intro {
+            page-break-after: always;
+        }
+        
+        .intro h2 {
+            font-size: 20pt;
+            text-align: center;
+            border-bottom: none;
+            margin-bottom: 1.5em;
+        }
+        
+        .intro .byline {
+            text-align: center;
+            font-style: italic;
+            color: #666;
+            margin-bottom: 2em;
+        }
+        
+        /* Emphasis and strong text */
+        strong {
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        em {
+            font-style: italic;
+        }
+        
+        /* Horizontal rule */
+        hr {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 2em 0;
+        }
+        
+        /* Signature */
+        .signature {
+            text-align: right;
+            font-style: italic;
+            margin-top: 2em;
+            color: #555;
+        }
+        
+        /* Keep code with its heading */
+        h4 + pre, h3 + pre, p + pre {
+            page-break-before: avoid;
+        }
+        
+        /* Avoid orphaned headings */
+        h2, h3, h4 {
+            page-break-after: avoid;
+        }
+        
+        /* License section */
+        .license {
+            margin-top: 3em;
+            padding: 1.5em;
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .license h2 {
+            margin-top: 0;
+            font-size: 14pt;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Title Page -->
+<div class="title-page">
+    <h1>Keras 3 Mastery</h1>
+    <p class="subtitle">Building Production-Grade Custom Layers and Models</p>
+    <p class="author">by Nikolas Markou</p>
+</div>
+
+<!-- Introduction -->
+<div class="intro">
+    <h2>Introduction</h2>
+    <p class="byline">By Nikolas Markou</p>
+    
+    <p>After years of building deep learning systems in production environments, I've witnessed the same failures repeat across teams and organizations. Engineers who can design sophisticated neural architectures struggle to deploy them reliably. Models that perform brilliantly in notebooks crash mysteriously in production. Custom layers that work perfectly during training become unserializable artifacts that can't be saved or shared.</p>
+    
+    <p>This guide exists because I grew tired of watching talented practitioners stumble over problems that have clear, systematic solutions.</p>
+    
+    <h3>The Problems This Guide Solves</h3>
+    
+    <p><strong>1. The Serialization Crisis</strong></p>
+    <p>You've built an innovative custom layer. It trains beautifully. Then you call <code>model.save()</code> and everything breaks. The error messages are cryptic. Your weights vanish into the void. This happens because most tutorials skip the critical details of how Keras 3's serialization lifecycle actually works. This guide provides complete, battle-tested patterns for saving and loading custom components that survive the full deployment pipeline.</p>
+    
+    <p><strong>2. The Create vs Build Confusion</strong></p>
+    <p>The distinction between layer creation and layer building is the single most misunderstood concept in custom Keras development. Developers create weights in <code>__init__</code> when they should be in <code>build</code>. They inspect input shapes before they exist. They wonder why their models fail to serialize. Chapter 1 dismantles this confusion with clear principles and concrete examples.</p>
+    
+    <p><strong>3. Shape Inference Failures</strong></p>
+    <p>"Output tensors must know their shapes." This error has derailed more projects than I can count. When you neglect <code>compute_output_shape</code>, Keras cannot construct your model using the Functional API. Your sub-layers fail to build correctly. Your architecture becomes brittle and untestable. This guide treats shape inference as a first-class concern, not an afterthought.</p>
+    
+    <p><strong>4. Composite Layer Chaos</strong></p>
+    <p>Real-world architectures aren't simple. They contain layers within layers, conditional execution paths, and complex weight sharing patterns. Building composite layers that serialize correctly requires explicit building of every sub-component with precisely calculated input shapes. Most documentation glosses over this. This guide does not.</p>
+    
+    <p><strong>5. Weight Compatibility Nightmares</strong></p>
+    <p>Transfer learning fails. Model variants can't share weights. Configuration changes break serialization. These problems stem from inconsistent weight naming and improper layer registration. The patterns in Chapter 3 ensure your models remain interchangeable across configurations and compatible with pretrained weights.</p>
+    
+    <p><strong>6. Graph-Unsafe Operations</strong></p>
+    <p>That Python <code>if</code> statement in your <code>call</code> method? It works in eager mode. It explodes during graph tracing. Those NumPy operations? They break compilation. This guide teaches you to think in symbolic operations, using <code>keras.ops</code> exclusively for computations that survive the transition from research to production.</p>
+    
+    <p><strong>7. The Testing Gap</strong></p>
+    <p>Most custom layers are tested exactly once: when they're written. Then they're integrated into models, trained for days, and deployed to production—where they fail in ways that could have been caught in five minutes. Chapter 3 provides comprehensive testing strategies that catch serialization errors, shape mismatches, gradient issues, and numerical instabilities before they become expensive production incidents.</p>
+    
+    <p><strong>8. Performance Blind Spots</strong></p>
+    <p>Your custom layer is correct. But it's also slow. Memory-hungry. Incompatible with quantization. Unable to run on edge devices. This guide addresses performance optimization as an integral part of production readiness, not a separate concern to be handled later.</p>
+    
+    <h3>Who This Guide Is For</h3>
+    <p>This guide is for practitioners who have outgrown tutorials. You understand neural networks. You can build models in Keras. Now you need to build custom components that are robust, maintainable, and production-ready.</p>
+    
+    <p>If you've ever asked:</p>
+    <ul>
+        <li>"Why won't my custom layer serialize?"</li>
+        <li>"Where should I create my weights?"</li>
+        <li>"How do I handle dynamic input shapes?"</li>
+        <li>"Why do my sub-layers have no weights after building?"</li>
+        <li>"How do I test that my layer will survive deployment?"</li>
+    </ul>
+    <p>Then this guide was written for you.</p>
+    
+    <h3>How to Use This Guide</h3>
+    <p>Chapter 1 establishes the foundations. Read it completely, even if you think you understand the basics. The Create vs Build paradigm and serialization lifecycle are the bedrock upon which everything else depends.</p>
+    
+    <p>Chapter 2 builds complexity progressively. Each section addresses a specific architectural pattern with complete, runnable examples. Use these as templates for your own implementations.</p>
+    
+    <p>Chapter 3 focuses on production readiness. Testing strategies, troubleshooting guides, and optimization techniques transform working code into deployable systems.</p>
+    
+    <p>The code examples throughout are not simplified for illustration. They are production-grade implementations that handle edge cases, implement proper error handling, and follow the patterns that will keep your systems running reliably.</p>
+    
+    <p>Build well.</p>
+    
+    <p class="signature">— Nikolas Markou</p>
+</div>
+
+<!-- Table of Contents -->
+<div class="toc">
+    <h2>Table of Contents</h2>
+    <ul>
+        <li><a href="#chapter1">Chapter 1: Foundations of Custom Keras Layers</a>
+            <ul>
+                <li><a href="#create-vs-build">Understanding the Create vs Build Paradigm in Keras 3</a></li>
+                <li><a href="#essential-principles">Essential Principles for Robust and Serializable Layers</a></li>
+                <li><a href="#dev-environment">Setting Up Your Development Environment Correctly</a></li>
+                <li><a href="#core-imports">Core Imports and Registration for Custom Components</a></li>
+                <li><a href="#type-hints">Type Hints and Documentation for Maintainable Code</a></li>
+                <li><a href="#layer-lifecycle">The Layer Lifecycle from Instantiation to Execution</a></li>
+                <li><a href="#common-pitfalls">Common Pitfalls in Layer Design and How to Avoid Them</a></li>
+                <li><a href="#config-data">Best Practices for Configuration as Serializable Data</a></li>
+                <li><a href="#testing-layer">Testing Your Layer Before Integration with Models</a></li>
+            </ul>
+        </li>
+        <li><a href="#chapter2">Chapter 2: Building Advanced Custom Layers and Models</a>
+            <ul>
+                <li><a href="#simple-layers">Implementing Simple Layers with Trainable Weights</a></li>
+                <li><a href="#composite-layers">Creating Composite Layers with Multiple Sub-Layers</a></li>
+                <li><a href="#graph-safe">Graph-Safe Operations for Dynamic Computations</a></li>
+                <li><a href="#variable-shapes">Handling Variable Input Shapes and Batch Sizes</a></li>
+                <li><a href="#custom-activation">Implementing Custom Activation and Normalization Layers</a></li>
+                <li><a href="#conditional-layers">Designing Models with Conditional Layer Usage</a></li>
+                <li><a href="#staged-construction">Staged Construction for Complex Architectures</a></li>
+                <li><a href="#config-driven">Configuration-Driven Model Architectures</a></li>
+                <li><a href="#weight-compatibility">Ensuring Weight Compatibility Across Model Variants</a></li>
+            </ul>
+        </li>
+        <li><a href="#chapter3">Chapter 3: Production-Ready Custom Components</a>
+            <ul>
+                <li><a href="#serialization-patterns">Complete Serialization and Deserialization Patterns</a></li>
+                <li><a href="#testing-serialization">Testing Serialization Cycles for Reliability</a></li>
+                <li><a href="#weight-transfer">Weight Transfer and Compatibility Strategies</a></li>
+                <li><a href="#extension-points">Extension Points and Modular Design Patterns</a></li>
+                <li><a href="#factory-builder">Factory and Builder Patterns for Model Creation</a></li>
+                <li><a href="#testing-strategies">Comprehensive Testing Strategies for Custom Layers</a></li>
+                <li><a href="#troubleshooting">Troubleshooting Common Runtime and Build Errors</a></li>
+                <li><a href="#optimizing">Optimizing Performance for Production Deployment</a></li>
+                <li><a href="#complete-examples">Complete Examples of Production-Grade Implementations</a></li>
+            </ul>
+        </li>
+    </ul>
+</div>
+
+<!-- Chapter 1 -->
+<h1 class="chapter" id="chapter1">Chapter 1: Foundations of Custom Keras Layers</h1>
+
+<h2 id="create-vs-build">Understanding the Create vs Build Paradigm in Keras 3</h2>
+
+<p>Understanding the Create vs Build Paradigm in Keras 3 is essential for developing custom layers and models that are robust, serializable, and production-ready. This distinction lies at the heart of Keras 3's architecture, ensuring that models can be saved, loaded, and reused without errors. By mastering this paradigm, you gain the freedom to design complex neural architectures while maintaining the integrity of your implementations.</p>
+
+<p>At its core, the Create vs Build paradigm separates two critical phases in a layer's lifecycle: <strong>creation</strong> and <strong>building</strong>. The creation phase occurs when you instantiate a layer or model, defining its architecture and storing configuration parameters. The building phase happens later, when the input shapes are known, and the layer creates its weights and finalizes its internal structure. This separation is analogous to designing a blueprint for a house (creation) versus actually constructing it with materials of specific dimensions (building). Just as you wouldn't start building a house without knowing the size of the plot, Keras 3 won't create weights until it knows the input shapes.</p>
+
+<p>The creation phase happens in the <code>__init__</code> method, where you define the layer's structure, sub-layers, and configuration parameters. Here, you store all the information needed to recreate the layer later, such as the number of units, activation functions, or dropout rates. However, you must avoid creating weights or inspecting input shapes at this stage, as these depend on runtime information that isn't available yet. For example, if you're designing a custom dense layer, you would store the number of units and the activation function in <code>__init__</code>, but you wouldn't create the weight matrices until the <code>build</code> method is called.</p>
+
+<p>The building phase occurs in the <code>build</code> method, which is automatically called by Keras when the input shapes become known. This is where you create the layer's weights using <code>add_weight()</code> and explicitly build any sub-layers. The <code>build</code> method ensures that all weights are created with the correct dimensions, which depend on the input shapes. For instance, a dense layer needs to know the input dimension to create a weight matrix of shape <code>(input_dim, units)</code>. By deferring weight creation to the <code>build</code> method, Keras 3 ensures that layers remain flexible and can adapt to different input shapes without requiring manual intervention.</p>
+
+<p>A critical component of this paradigm is the <code>compute_output_shape</code> method, which must be implemented in every custom layer. This method allows Keras to infer the output shape of a layer given its input shape, even before the layer is built. It's essential for shape inference, enabling Keras to construct models using the functional API and ensuring that sub-layers are built with the correct shapes. For example, if your layer doubles the input channels, <code>compute_output_shape</code> should return a shape tuple where the last dimension is twice that of the input. Without this method, Keras cannot determine how layers connect, leading to errors during model construction or serialization.</p>
+
+<p>To illustrate this paradigm in practice, consider a simple custom layer that performs a linear transformation. In the <code>__init__</code> method, you would store configuration parameters like the number of output units and the activation function. In the <code>build</code> method, you would create the weight matrix and bias vector, using the input shape to determine the dimensions. The <code>call</code> method would then perform the actual computation during the forward pass, applying the weights to the input and optionally adding an activation function. Finally, <code>compute_output_shape</code> would return the expected output shape based on the input shape and the layer's configuration.</p>
+
+<p>For composite layers that contain sub-layers, the Create vs Build paradigm ensures that all sub-layers are properly initialized and built. In the <code>__init__</code> method, you create instances of the sub-layers, but you don't build them yet. Instead, you explicitly call <code>build</code> on each sub-layer within the parent layer's <code>build</code> method, passing the appropriate input shapes. This approach guarantees that all weights are created with the correct dimensions and that the layer hierarchy is preserved during serialization and deserialization.</p>
+
+<p>The separation of creation and building also facilitates configuration as data, a principle that aligns with the broader ethos of transparency and user control. By storing all configuration parameters as serializable data—rather than embedding them in code—you make your models more flexible and easier to debug.</p>
+
+<p>In practice, the Create vs Build paradigm enables you to design layers and models that are both powerful and maintainable. For example, you can create a hierarchical model with nested blocks, where each block is a composite layer containing its own sub-layers. By following the paradigm, you ensure that each block is created in <code>__init__</code> and built in <code>build</code>, with <code>compute_output_shape</code> providing the necessary shape inference. This modularity allows you to experiment with different architectures, swap out components, and reuse layers across projects—all while maintaining the integrity of the serialization process.</p>
+
+<p>Ultimately, understanding and applying the Create vs Build paradigm empowers you to build custom layers and models that are not only functional but also robust and production-ready.</p>
+
+<h2 id="essential-principles">Essential Principles for Robust and Serializable Layers</h2>
+
+<p>Building robust and serializable custom layers in Keras 3 requires adherence to foundational principles that ensure reliability, maintainability, and seamless integration with the broader deep learning ecosystem.</p>
+
+<p><strong>The first essential principle</strong> is the strict separation of layer creation and layer usage. In Keras, this means defining all layers in the <code>__init__</code> method but only utilizing them conditionally during the <code>call</code> method. For example, a custom model might initialize all possible feature extraction layers upfront, but selectively apply them during the forward pass based on configuration flags. This approach ensures that all weights exist with consistent names, making the model interchangeable for transfer learning and resilient to configuration changes.</p>
+
+<p><strong>The second principle</strong> is treating configuration as data rather than code. Keras layers must store their architecture and hyperparameters as serializable data. Configuration data should include everything from dimensionality and activation functions to dropout rates and normalization settings, all stored in a structured format that can be easily serialized to JSON. This approach prevents the obfuscation of critical details.</p>
+
+<p><strong>Explicit design</strong> is the third cornerstone of robust layer implementation. This means avoiding implicit behaviors that might seem convenient but ultimately create fragility. For instance, instead of dynamically adding layers based on runtime conditions, a well-designed model will declare its entire structure upfront, using clear conditional logic during the forward pass. In code, this translates to methods like <code>_build_encoder</code> and <code>_build_decoder</code> that make the model's structure immediately visible to anyone inspecting the class definition.</p>
+
+<p><strong>The fourth principle</strong> revolves around proper weight management and the lifecycle of layer serialization. Weights should only be created in the <code>build</code> method, never in <code>__init__</code>, and every sub-layer must be explicitly built to guarantee that their weights are properly registered. This process ensures that when the model is serialized, all weights are captured in a consistent format. The <code>compute_output_shape</code> method is equally critical, as it allows Keras to infer shapes without executing a forward pass, enabling robust model construction and debugging.</p>
+
+<p>For composite layers that contain sub-layers, <strong>explicit building of each component is non-negotiable</strong>. Each dense layer, dropout layer, and normalization layer must be individually built with the correct input shapes.</p>
+
+<p><strong>Hierarchical layer organization</strong> further enhances robustness, especially in complex architectures like encoders with multiple stages. Using nested lists to manage blocks within stages creates a clear, modular structure that is easy to inspect and modify.</p>
+
+<p>Finally, the implementation of <code>compute_output_shape</code> is not just a technical requirement but a philosophical commitment to clarity. This method ensures that the model's behavior is predictable and transparent. By providing a clear mapping from input to output shapes, developers can debug and extend models with confidence, knowing that the system's behavior is fully specified.</p>
+
+<h2 id="dev-environment">Setting Up Your Development Environment Correctly</h2>
+
+<p>Setting up your development environment correctly is the foundation for building production-grade custom Keras layers and models. A properly configured environment ensures reproducibility, minimizes dependency conflicts, and provides the necessary tools for debugging and optimization.</p>
+
+<p>To begin, start by creating an isolated Python environment using a tool like <code>conda</code> or <code>venv</code>. This isolation prevents conflicts between different project dependencies and maintains a clean workspace.</p>
+
+<p><strong>Using conda:</strong></p>
+<ol>
+    <li>Open your terminal or command prompt.</li>
+    <li>Run <code>conda create --name keras3_env python=3.10</code> to create a new environment named <code>keras3_env</code> with Python 3.10.</li>
+    <li>Activate the environment with <code>conda activate keras3_env</code>.</li>
+</ol>
+
+<p>Next, install the core dependencies required for Keras 3 development:</p>
+
+<pre><code>pip install keras tensorflow numpy typing-extensions</code></pre>
+
+<p>For those who prefer avoiding centralized package repositories, consider using decentralized alternatives like <code>pipx</code> or building packages from source. You can clone the Keras repository from GitHub and install it directly:</p>
+
+<pre><code>git clone https://github.com/keras-team/keras.git
+cd keras
+pip install .</code></pre>
+
+<p>Once your environment is set up, configure your integrated development environment (IDE) to support Keras 3 development. Ensure your IDE is configured with the following:</p>
+
+<ol>
+    <li><strong>Python Interpreter:</strong> Point to the isolated environment you created (<code>keras3_env</code>).</li>
+    <li><strong>Linting and Formatting:</strong> Use tools like <code>flake8</code> or <code>black</code> to maintain code quality:</li>
+</ol>
+
+<pre><code>pip install flake8 black</code></pre>
+
+<ol start="3">
+    <li><strong>Debugging Support:</strong> Configure your IDE to use the Python debugger (<code>pdb</code>) for stepping through custom layer implementations.</li>
+    <li><strong>Type Hints:</strong> Enable type checking with <code>mypy</code> to catch potential errors early:</li>
+</ol>
+
+<pre><code>pip install mypy</code></pre>
+
+<p>To further enhance your environment, incorporate tools that promote transparency and self-reliance. For example, use <code>docker</code> to containerize your development environment. A simple <code>Dockerfile</code> for Keras 3 development might look like this:</p>
+
+<pre><code>FROM python:3.10-slim
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update &amp;&amp; apt-get install -y git
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application
+COPY . .
+
+# Set the default command
+CMD ["python"]</code></pre>
+
+<h2 id="core-imports">Core Imports and Registration for Custom Components</h2>
+
+<p>Building custom components in Keras 3 requires careful attention to imports, registration, and component structure. This section provides practical guidance for implementing production-grade custom layers and models.</p>
+
+<p>To begin, establish your core imports with precision. The foundational imports for custom Keras components should include:</p>
+
+<ol>
+    <li>Core Keras modules for layer and model development</li>
+    <li>Tensor operations through <code>keras.ops</code> for backend-agnostic computation</li>
+    <li>Type hints for code clarity and maintainability</li>
+    <li>Numerical libraries like NumPy for array operations</li>
+    <li>Testing utilities for backend-specific validation</li>
+</ol>
+
+<pre><code># Essential imports for custom Keras components
+import keras
+from keras import ops
+from keras import layers
+from keras import initializers
+from keras import regularizers
+from keras import constraints
+from keras import activations
+from typing import Optional, Union, Tuple, List, Dict, Any, Callable
+import numpy as np</code></pre>
+
+<p>The registration process is critical for serialization and model persistence. Every custom class must be decorated with <code>@keras.saving.register_keras_serializable()</code> to ensure proper saving and loading.</p>
+
+<pre><code>@keras.saving.register_keras_serializable(package='YourPackageName')
+class CustomLayer(keras.layers.Layer):
+    # Layer implementation
+    pass</code></pre>
+
+<p>For custom models, the same registration principle applies:</p>
+
+<pre><code>@keras.saving.register_keras_serializable(package='YourPackageName')
+class CustomModel(keras.Model):
+    # Model implementation
+    pass</code></pre>
+
+<p>The package name parameter serves as a namespace, preventing naming collisions and enabling decentralized development.</p>
+
+<p>When implementing custom layers, follow these essential patterns:</p>
+
+<ol>
+    <li><strong>Configuration Storage:</strong> Store all parameters in <code>__init__</code> as instance attributes</li>
+    <li><strong>Weight Creation:</strong> Create weights exclusively in the <code>build</code> method</li>
+    <li><strong>Shape Inference:</strong> Implement <code>compute_output_shape</code> for proper shape propagation</li>
+    <li><strong>Serialization Support:</strong> Override <code>get_config</code> to include all custom parameters</li>
+</ol>
+
+<p>Here's a complete example demonstrating these principles:</p>
+
+<pre><code>@keras.saving.register_keras_serializable(package='CustomLayers')
+class HerbalRemedyLayer(keras.layers.Layer):
+    """
+    Custom layer demonstrating proper implementation patterns 
+    for custom Keras components.
+    """
+
+    def __init__(
+        self,
+        remedy_units: int = 64,
+        activation: Optional[str] = 'relu',
+        use_bias: bool = True,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.remedy_units = remedy_units
+        self.activation = activations.get(activation)
+        self.use_bias = use_bias
+        self.kernel = None
+        self.bias = None
+
+    def build(self, input_shape):
+        input_dim = input_shape[-1]
+        self.kernel = self.add_weight(
+            name='remedy_kernel',
+            shape=(input_dim, self.remedy_units),
+            initializer='glorot_uniform',
+            trainable=True
+        )
+        if self.use_bias:
+            self.bias = self.add_weight(
+                name='remedy_bias',
+                shape=(self.remedy_units,),
+                initializer='zeros',
+                trainable=True
+            )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        outputs = ops.matmul(inputs, self.kernel)
+        if self.use_bias:
+            outputs = ops.add(outputs, self.bias)
+        if self.activation is not None:
+            outputs = self.activation(outputs)
+        return outputs
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[:-1] + (self.remedy_units,)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'remedy_units': self.remedy_units,
+            'activation': activations.serialize(self.activation),
+            'use_bias': self.use_bias
+        })
+        return config</code></pre>
+
+<p>For composite layers containing sub-layers, ensure proper building of all components:</p>
+
+<pre><code>@keras.saving.register_keras_serializable(package='HolisticModels')
+class NaturalHealthBlock(keras.layers.Layer):
+    """
+    Composite layer demonstrating proper sub-layer management.
+    """
+
+    def __init__(
+        self,
+        units: int = 128,
+        dropout_rate: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.units = units
+        self.dropout_rate = dropout_rate
+
+        # Create sub-layers in __init__
+        self.dense1 = layers.Dense(units * 2)
+        self.dropout = layers.Dropout(dropout_rate)
+        self.dense2 = layers.Dense(units)
+
+    def build(self, input_shape):
+        # Explicitly build each sub-layer
+        self.dense1.build(input_shape)
+        self.dropout.build(self.dense1.compute_output_shape(input_shape))
+        self.dense2.build(self.dropout.compute_output_shape(
+            self.dense1.compute_output_shape(input_shape)
+        ))
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        x = self.dense1(inputs)
+        x = self.dropout(x, training=training)
+        return self.dense2(x)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[:-1] + (self.units,)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'units': self.units,
+            'dropout_rate': self.dropout_rate
+        })
+        return config</code></pre>
+
+<p>Remember these critical principles when working with custom components:</p>
+
+<ol>
+    <li><strong>Self-Sufficiency:</strong> Each component should contain all necessary information for reconstruction</li>
+    <li><strong>Transparency:</strong> Configuration should be fully inspectable through <code>get_config</code></li>
+    <li><strong>Decentralization:</strong> Registration enables sharing without central authorities</li>
+    <li><strong>Natural Compatibility:</strong> Components should work harmoniously with Keras' built-in layers</li>
+</ol>
+
+<h2 id="type-hints">Type Hints and Documentation for Maintainable Code</h2>
+
+<p>Type hints and documentation are the cornerstones of maintainable code, especially in complex systems like custom Keras layers where precision and clarity are paramount.</p>
+
+<p>The foundation of maintainable Keras layers begins with Python's type hinting system. Type hints transform your code from ambiguous collections of operations into clearly defined contracts about what data flows where. For custom layers, this means explicitly declaring the types of all constructor parameters, method arguments, and return values. The <code>typing</code> module provides essential tools like <code>Optional</code> for nullable values, <code>Union</code> for multiple possible types, and <code>Tuple</code> for fixed-size collections.</p>
+
+<p>Documentation takes type hints to the next level by explaining the why behind the what. Every custom layer should include a comprehensive docstring that covers four critical aspects:</p>
+<ul>
+    <li>The layer's intent and architecture (using ASCII diagrams where helpful)</li>
+    <li>Detailed parameter descriptions with type information</li>
+    <li>Input/output shape specifications</li>
+    <li>Any important implementation notes</li>
+</ul>
+
+<p>Real-world maintainability emerges when type hints and documentation work together with proper code organization. The constructor parameters are all typed (<code>hidden_dim: int</code>, <code>dropout_rate: float</code>), and the docstring provides a visual architecture diagram alongside parameter explanations. This combination means another developer can understand the layer's purpose and usage without reading the implementation details.</p>
+
+<p>Error prevention through documentation extends to the <code>get_config</code> and <code>from_config</code> methods that enable serialization. These should always be explicitly documented to show what configuration keys they handle and how they reconstruct the layer.</p>
+
+<p>Practical implementation follows a clear pattern: start with comprehensive type hints, then layer on documentation that explains the architectural intent, and finally add runtime validation to catch violations early. This triple defense system—types, docs, and validation—creates layers that are robust against misuse while remaining flexible for legitimate use cases.</p>
+
+<p>The payoff comes during maintenance and debugging. Well-typed, well-documented layers make stack traces more informative because the type hints appear in error messages, and the documentation provides immediate context about what each component was supposed to do.</p>
+
+<h2 id="layer-lifecycle">The Layer Lifecycle from Instantiation to Execution</h2>
+
+<p>The lifecycle of a custom Keras layer from instantiation to execution follows a carefully orchestrated sequence that ensures proper weight initialization, shape inference, and computational efficiency.</p>
+
+<p>At the core of the layer lifecycle is the separation between layer creation and layer usage. When a custom layer is instantiated, its <code>__init__</code> method is called to store all configuration parameters and create sub-layers, but crucially, it does not create weights or inspect input shapes. This separation is vital because input shapes may not be known at instantiation time, particularly in dynamic architectures.</p>
+
+<p>The <code>build</code> method serves as the bridge between configuration and execution. It is called automatically when the layer first encounters input data, either during the initial forward pass or when the model's <code>build</code> method is explicitly invoked. In this phase, the layer creates its trainable weights using <code>add_weight()</code> and explicitly builds any sub-layers to ensure their weights are properly initialized.</p>
+
+<p>Once built, the layer enters its operational phase where the <code>call</code> method handles forward computation. This method must remain purely symbolic, using only Keras operations that can be traced by the computational graph. Every operation in <code>call</code> should be compatible with graph execution, avoiding any Python-side effects or non-tensor computations. The <code>compute_output_shape</code> method works in tandem with <code>call</code> by providing shape inference without requiring actual computation.</p>
+
+<p>The serialization process itself follows a strict protocol where <code>get_config()</code> captures all layer parameters in a dictionary format. When saving a model, Keras serializes this configuration alongside the layer's weights. During loading, the configuration is used to recreate the layer structure before weights are loaded. This two-phase reconstruction ensures that the loaded model matches the original architecture exactly.</p>
+
+<h2 id="common-pitfalls">Common Pitfalls in Layer Design and How to Avoid Them</h2>
+
+<p>When building custom Keras layers, developers frequently encounter design pitfalls that can lead to serialization failures, training instability, or poor model performance.</p>
+
+<p><strong>The most critical error</strong> in custom layer development is violating the separation between the creation phase (in <code>__init__</code>) and the usage phase (in <code>call</code>). Many developers mistakenly attempt to inspect input shapes or create weights during initialization, which breaks the serialization lifecycle. Remember that <code>__init__</code> should only store configuration and create sub-layer instances without building them, while <code>build</code> is the proper place for weight creation and sub-layer building.</p>
+
+<p><strong>Another frequent pitfall</strong> is neglecting to implement <code>compute_output_shape</code>, which is essential for shape inference and functional API compatibility. Without this method, Keras cannot determine output shapes during model construction. The solution is straightforward: always implement <code>compute_output_shape</code> to return the expected output shape based on the input shape and layer configuration.</p>
+
+<p><strong>Improper weight initialization patterns</strong> also cause significant issues. The proper approach is to use Keras' initializer system consistently, storing initializer objects in <code>__init__</code> and applying them during weight creation in <code>build</code>. For example:</p>
+
+<pre><code># In __init__
+self.kernel_initializer = initializers.get(kernel_initializer)
+
+# In build
+self.kernel = self.add_weight(
+    shape=(input_dim, units),
+    initializer=self.kernel_initializer
+)</code></pre>
+
+<p><strong>Composite layers</strong> present another set of challenges, particularly around sub-layer building and serialization. A common mistake is assuming that Keras will automatically build sub-layers when they're first called. The solution is to explicitly build each sub-layer in your layer's <code>build</code> method, calling <code>sub_layer.build(input_shape)</code> for each component.</p>
+
+<p><strong>Configuration management</strong> itself is often handled poorly. The proper approach is to treat all layer configuration as serializable data, storing it in <code>__init__</code> and exposing it through <code>get_config</code>.</p>
+
+<p>Finally, many developers overlook the importance of <strong>proper registration for serialization</strong>. Every custom layer and model must be decorated with <code>@keras.saving.register_keras_serializable()</code> to ensure it can be saved and loaded correctly.</p>
+
+<h2 id="config-data">Best Practices for Configuration as Serializable Data</h2>
+
+<p>Configuration as serializable data forms the backbone of robust, production-ready Keras models that can be reliably saved, shared, and deployed across different environments.</p>
+
+<p>The foundation of serializable configuration lies in treating all model parameters as declarative data rather than procedural code. Begin by structuring your layer and model configurations using standard Python data types that JSON can natively serialize: dictionaries for named parameters, lists for ordered collections, and primitive types (integers, floats, strings) for individual values.</p>
+
+<p>When designing configuration schemas, prioritize human readability and editability over machine optimization. Use descriptive keys that clearly indicate each parameter's purpose, such as 'num_attention_heads' instead of abbreviated forms like 'n_heads'. Organize related parameters into nested dictionaries that reflect the model's logical structure.</p>
+
+<p>For complex models with conditional architecture components, implement configuration-driven construction patterns rather than hard-coded logic. Use boolean flags in your configuration to enable or disable optional components like residual connections, normalization layers, or auxiliary outputs. The model's <code>__init__</code> method should create all possible sub-layers based on the configuration, while the <code>call</code> method determines which components to actually use during the forward pass.</p>
+
+<p>Type safety plays a crucial role in maintaining configuration integrity across different environments. Implement comprehensive validation in your layer and model constructors to verify that all configuration values fall within expected ranges and types. Raise descriptive <code>ValueError</code> exceptions when validation fails, including the problematic parameter name and value in the error message.</p>
+
+<p>The most robust configuration systems implement comprehensive serialization support that goes beyond basic JSON compatibility. Provide methods to export the complete model configuration including all sub-layer parameters in a standardized format. Similarly, implement class methods that can reconstruct the entire model from a configuration dictionary without requiring any additional context.</p>
+
+<h2 id="testing-layer">Testing Your Layer Before Integration with Models</h2>
+
+<p>Testing your custom Keras layer before integrating it into larger models is an essential step to ensure reliability, prevent catastrophic failures, and maintain the integrity of your deep learning systems.</p>
+
+<p><strong>The testing process begins with unit testing</strong> the layer's core functionality. Start by verifying that the layer can be instantiated with different configurations without errors. Test edge cases such as zero or negative dimensions, invalid activation functions, or unsupported data types.</p>
+
+<p><strong>Next, validate the layer's weight creation and shape inference capabilities.</strong> After instantiation, call the layer's <code>build()</code> method with a sample input shape and verify that all expected weights are created with the correct dimensions:</p>
+
+<pre><code>def test_variable_input_layer():
+    layer = VariableSequenceProcessor(32)
+    test_cases = [
+        tf.random.normal((1, 10, 5)),   # Single sample, length 10
+        tf.random.normal((8, 15, 5)),   # Batch of 8, length 15
+        tf.random.normal((None, 7, 5)), # Variable batch, length 7
+    ]
+    for inputs in test_cases:
+        outputs = layer(inputs)
+        assert outputs.shape[-1] == 32  # Fixed output dimension
+        assert outputs.shape[0] == inputs.shape[0]  # Preserved batch dim</code></pre>
+
+<p><strong>The most critical test</strong> involves verifying the layer's forward pass computation. Create synthetic input data that matches your expected use case—including edge cases like NaN values, extreme magnitudes, or unusual distributions.</p>
+
+<p><strong>For layers with trainable weights</strong>, you must test the gradient flow during backpropagation. Verify that:</p>
+<ol>
+    <li>Weights are updated after a training step (indicating gradients flowed correctly)</li>
+    <li>The loss decreases over several steps (indicating learning is happening)</li>
+    <li>No weights become NaN during training (indicating numerical stability)</li>
+</ol>
+
+<p><strong>Serialization testing</strong> ensures your layer can survive the save-load cycle:</p>
+
+<pre><code># Save and reload test
+layer.save('test_layer.keras')
+loaded_layer = keras.models.load_model('test_layer.keras')
+
+# Verify:
+# 1. The loaded layer has the same configuration (check get_config())
+# 2. The loaded layer produces identical outputs for the same inputs
+# 3. All weights remain unchanged after the round-trip</code></pre>
+
+<p><strong>Finally, integration testing</strong> verifies that your layer works correctly when combined with other layers in a model.</p>
+
+<!-- Chapter 2 -->
+<h1 class="chapter" id="chapter2">Chapter 2: Building Advanced Custom Layers and Models</h1>
+
+<h2 id="simple-layers">Implementing Simple Layers with Trainable Weights</h2>
+
+<p>Implementing simple layers with trainable weights is foundational to building custom neural networks. This section provides a step-by-step guide to implementing layers with trainable weights, ensuring your models remain adaptable, interpretable, and aligned with ethical AI development.</p>
+
+<p><strong>1. Layer Definition:</strong> Begin by creating a class that inherits from <code>keras.layers.Layer</code>. This class will encapsulate the layer's logic, weights, and configuration.</p>
+
+<p><strong>2. Initialization (<code>__init__</code> method):</strong> Store all configuration parameters here. Avoid creating weights in this method, as shapes are not yet known.</p>
+
+<pre><code>def __init__(self, units=32, activation=None, use_bias=True, **kwargs):
+    super().__init__(**kwargs)
+    self.units = units
+    self.activation = keras.activations.get(activation)
+    self.use_bias = use_bias
+    self.kernel = None  # Will be created in build()
+    self.bias = None</code></pre>
+
+<p><strong>3. Weight Creation (<code>build</code> method):</strong> This is where trainable weights are initialized, using <code>self.add_weight()</code>. The <code>build</code> method ensures weights are created only when the input shape is known.</p>
+
+<pre><code>def build(self, input_shape):
+    input_dim = input_shape[-1]
+    self.kernel = self.add_weight(
+        name='kernel',
+        shape=(input_dim, self.units),
+        initializer='glorot_uniform',
+        trainable=True
+    )
+    if self.use_bias:
+        self.bias = self.add_weight(
+            name='bias',
+            shape=(self.units,),
+            initializer='zeros',
+            trainable=True
+        )
+    super().build(input_shape)</code></pre>
+
+<p><strong>4. Forward Pass (<code>call</code> method):</strong> Define the computation performed by the layer during training or inference. Use <code>keras.ops</code> for tensor operations to ensure compatibility across backends.</p>
+
+<pre><code>def call(self, inputs):
+    outputs = keras.ops.matmul(inputs, self.kernel)
+    if self.use_bias:
+        outputs = keras.ops.add(outputs, self.bias)
+    if self.activation is not None:
+        outputs = self.activation(outputs)
+    return outputs</code></pre>
+
+<p><strong>5. Shape Inference (<code>compute_output_shape</code> method):</strong> This critical method allows Keras to infer output shapes without executing the layer.</p>
+
+<pre><code>def compute_output_shape(self, input_shape):
+    return input_shape[:-1] + (self.units,)</code></pre>
+
+<p><strong>6. Serialization (<code>get_config</code> method):</strong> Return a dictionary of the layer's configuration to enable saving and loading.</p>
+
+<pre><code>def get_config(self):
+    config = super().get_config()
+    config.update({
+        'units': self.units,
+        'activation': keras.activations.serialize(self.activation),
+        'use_bias': self.use_bias
+    })
+    return config</code></pre>
+
+<p>To validate your implementation, test the layer in isolation before integrating it into a larger model:</p>
+
+<pre><code># Test the layer
+layer = SimpleDenseLayer(units=64, activation='relu')
+input_tensor = keras.ops.ones((32, 10))  # Batch of 32 samples, 10 features
+output = layer(input_tensor)
+print(output.shape)  # Should be (32, 64)</code></pre>
+
+<h2 id="composite-layers">Creating Composite Layers with Multiple Sub-Layers</h2>
+
+<p>Creating composite layers with multiple sub-layers is a powerful technique for building modular, reusable, and highly customizable neural network architectures in Keras 3.</p>
+
+<p>To create a composite layer with multiple sub-layers, follow this structured approach:</p>
+
+<p><strong>1. Define the Layer Structure in <code>__init__</code>:</strong> Start by creating all sub-layers in the <code>__init__</code> method. This ensures that every component of your composite layer is instantiated upfront.</p>
+
+<pre><code>@keras.saving.register_keras_serializable()
+class MultiStageBlock(keras.layers.Layer):
+    def __init__(
+        self,
+        hidden_dims: List[int],
+        dropout_rate: float = 0.1,
+        use_norm: bool = True,
+        **kwargs: Any
+    ) -&gt; None:
+        super().__init__(**kwargs)
+        self.hidden_dims = hidden_dims
+        self.dropout_rate = dropout_rate
+        self.use_norm = use_norm
+
+        # Create all sub-layers during initialization
+        self.dense_layers = [
+            layers.Dense(dim, activation='relu')
+            for dim in hidden_dims
+        ]
+        self.dropout_layers = [
+            layers.Dropout(dropout_rate)
+            for _ in hidden_dims
+        ]
+        if use_norm:
+            self.norm_layers = [
+                layers.LayerNormalization()
+                for _ in hidden_dims
+            ]</code></pre>
+
+<p><strong>2. Build Sub-Layers Explicitly:</strong> In the <code>build</code> method, explicitly build each sub-layer with the correct input shapes:</p>
+
+<pre><code>def build(self, input_shape):
+    current_shape = input_shape
+    for i, dense in enumerate(self.dense_layers):
+        dense.build(current_shape)
+        current_shape = dense.compute_output_shape(current_shape)
+        self.dropout_layers[i].build(current_shape)
+        if self.use_norm:
+            self.norm_layers[i].build(current_shape)
+    super().build(input_shape)</code></pre>
+
+<p><strong>3. Implement the Forward Pass:</strong> In the <code>call</code> method, chain the operations:</p>
+
+<pre><code>def call(self, inputs, training=None):
+    x = inputs
+    for i, dense in enumerate(self.dense_layers):
+        x = dense(x)
+        x = self.dropout_layers[i](x, training=training)
+        if self.use_norm:
+            x = self.norm_layers[i](x)
+    return x</code></pre>
+
+<h2 id="graph-safe">Graph-Safe Operations for Dynamic Computations</h2>
+
+<p>At the heart of graph-safe operations lies the principle of symbolic computation. Unlike eager execution, where operations are immediately evaluated, symbolic computation builds a computational graph that defines relationships between tensors without executing them.</p>
+
+<p>The foundation of graph-safe dynamic computations is the proper use of Keras operations (ops) rather than raw TensorFlow or NumPy functions. Keras provides a comprehensive set of operations through the <code>keras.ops</code> module that are designed to work within the computational graph. These operations maintain the symbolic nature of the computation while providing the flexibility needed for dynamic behavior.</p>
+
+<p>For example, when implementing a layer that conditionally applies different transformations, you would use <code>keras.ops.cond()</code> rather than Python's native if-statements, ensuring the entire operation remains part of the computational graph.</p>
+
+<h2 id="variable-shapes">Handling Variable Input Shapes and Batch Sizes</h2>
+
+<p>Handling variable input shapes and batch sizes is a fundamental challenge when building production-grade custom layers and models in Keras 3.</p>
+
+<p>The core principle here mirrors the self-reliance found in organic gardening: prepare for variability by design, not as an afterthought. In Keras 3, this means implementing layers that dynamically adjust to input shapes while maintaining strict serialization compatibility.</p>
+
+<p>Keras 3's symbolic computation system requires all shape operations to remain graph-compatible. This means you cannot use Python control flow or NumPy operations that require concrete values during the graph construction phase. Instead, you must use Keras operations (from <code>keras.ops</code>) that work with symbolic tensors.</p>
+
+<p><strong>Dynamic reshaping</strong> allows layers to adapt to different input shapes at runtime:</p>
+
+<pre><code>@keras.saving.register_keras_serializable()
+class VariableSequenceProcessor(keras.layers.Layer):
+    def __init__(self, output_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.output_dim = output_dim
+        self.dense = layers.Dense(output_dim)
+
+    def call(self, inputs):
+        # inputs shape: (batch, None, features) -
+        # None allows variable sequence length
+        flattened = ops.reshape(inputs, (-1, ops.shape(inputs)[-1]))
+        return self.dense(flattened)
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.output_dim)</code></pre>
+
+<p><strong>For masking</strong> to handle variable-length data:</p>
+
+<pre><code>inputs = keras.Input(shape=(None, 10))  # None allows variable length
+x = layers.Masking(mask_value=0.0)(inputs)  # Mask padding values
+x = layers.LSTM(64)(x)  # LSTM handles variable lengths via masking</code></pre>
+
+<p><strong>For batch-flexible layers:</strong></p>
+
+<pre><code>@keras.saving.register_keras_serializable()
+class BatchFlexibleLayer(keras.layers.Layer):
+    def call(self, inputs):
+        # Process each sample independently
+        batch_processed = ops.map_fn(
+            lambda x: self._process_single(x),
+            inputs,
+            fn_output_signature=tf.TensorSpec(shape=(10,), dtype=tf.float32)
+        )
+        return batch_processed
+
+    def _process_single(self, single_input):
+        # Custom processing for single example
+        return ops.matmul(single_input, self.kernel)</code></pre>
+
+<h2 id="custom-activation">Implementing Custom Activation and Normalization Layers</h2>
+
+<p>Implementing custom activation and normalization layers in Keras 3 unlocks powerful capabilities for designing models tailored to specific problem domains.</p>
+
+<p>The foundation of any custom layer implementation begins with proper class structure. Every custom layer must inherit from <code>keras.layers.Layer</code> and implement four essential methods:</p>
+<ul>
+    <li><code>__init__</code>: stores all configuration parameters</li>
+    <li><code>build</code>: creates trainable weights</li>
+    <li><code>call</code>: defines the forward pass computation</li>
+    <li><code>compute_output_shape</code>: enables shape inference</li>
+</ul>
+
+<p>For activation layers that don't require trainable parameters, you can often skip the <code>build</code> method entirely, but normalization layers typically need explicit weight creation.</p>
+
+<h2 id="conditional-layers">Designing Models with Conditional Layer Usage</h2>
+
+<p>Designing models with conditional layer usage allows you to create flexible, adaptable neural networks capable of handling diverse tasks without sacrificing performance or maintainability.</p>
+
+<p>The core principle behind conditional layer usage is the separation of layer creation from layer execution. This means all layers are instantiated during model initialization, but their usage is controlled dynamically during the forward pass.</p>
+
+<p><strong>To implement conditional layer usage effectively, follow this process:</strong></p>
+
+<p><strong>1. Create All Layers in <code>__init__</code>:</strong> Instantiate every possible layer the model might need, regardless of whether it will be used in every forward pass.</p>
+
+<p><strong>2. Store Configuration as Data:</strong> Use class attributes to track which layers should be active under different conditions.</p>
+
+<p><strong>3. Implement Conditional Logic in <code>call</code>:</strong></p>
+
+<pre><code>def call(self, inputs, training=None):
+    x = inputs
+    if self.use_text_branch and 'text' in inputs:
+        x = self.text_encoder(inputs['text'])
+    if self.use_image_branch and 'image' in inputs:
+        x = self.image_encoder(inputs['image'])
+    return self.output_layer(x)</code></pre>
+
+<p><strong>4. Ensure Proper <code>build</code> and Shape Inference:</strong> Even unused layers must be built to maintain weight consistency.</p>
+
+<p><strong>5. Handle Serialization with <code>get_config</code>:</strong> Include all conditional flags in the layer's configuration dictionary.</p>
+
+<h2 id="staged-construction">Staged Construction for Complex Architectures</h2>
+
+<p>Building complex neural architectures often requires careful staging of layer construction to ensure proper weight initialization, shape compatibility, and serialization.</p>
+
+<p>The fundamental principle of staged construction is separating the creation of layer instances from their usage and weight initialization. The process follows three clear phases:</p>
+
+<ol>
+    <li><strong>Layer Creation Phase (in <code>__init__</code>):</strong> Instantiate all sub-layers and store configuration parameters</li>
+    <li><strong>Weight Initialization Phase (in <code>build</code>):</strong> Create all weight variables and explicitly build sub-layers</li>
+    <li><strong>Computation Phase (in <code>call</code>):</strong> Perform the actual forward pass using only symbolic operations</li>
+</ol>
+
+<p>Here's a staged implementation of a multi-head attention layer:</p>
+
+<pre><code>@keras.saving.register_keras_serializable(package='AdvancedModels')
+class StagedMultiHeadAttention(keras.layers.Layer):
+    def __init__(self, num_heads=8, key_dim=64, dropout=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.dropout_rate = dropout
+
+        # Phase 1: Layer Creation - create all sub-layers
+        self.query_dense = layers.Dense(key_dim * num_heads, name='query')
+        self.key_dense = layers.Dense(key_dim * num_heads, name='key')
+        self.value_dense = layers.Dense(key_dim * num_heads, name='value')
+        self.output_dense = layers.Dense(key_dim * num_heads, name='output')
+        self.attention_dropout = layers.Dropout(dropout, name='attention_dropout')
+        self.output_dropout = layers.Dropout(dropout, name='output_dropout')
+
+    def build(self, input_shape):
+        # Phase 2: Weight Initialization - build all sub-layers
+        self.query_dense.build(input_shape[0])
+        self.key_dense.build(input_shape[1] if len(input_shape) &gt; 1 
+                            else input_shape[0])
+        self.value_dense.build(input_shape[1] if len(input_shape) &gt; 1 
+                              else input_shape[0])
+        self.output_dense.build((input_shape[0][0], input_shape[0][1], 
+                                self.key_dim * self.num_heads))
+        self.built = True
+
+    def call(self, inputs, training=None, mask=None):
+        # Phase 3: Computation - perform attention calculation
+        if isinstance(inputs, (list, tuple)):
+            query, value = inputs
+            key = value
+        else:
+            query = key = value = inputs
+
+        # Linear projections
+        query = self.query_dense(query)
+        key = self.key_dense(key)
+        value = self.value_dense(value)
+
+        # Split into multiple heads
+        batch_size = ops.shape(query)[0]
+        query = ops.reshape(query, (batch_size, -1, self.num_heads, self.key_dim))
+        key = ops.reshape(key, (batch_size, -1, self.num_heads, self.key_dim))
+        value = ops.reshape(value, (batch_size, -1, self.num_heads, self.key_dim))
+
+        # Scaled dot-product attention
+        query = ops.transpose(query, (0, 2, 1, 3))
+        key = ops.transpose(key, (0, 2, 3, 1))
+        attention_scores = ops.matmul(query, key) / ops.sqrt(
+            ops.cast(self.key_dim, query.dtype)
+        )
+
+        if mask is not None:
+            attention_scores = ops.where(mask, attention_scores, -1e9)
+
+        attention_weights = ops.softmax(attention_scores, axis=-1)
+        attention_weights = self.attention_dropout(attention_weights, 
+                                                   training=training)
+
+        output = ops.matmul(attention_weights, value)
+
+        # Transpose back and reshape
+        output = ops.transpose(output, (0, 2, 1, 3))
+        output_shape = ops.shape(output)
+        output = ops.reshape(output, (batch_size, -1, 
+                                      self.num_heads * self.key_dim))
+
+        # Final projection
+        return self.output_dense(output)
+
+    def compute_output_shape(self, input_shape):
+        if isinstance(input_shape, (list, tuple)):
+            input_shape = input_shape[0]
+        return (input_shape[0], input_shape[1], self.key_dim * self.num_heads)</code></pre>
+
+<p><strong>Best practices for staged construction:</strong></p>
+
+<ol>
+    <li><strong>Explicit Layer Naming:</strong> Always provide explicit names to sub-layers for consistent weight loading</li>
+    <li><strong>Configuration Validation:</strong> Validate all constructor arguments in <code>__init__</code> to fail fast</li>
+    <li><strong>Shape Propagation:</strong> Implement <code>compute_output_shape</code> for every custom layer</li>
+    <li><strong>Weight Initialization:</strong> Use Keras' built-in initializers or create custom ones</li>
+    <li><strong>Serialization Support:</strong> Always implement <code>get_config</code> to return a complete serialization</li>
+    <li><strong>Training/Inference Consistency:</strong> Properly handle the <code>training</code> flag in all sub-layer calls</li>
+</ol>
+
+<h2 id="config-driven">Configuration-Driven Model Architectures</h2>
+
+<p>Configuration-driven model architectures represent a paradigm shift in how we design and implement neural networks, moving away from hardcoded structures toward flexible, reusable systems that adapt to different tasks through configuration files.</p>
+
+<p>At its core, configuration-driven architecture separates the definition of a model from its implementation. Instead of writing monolithic classes where architecture details are buried in code, we externalize the model's structure into declarative configuration files (JSON, YAML, or Python dictionaries).</p>
+
+<p><strong>Advantages:</strong></p>
+
+<ol>
+    <li><strong>Decentralized Development:</strong> Configuration files allow models to be shared, modified, and improved by distributed teams</li>
+    <li><strong>Reproducibility Without Lock-in:</strong> Configuration-driven models use open, human-readable formats that can be version-controlled</li>
+    <li><strong>Natural Evolution:</strong> Architectures can be incrementally improved by modifying parameters without rewriting core logic</li>
+</ol>
+
+<p><strong>Implementation Steps:</strong></p>
+
+<p><strong>Step 1: Define Your Configuration Schema:</strong> Design a structured configuration that captures all architectural decisions:</p>
+
+<pre><code>transformer_config = {
+    'model_type': 'transformer',
+    'hidden_dim': 768,
+    'num_heads': 12,
+    'num_layers': 12,
+    'mlp_ratio': 4.0,
+    'dropout': 0.1,
+    'attention': {
+        'type': 'multi_head',
+        'key_dim': 64,
+        'use_bias': True
+    },
+    'normalization': {
+        'type': 'layer_norm',
+        'epsilon': 1e-6
+    }
+}</code></pre>
+
+<h2 id="weight-compatibility">Ensuring Weight Compatibility Across Model Variants</h2>
+
+<p>Ensuring weight compatibility across model variants is a critical yet often overlooked aspect of building production-grade custom models in Keras 3.</p>
+
+<p>The foundation of weight compatibility lies in the proper separation of layer creation and layer usage. When designing custom layers, always create all possible sub-layers during initialization, even if they won't be used in every forward pass. This ensures weight names remain consistent across different model configurations.</p>
+
+<pre><code>@keras.saving.register_keras_serializable()
+class ConfigurableAttention(keras.layers.Layer):
+    def __init__(self, num_heads=8, use_projection=True, **kwargs):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.use_projection = use_projection
+
+        # Create all potential sub-layers
+        self.query_dense = layers.Dense(name='query')
+        self.key_dense = layers.Dense(name='key')
+        self.value_dense = layers.Dense(name='value')
+        self.output_dense = layers.Dense(name='output')
+        self.projection = layers.Dense(name='projection') if use_projection else None
+
+    def build(self, input_shape):
+        # Build all layers regardless of configuration
+        self.query_dense.build((input_shape[0], input_shape[-1]))
+        self.key_dense.build((input_shape[0], input_shape[-1]))
+        self.value_dense.build((input_shape[0], input_shape[-1]))
+        self.output_dense.build((input_shape[0], input_shape[-1]))
+        if self.projection:
+            self.projection.build((input_shape[0], input_shape[-1]))
+
+        # Calculate derived dimensions
+        self.head_dim = input_shape[-1] // self.num_heads
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        query = self.query_dense(inputs)
+        key = self.key_dense(inputs)
+        value = self.value_dense(inputs)
+
+        # Multi-head attention computation
+        attention_output = self._compute_attention(query, key, value)
+
+        output = self.output_dense(attention_output)
+        if self.use_projection and self.projection:
+            output = self.projection(output)
+        return output</code></pre>
+
+<p><strong>Key principles:</strong></p>
+<ul>
+    <li>Implement comprehensive <code>get_config</code> and <code>from_config</code> methods that capture all configuration parameters</li>
+    <li>Use Keras' built-in operations (<code>keras.ops</code>) rather than backend-specific functions</li>
+    <li>Always verify that your custom layers are properly registered with the <code>@keras.saving.register_keras_serializable</code> decorator</li>
+</ul>
+
+<!-- Chapter 3 -->
+<h1 class="chapter" id="chapter3">Chapter 3: Production-Ready Custom Components</h1>
+
+<h2 id="serialization-patterns">Complete Serialization and Deserialization Patterns</h2>
+
+<p>Complete serialization and deserialization patterns are essential for creating production-ready custom components in Keras 3, ensuring that models and layers can be saved, loaded, and deployed reliably across different environments.</p>
+
+<p>The serialization lifecycle in Keras 3 follows a precise sequence:</p>
+
+<ol>
+    <li>When saving a model, Keras calls <code>get_config()</code> on each layer to extract a serializable configuration dictionary</li>
+    <li>The configuration is converted to JSON, while weights are extracted separately</li>
+    <li>Both components are packaged into a single <code>.keras</code> archive</li>
+    <li>During loading, the JSON configuration is parsed</li>
+    <li>Each layer class is instantiated using its stored configuration</li>
+    <li>The <code>build()</code> method is called to create weight variables</li>
+    <li>Saved weight values are loaded into these variables</li>
+</ol>
+
+<p><strong>For complete serialization, custom layers must adhere to strict implementation patterns:</strong></p>
+<ul>
+    <li>The <code>__init__</code> method should only create sub-layers and store configuration—never create weights or inspect input shapes</li>
+    <li>Weight creation belongs exclusively in the <code>build()</code> method, which should explicitly build all sub-layers</li>
+    <li>The <code>call()</code> method must remain purely symbolic, using only Keras operations</li>
+    <li>Every custom layer must implement <code>compute_output_shape()</code></li>
+</ul>
+
+<h2 id="testing-serialization">Testing Serialization Cycles for Reliability</h2>
+
+<p>Testing serialization cycles for reliability is a critical step in ensuring your custom Keras 3 components can survive the full lifecycle of model development, deployment, and maintenance.</p>
+
+<p>The serialization cycle test follows a simple but rigorous protocol:</p>
+
+<ol>
+    <li>Save your model</li>
+    <li>Reload it into a fresh Python session</li>
+    <li>Verify that:
+        <ul>
+            <li>The architecture remains identical</li>
+            <li>All weights preserve their exact values</li>
+            <li>Forward passes produce bitwise-identical outputs</li>
+            <li>Training behavior remains consistent</li>
+        </ul>
+    </li>
+</ol>
+
+<p><strong>Verification steps:</strong></p>
+<ul>
+    <li><strong>Architectural integrity:</strong> Compare the <code>model.summary()</code> output before and after serialization</li>
+    <li><strong>Weight verification:</strong> Extract weights using <code>model.get_weights()</code> before saving and after loading, then use NumPy's <code>allclose()</code> function with <code>rtol=1e-6</code> and <code>atol=1e-6</code></li>
+    <li><strong>Forward pass test:</strong> Run the same input batch through both models and compare outputs with <code>np.array_equal()</code></li>
+    <li><strong>Training consistency:</strong> Run a single training step with the same input batch and compare weight updates</li>
+</ul>
+
+<pre><code>def test_serialization_cycle():
+    # 1. Instantiate model with representative input shapes
+    model = CustomModel()
+    
+    # 2. Run a forward pass and capture outputs
+    test_input = np.random.randn(8, 32)
+    original_output = model(test_input)
+    original_weights = model.get_weights()
+    
+    # 3. Save the model
+    model.save('test_model.keras')
+    
+    # 4. Load in subprocess (simulate fresh environment)
+    loaded_model = keras.models.load_model('test_model.keras')
+    
+    # 5. Re-run forward pass and compare
+    loaded_output = loaded_model(test_input)
+    assert np.allclose(original_output, loaded_output, rtol=1e-6)
+    
+    # 6. Verify weights
+    loaded_weights = loaded_model.get_weights()
+    for orig, loaded in zip(original_weights, loaded_weights):
+        assert np.allclose(orig, loaded, rtol=1e-6)</code></pre>
+
+<h2 id="weight-transfer">Weight Transfer and Compatibility Strategies</h2>
+
+<p>Weight transfer and compatibility strategies are essential for building production-ready custom models in Keras 3, especially when working with modular architectures, transfer learning, or distributed training.</p>
+
+<p>At the core of weight compatibility is the separation between layer creation and layer usage. When designing custom layers, always create all possible sub-layers during initialization, even if they won't be used in every forward pass. This ensures weight names remain consistent across different model configurations.</p>
+
+<p><strong>Key strategies:</strong></p>
+
+<ol>
+    <li><strong>Create all layers upfront:</strong> Instantiate all possible branches in <code>__init__</code> but control their usage through flags in <code>call</code></li>
+    <li><strong>Implement comprehensive serialization:</strong> Use <code>get_config()</code> to explicitly serialize all constructor arguments</li>
+    <li><strong>Use <code>add_weight()</code> exclusively in <code>build()</code>:</strong> Never create weights in <code>__init__</code></li>
+    <li><strong>Design for variable input shapes:</strong> Derive output shapes dynamically from input shapes</li>
+    <li><strong>Use backend-agnostic operations:</strong> Rely on <code>keras.ops</code> rather than backend-specific functions</li>
+</ol>
+
+<h2 id="extension-points">Extension Points and Modular Design Patterns</h2>
+
+<p>Extension points and modular design patterns are essential for building production-grade custom components in Keras 3 that are flexible, maintainable, and adaptable to evolving requirements.</p>
+
+<p><strong>The foundation of modular design</strong> begins with the separation of concerns. Each custom layer or model should encapsulate a single responsibility, making it easier to replace, upgrade, or extend without disrupting the entire system.</p>
+
+<p><strong>To implement extension points effectively:</strong></p>
+
+<ol>
+    <li>Design clear interfaces with well-documented input and output specifications</li>
+    <li>Expose configuration options rather than hardcoding behavior</li>
+    <li>Use a base class for common functionality, then extend for specific use cases</li>
+    <li>Leverage inheritance and composition to create reusable component libraries</li>
+</ol>
+
+<p><strong>Benefits of modular design:</strong></p>
+<ul>
+    <li>Fully serializable and portable components</li>
+    <li>Compatible with Keras' functional API</li>
+    <li>Usable in transfer learning scenarios</li>
+    <li>Maintainable and debuggable</li>
+    <li>Better testing and validation through isolation</li>
+</ul>
+
+<h2 id="factory-builder">Factory and Builder Patterns for Model Creation</h2>
+
+<p>Factory and Builder Patterns for Model Creation are essential for developing production-ready custom models in Keras 3, particularly when aiming for modularity, flexibility, and maintainability.</p>
+
+<p><strong>The Factory Pattern</strong> is useful when you need to create multiple instances of layers or models with varying configurations, without tightly coupling the creation logic to the client code. A factory function or class can generate layers or models based on input parameters, allowing for dynamic architecture construction.</p>
+
+<pre><code>@keras.saving.register_keras_serializable(package='CustomModels')
+class AttentionFactory:
+    @staticmethod
+    def create(attention_type: str, **kwargs):
+        if attention_type == 'multi_head':
+            return MultiHeadAttention(**kwargs)
+        elif attention_type == 'sparse':
+            return SparseAttention(**kwargs)
+        elif attention_type == 'linear':
+            return LinearAttention(**kwargs)
+        else:
+            raise ValueError(f"Unknown attention type: {attention_type}")</code></pre>
+
+<h2 id="testing-strategies">Comprehensive Testing Strategies for Custom Layers</h2>
+
+<p>Building production-grade custom layers in Keras 3 requires rigorous testing strategies to ensure reliability, correctness, and robustness across different environments.</p>
+
+<p><strong>Testing protocol:</strong></p>
+
+<p><strong>1. Unit tests for individual layer components:</strong></p>
+<ul>
+    <li>Test <code>compute_output_shape()</code> with various input shapes</li>
+    <li>Include edge cases like <code>None</code> dimensions for dynamic batch sizes</li>
+</ul>
+
+<p><strong>2. Tests for the <code>call()</code> method:</strong></p>
+<ul>
+    <li>Create synthetic tensors with known values</li>
+    <li>Test both training and inference modes</li>
+    <li>Include numerical stability tests with extreme values</li>
+</ul>
+
+<p><strong>3. Weight initialization and serialization tests:</strong></p>
+<ul>
+    <li>Verify <code>build()</code> creates weights with correct shapes</li>
+    <li>Test serialization round-trip with <code>get_config()</code> and <code>from_config()</code></li>
+</ul>
+
+<p><strong>4. Integration testing:</strong></p>
+<ul>
+    <li>Combine custom layers with standard Keras layers</li>
+    <li>Verify gradients flow correctly during backpropagation</li>
+    <li>Check shape compatibility between layers</li>
+</ul>
+
+<p><strong>5. Performance testing:</strong></p>
+<ul>
+    <li>Profile computational efficiency</li>
+    <li>Test numerical stability with extreme values</li>
+    <li>Consider gradient checking for complex operations</li>
+</ul>
+
+<p><strong>6. Cross-framework compatibility testing:</strong></p>
+<ul>
+    <li>Test with different backends (TensorFlow, JAX, PyTorch)</li>
+    <li>Catch any implicit assumptions about the computational environment</li>
+</ul>
+
+<p><strong>7. End-to-end validation:</strong></p>
+<ul>
+    <li>Train complete models on real datasets</li>
+    <li>Monitor training curves for expected behavior</li>
+    <li>Include tests for saving and loading complete models</li>
+</ul>
+
+<h2 id="troubleshooting">Troubleshooting Common Runtime and Build Errors</h2>
+
+<p>Troubleshooting common runtime and build errors in Keras 3 custom components requires a systematic approach.</p>
+
+<p><strong>Common errors and solutions:</strong></p>
+
+<p><strong>1. Separation violation errors</strong> (<code>ValueError: Input 0 of layer is incompatible</code>):</p>
+<ul>
+    <li>Verify all weight creation happens in <code>build</code> method</li>
+    <li>Ensure <code>super().build(input_shape)</code> is called at the end</li>
+    <li>Use <code>input_shape[-1]</code> for dynamic dimensions</li>
+</ul>
+
+<p><strong>2. Sub-layer not built errors</strong> (<code>NotImplementedError: Layer is not built</code>):</p>
+<ul>
+    <li>Explicitly build each sub-layer in parent's <code>build</code> method</li>
+    <li>Pass correct input shapes to each sub-layer</li>
+</ul>
+
+<p><strong>3. Shape inference errors</strong> (<code>ValueError: Output tensors must know their shapes</code>):</p>
+<ul>
+    <li>Implement <code>compute_output_shape</code> correctly</li>
+    <li>Handle both static and dynamic shapes</li>
+    <li>Return consistent shape tuples for all code paths</li>
+</ul>
+
+<p><strong>4. Runtime errors during forward pass:</strong></p>
+<ul>
+    <li>Avoid creating weights in <code>call</code></li>
+    <li>Use <code>keras.ops</code> exclusively for tensor operations</li>
+    <li>Use <code>ops.cond</code> or <code>ops.where</code> instead of Python if-statements</li>
+</ul>
+
+<p><strong>5. Serialization errors</strong> (<code>TypeError: Object is not JSON serializable</code>):</p>
+<ul>
+    <li>Implement <code>get_config</code> method</li>
+    <li>Use <code>@keras.saving.register_keras_serializable()</code> decorator</li>
+    <li>Ensure all sub-components are also registered</li>
+</ul>
+
+<p><strong>6. Memory errors</strong> (<code>ResourceExhaustedError: OOM</code>):</p>
+<ul>
+    <li>Check weight shapes in <code>build</code> method</li>
+    <li>Verify batch processing is correct</li>
+    <li>Use <code>model.summary()</code> to inspect layer shapes</li>
+</ul>
+
+<p><strong>Debugging approach:</strong></p>
+
+<ol>
+    <li>Create minimal reproducible examples</li>
+    <li>Use <code>model.summary()</code> and <code>layer.get_weights()</code> to inspect state</li>
+    <li>Log intermediate shapes and values during forward pass</li>
+    <li>Isolate the error to the specific layer causing issues</li>
+</ol>
+
+<h2 id="optimizing">Optimizing Performance for Production Deployment</h2>
+
+<p>Optimizing performance for production deployment requires a disciplined approach that balances computational efficiency with model accuracy.</p>
+
+<p><strong>Key optimization techniques:</strong></p>
+
+<p><strong>1. Quantization-aware training:</strong></p>
+<ul>
+    <li>Reduce precision from 32-bit to 8-bit integers</li>
+    <li>Can achieve 4x reduction in model size and 2-3x speedup</li>
+    <li>Use <code>keras.QuantizeConfig</code> API</li>
+</ul>
+
+<p><strong>2. Hardware-aware architecture design:</strong></p>
+<ul>
+    <li>For CPU: Use depthwise separable convolutions, replace LSTM with GRU</li>
+    <li>For GPU: Maximize parallelism through batch processing and fused operations</li>
+    <li>Profile layer execution times using <code>tf.profiler</code></li>
+</ul>
+
+<p><strong>3. Memory optimization:</strong></p>
+<ul>
+    <li>Implement weight pruning (50-70% sparsity with &lt;1% accuracy loss)</li>
+    <li>Use activation checkpointing (30-50% memory reduction)</li>
+    <li>Add pruning support with <code>tfmot.sparsity.keras.prune_low_magnitude</code></li>
+</ul>
+
+<p><strong>4. Deployment-specific optimizations:</strong></p>
+<ul>
+    <li>Convert to TensorFlow Lite for mobile (75% size reduction)</li>
+    <li>Use ONNX runtime with WebAssembly for web deployment</li>
+    <li>Implement fallback mechanisms for different hardware</li>
+</ul>
+
+<p><strong>5. Performance validation:</strong></p>
+<ul>
+    <li>Establish latency benchmarks (&lt;10ms for real-time, &lt;100ms for interactive)</li>
+    <li>Measure throughput in requests per second</li>
+    <li>Use representative input data that matches production distributions</li>
+    <li>Verify deterministic behavior across different hardware backends</li>
+</ul>
+
+<h2 id="complete-examples">Complete Examples of Production-Grade Implementations</h2>
+
+<p>Production-grade implementations in Keras 3 demand meticulous attention to architecture, serialization, and real-world applicability.</p>
+
+<h3>Example 1: MultiHeadSelfAttention Layer</h3>
+
+<pre><code>@keras.saving.register_keras_serializable(package='Transformers')
+class MultiHeadSelfAttention(keras.layers.Layer):
+    def __init__(
+        self,
+        num_heads: int = 8,
+        key_dim: int = 64,
+        value_dim: Optional[int] = None,
+        dropout: float = 0.1,
+        use_bias: bool = True,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.value_dim = value_dim if value_dim else key_dim
+        self.dropout_rate = dropout
+        self.use_bias = use_bias
+
+        # These will be built in build()
+        self.query_dense = None
+        self.key_dense = None
+        self.value_dense = None
+        self.attention_dropout = None
+        self.output_dense = None
+
+    def build(self, input_shape):
+        feature_dim = input_shape[-1]
+        self.query_dense = layers.Dense(
+            self.num_heads * self.key_dim,
+            use_bias=self.use_bias,
+            name='query'
+        )
+        self.key_dense = layers.Dense(
+            self.num_heads * self.key_dim,
+            use_bias=self.use_bias,
+            name='key'
+        )
+        self.value_dense = layers.Dense(
+            self.num_heads * self.value_dim,
+            use_bias=self.use_bias,
+            name='value'
+        )
+        self.attention_dropout = layers.Dropout(
+            self.dropout_rate,
+            name='attention_dropout'
+        )
+        self.output_dense = layers.Dense(
+            feature_dim,
+            use_bias=self.use_bias,
+            name='output'
+        )
+        super().build(input_shape)
+
+    def _compute_attention(self, query, key, value):
+        # Scale dot-product attention
+        score = ops.matmul(query, key, transpose_b=True)
+        dim_key = ops.cast(ops.shape(key)[-1], score.dtype)
+        scaled_score = score / ops.sqrt(dim_key)
+
+        # Compute attention weights
+        weights = ops.softmax(scaled_score, axis=-1)
+        weights = self.attention_dropout(weights)
+
+        # Apply to values
+        output = ops.matmul(weights, value)
+        return output, weights
+
+    def call(self, inputs, training=None):
+        # Project inputs to query, key, value
+        query = self.query_dense(inputs)
+        key = self.key_dense(inputs)
+        value = self.value_dense(inputs)
+
+        # Reshape for multi-head processing
+        batch_size = ops.shape(inputs)[0]
+        query = ops.reshape(
+            query,
+            (batch_size, -1, self.num_heads, self.key_dim)
+        )
+        key = ops.reshape(
+            key,
+            (batch_size, -1, self.num_heads, self.key_dim)
+        )
+        value = ops.reshape(
+            value,
+            (batch_size, -1, self.num_heads, self.value_dim)
+        )
+
+        # Transpose for attention computation
+        query = ops.transpose(query, (0, 2, 1, 3))
+        key = ops.transpose(key, (0, 2, 1, 3))
+        value = ops.transpose(value, (0, 2, 1, 3))
+
+        # Compute attention
+        attention_output, weights = self._compute_attention(
+            query, key, value
+        )
+
+        # Transpose back and reshape
+        attention_output = ops.transpose(attention_output, (0, 2, 1, 3))
+        output_shape = ops.shape(attention_output)
+        attention_output = ops.reshape(
+            attention_output,
+            (batch_size, -1, self.num_heads * self.value_dim)
+        )
+
+        # Final projection
+        return self.output_dense(attention_output)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'num_heads': self.num_heads,
+            'key_dim': self.key_dim,
+            'value_dim': self.value_dim,
+            'dropout': self.dropout_rate,
+            'use_bias': self.use_bias
+        })
+        return config</code></pre>
+
+<h3>Example 2: VisionTransformer Model</h3>
+
+<pre><code>@keras.saving.register_keras_serializable(package='Transformers')
+class VisionTransformer(keras.Model):
+    def __init__(
+        self,
+        image_size: int = 224,
+        patch_size: int = 16,
+        num_layers: int = 12,
+        num_heads: int = 12,
+        hidden_dim: int = 768,
+        mlp_dim: int = 3072,
+        num_classes: int = 1000,
+        dropout: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
+        # Configuration
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.mlp_dim = mlp_dim
+        self.num_classes = num_classes
+        self.dropout_rate = dropout
+
+        # Calculate derived values
+        self.num_patches = (image_size // patch_size) ** 2
+
+        # Create layers
+        self.patch_embed = layers.Conv2D(
+            hidden_dim,
+            kernel_size=patch_size,
+            strides=patch_size,
+            name='patch_embed'
+        )
+
+        self.pos_embed = self.add_weight(
+            name='pos_embed',
+            shape=(1, self.num_patches + 1, hidden_dim),
+            initializer='zeros',
+            trainable=True
+        )
+
+        self.class_token = self.add_weight(
+            name='class_token',
+            shape=(1, 1, hidden_dim),
+            initializer='zeros',
+            trainable=True
+        )
+
+        self.dropout = layers.Dropout(dropout)
+
+        # Transformer layers
+        self.encoder_layers = []
+        for i in range(num_layers):
+            self.encoder_layers.append(
+                TransformerEncoderBlock(
+                    hidden_dim=hidden_dim,
+                    num_heads=num_heads,
+                    mlp_dim=mlp_dim,
+                    dropout=dropout,
+                    name=f'encoder_{i}'
+                )
+            )
+
+        # Classification head
+        self.norm = layers.LayerNormalization(
+            epsilon=1e-6,
+            name='norm'
+        )
+        self.head = layers.Dense(
+            num_classes,
+            name='head'
+        )
+
+    def call(self, inputs, training=None):
+        # Create patches
+        batch_size = ops.shape(inputs)[0]
+        patches = self.patch_embed(inputs)
+        patches = ops.reshape(
+            patches,
+            (batch_size, self.num_patches, self.hidden_dim)
+        )
+
+        # Add class token
+        class_token = ops.tile(
+            self.class_token,
+            (batch_size, 1, 1)
+        )
+        x = ops.concatenate([class_token, patches], axis=1)
+
+        # Add position embedding
+        x = x + self.pos_embed
+        x = self.dropout(x, training=training)
+
+        # Pass through transformer layers
+        for layer in self.encoder_layers:
+            x = layer(x, training=training)
+
+        # Classification
+        x = self.norm(x)
+        class_token = x[:, 0]
+        return self.head(class_token)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'image_size': self.image_size,
+            'patch_size': self.patch_size,
+            'num_layers': self.num_layers,
+            'num_heads': self.num_heads,
+            'hidden_dim': self.hidden_dim,
+            'mlp_dim': self.mlp_dim,
+            'num_classes': self.num_classes,
+            'dropout': self.dropout_rate
+        })
+        return config</code></pre>
+
+<h3>Example 3: CustomTrainingLoopModel</h3>
+
+<pre><code>@keras.saving.register_keras_serializable(package='CustomTraining')
+class CustomTrainingLoopModel(keras.Model):
+    def __init__(
+        self,
+        encoder: keras.Model,
+        decoder: keras.Model,
+        temperature: float = 1.0,
+        label_smoothing: float = 0.1,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+        self.temperature = temperature
+        self.label_smoothing = label_smoothing
+
+        # Metrics
+        self.loss_tracker = keras.metrics.Mean(name='loss')
+        self.accuracy_tracker = keras.metrics.CategoricalAccuracy(
+            name='accuracy'
+        )
+
+    def compile(self, optimizer, loss=None, metrics=None, **kwargs):
+        super().compile(**kwargs)
+        self.optimizer = optimizer
+        self.compiled_loss = loss
+        self.compiled_metrics = metrics or []
+
+    def train_step(self, data):
+        x, y = data
+
+        with tf.GradientTape() as tape:
+            # Forward pass
+            z = self.encoder(x, training=True)
+            reconstructions = self.decoder(z, training=True)
+
+            # Custom loss computation
+            loss = self._compute_custom_loss(y, reconstructions)
+
+        # Compute gradients
+        trainable_vars = (
+            self.encoder.trainable_variables +
+            self.decoder.trainable_variables
+        )
+        gradients = tape.gradient(loss, trainable_vars)
+
+        # Apply gradients
+        self.optimizer.apply_gradients(
+            zip(gradients, trainable_vars)
+        )
+
+        # Update metrics
+        self.loss_tracker.update_state(loss)
+        self.accuracy_tracker.update_state(y, reconstructions)
+
+        return {
+            'loss': self.loss_tracker.result(),
+            'accuracy': self.accuracy_tracker.result()
+        }
+
+    def _compute_custom_loss(self, y_true, y_pred):
+        # Implement custom loss with temperature and label smoothing
+        y_pred = ops.softmax(y_pred / self.temperature, axis=-1)
+
+        # Label smoothing
+        num_classes = ops.shape(y_true)[-1]
+        smooth_positives = 1.0 - self.label_smoothing
+        smooth_negatives = self.label_smoothing / (num_classes - 1)
+        y_true = y_true * smooth_positives + smooth_negatives
+
+        # Cross entropy
+        loss = ops.categorical_crossentropy(
+            y_true,
+            y_pred,
+            from_logits=False
+        )
+        return ops.mean(loss)
+
+    def test_step(self, data):
+        x, y = data
+
+        # Forward pass
+        z = self.encoder(x, training=False)
+        reconstructions = self.decoder(z, training=False)
+
+        # Compute loss
+        loss = self._compute_custom_loss(y, reconstructions)
+
+        # Update metrics
+        self.loss_tracker.update_state(loss)
+        self.accuracy_tracker.update_state(y, reconstructions)
+
+        return {
+            'loss': self.loss_tracker.result(),
+            'accuracy': self.accuracy_tracker.result()
+        }
+
+    def call(self, inputs, training=None):
+        z = self.encoder(inputs, training=training)
+        return self.decoder(z, training=training)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'temperature': self.temperature,
+            'label_smoothing': self.label_smoothing,
+            'encoder': keras.layers.serialize(self.encoder),
+            'decoder': keras.layers.serialize(self.decoder)
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        encoder = keras.layers.deserialize(config.pop('encoder'))
+        decoder = keras.layers.deserialize(config.pop('decoder'))
+        return cls(encoder, decoder, **config)</code></pre>
+
+<hr>
+
+<p>These examples demonstrate how to build production-grade implementations that address real-world requirements while maintaining compatibility with Keras' ecosystem. The attention layer shows proper handling of multi-head processing with dynamic shapes, the vision transformer illustrates complex model composition, and the custom training loop model reveals how to extend Keras' training infrastructure for specialized needs.</p>
+
+<p>When developing your own production implementations, start with these patterns as templates and adapt them to your specific requirements. The most robust implementations are those that make their assumptions explicit, handle edge cases gracefully, and maintain compatibility with Keras' serialization and training infrastructure.</p>
+
+<!-- License -->
+<div class="license">
+    <h2>License</h2>
+    <p>This work is licensed under the Creative Commons Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0).</p>
+    <p>You are free to:</p>
+    <ul>
+        <li>Copy and share this work in any format</li>
+        <li>Adapt, remix, or build upon this work for any purpose, including commercially</li>
+    </ul>
+    <p>Under these terms:</p>
+    <ul>
+        <li>You must give appropriate credit</li>
+        <li>If you create something based on this work, you must release it under this same license</li>
+    </ul>
+    <p>For the full legal text, visit: <code>creativecommons.org/licenses/by-sa/4.0</code></p>
+</div>
+
+</body>
+</html>
