@@ -693,6 +693,7 @@ class PRISMTrainer:
         self.model(dummy_input)
         logger.info("Model created successfully")
         logger.info(f"Model parameters: {self.model.count_params():,}")
+        self.model.summary(print_fn=logger.info)
 
         # Train
         training_results = self._train_model(data_pipeline, self.exp_dir)
@@ -968,10 +969,20 @@ def main() -> None:
         default_noise_level=0.1
     )
 
-    trainer = PRISMTrainer(config, generator_config)
-    results = trainer.run_experiment()
-    logger.info(f"Completed. Results: {results['results_dir']}")
-    sys.exit(0)
+    try:
+        trainer = PRISMTrainer(config, generator_config)
+        results = trainer.run_experiment()
+        logger.info(f"Completed. Results: {results['results_dir']}")
+        # 1. Clear memory/session
+        keras.backend.clear_session()
+        # 2. Ensure all logs are flushed
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+
+    # 3. Force exit at OS level to kill any background C++ threads
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@ PRISM: Partitioned Representation for Iterative Sequence Modeling.
 
 This module implements the PRISM model for multivariate time series forecasting,
 combining hierarchical time-frequency decomposition with forecasting capabilities.
-Supports both point forecasts and probabilistic quantile forecasts.
+Supports both point forecasts and probabilistic quantile forecasts using a
+standardized QuantileHead.
 
 **Overview**:
 
@@ -35,17 +36,19 @@ The model cycles through four key stages:
 
 **Key Design Principles**:
 
-- Joint hierarchy in both time AND frequency domains (unlike prior work that
-  operates in only one domain)
-- Reconstructible design with overlap-based stitching for stability
-- Data-driven importance scoring enables automatic focus on predictive components
-- Decoupled temporal and frequency resolutions through learned weighting
+- Joint hierarchy in both time AND frequency domains.
+- Reconstructible design with overlap-based stitching for stability.
+- Data-driven importance scoring enables automatic focus on predictive components.
+- Decoupled temporal and frequency resolutions through learned weighting.
+- **Efficient Decoding**: Uses a channel-independent temporal projection strategy
+  (similar to DLinear) to map context steps to forecast steps, drastically reducing
+  parameter count compared to flattened dense projections.
 
 **Quantile Forecasting**:
 
-When ``use_quantile_head=True``, the model outputs probabilistic forecasts as
-quantile predictions with optional monotonicity enforcement to prevent quantile
-crossing (Q_i <= Q_{i+1}).
+When ``use_quantile_head=True``, the model employs a dedicated ``QuantileHead``
+to output probabilistic forecasts. This ensures monotonicity (Q_i <= Q_{i+1})
+and provides a standardized interface for confidence intervals.
 
 **Performance**:
 
@@ -62,6 +65,7 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import initializers, regularizers, layers, ops
 from typing import Dict, Any, Optional, Union, List, Tuple
 
@@ -69,10 +73,15 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 # Local Imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.time_series.prism_blocks import PRISMLayer
+from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 
 # ---------------------------------------------------------------------
+
+# Default quantile levels for probabilistic forecasting
+DEFAULT_QUANTILES: List[float] = [0.1, 0.5, 0.9]
 
 
 @keras.saving.register_keras_serializable()
@@ -82,82 +91,68 @@ class PRISMModel(keras.Model):
 
     Combines hierarchical time-frequency decomposition with a forecasting
     head to predict future values of a time series. Supports both point
-    forecasts and probabilistic quantile forecasts.
+    forecasts and probabilistic quantile forecasts via ``QuantileHead``.
 
-    **Architecture**::
-
-        Input: context window [batch, context_len, num_features]
-               ↓
-        (optional) Input embedding: Linear -> hidden_dim
-               ↓
-        num_layers × PRISMLayer (stacked)
-               ↓
-        Flatten: [batch, context_len * hidden_dim]
-               ↓
-        Forecasting Head (Point or Quantile)
-               ↓
-        Point Mode Output: [batch, forecast_len, num_features]
-        Quantile Mode Output: [batch, forecast_len, num_features, num_quantiles]
+    **Architecture**:
+    ```
+    Input [Batch, ContextLen, Features]
+           ↓
+    Input Projection [Batch, ContextLen, Hidden]
+           ↓
+    N × PRISM Layers (Hierarchical Decomp + Stitching)
+           ↓
+    Latent Representation [Batch, ContextLen, Hidden]
+           ↓
+    ┌────────────────────────────────────────────────────────┐
+    │ Efficient Temporal Decoding (DLinear Style)            │
+    │ 1. Transpose to [Batch, Hidden, ContextLen]            │
+    │ 2. Shared Linear Projection: ContextLen → ForecastLen  │
+    │ 3. Transpose to [Batch, ForecastLen, Hidden]           │
+    └────────────────────────────────────────────────────────┘
+           ↓
+    Reshape [Batch * ForecastLen, Hidden]
+           ↓
+    Forecast Head (Shared across time steps)
+           ↓
+    Reshape [Batch, ForecastLen, Features, (Quantiles)]
+    ```
 
     **Quantile Mode**:
     When ``use_quantile_head=True``, the model outputs probabilistic forecasts
-    as quantile predictions. Each output feature has ``num_quantiles`` predicted
-    quantile values (e.g., 10th, 50th, 90th percentiles). Optional monotonicity
-    enforcement prevents quantile crossing (Q_i <= Q_{i+1}).
+    as quantile predictions. Monotonicity enforcement prevents quantile
+    crossing (Q_i <= Q_{i+1}).
 
-    :param context_len: Length of input context window.
-    :type context_len: int
-    :param forecast_len: Length of forecast horizon.
-    :type forecast_len: int
-    :param num_features: Number of input/output features (channels).
-    :type num_features: int
-    :param hidden_dim: Hidden dimension for processing. If None, uses
-        num_features. Defaults to None.
-    :type hidden_dim: Optional[int]
-    :param num_layers: Number of stacked PRISM layers.
-        Defaults to 2.
-    :type num_layers: int
-    :param tree_depth: Depth of time tree in each PRISM layer.
-        Defaults to 2.
-    :type tree_depth: int
-    :param overlap_ratio: Overlap ratio for segment splitting.
-        Defaults to 0.25.
-    :type overlap_ratio: float
-    :param num_wavelet_levels: Number of Haar DWT levels.
-        Defaults to 3.
-    :type num_wavelet_levels: int
-    :param router_hidden_dim: Hidden dimension for routers.
-        Defaults to 64.
-    :type router_hidden_dim: int
-    :param router_temperature: Temperature for router softmax.
-        Defaults to 1.0.
-    :type router_temperature: float
-    :param dropout_rate: Dropout rate.
-        Defaults to 0.1.
-    :type dropout_rate: float
-    :param ffn_expansion: Expansion factor for forecasting head FFN.
-        Defaults to 4.
-    :type ffn_expansion: int
-    :param use_quantile_head: Whether to use quantile prediction head instead
-        of point forecast head. Defaults to False.
-    :type use_quantile_head: bool
-    :param num_quantiles: Number of quantiles to predict when using quantile
-        head. Defaults to 3 (typically 10th, 50th, 90th percentiles).
-    :type num_quantiles: int
-    :param quantile_levels: Optional list of quantile levels (e.g., [0.1, 0.5, 0.9]).
-        Used for documentation and loss function configuration. Length must match
-        num_quantiles if provided. Defaults to None.
-    :type quantile_levels: Optional[List[float]]
-    :param enforce_monotonicity: Whether to enforce non-crossing quantiles
-        (Q_i <= Q_{i+1}) via cumulative softplus. Only used when
-        use_quantile_head=True. Defaults to True.
-    :type enforce_monotonicity: bool
-    :param kernel_initializer: Initializer for kernel weights.
-        Defaults to "glorot_uniform".
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for kernel weights.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional arguments for the Model base class.
+    **Parameter Efficiency**:
+    Unlike naive approaches that flatten the entire time sequence (producing
+    massive Dense layers), this model uses channel-independent temporal
+    projection. This reduces the head parameters from O(T_in * T_out * Hidden)
+    to O(T_in * T_out + Hidden * Features * Quantiles).
+
+    Args:
+        context_len: Length of input context window.
+        forecast_len: Length of forecast horizon.
+        num_features: Number of input/output features (channels).
+        hidden_dim: Hidden dimension for processing. If None, uses num_features.
+        num_layers: Number of stacked PRISM layers. Defaults to 2.
+        tree_depth: Depth of time tree in each PRISM layer. Defaults to 2.
+        overlap_ratio: Overlap ratio for segment splitting. Defaults to 0.25.
+        num_wavelet_levels: Number of Haar DWT levels. Defaults to 3.
+        router_hidden_dim: Hidden dimension for routers. Defaults to 64.
+        router_temperature: Temperature for router softmax. Defaults to 1.0.
+        dropout_rate: Dropout rate. Defaults to 0.1.
+        ffn_expansion: Expansion factor for forecasting head FFN. Defaults to 4.
+        use_quantile_head: Whether to use quantile prediction head instead
+            of point forecast head. Defaults to False.
+        num_quantiles: Number of quantiles to predict when using quantile
+            head. Defaults to 3 (typically 10th, 50th, 90th percentiles).
+        quantile_levels: Optional list of quantile levels (e.g., [0.1, 0.5, 0.9]).
+            Used for documentation and API responses. Length must match num_quantiles.
+            If None, generates linear space.
+        enforce_monotonicity: Whether to enforce non-crossing quantiles
+            (Q_i <= Q_{i+1}). Only used when use_quantile_head=True. Defaults to True.
+        kernel_initializer: Initializer for kernel weights. Defaults to "glorot_uniform".
+        kernel_regularizer: Optional regularizer for kernel weights.
+        **kwargs: Additional arguments for the Model base class.
     """
 
     # Presets for common configurations
@@ -220,6 +215,9 @@ class PRISMModel(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
+        # ---------------------------------------------------------------------
+        # 1. Validation
+        # ---------------------------------------------------------------------
         if context_len <= 0:
             raise ValueError(f"context_len must be > 0, got {context_len}")
         if forecast_len <= 0:
@@ -228,12 +226,27 @@ class PRISMModel(keras.Model):
             raise ValueError(f"num_features must be > 0, got {num_features}")
         if num_quantiles <= 0:
             raise ValueError(f"num_quantiles must be > 0, got {num_quantiles}")
-        if quantile_levels is not None and len(quantile_levels) != num_quantiles:
-            raise ValueError(
-                f"quantile_levels length ({len(quantile_levels)}) must match "
-                f"num_quantiles ({num_quantiles})"
-            )
 
+        # Validate or generate quantile levels
+        if quantile_levels is not None:
+            if len(quantile_levels) != num_quantiles:
+                raise ValueError(
+                    f"quantile_levels length ({len(quantile_levels)}) must match "
+                    f"num_quantiles ({num_quantiles})"
+                )
+            self.quantile_levels = quantile_levels
+        else:
+            if use_quantile_head:
+                # Generate roughly evenly spaced quantiles if not provided
+                self.quantile_levels = list(
+                    np.linspace(0, 1, num_quantiles + 2)[1:-1]
+                )
+            else:
+                self.quantile_levels = None
+
+        # ---------------------------------------------------------------------
+        # 2. Store Config
+        # ---------------------------------------------------------------------
         self.context_len = context_len
         self.forecast_len = forecast_len
         self.num_features = num_features
@@ -248,12 +261,15 @@ class PRISMModel(keras.Model):
         self.ffn_expansion = ffn_expansion
         self.use_quantile_head = use_quantile_head
         self.num_quantiles = num_quantiles
-        self.quantile_levels = quantile_levels
         self.enforce_monotonicity = enforce_monotonicity
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Input projection (if hidden_dim != num_features)
+        # ---------------------------------------------------------------------
+        # 3. Create Layers (Unconditionally)
+        # ---------------------------------------------------------------------
+
+        # Input projection
         self.input_projection = layers.Dense(
             self.hidden_dim,
             kernel_initializer=kernel_initializer,
@@ -262,7 +278,7 @@ class PRISMModel(keras.Model):
         )
 
         # Stacked PRISM layers
-        self.prism_layers: List[PRISMLayer] = []
+        self.prism_layers = []
         for i in range(num_layers):
             layer = PRISMLayer(
                 tree_depth=tree_depth,
@@ -279,118 +295,84 @@ class PRISMModel(keras.Model):
             )
             self.prism_layers.append(layer)
 
-        # Flatten layer
-        self.flatten = layers.Flatten(name="flatten")
+        # Efficient Temporal Projector (Shared across hidden dim)
+        # We apply this to the time axis: Input ContextLen -> Output ForecastLen
+        self.temporal_projector = layers.Dense(
+            forecast_len,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name="temporal_projector"
+        )
 
-        # Head dropout (shared)
-        if self.dropout_rate > 0.0:
-            self.head_dropout = layers.Dropout(
-                rate=dropout_rate,
-                name="head_dropout"
-            )
-        else:
-            self.head_dropout = None
+        # Head Dropout
+        self.head_dropout = layers.Dropout(
+            rate=dropout_rate,
+            name="head_dropout"
+        )
 
-        # Forecasting head - point or quantile
+        # Forecasting Head (Applied per time-step)
         head_hidden_dim = self.hidden_dim * ffn_expansion
 
         if use_quantile_head:
-            # Quantile head: outputs [batch, forecast_len, num_features, num_quantiles]
-            # Total output units = forecast_len * num_features * num_quantiles
-            output_units = forecast_len * num_features * num_quantiles
-            self.forecast_head = create_ffn_layer(
-                "mlp",
-                hidden_dim=head_hidden_dim,
-                output_dim=output_units,
-                activation="gelu",
-                dropout_rate=0.0,  # Dropout applied separately
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
+            # Quantile Head: Projects Hidden -> NumFeatures * NumQuantiles
+            # We set flatten_input=False to respect the input shape structure.
+            # Output length is NumFeatures because we apply it per time step.
+            self.forecast_head = QuantileHead(
+                num_quantiles=self.num_quantiles,
+                output_length=self.num_features,
+                dropout_rate=0.0,  # Handled by head_dropout
+                enforce_monotonicity=self.enforce_monotonicity,
+                use_bias=True,
+                flatten_input=False,
                 name="quantile_forecast_head"
             )
         else:
-            # Point forecast head: outputs [batch, forecast_len, num_features]
+            # Point Head: Projects Hidden -> NumFeatures
             self.forecast_head = create_ffn_layer(
                 "mlp",
                 hidden_dim=head_hidden_dim,
-                output_dim=forecast_len * num_features,
+                output_dim=self.num_features,
                 activation="gelu",
-                dropout_rate=dropout_rate,
+                dropout_rate=0.0,  # Handled by head_dropout
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                name="forecast_head"
+                name="point_forecast_head"
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build all model components.
 
-        :param input_shape: Input shape tuple.
-        :type input_shape: Tuple[Optional[int], ...]
+        Args:
+            input_shape: Input shape tuple.
         """
         batch_size = input_shape[0]
 
-        # Build input projection
+        # 1. Input Projection
         self.input_projection.build(input_shape)
+        # Output: (Batch, ContextLen, Hidden)
+        current_shape = (batch_size, self.context_len, self.hidden_dim)
 
-        # Projected shape
-        projected_shape = (batch_size, self.context_len, self.hidden_dim)
-
-        # Build PRISM layers
-        current_shape = projected_shape
+        # 2. PRISM Layers
         for layer in self.prism_layers:
             layer.build(current_shape)
 
-        # Build flatten
-        self.flatten.build(current_shape)
+        # 3. Temporal Projector
+        # Logic: Transpose (B, T, H) -> (B, H, T). Dense acts on T.
+        transposed_shape = (batch_size, self.hidden_dim, self.context_len)
+        self.temporal_projector.build(transposed_shape)
+        # Output after Dense: (Batch, Hidden, ForecastLen)
 
-        # Build head dropout
-        flat_dim = self.context_len * self.hidden_dim
-        if self.head_dropout is not None:
-            self.head_dropout.build((batch_size, flat_dim))
+        # 4. Head Dropout & Forecast Head
+        # Logic: We flatten Batch and Time dimensions to reuse the head per step
+        # Input to Head: (Batch * ForecastLen, Hidden)
+        # Note: We use None for the batch dimension size during build
+        collapsed_shape = (None, self.hidden_dim)
 
-        # Build forecast head
-        self.forecast_head.build((batch_size, flat_dim))
+        self.head_dropout.build(collapsed_shape)
+        self.forecast_head.build(collapsed_shape)
 
         super().build(input_shape)
-
-    def _apply_monotonicity(
-        self,
-        quantiles: keras.KerasTensor
-    ) -> keras.KerasTensor:
-        """
-        Apply monotonicity constraint to quantile predictions.
-
-        Ensures Q_i <= Q_{i+1} by predicting the first quantile directly
-        and subsequent quantiles as cumulative positive deltas.
-
-        :param quantiles: Raw quantile predictions of shape
-            [batch, forecast_len, num_features, num_quantiles].
-        :type quantiles: keras.KerasTensor
-        :return: Monotonic quantile predictions.
-        :rtype: keras.KerasTensor
-        """
-        if self.num_quantiles <= 1:
-            return quantiles
-
-        # Split first quantile from rest
-        # q0: [batch, forecast_len, num_features, 1]
-        q0 = quantiles[:, :, :, 0:1]
-
-        # rest: [batch, forecast_len, num_features, num_quantiles - 1]
-        rest = quantiles[:, :, :, 1:]
-
-        # Force deltas to be positive using softplus
-        deltas = ops.softplus(rest)
-
-        # Accumulate deltas along quantile dimension
-        accumulated_deltas = ops.cumsum(deltas, axis=-1)
-
-        # Subsequent quantiles = base + accumulated deltas
-        subsequent_quantiles = q0 + accumulated_deltas
-
-        # Concatenate [q0, q0 + delta1, q0 + delta1 + delta2, ...]
-        return ops.concatenate([q0, subsequent_quantiles], axis=-1)
 
     def call(
         self,
@@ -400,59 +382,139 @@ class PRISMModel(keras.Model):
         """
         Generate forecasts from context window.
 
-        :param inputs: Input tensor of shape [batch, context_len, num_features].
-        :type inputs: keras.KerasTensor
-        :param training: Training mode flag.
-        :type training: Optional[bool]
-        :return: Point forecast of shape [batch, forecast_len, num_features] or
-            quantile forecast of shape [batch, forecast_len, num_features, num_quantiles].
-        :rtype: keras.KerasTensor
+        Args:
+            inputs: Input tensor of shape [batch, context_len, num_features].
+            training: Training mode flag.
+
+        Returns:
+            Point forecast [batch, forecast_len, num_features] or
+            Quantile forecast [batch, forecast_len, num_features, num_quantiles].
         """
-        # Project input to hidden dimension
+        # 1. Project to Latent Space
+        # Shape: [Batch, ContextLen, Hidden]
         x = self.input_projection(inputs)
 
-        # Process through PRISM layers
+        # 2. Process Hierarchical Features
         for layer in self.prism_layers:
             x = layer(x, training=training)
 
-        # Flatten
-        x = self.flatten(x)
+        # 3. Efficient Temporal Projection (Channel-Independent)
+        # Transpose to [Batch, Hidden, ContextLen]
+        x = ops.transpose(x, axes=(0, 2, 1))
 
-        # Apply head dropout (for quantile mode, point mode has internal dropout)
-        if self.use_quantile_head and self.head_dropout is not None:
-            x = self.head_dropout(x, training=training)
+        # Project Time Dimension: ContextLen -> ForecastLen
+        # Dense acts on the last dimension (ContextLen)
+        # Shape: [Batch, Hidden, ForecastLen]
+        x = self.temporal_projector(x)
 
-        # Generate forecast
+        # Transpose back to [Batch, ForecastLen, Hidden]
+        x = ops.transpose(x, axes=(0, 2, 1))
+
+        # 4. Collapse dimensions for Head Application
+        # We merge Batch and ForecastLen to treat every time step as an independent sample
+        # Shape: [Batch * ForecastLen, Hidden]
+        x = ops.reshape(x, (-1, self.hidden_dim))
+
+        # 5. Decode to Output Features/Quantiles
+        x = self.head_dropout(x, training=training)
+
+        # Shape: [Batch * ForecastLen, OutputDim]
+        # For Point: OutputDim = NumFeatures
+        # For Quantile: OutputDim = NumFeatures * NumQuantiles (handled by Head)
         x = self.forecast_head(x, training=training)
 
+        # 6. Final Reshaping
+        # We restore the Batch and ForecastLen dimensions
         if self.use_quantile_head:
-            # Reshape to [batch, forecast_len, num_features, num_quantiles]
+            # QuantileHead outputs flattened features+quantiles or reshaped
+            # We explicitly enforce the desired 4D shape
             x = ops.reshape(
                 x,
                 (-1, self.forecast_len, self.num_features, self.num_quantiles)
             )
-
-            # Apply monotonicity constraint if enabled
-            if self.enforce_monotonicity:
-                x = self._apply_monotonicity(x)
         else:
-            # Reshape to [batch, forecast_len, num_features]
+            # Ensure shape is [Batch, ForecastLen, NumFeatures]
             x = ops.reshape(x, (-1, self.forecast_len, self.num_features))
 
         return x
+
+    def predict_quantiles(
+            self,
+            context: Union[np.ndarray, keras.utils.PyDataset],
+            quantile_levels: Optional[List[float]] = None,
+            batch_size: int = 32,
+            **kwargs: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate specific quantile and point forecasts for time series data.
+
+        This acts as a wrapper around `model.predict()`, mapping requested
+        quantiles to output indices and extracting the median as a point forecast.
+
+        Args:
+            context: Input data array or dataset.
+            quantile_levels: List of floats (e.g., [0.1, 0.5, 0.9]). If None,
+                returns all trained quantiles.
+            batch_size: Batch size for inference.
+            **kwargs: Arguments passed to `model.predict()`.
+
+        Returns:
+            Tuple (quantile_preds, point_preds):
+            - quantile_preds: [Batch, ForecastLen, Features, RequestedQuantiles]
+            - point_preds: [Batch, ForecastLen, Features] (Median)
+        """
+        if not self.use_quantile_head:
+            raise ValueError(
+                "Model was not initialized with use_quantile_head=True."
+            )
+
+        # Handle Quantile Levels
+        if quantile_levels is None:
+            quantile_levels = self.quantile_levels
+
+        if not self.quantile_levels:
+            # Fallback safety
+            self.quantile_levels = list(
+                np.linspace(0, 1, self.num_quantiles + 2)[1:-1]
+            )
+
+        # Run Inference
+        # Output: [Batch, ForecastLen, Features, TrainedQuantiles]
+        raw_predictions = self.predict(context, batch_size=batch_size, **kwargs)
+
+        # Map Requested Levels to Indices
+        quantile_indices = []
+        trained_quantiles_arr = np.array(self.quantile_levels)
+
+        for q in quantile_levels:
+            if q in self.quantile_levels:
+                idx = self.quantile_levels.index(q)
+            else:
+                idx = int(np.argmin(np.abs(trained_quantiles_arr - q)))
+                logger.warning(
+                    f"Requested quantile {q} not found. Using closest: "
+                    f"{self.quantile_levels[idx]}"
+                )
+            quantile_indices.append(idx)
+
+        # Extract Quantiles
+        quantile_preds = raw_predictions[:, :, :, quantile_indices]
+
+        # Extract Median (Point Forecast)
+        if 0.5 in self.quantile_levels:
+            median_idx = self.quantile_levels.index(0.5)
+        else:
+            median_idx = len(self.quantile_levels) // 2
+
+        mean_preds = raw_predictions[:, :, :, median_idx]
+
+        return quantile_preds, mean_preds
 
     def compute_output_shape(
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
-
-        :param input_shape: Input shape tuple.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple.
-        :rtype: Tuple[Optional[int], ...]
-        """
+        """Compute output shape based on configuration."""
         batch_size = input_shape[0]
         if self.use_quantile_head:
             return (batch_size, self.forecast_len, self.num_features, self.num_quantiles)
@@ -467,26 +529,10 @@ class PRISMModel(keras.Model):
         num_features: int,
         **kwargs: Any
     ) -> "PRISMModel":
-        """
-        Create model from a predefined preset.
-
-        :param preset: Preset name ("tiny", "small", "base", "large").
-        :type preset: str
-        :param context_len: Length of input context window.
-        :type context_len: int
-        :param forecast_len: Length of forecast horizon.
-        :type forecast_len: int
-        :param num_features: Number of input/output features.
-        :type num_features: int
-        :param kwargs: Override parameters from preset.
-        :type kwargs: Any
-        :return: Configured model instance.
-        :rtype: PRISMModel
-        """
+        """Create model from a predefined preset ('tiny', 'small', 'base', 'large')."""
         if preset not in cls.PRESETS:
             raise ValueError(
-                f"Unknown preset '{preset}'. "
-                f"Available: {list(cls.PRESETS.keys())}"
+                f"Unknown preset '{preset}'. Available: {list(cls.PRESETS.keys())}"
             )
 
         config = cls.PRESETS[preset].copy()
@@ -526,15 +572,7 @@ class PRISMModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "PRISMModel":
-        """
-        Create model from configuration dictionary.
-
-        :param config: Configuration dictionary.
-        :type config: Dict[str, Any]
-        :return: Model instance.
-        :rtype: PRISMModel
-        """
-        # Deserialize initializers and regularizers
+        """Create model from configuration."""
         config = config.copy()
         if "kernel_initializer" in config:
             config["kernel_initializer"] = initializers.deserialize(

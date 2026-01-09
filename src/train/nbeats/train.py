@@ -964,10 +964,20 @@ def main() -> None:
         default_noise_level=0.1
     )
 
-    trainer = NBeatsTrainer(config, generator_config)
-    results = trainer.run_experiment()
-    logger.info(f"Experiment completed! Results saved to: {results['results_dir']}")
-    sys.exit(0)
+    try:
+        trainer = NBeatsTrainer(config, generator_config)
+        results = trainer.run_experiment()
+        logger.info(f"Experiment completed! Results saved to: {results['results_dir']}")
+        # 1. Clear memory/session
+        keras.backend.clear_session()
+        # 2. Ensure all logs are flushed
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+
+    # 3. Force exit at OS level to kill any background C++ threads
+    os._exit(0)
 
 
 if __name__ == "__main__":
