@@ -17,8 +17,10 @@ This document provides a comprehensive guide to using the `visualization` framew
     -   [Analyzing Classification Results](#analyzing-classification-results)
     -   [Analyzing Time Series Forecasts](#analyzing-time-series-forecasts)
     -   [Inspecting Neural Networks](#inspecting-neural-networks)
+    -   [Integrating with Training Loops](#integrating-with-training-loops)
 5.  [Advanced Usage](#advanced-usage)
     -   [Customizing Plot Appearance](#customizing-plot-appearance)
+    -   [File Formats and Saving](#file-formats-and-saving)
     -   [Creating Multi-Plot Dashboards](#creating-multi-plot-dashboards)
 6.  [Extending the Framework](#extending-the-framework)
 
@@ -391,6 +393,35 @@ viz_manager.register_template("network_architecture", NetworkArchitectureVisuali
 viz_manager.visualize(model, plugin_name="network_architecture", show=True)
 ```
 
+### Integrating with Training Loops
+
+If you are using a framework like Keras, you can easily adapt the history object returned by `model.fit()` into the framework's `TrainingHistory` structure.
+
+```python
+# 1. Train your model
+history = model.fit(x_train, y_train, validation_data=(x_val, y_val), epochs=50)
+
+# 2. Convert to TrainingHistory
+from dl_techniques.visualization import TrainingHistory
+
+# The History object returned by Keras contains a .history dict and .epoch list
+train_hist = TrainingHistory(
+    epochs=history.epoch,
+    train_loss=history.history['loss'],
+    val_loss=history.history['val_loss'],
+    train_metrics={'accuracy': history.history['accuracy']},
+    # Note: Keras uses 'val_' prefix for validation metrics
+    val_metrics={'accuracy': history.history['val_accuracy']}
+)
+
+# 3. Visualize
+viz_manager.visualize(
+    data=train_hist, 
+    plugin_name="training_curves", 
+    show=True
+)
+```
+
 ---
 
 ## Advanced Usage
@@ -416,6 +447,32 @@ custom_viz_manager = VisualizationManager(
 )
 
 # All plots created with `custom_viz_manager` will now use this new style.
+```
+
+### File Formats and Saving
+
+You can control how and where files are saved using the `PlotConfig` and the `visualize` method options.
+
+**Changing Output Format:**
+To save high-resolution vectors (SVG) or documents (PDF) instead of PNGs, adjust the `PlotConfig`.
+
+```python
+config = PlotConfig(
+    save_format="svg",   # Options: 'png', 'pdf', 'svg', 'jpg'
+    save_dpi=300         # High DPI for print quality
+)
+```
+
+**Disabling File Saving:**
+If you are working in a Jupyter Notebook and only want to view the plot inline without creating a file on disk, set `save=False`.
+
+```python
+viz_manager.visualize(
+    data=my_data,
+    plugin_name="my_plugin",
+    save=False,  # Do not save to disk
+    show=True    # Show inline
+)
 ```
 
 ### Creating Multi-Plot Dashboards
