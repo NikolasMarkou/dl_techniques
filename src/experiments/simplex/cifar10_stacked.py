@@ -566,7 +566,7 @@ class ExperimentConfig:
     units_per_layer: int = 128
 
     # --- Training Parameters ---
-    epochs: int = 1
+    epochs: int = 100
     batch_size: int = 64
     learning_rate: float = 0.001
     early_stopping_patience: int = 50
