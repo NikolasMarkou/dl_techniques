@@ -84,6 +84,21 @@ from .data_nn import (
 )
 
 # ---------------------------------------------------------------------
+# Regression Data & Plugins
+# ---------------------------------------------------------------------
+
+from .regression import (
+    RegressionResults,
+    MultiModelRegression,
+    PredictionErrorVisualization,
+    ResidualsPlotVisualization,
+    ResidualDistributionVisualization,
+    QQPlotVisualization,
+    RegressionEvaluationDashboard,
+)
+
+
+# ---------------------------------------------------------------------
 # Public API Control
 # ---------------------------------------------------------------------
 
@@ -143,4 +158,13 @@ __all__ = [
     "ImageComparisonVisualization",
 
     "ForecastVisualization",
+
+    # Regression
+    "RegressionResults",
+    "MultiModelRegression",
+    "PredictionErrorVisualization",
+    "ResidualsPlotVisualization",
+    "ResidualDistributionVisualization",
+    "QQPlotVisualization",
+    "RegressionEvaluationDashboard"
 ]
