@@ -77,6 +77,7 @@ from dl_techniques.analyzer import (
     AnalysisConfig,
 )
 
+# Local import for RigidSimplexLayer
 from dl_techniques.layers.rigid_simplex_layer import RigidSimplexLayer
 
 
@@ -141,10 +142,10 @@ class DepthComparisonDashboard(VisualizationPlugin):
         return isinstance(data, DepthComparisonData)
 
     def create_visualization(
-            self,
-            data: DepthComparisonData,
-            ax: Optional[Any] = None,
-            **kwargs
+        self,
+        data: DepthComparisonData,
+        ax: Optional[Any] = None,
+        **kwargs
     ) -> Any:
         """Create depth comparison dashboard."""
         import matplotlib.pyplot as plt
@@ -194,11 +195,11 @@ class DepthComparisonDashboard(VisualizationPlugin):
         return fig
 
     def _plot_training_curves(
-            self,
-            data: DepthComparisonData,
-            ax: Any,
-            metric: str,
-            title: str
+        self,
+        data: DepthComparisonData,
+        ax: Any,
+        metric: str,
+        title: str
     ) -> None:
         """Plot training curves with depth-based styling."""
         import matplotlib.pyplot as plt
@@ -384,10 +385,10 @@ class StackedSimplexAnalysisDashboard(VisualizationPlugin):
         return isinstance(data, list) and all(isinstance(d, StackedSimplexAnalysis) for d in data)
 
     def create_visualization(
-            self,
-            data: List[StackedSimplexAnalysis],
-            ax: Optional[Any] = None,
-            **kwargs
+        self,
+        data: List[StackedSimplexAnalysis],
+        ax: Optional[Any] = None,
+        **kwargs
     ) -> Any:
         """Create stacked simplex analysis dashboard."""
         import matplotlib.pyplot as plt
@@ -431,7 +432,7 @@ class StackedSimplexAnalysisDashboard(VisualizationPlugin):
         ax.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5, label='Unit scale')
         ax.set_xlabel('Layer Index')
         ax.set_ylabel('Scale Value')
-        ax.set_title(f'{data.config_name}Learned Scale per Layer')
+        ax.set_title(f'{data.config_name}\nLearned Scale per Layer')
         ax.set_xticks(layers)
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3, axis='y')
@@ -447,7 +448,7 @@ class StackedSimplexAnalysisDashboard(VisualizationPlugin):
 
         ax.set_xlabel('Layer Index')
         ax.set_ylabel('‖R^T R - I‖_F')
-        ax.set_title(f'Orthogonality Error per LayerTotal: {sum(data.orthogonality_errors):.2f}')
+        ax.set_title(f'Orthogonality Error per Layer\nTotal: {sum(data.orthogonality_errors):.2f}')
         ax.set_xticks(layers)
         ax.grid(alpha=0.3, axis='y')
 
@@ -464,7 +465,7 @@ class StackedSimplexAnalysisDashboard(VisualizationPlugin):
             CtC = CtC[:32, :32]
 
         im = ax.imshow(CtC, cmap='RdBu', aspect='auto')
-        ax.set_title(f'Cumulative Transform(R1 @ R2 @ ... @ Rn)^T @ (R1 @ R2 @ ... @ Rn)')
+        ax.set_title(f'Cumulative Transform\n(R1 @ R2 @ ... @ Rn)^T @ (R1 @ R2 @ ... @ Rn)')
         ax.set_xlabel('Column Index')
         ax.set_ylabel('Row Index')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -485,11 +486,11 @@ class StackedSimplexAnalysisDashboard(VisualizationPlugin):
         x = np.arange(len(layers))
         width = 0.35
 
-        bars1 = ax.bar(x - width / 2, spectral_norms, width, label='Spectral Norm',
+        bars1 = ax.bar(x - width/2, spectral_norms, width, label='Spectral Norm',
                        color='#2E86AB', alpha=0.8)
 
         ax2 = ax.twinx()
-        bars2 = ax2.bar(x + width / 2, condition_numbers, width, label='Condition #',
+        bars2 = ax2.bar(x + width/2, condition_numbers, width, label='Condition #',
                         color='#F18F01', alpha=0.8)
 
         ax.set_xlabel('Layer Index')
@@ -606,8 +607,8 @@ class ExperimentConfig:
 # ==============================================================================
 
 def build_backbone(
-        inputs: keras.KerasTensor,
-        config: ExperimentConfig
+    inputs: keras.KerasTensor,
+    config: ExperimentConfig
 ) -> keras.KerasTensor:
     """
     Build the shared convolutional backbone.
@@ -673,9 +674,9 @@ def build_backbone(
 
 
 def build_stacked_projection(
-        inputs: keras.KerasTensor,
-        stacked_config: StackedLayerConfig,
-        config: ExperimentConfig
+    inputs: keras.KerasTensor,
+    stacked_config: StackedLayerConfig,
+    config: ExperimentConfig
 ) -> keras.KerasTensor:
     """
     Build stacked projection layers (Dense or RigidSimplex).
@@ -718,8 +719,8 @@ def build_stacked_projection(
 
 
 def build_model(
-        config: ExperimentConfig,
-        stacked_config: StackedLayerConfig
+    config: ExperimentConfig,
+    stacked_config: StackedLayerConfig
 ) -> keras.Model:
     """
     Build a complete CNN model with stacked projection layers.
@@ -780,14 +781,14 @@ def build_model(
 # ==============================================================================
 
 def train_single_model(
-        model: keras.Model,
-        train_ds: tf.data.Dataset,
-        val_ds: tf.data.Dataset,
-        config: ExperimentConfig,
-        steps_per_epoch: int,
-        val_steps: int,
-        config_name: str,
-        output_dir: Path
+    model: keras.Model,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    config: ExperimentConfig,
+    steps_per_epoch: int,
+    val_steps: int,
+    config_name: str,
+    output_dir: Path
 ) -> Dict[str, List[float]]:
     """
     Train a single model and return its history.
@@ -844,8 +845,8 @@ def train_single_model(
 
 
 def extract_stacked_simplex_analysis(
-        model: keras.Model,
-        config_name: str
+    model: keras.Model,
+    config_name: str
 ) -> Optional[StackedSimplexAnalysis]:
     """
     Extract analysis data from stacked RigidSimplexLayers in model.
@@ -883,10 +884,30 @@ def extract_stacked_simplex_analysis(
         ortho_error = float(np.linalg.norm(RtR - I, 'fro'))
         orthogonality_errors.append(ortho_error)
 
-    # Compute cumulative transform (product of all rotations)
-    cumulative = rotation_matrices[0].copy()
-    for R in rotation_matrices[1:]:
-        cumulative = cumulative @ R
+    # Compute cumulative transform (product of square rotation matrices only)
+    # First layer may have different input/output dims, so we only multiply
+    # layers with matching dimensions (all layers after the first typically
+    # have the same square rotation matrix shape)
+
+    # Find layers with same-sized rotation matrices (square matrices of units_per_layer)
+    square_rotations = [R for R in rotation_matrices if R.shape[0] == R.shape[1]]
+
+    if len(square_rotations) >= 2:
+        # Group by size and compute cumulative for matching sizes
+        target_size = square_rotations[-1].shape[0]  # Use last layer's size
+        matching_rotations = [R for R in square_rotations if R.shape[0] == target_size]
+
+        if matching_rotations:
+            cumulative = matching_rotations[0].copy()
+            for R in matching_rotations[1:]:
+                cumulative = cumulative @ R
+        else:
+            cumulative = square_rotations[-1].copy()
+    elif square_rotations:
+        cumulative = square_rotations[0].copy()
+    else:
+        # Fallback: use last rotation matrix
+        cumulative = rotation_matrices[-1].copy()
 
     return StackedSimplexAnalysis(
         config_name=config_name,
@@ -925,7 +946,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         style=PlotStyle.SCIENTIFIC,
         color_scheme=ColorScheme(
             primary='#2E86AB',
-            secondary='#F18F01'
+            secondary='#F18F01',
+            accent='#A23B72'
         ),
         title_fontsize=14,
         save_format='png'
@@ -947,12 +969,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Log experiment start
     logger.info("=" * 80)
-    logger.info("Starting Stacked RigidSimplex Depth Comparison Experiment")
-    logger.info(f"Results will be saved to: {experiment_dir}")
+    logger.info("🚀 Starting Stacked RigidSimplex Depth Comparison Experiment")
+    logger.info(f"📁 Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("Loading CIFAR-10 dataset...")
+    logger.info("📊 Loading CIFAR-10 dataset...")
 
     train_config = TrainingConfig(
         input_shape=config.input_shape,
@@ -977,7 +999,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     stacked_analyses = []
 
     for stacked_config in config.stacked_configs:
-        logger.info(f"{'=' * 60}")
+        logger.info(f"\n{'='*60}")
         logger.info(f"--- Training: {stacked_config.name} ---")
         logger.info(f"    Type: {stacked_config.layer_type}")
         logger.info(f"    Depth: {stacked_config.num_layers} layers")
@@ -1013,14 +1035,14 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             logger.info(f"   Simplex scales: {[f'{s:.3f}' for s in analysis.scale_values]}")
             logger.info(f"   Ortho errors: {[f'{e:.2f}' for e in analysis.orthogonality_errors]}")
 
-        logger.info(f"{stacked_config.name} training completed!")
+        logger.info(f"✅ {stacked_config.name} training completed!")
 
     # ===== MEMORY MANAGEMENT =====
-    logger.info("Triggering garbage collection...")
+    logger.info("\n🗑️ Triggering garbage collection...")
     gc.collect()
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("Evaluating final model performance on test set...")
+    logger.info("\n📈 Evaluating final model performance on test set...")
 
     performance_results = {}
     all_predictions = {}
@@ -1070,7 +1092,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.info(f"   {name} - Accuracy: {accuracy:.4f}, Top-5: {top5_acc:.4f}")
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("Generating visualizations...")
+    logger.info("\n🖼️ Generating visualizations...")
 
     # 1. Training curves comparison
     training_histories = {
@@ -1155,7 +1177,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
     # ===== MODEL ANALYSIS =====
-    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("\n📊 Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
@@ -1201,13 +1223,13 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     Args:
         results: Dictionary containing all experimental results
     """
-    logger.info("=" * 80)
-    logger.info("EXPERIMENT SUMMARY")
+    logger.info("\n" + "=" * 80)
+    logger.info("📋 EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("PERFORMANCE METRICS (on Test Set):")
+        logger.info("\n🎯 PERFORMANCE METRICS (on Test Set):")
         logger.info(f"{'Model':<15} {'Depth':<7} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12} {'Params':<15}")
         logger.info("-" * 80)
 
@@ -1230,7 +1252,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== DEPTH SCALING ANALYSIS =====
     if 'performance_analysis' in results and 'depth_info' in results:
-        logger.info("DEPTH SCALING ANALYSIS:")
+        logger.info("\n📈 DEPTH SCALING ANALYSIS:")
 
         perf = results['performance_analysis']
         depth_info = results['depth_info']
@@ -1240,14 +1262,14 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         simplex_results = {k: v for k, v in perf.items() if 'Simplex' in k}
 
         if dense_results:
-            logger.info("   Dense Layers:")
+            logger.info("\n   Dense Layers:")
             for name in sorted(dense_results.keys(), key=lambda x: depth_info.get(x, 0)):
                 acc = dense_results[name]['accuracy']
                 depth = depth_info.get(name, '?')
                 logger.info(f"      {depth} layers: {acc:.4f}")
 
         if simplex_results:
-            logger.info("   Simplex Layers:")
+            logger.info("\n   Simplex Layers:")
             for name in sorted(simplex_results.keys(), key=lambda x: depth_info.get(x, 0)):
                 acc = simplex_results[name]['accuracy']
                 depth = depth_info.get(name, '?')
@@ -1255,10 +1277,10 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== STACKED SIMPLEX ANALYSIS =====
     if 'stacked_analyses' in results and results['stacked_analyses']:
-        logger.info("STACKED SIMPLEX LAYER ANALYSIS:")
+        logger.info("\n🔬 STACKED SIMPLEX LAYER ANALYSIS:")
 
         for analysis in sorted(results['stacked_analyses'], key=lambda x: x.num_layers):
-            logger.info(f"   {analysis.config_name} ({analysis.num_layers} layers):")
+            logger.info(f"\n   {analysis.config_name} ({analysis.num_layers} layers):")
             logger.info(f"      Scales: {[f'{s:.3f}' for s in analysis.scale_values]}")
             logger.info(f"      Ortho Errors: {[f'{e:.2f}' for e in analysis.orthogonality_errors]}")
             logger.info(f"      Total Ortho Error: {sum(analysis.orthogonality_errors):.2f}")
@@ -1271,7 +1293,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== BEST MODELS PER DEPTH =====
     if 'performance_analysis' in results and 'depth_info' in results:
-        logger.info("🏆 BEST MODEL AT EACH DEPTH:")
+        logger.info("\n🏆 BEST MODEL AT EACH DEPTH:")
 
         perf = results['performance_analysis']
         depth_info = results['depth_info']
@@ -1288,12 +1310,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             results['performance_analysis'].items(),
             key=lambda x: x[1]['accuracy']
         )
-        logger.info(f"🏆 OVERALL BEST: {best_model[0]}")
+        logger.info(f"\n🏆 OVERALL BEST: {best_model[0]}")
         logger.info(f"   Accuracy: {best_model[1]['accuracy']:.4f}")
         logger.info(f"   Top-5 Accuracy: {best_model[1]['top_5_accuracy']:.4f}")
         logger.info(f"   Depth: {results['depth_info'].get(best_model[0], '?')} layers")
 
-    logger.info("" + "=" * 80)
+    logger.info("\n" + "=" * 80)
 
 
 # ==============================================================================
@@ -1313,7 +1335,7 @@ def main() -> None:
         try:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"GPU configured: {len(gpus)} device(s) available")
+            logger.info(f"✅ GPU configured: {len(gpus)} device(s) available")
         except RuntimeError as e:
             logger.warning(f"GPU configuration warning: {e}")
 
@@ -1321,7 +1343,7 @@ def main() -> None:
     config = ExperimentConfig()
 
     # Log configuration
-    logger.info("⚙EXPERIMENT CONFIGURATION:")
+    logger.info("\n⚙️ EXPERIMENT CONFIGURATION:")
     logger.info(f"   Configurations: {[sc.name for sc in config.stacked_configs]}")
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
     logger.info(f"   Units per layer: {config.units_per_layer}")
@@ -1330,10 +1352,10 @@ def main() -> None:
 
     try:
         results = run_experiment(config)
-        logger.info("Experiment completed successfully!")
+        logger.info("\n✅ Experiment completed successfully!")
 
     except Exception as e:
-        logger.error(f"Experiment failed with error: {e}", exc_info=True)
+        logger.error(f"\n❌ Experiment failed with error: {e}", exc_info=True)
         raise
 
 
