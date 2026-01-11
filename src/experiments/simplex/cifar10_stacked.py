@@ -946,8 +946,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         style=PlotStyle.SCIENTIFIC,
         color_scheme=ColorScheme(
             primary='#2E86AB',
-            secondary='#F18F01',
-            accent='#A23B72'
+            secondary='#F18F01'
         ),
         title_fontsize=14,
         save_format='png'
