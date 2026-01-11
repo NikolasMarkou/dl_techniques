@@ -491,7 +491,7 @@ class TrainingConfig:
     input_shape: Tuple[int, int, int] = (32, 32, 3)
     num_classes: int = 10
     batch_size: int = 64
-    epochs: int = 100
+    epochs: int = 300
 
 
 @dataclass
@@ -542,7 +542,7 @@ class ExperimentConfig:
     epochs: int = 100
     batch_size: int = 64
     learning_rate: float = 0.001
-    early_stopping_patience: int = 50
+    early_stopping_patience: int = 100
     monitor_metric: str = 'val_accuracy'
 
     # --- Layer Configurations to Evaluate ---
@@ -551,20 +551,20 @@ class ExperimentConfig:
         LayerConfig(
             name='Dense_Baseline',
             layer_type='dense',
-            units=128,
+            units=1024,
             kwargs={}
         ),
         LayerConfig(
             name='Dense_L2',
             layer_type='dense',
-            units=128,
+            units=1024,
             kwargs={'kernel_regularizer': 'l2'}
         ),
         # RigidSimplex variants
         LayerConfig(
             name='Simplex_Default',
             layer_type='simplex',
-            units=128,
+            units=1024,
             kwargs={
                 'scale_min': 0.5,
                 'scale_max': 2.0,
@@ -574,7 +574,7 @@ class ExperimentConfig:
         LayerConfig(
             name='Simplex_Tight',
             layer_type='simplex',
-            units=128,
+            units=1024,
             kwargs={
                 'scale_min': 0.8,
                 'scale_max': 1.2,
@@ -584,7 +584,7 @@ class ExperimentConfig:
         LayerConfig(
             name='Simplex_Wide',
             layer_type='simplex',
-            units=128,
+            units=1024,
             kwargs={
                 'scale_min': 0.1,
                 'scale_max': 10.0,
@@ -594,7 +594,7 @@ class ExperimentConfig:
         LayerConfig(
             name='Simplex_HighOrtho',
             layer_type='simplex',
-            units=128,
+            units=1024,
             kwargs={
                 'scale_min': 0.5,
                 'scale_max': 2.0,
@@ -604,7 +604,7 @@ class ExperimentConfig:
         LayerConfig(
             name='Simplex_NoOrtho',
             layer_type='simplex',
-            units=128,
+            units=1024,
             kwargs={
                 'scale_min': 0.5,
                 'scale_max': 2.0,
