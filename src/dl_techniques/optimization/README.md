@@ -1,27 +1,31 @@
 # Deep Learning Techniques - Optimization Module Guide
 
-A comprehensive guide to using the optimization module for configuring optimizers, learning rate schedules, and deep supervision in your deep learning projects.
+A comprehensive guide to using the optimization module for configuring optimizers, learning rate schedules, deep supervision, and advanced inference techniques in your deep learning projects.
 
 ## Table of Contents
 
 1. [Overview](#overview)
 2. [Quick Start](#quick-start)
 3. [Optimizer Builder](#optimizer-builder)
-4. [Learning Rate Schedule Builder](#learning-rate-schedule-builder)
-5. [Deep Supervision Schedule Builder](#deep-supervision-schedule-builder)
-6. [Complete Integration Examples](#complete-integration-examples)
-7. [Configuration Reference](#configuration-reference)
-8. [Best Practices](#best-practices)
-9. [Troubleshooting](#troubleshooting)
-10. [Advanced Usage](#advanced-usage)
+4. [Muon Optimizer](#muon-optimizer)
+5. [Learning Rate Schedule Builder](#learning-rate-schedule-builder)
+6. [Deep Supervision Schedule Builder](#deep-supervision-schedule-builder)
+7. [SLED Logits Processor](#sled-logits-processor)
+8. [Complete Integration Examples](#complete-integration-examples)
+9. [Configuration Reference](#configuration-reference)
+10. [Best Practices](#best-practices)
+11. [Troubleshooting](#troubleshooting)
+12. [Advanced Usage](#advanced-usage)
 
 ## Overview
 
-The optimization module provides three main components for configuring training optimization:
+The optimization module provides comprehensive components for configuring training optimization and inference:
 
 - **Optimizer Builder**: Creates and configures Keras optimizers (Adam, AdamW, RMSprop, Adadelta) with gradient clipping support
+- **Muon Optimizer**: MomentUm Orthogonalized by Newton-schulz optimizer for faster convergence on Transformers and ConvNets
 - **Learning Rate Schedule Builder**: Creates learning rate schedules with automatic warmup periods
 - **Deep Supervision Schedule Builder**: Creates weight schedules for multi-scale deep supervision training
+- **SLED Logits Processor**: Self Logits Evolution Decoding for improving factuality in LLMs
 
 ### Key Features
 
@@ -31,6 +35,7 @@ The optimization module provides three main components for configuring training 
 - **Gradient clipping**: Built-in support for gradient clipping methods
 - **Warmup periods**: Automatic learning rate warmup for training stability
 - **Deep supervision**: Multiple scheduling strategies for multi-scale training
+- **Backend-agnostic**: SLED and core components work across TensorFlow, PyTorch, and JAX backends
 
 ## Quick Start
 
@@ -178,6 +183,102 @@ config = {
 }
 ```
 
+## Muon Optimizer
+
+The Muon (MomentUm Orthogonalized by Newton-schulz) optimizer is a novel optimization algorithm designed for faster convergence on Transformers and ConvNets.
+
+### Key Characteristics
+
+1. **Hybrid Optimization**: Muon optimizes hidden linear transformation weights (rank >= 2) while an integrated auxiliary AdamW handles embeddings, normalization, biases, and classification heads.
+
+2. **Newton-Schulz Orthogonalization**: Projects momentum updates onto the manifold of orthogonal matrices, enabling significantly larger learning rates (e.g., 0.02 vs 0.0003 for AdamW).
+
+3. **Hardware Efficient**: Uses standard matrix multiplications, making it efficient on GPUs/TPUs and stable in lower precision (bfloat16).
+
+### Performance Achievements
+
+- ~1.35x training speedup for GPT-2 scale models compared to AdamW
+- State-of-the-art training speed records for CIFAR-10
+- Proven effectiveness at large batch sizes
+- Adopted by frontier labs for large-scale LLM pre-training
+
+### Basic Usage
+
+```python
+from dl_techniques.optimization.muon_optimizer import Muon
+
+# Create Muon optimizer
+optimizer = Muon(
+    learning_rate=0.02,           # Muon LR (higher than typical AdamW)
+    momentum=0.95,                # Momentum factor
+    nesterov=True,                # Use Nesterov momentum
+    ns_steps=5,                   # Newton-Schulz iterations
+    adam_learning_rate=1e-3,      # AdamW LR for auxiliary params
+    adam_beta_1=0.9,
+    adam_beta_2=0.999,
+    weight_decay=0.0
+)
+
+# Use with your model
+model.compile(optimizer=optimizer, loss='categorical_crossentropy')
+```
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `learning_rate` | 0.02 | Learning rate for Muon-optimized parameters |
+| `momentum` | 0.95 | Momentum factor for Muon |
+| `nesterov` | True | Whether to use Nesterov momentum |
+| `ns_steps` | 5 | Number of Newton-Schulz iterations |
+| `adam_learning_rate` | 1e-3 | Learning rate for AdamW auxiliary optimizer |
+| `adam_beta_1` | 0.9 | First moment decay rate (Adam) |
+| `adam_beta_2` | 0.999 | Second moment decay rate (Adam) |
+| `adam_epsilon` | 1e-7 | Numerical stability constant (Adam) |
+| `weight_decay` | 0.0 | Weight decay coefficient (decoupled) |
+| `exclude_embedding_names` | ["embedding", "token_emb", "embed"] | Substrings to identify embedding layers |
+
+### Automatic Parameter Routing
+
+Muon automatically routes parameters to the appropriate optimizer:
+
+- **Muon**: Weight matrices with rank >= 2 (excluding embeddings)
+- **AdamW**: Biases, normalization parameters, embeddings, and 1D parameters
+
+```python
+# Parameters routed to Muon:
+# - Dense layer kernels
+# - Conv2D kernels
+# - Attention projection weights
+
+# Parameters routed to AdamW:
+# - All biases
+# - LayerNorm/BatchNorm parameters
+# - Embedding tables
+# - Final classification head
+```
+
+### Advanced Configuration
+
+```python
+# Transformer-optimized Muon configuration
+optimizer = Muon(
+    learning_rate=0.02,
+    momentum=0.95,
+    nesterov=True,
+    ns_steps=5,
+    adam_learning_rate=3e-4,      # Lower for embeddings
+    adam_beta_2=0.95,             # Lower for transformers
+    weight_decay=0.01,            # Apply weight decay
+    exclude_embedding_names=[     # Custom embedding patterns
+        "embedding", 
+        "token_emb", 
+        "embed",
+        "position"
+    ]
+)
+```
+
 ## Learning Rate Schedule Builder
 
 Creates learning rate schedules with automatic warmup periods for training stability.
@@ -259,10 +360,13 @@ All schedules automatically include a linear warmup period:
 - **Behavior**: Linear increase from `warmup_start_lr` to target learning rate
 - **Duration**: Specified by `warmup_steps` parameter
 - **Default**: No warmup (`warmup_steps=0`) if not specified
+- **Post-warmup**: Primary schedule starts from step 0 after warmup completes
 
 ```python
-# During warmup: lr = warmup_start_lr + (target_lr - warmup_start_lr) * (step / warmup_steps)
-# After warmup: lr = primary_schedule(step)
+# During warmup (step < warmup_steps):
+#   lr = warmup_start_lr + (target_lr - warmup_start_lr) * (step / warmup_steps)
+# After warmup (step >= warmup_steps):
+#   lr = primary_schedule(step - warmup_steps)
 ```
 
 ## Deep Supervision Schedule Builder
@@ -280,6 +384,7 @@ Creates weight schedules for training models with multiple output scales (e.g., 
 - **scale_by_scale_low_to_high**: Progressive activation of outputs
 - **cosine_annealing**: Oscillating weights with overall trend
 - **curriculum**: Progressive activation based on training progress
+- **step_wise**: Two-phase training with hard cutoff
 
 ### Basic Usage
 
@@ -333,7 +438,7 @@ config = {
     "type": "cosine_annealing",
     "config": {
         "frequency": 3.0,             # Number of cycles during training
-        "final_ratio": 0.8            # Ratio between final and initial weights
+        "final_ratio": 0.5            # Ratio between final and initial weights
     }
 }
 ```
@@ -350,6 +455,80 @@ config = {
     }
 }
 ```
+
+#### 5. Step-Wise Transition
+Two-phase training with linear transition then hard cutoff to final output.
+
+```python
+config = {
+    "type": "step_wise",
+    "config": {
+        "threshold": 0.5              # Progress point for hard cutoff
+    }
+}
+```
+
+### Weight Order Inversion
+
+By default, output 0 is the final inference output (highest resolution). Use `invert_order=True` if your architecture uses the opposite convention:
+
+```python
+scheduler = deep_supervision_schedule_builder(config, num_outputs, invert_order=True)
+```
+
+## SLED Logits Processor
+
+Self Logits Evolution Decoding (SLED) is an inference-time framework that enhances factual accuracy of LLMs by leveraging "latent knowledge" from earlier layers.
+
+### Key Features
+
+- **No Fine-tuning Required**: Works at inference time only
+- **Backend-Agnostic**: Fully portable across TensorFlow, PyTorch, and JAX
+- **Top-k Optimization**: Efficient computation focused on top-k tokens
+
+### Basic Usage
+
+```python
+from dl_techniques.optimization.sled_supervision import sled_builder
+
+# Configure SLED processor
+config = {
+    "type": "sled_v1",
+    "config": {
+        "evolution_rate": 0.5,        # Alpha: magnitude of logit update
+        "evolution_scale": 10,        # k: number of top tokens to consider
+        "temperature": 1.0,           # Tau: softmax temperature
+        "use_tau_in_update": True,    # Divide update by temperature
+        "inactive_logit_value": -1e9  # Value for non-top-k tokens
+    }
+}
+
+# Build processor
+sled_processor = sled_builder(config)
+
+# Use during generation
+# all_logits_for_step: List of logits from each layer [batch_size, vocab_size]
+evolved_logits = sled_processor(all_logits_for_step)
+next_token = keras.ops.argmax(evolved_logits, axis=-1)
+```
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `evolution_rate` | 0.5 | Alpha parameter controlling update magnitude |
+| `evolution_scale` | 10 | Number of top-k tokens for evolution |
+| `temperature` | 1.0 | Softmax temperature (must be > 0) |
+| `use_tau_in_update` | True | Divide update term by temperature |
+| `inactive_logit_value` | -1e9 | Logit value for non-top-k tokens |
+
+### Algorithm Overview
+
+SLED operates in three phases:
+
+1. **Phase 1 - Estimate**: Compute gradient-based alignment scores between early and final layer logits
+2. **Phase 2 - Ensemble**: Aggregate scores across all early layers to form latent knowledge estimate
+3. **Phase 3 - Evolve**: Apply correction to final layer logits based on latent knowledge
 
 ## Complete Integration Examples
 
@@ -401,10 +580,42 @@ model.compile(
 model.fit(x_train, y_train, epochs=50, batch_size=32)
 ```
 
-### Example 2: U-Net with Deep Supervision
+### Example 2: Transformer Training with Muon
 
 ```python
 import keras
+from dl_techniques.optimization.muon_optimizer import Muon
+
+# Create Muon optimizer for transformers
+optimizer = Muon(
+    learning_rate=0.02,
+    momentum=0.95,
+    nesterov=True,
+    ns_steps=5,
+    adam_learning_rate=3e-4,
+    adam_beta_2=0.95,
+    weight_decay=0.01,
+    exclude_embedding_names=["embedding", "token_emb", "position"]
+)
+
+# Create transformer model
+transformer_model = create_transformer_model()
+
+# Compile with Muon
+transformer_model.compile(
+    optimizer=optimizer,
+    loss='sparse_categorical_crossentropy'
+)
+
+# Train - Muon automatically routes parameters
+transformer_model.fit(train_dataset, epochs=100)
+```
+
+### Example 3: U-Net with Deep Supervision
+
+```python
+import keras
+import tensorflow as tf
 import numpy as np
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -459,7 +670,6 @@ def train_step(x_batch, y_batch, epoch_progress):
         # Compute weighted loss
         total_loss = 0
         for i, (output, weight) in enumerate(zip(outputs, supervision_weights)):
-            # Each output corresponds to a different scale
             target = tf.image.resize(y_batch, output.shape[1:3])
             scale_loss = keras.losses.binary_crossentropy(target, output)
             total_loss += weight * tf.reduce_mean(scale_loss)
@@ -472,48 +682,49 @@ def train_step(x_batch, y_batch, epoch_progress):
 
 # Training loop
 epochs = 100
-steps_per_epoch = len(train_dataset)
-
 for epoch in range(epochs):
     epoch_progress = epoch / epochs
-    
     for step, (x_batch, y_batch) in enumerate(train_dataset):
         loss = train_step(x_batch, y_batch, epoch_progress)
-        
-        if step % 100 == 0:
-            weights = ds_scheduler(epoch_progress)
-            print(f"Epoch {epoch}, Step {step}, Loss: {loss:.4f}")
-            print(f"Supervision weights: {weights}")
 ```
 
-### Example 3: Transformer Training with Advanced Schedules
+### Example 4: LLM Generation with SLED
 
 ```python
-# Transformer-optimized configuration
-lr_config = {
-    "type": "cosine_decay_restarts",
-    "warmup_steps": 4000,           # Longer warmup for transformers
-    "warmup_start_lr": 1e-9,        # Very low starting LR
-    "learning_rate": 0.0005,        # Conservative peak LR
-    "decay_steps": 20000,
-    "t_mul": 1.5,
-    "m_mul": 0.95,
-    "alpha": 0.01
+import keras
+from dl_techniques.optimization.sled_supervision import sled_builder
+
+# Configure SLED
+sled_config = {
+    "type": "sled_v1",
+    "config": {
+        "evolution_rate": 0.5,
+        "evolution_scale": 10,
+        "temperature": 1.0
+    }
 }
 
-opt_config = {
-    "type": "adamw",                # AdamW better for transformers
-    "beta_1": 0.9,
-    "beta_2": 0.98,                 # Higher beta_2 for transformers
-    "epsilon": 1e-9,
-    "gradient_clipping_by_norm": 1.0
-}
+sled_processor = sled_builder(sled_config)
 
-# Build and use
-lr_schedule = learning_rate_schedule_builder(lr_config)
-optimizer = optimizer_builder(opt_config, lr_schedule)
-
-# Create transformer model and train...
+def generate_with_sled(model, input_ids, max_length=100):
+    """Generate text using SLED-enhanced decoding."""
+    generated = input_ids
+    
+    for _ in range(max_length):
+        # Get logits from all layers (model must expose intermediate logits)
+        all_layer_logits = model.get_all_layer_logits(generated)
+        
+        # Apply SLED evolution
+        evolved_logits = sled_processor(all_layer_logits)
+        
+        # Sample next token
+        next_token = keras.ops.argmax(evolved_logits[:, -1, :], axis=-1)
+        generated = keras.ops.concatenate([generated, next_token[:, None]], axis=1)
+        
+        if next_token == eos_token_id:
+            break
+    
+    return generated
 ```
 
 ## Configuration Reference
@@ -532,9 +743,25 @@ The module uses research-backed default values from the constants module:
 - **RMSprop**: `rho=0.9, momentum=0.0, epsilon=1e-7, centered=False`
 - **Adadelta**: `rho=0.9, epsilon=1e-7`
 
+#### Muon Defaults
+- `learning_rate=0.02`
+- `momentum=0.95`
+- `nesterov=True`
+- `ns_steps=5`
+- `adam_learning_rate=1e-3`
+- `adam_beta_1=0.9, adam_beta_2=0.999, adam_epsilon=1e-7`
+- `weight_decay=0.0`
+
 #### Schedule Defaults
 - **Cosine Decay**: `alpha=0.0001`
 - **Cosine Restarts**: `t_mul=2.0, m_mul=0.9, alpha=0.001`
+
+#### SLED Defaults
+- `evolution_rate=0.5`
+- `evolution_scale=10`
+- `temperature=1.0`
+- `use_tau_in_update=True`
+- `inactive_logit_value=-1e9`
 
 ### Required vs Optional Parameters
 
@@ -586,12 +813,20 @@ The module uses research-backed default values from the constants module:
 ### Optimizers
 
 1. **Choose Based on Architecture**:
-   - **AdamW**: Transformers, large models
+   - **Muon**: Transformers, large ConvNets (fastest convergence)
+   - **AdamW**: Transformers, large models (most stable)
    - **Adam**: General purpose, CNNs
    - **RMSprop**: RNNs, unstable gradients
    - **Adadelta**: When learning rate is hard to tune
 
-2. **Gradient Clipping Guidelines**:
+2. **Muon Learning Rates**:
+   ```python
+   # Muon uses much higher LR than AdamW
+   muon_lr = 0.02       # Good starting point
+   adamw_lr = 0.0003    # Typical AdamW LR
+   ```
+
+3. **Gradient Clipping Guidelines**:
    ```python
    # Conservative clipping for stability
    "gradient_clipping_by_norm": 1.0  # Good default
@@ -600,18 +835,12 @@ The module uses research-backed default values from the constants module:
    "gradient_clipping_by_norm": 0.5  # Prevent exploding gradients
    ```
 
-3. **Hyperparameter Tuning**:
-   ```python
-   # Start with defaults, then tune
-   # Lower beta_2 for noisy gradients
-   "beta_2": 0.98 if transformer_model else 0.999
-   ```
-
 ### Deep Supervision
 
 1. **Choose Schedule Based on Architecture**:
    - **linear_low_to_high**: Standard U-Net, gradual transition
    - **curriculum**: Complex models, progressive learning
+   - **step_wise**: Two-phase training (features then refinement)
    - **constant_equal**: When all scales are equally important
 
 2. **Monitor Weight Distribution**:
@@ -622,10 +851,21 @@ The module uses research-backed default values from the constants module:
        logger.info(f"DS weights: {weights}")
    ```
 
-3. **Adjust Based on Training Behavior**:
-   - If early layers aren't learning: Use `constant_high_to_low`
-   - If final output is poor: Use `constant_low_to_high`
-   - For balanced learning: Use `linear_low_to_high`
+### SLED
+
+1. **Tune Evolution Rate**:
+   ```python
+   # Higher alpha = stronger correction
+   "evolution_rate": 0.3  # Conservative
+   "evolution_rate": 0.7  # Aggressive
+   ```
+
+2. **Adjust Top-k for Vocabulary Size**:
+   ```python
+   # Larger k for larger vocabularies
+   "evolution_scale": 10   # Small vocab
+   "evolution_scale": 50   # Large vocab (50k+)
+   ```
 
 ## Troubleshooting
 
@@ -655,9 +895,26 @@ config = {
     "t_mul": 2.0,                      # Add restarts
     "decay_steps": 5000
 }
+
+# Or try Muon for faster convergence
+optimizer = Muon(learning_rate=0.02)
 ```
 
-#### 3. Deep Supervision Not Working
+#### 3. Muon Not Improving Over AdamW
+```python
+# Check parameter routing
+for var in model.trainable_variables:
+    uses_muon = optimizer._should_use_muon(var)
+    print(f"{var.name}: {'Muon' if uses_muon else 'AdamW'}")
+
+# Ensure weight matrices are rank >= 2
+# Add custom embedding patterns if needed
+optimizer = Muon(
+    exclude_embedding_names=["embedding", "your_custom_pattern"]
+)
+```
+
+#### 4. Deep Supervision Not Working
 ```python
 # Check weight distribution
 weights = ds_scheduler(0.5)  # Mid-training
@@ -674,13 +931,18 @@ config = {
 }
 ```
 
-#### 4. Memory Issues
+#### 5. SLED Returning Original Logits
 ```python
-# Large models with gradient clipping
+# Check for zero denominator warning in logs
+# This means all layer contrasts were misaligned
+
+# Try adjusting parameters:
 config = {
-    "type": "adamw",
-    "gradient_clipping_by_value": 0.1,  # Use value clipping instead of norm
-    # Remove global norm clipping to save memory
+    "type": "sled_v1",
+    "config": {
+        "evolution_scale": 20,         # Increase top-k
+        "temperature": 0.8             # Lower temperature
+    }
 }
 ```
 
@@ -693,7 +955,6 @@ config = {
     "type": "cosine_decay",
     "learning_rate": 0.001,  # Required
     "decay_steps": 10000,    # Required
-    # Optional parameters can be omitted
 }
 ```
 
@@ -702,6 +963,11 @@ config = {
 # Check spelling and supported types
 supported_optimizers = ["adam", "adamw", "rmsprop", "adadelta"]
 supported_schedules = ["cosine_decay", "exponential_decay", "cosine_decay_restarts"]
+supported_ds_schedules = [
+    "constant_equal", "constant_low_to_high", "constant_high_to_low",
+    "linear_low_to_high", "non_linear_low_to_high", "custom_sigmoid_low_to_high",
+    "scale_by_scale_low_to_high", "cosine_annealing", "curriculum", "step_wise"
+]
 ```
 
 ## Advanced Usage
@@ -723,12 +989,33 @@ phase1_config = {
 phase2_config = {
     "type": "cosine_decay",
     "warmup_steps": 0,  # No warmup for second phase
-    "learning_rate": 0.0005,  # Lower starting LR
+    "learning_rate": 0.0005,
     "decay_steps": 10000,
     "alpha": 0.0001
 }
+```
 
-# Use different schedules for different training phases
+### Muon with Learning Rate Schedules
+
+```python
+from dl_techniques.optimization import learning_rate_schedule_builder
+from dl_techniques.optimization.muon_optimizer import Muon
+
+# Create schedule for Muon's main learning rate
+lr_config = {
+    "type": "cosine_decay",
+    "warmup_steps": 1000,
+    "learning_rate": 0.02,  # Higher LR for Muon
+    "decay_steps": 50000,
+    "alpha": 0.001
+}
+lr_schedule = learning_rate_schedule_builder(lr_config)
+
+# Use schedule with Muon
+optimizer = Muon(
+    learning_rate=lr_schedule,
+    adam_learning_rate=1e-3  # AdamW uses fixed rate
+)
 ```
 
 ### Dynamic Deep Supervision
@@ -737,27 +1024,30 @@ Adapt supervision weights based on validation performance:
 
 ```python
 class AdaptiveSupervisionCallback(keras.callbacks.Callback):
-    def __init__(self, ds_scheduler, base_config):
+    def __init__(self, ds_scheduler, base_config, num_outputs):
         self.ds_scheduler = ds_scheduler
         self.base_config = base_config
+        self.num_outputs = num_outputs
         self.best_val_loss = float('inf')
         
     def on_epoch_end(self, epoch, logs=None):
         val_loss = logs.get('val_loss', 0)
         
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
+        if val_loss >= self.best_val_loss:
+            # Switch to more aggressive schedule if plateauing
+            new_config = {"type": "step_wise", "config": {"threshold": 0.3}}
+            self.ds_scheduler = deep_supervision_schedule_builder(
+                new_config, self.num_outputs
+            )
         else:
-            # Adapt schedule if validation loss plateaus
-            # Switch to more aggressive schedule
-            new_config = self.base_config.copy()
-            new_config['type'] = 'curriculum'
-            self.ds_scheduler = deep_supervision_schedule_builder(new_config, 5)
+            self.best_val_loss = val_loss
 ```
 
 ### Multi-GPU Training Considerations
 
 ```python
+import tensorflow as tf
+
 # Adjust learning rate for multi-GPU training
 strategy = tf.distribute.MirroredStrategy()
 num_gpus = strategy.num_replicas_in_sync
@@ -768,6 +1058,13 @@ config = {
     "warmup_steps": 1000 * num_gpus,    # Scale warmup proportionally
     "decay_steps": 10000
 }
+
+# For Muon, scale both learning rates
+with strategy.scope():
+    optimizer = Muon(
+        learning_rate=0.02 * num_gpus,
+        adam_learning_rate=1e-3 * num_gpus
+    )
 ```
 
 ### Hyperparameter Sweeps
@@ -775,27 +1072,36 @@ config = {
 ```python
 def create_sweep_configs():
     """Generate configurations for hyperparameter sweeps."""
-    base_config = {
-        "type": "adam",
-        "warmup_steps": 1000,
-        "decay_steps": 10000
-    }
-    
     sweep_configs = []
     
-    # Sweep learning rates
-    for lr in [0.0001, 0.0003, 0.001, 0.003]:
-        # Sweep optimizer types
+    # Standard optimizer sweep
+    for lr in [0.0001, 0.0003, 0.001]:
         for opt_type in ["adam", "adamw"]:
-            # Sweep gradient clipping
             for clip_norm in [0.5, 1.0, 2.0]:
-                config = base_config.copy()
-                config.update({
-                    "learning_rate": lr,
-                    "type": opt_type,
-                    "gradient_clipping_by_norm": clip_norm
+                sweep_configs.append({
+                    "optimizer": {
+                        "type": opt_type,
+                        "gradient_clipping_by_norm": clip_norm
+                    },
+                    "lr_schedule": {
+                        "type": "cosine_decay",
+                        "learning_rate": lr,
+                        "warmup_steps": 1000,
+                        "decay_steps": 10000
+                    }
                 })
-                sweep_configs.append(config)
+    
+    # Muon sweep
+    for muon_lr in [0.01, 0.02, 0.05]:
+        for adam_lr in [1e-4, 3e-4, 1e-3]:
+            sweep_configs.append({
+                "optimizer": "muon",
+                "muon_config": {
+                    "learning_rate": muon_lr,
+                    "adam_learning_rate": adam_lr,
+                    "momentum": 0.95
+                }
+            })
     
     return sweep_configs
 ```
