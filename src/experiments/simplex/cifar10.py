@@ -79,6 +79,7 @@ from dl_techniques.visualization import (
     TrainingHistory,
     ModelComparison,
     ClassificationResults,
+    MultiModelClassification,
     PlotConfig,
     PlotStyle,
     ColorScheme,
@@ -86,6 +87,10 @@ from dl_techniques.visualization import (
     ModelComparisonBarChart,
     PerformanceRadarChart,
     ConfusionMatrixVisualization,
+    ROCPRCurves,
+    ConvergenceAnalysis,
+    OverfittingAnalysis,
+    ErrorAnalysisDashboard,
 )
 
 from dl_techniques.analyzer import (
@@ -970,15 +975,21 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
     viz_manager.register_template("layer_comparison_dashboard", LayerComparisonDashboard)
     viz_manager.register_template("simplex_analysis_dashboard", SimplexAnalysisDashboard)
+    
+    # Newly registered plugins for comprehensive analysis
+    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
+    viz_manager.register_template("convergence_analysis", ConvergenceAnalysis)
+    viz_manager.register_template("overfitting_analysis", OverfittingAnalysis)
+    viz_manager.register_template("error_analysis", ErrorAnalysisDashboard)
 
     # Log experiment start
     logger.info("=" * 80)
-    logger.info("🚀 Starting CIFAR-10 RigidSimplex Layer Comparison Experiment")
-    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("Starting CIFAR-10 RigidSimplex Layer Comparison Experiment")
+    logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading CIFAR-10 dataset...")
+    logger.info("Loading CIFAR-10 dataset...")
 
     train_config = TrainingConfig(
         input_shape=config.input_shape,
@@ -993,12 +1004,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     test_data = dataset_builder.get_test_data()
     class_names = dataset_builder.get_class_names()
 
-    logger.info("✅ Dataset loaded successfully")
+    logger.info("Dataset loaded successfully")
     logger.info(f"   Steps per epoch: {steps_per_epoch}, Validation steps: {val_steps}")
     logger.info(f"   Test data shape: {test_data.x_data.shape}")
 
     # ===== MODEL TRAINING PHASE =====
-    logger.info("🏋️ Starting model training phase...")
+    logger.info("Starting model training phase...")
 
     trained_models = {}
     all_histories = {}
@@ -1047,17 +1058,18 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             logger.info(f"   Simplex orthogonality error: {simplex_analysis.orthogonality_error:.6f}")
             logger.info(f"   Simplex learned scale: {simplex_analysis.scale_value:.4f}")
 
-        logger.info(f"✅ {layer_config.name} training completed!")
+        logger.info(f"{layer_config.name} training completed!")
 
     # ===== MEMORY MANAGEMENT =====
-    logger.info("🗑️ Triggering garbage collection...")
+    logger.info("Triggering garbage collection...")
     gc.collect()
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("📈 Evaluating final model performance on test set...")
+    logger.info("Evaluating final model performance on test set...")
 
     performance_results = {}
     all_predictions = {}
+    all_probabilities = {} # New: store probability outputs for advanced metrics
 
     for name, model in trained_models.items():
         logger.info(f"Evaluating model {name}...")
@@ -1095,11 +1107,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         }
 
         all_predictions[name] = y_pred_classes
+        all_probabilities[name] = predictions # Store probabilities
 
         logger.info(f"   {name} - Accuracy: {accuracy:.4f}, Top-5: {top5_acc:.4f}")
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼️ Generating visualizations...")
+    logger.info("Generating visualizations...")
 
     # 1. Training curves comparison
     training_histories = {
@@ -1116,6 +1129,20 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     viz_manager.visualize(
         data=training_histories,
         plugin_name="training_curves",
+        show=False
+    )
+    
+    # 1.1 Training Dynamics Analysis (New)
+    # Check convergence properties
+    viz_manager.visualize(
+        data=training_histories,
+        plugin_name="convergence_analysis",
+        show=False
+    )
+    # Check overfitting properties
+    viz_manager.visualize(
+        data=training_histories,
+        plugin_name="overfitting_analysis",
         show=False
     )
 
@@ -1145,23 +1172,52 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         show=False
     )
 
-    # 3. Confusion matrices
+    # 3. Classification Results Collection and Individual Analysis
+    all_classification_results = {}
+    
     for name, y_pred in all_predictions.items():
         classification_results = ClassificationResults(
             y_true=test_data.y_data.astype(int),
             y_pred=y_pred,
+            y_prob=all_probabilities[name], # Pass probabilities for advanced metrics
             class_names=class_names,
             model_name=name
         )
+        all_classification_results[name] = classification_results
 
+        # Individual Error Analysis (requires y_prob)
         viz_manager.visualize(
             data=classification_results,
-            plugin_name="confusion_matrix",
-            normalize='true',
-            show=False
+            plugin_name="error_analysis",
+            show=False,
+            # Pass raw x_data if the plugin supports showing examples
+            x_data=test_data.x_data 
         )
 
-    # 4. Layer comparison dashboard
+    # 4. Multi-Model Classification Analysis (New)
+    # Combined analysis for Confusion Matrices and ROC/PR Curves
+    multi_model_data = MultiModelClassification(
+        results=all_classification_results,
+        dataset_name="CIFAR-10 Test"
+    )
+
+    # Combined Confusion Matrices
+    viz_manager.visualize(
+        data=multi_model_data,
+        plugin_name="confusion_matrix",
+        normalize='true',
+        show=False
+    )
+
+    # Combined ROC/PR Curves
+    viz_manager.visualize(
+        data=multi_model_data,
+        plugin_name="roc_pr_curves",
+        plot_type='both',
+        show=False
+    )
+
+    # 5. Layer comparison dashboard
     layer_comparison = LayerComparisonData(
         layer_names=list(config.layer_configs[i].name for i in range(len(config.layer_configs))),
         metrics=performance_results,
@@ -1174,7 +1230,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         show=False
     )
 
-    # 5. Simplex analysis dashboard (if we have simplex models)
+    # 6. Simplex analysis dashboard (if we have simplex models)
     if simplex_analyses:
         viz_manager.visualize(
             data=simplex_analyses,
@@ -1183,7 +1239,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
-    logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
@@ -1194,10 +1250,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
         model_analysis_results = analyzer.analyze(data=test_data)
-        logger.info("✅ Model analysis completed successfully!")
+        logger.info("Model analysis completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
+        logger.error(f"Model analysis failed: {e}", exc_info=True)
 
     # ===== RESULTS COMPILATION =====
     results_payload = {
@@ -1206,6 +1262,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'histories': all_histories,
         'trained_models': trained_models,
         'predictions': all_predictions,
+        'probabilities': all_probabilities,
         'simplex_analyses': simplex_analyses,
         'test_data': test_data,
         'class_names': class_names
@@ -1229,12 +1286,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         results: Dictionary containing all experimental results
     """
     logger.info("=" * 80)
-    logger.info("📋 EXPERIMENT SUMMARY")
+    logger.info("EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("🎯 PERFORMANCE METRICS (on Test Set):")
+        logger.info("PERFORMANCE METRICS (on Test Set):")
         logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12} {'Params':<15}")
         logger.info("-" * 75)
 
@@ -1257,7 +1314,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== SIMPLEX ANALYSIS SECTION =====
     if 'simplex_analyses' in results and results['simplex_analyses']:
-        logger.info("🔬 SIMPLEX LAYER ANALYSIS:")
+        logger.info("SIMPLEX LAYER ANALYSIS:")
         logger.info(f"{'Model':<20} {'Scale':<12} {'Ortho Error':<15}")
         logger.info("-" * 50)
 
@@ -1278,17 +1335,17 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             best_dense = max(dense_models.items(), key=lambda x: x[1]['accuracy'])
             best_simplex = max(simplex_models.items(), key=lambda x: x[1]['accuracy'])
 
-            logger.info("📊 DENSE vs SIMPLEX COMPARISON:")
+            logger.info("DENSE vs SIMPLEX COMPARISON:")
             logger.info(f"   Best Dense:   {best_dense[0]} (Acc: {best_dense[1]['accuracy']:.4f})")
             logger.info(f"   Best Simplex: {best_simplex[0]} (Acc: {best_simplex[1]['accuracy']:.4f})")
 
             diff = best_simplex[1]['accuracy'] - best_dense[1]['accuracy']
             if diff > 0:
-                logger.info(f"   ✅ Simplex outperforms Dense by {diff:.4f}")
+                logger.info(f"   Simplex outperforms Dense by {diff:.4f}")
             elif diff < 0:
-                logger.info(f"   ⚠️ Dense outperforms Simplex by {-diff:.4f}")
+                logger.info(f"   Dense outperforms Simplex by {-diff:.4f}")
             else:
-                logger.info(f"   ➡️ Equal performance")
+                logger.info(f"   Equal performance")
 
             # Parameter efficiency
             dense_params = best_dense[1].get('trainable_params', 1)
@@ -1306,7 +1363,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             results['performance_analysis'].items(),
             key=lambda x: x[1]['accuracy']
         )
-        logger.info(f"🏆 BEST MODEL: {best_model[0]}")
+        logger.info(f"BEST MODEL: {best_model[0]}")
         logger.info(f"   Accuracy: {best_model[1]['accuracy']:.4f}")
         logger.info(f"   Top-5 Accuracy: {best_model[1]['top_5_accuracy']:.4f}")
 
@@ -1330,7 +1387,7 @@ def main() -> None:
         try:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"✅ GPU configured: {len(gpus)} device(s) available")
+            logger.info(f"GPU configured: {len(gpus)} device(s) available")
         except RuntimeError as e:
             logger.warning(f"GPU configuration warning: {e}")
 
