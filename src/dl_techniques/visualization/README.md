@@ -255,6 +255,36 @@ viz_manager.visualize(
 )
 ```
 
+#### Comparing Multiple Confusion Matrices
+
+To visualize multiple models side-by-side (e.g., comparing a Baseline to a New Model), use the `MultiModelClassification` container.
+
+```python
+from dl_techniques.visualization import (
+    ClassificationResults, 
+    MultiModelClassification,
+    ConfusionMatrixVisualization
+)
+
+# Assume results_A and results_B are existing ClassificationResults objects
+# for two different models.
+multi_model_data = MultiModelClassification(
+    results={
+        "Baseline Model": results_A, 
+        "New Model": results_B
+    },
+    dataset_name="Test Set"
+)
+
+viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+viz_manager.visualize(
+    data=multi_model_data,
+    plugin_name="confusion_matrix",
+    normalize='true', 
+    show=True
+)
+```
+
 #### ROC and PR Curves (`roc_pr_curves`)
 
 ```python
