@@ -446,6 +446,7 @@ class VisualizationManager:
             plugin_name: Optional[str] = None,
             save: bool = True,
             show: bool = False,
+            filename: Optional[str] = None,
             **kwargs
     ) -> Optional[plt.Figure]:
         """
@@ -456,6 +457,7 @@ class VisualizationManager:
             plugin_name: Specific plugin to use (auto-detect if None)
             save: Whether to save the figure
             show: Whether to show the figure
+            filename: Optional custom filename for saving (defaults to plugin name)
             **kwargs: Additional arguments for the plugin
 
         Returns:
@@ -485,7 +487,9 @@ class VisualizationManager:
                 fig = plugin.create_visualization(data, **kwargs)
 
                 if save:
-                    plugin.save_figure(fig, plugin.name)
+                    # Use provided filename or default to plugin name
+                    save_name = filename if filename else plugin.name
+                    plugin.save_figure(fig, save_name)
 
                 if show:
                     plt.show()
