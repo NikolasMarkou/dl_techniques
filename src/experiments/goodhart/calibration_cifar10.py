@@ -16,7 +16,7 @@ confidence calibration, and resistance to overfitting.
 Experimental Design
 -------------------
 
-**Dataset**: CIFAR-10 (10 classes, 32×32 RGB images)
+**Dataset**: CIFAR-10 (10 classes, 32x32 RGB images)
 - 50,000 training images
 - 10,000 test images
 - Standard preprocessing with normalization
@@ -34,8 +34,8 @@ Experimental Design
 **Loss Functions Evaluated**:
 
 1. **Standard Cross-Entropy**: The baseline approach for multi-class classification
-2. **Label Smoothing**: Cross-entropy with soft targets (α=0.1) to reduce overconfidence
-3. **Focal Loss**: Addresses class imbalance by down-weighting easy examples (γ=2.0)
+2. **Label Smoothing**: Cross-entropy with soft targets (alpha=0.1) to reduce overconfidence
+3. **Focal Loss**: Addresses class imbalance by down-weighting easy examples (gamma=2.0)
 4. **Brier Score Loss**: Direct optimization of calibration via mean squared error
    between predicted probabilities and one-hot labels
 5. **Combined Calibration Loss**: Weighted combination of Cross-Entropy and Brier Score
@@ -77,7 +77,7 @@ The experiment employs a multi-faceted analysis approach using the ModelAnalyzer
 - Feature representation quality
 
 **Spectral Analysis (WeightWatcher)**:
-- Power-law exponent (α) for training quality assessment
+- Power-law exponent (alpha) for training quality assessment
 - Concentration scores for information distribution
 - Matrix entropy and stable rank metrics
 - Data-free generalization estimates
@@ -186,8 +186,13 @@ from dl_techniques.visualization import (
     VisualizationManager,
     ClassificationResults,
     MultiModelClassification,
+    TrainingHistory,
     TrainingCurvesVisualization,
-    ConfusionMatrixVisualization
+    ConfusionMatrixVisualization,
+    ROCPRCurves,
+    ConvergenceAnalysis,
+    OverfittingAnalysis,
+    ErrorAnalysisDashboard
 )
 
 from dl_techniques.analyzer import (
@@ -277,7 +282,7 @@ class CombinedCrossEntropyBrierLoss(keras.losses.Loss):
     The combination provides a balance between discriminative power and
     probabilistic calibration.
 
-    Loss = α * CrossEntropy + (1-α) * BrierScore
+    Loss = alpha * CrossEntropy + (1-alpha) * BrierScore
 
     Args:
         alpha: Weight for the cross-entropy component. The Brier Score component
@@ -730,7 +735,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     experiment_dir = config.output_dir / f"{config.experiment_name}_{timestamp}"
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize visualization manager (for confusion matrices)
+    # Initialize visualization manager
     vis_manager = VisualizationManager(
         experiment_name=config.experiment_name,
         output_dir=experiment_dir / "visualizations"
@@ -739,6 +744,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     # Register visualization templates
     vis_manager.register_template("training_curves", TrainingCurvesVisualization)
     vis_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+    vis_manager.register_template("roc_pr_curves", ROCPRCurves)
+    vis_manager.register_template("convergence_analysis", ConvergenceAnalysis)
+    vis_manager.register_template("overfitting_analysis", OverfittingAnalysis)
+    vis_manager.register_template("error_analysis", ErrorAnalysisDashboard)
 
     # Log experiment start
     logger.info("=" * 80)
@@ -760,6 +769,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     trained_models = {}  # Store trained models: Dict[str, keras.Model]
     training_histories = {}  # Store training histories: Dict[str, Dict[str, List[float]]]
+    training_histories_objects = {} # Store standardized TrainingHistory objects
 
     for loss_name, loss_fn_factory in config.loss_functions.items():
         logger.info(f"\n--- Training model with {loss_name} loss ---")
@@ -796,6 +806,15 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # This is the correct format for ModelAnalyzer's training_history parameter
         trained_models[loss_name] = model
         training_histories[loss_name] = history.history
+
+        # Standardize history for framework visualizations
+        training_histories_objects[loss_name] = TrainingHistory(
+            epochs=history.epoch,
+            train_loss=history.history['loss'],
+            val_loss=history.history['val_loss'] if 'val_loss' in history.history else None,
+            train_metrics={k: v for k, v in history.history.items() if 'loss' not in k and 'val_' not in k},
+            val_metrics={k: v for k, v in history.history.items() if 'val_' in k and 'loss' not in k}
+        )
 
         logger.info(f"{loss_name} training completed successfully!")
 
@@ -854,7 +873,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.info("")
         logger.info("Generated analysis outputs:")
         logger.info("  - summary_dashboard.png: High-level overview")
-        logger.info("  - spectral_summary.png: Training quality (power-law α)")
+        logger.info("  - spectral_summary.png: Training quality (power-law alpha)")
         logger.info("  - training_dynamics.png: Learning curves and overfitting")
         logger.info("  - weight_learning_journey.png: Weight evolution")
         logger.info("  - confidence_calibration_analysis.png: Calibration metrics")
@@ -867,13 +886,26 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.warning("Continuing with remaining analyses...")
         logger.info("")
 
-    # ===== ADDITIONAL VISUALIZATION: CONFUSION MATRICES =====
+    # ===== ADDITIONAL VISUALIZATION: FRAMEWORK PLOTS =====
     logger.info("=" * 80)
-    logger.info("GENERATING CONFUSION MATRICES")
+    logger.info("GENERATING FRAMEWORK VISUALIZATIONS")
     logger.info("=" * 80)
     logger.info("")
 
     try:
+        # 1. Training Dynamics (Convergence & Overfitting)
+        logger.info("Generating training dynamics visualizations...")
+        vis_manager.visualize(
+            data=training_histories_objects,
+            plugin_name="convergence_analysis",
+            show=False
+        )
+        vis_manager.visualize(
+            data=training_histories_objects,
+            plugin_name="overfitting_analysis",
+            show=False
+        )
+
         # Generate predictions for all models
         raw_predictions = {
             name: model.predict(cifar10_data.x_test, verbose=0)
@@ -899,6 +931,17 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                     model_name=model_name
                 )
                 all_classification_results[model_name] = classification_data
+
+                # Individual Error Analysis Dashboard
+                # Using unique filenames to prevent overwriting
+                vis_manager.visualize(
+                    data=classification_data,
+                    plugin_name="error_analysis",
+                    show=False,
+                    filename=f"error_analysis_{model_name}",
+                    x_data=cifar10_data.x_test # Pass examples for visualization
+                )
+
             except Exception as e:
                 logger.error(f"Failed to prepare classification results for {model_name}: {e}")
 
@@ -909,17 +952,27 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
                 dataset_name="CIFAR-10"
             )
 
+            # Confusion Matrices
             vis_manager.visualize(
                 data=multi_model_data,
                 plugin_name="confusion_matrix",
                 normalize='true',
                 show=False
             )
-            logger.info("Multi-model confusion matrix visualization created")
+
+            # ROC/PR Curves
+            vis_manager.visualize(
+                data=multi_model_data,
+                plugin_name="roc_pr_curves",
+                plot_type='both',
+                show=False
+            )
+
+            logger.info("Multi-model visualizations created (Confusion Matrix, ROC/PR)")
             logger.info("")
 
     except Exception as e:
-        logger.error(f"Failed to create confusion matrices: {e}")
+        logger.error(f"Failed to create framework visualizations: {e}")
         logger.info("")
 
     # ===== FINAL PERFORMANCE EVALUATION =====
@@ -1059,7 +1112,7 @@ def print_experiment_summary(
         if analyzer_config.analyze_spectral and model_analysis.spectral_metrics:
             logger.info("SPECTRAL ANALYSIS (WeightWatcher)")
             logger.info("-" * 80)
-            logger.info(f"{'Model':<30} {'Mean α':<12} {'Concentration':<15} {'Matrix Entropy':<15}")
+            logger.info(f"{'Model':<30} {'Mean alpha':<12} {'Concentration':<15} {'Matrix Entropy':<15}")
             logger.info("-" * 80)
 
             for model_name, spectral in model_analysis.spectral_metrics.items():
@@ -1074,9 +1127,9 @@ def print_experiment_summary(
                     f"{mean_entropy:<15.4f}"
                 )
             logger.info("")
-            logger.info("Note: Ideal Mean α is typically in range [2.0, 6.0]")
-            logger.info("      α < 2.0 may indicate over-training")
-            logger.info("      α > 6.0 may indicate under-training")
+            logger.info("Note: Ideal Mean alpha is typically in range [2.0, 6.0]")
+            logger.info("      alpha < 2.0 may indicate over-training")
+            logger.info("      alpha > 6.0 may indicate under-training")
             logger.info("")
 
         # --- Training Dynamics ---
@@ -1131,14 +1184,14 @@ def print_experiment_summary(
     logger.info("")
     logger.info("Key Outputs:")
     logger.info("  1. summary_dashboard.png - Start here for high-level comparison")
-    logger.info("  2. spectral_summary.png - Training quality assessment (α values)")
+    logger.info("  2. spectral_summary.png - Training quality assessment (alpha values)")
     logger.info("  3. training_dynamics.png - Learning curves and overfitting")
     logger.info("  4. confidence_calibration_analysis.png - Reliability diagrams")
     logger.info("  5. analysis_results.json - Raw metrics for further analysis")
     logger.info("")
     logger.info("Interpretation Tips:")
     logger.info("  - Lower ECE & Brier Score = Better calibration")
-    logger.info("  - Power-law α in [2.0, 6.0] = Well-trained model")
+    logger.info("  - Power-law alpha in [2.0, 6.0] = Well-trained model")
     logger.info("  - Lower Overfitting Index = Better generalization")
     logger.info("  - Check Pareto plots for optimal hyperparameter trade-offs")
     logger.info("")

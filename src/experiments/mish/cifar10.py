@@ -16,7 +16,7 @@ model expressiveness.
 Experimental Design
 -------------------
 
-**Dataset**: CIFAR-10 (10 classes, 32×32 RGB images)
+**Dataset**: CIFAR-10 (10 classes, 32x32 RGB images)
 - 50,000 training images
 - 10,000 test images
 - Standard preprocessing with normalization and augmentation
@@ -48,6 +48,7 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
+import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable, Optional
 
@@ -64,6 +65,7 @@ from dl_techniques.visualization import (
     TrainingHistory,
     ModelComparison,
     ClassificationResults,
+    MultiModelClassification,
     PlotConfig,
     PlotStyle,
     ColorScheme,
@@ -71,6 +73,10 @@ from dl_techniques.visualization import (
     ModelComparisonBarChart,
     PerformanceRadarChart,
     ConfusionMatrixVisualization,
+    ROCPRCurves,
+    ConvergenceAnalysis,
+    OverfittingAnalysis,
+    ErrorAnalysisDashboard,
 )
 
 from dl_techniques.analyzer import (
@@ -136,8 +142,6 @@ class ActivationComparisonDashboard(VisualizationPlugin):
         **kwargs
     ) -> Any:
         """Create comprehensive comparison dashboard."""
-        import matplotlib.pyplot as plt
-
         fig = plt.figure(figsize=(20, 12), dpi=self.config.dpi)
         gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
 
@@ -683,13 +687,19 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
     viz_manager.register_template("activation_dashboard", ActivationComparisonDashboard)
 
+    # Newly registered plugins for comprehensive analysis
+    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
+    viz_manager.register_template("convergence_analysis", ConvergenceAnalysis)
+    viz_manager.register_template("overfitting_analysis", OverfittingAnalysis)
+    viz_manager.register_template("error_analysis", ErrorAnalysisDashboard)
+
     # Log experiment start
-    logger.info("🚀 Starting CIFAR-10 Activation Function Comparison Experiment")
-    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("Starting CIFAR-10 Activation Function Comparison Experiment")
+    logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading CIFAR-10 dataset using standardized builder...")
+    logger.info("Loading CIFAR-10 dataset using standardized builder...")
 
     # Create training config for dataset builder
     train_config = TrainingConfig(
@@ -709,13 +719,13 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     test_data = dataset_builder.get_test_data()
     class_names = dataset_builder.get_class_names()
 
-    logger.info("✅ Dataset loaded successfully")
+    logger.info("Dataset loaded successfully")
     logger.info(f"Steps per epoch: {steps_per_epoch}, Validation steps: {val_steps}")
     logger.info(f"Test data shape: {test_data.x_data.shape}")
     logger.info(f"Class names: {class_names}")
 
     # ===== MODEL TRAINING PHASE =====
-    logger.info("🏋️ Starting model training phase...")
+    logger.info("Starting model training phase...")
 
     trained_models = {}
     all_histories = {}
@@ -745,17 +755,18 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         # Store results
         trained_models[activation_name] = model
         all_histories[activation_name] = history
-        logger.info(f"✅ {activation_name} training completed!")
+        logger.info(f"{activation_name} training completed!")
 
     # ===== MEMORY MANAGEMENT =====
-    logger.info("🗑️ Triggering garbage collection...")
+    logger.info("Triggering garbage collection...")
     gc.collect()
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("📈 Evaluating final model performance on test set...")
+    logger.info("Evaluating final model performance on test set...")
 
     performance_results = {}
     all_predictions = {}
+    all_probabilities = {} # New: store probability outputs for advanced metrics
 
     for name, model in trained_models.items():
         logger.info(f"Evaluating model {name}...")
@@ -787,11 +798,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         }
 
         all_predictions[name] = y_pred_classes
+        all_probabilities[name] = predictions # Store probabilities
 
         logger.info(f"Model {name} - Accuracy: {accuracy:.4f}, Top-5: {top5_acc:.4f}, Loss: {loss:.4f}")
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("🖼️ Generating visualizations using framework...")
+    logger.info("Generating visualizations using framework...")
 
     # 1. Training curves comparison
     training_histories = {
@@ -808,6 +820,20 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     viz_manager.visualize(
         data=training_histories,
         plugin_name="training_curves",
+        show=False
+    )
+
+    # 1.1 Training Dynamics Analysis (New)
+    # Check convergence properties
+    viz_manager.visualize(
+        data=training_histories,
+        plugin_name="convergence_analysis",
+        show=False
+    )
+    # Check overfitting properties
+    viz_manager.visualize(
+        data=training_histories,
+        plugin_name="overfitting_analysis",
         show=False
     )
 
@@ -837,23 +863,54 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         show=False
     )
 
-    # 3. Confusion matrices for each model
+    # 3. Classification Results Collection and Individual Analysis
+    all_classification_results = {}
+
     for name, y_pred in all_predictions.items():
         classification_results = ClassificationResults(
             y_true=test_data.y_data.astype(int),
             y_pred=y_pred,
+            y_prob=all_probabilities[name], # Pass probabilities for advanced metrics
             class_names=class_names,
             model_name=name
         )
+        all_classification_results[name] = classification_results
 
+        # Individual Error Analysis (requires y_prob)
+        # Using unique filenames to avoid overwriting
         viz_manager.visualize(
             data=classification_results,
-            plugin_name="confusion_matrix",
-            normalize='true',
-            show=False
+            plugin_name="error_analysis",
+            show=False,
+            filename=f"error_analysis_{name}",
+            # Pass raw x_data if the plugin supports showing examples
+            x_data=test_data.x_data
         )
 
-    # 4. Comprehensive activation comparison dashboard
+    # 4. Multi-Model Classification Analysis (New)
+    # Combined analysis for Confusion Matrices and ROC/PR Curves
+    multi_model_data = MultiModelClassification(
+        results=all_classification_results,
+        dataset_name="CIFAR-10 Test"
+    )
+
+    # Combined Confusion Matrices
+    viz_manager.visualize(
+        data=multi_model_data,
+        plugin_name="confusion_matrix",
+        normalize='true',
+        show=False
+    )
+
+    # Combined ROC/PR Curves
+    viz_manager.visualize(
+        data=multi_model_data,
+        plugin_name="roc_pr_curves",
+        plot_type='both',
+        show=False
+    )
+
+    # 5. Comprehensive activation comparison dashboard
     activation_comparison = ActivationComparisonData(
         activation_names=list(config.activations.keys()),
         metrics=performance_results,
@@ -867,7 +924,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     )
 
     # ===== COMPREHENSIVE MODEL ANALYSIS =====
-    logger.info("📊 Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
@@ -878,10 +935,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
         model_analysis_results = analyzer.analyze(data=test_data)
-        logger.info("✅ Model analysis completed successfully!")
+        logger.info("Model analysis completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Model analysis failed: {e}", exc_info=True)
+        logger.error(f"Model analysis failed: {e}", exc_info=True)
 
     # ===== RESULTS COMPILATION =====
     results_payload = {
@@ -890,6 +947,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         'histories': all_histories,
         'trained_models': trained_models,
         'predictions': all_predictions,
+        'probabilities': all_probabilities,
         'test_data': test_data,
         'class_names': class_names
     }
@@ -912,12 +970,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         results: Dictionary containing all experimental results and analysis
     """
     logger.info("=" * 80)
-    logger.info("📋 EXPERIMENT SUMMARY")
+    logger.info("EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("🎯 PERFORMANCE METRICS (on Test Set):")
+        logger.info("PERFORMANCE METRICS (on Test Set):")
         logger.info(f"{'Model':<20} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12}")
         logger.info("-" * 60)
 
@@ -937,7 +995,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     # ===== CALIBRATION METRICS SECTION =====
     model_analysis = results.get('model_analysis')
     if model_analysis and model_analysis.calibration_metrics:
-        logger.info("\n🎯 CALIBRATION METRICS:")
+        logger.info("\nCALIBRATION METRICS:")
         logger.info(f"{'Model':<20} {'ECE':<12} {'Brier Score':<15} {'Mean Entropy':<12}")
         logger.info("-" * 65)
 
@@ -953,7 +1011,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             results['performance_analysis'].items(),
             key=lambda x: x[1]['accuracy']
         )
-        logger.info(f"\n🏆 BEST MODEL: {best_model[0]} (Accuracy: {best_model[1]['accuracy']:.4f})")
+        logger.info(f"\nBEST MODEL: {best_model[0]} (Accuracy: {best_model[1]['accuracy']:.4f})")
 
     logger.info("=" * 80)
 
@@ -966,7 +1024,7 @@ def main() -> None:
     """
     Main execution function for running the CIFAR-10 activation comparison experiment.
     """
-    logger.info("🚀 CIFAR-10 Activation Function Comparison Experiment")
+    logger.info("CIFAR-10 Activation Function Comparison Experiment")
     logger.info("=" * 80)
 
     # Configure GPU
@@ -982,7 +1040,7 @@ def main() -> None:
     config = ExperimentConfig()
 
     # Log key configuration parameters
-    logger.info("⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"   Activation Functions: {list(config.activations.keys())}")
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
     logger.info(f"   Model Architecture: {len(config.conv_filters)} conv blocks, "
@@ -993,10 +1051,10 @@ def main() -> None:
     try:
         # Run the complete experiment
         results = run_experiment(config)
-        logger.info("✅ Experiment completed successfully!")
+        logger.info("Experiment completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Experiment failed with error: {e}", exc_info=True)
+        logger.error(f"Experiment failed with error: {e}", exc_info=True)
         raise
 
 
