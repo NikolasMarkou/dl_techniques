@@ -968,12 +968,12 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Log experiment start
     logger.info("=" * 80)
-    logger.info("🚀 Starting Stacked RigidSimplex Depth Comparison Experiment")
-    logger.info(f"📁 Results will be saved to: {experiment_dir}")
+    logger.info("Starting Stacked RigidSimplex Depth Comparison Experiment")
+    logger.info(f"Results will be saved to: {experiment_dir}")
     logger.info("=" * 80)
 
     # ===== DATASET LOADING =====
-    logger.info("📊 Loading CIFAR-10 dataset...")
+    logger.info("Loading CIFAR-10 dataset...")
 
     train_config = TrainingConfig(
         input_shape=config.input_shape,
@@ -991,14 +991,14 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
     logger.info("✅ Dataset loaded successfully")
 
     # ===== MODEL TRAINING PHASE =====
-    logger.info("🏋️ Starting model training phase...")
+    logger.info("Starting model training phase...")
 
     trained_models = {}
     all_histories = {}
     stacked_analyses = []
 
     for stacked_config in config.stacked_configs:
-        logger.info(f"\n{'='*60}")
+        logger.info(f"{'='*60}")
         logger.info(f"--- Training: {stacked_config.name} ---")
         logger.info(f"    Type: {stacked_config.layer_type}")
         logger.info(f"    Depth: {stacked_config.num_layers} layers")
@@ -1037,11 +1037,11 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.info(f"✅ {stacked_config.name} training completed!")
 
     # ===== MEMORY MANAGEMENT =====
-    logger.info("\n🗑️ Triggering garbage collection...")
+    logger.info("Triggering garbage collection...")
     gc.collect()
 
     # ===== FINAL PERFORMANCE EVALUATION =====
-    logger.info("\n📈 Evaluating final model performance on test set...")
+    logger.info("Evaluating final model performance on test set...")
 
     performance_results = {}
     all_predictions = {}
@@ -1091,7 +1091,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         logger.info(f"   {name} - Accuracy: {accuracy:.4f}, Top-5: {top5_acc:.4f}")
 
     # ===== VISUALIZATION GENERATION =====
-    logger.info("\n🖼️ Generating visualizations...")
+    logger.info("Generating visualizations...")
 
     # 1. Training curves comparison
     training_histories = {
@@ -1176,7 +1176,7 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
         )
 
     # ===== MODEL ANALYSIS =====
-    logger.info("\n📊 Performing comprehensive analysis with ModelAnalyzer...")
+    logger.info("Performing comprehensive analysis with ModelAnalyzer...")
     model_analysis_results = None
 
     try:
@@ -1222,13 +1222,13 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
     Args:
         results: Dictionary containing all experimental results
     """
-    logger.info("\n" + "=" * 80)
-    logger.info("📋 EXPERIMENT SUMMARY")
+    logger.info("" + "=" * 80)
+    logger.info("EXPERIMENT SUMMARY")
     logger.info("=" * 80)
 
     # ===== PERFORMANCE METRICS SECTION =====
     if 'performance_analysis' in results and results['performance_analysis']:
-        logger.info("\n🎯 PERFORMANCE METRICS (on Test Set):")
+        logger.info("PERFORMANCE METRICS (on Test Set):")
         logger.info(f"{'Model':<15} {'Depth':<7} {'Accuracy':<12} {'Top-5 Acc':<12} {'Loss':<12} {'Params':<15}")
         logger.info("-" * 80)
 
@@ -1251,7 +1251,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== DEPTH SCALING ANALYSIS =====
     if 'performance_analysis' in results and 'depth_info' in results:
-        logger.info("\n📈 DEPTH SCALING ANALYSIS:")
+        logger.info("DEPTH SCALING ANALYSIS:")
 
         perf = results['performance_analysis']
         depth_info = results['depth_info']
@@ -1261,14 +1261,14 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
         simplex_results = {k: v for k, v in perf.items() if 'Simplex' in k}
 
         if dense_results:
-            logger.info("\n   Dense Layers:")
+            logger.info("   Dense Layers:")
             for name in sorted(dense_results.keys(), key=lambda x: depth_info.get(x, 0)):
                 acc = dense_results[name]['accuracy']
                 depth = depth_info.get(name, '?')
                 logger.info(f"      {depth} layers: {acc:.4f}")
 
         if simplex_results:
-            logger.info("\n   Simplex Layers:")
+            logger.info("   Simplex Layers:")
             for name in sorted(simplex_results.keys(), key=lambda x: depth_info.get(x, 0)):
                 acc = simplex_results[name]['accuracy']
                 depth = depth_info.get(name, '?')
@@ -1276,10 +1276,10 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== STACKED SIMPLEX ANALYSIS =====
     if 'stacked_analyses' in results and results['stacked_analyses']:
-        logger.info("\n🔬 STACKED SIMPLEX LAYER ANALYSIS:")
+        logger.info("STACKED SIMPLEX LAYER ANALYSIS:")
 
         for analysis in sorted(results['stacked_analyses'], key=lambda x: x.num_layers):
-            logger.info(f"\n   {analysis.config_name} ({analysis.num_layers} layers):")
+            logger.info(f"   {analysis.config_name} ({analysis.num_layers} layers):")
             logger.info(f"      Scales: {[f'{s:.3f}' for s in analysis.scale_values]}")
             logger.info(f"      Ortho Errors: {[f'{e:.2f}' for e in analysis.orthogonality_errors]}")
             logger.info(f"      Total Ortho Error: {sum(analysis.orthogonality_errors):.2f}")
@@ -1292,7 +1292,7 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
 
     # ===== BEST MODELS PER DEPTH =====
     if 'performance_analysis' in results and 'depth_info' in results:
-        logger.info("\n🏆 BEST MODEL AT EACH DEPTH:")
+        logger.info("BEST MODEL AT EACH DEPTH:")
 
         perf = results['performance_analysis']
         depth_info = results['depth_info']
@@ -1309,12 +1309,12 @@ def print_experiment_summary(results: Dict[str, Any]) -> None:
             results['performance_analysis'].items(),
             key=lambda x: x[1]['accuracy']
         )
-        logger.info(f"\n🏆 OVERALL BEST: {best_model[0]}")
+        logger.info(f"OVERALL BEST: {best_model[0]}")
         logger.info(f"   Accuracy: {best_model[1]['accuracy']:.4f}")
         logger.info(f"   Top-5 Accuracy: {best_model[1]['top_5_accuracy']:.4f}")
         logger.info(f"   Depth: {results['depth_info'].get(best_model[0], '?')} layers")
 
-    logger.info("\n" + "=" * 80)
+    logger.info("=" * 80)
 
 
 # ==============================================================================
@@ -1325,7 +1325,7 @@ def main() -> None:
     """
     Main execution function for the stacked RigidSimplex depth experiment.
     """
-    logger.info("🚀 Stacked RigidSimplex Depth Comparison Experiment")
+    logger.info("Stacked RigidSimplex Depth Comparison Experiment")
     logger.info("=" * 80)
 
     # Configure GPU
@@ -1342,7 +1342,7 @@ def main() -> None:
     config = ExperimentConfig()
 
     # Log configuration
-    logger.info("\n⚙️ EXPERIMENT CONFIGURATION:")
+    logger.info("EXPERIMENT CONFIGURATION:")
     logger.info(f"   Configurations: {[sc.name for sc in config.stacked_configs]}")
     logger.info(f"   Epochs: {config.epochs}, Batch Size: {config.batch_size}")
     logger.info(f"   Units per layer: {config.units_per_layer}")
@@ -1351,10 +1351,10 @@ def main() -> None:
 
     try:
         results = run_experiment(config)
-        logger.info("\n✅ Experiment completed successfully!")
+        logger.info("✅ Experiment completed successfully!")
 
     except Exception as e:
-        logger.error(f"\n❌ Experiment failed with error: {e}", exc_info=True)
+        logger.error(f"❌ Experiment failed with error: {e}", exc_info=True)
         raise
 
 
