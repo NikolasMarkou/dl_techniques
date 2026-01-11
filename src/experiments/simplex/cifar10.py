@@ -98,7 +98,6 @@ from dl_techniques.analyzer import (
     AnalysisConfig,
 )
 
-# Local import for RigidSimplexLayer
 from dl_techniques.layers.rigid_simplex_layer import RigidSimplexLayer
 
 
