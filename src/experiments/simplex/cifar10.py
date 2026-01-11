@@ -1191,7 +1191,8 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
             plugin_name="error_analysis",
             show=False,
             # Pass raw x_data if the plugin supports showing examples
-            x_data=test_data.x_data 
+            x_data=test_data.x_data ,
+            filename=f"error_analysis_{name}"
         )
 
     # 4. Multi-Model Classification Analysis (New)
