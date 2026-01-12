@@ -50,7 +50,7 @@ from scipy import stats
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.mdn_model.model import MDNModel
+from dl_techniques.models.mdn_model import MDNModel
 
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
