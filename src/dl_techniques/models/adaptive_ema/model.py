@@ -22,15 +22,12 @@ from typing import Any, Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.time_series.ema_layer import (
-    ExponentialMovingAverage)
-from dl_techniques.layers.time_series.quantile_head_variable_io import (
-    QuantileSequenceHead,
-)
+from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
+from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable()
 class AdaptiveEMASlopeFilterModel(keras.Model):
     """
     Model wrapper for adaptive EMA slope filtering with learnable thresholds.
@@ -196,6 +193,9 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
             )
         else:
             self.quantile_head = None
+
+        self.upper_threshold_var = None
+        self.lower_threshold_var = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
