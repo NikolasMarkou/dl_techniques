@@ -173,7 +173,7 @@ class TiRexTrainingConfig:
     analysis_start_epoch: int = 1
 
     # ONNX Export Configuration
-    export_onnx: bool = True
+    export_onnx: bool = False
     onnx_opset_version: int = 17
 
     def __post_init__(self) -> None:
@@ -979,7 +979,7 @@ def parse_args() -> argparse.Namespace:
         "--no-onnx", dest="export_onnx", action="store_false",
         help="Disable ONNX export of the best model."
     )
-    parser.set_defaults(export_onnx=True)
+    parser.set_defaults(export_onnx=False)
     parser.add_argument(
         "--onnx_opset_version", type=int, default=17,
         help="ONNX opset version for export."
