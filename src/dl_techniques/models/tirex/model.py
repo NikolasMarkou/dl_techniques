@@ -228,7 +228,7 @@ class TiRexCore(keras.Model):
             hidden_dim=self.embed_dim * 2,
             output_dim=self.embed_dim,
             dropout_rate=self.dropout_rate,
-            activation="gelu",
+            activation="mish",
             name="input_projection"
         )
 
@@ -247,7 +247,7 @@ class TiRexCore(keras.Model):
                 normalization_type='rms_norm',
                 attention_type='window',
                 ffn_type='geglu',
-                activation='gelu',
+                activation='mish',
                 name=f"block_{i}"
             )
             # ---------------------------------------------

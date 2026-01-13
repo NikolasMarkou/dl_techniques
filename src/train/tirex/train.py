@@ -172,6 +172,10 @@ class TiRexTrainingConfig:
     analysis_frequency: int = 10
     analysis_start_epoch: int = 1
 
+    # ONNX Export Configuration
+    export_onnx: bool = True
+    onnx_opset_version: int = 17
+
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         if self.model_type not in ['core', 'extended']:
@@ -838,10 +842,15 @@ class TiRexTrainer:
             return_dict=True
         )
 
+        # Export best model to ONNX format
+        best_model_path = os.path.join(exp_dir, 'best_model.keras')
+        onnx_path = self._export_to_onnx(best_model_path, exp_dir)
+
         return {
             'history': history.history,
             'test_metrics': {k: float(v) for k, v in test_metrics.items()},
-            'final_epoch': len(history.history['loss'])
+            'final_epoch': len(history.history['loss']),
+            'onnx_path': onnx_path
         }
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
@@ -849,6 +858,7 @@ class TiRexTrainer:
             'history': results['history'],
             'test_metrics': results['test_metrics'],
             'final_epoch': results['final_epoch'],
+            'onnx_path': results.get('onnx_path'),
             'config': self.config.__dict__
         }
 
@@ -859,6 +869,49 @@ class TiRexTrainer:
 
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
             json.dump(serializable, f, indent=4, default=json_convert)
+
+    def _export_to_onnx(self, model_path: str, exp_dir: str) -> Optional[str]:
+        """
+        Export the trained model to ONNX format.
+
+        :param model_path: Path to the saved .keras model.
+        :param exp_dir: Experiment directory for saving ONNX file.
+        :return: Path to exported ONNX file, or None if export failed.
+        """
+        if not self.config.export_onnx:
+            return None
+
+        onnx_path = os.path.join(exp_dir, 'model.onnx')
+
+        try:
+            logger.info(f"Exporting model to ONNX format: {onnx_path}")
+
+            # Load the best model without compilation (inference only, no metrics needed)
+            best_model = keras.saving.load_model(model_path, compile=False)
+
+            # Define input signature matching training configuration
+            input_signature = [
+                keras.InputSpec(
+                    shape=(None, self.config.input_length, 1),
+                    dtype="float32"
+                )
+            ]
+
+            # Export to ONNX
+            best_model.export(
+                onnx_path,
+                format="onnx",
+                input_signature=input_signature,
+                opset_version=self.config.onnx_opset_version,
+                verbose=True
+            )
+
+            logger.info(f"ONNX export successful: {onnx_path}")
+            return onnx_path
+
+        except Exception as e:
+            logger.error(f"ONNX export failed: {e}", exc_info=True)
+            return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -921,6 +974,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis_frequency", type=int, default=10)
     parser.add_argument("--analysis_start_epoch", type=int, default=1)
 
+    # ONNX export arguments
+    parser.add_argument(
+        "--no-onnx", dest="export_onnx", action="store_false",
+        help="Disable ONNX export of the best model."
+    )
+    parser.set_defaults(export_onnx=True)
+    parser.add_argument(
+        "--onnx_opset_version", type=int, default=17,
+        help="ONNX opset version for export."
+    )
+
     return parser.parse_args()
 
 
@@ -951,7 +1015,9 @@ def main() -> None:
         plot_top_k_patterns=args.plot_top_k_patterns,
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
-        analysis_start_epoch=args.analysis_start_epoch
+        analysis_start_epoch=args.analysis_start_epoch,
+        export_onnx=args.export_onnx,
+        onnx_opset_version=args.onnx_opset_version
     )
 
     generator_config = TimeSeriesGeneratorConfig(
