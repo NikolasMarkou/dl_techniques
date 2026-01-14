@@ -30,7 +30,7 @@ Pattern Categories
 The generator organizes patterns into the following categories:
 
 **Basic Patterns:**
-* **trend**: Linear, exponential, polynomial, logarithmic trends
+* **trend**: Linear, exponential, polynomial, logarithmic, mean-reverting trends
 * **seasonal**: Single and multi-period seasonal patterns
 * **composite**: Combined trend and seasonal patterns
 
@@ -106,6 +106,15 @@ Custom Pattern Generation:
     ...     ma_coeffs=[0.4],
     ...     noise_std=0.1
     ... )
+    >>>
+    >>> # Create custom mean-reverting trend
+    >>> custom_mr_trend = generator.generate_custom_pattern(
+    ...     "mean_reverting_trend",
+    ...     equilibrium=50.0,
+    ...     reversion_speed=0.05,
+    ...     trend_strength=0.1,
+    ...     volatility=0.5
+    ... )
 
 Multi-Task Dataset Creation:
     >>> # Create dataset for multiple forecasting tasks
@@ -138,10 +147,12 @@ Available Patterns
 ------------------
 The generator includes the following predefined patterns:
 
-**Trend Patterns (8 patterns):**
+**Trend Patterns (12 patterns):**
 * linear_trend_strong, linear_trend_weak
 * exponential_growth, polynomial_trend, quadratic_trend, cubic_trend
 * logistic_growth, logarithmic_trend
+* mean_reverting_trend_slow, mean_reverting_trend_fast
+* mean_reverting_trend_volatile, mean_reverting_trend_with_drift
 
 **Seasonal Patterns (7 patterns):**
 * daily_seasonality, weekly_seasonality, hourly_seasonality, yearly_seasonality
@@ -254,6 +265,9 @@ class TimeSeriesGeneratorConfig:
         ma_coeffs_range: Range for MA coefficients.
         volatility_range: Range for volatility parameters.
 
+        # Mean-reverting trend parameters
+        reversion_speed_range: Range for mean reversion speed.
+
         # Advanced pattern parameters
         outlier_prob_range: Range for outlier probabilities.
         regime_switch_prob_range: Range for regime switching probabilities.
@@ -276,6 +290,9 @@ class TimeSeriesGeneratorConfig:
     ar_coeffs_range: Tuple[float, float] = (-0.8, 0.8)
     ma_coeffs_range: Tuple[float, float] = (-0.8, 0.8)
     volatility_range: Tuple[float, float] = (0.01, 0.3)
+
+    # Mean-reverting trend parameters
+    reversion_speed_range: Tuple[float, float] = (0.01, 0.2)
 
     # Advanced pattern parameters
     outlier_prob_range: Tuple[float, float] = (0.01, 0.1)
@@ -402,6 +419,53 @@ class TimeSeriesGenerator:
             "params": {
                 "strength": 0.5,
                 "noise_level": 0.12
+            }
+        }
+
+        # === MEAN-REVERTING TREND PATTERNS ===
+        tasks["mean_reverting_trend_slow"] = {
+            "category": "trend",
+            "generator": self._generate_mean_reverting_trend,
+            "params": {
+                "equilibrium": 50.0,
+                "reversion_speed": 0.02,
+                "trend_strength": 0.1,
+                "volatility": 0.5,
+                "noise_level": 0.05
+            }
+        }
+        tasks["mean_reverting_trend_fast"] = {
+            "category": "trend",
+            "generator": self._generate_mean_reverting_trend,
+            "params": {
+                "equilibrium": 50.0,
+                "reversion_speed": 0.15,
+                "trend_strength": 0.2,
+                "volatility": 0.8,
+                "noise_level": 0.05
+            }
+        }
+        tasks["mean_reverting_trend_volatile"] = {
+            "category": "trend",
+            "generator": self._generate_mean_reverting_trend,
+            "params": {
+                "equilibrium": 100.0,
+                "reversion_speed": 0.05,
+                "trend_strength": 0.05,
+                "volatility": 2.0,
+                "noise_level": 0.1
+            }
+        }
+        tasks["mean_reverting_trend_with_drift"] = {
+            "category": "trend",
+            "generator": self._generate_mean_reverting_trend,
+            "params": {
+                "equilibrium": 0.0,
+                "reversion_speed": 0.03,
+                "trend_strength": 0.5,
+                "volatility": 0.3,
+                "drift": 0.01,
+                "noise_level": 0.05
             }
         }
 
@@ -1084,6 +1148,7 @@ class TimeSeriesGenerator:
             "trend_seasonal": self._generate_trend_seasonal,
             "stochastic": self._generate_stochastic_series,
             "mean_reverting": self._generate_mean_reverting,
+            "mean_reverting_trend": self._generate_mean_reverting_trend,
             "intermittent": self._generate_intermittent_series,
             "garch": self._generate_garch_series,
             "regime_switching": self._generate_regime_switching,
@@ -1243,6 +1308,52 @@ class TimeSeriesGenerator:
         t = np.arange(1, self.config.n_samples + 1)
         y = strength * np.log(t)
         noise = self.random_state.normal(0, noise_level, len(y))
+        return (y + noise).reshape(-1, 1)
+
+    def _generate_mean_reverting_trend(
+            self,
+            equilibrium: float,
+            reversion_speed: float,
+            trend_strength: float,
+            volatility: float,
+            noise_level: Optional[float] = None,
+            drift: float = 0.0
+    ) -> np.ndarray:
+        """Generate mean-reverting trend time series.
+
+        Combines a directional trend component with mean-reversion dynamics,
+        creating trends that pull back toward an equilibrium level.
+
+        Args:
+            equilibrium: Long-term equilibrium level the series reverts to.
+            reversion_speed: Speed of mean reversion (higher = faster pullback).
+            trend_strength: Strength of the underlying trend component.
+            volatility: Volatility of the stochastic component.
+            noise_level: Additional observation noise level.
+            drift: Constant drift term added at each step.
+
+        Returns:
+            Generated mean-reverting trend time series.
+        """
+        if noise_level is None:
+            noise_level = self.config.default_noise_level
+
+        n = self.config.n_samples
+        y = np.zeros(n)
+        y[0] = equilibrium
+
+        for t in range(1, n):
+            # Mean reversion component
+            reversion = reversion_speed * (equilibrium - y[t - 1])
+            # Trend component (decays as we move away from equilibrium)
+            trend = trend_strength * (1 - abs(y[t - 1] - equilibrium) / (abs(equilibrium) + 1))
+            # Stochastic component
+            shock = volatility * self.random_state.normal()
+
+            y[t] = y[t - 1] + reversion + trend + shock + drift
+
+        # Add observation noise
+        noise = self.random_state.normal(0, noise_level, n)
         return (y + noise).reshape(-1, 1)
 
     def _generate_seasonal_series(
