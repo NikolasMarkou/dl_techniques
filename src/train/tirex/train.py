@@ -130,7 +130,7 @@ class TiRexTrainingConfig:
 
     dropout_rate: float = 0.1
     quantile_levels: List[float] = field(
-        default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9]
     )
 
     # Training configuration
@@ -999,7 +999,6 @@ def main() -> None:
         input_length=args.input_length,
         prediction_length=args.prediction_length,
         patch_size=args.patch_size,
-        quantile_levels=[0.1, 0.25, 0.5, 0.75, 0.9],
         epochs=args.epochs,
         batch_size=args.batch_size,
         steps_per_epoch=args.steps_per_epoch,
