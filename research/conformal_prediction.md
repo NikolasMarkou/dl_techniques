@@ -111,25 +111,33 @@ Conformal prediction guarantees **marginal** coverage (averaged over the distrib
 
 ## 3. Core Method: Generalized Inverse Quantile Conformity Score
 
-## 3.1 Key Definitions
+### 3.1 Key Definitions
 
-**Generalized conditional quantile function:**
-$$L(x; \pi, \tau) = \min\{c \in \{1, \ldots, C\} : \pi_{(1)}(x) + \pi_{(2)}(x) + \ldots + \pi_{(c)}(x) \geq \tau\}$$
+**Sorted probabilities:**
 
-where $\pi_{(1)}(x) \geq \pi_{(2)}(x) \geq \ldots \geq \pi_{(C)}(x)$ are ordered class probabilities.
+Let $\hat{\pi}_{(1)}(x) \geq \hat{\pi}_{(2)}(x) \geq \ldots \geq \hat{\pi}_{(C)}(x)$ be the class probabilities sorted in descending order.
 
-**Set function $S$:**
-$$S(x, u; \pi, \tau) = \begin{cases} 
-\text{indices of } L-1 \text{ largest } \pi_y(x), & \text{if } u \leq V(x; \pi, \tau) \\
-\text{indices of } L \text{ largest } \pi_y(x), & \text{otherwise}
-\end{cases}$$
+**Conformity score $E$ (Adaptive Prediction Sets):**
 
-where $V(x; \pi, \tau) = \frac{1}{\pi_{(L)}(x)}\left[\sum_{c=1}^{L} \pi_{(c)}(x) - \tau\right]$ and $u \sim \text{Uniform}(0,1)$.
+For a calibration point $(x, y)$ where $y$ has rank $k$ among the sorted probabilities (i.e., $y$ is the $k$-th most likely class):
 
-**Conformity score $E$ (Generalized Inverse Quantile):**
-$$E(x, y, u; \hat{\pi}) = \min\{\tau \in [0,1] : y \in S(x, u; \hat{\pi}, \tau)\}$$
+$$E(x, y, u; \hat{\pi}) = \sum_{j=1}^{k-1} \hat{\pi}_{(j)}(x) + u \cdot \hat{\pi}_{(k)}(x)$$
 
-This score measures the smallest threshold $\tau$ needed for the prediction set to include the true label.
+where $u \sim \text{Uniform}(0,1)$ provides randomization for tighter coverage.
+
+**Intuition:**
+- The score measures how much cumulative probability mass you need to accumulate (going from most likely to least likely) before including the true label
+- Small score → true label was among the top predictions → model was "confident and correct"
+- Large score → true label was far down the ranking → model was "wrong"
+- The randomization term $u \cdot \hat{\pi}_{(k)}(x)$ breaks ties and enables exact coverage
+
+**Example:**
+
+If $\hat{\pi}(x) = [0.1, 0.6, 0.3]$ for classes $\{1, 2, 3\}$ and true label $y = 3$:
+- Sorted: $\hat{\pi}_{(1)} = 0.6$ (class 2), $\hat{\pi}_{(2)} = 0.3$ (class 3), $\hat{\pi}_{(3)} = 0.1$ (class 1)
+- True label $y=3$ has rank $k=2$
+- Score: $E = \hat{\pi}_{(1)} + u \cdot \hat{\pi}_{(2)} = 0.6 + u \cdot 0.3$
+- If $u = 0.5$: $E = 0.6 + 0.15 = 0.75$
 
 ---
 
@@ -143,11 +151,11 @@ This score measures the smallest threshold $\tau$ needed for the prediction set 
 3. For each i ∈ I₂:
    - Sample Uᵢ ~ Uniform(0,1)
    - Compute Eᵢ = E(Xᵢ, Yᵢ, Uᵢ; π̂)
-4. Compute threshold: τ̂ = Q̂₁₋α({Eᵢ}ᵢ∈I₂)
-   (the ⌈(1-α)(1+|I₂|)⌉-th largest value)
+4. Compute threshold: τ̂ = the ⌈(1-α)(|I₂|+1)⌉-th smallest value in {Eᵢ}
+   Example: n=1000 calibration points, α=0.1 → τ̂ = 901st smallest score
 5. For new point X_{n+1}:
    - Sample U_{n+1} ~ Uniform(0,1)
-   - Return Ĉ(X_{n+1}) = S(X_{n+1}, U_{n+1}; π̂, τ̂)
+   - Include label y in prediction set if its score ≤ τ̂
 ```
 
 **Coverage guarantee:** $P[Y_{n+1} \in \hat{C}] \geq 1 - \alpha$
@@ -162,7 +170,7 @@ This score measures the smallest threshold $\tau$ needed for the prediction set 
    Σᵢ 𝟙[E(Xᵢ, Yᵢ, Uᵢ; π̂^{k(i)}) < E(X_{n+1}, y, U_{n+1}; π̂^{k(i)})] < (1-α)(n+1)
 ```
 
-**Coverage guarantee:** $P[Y_{n+1} \in \hat{C}] \geq 1 - 2\alpha$ (use $\alpha/2$ for $1-\alpha$ coverage)
+**Coverage guarantee:** Theoretical lower bound is $1 - 2\alpha$, but empirically CV+ typically achieves $1-\alpha$ coverage. The $1-2\alpha$ is a worst-case safety bound; in practice, use target $\alpha$ directly.
 
 ### Option C: Jackknife+ (JK+) — Most Powerful, Slowest
 
@@ -187,44 +195,92 @@ Same as CV+ with K = n (leave-one-out).
 
 ### Phase 3: Conformity Score Computation
 ```python
-def compute_E(x, y, u, pi_hat):
-    """Compute generalized inverse quantile conformity score."""
-    # Sort probabilities in descending order
-    sorted_probs = sorted(enumerate(pi_hat(x)), key=lambda p: -p[1])
+def compute_E(pi_hat_x, y, u):
+    """
+    Compute APS conformity score for a single calibration point.
     
-    cumsum = 0
-    for idx, (label, prob) in enumerate(sorted_probs):
+    Args:
+        pi_hat_x: array of probabilities for all classes for input x
+        y: the ground truth label index
+        u: a random value from Uniform(0,1)
+    
+    Returns:
+        score: the conformity score E
+    """
+    # 1. Sort probabilities in descending order, tracking original indices
+    indexed_probs = list(enumerate(pi_hat_x))
+    sorted_probs = sorted(indexed_probs, key=lambda p: p[1], reverse=True)
+    
+    # 2. Accumulate probability until we reach the true label
+    cumsum = 0.0
+    for label_idx, prob in sorted_probs:
+        if label_idx == y:
+            # True label found at this rank
+            # Score = (sum of probs more likely than y) + u * (prob of y)
+            return cumsum + u * prob
         cumsum += prob
-        if label == y:
-            # Compute V for randomization
-            L = idx + 1
-            V = (cumsum - (1 - tau)) / prob if prob > 0 else 0
-            if u <= V:
-                return cumsum - prob  # Exclude this label
-            else:
-                return cumsum  # Include this label
-    return 1.0
+    
+    return 1.0  # Should not reach here if y is valid
 ```
 
 ### Phase 4: Calibration
-1. Compute scores $E_i$ for all calibration points
-2. Find quantile threshold $\hat{\tau}$
+```python
+def calibrate(calibration_scores, alpha):
+    """
+    Compute the threshold τ̂ from calibration scores.
+    
+    Args:
+        calibration_scores: 1D array/list of E_i scores from calibration set
+                           (one score per calibration point)
+        alpha: miscoverage level (e.g., 0.1 for 90% coverage)
+    
+    Returns:
+        tau_hat: the calibrated threshold
+    """
+    n = len(calibration_scores)
+    # Compute the (1-α) quantile with finite-sample correction
+    q = np.ceil((1 - alpha) * (n + 1)) / n
+    tau_hat = np.quantile(calibration_scores, q, method='higher')
+    return tau_hat
+```
 
 ### Phase 5: Prediction Set Construction
 ```python
-def predict_set(x_new, pi_hat, tau_hat, u):
-    """Construct prediction set for new point."""
-    sorted_probs = sorted(enumerate(pi_hat(x_new)), key=lambda p: -p[1])
+def predict_set(pi_hat_x_new, tau_hat, u):
+    """
+    Construct prediction set for a new point.
     
-    cumsum = 0
+    Args:
+        pi_hat_x_new: array of probabilities for all classes for new input
+        tau_hat: calibrated threshold from Phase 4
+        u: a random value from Uniform(0,1)
+           IMPORTANT: Draw u ONCE per test point and reuse for all candidate labels
+    
+    Returns:
+        pred_set: list of label indices in the prediction set
+    """
+    indexed_probs = list(enumerate(pi_hat_x_new))
+    # Note: Python's sorted() is stable; ties are broken by original index order.
+    # This is acceptable for practical use. For strict theoretical compliance,
+    # ties could be broken randomly.
+    sorted_probs = sorted(indexed_probs, key=lambda p: p[1], reverse=True)
+    
+    cumsum = 0.0
     pred_set = []
-    for label, prob in sorted_probs:
-        cumsum += prob
-        V = (cumsum - tau_hat) / prob if prob > 0 else 0
-        if cumsum > tau_hat or (cumsum == tau_hat and u > V):
-            pred_set.append(label)
-        if cumsum >= tau_hat:
+    
+    for label_idx, prob in sorted_probs:
+        # Compute the score this label would have if it were the true label
+        candidate_score = cumsum + u * prob
+        
+        if candidate_score <= tau_hat:
+            # Include this label in the prediction set
+            pred_set.append(label_idx)
+            cumsum += prob
+        else:
+            # Once a label's score exceeds tau_hat, stop
+            # (all remaining labels are less likely and will also exceed)
             break
+    
     return pred_set
 ```
 
