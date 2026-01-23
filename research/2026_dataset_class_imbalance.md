@@ -1,190 +1,385 @@
-# Mathematically Grounded Methods for Fixing Dataset Imbalance
+# Comprehensive Guide to Handling Class Imbalance in Machine Learning
 
-Class imbalance remains one of machine learning's most persistent challenges, causing models to systematically underperform on minority classes. **Two fundamentally different approaches** have emerged: modifying the loss function to penalize errors asymmetrically, or manipulating the dataset itself to achieve better representation. This report provides a comprehensive survey of both perspectives, emphasizing mathematically rigorous methods with proven empirical success across thousands of publications.
+Class imbalance remains one of machine learning's most persistent challenges, causing models to systematically underperform on minority classes. **Three fundamentally different paradigms** have emerged: modifying the loss function to penalize errors asymmetrically, manipulating the dataset itself to achieve better representation, and applying calibration-based methods with mathematical validity guarantees. This guide provides an exhaustive survey of all three perspectives, including both mainstream techniques with proven empirical success and an increasingly influential critique arguing that proper calibration—not data manipulation—is the principled solution.
 
-## Loss function approaches reweight the learning signal itself
+---
+
+## Part I: Loss Function Approaches
 
 The loss function perspective addresses imbalance by adjusting how errors are weighted during optimization, without modifying the underlying data distribution. These methods range from simple class weighting to sophisticated margin-based formulations with theoretical guarantees.
 
-### Cost-sensitive learning established the theoretical foundation
+### Cost-Sensitive Learning: The Theoretical Foundation
 
 Cost-sensitive learning acknowledges that misclassification errors carry different penalties—a false negative for cancer detection costs more than a false positive. Charles Elkan's seminal 2001 IJCAI paper, "The Foundations of Cost-Sensitive Learning," proved that **any cost-insensitive learner can be made cost-sensitive** through threshold adjustment or sample reweighting.
 
 The framework uses a cost matrix C where C(i,j) represents the cost of predicting class j when the true label is i. For binary classification, the optimal decision threshold becomes:
 
-**t* = [C(+1,-1) - C(-1,-1)] / [C(+1,-1) - C(+1,+1) + C(-1,+1) - C(-1,-1)]**
+$$t^* = \frac{C(+1,-1) - C(-1,-1)}{C(+1,-1) - C(+1,+1) + C(-1,+1) - C(-1,-1)}$$
 
 Implementation takes three forms: threshold adjustment at prediction time, sample reweighting during training, or direct incorporation into the objective function. This theoretical framework underpins nearly all subsequent loss-based methods for imbalanced learning.
 
-### Class-weighted cross-entropy provides the simplest practical solution
+### Class-Weighted Cross-Entropy
 
-The most straightforward adaptation multiplies each class's contribution to the loss by a weight inversely proportional to its frequency. Standard cross-entropy extends to:
+The most straightforward adaptation multiplies each class's contribution to the loss by a weight inversely proportional to its frequency:
 
-**L_WCE = -Σᵢ wᵢ · yᵢ · log(ŷᵢ)**
+$$\mathcal{L}_{WCE} = -\sum_i w_i \cdot y_i \cdot \log(\hat{y}_i)$$
 
-Three weighting schemes dominate practice. **Inverse frequency weighting** sets wⱼ = N/(C × nⱼ), where N is total samples, C is class count, and nⱼ is samples in class j. **Inverse square root weighting** uses wⱼ = 1/√nⱼ for a gentler correction. **Median frequency weighting** normalizes by the median class size. While simple to implement, class weighting can destabilize training under extreme imbalance ratios exceeding 1:100, often requiring combination with other techniques.
+**Three weighting schemes dominate practice:**
 
-### Focal loss revolutionized dense object detection
+| Scheme | Formula | Characteristics |
+|--------|---------|-----------------|
+| Inverse frequency | $w_j = \frac{N}{C \times n_j}$ | N = total samples, C = class count, $n_j$ = samples in class j |
+| Inverse square root | $w_j = \frac{1}{\sqrt{n_j}}$ | Gentler correction |
+| Median frequency | Normalized by median class size | Balanced approach |
+
+While simple to implement, class weighting can destabilize training under extreme imbalance ratios exceeding 1:100, often requiring combination with other techniques.
+
+### Focal Loss
 
 Lin et al.'s 2017 ICCV paper introduced Focal Loss to address the extreme foreground-background imbalance (often 1:1000) in object detection. The key insight: standard cross-entropy treats all correctly classified examples equally, allowing easy negatives to dominate gradients.
 
 The focal loss adds a modulating factor:
 
-**FL(pₜ) = -αₜ(1 - pₜ)^γ · log(pₜ)**
+$$FL(p_t) = -\alpha_t(1 - p_t)^\gamma \cdot \log(p_t)$$
 
-The focusing parameter γ controls down-weighting of easy examples. When γ = 0, this reduces to standard cross-entropy. At γ = 2 (the recommended value), **well-classified examples with pₜ = 0.9 have their loss reduced by 100×** compared to cross-entropy. The balance factor α typically equals 0.25 for positives. RetinaNet with focal loss achieved state-of-the-art on COCO detection, demonstrating effectiveness for extreme imbalance ratios.
+The focusing parameter γ controls down-weighting of easy examples:
+- When γ = 0: reduces to standard cross-entropy
+- At γ = 2 (recommended): **well-classified examples with $p_t = 0.9$ have their loss reduced by 100×**
 
-Notable variants include **Focal Tversky Loss** for segmentation, **Adaptive Focal Loss** with dynamic γ adjustment, and **Unified Focal Loss** which generalizes across Dice and cross-entropy families.
+The balance factor α typically equals 0.25 for positives. RetinaNet with focal loss achieved state-of-the-art on COCO detection.
 
-### Effective number of samples corrects for data overlap
+**Notable variants include:**
+- Focal Tversky Loss for segmentation
+- Adaptive Focal Loss with dynamic γ adjustment
+- Unified Focal Loss generalizing across Dice and cross-entropy families
+
+### Effective Number of Samples
 
 Cui et al.'s CVPR 2019 paper observed that inverse frequency weighting performs poorly on real-world long-tailed distributions because it ignores **diminishing marginal returns** from additional samples. As sample count increases, new samples increasingly overlap with existing ones in feature space.
 
 The effective number of samples is defined as:
 
-**Eₙ = (1 - β^n) / (1 - β)**
+$$E_n = \frac{1 - \beta^n}{1 - \beta}$$
 
 where n is sample count and β ∈ [0,1) controls overlap assumptions. Class-balanced weights become:
 
-**wⱼ = (1 - β) / (1 - β^nⱼ)**
+$$w_j = \frac{1 - \beta}{1 - \beta^{n_j}}$$
 
-This formula interpolates smoothly: when β → 0, Eₙ → 1 (no reweighting); when β → 1, Eₙ → n (standard inverse frequency). **β = 0.999 works well empirically** across datasets. Combining class-balanced weighting with focal loss (CB-Focal) achieved significant improvements on ImageNet-LT and iNaturalist 2018.
+This formula interpolates smoothly:
+- When β → 0: $E_n$ → 1 (no reweighting)
+- When β → 1: $E_n$ → n (standard inverse frequency)
+- **β = 0.999 works well empirically** across datasets
 
-### LDAM loss provides theoretical generalization guarantees
+Combining class-balanced weighting with focal loss (CB-Focal) achieved significant improvements on ImageNet-LT and iNaturalist 2018.
 
-Cao et al.'s NeurIPS 2019 paper derived Label-Distribution-Aware Margin (LDAM) loss from first principles, minimizing a margin-based generalization bound. The key theoretical result establishes that **optimal per-class margins scale as nⱼ^(-1/4)**.
+### LDAM Loss: Theoretical Generalization Guarantees
+
+Cao et al.'s NeurIPS 2019 paper derived Label-Distribution-Aware Margin (LDAM) loss from first principles, minimizing a margin-based generalization bound. The key theoretical result establishes that **optimal per-class margins scale as $n_j^{-1/4}$**.
 
 The LDAM loss modifies the softmax with class-dependent margins:
 
-**L_LDAM = -log[e^(zᵧ - Δᵧ) / (e^(zᵧ - Δᵧ) + Σⱼ≠ᵧ e^zⱼ)]**
+$$\mathcal{L}_{LDAM} = -\log\left[\frac{e^{z_y - \Delta_y}}{e^{z_y - \Delta_y} + \sum_{j \neq y} e^{z_j}}\right]$$
 
-where **Δⱼ = C / nⱼ^(1/4)** and C is a tunable hyperparameter. Larger margins for minority classes provide stronger regularization, preventing overfitting on limited samples.
+where $\Delta_j = \frac{C}{n_j^{1/4}}$ and C is a tunable hyperparameter. Larger margins for minority classes provide stronger regularization, preventing overfitting on limited samples.
 
-The authors introduced **Deferred Re-Weighting (DRW)**: train initially with LDAM alone to learn good representations, then apply class-balanced weighting in later epochs. This two-stage approach prevents early overfitting to minority classes and consistently outperforms immediate reweighting across CIFAR-LT, Tiny ImageNet-LT, and iNaturalist.
+**Deferred Re-Weighting (DRW):** Train initially with LDAM alone to learn good representations, then apply class-balanced weighting in later epochs. This two-stage approach prevents early overfitting to minority classes.
 
-### Asymmetric loss handles multi-label positive-negative imbalance
+### Asymmetric Loss for Multi-Label Classification
 
-Ben-Baruch et al.'s ICCV 2021 paper addressed a distinct imbalance problem: in multi-label classification, each image has few positive labels but many negatives. Standard losses cause optimization to be dominated by negative gradients.
+Ben-Baruch et al.'s ICCV 2021 paper addressed a distinct imbalance problem: in multi-label classification, each image has few positive labels but many negatives.
 
-Asymmetric Loss (ASL) uses different focusing parameters for positives and negatives:
+Asymmetric Loss (ASL) uses different focusing parameters:
 
-**L⁺ = (1 - p)^γ⁺ · log(p)** for positive labels  
-**L⁻ = (pₘ)^γ⁻ · log(1 - pₘ)** for negative labels
+$$\mathcal{L}^+ = (1 - p)^{\gamma^+} \cdot \log(p) \quad \text{for positive labels}$$
+$$\mathcal{L}^- = (p_m)^{\gamma^-} \cdot \log(1 - p_m) \quad \text{for negative labels}$$
 
-The probability shifting mechanism **pₘ = max(p - m, 0)** hard-thresholds easy negatives, also helping with label noise. Recommended settings (γ⁺ = 0, γ⁻ = 4, m = 0.05) achieved state-of-the-art on MS-COCO, Pascal-VOC, and Open Images.
+The probability shifting mechanism $p_m = \max(p - m, 0)$ hard-thresholds easy negatives. Recommended settings: γ⁺ = 0, γ⁻ = 4, m = 0.05.
 
-### Region-based losses dominate medical image segmentation
+### Region-Based Losses for Segmentation
 
 For semantic segmentation with small regions of interest, **Dice Loss** directly optimizes the Dice coefficient:
 
-**L_Dice = 1 - (2Σpᵢ·gᵢ + ε) / (Σpᵢ + Σgᵢ + ε)**
+$$\mathcal{L}_{Dice} = 1 - \frac{2\sum p_i \cdot g_i + \epsilon}{\sum p_i + \sum g_i + \epsilon}$$
 
-This relative metric inherently handles imbalance since it measures overlap rather than per-pixel accuracy. **Tversky Loss** (Salehi et al., 2017) generalizes Dice by controlling the precision-recall trade-off:
+**Tversky Loss** (Salehi et al., 2017) generalizes Dice by controlling the precision-recall trade-off:
 
-**TI(α, β) = TP / (TP + α·FP + β·FN)**
+$$TI(\alpha, \beta) = \frac{TP}{TP + \alpha \cdot FP + \beta \cdot FN}$$
 
-Setting β > α penalizes false negatives more heavily, favoring recall—critical for lesion detection. Common settings use α = 0.3, β = 0.7. **Focal Tversky Loss** adds focal modulation: (1 - TI)^(1/γ), further emphasizing hard examples. Compound losses combining Dice and cross-entropy (L_Combo = α·L_CE + (1-α)·L_Dice) consistently outperform either alone.
+Setting β > α penalizes false negatives more heavily, favoring recall—critical for lesion detection. Common settings: α = 0.3, β = 0.7.
 
-### Long-tail recognition requires specialized formulations
+**Focal Tversky Loss** adds focal modulation: $(1 - TI)^{1/\gamma}$
 
-Instance segmentation on datasets like LVIS with 1,000+ categories and extreme imbalance spawned dedicated loss functions. **Seesaw Loss** (Wang et al., CVPR 2021) observes that negative gradients from head classes overwhelm positive gradients for tail classes. It applies mitigation factors Mᵢⱼ = (σⱼ/σᵢ)^p that reduce punishment on tail classes and compensation factors Cᵢⱼ = 1 + α·qⱼ^q that increase penalties for misclassification.
+**Compound losses** combining Dice and cross-entropy consistently outperform either alone:
+$$\mathcal{L}_{Combo} = \alpha \cdot \mathcal{L}_{CE} + (1-\alpha) \cdot \mathcal{L}_{Dice}$$
 
-**Equalization Loss (EQL)** takes a simpler approach: ignore negative gradients from rare categories entirely during training. This method won 1st place in the LVIS Challenge 2019. **Equalized Focal Loss** further refines this by making the focal parameter category-dependent based on frequency.
+### Long-Tail Recognition Losses
 
-## Dataset-level methods modify the training distribution directly
+Instance segmentation on datasets like LVIS with 1,000+ categories spawned dedicated loss functions:
 
-Rather than changing how errors are weighted, dataset methods alter the data itself through selective removal (undersampling), duplication (oversampling), or synthesis of new examples. These techniques can be combined with loss modifications for compounded effect.
+**Seesaw Loss** (Wang et al., CVPR 2021) applies:
+- Mitigation factors $M_{ij} = (\sigma_j/\sigma_i)^p$ that reduce punishment on tail classes
+- Compensation factors $C_{ij} = 1 + \alpha \cdot q_j^q$ that increase penalties for misclassification
 
-### Random undersampling trades information for speed
+**Equalization Loss (EQL)** ignores negative gradients from rare categories entirely during training. This method won 1st place in the LVIS Challenge 2019.
 
-Random Undersampling (RUS) simply removes majority class samples until a target ratio is achieved. Despite obvious information loss, Drummond and Holte's influential 2003 workshop paper demonstrated that **undersampling often outperforms oversampling** for decision trees, particularly when the majority class contains redundant samples.
+**Equalized Focal Loss** makes the focal parameter category-dependent based on frequency.
 
-The method's appeal lies in computational efficiency—smaller datasets train faster—and reduced risk of overfitting. It works best on large datasets with redundant majority samples and forms the basis of ensemble methods like EasyEnsemble and BalanceCascade. However, random selection may discard informative boundary samples, and results vary across different random seeds.
+---
 
-### Tomek links clean decision boundaries
+## Part II: Dataset-Level Methods
 
-Tomek's 1976 IEEE paper defined a Tomek link: two samples from different classes are each other's nearest neighbors. Such pairs identify **borderline or noisy samples** at class boundaries. Removing the majority class member from each Tomek link cleans the decision region without aggressive undersampling.
+Rather than changing how errors are weighted, dataset methods alter the data itself through selective removal (undersampling), duplication (oversampling), or synthesis of new examples.
 
-Formally, samples (xᵢ, xⱼ) form a Tomek link if d(xᵢ, xⱼ) < d(xᵢ, xₖ) for all other samples xₖ, and d(xᵢ, xⱼ) < d(xⱼ, xₖ) for all other samples xₖ. The method is conservative—removing few samples—and is typically combined with other techniques. Computational cost scales with pairwise distance calculations, making it expensive for large datasets.
+### Undersampling Methods
 
-### Edited nearest neighbors removes noisy samples
+#### Random Undersampling (RUS)
 
-Wilson's 1972 editing rule removes any sample whose class differs from the majority vote of its k nearest neighbors. For the majority class, this eliminates:
+Simply removes majority class samples until a target ratio is achieved. Despite obvious information loss, Drummond and Holte's influential 2003 workshop paper demonstrated that **undersampling often outperforms oversampling** for decision trees, particularly when the majority class contains redundant samples.
 
-**xᵢ where mode({class(xⱼ) : xⱼ ∈ kNN(xᵢ)}) ≠ class(xᵢ)**
+**Advantages:** Computational efficiency, reduced overfitting risk
+**Disadvantages:** May discard informative boundary samples, results vary across seeds
 
-This identifies and removes noisy or mislabeled majority samples embedded in minority regions. The **'all' variant** (remove if any neighbor differs) is more aggressive than the **'mode' variant** (remove only if most neighbors differ). Repeated ENN applies editing iteratively until convergence, while All-kNN extends editing across k=1,2,...,K values.
+#### Tomek Links
 
-### Neighborhood Cleaning Rule focuses on data quality
+Tomek's 1976 IEEE paper defined a Tomek link: two samples from different classes are each other's nearest neighbors. Such pairs identify **borderline or noisy samples** at class boundaries.
 
-Laurikkala's 2001 NCL method combines ENN with additional boundary cleaning in two phases. Phase 1 applies ENN to remove misclassified majority samples. Phase 2 examines each minority sample's neighbors: if all k neighbors belong to the majority class and the majority class exceeds half the minority class size, those majority neighbors are removed.
+Formally, samples $(x_i, x_j)$ form a Tomek link if:
+- $d(x_i, x_j) < d(x_i, x_k)$ for all other samples $x_k$
+- $d(x_i, x_j) < d(x_j, x_k)$ for all other samples $x_k$
 
-NCL prioritizes **data quality over aggressive balancing**, particularly effective for identifying difficult small classes while preserving minority representation.
+Removing the majority class member from each Tomek link cleans the decision region conservatively.
 
-### One-sided selection combines cleaning and condensing
+#### Edited Nearest Neighbors (ENN)
 
-Kubat and Matwin's 1997 ICML paper introduced One-Sided Selection (OSS), combining Tomek links with the Condensed Nearest Neighbor (CNN) rule. Tomek links remove borderline/noisy samples, while CNN identifies the minimal consistent subset—majority samples that would be misclassified if removed.
+Wilson's 1972 editing rule removes any sample whose class differs from the majority vote of its k nearest neighbors:
 
-This removes both noise at boundaries and redundant majority samples far from the decision boundary, achieving substantial dataset reduction while preserving classification accuracy.
+$$\text{Remove } x_i \text{ where } \text{mode}(\{\text{class}(x_j) : x_j \in kNN(x_i)\}) \neq \text{class}(x_i)$$
 
-### NearMiss algorithms use distance-based selection heuristics
+**Variants:**
+- 'all' variant: remove if any neighbor differs (more aggressive)
+- 'mode' variant: remove only if most neighbors differ
+- Repeated ENN: apply iteratively until convergence
+- All-kNN: extend editing across k=1,2,...,K values
 
-Mani and Zhang's 2003 work introduced three NearMiss variants for controlled undersampling. **NearMiss-1** selects majority samples with smallest average distance to k nearest minority samples—keeping samples close to the boundary but sensitive to noise. **NearMiss-2** uses distance to k farthest minority samples, selecting samples in the class overlap region with less noise sensitivity.
+#### Neighborhood Cleaning Rule (NCL)
 
-**NearMiss-3** operates in two stages: first keep M nearest majority neighbors for each minority sample, then from this subset select samples with largest average distance to nearest minority neighbors. This **pre-selection makes NearMiss-3 most robust to noise**.
+Laurikkala's 2001 method combines ENN with additional boundary cleaning:
+1. **Phase 1:** Apply ENN to remove misclassified majority samples
+2. **Phase 2:** For each minority sample, if all k neighbors belong to majority class and majority exceeds half the minority size, remove those majority neighbors
 
-### Random oversampling risks overfitting through duplication
+NCL prioritizes **data quality over aggressive balancing**.
 
-Random Oversampling (ROS) duplicates minority samples with replacement until achieving target balance. While adding no new information, it provides a simple baseline that surprisingly works well with robust classifiers like Random Forest.
+#### One-Sided Selection (OSS)
 
-The primary concern is overfitting: exact duplication can cause models to memorize specific instances, creating overly specific decision boundaries. Risk increases with higher oversampling ratios. Combining ROS with regularization techniques or using it alongside ensemble methods mitigates these concerns.
+Kubat and Matwin's 1997 ICML paper combined Tomek links with the Condensed Nearest Neighbor (CNN) rule:
+- Tomek links remove borderline/noisy samples
+- CNN identifies the minimal consistent subset
 
-### ADASYN adapts synthesis to learning difficulty
+This removes both noise at boundaries and redundant majority samples far from the decision boundary.
 
-He et al.'s 2008 IJNN paper introduced Adaptive Synthetic Sampling (ADASYN), which **generates more samples for harder-to-learn minority instances**. The algorithm computes a density ratio for each minority sample:
+#### NearMiss Algorithms
 
-**rᵢ = Δᵢ/k**
+Mani and Zhang's 2003 work introduced three variants:
 
-where Δᵢ is the count of majority samples among k nearest neighbors. Higher ratios indicate samples in difficult, overlapping regions. After normalizing to r̂ᵢ = rᵢ/Σrᵢ, the number of synthetic samples per instance becomes gᵢ = r̂ᵢ × G, where G is total samples needed.
+| Variant | Selection Criterion | Characteristics |
+|---------|---------------------|-----------------|
+| NearMiss-1 | Smallest average distance to k nearest minority samples | Close to boundary, sensitive to noise |
+| NearMiss-2 | Distance to k farthest minority samples | Class overlap region, less noise sensitive |
+| NearMiss-3 | Two-stage: pre-select M nearest majority neighbors, then select by largest average distance | **Most robust to noise** |
 
-ADASYN adapts to local data characteristics, **shifting the decision boundary toward difficult examples**. With over 4,000 citations, it remains among the most influential oversampling methods. However, generating samples in overlapping regions may introduce noise, and performance depends on k and balance parameters.
+### Oversampling Methods
 
-### Cluster-based methods preserve data structure
+#### Random Oversampling (ROS)
 
-Cluster-based undersampling replaces majority samples with K-means centroids, reducing the class while preserving distributional structure. The number of clusters equals the desired majority sample count, with centroids serving as representative prototypes.
+Duplicates minority samples with replacement until achieving target balance. While adding no new information, it provides a simple baseline that surprisingly works well with robust classifiers like Random Forest.
 
-This **prototype generation approach** differs from selection-based methods—it creates new points rather than choosing existing ones. Effectiveness depends on data naturally forming clusters. Variations include selecting samples nearest to centroids (preserving original data points) or combining clustering with instance selection for both inter-class and intra-class diversity.
+**Primary concern:** Overfitting through exact duplication, causing models to memorize specific instances.
 
-### Modern augmentation extends beyond geometric transforms
+#### SMOTE (Synthetic Minority Over-sampling Technique)
 
-Traditional augmentation (rotation, flipping, scaling) applied preferentially to minority classes increases their representation without exact duplication. **Mixup** (Zhang et al., 2017) creates virtual examples through convex combinations:
+Chawla et al.'s 2002 JAIR paper introduced SMOTE, generating synthetic samples by interpolating between minority instances and their k-nearest neighbors:
 
-**x̃ = λxᵢ + (1-λ)xⱼ,  ỹ = λyᵢ + (1-λ)yⱼ**
+$$x_{new} = x_i + \lambda \cdot (x_j - x_i)$$
 
-where λ ~ Beta(α, α). **Remix** adapts Mixup for imbalance by assigning labels favoring the minority class while maintaining feature mixing. **CutMix** pastes rectangular regions between images with proportional label mixing.
+where $\lambda \sim U(0,1)$ and $x_j$ is a randomly selected neighbor.
 
-**GAN-based generation** learns the minority class distribution directly. GAMO (Generative Adversarial Minority Oversampling) uses a three-player game to generate samples near class boundaries. BAGAN pre-trains an autoencoder before GAN fine-tuning for more stable generation. These methods generate diverse, realistic samples and handle high-dimensional data (images, text) effectively, but require substantial minority samples to learn distributions and significant computational resources.
+**Variants addressing SMOTE limitations:**
 
-### Curriculum learning orders samples by difficulty
+| Variant | Modification | Purpose |
+|---------|--------------|---------|
+| Borderline-SMOTE | Only synthesize from borderline samples | Focus on decision boundary |
+| Safe-Level-SMOTE | Weight interpolation by "safe level" | Avoid noise generation |
+| SMOTE-ENN | Apply ENN after SMOTE | Clean noisy synthetics |
+| SMOTE-Tomek | Apply Tomek links after SMOTE | Remove borderline noise |
 
-Bengio et al.'s foundational 2009 ICML paper showed that **presenting samples from easy to hard** improves learning. Self-Paced Learning (SPL) lets the model determine difficulty based on current loss, dynamically selecting training samples. For imbalanced data, this starts with minority samples and easy majority samples, gradually incorporating harder examples.
+#### ADASYN (Adaptive Synthetic Sampling)
 
-**Dynamic Curriculum Learning** combines sampling and loss schedulers, adjusting from imbalanced→balanced distributions and easy→hard examples throughout training. **Hard Example Mining** takes the opposite approach—focusing on highest-loss samples—with Online Hard Example Mining (OHEM) selecting hardest examples per mini-batch. Focal loss implements soft hard example mining through its modulating factor.
+He et al.'s 2008 IJNN paper generates more samples for harder-to-learn minority instances. The algorithm computes a density ratio:
 
-## Choosing the right method depends on context and constraints
+$$r_i = \frac{\Delta_i}{k}$$
 
-Method selection requires considering dataset size, imbalance ratio, computational budget, and task type. For **mild imbalance (< 1:10)**, class-weighted cross-entropy often suffices. **Moderate imbalance (1:10 to 1:100)** benefits from focal loss or class-balanced losses combined with informed undersampling like Tomek links or ENN.
+where $\Delta_i$ is the count of majority samples among k nearest neighbors. After normalizing to $\hat{r}_i = r_i/\sum r_i$, synthetic samples per instance: $g_i = \hat{r}_i \times G$.
 
-**Severe imbalance (> 1:100)** typically requires multiple techniques: LDAM with deferred reweighting, ADASYN oversampling, or GAN-based generation. For **long-tailed recognition** with thousands of classes, specialized losses like Seesaw or EQL combined with curriculum learning show strongest results.
+ADASYN adapts to local data characteristics, **shifting the decision boundary toward difficult examples**. With over 4,000 citations, it remains among the most influential oversampling methods.
 
-**Segmentation tasks** favor region-based losses (Dice, Tversky) over pixel-wise cross-entropy. **Object detection** benefits most from focal loss addressing foreground-background imbalance. **Multi-label classification** requires asymmetric losses handling positive-negative skew.
+**Concern:** Generating samples in overlapping regions may introduce noise.
 
-Dataset methods and loss modifications are not mutually exclusive—combining informed undersampling with focal loss or class-balanced losses often outperforms either approach alone. The key is understanding each method's theoretical assumptions and matching them to your specific imbalance characteristics.
+#### Cluster-Based Methods
+
+Cluster-based undersampling replaces majority samples with K-means centroids, preserving distributional structure. This **prototype generation approach** creates new representative points rather than selecting existing ones.
+
+Variations include:
+- Selecting samples nearest to centroids (preserving original data)
+- Combining clustering with instance selection for diversity
+
+### Modern Augmentation Techniques
+
+#### Mixup and Variants
+
+**Mixup** (Zhang et al., 2017) creates virtual examples through convex combinations:
+
+$$\tilde{x} = \lambda x_i + (1-\lambda) x_j, \quad \tilde{y} = \lambda y_i + (1-\lambda) y_j$$
+
+where $\lambda \sim \text{Beta}(\alpha, \alpha)$.
+
+**Remix** adapts Mixup for imbalance by assigning labels favoring the minority class.
+
+**CutMix** pastes rectangular regions between images with proportional label mixing.
+
+#### GAN-Based Generation
+
+Learns the minority class distribution directly:
+- **GAMO** (Generative Adversarial Minority Oversampling): three-player game generating samples near class boundaries
+- **BAGAN**: pre-trains autoencoder before GAN fine-tuning for stability
+
+**Advantages:** Diverse, realistic samples; handles high-dimensional data
+**Disadvantages:** Requires substantial minority samples; significant computational resources
+
+### Curriculum Learning
+
+Bengio et al.'s 2009 ICML paper showed that **presenting samples from easy to hard** improves learning.
+
+**Self-Paced Learning (SPL):** Model determines difficulty based on current loss, dynamically selecting samples.
+
+**Dynamic Curriculum Learning:** Combines sampling and loss schedulers, adjusting distributions and difficulty throughout training.
+
+**Hard Example Mining / OHEM:** Opposite approach—focusing on highest-loss samples. Focal loss implements soft hard example mining through its modulating factor.
+
+---
+
+## Part III: The Calibration Perspective—Conformal Prediction and Venn-Abers
+
+A minority but increasingly influential voice argues that the standard approach to class imbalance—resampling the data—is fundamentally misguided. **Dr. Valeriy Manokhin**, who completed his PhD in Machine Learning at Royal Holloway under Professor Vladimir Vovk (the inventor of Conformal Prediction), has emerged as a vocal proponent of this perspective.
+
+### The Core Thesis
+
+Manokhin's central argument: **the problem with imbalanced data isn't the imbalance itself—it's poor probability calibration**. Rather than manipulating training data through resampling, conformal methods provide validity guarantees that SMOTE fundamentally cannot.
+
+His most comprehensive treatment appears in Chapter 11 ("Handling Imbalanced Data") of his book *"Practical Guide to Applied Conformal Prediction in Python"* (Packt Publishing, 2024). The chapter argues:
+
+> "While a significant portion of resources in the field suggest using resampling methods, including undersampling, oversampling, and techniques such as SMOTE, it's crucial to note that **these recommendations often sidestep foundational theory and practical application**."
+
+### Critique of SMOTE and Resampling
+
+Manokhin has cited research showing that SMOTE, random undersampling, and random oversampling:
+- Did not improve classification metrics
+- **Destroyed classifier calibration** in the process
+- Were only tested on weak learners (C4.5, Ripper, Naive Bayes) in the original paper
+- Do not work well with modern ML models like XGBoost, LightGBM, and Random Forests
+
+Key paper cited: "The harm of class imbalance corrections for risk prediction models" (van Smeden et al.), which concludes that **"outcome imbalance is not a problem in itself, imbalance correction may even worsen results."**
+
+### Conformal Prediction as the Alternative
+
+Conformal Prediction, developed by Vovk, Gammerman, and Shafer, provides **mathematically guaranteed coverage** regardless of class distribution. The framework maintains validity without manipulating training data.
+
+**Key properties:**
+- Distribution-free: no assumptions about underlying data distribution
+- Finite-sample validity guarantees
+- Works with any underlying model (model-agnostic)
+- Handles classes independently through Mondrian (class-conditional) approach
+
+The **Mondrian approach** handles classes independently with separate calibration sets, providing valid confidence estimates for both majority and minority classes without requiring resampling.
+
+### Venn-Abers Predictors for Calibration
+
+Venn-ABERS predictors provide superior calibration compared to:
+- Platt's scaling
+- Isotonic regression
+- Standard calibration methods
+
+Manokhin's academic work includes "Multi-class probabilistic classification using inductive and cross Venn–Abers predictors" (COPA 2017), demonstrating these methods are **more accurate than both uncalibrated predictors and existing calibration methods**.
+
+**Multi-class extensions** are particularly valuable since class imbalance is especially challenging in multi-class settings.
+
+### The Recommended Framework
+
+Synthesizing Manokhin's approach:
+
+1. **Understand the problem first:** Determine whether imbalance is static or dynamic; consider whether the problem might be better framed as anomaly detection rather than classification
+
+2. **Avoid SMOTE and resampling:** These methods change the data distribution, destroy calibration, and lack theoretical foundations—they address a symptom rather than the underlying problem
+
+3. **Use cost-sensitive learning:** Apply class-weighted cost functions rather than synthetic data generation
+
+4. **Apply Conformal Prediction:** The framework provides mathematically guaranteed coverage regardless of class distribution
+
+5. **Calibrate with Venn-Abers:** For probability estimates, Venn-ABERS predictors provide superior calibration, particularly important when classes are imbalanced
+
+### Resources for Implementation
+
+**GitHub repositories (github.com/valeman):**
+- **Awesome Conformal Prediction** (3,300+ stars): definitive resource, cited in Kevin Murphy's *"Probabilistic Machine Learning: An Introduction"*
+- **Venn-Abers-Predictor**: implementation with offline, online, and cross-validation modes
+- **Multi-class-probabilistic-classification**: code for multi-class Venn-ABERS
+
+**Courses:** Applied Conformal Prediction course on Maven, with participants from Amazon, Apple, Google, Meta, Nike, BlackRock, Goldman Sachs, and Morgan Stanley. Notable testimonial: *"I learned to use methods like Venn-Abers and saw how conformal prediction tackles imbalanced data. It inspired my Python library, TinyCP, now used in my work. I've dropped SMOTE."*
+
+---
+
+## Part IV: Method Selection Guide
+
+### By Imbalance Severity
+
+| Imbalance Ratio | Recommended Approaches |
+|-----------------|------------------------|
+| Mild (< 1:10) | Class-weighted cross-entropy; potentially no intervention needed |
+| Moderate (1:10 to 1:100) | Focal loss or class-balanced losses + informed undersampling (Tomek links, ENN); consider Venn-Abers calibration |
+| Severe (> 1:100) | Multiple techniques: LDAM + DRW, or ADASYN, or GAN-based generation; strongly consider conformal methods |
+| Long-tailed (1000+ classes) | Seesaw or EQL + curriculum learning; Mondrian conformal prediction |
+
+### By Task Type
+
+| Task | Preferred Methods |
+|------|-------------------|
+| Binary classification | Weighted CE, focal loss, Venn-Abers calibration |
+| Multi-class classification | Class-balanced losses, LDAM, multi-class Venn-Abers |
+| Semantic segmentation | Dice loss, Tversky loss, compound losses |
+| Object detection | Focal loss (foreground-background imbalance) |
+| Multi-label classification | Asymmetric loss |
+| Medical/high-stakes | Conformal prediction (validity guarantees), cost-sensitive learning |
+
+### Combining Approaches
+
+Dataset methods and loss modifications are not mutually exclusive:
+- Informed undersampling + focal loss
+- ADASYN + class-balanced losses
+- Any approach + Venn-Abers post-hoc calibration
+
+**Critical consideration:** If well-calibrated probability estimates are required (medical diagnosis, risk assessment, financial decisions), the calibration-based approach may be essential regardless of other methods used.
+
+---
 
 ## Conclusion
 
-Two decades of research have produced a rich toolkit for imbalanced learning, from Elkan's cost-sensitive foundations to modern LDAM margins and seesaw losses. The most impactful methods share common traits: **solid theoretical grounding** (effective number of samples, margin-based generalization bounds), **intuitive mechanisms** (focal modulation, adaptive sampling), and **empirical validation** across diverse domains.
+Three decades of research have produced a rich toolkit for imbalanced learning:
 
-Loss function approaches excel when preserving all data is important and computational resources allow full dataset training. Dataset methods provide complementary benefits through noise removal (Tomek links, ENN), adaptive synthesis (ADASYN), and structure preservation (cluster-based methods). Curriculum learning bridges both perspectives by controlling how samples contribute to learning over time.
+**Loss function approaches** excel when preserving all data is important. Key methods include focal loss (object detection), LDAM with theoretical guarantees (long-tailed distributions), and region-based losses (segmentation).
 
-The field continues advancing rapidly, with recent work on equalized losses for extreme long-tail scenarios and GAN-based augmentation for high-dimensional minority classes. Yet classical methods like weighted cross-entropy and informed undersampling remain competitive baselines, often sufficient for practical applications with moderate imbalance.
+**Dataset methods** provide complementary benefits through noise removal (Tomek links, ENN), adaptive synthesis (ADASYN, SMOTE variants), and structure preservation (cluster-based methods).
+
+**The calibration perspective** represents a paradigm shift: rather than treating imbalance as a data problem requiring data manipulation, it frames imbalance as causing poor calibration—solvable through methods with mathematical validity guarantees like Conformal Prediction and Venn-Abers.
+
+The most impactful methods share common traits: **solid theoretical grounding**, **intuitive mechanisms**, and **empirical validation**. Understanding each method's theoretical assumptions and matching them to specific problem characteristics remains the key to success.
+
+For practitioners, the choice isn't necessarily between these paradigms. Modern best practice may involve: using appropriate loss functions during training, applying informed dataset modifications where beneficial, and ensuring proper calibration through conformal methods—particularly when probability estimates matter for downstream decisions.
