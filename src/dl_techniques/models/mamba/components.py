@@ -520,6 +520,10 @@ class MambaLayer(keras.layers.Layer):
 
         return output
 
+    def compute_output_shape(self, input_shape):
+        """Output shape: (batch, seq_len, d_model)."""
+        return (*input_shape[:-1], self.d_model)
+
     def get_config(self) -> Dict[str, Any]:
         """
         Return configuration for serialization.
@@ -700,6 +704,11 @@ class MambaResidualBlock(keras.layers.Layer):
         mamba_output = self.mamba(normalized, training=training)
 
         return mamba_output, new_residual
+
+    def compute_output_shape(self, input_shape):
+        """Returns tuple of (hidden_states, residual), both (batch, seq_len, d_model)."""
+        output_shape = (*input_shape[:-1], self.d_model)
+        return (output_shape, output_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """

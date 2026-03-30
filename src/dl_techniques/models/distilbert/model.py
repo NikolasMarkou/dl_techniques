@@ -256,6 +256,10 @@ class DistilBertEmbeddings(keras.layers.Layer):
 
         return embeddings
 
+    def compute_output_shape(self, input_shape):
+        """Compute output shape: (batch_size, seq_length) -> (batch_size, seq_length, hidden_size)."""
+        return (*input_shape, self.hidden_size)
+
     def get_config(self) -> Dict[str, Any]:
         """Return layer configuration for serialization."""
         config = super().get_config()

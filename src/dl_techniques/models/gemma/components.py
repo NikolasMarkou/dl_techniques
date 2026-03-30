@@ -249,6 +249,10 @@ class Gemma3TransformerBlock(keras.layers.Layer):
 
         return residual + ffn_output
 
+    def compute_output_shape(self, input_shape):
+        """Output shape equals input shape (residual connections preserve dimensions)."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
         config = super().get_config()
