@@ -12,10 +12,15 @@ import pickle
 import keras
 import numpy as np
 import tensorflow as tf
-import tensorflow_datasets as tfds
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu
+from train.common.nlp import (
+    create_tokenizer,
+    load_text_dataset,
+    preprocess_classification_dataset,
+    create_nlp_callbacks,
+)
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
 from dl_techniques.models.fnet import FNet
@@ -35,9 +40,6 @@ class FinetuneConfig:
     # Model and paths
     pretrained_encoder_path: str = "results/fnet_pretrain/pretrained_fnet_encoder_best.keras"
     save_dir: str = "results/fnet_sentiment_finetune"
-    log_dir: str = "results/fnet_sentiment_finetune/logs"
-    checkpoint_dir: str = "results/fnet_sentiment_finetune/checkpoints"
-    analysis_dir: str = "results/fnet_sentiment_finetune/epoch_analysis"
     full_analysis_dir: str = "results/fnet_sentiment_finetune/full_analysis"
 
     # Task
@@ -70,93 +72,6 @@ class FinetuneConfig:
     analysis_epoch_frequency: int = 1
     run_post_training_analysis: bool = True
     analysis_n_samples: int = 1000
-
-
-# ---------------------------------------------------------------------
-# Data Pipeline
-# ---------------------------------------------------------------------
-
-
-def create_tokenizer(config: FinetuneConfig) -> TiktokenPreprocessor:
-    """Create and configure Tiktoken preprocessor."""
-    preprocessor = TiktokenPreprocessor(
-        encoding_name=config.encoding_name,
-        max_length=config.max_seq_length,
-        cls_token_id=config.cls_token_id,
-        sep_token_id=config.sep_token_id,
-        pad_token_id=config.pad_token_id,
-        mask_token_id=config.mask_token_id,
-        truncation=True,
-        padding='max_length',
-    )
-    logger.info(
-        f"TiktokenPreprocessor: vocab_size={preprocessor.vocab_size}, "
-        f"encoding={config.encoding_name}"
-    )
-    return preprocessor
-
-
-def _decode_text(text) -> str:
-    """Decode a TF text tensor to a Python string."""
-    if isinstance(text, bytes):
-        return text.decode('utf-8')
-    if hasattr(text, 'numpy'):
-        text_np = text.numpy()
-        return text_np.decode('utf-8') if isinstance(text_np, bytes) else str(text_np)
-    return str(text)
-
-
-def load_dataset(config: FinetuneConfig, split: str = "train") -> tf.data.Dataset:
-    """Load text dataset with labels from tensorflow-datasets."""
-    logger.info(f"Loading {config.dataset_name} ({split})...")
-    dataset, _ = tfds.load(
-        config.dataset_name, split=split,
-        as_supervised=True, shuffle_files=True, with_info=True,
-    )
-    if config.max_samples is not None and "train" in split:
-        dataset = dataset.take(config.max_samples)
-        logger.info(f"Limited training data to {config.max_samples} samples")
-    return dataset
-
-
-def preprocess_dataset(
-    dataset: tf.data.Dataset,
-    preprocessor: TiktokenPreprocessor,
-    config: FinetuneConfig,
-) -> tf.data.Dataset:
-    """Tokenize and batch text dataset for classification."""
-    def tokenize_fn(text, label):
-        encoded = preprocessor(_decode_text(text), return_tensors='np')
-        return encoded['input_ids'][0], encoded['attention_mask'][0], encoded['token_type_ids'][0], label
-
-    dataset = dataset.map(
-        lambda text, label: tf.py_function(
-            func=tokenize_fn, inp=[text, label],
-            Tout=[tf.int32, tf.int32, tf.int32, tf.int64],
-        ),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-
-    seq_len = config.max_seq_length
-
-    def to_dict_and_label(ids, mask, types, label):
-        inputs = {
-            'input_ids': tf.ensure_shape(ids, [seq_len]),
-            'attention_mask': tf.ensure_shape(mask, [seq_len]),
-            'token_type_ids': tf.ensure_shape(types, [seq_len]),
-        }
-        lbl = tf.cast(label, tf.int32)
-        lbl.set_shape(())
-        return inputs, lbl
-
-    dataset = dataset.map(to_dict_and_label, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = (
-        dataset.cache().shuffle(1000)
-        .batch(config.batch_size, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
-    )
-    logger.info(f"Dataset preprocessed: batch_size={config.batch_size}")
-    return dataset
 
 
 # ---------------------------------------------------------------------
@@ -215,22 +130,6 @@ def compile_model(model: keras.Model, config: FinetuneConfig, learning_rate: flo
     logger.info(f"Compiled with lr={learning_rate}")
 
 
-def create_callbacks(config: FinetuneConfig) -> Tuple[List[keras.callbacks.Callback], str]:
-    """Create training callbacks using common callback factory."""
-    callbacks, results_dir = create_common_callbacks(
-        model_name="FNet-Sentiment-Finetuned-Tiktoken",
-        results_dir_prefix="fnet_finetune",
-        monitor='val_accuracy',
-        patience=3,
-        use_lr_schedule=True,
-        include_tensorboard=True,
-        include_analyzer=config.run_epoch_analysis,
-        analyzer_epoch_frequency=config.analysis_epoch_frequency,
-        analyzer_start_epoch=config.analysis_start_epoch,
-    )
-    return callbacks, results_dir
-
-
 def _merge_histories(base, new):
     """Merge two Keras History objects."""
     for key, value in new.history.items():
@@ -251,11 +150,29 @@ def finetune_sentiment_model(
     keras.utils.set_random_seed(42)
     os.makedirs(config.save_dir, exist_ok=True)
 
-    preprocessor = create_tokenizer(config)
-    train_dataset = preprocess_dataset(load_dataset(config, "train"), preprocessor, config)
-    val_dataset = preprocess_dataset(load_dataset(config, "test"), preprocessor, config)
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    train_dataset = preprocess_classification_dataset(
+        load_text_dataset(config.dataset_name, "train", config.max_samples, as_supervised=True),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
+    val_dataset = preprocess_classification_dataset(
+        load_text_dataset(config.dataset_name, "test", config.max_samples, as_supervised=True),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
     model, fnet_encoder = create_sentiment_model(config)
-    callbacks, results_dir = create_callbacks(config)
+    callbacks, results_dir = create_nlp_callbacks(
+        model_name="FNet-Sentiment-Finetuned-Tiktoken",
+        results_dir_prefix="fnet_finetune",
+        monitor='val_accuracy',
+        patience=3,
+        include_analyzer=config.run_epoch_analysis,
+        analyzer_epoch_frequency=config.analysis_epoch_frequency,
+        analyzer_start_epoch=config.analysis_start_epoch,
+    )
 
     if config.run_two_stage_finetuning:
         # Stage 1: train head only
@@ -322,7 +239,7 @@ def post_training_analysis(config: FinetuneConfig) -> None:
     os.makedirs(config.full_analysis_dir, exist_ok=True)
 
     initial_model, _ = create_sentiment_model(config)
-    best_path = os.path.join(config.checkpoint_dir, "best_sentiment_model.keras")
+    best_path = os.path.join(config.save_dir, "best_sentiment_model.keras")
     final_path = os.path.join(config.save_dir, "fnet_sentiment_final_best.keras")
 
     models_to_analyze = {
@@ -336,8 +253,15 @@ def post_training_analysis(config: FinetuneConfig) -> None:
         history_dict = pickle.load(f)
     training_histories = {name: history_dict for name in models_to_analyze}
 
-    preprocessor = create_tokenizer(config)
-    val_dataset = preprocess_dataset(load_dataset(config, "test"), preprocessor, config)
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    val_dataset = preprocess_classification_dataset(
+        load_text_dataset(config.dataset_name, "test", config.max_samples, as_supervised=True),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
     analysis_data = prepare_data_for_analyzer(val_dataset, config.analysis_n_samples)
 
     analyzer = ModelAnalyzer(
@@ -403,7 +327,11 @@ def main() -> None:
     if config.run_post_training_analysis:
         post_training_analysis(config)
 
-    preprocessor = create_tokenizer(config)
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
     evaluate_model(model, preprocessor, config)
     logger.info("Script complete! Model is ready for inference.")
 
