@@ -8,12 +8,17 @@ import argparse
 import os
 
 import keras
-import numpy as np
 import tensorflow as tf
-import tensorflow_datasets as tfds
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu
+from train.common.nlp import (
+    create_tokenizer,
+    load_text_dataset,
+    preprocess_mlm_dataset,
+    create_warmup_lr_schedule,
+    create_nlp_callbacks,
+)
 
 from dl_techniques.models.bert import BERT
 from dl_techniques.models.masked_language_model import (
@@ -22,7 +27,6 @@ from dl_techniques.models.masked_language_model import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -58,9 +62,6 @@ class TrainingConfig:
 
     # Paths
     save_dir: str = "results/bert_pretrain"
-    log_dir: str = "results/bert_pretrain/logs"
-    checkpoint_dir: str = "results/bert_pretrain/checkpoints"
-    analysis_dir: str = "results/bert_pretrain/epoch_analysis"
 
     # Data
     dataset_name: str = "imdb_reviews"
@@ -70,92 +71,6 @@ class TrainingConfig:
     run_epoch_analysis: bool = True
     analysis_start_epoch: int = 1
     analysis_epoch_frequency: int = 5
-
-
-# ---------------------------------------------------------------------
-# Data Pipeline
-# ---------------------------------------------------------------------
-
-
-def create_tokenizer(config: TrainingConfig) -> TiktokenPreprocessor:
-    """Create and configure Tiktoken preprocessor."""
-    preprocessor = TiktokenPreprocessor(
-        encoding_name=config.encoding_name,
-        max_length=config.max_seq_length,
-        cls_token_id=config.cls_token_id,
-        sep_token_id=config.sep_token_id,
-        pad_token_id=config.pad_token_id,
-        mask_token_id=config.mask_token_id,
-        truncation=True,
-        padding='max_length',
-    )
-    logger.info(
-        f"TiktokenPreprocessor: vocab_size={preprocessor.vocab_size}, "
-        f"encoding={config.encoding_name}"
-    )
-    return preprocessor
-
-
-def _decode_text(text) -> str:
-    """Decode a TF text tensor to a Python string."""
-    if isinstance(text, bytes):
-        return text.decode('utf-8')
-    if hasattr(text, 'numpy'):
-        text_np = text.numpy()
-        return text_np.decode('utf-8') if isinstance(text_np, bytes) else str(text_np)
-    return str(text)
-
-
-def load_dataset(config: TrainingConfig, split: str = "train") -> tf.data.Dataset:
-    """Load text dataset from tensorflow-datasets."""
-    logger.info(f"Loading {config.dataset_name} ({split})...")
-    dataset, _ = tfds.load(
-        config.dataset_name, split=split,
-        as_supervised=False, shuffle_files=True, with_info=True,
-    )
-    dataset = dataset.map(lambda x: x["text"], num_parallel_calls=tf.data.AUTOTUNE)
-
-    if config.max_samples is not None and split == "train":
-        dataset = dataset.take(config.max_samples)
-        logger.info(f"Limited training data to {config.max_samples} samples")
-    elif split != "train":
-        limit = config.max_samples // 5 if config.max_samples else 2000
-        dataset = dataset.take(limit)
-    return dataset
-
-
-def preprocess_dataset(
-    dataset: tf.data.Dataset,
-    preprocessor: TiktokenPreprocessor,
-    config: TrainingConfig,
-) -> tf.data.Dataset:
-    """Tokenize and batch text dataset for MLM training."""
-    def tokenize_fn(text):
-        encoded = preprocessor(_decode_text(text), return_tensors='np')
-        return encoded['input_ids'][0], encoded['attention_mask'][0], encoded['token_type_ids'][0]
-
-    dataset = dataset.map(
-        lambda x: tf.py_function(tokenize_fn, [x], [tf.int32, tf.int32, tf.int32]),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-
-    seq_len = config.max_seq_length
-    dataset = dataset.map(
-        lambda ids, mask, types: {
-            'input_ids': tf.ensure_shape(ids, [seq_len]),
-            'attention_mask': tf.ensure_shape(mask, [seq_len]),
-            'token_type_ids': tf.ensure_shape(types, [seq_len]),
-        },
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    dataset = (
-        dataset.cache()
-        .shuffle(buffer_size=1000)
-        .batch(config.batch_size, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
-    )
-    logger.info(f"Dataset preprocessed: batch_size={config.batch_size}")
-    return dataset
 
 
 # ---------------------------------------------------------------------
@@ -208,43 +123,16 @@ def create_bert_mlm_model(config: TrainingConfig) -> MaskedLanguageModel:
 # ---------------------------------------------------------------------
 
 
-def create_learning_rate_schedule(config: TrainingConfig, steps_per_epoch: int):
-    """Warmup + cosine decay schedule."""
-    total_steps = config.num_epochs * steps_per_epoch
-    warmup_steps = int(config.warmup_ratio * total_steps)
-    primary = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=config.learning_rate,
-        decay_steps=total_steps - warmup_steps, alpha=0.0,
-    )
-    return WarmupSchedule(
-        warmup_steps=warmup_steps, primary_schedule=primary, warmup_start_lr=1e-7,
-    )
-
-
 def compile_model(mlm_model: MaskedLanguageModel, config: TrainingConfig, steps_per_epoch: int):
     """Compile MLM model with AdamW and warmup schedule."""
-    lr_schedule = create_learning_rate_schedule(config, steps_per_epoch)
+    lr_schedule = create_warmup_lr_schedule(
+        config.learning_rate, config.num_epochs, steps_per_epoch, config.warmup_ratio,
+    )
     optimizer = keras.optimizers.AdamW(
         learning_rate=lr_schedule, weight_decay=config.weight_decay, clipnorm=1.0,
     )
     mlm_model.compile(optimizer=optimizer)
     logger.info(f"Compiled: AdamW, peak_lr={config.learning_rate}, wd={config.weight_decay}")
-
-
-def create_callbacks(config: TrainingConfig) -> Tuple[List[keras.callbacks.Callback], str]:
-    """Create training callbacks using common callback factory."""
-    callbacks, results_dir = create_common_callbacks(
-        model_name=f"BERT-{config.bert_variant}",
-        results_dir_prefix="bert_pretrain",
-        monitor='val_loss',
-        patience=15,
-        use_lr_schedule=True,
-        include_tensorboard=True,
-        include_analyzer=config.run_epoch_analysis,
-        analyzer_epoch_frequency=config.analysis_epoch_frequency,
-        analyzer_start_epoch=config.analysis_start_epoch,
-    )
-    return callbacks, results_dir
 
 
 def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.callbacks.History]:
@@ -257,14 +145,30 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     keras.utils.set_random_seed(42)
     os.makedirs(config.save_dir, exist_ok=True)
 
-    preprocessor = create_tokenizer(config)
-    train_dataset = preprocess_dataset(load_dataset(config, "train"), preprocessor, config)
-    val_dataset = preprocess_dataset(load_dataset(config, "test"), preprocessor, config)
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    train_dataset = preprocess_mlm_dataset(
+        load_text_dataset(config.dataset_name, "train", config.max_samples),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
+    val_dataset = preprocess_mlm_dataset(
+        load_text_dataset(config.dataset_name, "test", config.max_samples),
+        preprocessor, config.max_seq_length, config.batch_size,
+    )
 
     steps_per_epoch = config.max_samples // config.batch_size if config.max_samples else 1000
     mlm_model = create_bert_mlm_model(config)
     compile_model(mlm_model, config, steps_per_epoch)
-    callbacks, results_dir = create_callbacks(config)
+    callbacks, results_dir = create_nlp_callbacks(
+        model_name=f"BERT-{config.bert_variant}",
+        results_dir_prefix="bert_pretrain",
+        include_analyzer=config.run_epoch_analysis,
+        analyzer_epoch_frequency=config.analysis_epoch_frequency,
+        analyzer_start_epoch=config.analysis_start_epoch,
+    )
 
     logger.info("Starting training...")
     history = mlm_model.fit(
@@ -298,7 +202,6 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
 def evaluate_model(
     mlm_model: MaskedLanguageModel,
     preprocessor: TiktokenPreprocessor,
-    config: TrainingConfig,
 ) -> None:
     """Evaluate the trained model with MLM prediction visualization."""
     test_texts = [
@@ -341,8 +244,12 @@ def main() -> None:
 
     mlm_model, history = train_bert_mlm(config)
 
-    preprocessor = create_tokenizer(config)
-    evaluate_model(mlm_model, preprocessor, config)
+    preprocessor = create_tokenizer(
+        config.encoding_name, config.max_seq_length,
+        config.cls_token_id, config.sep_token_id,
+        config.pad_token_id, config.mask_token_id,
+    )
+    evaluate_model(mlm_model, preprocessor)
 
     logger.info(f"Pre-training complete! Encoder: {config.save_dir}/pretrained_bert_encoder_best.keras")
 
