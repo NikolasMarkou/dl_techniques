@@ -3,7 +3,7 @@
 import os
 import keras
 from datetime import datetime
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -18,6 +18,11 @@ def create_callbacks(
         patience: int = 15,
         use_lr_schedule: bool = True,
         analyzer_epoch_frequency: int = 1,
+        include_tensorboard: bool = False,
+        include_terminate_on_nan: bool = False,
+        include_analyzer: bool = True,
+        analyzer_config: Optional[Any] = None,
+        analyzer_start_epoch: int = 1,
 ) -> Tuple[List, str]:
     """
     Create standard training callbacks.
@@ -36,6 +41,16 @@ def create_callbacks(
         If True, skip ReduceLROnPlateau (assumes external LR schedule).
     analyzer_epoch_frequency : int
         How often to run the EpochAnalyzerCallback (every N epochs).
+    include_tensorboard : bool
+        If True, add TensorBoard callback.
+    include_terminate_on_nan : bool
+        If True, add TerminateOnNaN callback.
+    include_analyzer : bool
+        If True, add EpochAnalyzerCallback. Set False to disable.
+    analyzer_config : Optional[AnalysisConfig]
+        Custom AnalysisConfig for EpochAnalyzerCallback. None uses defaults.
+    analyzer_start_epoch : int
+        Epoch to start running the analyzer (default: 1).
 
     Returns
     -------
@@ -66,12 +81,29 @@ def create_callbacks(
         keras.callbacks.CSVLogger(
             filename=os.path.join(results_dir, 'training_log.csv')
         ),
-        EpochAnalyzerCallback(
+    ]
+
+    if include_terminate_on_nan:
+        callbacks.insert(0, keras.callbacks.TerminateOnNaN())
+
+    if include_analyzer:
+        analyzer_kwargs = dict(
             output_dir=os.path.join(results_dir, "epoch_analysis"),
             model_name=model_name,
             epoch_frequency=analyzer_epoch_frequency,
-        ),
-    ]
+            start_epoch=analyzer_start_epoch,
+        )
+        if analyzer_config is not None:
+            analyzer_kwargs["analysis_config"] = analyzer_config
+        callbacks.append(EpochAnalyzerCallback(**analyzer_kwargs))
+
+    if include_tensorboard:
+        callbacks.append(keras.callbacks.TensorBoard(
+            log_dir=os.path.join(results_dir, "tensorboard"),
+            histogram_freq=1,
+            write_graph=True,
+            update_freq='epoch',
+        ))
 
     if not use_lr_schedule:
         callbacks.append(
