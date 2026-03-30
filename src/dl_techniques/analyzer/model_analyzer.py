@@ -99,7 +99,7 @@ import matplotlib.pyplot as plt
 
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults
-from .utils import find_pareto_front, normalize_metric, DataSampler
+from .utils import find_pareto_front, normalize_metric, DataSampler, recursively_get_layers
 from . import spectral_metrics, spectral_utils
 from .constants import SmoothingMethod
 
@@ -970,9 +970,15 @@ class ModelAnalyzer:
         smoothed_model = keras.models.clone_model(original_model)
         smoothed_model.set_weights(original_model.get_weights())
 
+        # Use recursive flat list for correct layer indexing (matches spectral analyzer)
+        all_layers = recursively_get_layers(smoothed_model)
+
         for _, row in model_details.iterrows():
             layer_id = int(row['layer_id'])
-            layer = smoothed_model.layers[layer_id]
+            if layer_id >= len(all_layers):
+                logger.warning(f"Layer index {layer_id} out of range for smoothed model, skipping")
+                continue
+            layer = all_layers[layer_id]
             layer_type = spectral_utils.infer_layer_type(layer)
 
             has_weights, old_weights, has_bias, old_bias = spectral_utils.get_layer_weights_and_bias(layer)

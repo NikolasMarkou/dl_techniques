@@ -282,6 +282,144 @@ def fit_powerlaw(
 
     return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, warning
 
+
+# ---------------------------------------------------------------------
+
+def powerlaw_goodness_of_fit(
+        evals: np.ndarray,
+        alpha: float,
+        xmin: float,
+        n_bootstraps: int = 100
+) -> float:
+    """
+    Bootstrap goodness-of-fit test for power-law hypothesis (Clauset et al. 2009).
+
+    Generates synthetic power-law samples, fits each, and compares KS distances
+    to the observed D. The p-value is the fraction of synthetic datasets with
+    KS distance >= observed D.
+
+    Args:
+        evals: Original eigenvalue array.
+        alpha: Fitted power-law exponent.
+        xmin: Fitted xmin threshold.
+        n_bootstraps: Number of bootstrap iterations.
+
+    Returns:
+        p-value (0 to 1). Values < 0.1 suggest the power-law is a poor fit.
+    """
+    if alpha <= 1.0 or xmin <= 0:
+        return 0.0
+
+    data = evals[evals >= xmin]
+    n_tail = len(data)
+    if n_tail < 5:
+        return 0.0
+
+    # Observed KS distance
+    _, _, D_obs, _, _, _, _ = fit_powerlaw(data, xmin=xmin)
+    if D_obs < 0:
+        return 0.0
+
+    count_ge = 0
+    for _ in range(n_bootstraps):
+        # Generate synthetic power-law sample: x = xmin * (1 - u)^(-1/(alpha-1))
+        u = np.random.uniform(0, 1, n_tail)
+        synthetic = xmin * (1.0 - u) ** (-1.0 / (alpha - 1.0))
+        _, _, D_syn, _, _, status_syn, _ = fit_powerlaw(synthetic)
+        if status_syn == "success" and D_syn >= D_obs:
+            count_ge += 1
+
+    return count_ge / n_bootstraps
+
+
+# ---------------------------------------------------------------------
+
+def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
+    """
+    Compute the ERG (Exact Renormalization Group) condition from SETOL theory.
+
+    The ERG condition measures whether ln det(X̃) ≈ 0, where X̃ is the
+    rescaled correlation matrix restricted to the Effective Correlation Space
+    (eigenvalues above xmin).
+
+    Args:
+        evals: Array of eigenvalues (sorted descending).
+        xmin: Power-law xmin threshold defining the ECS boundary.
+
+    Returns:
+        Dictionary with ERG diagnostic metrics:
+        - erg_log_det: ln det of rescaled ECS eigenvalues (ideal: ≈ 0)
+        - erg_delta_lambda_min: gap between xmin and the ERG boundary (ideal: ≈ 0)
+        - erg_satisfied: whether |erg_log_det| < 1.0 (approximate ERG condition)
+    """
+    if evals is None or len(evals) == 0 or xmin <= 0:
+        return {'erg_log_det': float('nan'), 'erg_delta_lambda_min': float('nan'),
+                'erg_satisfied': False}
+
+    # ECS: eigenvalues above xmin
+    ecs_evals = evals[evals >= xmin]
+    if len(ecs_evals) < 2:
+        return {'erg_log_det': float('nan'), 'erg_delta_lambda_min': float('nan'),
+                'erg_satisfied': False}
+
+    # Rescale ECS eigenvalues so that their product → 1 at the critical point
+    rescaled, wscale = rescale_eigenvalues(ecs_evals)
+
+    # ln det(X̃) = Σ ln(λ_i) for ECS eigenvalues
+    log_evals = np.log(rescaled[rescaled > SPECTRAL_EPSILON])
+    erg_log_det = float(np.sum(log_evals))
+
+    # Δλ_min: gap between xmin and the lambda_min that would satisfy ERG
+    # The ERG boundary is where cumulative log product crosses zero from above
+    sorted_ecs = np.sort(rescaled)
+    cumulative_log = np.cumsum(np.log(sorted_ecs[sorted_ecs > SPECTRAL_EPSILON]))
+    erg_boundary_idx = np.searchsorted(cumulative_log, 0.0)
+    if erg_boundary_idx < len(sorted_ecs):
+        erg_lambda_min = sorted_ecs[erg_boundary_idx]
+        delta_lambda_min = float(abs(xmin * wscale * wscale - erg_lambda_min))
+    else:
+        delta_lambda_min = float('nan')
+
+    return {
+        'erg_log_det': erg_log_det,
+        'erg_delta_lambda_min': delta_lambda_min,
+        'erg_satisfied': abs(erg_log_det) < 1.0
+    }
+
+
+# ---------------------------------------------------------------------
+
+def classify_learning_phase(alpha: float) -> str:
+    """
+    Classify the learning phase of a layer based on its power-law exponent α.
+
+    Based on SETOL Section 4 (Phases of Learning):
+    - α ≈ 2.0: Ideal (critical phase boundary, ERG satisfied)
+    - 2.0 < α < 4.0: Good/Typical (standard SOTA models)
+    - α < 2.0: Over-regularized/Glassy (correlation traps)
+    - α > 6.0: Under-trained (random-like, Marchenko-Pastur)
+    - 4.0 < α < 6.0: Fair (working but room for improvement)
+
+    Args:
+        alpha: Power-law exponent.
+
+    Returns:
+        Phase classification string.
+    """
+    if alpha < 0:
+        return "failed"
+    elif alpha < 2.0:
+        return "over-regularized"
+    elif alpha < 2.5:
+        return "ideal"
+    elif alpha < 4.0:
+        return "good"
+    elif alpha <= 6.0:
+        return "fair"
+    else:
+        return "under-trained"
+
+
 # ---------------------------------------------------------------------
 
 def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
@@ -342,13 +480,14 @@ def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
 
 # ---------------------------------------------------------------------
 
-def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, float]:
+def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> Dict[str, float]:
     """
     Calculate various spectral metrics from eigenvalues.
 
     Args:
         evals: Array of eigenvalues.
         alpha: Power-law exponent for alpha-weighted metrics.
+        N: Maximum matrix dimension (for α̂ normalization). If 0, normalization is skipped.
 
     Returns:
         Dictionary containing spectral metrics.
@@ -357,7 +496,7 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, flo
         return {
             "norm": 0.0, "log_norm": 0.0, "spectral_norm": 0.0,
             "log_spectral_norm": 0.0, "alpha_weighted": 0.0,
-            "log_alpha_norm": 0.0, "stable_rank": 0.0
+            "alpha_hat": 0.0, "log_alpha_norm": 0.0, "stable_rank": 0.0
         }
 
     norm = np.sum(evals)
@@ -367,12 +506,25 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float) -> Dict[str, flo
     norm_safe = norm if norm > SPECTRAL_EPSILON else SPECTRAL_EPSILON
     spectral_norm_safe = spectral_norm if spectral_norm > SPECTRAL_EPSILON else SPECTRAL_EPSILON
 
+    # α̂ (alpha_weighted) uses unnormalized λ_max (legacy, for backward compatibility)
+    alpha_weighted = alpha * np.log10(spectral_norm_safe)
+
+    # α̂_normalized: SETOL-correct version using λ_max/N normalization
+    # This makes α̂ comparable across layers with different dimensions
+    if N > 0:
+        lambda_max_normalized = spectral_norm / N
+        lambda_max_norm_safe = lambda_max_normalized if lambda_max_normalized > SPECTRAL_EPSILON else SPECTRAL_EPSILON
+        alpha_hat = alpha * np.log10(lambda_max_norm_safe)
+    else:
+        alpha_hat = alpha_weighted
+
     return {
         "norm": norm,
         "log_norm": np.log10(norm_safe),
         "spectral_norm": spectral_norm,
         "log_spectral_norm": np.log10(spectral_norm_safe),
-        "alpha_weighted": alpha * np.log10(spectral_norm_safe),
+        "alpha_weighted": alpha_weighted,
+        "alpha_hat": alpha_hat,
         "log_alpha_norm": np.log10(np.sum(evals ** alpha)) if alpha > 0 else 0.0,
         "stable_rank": norm / spectral_norm_safe
     }
@@ -620,51 +772,70 @@ def find_critical_weights(
 
 def calculate_concentration_metrics(
         weight_matrix: np.ndarray,
-        num_eigenvectors: int = 3
+        num_eigenvectors: int = 3,
+        evals: Optional[np.ndarray] = None
 ) -> Dict[str, Union[float, List[Tuple[int, int, float]]]]:
     """
     Calculate comprehensive concentration metrics for a weight matrix.
+
+    Args:
+        weight_matrix: Weight matrix to analyze.
+        num_eigenvectors: Number of top eigenvectors for participation ratio.
+        evals: Pre-computed eigenvalues (full spectrum). If None, computed from weight_matrix.
     """
     min_dim = min(weight_matrix.shape)
     if min_dim < SPECTRAL_DEFAULT_MIN_EVALS:
         return {}
 
-    # Get eigenvalues and eigenvectors
-    # Limit num_eigenvectors to actual matrix rank/dimensions
+    # Compute full eigenvalue spectrum for Gini and dominance if not provided
+    if evals is None:
+        try:
+            sv = np.linalg.svd(weight_matrix, compute_uv=False)
+            evals = sv * sv
+        except Exception:
+            return {}
+
+    if len(evals) == 0:
+        return {}
+
+    # Gini and dominance use FULL eigenvalue spectrum (not just top-k)
+    gini = calculate_gini_coefficient(evals)
+    dominance = calculate_dominance_ratio(evals)
+
+    # Get top-k eigenvectors for participation ratio (localization analysis)
     k_safe = min(num_eigenvectors, min_dim - 1)
-    if k_safe < 1:
-        return {}
+    mean_pr = 0.0
+    min_pr = 0.0
+    critical_weights = []
 
-    eigenvalues, eigenvectors = get_top_eigenvectors(weight_matrix, k=k_safe)
+    if k_safe >= 1:
+        eigenvalues_topk, eigenvectors = get_top_eigenvectors(weight_matrix, k=k_safe)
 
-    if len(eigenvalues) == 0:
-        return {}
+        if len(eigenvalues_topk) > 0 and eigenvectors.size > 0:
+            # Calculate participation ratios for top eigenvectors
+            participation_ratios = []
+            for i in range(eigenvectors.shape[1]):
+                pr = calculate_participation_ratio(eigenvectors[:, i])
+                participation_ratios.append(pr)
 
-    gini = calculate_gini_coefficient(eigenvalues)
-    dominance = calculate_dominance_ratio(eigenvalues)
+            mean_pr = np.mean(participation_ratios) if participation_ratios else 0.0
+            min_pr = np.min(participation_ratios) if participation_ratios else 0.0
 
-    # Calculate participation ratios for top eigenvectors
-    participation_ratios = []
-    for i in range(eigenvectors.shape[1]):
-        pr = calculate_participation_ratio(eigenvectors[:, i])
-        participation_ratios.append(pr)
+            critical_weights = find_critical_weights(
+                weight_matrix, eigenvectors, eigenvalues_topk)
 
-    critical_weights = find_critical_weights(weight_matrix, eigenvectors, eigenvalues)
-
-    mean_pr = np.mean(participation_ratios) if participation_ratios else 0.0
-
-    # Concentration score: Higher score = More concentrated (bad for robustness)
-    # High Gini (inequality) * High Dominance / Low Participation
+    # Concentration score: Higher = more concentrated (fragile)
+    # Combines inequality (Gini), dominance, and localization (1/PR)
     concentration_score = (gini * dominance) / (mean_pr + SPECTRAL_EPSILON)
 
     return {
         'gini_coefficient': gini,
         'dominance_ratio': dominance,
         'participation_ratio': mean_pr,
-        'min_participation_ratio': np.min(participation_ratios) if participation_ratios else 0,
+        'min_participation_ratio': min_pr,
         'critical_weight_count': len(critical_weights),
         'critical_weights': critical_weights[:SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED],
-        'concentration_score': np.log1p(concentration_score)  # Log to manage extreme values
+        'concentration_score': np.log1p(concentration_score)
     }
 
 
@@ -755,7 +926,7 @@ def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
         if n_comp < len(s):
             s[n_comp:] = 0
 
-        smoothed_W = np.dot(u * s[:, np.newaxis] if s.ndim == 1 else u * s, vh)
+        smoothed_W = np.dot(u * s[np.newaxis, :], vh)
 
         if transpose:
             smoothed_W = smoothed_W.T

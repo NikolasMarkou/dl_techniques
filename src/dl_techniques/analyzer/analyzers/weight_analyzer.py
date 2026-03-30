@@ -82,6 +82,7 @@ from sklearn.preprocessing import StandardScaler
 from dl_techniques.utils.logger import logger
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
+from ..utils import recursively_get_layers
 
 # ---------------------------------------------------------------------
 
@@ -105,7 +106,7 @@ class WeightAnalyzer(BaseAnalyzer):
             results.weight_stats[model_name] = {}
             layer_names_in_order = []  # Track actual layer order
 
-            for layer in model.layers:
+            for layer in recursively_get_layers(model):
                 if (self.config.weight_layer_types and
                     layer.__class__.__name__ not in self.config.weight_layer_types):
                     continue

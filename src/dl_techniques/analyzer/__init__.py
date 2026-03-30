@@ -15,7 +15,7 @@ Key Features:
 
 Example Usage:
     ```python
-    from dl_techniques.utils.analyzer import ModelAnalyzer, AnalysisConfig
+    from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 
     # Configure analysis
     config = AnalysisConfig(

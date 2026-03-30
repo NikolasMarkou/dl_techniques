@@ -77,17 +77,18 @@ class InformationFlowAnalyzer(BaseAnalyzer):
             raise ValueError("Data is required for information flow analysis")
 
         x_sample = data.x_data
+        max_info_flow_samples = min(self.config.n_samples, 200)
         # Correctly handle dictionary vs. numpy array for batch size
         if isinstance(x_sample, dict):
             # Take the first key to determine batch size
             first_key = next(iter(x_sample))
             self._batch_size = len(x_sample[first_key])
             # Subsample the dictionary
-            x_sample = {k: v[:min(200, self._batch_size)] for k, v in x_sample.items()}
+            x_sample = {k: v[:min(max_info_flow_samples, self._batch_size)] for k, v in x_sample.items()}
             self._batch_size = len(x_sample[first_key])
         else:
             self._batch_size = len(x_sample)
-            x_sample = x_sample[:min(200, self._batch_size)]
+            x_sample = x_sample[:min(max_info_flow_samples, self._batch_size)]
 
 
         for model_name, model in self.models.items():
@@ -142,48 +143,6 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 for handle in hook_handles:
                     handle.remove()
                 logger.debug(f"Removed {len(hook_handles)} hooks from model '{model_name}'.")
-
-    # The rest of the file remains unchanged as it contains the correct logic...
-    # (The _setup_activation_models method is now dead code, but we leave it for reference)
-
-    def _setup_activation_models(self) -> None:
-        """Set up models for extracting intermediate activations."""
-        for model_name, model in self.models.items():
-            if not hasattr(model, 'input') or not hasattr(model, 'layers'):
-                logger.warning(
-                    f"Model '{model_name}' is likely a subclassed model or not a standard Keras Functional model. "
-                    "Automatic information flow analysis is not supported. Skipping."
-                )
-                self.layer_extraction_models[model_name] = None
-                continue
-
-            try:
-                extraction_layers = self._get_extraction_layers(model.layers) # Corrected call
-
-                if not extraction_layers:
-                    logger.warning(f"No suitable layers found for extraction in {model_name}")
-                    self.layer_extraction_models[model_name] = None
-                    continue
-
-                layer_outputs = [layer.output for layer in extraction_layers]
-                layer_info = [{'name': layer.name, 'type': layer.__class__.__name__} for layer in extraction_layers]
-
-                extraction_model = keras.Model(
-                    inputs=model.input,
-                    outputs=layer_outputs,
-                    name=f"{model_name}_activation_extractor"
-                )
-
-                self.layer_extraction_models[model_name] = {
-                    'model': extraction_model,
-                    'layer_info': layer_info
-                }
-                logger.info(f"Successfully created activation extraction model for '{model_name}'.")
-
-            except Exception as e:
-                logger.error(f"Failed to create activation extraction model for '{model_name}': {e}. "
-                             f"This can happen with complex, non-standard model architectures. Skipping.")
-                self.layer_extraction_models[model_name] = None
 
     def _get_extraction_layers(self, layers: List[keras.layers.Layer]) -> List[keras.layers.Layer]:
         """Get a list of layer objects suitable for information flow analysis from a flat list."""

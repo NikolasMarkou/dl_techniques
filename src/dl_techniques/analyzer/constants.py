@@ -75,6 +75,7 @@ class MetricNames:
     LOG_NORM = 'log_norm'
     LOG_SPECTRAL_NORM = 'log_spectral_norm'
     ALPHA_WEIGHTED = 'alpha_weighted'
+    ALPHA_HAT = 'alpha_hat'
     LOG_ALPHA_NORM = 'log_alpha_norm'
     NUM_EVALS = 'num_evals'
     LAMBDA_MAX = 'lambda_max'
@@ -94,6 +95,11 @@ class MetricNames:
     PARTICIPATION_RATIO = 'participation_ratio'
     CONCENTRATION_SCORE = 'concentration_score'
     CRITICAL_WEIGHT_COUNT = 'critical_weight_count'
+    LEARNING_PHASE = 'learning_phase'
+    PL_PVALUE = 'pl_pvalue'
+    ERG_LOG_DET = 'erg_log_det'
+    ERG_DELTA_LAMBDA_MIN = 'erg_delta_lambda_min'
+    ERG_SATISFIED = 'erg_satisfied'
 
 SPECTRAL_DEFAULT_SUMMARY_METRICS = [
     MetricNames.ALPHA, MetricNames.STABLE_RANK, MetricNames.ENTROPY,

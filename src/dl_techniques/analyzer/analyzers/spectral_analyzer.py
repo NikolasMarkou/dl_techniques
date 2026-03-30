@@ -77,12 +77,11 @@ References
 
 import keras
 import warnings
+import contextlib
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Optional, List, Tuple
 
-# Suppress scipy/numpy warnings in eigenvalue calculations
-warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -165,12 +164,21 @@ class SpectralAnalyzer(BaseAnalyzer):
             return details.reset_index()  # Return empty but correctly formatted DataFrame
 
         # Perform detailed analysis on each qualifying layer
-        for layer_id in details.index:
-            # [-] OLD, BUGGY LINE:
-            # layer = model.layers[layer_id]
+        # Suppress runtime warnings locally (e.g. divide-by-zero in eigenvalue calculations)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            self._analyze_layers(details, all_layers)
 
-            # [+] NEW, CORRECT LINE:
-            # Use the flattened list with the correct index.
+        # Generate and store recommendations for this model
+        summary = self._get_summary(details)
+        self._recommendations = self._generate_recommendations(details, summary)
+
+        # Convert layer_id index to a column for robust concatenation
+        return details.reset_index()
+
+    def _analyze_layers(self, details: pd.DataFrame, all_layers: List[keras.layers.Layer]) -> None:
+        """Perform spectral analysis on each qualifying layer."""
+        for layer_id in details.index:
             layer = all_layers[layer_id]
 
             logger.debug(f"Analyzing layer {layer_id}: {layer.name}")
@@ -193,11 +201,26 @@ class SpectralAnalyzer(BaseAnalyzer):
             weak_rank_loss = np.sum(evals < SPECTRAL_WEAK_RANK_LOSS_TOLERANCE)
             alpha, xmin, D, sigma, num_pl_spikes, status, warning = spectral_metrics.fit_powerlaw(evals)
             entropy = spectral_metrics.calculate_matrix_entropy(np.sqrt(evals), N)
-            spectral_mets = spectral_metrics.calculate_spectral_metrics(evals, alpha)
+            spectral_mets = spectral_metrics.calculate_spectral_metrics(evals, alpha, N=N)
+
+            # SETOL: Learning phase classification
+            learning_phase = spectral_metrics.classify_learning_phase(alpha)
+
+            # SETOL: ERG condition (Δλ_min diagnostic)
+            erg_metrics = {}
+            if status == "success" and xmin > 0:
+                erg_metrics = spectral_metrics.compute_erg_condition(evals, xmin)
+
+            # SETOL: Goodness-of-fit p-value (Clauset et al. 2009)
+            pl_pvalue = -1.0
+            if status == "success" and alpha > 1.0:
+                pl_pvalue = spectral_metrics.powerlaw_goodness_of_fit(
+                    evals, alpha, xmin, n_bootstraps=50)
 
             concentration_metrics = {}
             if self.config.spectral_concentration_analysis and Wmats:
-                concentration_metrics = spectral_metrics.calculate_concentration_metrics(Wmats[0])
+                concentration_metrics = spectral_metrics.calculate_concentration_metrics(
+                    Wmats[0], evals=evals)
 
             randomization_metrics = {}
             if self.config.spectral_randomize and Wmats:
@@ -217,19 +240,15 @@ class SpectralAnalyzer(BaseAnalyzer):
                 MetricNames.SIGMA: sigma, MetricNames.NUM_PL_SPIKES: num_pl_spikes,
                 MetricNames.STATUS: status, MetricNames.WARNING: warning,
                 MetricNames.ENTROPY: entropy,
+                'learning_phase': learning_phase,
+                'pl_pvalue': pl_pvalue,
+                **erg_metrics,
                 **spectral_mets, **concentration_metrics, **randomization_metrics
             }
 
             for key, value in metrics.items():
                 if key != 'critical_weights':
                     details.at[layer_id, key] = value
-
-        # Generate and store recommendations for this model
-        summary = self._get_summary(details)
-        self._recommendations = self._generate_recommendations(details, summary)
-
-        # Convert layer_id index to a column for robust concatenation
-        return details.reset_index()
 
     def _describe_model(self, model: keras.Model) -> Tuple[pd.DataFrame, List[keras.layers.Layer]]:
         """
@@ -303,6 +322,41 @@ class SpectralAnalyzer(BaseAnalyzer):
                 recommendations.append("Model may be under-trained (high α). Consider training longer or reducing regularization.")
             else:
                 recommendations.append(f"Model training quality appears good (α = {mean_alpha:.2f}).")
+
+        # SETOL: Phase distribution analysis
+        if 'learning_phase' in analysis_df.columns:
+            phase_counts = analysis_df['learning_phase'].value_counts()
+            total = len(analysis_df)
+            for phase, count in phase_counts.items():
+                pct = 100 * count / total
+                if phase == 'over-regularized' and pct > 20:
+                    recommendations.append(
+                        f"{pct:.0f}% of layers are over-regularized (α < 2.0). "
+                        "Reduce learning rate or check for correlation traps.")
+                elif phase == 'under-trained' and pct > 20:
+                    recommendations.append(
+                        f"{pct:.0f}% of layers are under-trained (α > 6.0). "
+                        "Train longer or reduce regularization.")
+                elif phase == 'ideal' and pct > 50:
+                    recommendations.append(
+                        f"{pct:.0f}% of layers are in the ideal phase (α ≈ 2.0). Excellent training quality.")
+
+        # SETOL: ERG condition check
+        if 'erg_satisfied' in analysis_df.columns:
+            erg_satisfied = analysis_df['erg_satisfied'].sum()
+            total = len(analysis_df)
+            if erg_satisfied > 0:
+                recommendations.append(
+                    f"{erg_satisfied}/{total} layers satisfy the ERG condition (ideal learning).")
+
+        # Power-law fit quality
+        if 'pl_pvalue' in analysis_df.columns:
+            poor_fits = analysis_df[
+                (analysis_df['pl_pvalue'] >= 0) & (analysis_df['pl_pvalue'] < 0.1)]
+            if len(poor_fits) > 0:
+                recommendations.append(
+                    f"{len(poor_fits)} layers have poor power-law fit (p < 0.1). "
+                    "Their α values may be unreliable.")
 
         if 'concentration_score' in summary and summary['concentration_score'] > 5.0:
             recommendations.append("High information concentration detected. Be careful with pruning/quantization.")

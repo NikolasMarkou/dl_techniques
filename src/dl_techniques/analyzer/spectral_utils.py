@@ -135,7 +135,7 @@ def get_layer_weights_and_bias(layer: keras.layers.Layer) -> Tuple[bool, Optiona
     # Get layer weights
     try:
         weights_list = layer.get_weights()
-    except:
+    except Exception:
         return has_weights, weights, has_bias, bias
 
     if len(weights_list) > 0:
