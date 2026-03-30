@@ -326,13 +326,16 @@ class MixedSequentialBlock(keras.layers.Layer):
                     'dropout_rate': self.dropout_rate
                 })
             elif self.attention_type == 'window':
-                attention_kwargs.update({
+                window_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
                     'dropout_rate': self.dropout_rate,
-                    'window_size': 4,
+                    'window_size': 8,
                     'normalization': 'softmax'
-                })
+                }
+                # Allow attention_args to override defaults (e.g. window_size)
+                window_defaults.update(attention_kwargs)
+                attention_kwargs = window_defaults
             elif self.attention_type == 'differential':
                 attention_kwargs.update({
                     'dim': self.embed_dim,

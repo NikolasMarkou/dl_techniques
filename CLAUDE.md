@@ -4,6 +4,10 @@ A deep learning research library providing 150+ model architectures, 290+ custom
 
 **Author**: Nikolas Markou | **License**: GPL-3.0 | **Python**: >= 3.11
 
+## Environment
+
+Always use the `.venv` virtual environment for running code, tests, and training scripts.
+
 ## Quick Reference
 
 ```

@@ -134,6 +134,14 @@ class TiRexExtended(TiRexCore):
             **kwargs
         )
 
+        # Learnable query tokens for the prediction horizon
+        self.query_tokens = self.add_weight(
+            shape=(1, prediction_length, embed_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+            name="query_tokens"
+        )
+
         # Quantile prediction head
         self.quantile_head = QuantileSequenceHead(
             num_quantiles=len(self.quantile_levels),
@@ -149,9 +157,9 @@ class TiRexExtended(TiRexCore):
         Forward pass with Query Token appending.
 
         Logic:
-            1. Normalize & Mask
+            1. Mask & Normalize (NaN-safe)
             2. Embed History -> [Batch, Patches, Dim]
-            3. Append Learned Queries -> [Batch, Patches + Pred_Len, Dim]
+            3. Append Learnable Queries -> [Batch, Patches + Pred_Len, Dim]
             4. Process via Mixed Blocks (LSTM flows history -> queries)
             5. Slice last Pred_Len tokens
             6. Project to Quantiles
@@ -160,38 +168,43 @@ class TiRexExtended(TiRexCore):
         if len(inputs.shape) == 2:
             inputs = ops.expand_dims(inputs, axis=-1)
 
-        # 1. CALCULATE STATISTICS & NORMALIZE (Reversible Norm)
+        # 1. HANDLE MASKING (before normalization to avoid NaN propagation)
+        nan_mask = ops.logical_not(ops.isnan(inputs))
+        nan_mask = ops.cast(nan_mask, dtype=inputs.dtype)
+        clean_inputs = ops.where(ops.isnan(inputs), ops.zeros_like(inputs), inputs)
+
+        # 2. CALCULATE STATISTICS & NORMALIZE (NaN-safe Reversible Norm)
         if self.use_normalization:
-            mean = ops.mean(inputs, axis=1, keepdims=True)
-            std = ops.std(inputs, axis=1, keepdims=True)
+            valid_count = ops.maximum(ops.sum(nan_mask, axis=1, keepdims=True), 1e-7)
+            mean = ops.sum(clean_inputs * nan_mask, axis=1, keepdims=True) / valid_count
+            sq_diff = ((clean_inputs - mean) * nan_mask) ** 2
+            variance = ops.sum(sq_diff, axis=1, keepdims=True) / valid_count
+            std = ops.sqrt(variance)
             std = ops.maximum(std, 1e-7)
-            x = (inputs - mean) / std
+            x = (clean_inputs - mean) / std
         else:
-            x = inputs
+            x = clean_inputs
             mean = None
             std = None
 
-        # 2. HANDLE MASKING
-        nan_mask = ops.logical_not(ops.isnan(inputs))
-        nan_mask = ops.cast(nan_mask, dtype=x.dtype)
+        # 3. CONCATENATE DATA WITH MASK
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
-        # 3. ENCODE HISTORY
-        # Standard patch embedding from parent class
+        # 4. ENCODE HISTORY
         x_patches = self.patch_embedding(x_with_mask, training=training)
         x_embedded = self.input_projection(x_patches, training=training)
         # x_embedded shape: (Batch, Num_Patches, Embed_Dim)
 
         # ---------------------------------------------------------------------
-        # 4. APPEND PREDICTION TOKENS
+        # 5. APPEND LEARNABLE PREDICTION TOKENS
         # ---------------------------------------------------------------------
         batch_size = ops.shape(x_embedded)[0]
 
-        prediction_tokens = (
-            ops.zeros(
-                shape=(batch_size, self.prediction_length, self.embed_dim),
-                dtype=inputs.dtype
-            )
+        # Broadcast learnable query tokens to batch size
+        # self.query_tokens shape: (1, Pred_Len, Embed_Dim)
+        prediction_tokens = ops.broadcast_to(
+            self.query_tokens,
+            (batch_size, self.prediction_length, self.embed_dim)
         )
 
         # Concatenate along time dimension (axis 1)
@@ -199,7 +212,7 @@ class TiRexExtended(TiRexCore):
         mixed_sequence = ops.concatenate([x_embedded, prediction_tokens], axis=1)
 
         # ---------------------------------------------------------------------
-        # 5. PROCESS SEQUENCE
+        # 6. PROCESS SEQUENCE
         # ---------------------------------------------------------------------
         hidden_states = mixed_sequence
 
@@ -213,22 +226,23 @@ class TiRexExtended(TiRexCore):
         hidden_states = self.output_norm(hidden_states, training=training)
 
         # ---------------------------------------------------------------------
-        # 6. EXTRACT PREDICTION PART (No Pooling)
+        # 7. EXTRACT PREDICTION PART (No Pooling)
         # ---------------------------------------------------------------------
         # We only care about the states of our Query Tokens (the end of the sequence).
         # Slice the last 'prediction_length' steps.
         # Shape: (Batch, Prediction_Length, Embed_Dim)
         prediction_states = hidden_states[:, -self.prediction_length:, :]
 
-        # 7. PREDICT (Normalized Space)
+        # 8. PREDICT (Normalized Space)
         # The head operates token-wise
         # It projects (Batch, Pred_Len, Dim) -> (Batch, Pred_Len, Num_Quantiles)
         quantile_predictions = self.quantile_head(prediction_states, training=training)
 
-        # 8. DENORMALIZE OUTPUT
+        # 9. DENORMALIZE OUTPUT (Reversible Instance Normalization)
         if self.use_normalization:
-            # mean/std shape is (Batch, 1, 1). Broadcasting handles the rest.
-            quantile_predictions = (quantile_predictions * std) + mean
+            norm_mean, norm_std = self._get_target_stats(mean, std)
+            # Broadcasting: (B, PredLen, Quantiles) * (B, 1, 1) + (B, 1, 1)
+            quantile_predictions = (quantile_predictions * norm_std) + norm_mean
 
         return quantile_predictions
 

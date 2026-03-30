@@ -183,6 +183,7 @@ class TiRexCore(keras.Model):
         dropout_rate: float = 0.1,
         use_layer_norm: bool = True,
         use_normalization: bool = True,
+        attention_window_size: int = 8,
         name: str = "TiRex",
         **kwargs: Any
     ) -> None:
@@ -197,6 +198,8 @@ class TiRexCore(keras.Model):
             raise ValueError(f"num_blocks must be positive, got {num_blocks}")
         if prediction_length <= 0:
             raise ValueError(f"prediction_length must be positive, got {prediction_length}")
+        if attention_window_size <= 0:
+            raise ValueError(f"attention_window_size must be positive, got {attention_window_size}")
 
         # Store configuration
         self.patch_size = patch_size
@@ -211,6 +214,7 @@ class TiRexCore(keras.Model):
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
         self.use_normalization = use_normalization
+        self.attention_window_size = attention_window_size
 
         if len(self.block_types) != num_blocks:
             raise ValueError(
@@ -248,6 +252,7 @@ class TiRexCore(keras.Model):
                 attention_type='window',
                 ffn_type='geglu',
                 activation='mish',
+                attention_args={'window_size': self.attention_window_size},
                 name=f"block_{i}"
             )
             # ---------------------------------------------
@@ -301,29 +306,36 @@ class TiRexCore(keras.Model):
         if len(inputs.shape) == 2:
             inputs = ops.expand_dims(inputs, axis=-1)
 
-        # 1. CALCULATE STATISTICS & NORMALIZE
+        # 1. HANDLE MASKING (before normalization to avoid NaN propagation)
+        nan_mask = ops.logical_not(ops.isnan(inputs))
+        nan_mask = ops.cast(nan_mask, dtype=inputs.dtype)
+        # Replace NaN with 0 for safe stat computation
+        clean_inputs = ops.where(ops.isnan(inputs), ops.zeros_like(inputs), inputs)
+
+        # 2. CALCULATE STATISTICS & NORMALIZE
         if self.use_normalization:
-            # Calculate stats across the time dimension (axis 1)
-            # Shape: (Batch, 1, Features)
-            mean = ops.mean(inputs, axis=1, keepdims=True)
-            std = ops.std(inputs, axis=1, keepdims=True)
+            # Compute NaN-safe mean: sum of valid values / count of valid values
+            valid_count = ops.maximum(ops.sum(nan_mask, axis=1, keepdims=True), 1e-7)
+            mean = ops.sum(clean_inputs * nan_mask, axis=1, keepdims=True) / valid_count
+            # Compute NaN-safe std
+            sq_diff = ((clean_inputs - mean) * nan_mask) ** 2
+            variance = ops.sum(sq_diff, axis=1, keepdims=True) / valid_count
+            std = ops.sqrt(variance)
             std = ops.maximum(std, 1e-7)  # Prevent division by zero
-            x = (inputs - mean) / std
+            x = (clean_inputs - mean) / std
         else:
-            x = inputs
+            x = clean_inputs
             mean = None
             std = None
 
-        # 2. HANDLE MASKING
-        nan_mask = ops.logical_not(ops.isnan(inputs))
-        nan_mask = ops.cast(nan_mask, dtype=x.dtype)
+        # 3. CONCATENATE DATA WITH MASK
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
-        # 3. ENCODE
+        # 4. ENCODE
         x_patches = self.patch_embedding(x_with_mask, training=training)
         x_embedded = self.input_projection(x_patches, training=training)
 
-        # 4. PROCESS
+        # 5. PROCESS
         hidden_states = x_embedded
         for block in self.blocks:
             hidden_states = block(hidden_states, training=training)
@@ -331,29 +343,44 @@ class TiRexCore(keras.Model):
         hidden_states = self.output_norm(hidden_states, training=training)
         mean_hidden_states = ops.mean(hidden_states, axis=1, keepdims=True)
 
-        # 5. PREDICT (Normalized Space)
+        # 6. PREDICT (Normalized Space)
         # Shape: [batch, prediction_length, num_quantiles]
         quantile_predictions = self.quantile_head(mean_hidden_states, training=training)
 
-        # 6. DENORMALIZE OUTPUT (Reversible Instance Normalization)
+        # 7. DENORMALIZE OUTPUT (Reversible Instance Normalization)
         if self.use_normalization:
-            # The model predicts the distribution of a target variable.
-            # If the input is multivariate, we assume the target is the last feature.
-            # We must slice the statistics to match the univariate output shape.
-
-            # mean/std shape is (Batch, 1, Features)
-            if mean.shape[-1] > 1:
-                # Select stats for the last feature -> (Batch, 1, 1)
-                norm_mean = mean[:, :, -1:]
-                norm_std = std[:, :, -1:]
-            else:
-                norm_mean = mean
-                norm_std = std
-
+            norm_mean, norm_std = self._get_target_stats(mean, std)
             # Broadcasting: (B, PredLen, Quantiles) * (B, 1, 1) + (B, 1, 1)
             quantile_predictions = (quantile_predictions * norm_std) + norm_mean
 
         return quantile_predictions
+
+    @staticmethod
+    def _get_target_stats(
+        mean: keras.KerasTensor,
+        std: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """
+        Extract normalization stats for the target (last) feature.
+
+        For multivariate inputs, assumes the target is the last feature.
+        Returns stats shaped (Batch, 1, 1) for broadcasting with quantile predictions.
+
+        Args:
+            mean: Mean tensor of shape (Batch, 1, Features).
+            std: Std tensor of shape (Batch, 1, Features).
+
+        Returns:
+            Tuple of (norm_mean, norm_std), each shaped (Batch, 1, 1).
+        """
+        if mean.shape[-1] is not None and mean.shape[-1] > 1:
+            # Select stats for the last feature -> (Batch, 1, 1)
+            norm_mean = mean[:, :, -1:]
+            norm_std = std[:, :, -1:]
+        else:
+            norm_mean = mean
+            norm_std = std
+        return norm_mean, norm_std
 
     def predict_quantiles(
             self,
@@ -546,6 +573,7 @@ class TiRexCore(keras.Model):
             "dropout_rate": self.dropout_rate,
             "use_layer_norm": self.use_layer_norm,
             "use_normalization": self.use_normalization,
+            "attention_window_size": self.attention_window_size,
         })
         return config
 

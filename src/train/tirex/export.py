@@ -169,15 +169,31 @@ def verify_onnx(
         print(f"  - {out.name}: {out.shape} ({out.type})")
 
     # Get input/output names
-    input_name = ort_session.get_inputs()[0].name
+    onnx_inputs = ort_session.get_inputs()
     output_name = ort_session.get_outputs()[0].name
 
     # Generate test data
     test_input = np.random.randn(num_samples, input_length, num_features).astype(np.float32)
 
+    # Build feed dict — primary data input plus any auxiliary inputs
+    # (e.g. reshape tensors captured from dynamic shape ops in attention layers)
+    input_feed = {onnx_inputs[0].name: test_input}
+    for inp in onnx_inputs[1:]:
+        # Auxiliary inputs are typically shape tensors used by Reshape ops.
+        # Their ONNX shape metadata describes the tensor shape itself,
+        # and the values inside are the reshape target dimensions.
+        inp_shape = [d if isinstance(d, int) else 1 for d in inp.shape]
+        if inp.type == 'tensor(int32)':
+            input_feed[inp.name] = np.zeros(inp_shape, dtype=np.int32)
+        elif inp.type == 'tensor(int64)':
+            input_feed[inp.name] = np.zeros(inp_shape, dtype=np.int64)
+        else:
+            input_feed[inp.name] = np.zeros(inp_shape, dtype=np.float32)
+        print(f"  Feeding auxiliary input '{inp.name}': shape={inp_shape}")
+
     # Get predictions
     keras_preds = keras_model.predict(test_input, verbose=0)
-    onnx_preds = ort_session.run([output_name], {input_name: test_input})[0]
+    onnx_preds = ort_session.run([output_name], input_feed)[0]
 
     # Compare
     abs_diff = np.abs(keras_preds - onnx_preds)

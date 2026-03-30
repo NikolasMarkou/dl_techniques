@@ -75,8 +75,6 @@ from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiR
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
-    TimeSeriesNormalizer,
-    NormalizationMethod
 )
 
 from dl_techniques.analyzer import AnalysisConfig
@@ -146,11 +144,10 @@ class TiRexTrainingConfig:
     warmup_steps: int = 1000
     warmup_start_lr: float = 1e-6
 
-    # Pattern selection and Normalization
+    # Pattern selection
     max_patterns: Optional[int] = None
     max_patterns_per_category: int = 10
     min_data_length: int = 2000
-    normalize_per_instance: bool = True
 
     # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
@@ -255,21 +252,20 @@ class TiRexDataProcessor:
 
     def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
         """
-        Normalize series instance using TimeSeriesNormalizer.
-        Includes clipping to prevent extreme outliers from destabilizing training.
+        Clean series for safe training.
+
+        Only applies a wide safety clip and NaN filling. The model's built-in
+        reversible normalization (use_normalization=True) handles per-instance
+        z-score normalization in the forward pass, so no scaling is done here.
 
         :param series: Input numpy array (n_timesteps, features) or (n_timesteps,).
-        :return: Normalized array as float32.
+        :return: Cleaned array as float32.
         """
         series = np.clip(series, -1e6, 1e6)
 
-        if self.config.normalize_per_instance:
-            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
-            if np.isnan(series).any():
-                series = _fill_nans(series)
-            series = normalizer.fit_transform(series)
+        if np.isnan(series).any():
+            series = _fill_nans(series)
 
-        series = np.clip(series, -10.0, 10.0)
         return series.astype(np.float32)
 
     def _training_generator(
@@ -720,7 +716,7 @@ class TiRexTrainer:
         if self.config.gradient_clip_norm:
             optimizer.clipnorm = self.config.gradient_clip_norm
 
-        loss = QuantileLoss(quantiles=self.config.quantile_levels)
+        loss = QuantileLoss(quantiles=self.config.quantile_levels, normalize=True)
 
         metrics = []
         if 0.5 in self.config.quantile_levels:
@@ -752,11 +748,7 @@ class TiRexTrainer:
         data_pipeline = self.processor.prepare_datasets()
 
         self.model = self.create_model()
-
-        dummy_in = np.zeros(
-            (1, self.config.input_length, 1), dtype='float32'
-        )
-        self.model(dummy_in)
+        # Model is already built by factory function (create_tirex_by_variant / create_tirex_extended)
         logger.info("Model created successfully")
         logger.info(f"Model parameters: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
@@ -862,9 +854,13 @@ class TiRexTrainer:
             'config': self.config.__dict__
         }
 
-        def json_convert(o: Any) -> str:
-            if isinstance(o, (np.floating, np.integer)):
-                return str(o)
+        def json_convert(o: Any) -> Any:
+            if isinstance(o, np.floating):
+                return float(o)
+            if isinstance(o, np.integer):
+                return int(o)
+            if isinstance(o, np.ndarray):
+                return o.tolist()
             return str(o)
 
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
@@ -890,9 +886,10 @@ class TiRexTrainer:
             best_model = keras.saving.load_model(model_path, compile=False)
 
             # Define input signature matching training configuration
+            num_features = self.processor.num_features
             input_signature = [
                 keras.InputSpec(
-                    shape=(None, self.config.input_length, 1),
+                    shape=(None, self.config.input_length, num_features),
                     dtype="float32"
                 )
             ]
@@ -956,11 +953,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_steps", type=int, default=1000)
     parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
 
-    parser.add_argument(
-        "--no-normalize", dest="normalize_per_instance", action="store_false",
-        help="Disable per-instance normalization."
-    )
-    parser.set_defaults(normalize_per_instance=True)
     parser.add_argument("--max_patterns_per_category", type=int, default=100)
 
     parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
@@ -1008,7 +1000,6 @@ def main() -> None:
         warmup_start_lr=args.warmup_start_lr,
         gradient_clip_norm=args.gradient_clip_norm,
         optimizer=args.optimizer,
-        normalize_per_instance=args.normalize_per_instance,
         max_patterns_per_category=args.max_patterns_per_category,
         visualize_every_n_epochs=args.visualize_every_n_epochs,
         plot_top_k_patterns=args.plot_top_k_patterns,
@@ -1029,16 +1020,13 @@ def main() -> None:
         trainer = TiRexTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['results_dir']}")
-        # 1. Clear memory/session
-        keras.backend.clear_session()
-        # 2. Ensure all logs are flushed
-        sys.stdout.flush()
-        sys.stderr.flush()
     except Exception as e:
         logger.error(f"Failed: {e}", exc_info=True)
-
-    # 3. Force exit at OS level to kill any background C++ threads
-    os._exit(0)
+        sys.exit(1)
+    finally:
+        keras.backend.clear_session()
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 
 if __name__ == "__main__":

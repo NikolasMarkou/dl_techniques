@@ -117,17 +117,40 @@ class QuantileLoss(keras.losses.Loss):
     the pinball loss for each predicted quantile in a broadcasted, vectorized
     manner, which is highly efficient.
 
+    When ``normalize=True``, the pinball loss for each sample is divided by
+    the mean absolute value of that sample's target. This yields the
+    **Normalized Quantile Loss**, which is scale-invariant: samples at
+    different magnitudes contribute equally to the gradient, preventing
+    large-scale series from dominating training.
+
+    Mathematically, per sample *i*:
+
+        NQL_i = mean_over(t, q)[ pinball_q(y_i,t, ŷ_i,t,q) ] / mean_over(t)[ |y_i,t| ]
+
+    This is standard practice in the M-competition and DeepAR literature.
+
     Args:
         quantiles: A list of floats, the quantiles to be predicted.
+        normalize: If True, divide each sample's loss by the mean absolute
+            value of its target, making the loss scale-invariant.
+            Defaults to False.
         name: Name for the loss function.
         **kwargs: Additional keyword arguments.
     """
 
-    def __init__(self, quantiles: List[float], name: str = "quantile_loss", **kwargs):
+    def __init__(
+        self,
+        quantiles: List[float],
+        normalize: bool = False,
+        name: str = "quantile_loss",
+        **kwargs
+    ):
         super().__init__(name=name, **kwargs)
         if not all(0 < q < 1 for q in quantiles):
             raise ValueError("All quantiles must be strictly between 0 and 1.")
-        
+
+        self.normalize = normalize
+
         # Store quantiles as a tensor shaped for broadcasting against (batch, time, quantiles)
         # Shape: (1, 1, num_quantiles)
         self.quantiles_tensor = keras.ops.convert_to_tensor(quantiles, dtype=keras.backend.floatx())
@@ -164,6 +187,18 @@ class QuantileLoss(keras.losses.Loss):
             (self.quantiles_tensor - 1) * error
         )
 
+        if self.normalize:
+            # Per-sample scale: mean absolute value of the target across the horizon
+            # Shape: (batch, 1, 1) for broadcasting against (batch, horizon, quantiles)
+            scale = keras.ops.mean(keras.ops.abs(y_true), axis=-1, keepdims=True)
+            scale = keras.ops.expand_dims(scale, axis=-1)
+            # Floor at 1.0: series with mean(|y|) < 1 use unnormalized loss,
+            # series with mean(|y|) > 1 get scale-normalized loss.
+            # A very low floor (e.g. 1e-7) causes near-zero amplitude series
+            # to produce catastrophically large normalized losses.
+            scale = keras.ops.maximum(scale, 1.0)
+            loss = loss / scale
+
         # Return the mean over all dimensions to get a single scalar loss
         return keras.ops.mean(loss)
 
@@ -172,7 +207,8 @@ class QuantileLoss(keras.losses.Loss):
         config = super().get_config()
         # Convert tensor back to a standard list for JSON serialization
         config.update({
-            'quantiles': keras.ops.convert_to_numpy(self.quantiles_tensor).flatten().tolist()
+            'quantiles': keras.ops.convert_to_numpy(self.quantiles_tensor).flatten().tolist(),
+            'normalize': self.normalize,
         })
         return config
 
