@@ -2,16 +2,13 @@
 KAN Training & Visualization Script
 ====================================================================
 
-This script demonstrates the complete workflow for training a Kolmogorov-Arnold
-Network (KAN) on a synthetic regression task. It includes:
-1. Synthetic data generation (y = sin(pi*x1) + x2^2).
-2. Model creation using the factory pattern.
-3. Grid adaptation (critical for KAN performance).
-4. Training with a custom callback to keep grids updated.
-5. Comprehensive visualization using the visualization module.
+Trains a Kolmogorov-Arnold Network (KAN) on a synthetic regression task
+(y = sin(pi*x1) + x2^2) with grid adaptation, custom callbacks, and
+comprehensive visualization of learned spline activation functions.
 
 Usage:
-    python train.py
+    python train_kan.py
+    python train_kan.py --epochs 300 --batch-size 256 --learning-rate 0.005
 """
 
 import keras
@@ -29,6 +26,7 @@ from dl_techniques.visualization import (
     TrainingHistory,
     TrainingCurvesVisualization,
 )
+from train.common import setup_gpu, create_base_argument_parser
 
 
 # ---------------------------------------------------------------------
@@ -37,15 +35,7 @@ from dl_techniques.visualization import (
 
 @dataclass
 class KANFunctionApproximation:
-    """Data container for KAN function approximation visualization.
-
-    Attributes:
-        x1_grid: 2D meshgrid for x1 values.
-        x2_grid: 2D meshgrid for x2 values.
-        z_true: Ground truth function values.
-        z_pred: Model predicted values.
-        model_name: Name of the model.
-    """
+    """Data container for KAN function approximation visualization."""
 
     x1_grid: np.ndarray
     x2_grid: np.ndarray
@@ -56,15 +46,7 @@ class KANFunctionApproximation:
 
 @dataclass
 class KANSplineData:
-    """Data container for KAN spline visualization.
-
-    Attributes:
-        layer: The KANLinear layer to visualize.
-        input_dim: Number of input features.
-        x_range: Input range for plotting.
-        feature_names: Names for each input feature.
-        expected_shapes: Expected function shapes for each input.
-    """
+    """Data container for KAN spline visualization."""
 
     layer: KANLinear
     input_dim: int
@@ -99,7 +81,6 @@ class FunctionApproximationVisualization(VisualizationPlugin):
     ) -> plt.Figure:
         fig = plt.figure(figsize=(14, 6))
 
-        # Ground Truth
         ax1 = fig.add_subplot(122, projection='3d')
         ax1.plot_surface(
             data.x1_grid, data.x2_grid, data.z_true,
@@ -109,7 +90,6 @@ class FunctionApproximationVisualization(VisualizationPlugin):
         ax1.set_xlabel(r'$x_1$')
         ax1.set_ylabel(r'$x_2$')
 
-        # Prediction
         ax2 = fig.add_subplot(121, projection='3d')
         ax2.plot_surface(
             data.x1_grid, data.x2_grid, data.z_pred,
@@ -153,7 +133,6 @@ class KANSplineVisualization(VisualizationPlugin):
 
         for input_idx in range(data.input_dim):
             ax_plot = axes[input_idx]
-
             dummy_batch[:, :] = 0.0
             dummy_batch[:, input_idx] = data.x_range
 
@@ -203,8 +182,7 @@ class KANGridUpdateCallback(keras.callbacks.Callback):
     """Updates the B-spline grids periodically during training.
 
     KANs perform best when the grid range matches the activation distribution
-    of the inputs. As weights change during training, these distributions shift.
-    This callback ensures the grid adapts.
+    of the inputs. This callback ensures the grid adapts as weights change.
 
     Args:
         x_data: Input data for grid updates.
@@ -223,61 +201,49 @@ class KANGridUpdateCallback(keras.callbacks.Callback):
 
 
 # ---------------------------------------------------------------------
-# Utilities
+# Data Generation (synthetic function approximation)
 # ---------------------------------------------------------------------
 
 def generate_data(num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Generates synthetic regression data.
-
-    Function: y = sin(pi * x1) + x2^2
+    """Generates synthetic regression data: y = sin(pi * x1) + x2^2.
 
     Args:
         num_samples: Number of samples to generate.
 
     Returns:
-        Tuple of input features and target values.
+        Tuple of input features (N, 2) and target values (N,).
     """
     X = np.random.rand(num_samples, 2) * 2 - 1
     y = np.sin(np.pi * X[:, 0]) + np.square(X[:, 1])
     return X, y
 
 
+# ---------------------------------------------------------------------
+# Visualization
+# ---------------------------------------------------------------------
+
 def create_visualization_manager(experiment_name: str) -> VisualizationManager:
-    """Creates and configures the visualization manager.
-
-    Args:
-        experiment_name: Name for the experiment.
-
-    Returns:
-        Configured VisualizationManager instance.
-    """
+    """Creates visualization manager with KAN-specific plugins."""
     viz_manager = VisualizationManager(
         experiment_name=experiment_name,
         output_dir="kan_visualizations"
     )
-
     viz_manager.register_template("training_curves", TrainingCurvesVisualization)
     viz_manager.register_template("function_approximation", FunctionApproximationVisualization)
     viz_manager.register_template("kan_splines", KANSplineVisualization)
-
     return viz_manager
 
 
 def plot_results(
     history: keras.callbacks.History,
     model: keras.Model,
-    viz_manager: VisualizationManager
+    viz_manager: VisualizationManager,
+    show: bool = True,
 ) -> None:
-    """Visualizes training history, 3D prediction surface, and learned splines.
-
-    Args:
-        history: Keras training history object.
-        model: Trained KAN model.
-        viz_manager: Visualization manager instance.
-    """
+    """Visualizes training history, 3D prediction surface, and learned splines."""
     logger.info("Generating visualizations...")
 
-    # 1. Training History
+    # 1. Training curves
     train_history = TrainingHistory(
         epochs=list(range(len(history.history['loss']))),
         train_loss=history.history['loss'],
@@ -285,15 +251,12 @@ def plot_results(
         train_metrics={'mae': history.history.get('mean_absolute_error', [])},
         val_metrics={'mae': history.history.get('val_mean_absolute_error', [])}
     )
-
     viz_manager.visualize(
-        data=train_history,
-        plugin_name="training_curves",
-        smooth_factor=0.0,
-        show=True
+        data=train_history, plugin_name="training_curves",
+        smooth_factor=0.0, show=show,
     )
 
-    # 2. 3D Function Approximation Surface
+    # 2. 3D function approximation surface
     res = 50
     x1 = np.linspace(-1, 1, res)
     x2 = np.linspace(-1, 1, res)
@@ -303,79 +266,90 @@ def plot_results(
     Z_true = np.sin(np.pi * X1) + X2 ** 2
     Z_pred = model.predict(grid_inputs, verbose=0).reshape(res, res)
 
-    approx_data = KANFunctionApproximation(
-        x1_grid=X1,
-        x2_grid=X2,
-        z_true=Z_true,
-        z_pred=Z_pred,
-        model_name="KAN"
-    )
-
     viz_manager.visualize(
-        data=approx_data,
-        plugin_name="function_approximation",
-        show=True
+        data=KANFunctionApproximation(
+            x1_grid=X1, x2_grid=X2,
+            z_true=Z_true, z_pred=Z_pred,
+        ),
+        plugin_name="function_approximation", show=show,
     )
 
-    # 3. KAN Spline Interpretability
-    kan_layers = [layer for layer in model.layers if isinstance(layer, KANLinear)]
+    # 3. KAN spline interpretability
+    kan_layers = [l for l in model.layers if isinstance(l, KANLinear)]
     if not kan_layers:
         logger.warning("No KANLinear layers found for spline visualization.")
         return
 
-    layer_0 = kan_layers[0]
-    spline_data = KANSplineData(
-        layer=layer_0,
-        input_dim=2,
-        x_range=np.linspace(-1.5, 1.5, 100),
-        feature_names=[r'Input 0 ($x_1$)', r'Input 1 ($x_2$)'],
-        expected_shapes=['Sine Wave-like', 'Quadratic-like']
-    )
-
     logger.info("Extracting learned activation functions from Layer 0...")
     viz_manager.visualize(
-        data=spline_data,
-        plugin_name="kan_splines",
-        show=True
+        data=KANSplineData(
+            layer=kan_layers[0],
+            input_dim=2,
+            x_range=np.linspace(-1.5, 1.5, 100),
+            feature_names=[r'Input 0 ($x_1$)', r'Input 1 ($x_2$)'],
+            expected_shapes=['Sine Wave-like', 'Quadratic-like'],
+        ),
+        plugin_name="kan_splines", show=show,
     )
 
 
 # ---------------------------------------------------------------------
-# Main Execution
+# Main
 # ---------------------------------------------------------------------
 
 def main() -> None:
     """Main training pipeline for KAN model."""
+    parser = create_base_argument_parser(
+        description="Train a KAN model on synthetic function approximation",
+        default_dataset="synthetic",
+        dataset_choices=["synthetic"],
+    )
+    parser.add_argument('--num-samples', type=int, default=3000,
+                        help='Number of training samples')
+    parser.add_argument('--val-samples', type=int, default=600,
+                        help='Number of validation samples')
+    parser.add_argument('--variant', type=str, default='small',
+                        choices=['tiny', 'small', 'medium', 'large'],
+                        help='KAN model variant')
+    parser.add_argument('--hidden-features', type=int, nargs='+', default=[16, 8],
+                        help='Hidden layer feature sizes')
+    parser.add_argument('--grid-update-freq', type=int, default=5,
+                        help='Grid update frequency in epochs')
+    args = parser.parse_args()
+
+    # Override defaults for KAN
+    if args.epochs == 100:
+        args.epochs = 200
+    if args.batch_size == 64:
+        args.batch_size = 128
+    if args.learning_rate == 1e-3:
+        args.learning_rate = 1e-2
+
+    setup_gpu(args.gpu)
+
     logger.info("Initializing KAN Training Pipeline")
 
-    # Configuration
-    NUM_SAMPLES = 3000
-    VAL_SAMPLES = 600
-    EPOCHS = 200
-    BATCH_SIZE = 128
-    LEARNING_RATE = 1e-2
+    # Data generation (synthetic)
+    logger.info(f"Generating {args.num_samples} training samples...")
+    X_train, y_train = generate_data(args.num_samples)
+    X_val, y_val = generate_data(args.val_samples)
 
-    # Data Generation
-    logger.info(f"Generating {NUM_SAMPLES} training samples...")
-    X_train, y_train = generate_data(NUM_SAMPLES)
-    X_val, y_val = generate_data(VAL_SAMPLES)
-
-    # Model Creation
+    # Model creation
     logger.info("Building KAN model...")
     model = create_kan_model(
-        variant="small",
+        variant=args.variant,
         input_features=2,
         output_features=1,
-        override_config={"hidden_features": [16, 8]}
+        override_config={"hidden_features": args.hidden_features}
     )
 
-    # Grid Initialization
+    # Grid initialization
     logger.info("Initializing B-spline grids with training data subset...")
     model.update_kan_grids(X_train[:200])
 
     # Compilation
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+        optimizer=keras.optimizers.Adam(learning_rate=args.learning_rate),
         loss="mean_squared_error",
         metrics=["mean_absolute_error"]
     )
@@ -383,25 +357,24 @@ def main() -> None:
 
     # Training
     logger.info("Starting training...")
-    grid_updater = KANGridUpdateCallback(X_train[:500], update_freq=5)
-
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=[grid_updater],
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        callbacks=[
+            KANGridUpdateCallback(X_train[:500], update_freq=args.grid_update_freq),
+        ],
         verbose=1
     )
 
     logger.info("Training complete.")
-
-    # Evaluation & Visualization
     final_loss = history.history['val_loss'][-1]
     logger.info(f"Final Validation MSE: {final_loss:.6f}")
 
+    # Visualization
     viz_manager = create_visualization_manager("kan_regression")
-    plot_results(history, model, viz_manager)
+    plot_results(history, model, viz_manager, show=args.show_plots)
 
 
 if __name__ == "__main__":

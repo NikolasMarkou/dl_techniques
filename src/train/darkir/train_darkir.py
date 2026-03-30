@@ -1,13 +1,8 @@
 """
 Training Script for DarkIR (Low-Light Image Restoration).
 
-This script trains the DarkIR model using the dl_techniques framework.
-It includes:
-1. Data loading for Image Restoration (Paired Low/High light images).
-2. Custom DarkIR configuration options.
-3. Integration of Image Restoration Losses (Charbonnier, Perceptual, etc.).
-4. Visualization of restoration results (Input vs Output vs GT).
-5. Comprehensive model analysis.
+Trains the DarkIR model on paired low/high light image data using
+DarkIRCompositeLoss (Charbonnier + SSIM + Perceptual) with PSNR/SSIM metrics.
 """
 
 import os
@@ -19,25 +14,17 @@ from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------------------
-# dl_techniques imports
-# ---------------------------------------------------------------------
+from train.common import setup_gpu, create_base_argument_parser
 
 from dl_techniques.utils.logger import logger
-
 from dl_techniques.models.darkir.model import create_darkir_model
-
-# Import the loss functions provided in the context
-from dl_techniques.losses.image_restoration_loss import (
-    DarkIRCompositeLoss,
-)
-
+from dl_techniques.losses.image_restoration_loss import DarkIRCompositeLoss
 from dl_techniques.visualization import (
     VisualizationManager,
     TrainingHistory,
     PlotConfig,
     PlotStyle,
-    TrainingCurvesVisualization
+    TrainingCurvesVisualization,
 )
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
@@ -45,47 +32,20 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 
 # ---------------------------------------------------------------------
 
-def setup_gpu():
-    """Configure GPU settings for optimal training."""
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
-        except RuntimeError as e:
-            logger.error(f"GPU setup error: {e}")
-    else:
-        logger.info("No GPUs found, using CPU")
-
-
-# ---------------------------------------------------------------------
-
 def load_restoration_dataset(
         dataset_path: Optional[str],
         img_size: Tuple[int, int] = (256, 256),
-        batch_size: int = 8
+        batch_size: int = 8,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, int]:
-    """
-    Load image restoration dataset (Paired).
+    """Load paired image restoration dataset (low/high light pairs).
 
-    If dataset_path is None, generates synthetic noisy data based on CIFAR-10
-    for testing the pipeline.
+    If dataset_path is None, generates synthetic noisy data from CIFAR-10.
     """
     if dataset_path is None:
         logger.warning("No dataset path provided. Generating SYNTHETIC low-light data using CIFAR-10.")
         return _create_synthetic_dataset(img_size, batch_size)
 
     logger.info(f"Loading dataset from: {dataset_path}")
-
-    # Expected structure:
-    # dataset_path/
-    #   train/
-    #     low/ (input images)
-    #     high/ (ground truth)
-    #   val/
-    #     low/
-    #     high/
 
     train_low_dir = os.path.join(dataset_path, 'train', 'low')
     train_high_dir = os.path.join(dataset_path, 'train', 'high')
@@ -101,25 +61,18 @@ def load_restoration_dataset(
 
     train_x, train_y = load_paired_paths(train_low_dir, train_high_dir)
     val_x, val_y = load_paired_paths(val_low_dir, val_high_dir)
-
     logger.info(f"Found {len(train_x)} training pairs and {len(val_x)} validation pairs.")
 
     def process_path(low_path, high_path):
-        # Load Low
         low_img = tf.io.read_file(low_path)
         low_img = tf.image.decode_png(low_img, channels=3)
-        low_img = tf.image.resize(low_img, img_size)
-        low_img = tf.cast(low_img, tf.float32) / 255.0
+        low_img = tf.cast(tf.image.resize(low_img, img_size), tf.float32) / 255.0
 
-        # Load High
         high_img = tf.io.read_file(high_path)
         high_img = tf.image.decode_png(high_img, channels=3)
-        high_img = tf.image.resize(high_img, img_size)
-        high_img = tf.cast(high_img, tf.float32) / 255.0
-
+        high_img = tf.cast(tf.image.resize(high_img, img_size), tf.float32) / 255.0
         return low_img, high_img
 
-    # Create TF Datasets
     train_ds = tf.data.Dataset.from_tensor_slices((train_x, train_y))
     train_ds = train_ds.map(process_path, num_parallel_calls=tf.data.AUTOTUNE)
     train_ds = train_ds.shuffle(buffer_size=1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
@@ -135,14 +88,12 @@ def _create_synthetic_dataset(img_size, batch_size):
     """Create synthetic low-light data from CIFAR-10 for testing."""
     (x_train, _), (x_test, _) = keras.datasets.cifar10.load_data()
 
-    # Resize to target size
     x_train = tf.image.resize(x_train, img_size).numpy() / 255.0
     x_test = tf.image.resize(x_test, img_size).numpy() / 255.0
 
-    # Simulate low light: gamma correction + noise
     def darken(img):
-        img_dark = img ** 2.5  # Gamma correction to darken
-        noise = np.random.normal(0, 0.02, img.shape)  # Add noise
+        img_dark = img ** 2.5
+        noise = np.random.normal(0, 0.02, img.shape)
         return np.clip(img_dark + noise, 0, 1).astype('float32')
 
     x_train_low = darken(x_train)
@@ -161,10 +112,7 @@ def _create_synthetic_dataset(img_size, batch_size):
 # ---------------------------------------------------------------------
 
 def create_darkir_config(variant: str) -> Dict[str, Any]:
-    """
-    Create DarkIR configuration based on variant.
-    Variants based on original paper: 'medium' (DarkIR-m) and 'large' (DarkIR-l).
-    """
+    """Create DarkIR configuration. Variants: 'medium' (width=32), 'large' (width=64)."""
     config = {
         'img_channels': 3,
         'middle_blk_num_enc': 2,
@@ -173,7 +121,7 @@ def create_darkir_config(variant: str) -> Dict[str, Any]:
         'dec_blk_nums': [3, 1, 1],
         'dilations': [1, 4, 9],
         'extra_depth_wise': True,
-        'use_side_loss': False  # Simplify training loop by disabling deep supervision by default
+        'use_side_loss': False,
     }
 
     if variant == 'medium':
@@ -191,7 +139,7 @@ def create_darkir_config(variant: str) -> Dict[str, Any]:
 
 @keras.saving.register_keras_serializable()
 class PSNRMetric(keras.metrics.Metric):
-    """Custom PSNR Metric wrapper for better logging."""
+    """PSNR metric wrapper."""
 
     def __init__(self, max_val=1.0, name='psnr', **kwargs):
         super().__init__(name=name, **kwargs)
@@ -199,8 +147,8 @@ class PSNRMetric(keras.metrics.Metric):
         self.mean_psnr = keras.metrics.Mean(name='mean_psnr')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
-        psnr = tf.image.psnr(y_true, y_pred, max_val=self.max_val)
-        self.mean_psnr.update_state(psnr, sample_weight)
+        self.mean_psnr.update_state(
+            tf.image.psnr(y_true, y_pred, max_val=self.max_val), sample_weight)
 
     def result(self):
         return self.mean_psnr.result()
@@ -216,7 +164,7 @@ class PSNRMetric(keras.metrics.Metric):
 
 @keras.saving.register_keras_serializable()
 class SSIMMetric(keras.metrics.Metric):
-    """Custom SSIM Metric wrapper."""
+    """SSIM metric wrapper."""
 
     def __init__(self, max_val=1.0, name='ssim', **kwargs):
         super().__init__(name=name, **kwargs)
@@ -224,8 +172,8 @@ class SSIMMetric(keras.metrics.Metric):
         self.mean_ssim = keras.metrics.Mean(name='mean_ssim')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
-        ssim = tf.image.ssim(y_true, y_pred, max_val=self.max_val)
-        self.mean_ssim.update_state(ssim, sample_weight)
+        self.mean_ssim.update_state(
+            tf.image.ssim(y_true, y_pred, max_val=self.max_val), sample_weight)
 
     def result(self):
         return self.mean_ssim.result()
@@ -245,38 +193,27 @@ def visualize_restoration_results(
         model: keras.Model,
         val_ds: tf.data.Dataset,
         results_dir: str,
-        num_samples: int = 4
+        num_samples: int = 4,
 ):
-    """
-    Generate comparison plots (Input vs Prediction vs GT).
-    Unlike classification, we need to see the actual pixels.
-    """
+    """Generate comparison plots: Input vs Prediction vs Ground Truth."""
     viz_dir = os.path.join(results_dir, "visualizations")
     os.makedirs(viz_dir, exist_ok=True)
 
-    # Get a batch
     for inputs, targets in val_ds.take(1):
-        preds = model.predict(inputs, verbose=0)
+        preds = np.clip(model.predict(inputs, verbose=0), 0.0, 1.0)
 
-        # Clip values for display
-        preds = np.clip(preds, 0.0, 1.0)
-
-        # Plot
         fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4 * num_samples))
         plt.suptitle("DarkIR Restoration Results (Low Light | Restored | Ground Truth)")
 
         for i in range(min(num_samples, len(inputs))):
-            # Input (Low Light)
             axes[i, 0].imshow(inputs[i])
             axes[i, 0].set_title("Input (Low)")
             axes[i, 0].axis('off')
 
-            # Prediction
             axes[i, 1].imshow(preds[i])
             axes[i, 1].set_title("DarkIR Prediction")
             axes[i, 1].axis('off')
 
-            # Ground Truth
             axes[i, 2].imshow(targets[i])
             axes[i, 2].set_title("Ground Truth")
             axes[i, 2].axis('off')
@@ -294,35 +231,29 @@ def run_model_analysis(
         model: keras.Model,
         training_history: keras.callbacks.History,
         model_name: str,
-        results_dir: str
+        results_dir: str,
 ):
-    """Run model analysis focusing on weight distributions and training dynamics."""
+    """Run weight distribution and training dynamics analysis."""
     logger.info("Running model analysis...")
     try:
         analysis_config = AnalysisConfig(
             analyze_weights=True,
             analyze_training_dynamics=True,
-            analyze_calibration=False,  # Not relevant for regression
+            analyze_calibration=False,
             save_plots=True,
-            save_format='png'
+            save_format='png',
         )
-
         analysis_dir = os.path.join(results_dir, "model_analysis")
-
         analyzer = ModelAnalyzer(
             models={model_name: model},
             training_history={model_name: training_history.history},
             config=analysis_config,
-            output_dir=analysis_dir
+            output_dir=analysis_dir,
         )
-
-        # Passing None for data because regression analysis isn't fully supported
-        # by the generic analyzer yet, but weight analysis works without data.
         analyzer.analyze(data=None)
         logger.info(f"Model analysis saved to {analysis_dir}")
-
     except Exception as e:
-        logger.warning(f"Model analysis failed (likely due to regression task nature): {e}")
+        logger.warning(f"Model analysis failed: {e}")
 
 
 # ---------------------------------------------------------------------
@@ -330,63 +261,53 @@ def run_model_analysis(
 def train_model(args: argparse.Namespace):
     """Main training loop."""
     logger.info("Starting DarkIR Training...")
-    setup_gpu()
+    setup_gpu(gpu_id=args.gpu)
 
-    # 1. Load Data
+    # Data
     train_ds, val_ds, val_samples = load_restoration_dataset(
         args.dataset_path,
         img_size=(args.img_size, args.img_size),
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
     )
 
-    # 2. Configure Model
+    # Model
     model_config = create_darkir_config(args.variant)
-
     logger.info(f"Creating DarkIR model (Variant: {args.variant})")
     model = create_darkir_model(**model_config)
 
-    # 3. Setup Optimization
-    # Cosine Decay is standard for DarkIR
-    lr_config = {
+    # Optimization
+    lr_schedule = learning_rate_schedule_builder({
         "type": "cosine_decay",
         "warmup_steps": args.warmup_steps,
         "warmup_start_lr": 1e-7,
         "learning_rate": args.learning_rate,
-        "decay_steps": args.epochs * (1000 if args.dataset_path is None else 500),  # Approximate steps
-        "alpha": 1e-6
-    }
-    lr_schedule = learning_rate_schedule_builder(lr_config)
-
-    optimizer_config = {
+        "decay_steps": args.epochs * (1000 if args.dataset_path is None else 500),
+        "alpha": 1e-6,
+    })
+    optimizer = optimizer_builder({
         "type": "adamw",
         "beta_1": 0.9,
         "beta_2": 0.999,
         "weight_decay": args.weight_decay,
-        "gradient_clipping_by_norm": 1.0
-    }
-    optimizer = optimizer_builder(optimizer_config, lr_schedule)
+        "gradient_clipping_by_norm": 1.0,
+    }, lr_schedule)
 
-    # 4. Setup Loss & Metrics
-    # Using composite loss from image_restoration_loss.py
+    # Loss & Metrics
     loss_fn = DarkIRCompositeLoss(
         charbonnier_weight=1.0,
         ssim_weight=args.ssim_weight,
         perceptual_weight=args.perceptual_weight,
-        name='darkir_loss'
+        name='darkir_loss',
     )
-
-    metrics = [
-        PSNRMetric(max_val=1.0),
-        SSIMMetric(max_val=1.0)
-    ]
-
-    model.compile(optimizer=optimizer, loss=loss_fn, metrics=metrics)
-
-    # Build & Summary
+    model.compile(
+        optimizer=optimizer,
+        loss=loss_fn,
+        metrics=[PSNRMetric(max_val=1.0), SSIMMetric(max_val=1.0)],
+    )
     model.build((None, args.img_size, args.img_size, 3))
     model.summary(print_fn=logger.info)
 
-    # 5. Callbacks
+    # Callbacks
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = os.path.join("results", f"darkir_{args.variant}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
@@ -394,63 +315,48 @@ def train_model(args: argparse.Namespace):
     callbacks = [
         keras.callbacks.ModelCheckpoint(
             os.path.join(results_dir, 'best_model.keras'),
-            monitor='val_psnr',
-            mode='max',
-            save_best_only=True,
-            verbose=1
+            monitor='val_psnr', mode='max', save_best_only=True, verbose=1,
         ),
         keras.callbacks.CSVLogger(os.path.join(results_dir, 'log.csv')),
         keras.callbacks.EarlyStopping(
-            monitor='val_psnr',
-            patience=args.patience,
-            mode='max',
-            verbose=1,
-            restore_best_weights=True
+            monitor='val_psnr', patience=args.patience, mode='max',
+            verbose=1, restore_best_weights=True,
         ),
-        keras.callbacks.BackupAndRestore(os.path.join(results_dir, 'backup'))
+        keras.callbacks.BackupAndRestore(os.path.join(results_dir, 'backup')),
     ]
 
-    # 6. Visualization Manager (For Training Curves)
+    # Visualization Manager
     viz_manager = VisualizationManager(
         experiment_name=f"darkir_{args.variant}",
         output_dir=os.path.join(results_dir, "visualizations"),
-        config=PlotConfig(style=PlotStyle.PUBLICATION)
+        config=PlotConfig(style=PlotStyle.PUBLICATION),
     )
     viz_manager.register_template("training_curves", TrainingCurvesVisualization)
 
-    # 7. Training
+    # Train
     logger.info("Starting Fit...")
     history = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=args.epochs,
-        callbacks=callbacks,
-        verbose=1
+        train_ds, validation_data=val_ds,
+        epochs=args.epochs, callbacks=callbacks, verbose=1,
     )
 
-    # 8. Post-Training Evaluation & Visualization
+    # Post-Training
     logger.info("Training complete. Generating visualizations...")
-
-    # Visualizing Predictions (Images)
     visualize_restoration_results(model, val_ds, results_dir)
 
-    # Visualizing Curves
     history_viz = TrainingHistory(
         epochs=list(range(len(history.history['loss']))),
         train_loss=history.history['loss'],
         val_loss=history.history['val_loss'],
-        train_metrics={k: v for k, v in history.history.items() if
-                       k not in ['loss', 'val_loss'] and not k.startswith('val_')},
-        val_metrics={k.replace('val_', ''): v for k, v in history.history.items() if
-                     k.startswith('val_') and k != 'val_loss'}
+        train_metrics={k: v for k, v in history.history.items()
+                       if k not in ['loss', 'val_loss'] and not k.startswith('val_')},
+        val_metrics={k.replace('val_', ''): v for k, v in history.history.items()
+                     if k.startswith('val_') and k != 'val_loss'},
     )
-
     viz_manager.visualize(data=history_viz, plugin_name="training_curves", show=False)
 
-    # 9. Analysis
     run_model_analysis(model, history, f"darkir_{args.variant}", results_dir)
 
-    # 10. Save Final Model
     final_path = os.path.join(results_dir, "final_model.keras")
     model.save(final_path)
     logger.info(f"Done. Model saved to {final_path}")
@@ -459,27 +365,23 @@ def train_model(args: argparse.Namespace):
 # ---------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Train DarkIR for Image Restoration")
+    parser = create_base_argument_parser(description="Train DarkIR for Image Restoration")
 
-    # Dataset
+    # DarkIR-specific args
     parser.add_argument('--dataset-path', type=str, default=None,
-                        help='Path to dataset (containing train/val subfolders). If None, uses synthetic data.')
+                        help='Path to paired dataset (train/val with low/high subfolders). If None, uses synthetic.')
     parser.add_argument('--img-size', type=int, default=128, help='Input image resolution')
-
-    # Model
-    parser.add_argument('--variant', type=str, default='medium', choices=['medium', 'large'], help='DarkIR Variant')
-
-    # Training
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--learning-rate', type=float, default=2e-4)
-    parser.add_argument('--weight-decay', type=float, default=1e-4)
-    parser.add_argument('--warmup-steps', type=int, default=1000)
-    parser.add_argument('--patience', type=int, default=20)
-
-    # Loss Weights
+    parser.add_argument('--variant', type=str, default='medium', choices=['medium', 'large'], help='DarkIR variant')
+    parser.add_argument('--warmup-steps', type=int, default=1000, help='LR warmup steps')
     parser.add_argument('--ssim-weight', type=float, default=0.2, help='Weight for SSIM loss component')
     parser.add_argument('--perceptual-weight', type=float, default=0.01, help='Weight for VGG perceptual loss')
+
+    # Override base defaults for restoration task
+    parser.set_defaults(
+        batch_size=8,
+        learning_rate=2e-4,
+        patience=20,
+    )
 
     args = parser.parse_args()
 
