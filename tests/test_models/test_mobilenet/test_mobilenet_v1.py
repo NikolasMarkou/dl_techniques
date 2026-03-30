@@ -196,17 +196,18 @@ class TestMobileNetV1:
         assert reconstructed_model.dropout_rate == model.dropout_rate
         assert reconstructed_model.include_top == model.include_top
 
-    @pytest.mark.parametrize("variant", ["1.0", "0.75", "0.5", "0.25"])
-    def test_variant_creation(self, variant):
+    @pytest.mark.parametrize("variant,expected_multiplier", [
+        ("large", 1.0), ("medium", 0.75), ("small", 0.5), ("pico", 0.25)
+    ])
+    def test_variant_creation(self, variant, expected_multiplier):
         """Test creation of all predefined variants."""
         model = MobileNetV1.from_variant(variant, num_classes=10, input_shape=(32, 32, 3))
-        expected_multiplier = float(variant)
         assert model.width_multiplier == expected_multiplier
 
     def test_convenience_function(self):
         """Test create_mobilenetv1 convenience function."""
         model = create_mobilenetv1(
-            variant="0.75",
+            variant="medium",
             num_classes=10,
             input_shape=(32, 32, 3)
         )
@@ -221,12 +222,12 @@ class TestMobileNetV1:
     def test_forward_pass_shapes(self, sample_inputs):
         """Test forward pass produces correct output shapes."""
         # With classification head
-        model = MobileNetV1.from_variant("1.0", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV1.from_variant("large", num_classes=10, input_shape=(32, 32, 3))
         output = model(sample_inputs['cifar'])
         assert output.shape == (4, 10)
 
         # As a feature extractor
-        model_no_top = MobileNetV1.from_variant("1.0", include_top=False, input_shape=(32, 32, 3))
+        model_no_top = MobileNetV1.from_variant("large", include_top=False, input_shape=(32, 32, 3))
         features = model_no_top(sample_inputs['cifar'])
         assert len(features.shape) == 2  # (batch, channels) after GlobalAveragePooling
 
@@ -237,14 +238,14 @@ class TestMobileNetV1:
     ])
     def test_different_input_sizes(self, input_shape, sample_shape):
         """Test model with different input sizes."""
-        model = MobileNetV1.from_variant("0.5", num_classes=5, input_shape=input_shape)
+        model = MobileNetV1.from_variant("small", num_classes=5, input_shape=input_shape)
         sample_input = keras.random.normal(shape=sample_shape)
         output = model(sample_input)
         assert output.shape == (sample_shape[0], 5)
 
     def test_batch_size_handling(self):
         """Test model handles different batch sizes correctly."""
-        model = MobileNetV1.from_variant("0.25", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV1.from_variant("pico", num_classes=10, input_shape=(32, 32, 3))
         for batch_size in [1, 4, 16]:
             sample_input = keras.random.normal(shape=(batch_size, 32, 32, 3))
             output = model(sample_input)
@@ -275,7 +276,7 @@ class TestMobileNetV1:
 
     def test_model_compilation_and_fit(self, sample_inputs):
         """Test model compiles and can run a training step."""
-        model = MobileNetV1.from_variant("0.25", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV1.from_variant("pico", num_classes=10, input_shape=(32, 32, 3))
         model.compile(
             optimizer='adam',
             loss='sparse_categorical_crossentropy',
@@ -317,10 +318,10 @@ class TestMobileNetV1:
         # Expected params for ImageNet (num_classes=1000, input_shape=(224, 224, 3))
         # From paper: 1.0 -> ~4.2M, 0.75 -> ~2.6M, 0.5 -> ~1.3M, 0.25 -> ~0.5M
         params_ranges = {
-            "1.0": (4.0e6, 4.5e6),
-            "0.75": (2.4e6, 2.8e6),
-            "0.5": (1.2e6, 1.5e6),
-            "0.25": (0.4e6, 0.6e6),
+            "large": (4.0e6, 4.5e6),
+            "medium": (2.4e6, 2.8e6),
+            "small": (1.2e6, 1.5e6),
+            "pico": (0.4e6, 0.6e6),
         }
         for variant, (min_p, max_p) in params_ranges.items():
             model = MobileNetV1.from_variant(
@@ -339,7 +340,7 @@ class TestMobileNetV1:
 
     def test_model_summary_execution(self):
         """Test that model summary executes without errors."""
-        model = MobileNetV1.from_variant("0.25", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV1.from_variant("pico", num_classes=10, input_shape=(32, 32, 3))
         try:
             model.summary()
         except Exception as e:
@@ -351,7 +352,7 @@ class TestMobileNetV1:
 
     def test_model_evaluation_and_prediction(self):
         """Test model evaluation and prediction methods."""
-        model = MobileNetV1.from_variant("0.25", num_classes=5, input_shape=(32, 32, 3))
+        model = MobileNetV1.from_variant("pico", num_classes=5, input_shape=(32, 32, 3))
         model.compile(
             optimizer='adam',
             loss='sparse_categorical_crossentropy',

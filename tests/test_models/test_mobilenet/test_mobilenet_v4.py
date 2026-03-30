@@ -228,7 +228,7 @@ class TestMobileNetV4:
         assert reconstructed_model.width_multiplier == model.width_multiplier
 
     @pytest.mark.parametrize("variant", [
-        "conv_small", "conv_medium", "conv_large", "hybrid_medium", "hybrid_large"
+        "small", "medium", "large", "hybrid_medium", "hybrid_large"
     ])
     def test_variant_creation(self, variant):
         """Test creation of all predefined variants."""
@@ -244,7 +244,7 @@ class TestMobileNetV4:
     def test_convenience_function(self):
         """Test create_mobilenetv4 convenience function."""
         model = create_mobilenetv4(
-            variant="conv_small",
+            variant="small",
             num_classes=10,
             input_shape=(32, 32, 3),
             width_multiplier=0.75
@@ -261,12 +261,12 @@ class TestMobileNetV4:
     def test_forward_pass_shapes(self, sample_inputs):
         """Test forward pass produces correct output shapes."""
         # Conv-only model
-        model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         output = model(sample_inputs['cifar'])
         assert output.shape == (4, 10)
 
         # Feature extractor
-        model = MobileNetV4.from_variant("conv_small", include_top=False, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", include_top=False, input_shape=(32, 32, 3))
         features = model(sample_inputs['cifar'])
         # Output should be spatial features from last stage
         assert len(features.shape) == 4  # (batch, height, width, channels)
@@ -280,7 +280,7 @@ class TestMobileNetV4:
         ]
 
         for input_shape, sample_shape in test_configs:
-            model = MobileNetV4.from_variant("conv_small", num_classes=5, input_shape=input_shape)
+            model = MobileNetV4.from_variant("small", num_classes=5, input_shape=input_shape)
             sample_input = keras.random.normal(shape=sample_shape)
 
             output = model(sample_input)
@@ -288,7 +288,7 @@ class TestMobileNetV4:
 
     def test_batch_size_handling(self):
         """Test model handles different batch sizes correctly."""
-        model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
 
         batch_sizes = [1, 4, 8, 16]
         for batch_size in batch_sizes:
@@ -338,7 +338,7 @@ class TestMobileNetV4:
 
     def test_model_compilation_and_fit(self, sample_inputs):
         """Test model compiles and can run a training step."""
-        model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
 
         # Compile model
         model.compile(
@@ -430,9 +430,9 @@ class TestMobileNetV4:
     def test_model_parameter_counts(self):
         """Test parameter counts are reasonable for different variants."""
         variants_expected_range = {
-            'conv_small': (1e5, 5e6),    # 100K - 5M parameters
-            'conv_medium': (3e6, 20e6),  # 3M - 20M parameters
-            'conv_large': (4e6, 50e6),  # 10M - 50M parameters
+            'small': (1e5, 5e6),    # 100K - 5M parameters
+            'medium': (3e6, 20e6),  # 3M - 20M parameters
+            'large': (4e6, 50e6),  # 10M - 50M parameters
         }
 
         for variant, (min_params, max_params) in variants_expected_range.items():
@@ -448,7 +448,7 @@ class TestMobileNetV4:
 
     def test_model_summary_execution(self):
         """Test that model summary executes without errors."""
-        model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
 
         # Build model first
         model(keras.random.normal(shape=(1, 32, 32, 3)))
@@ -465,7 +465,7 @@ class TestMobileNetV4:
 
     def test_model_in_training_loop(self):
         """Test model in a realistic training scenario."""
-        model = MobileNetV4.from_variant("conv_small", num_classes=2, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", num_classes=2, input_shape=(32, 32, 3))
         model.compile(
             optimizer='adam',
             loss='sparse_categorical_crossentropy',
@@ -493,7 +493,7 @@ class TestMobileNetV4:
 
     def test_model_evaluation_and_prediction(self):
         """Test model evaluation and prediction methods."""
-        model = MobileNetV4.from_variant("conv_small", num_classes=5, input_shape=(32, 32, 3))
+        model = MobileNetV4.from_variant("small", num_classes=5, input_shape=(32, 32, 3))
         model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
         # Test data
@@ -529,7 +529,7 @@ def test_models():
 
     # Small conv model for quick tests
     models['small_conv'] = MobileNetV4.from_variant(
-        "conv_small",
+        "small",
         num_classes=10,
         input_shape=(32, 32, 3)
     )

@@ -125,19 +125,19 @@ class MobileNetV4(keras.Model):
 
     # Model variant configurations
     MODEL_VARIANTS = {
-        "conv_small": {
+        "small": {
             "depths": [1, 1, 2, 3, 2, 2, 1],
             "dims": [16, 24, 32, 64, 96, 128, 160],
             "block_types": ["IB", "IB", "IB", "ExtraDW", "IB", "IB", "IB"],
             "use_attention": False,
         },
-        "conv_medium": {
+        "medium": {
             "depths": [1, 2, 3, 4, 3, 3, 1],
             "dims": [16, 24, 40, 80, 112, 192, 320],
             "block_types": ["IB", "IB", "ExtraDW", "ExtraDW", "IB", "ExtraDW", "IB"],
             "use_attention": False,
         },
-        "conv_large": {
+        "large": {
             "depths": [1, 2, 4, 5, 4, 4, 1],
             "dims": [24, 32, 48, 96, 136, 224, 384],
             "block_types": ["IB", "ExtraDW", "ExtraDW", "ExtraDW", "ExtraDW", "ExtraDW", "IB"],
@@ -376,7 +376,7 @@ class MobileNetV4(keras.Model):
         """Create a MobileNetV4 model from a predefined variant.
 
         Args:
-            variant: String, one of "conv_small", "conv_medium", "conv_large",
+            variant: String, one of "small", "medium", "large",
                 "hybrid_medium", "hybrid_large"
             num_classes: Integer, number of output classes
             input_shape: Tuple, input shape. If None, uses (224, 224, 3)
@@ -390,9 +390,7 @@ class MobileNetV4(keras.Model):
             ValueError: If variant is not recognized
 
         Example:
-            >>> # CIFAR-10 model
-            >>> model = MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
-            >>> # ImageNet model with attention
+            >>> model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
             >>> model = MobileNetV4.from_variant("hybrid_medium", num_classes=1000)
         """
         if variant not in cls.MODEL_VARIANTS:
@@ -495,7 +493,7 @@ class MobileNetV4(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_mobilenetv4(
-    variant: str = "conv_medium",
+    variant: str = "medium",
     num_classes: int = 1000,
     input_shape: Optional[Tuple[int, ...]] = None,
     width_multiplier: float = 1.0,
@@ -505,7 +503,7 @@ def create_mobilenetv4(
     """Convenience function to create MobileNetV4 models.
 
     Args:
-        variant: String, model variant ("conv_small", "conv_medium", "conv_large",
+        variant: String, model variant ("small", "medium", "large",
             "hybrid_medium", "hybrid_large")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
@@ -517,14 +515,9 @@ def create_mobilenetv4(
         MobileNetV4 model instance
 
     Example:
-        >>> # Create MobileNetV4-ConvSmall for CIFAR-10
-        >>> model = create_mobilenetv4("conv_small", num_classes=10, input_shape=(32, 32, 3))
-        >>>
-        >>> # Create MobileNetV4-HybridMedium for ImageNet
+        >>> model = create_mobilenetv4("small", num_classes=10, input_shape=(32, 32, 3))
         >>> model = create_mobilenetv4("hybrid_medium", num_classes=1000)
-        >>>
-        >>> # Create custom width multiplier model
-        >>> model = create_mobilenetv4("conv_medium", width_multiplier=0.75)
+        >>> model = create_mobilenetv4("medium", width_multiplier=0.75)
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented")

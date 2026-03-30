@@ -211,17 +211,18 @@ class TestMobileNetV2:
         assert reconstructed_model.width_multiplier == model.width_multiplier
         assert reconstructed_model.dropout_rate == model.dropout_rate
 
-    @pytest.mark.parametrize("variant", ["1.4", "1.0", "0.75", "0.5", "0.35"])
-    def test_variant_creation(self, variant):
+    @pytest.mark.parametrize("variant,expected_multiplier", [
+        ("large", 1.4), ("medium", 1.0), ("small", 0.75), ("nano", 0.5), ("pico", 0.35)
+    ])
+    def test_variant_creation(self, variant, expected_multiplier):
         """Test creation of all predefined variants."""
         model = MobileNetV2.from_variant(variant, num_classes=10, input_shape=(32, 32, 3))
-        expected_multiplier = MobileNetV2.MODEL_VARIANTS[variant]
         assert model.width_multiplier == expected_multiplier
 
     def test_convenience_function(self):
         """Test create_mobilenetv2 convenience function."""
         model = create_mobilenetv2(
-            variant="0.75",
+            variant="small",
             num_classes=10,
             input_shape=(32, 32, 3),
             dropout_rate=0.5
@@ -238,11 +239,11 @@ class TestMobileNetV2:
 
     def test_forward_pass_shapes(self, sample_inputs):
         """Test forward pass produces correct output shapes."""
-        model = MobileNetV2.from_variant("1.0", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("medium", num_classes=10, input_shape=(32, 32, 3))
         output = model(sample_inputs['cifar'])
         assert output.shape == (4, 10)
 
-        model = MobileNetV2.from_variant("0.5", include_top=False, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("nano", include_top=False, input_shape=(32, 32, 3))
         features = model(sample_inputs['cifar'])
         assert len(features.shape) == 4
 
@@ -255,14 +256,14 @@ class TestMobileNetV2:
         ]
 
         for input_shape, sample_shape in test_configs:
-            model = MobileNetV2.from_variant("0.5", num_classes=5, input_shape=input_shape)
+            model = MobileNetV2.from_variant("nano", num_classes=5, input_shape=input_shape)
             sample_input = keras.random.normal(shape=sample_shape)
             output = model(sample_input)
             assert output.shape == (sample_shape[0], 5)
 
     def test_batch_size_handling(self):
         """Test model handles different batch sizes correctly."""
-        model = MobileNetV2.from_variant("1.0", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("medium", num_classes=10, input_shape=(32, 32, 3))
         for batch_size in [1, 4, 8]:
             sample_input = keras.random.normal(shape=(batch_size, 32, 32, 3))
             output = model(sample_input)
@@ -294,7 +295,7 @@ class TestMobileNetV2:
 
     def test_model_compilation_and_fit(self, sample_inputs):
         """Test model compiles and can run a training step."""
-        model = MobileNetV2.from_variant("0.35", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("pico", num_classes=10, input_shape=(32, 32, 3))
         # FIX: Use keyword arguments to prevent type promotion errors.
         model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
         x_train = sample_inputs['cifar']
@@ -327,10 +328,10 @@ class TestMobileNetV2:
     def test_model_parameter_counts(self):
         """Test parameter counts are reasonable for different variants."""
         variants_expected_range = {
-            '1.0': (3.0e6, 4.0e6),
-            '0.75': (2.0e6, 3.0e6),
-            '0.5': (1.5e6, 2.5e6),
-            '0.35': (1.0e6, 2.0e6),
+            'medium': (3.0e6, 4.0e6),
+            'small': (2.0e6, 3.0e6),
+            'nano': (1.5e6, 2.5e6),
+            'pico': (1.0e6, 2.0e6),
         }
         for variant, (min_p, max_p) in variants_expected_range.items():
             model = MobileNetV2.from_variant(variant, num_classes=1000)
@@ -340,7 +341,7 @@ class TestMobileNetV2:
 
     def test_model_summary_execution(self):
         """Test that model summary executes without errors."""
-        model = MobileNetV2.from_variant("0.5", num_classes=10, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("nano", num_classes=10, input_shape=(32, 32, 3))
         model(keras.random.normal(shape=(1, 32, 32, 3)))
         try:
             model.summary()
@@ -353,7 +354,7 @@ class TestMobileNetV2:
 
     def test_model_in_training_loop(self):
         """Test model in a realistic training scenario."""
-        model = MobileNetV2.from_variant("0.5", num_classes=2, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("nano", num_classes=2, input_shape=(32, 32, 3))
         # FIX: Use keyword arguments to prevent type promotion errors.
         model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
         x_train = keras.random.normal(shape=(20, 32, 32, 3))
@@ -370,7 +371,7 @@ class TestMobileNetV2:
 
     def test_model_evaluation_and_prediction(self):
         """Test model evaluation and prediction methods."""
-        model = MobileNetV2.from_variant("0.5", num_classes=5, input_shape=(32, 32, 3))
+        model = MobileNetV2.from_variant("nano", num_classes=5, input_shape=(32, 32, 3))
         # FIX: Use keyword arguments to prevent type promotion errors.
         model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
         x_test = keras.random.normal(shape=(10, 32, 32, 3))

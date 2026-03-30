@@ -144,9 +144,13 @@ class MobileNetV2(keras.Model):
         - MobileNetV2 Paper: https://arxiv.org/abs/1801.04381
     """
 
-    # Model variant configurations mapping variant name to width_multiplier
+    # Model variant configurations
     MODEL_VARIANTS = {
-        "1.4": 1.4, "1.0": 1.0, "0.75": 0.75, "0.5": 0.5, "0.35": 0.35,
+        "large": {"width_multiplier": 1.4},
+        "medium": {"width_multiplier": 1.0},
+        "small": {"width_multiplier": 0.75},
+        "nano": {"width_multiplier": 0.5},
+        "pico": {"width_multiplier": 0.35},
     }
 
     # Architecture definition from Table 2 of the paper: (t, c, n, s)
@@ -288,18 +292,31 @@ class MobileNetV2(keras.Model):
             variant: str,
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
+            width_multiplier: float = 1.0,
             **kwargs: Any
     ) -> "MobileNetV2":
-        """Create a MobileNetV2 model from a predefined variant string."""
+        """Create a MobileNetV2 model from a predefined variant.
+
+        Args:
+            variant: String, one of "large", "medium", "small", "nano", "pico"
+            num_classes: Integer, number of output classes
+            input_shape: Tuple, input shape. If None, uses (224, 224, 3)
+            width_multiplier: Float, additional multiplier applied on top of variant default
+            **kwargs: Additional arguments passed to the constructor
+
+        Returns:
+            MobileNetV2 model instance
+        """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}")
 
-        width_multiplier = cls.MODEL_VARIANTS[variant]
-        logger.info(f"Creating MobileNetV2 variant '{variant}' (α={width_multiplier})")
+        config = cls.MODEL_VARIANTS[variant]
+        effective_width = config["width_multiplier"] * width_multiplier
+        logger.info(f"Creating MobileNetV2-{variant} (α={effective_width})")
 
         return cls(
             num_classes=num_classes,
-            width_multiplier=width_multiplier,
+            width_multiplier=effective_width,
             input_shape=input_shape,
             **kwargs
         )
@@ -346,18 +363,20 @@ class MobileNetV2(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_mobilenetv2(
-        variant: str = "1.0",
+        variant: str = "medium",
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
+        width_multiplier: float = 1.0,
         pretrained: bool = False,
         **kwargs: Any
 ) -> MobileNetV2:
     """Convenience function to create MobileNetV2 models.
 
     Args:
-        variant: String, model variant ("1.4", "1.0", "0.75", "0.5", "0.35")
+        variant: String, model variant ("large", "medium", "small", "nano", "pico")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
+        width_multiplier: Float, additional multiplier applied on top of variant default
         pretrained: Boolean, whether to load pretrained weights (not implemented)
         **kwargs: Additional arguments passed to the model constructor
 
@@ -365,14 +384,9 @@ def create_mobilenetv2(
         MobileNetV2 model instance
 
     Example:
-        >>> # Create standard MobileNetV2
-        >>> model = create_mobilenetv2("1.0", num_classes=1000)
-        >>>
-        >>> # Create smaller model for CIFAR-10
-        >>> model = create_mobilenetv2("0.5", num_classes=10, input_shape=(32, 32, 3))
-        >>>
-        >>> # Create tiny model for embedded devices
-        >>> model = create_mobilenetv2("0.35", num_classes=100)
+        >>> model = create_mobilenetv2("medium", num_classes=1000)
+        >>> model = create_mobilenetv2("nano", num_classes=10, input_shape=(32, 32, 3))
+        >>> model = create_mobilenetv2("pico", num_classes=100)
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented for MobileNetV2")
@@ -381,6 +395,7 @@ def create_mobilenetv2(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        width_multiplier=width_multiplier,
         **kwargs
     )
 

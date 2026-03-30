@@ -100,6 +100,12 @@ class MobileNetV3(keras.Model):
         ... )
     """
 
+    # Model variant configurations
+    MODEL_VARIANTS = {
+        "large": {"variant": "large"},
+        "small": {"variant": "small"},
+    }
+
     # Model configurations from the paper
     LARGE_CONFIG = [
         # exp_size, out_channels, kernel_size, stride, use_se, activation
@@ -334,11 +340,15 @@ class MobileNetV3(keras.Model):
             MobileNetV3 model instance
 
         Example:
-            >>> # ImageNet model
             >>> model = MobileNetV3.from_variant("large", num_classes=1000)
-            >>> # CIFAR-10 model
             >>> model = MobileNetV3.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
         logger.info(f"Creating MobileNetV3-{variant.capitalize()} model")
 
         return cls(

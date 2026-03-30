@@ -85,10 +85,10 @@ class MobileNetV1(keras.Model):
 
     # Model variant configurations
     MODEL_VARIANTS = {
-        "1.0": {"width_multiplier": 1.0},
-        "0.75": {"width_multiplier": 0.75},
-        "0.5": {"width_multiplier": 0.5},
-        "0.25": {"width_multiplier": 0.25},
+        "large": {"width_multiplier": 1.0},
+        "medium": {"width_multiplier": 0.75},
+        "small": {"width_multiplier": 0.5},
+        "pico": {"width_multiplier": 0.25},
     }
 
     # Architecture definition (filters and strides for each block)
@@ -244,14 +244,16 @@ class MobileNetV1(keras.Model):
             variant: str,
             num_classes: int = 1000,
             input_shape: Optional[Tuple[int, ...]] = None,
+            width_multiplier: float = 1.0,
             **kwargs: Any
     ) -> "MobileNetV1":
         """Create a MobileNetV1 model from a predefined variant.
 
         Args:
-            variant: String, one of "1.0", "0.75", "0.5", "0.25"
+            variant: String, one of "large", "medium", "small", "pico"
             num_classes: Integer, number of output classes
             input_shape: Tuple, input shape. If None, uses (224, 224, 3)
+            width_multiplier: Float, additional multiplier applied on top of variant default
             **kwargs: Additional arguments passed to the constructor
 
         Returns:
@@ -261,10 +263,8 @@ class MobileNetV1(keras.Model):
             ValueError: If variant is not recognized
 
         Example:
-            >>> # Standard MobileNetV1
-            >>> model = MobileNetV1.from_variant("1.0", num_classes=1000)
-            >>> # Smaller model for mobile
-            >>> model = MobileNetV1.from_variant("0.5", num_classes=100)
+            >>> model = MobileNetV1.from_variant("large", num_classes=1000)
+            >>> model = MobileNetV1.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -273,6 +273,7 @@ class MobileNetV1(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant]
+        effective_width = config["width_multiplier"] * width_multiplier
 
         # Set default input shape if not provided
         if input_shape is None:
@@ -283,7 +284,7 @@ class MobileNetV1(keras.Model):
 
         return cls(
             num_classes=num_classes,
-            width_multiplier=config["width_multiplier"],
+            width_multiplier=effective_width,
             input_shape=input_shape,
             **kwargs
         )
@@ -339,18 +340,20 @@ class MobileNetV1(keras.Model):
 # ---------------------------------------------------------------------
 
 def create_mobilenetv1(
-        variant: str = "1.0",
+        variant: str = "large",
         num_classes: int = 1000,
         input_shape: Optional[Tuple[int, ...]] = None,
+        width_multiplier: float = 1.0,
         pretrained: bool = False,
         **kwargs: Any
 ) -> MobileNetV1:
     """Convenience function to create MobileNetV1 models.
 
     Args:
-        variant: String, model variant ("1.0", "0.75", "0.5", "0.25")
+        variant: String, model variant ("large", "medium", "small", "pico")
         num_classes: Integer, number of output classes
         input_shape: Tuple, input shape. If None, uses (224, 224, 3)
+        width_multiplier: Float, additional multiplier applied on top of variant default
         pretrained: Boolean, whether to load pretrained weights (not implemented)
         **kwargs: Additional arguments passed to the model constructor
 
@@ -358,14 +361,9 @@ def create_mobilenetv1(
         MobileNetV1 model instance
 
     Example:
-        >>> # Create standard MobileNetV1
-        >>> model = create_mobilenetv1("1.0", num_classes=1000)
-        >>>
-        >>> # Create smaller model for CIFAR-10
-        >>> model = create_mobilenetv1("0.5", num_classes=10, input_shape=(32, 32, 3))
-        >>>
-        >>> # Create tiny model for embedded devices
-        >>> model = create_mobilenetv1("0.25", num_classes=100)
+        >>> model = create_mobilenetv1("large", num_classes=1000)
+        >>> model = create_mobilenetv1("small", num_classes=10, input_shape=(32, 32, 3))
+        >>> model = create_mobilenetv1("pico", num_classes=100)
     """
     if pretrained:
         logger.warning("Pretrained weights are not yet implemented for MobileNetV1")
@@ -374,6 +372,7 @@ def create_mobilenetv1(
         variant,
         num_classes=num_classes,
         input_shape=input_shape,
+        width_multiplier=width_multiplier,
         **kwargs
     )
 
