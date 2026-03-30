@@ -29,7 +29,7 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.prism.model import PRISMModel
@@ -566,31 +566,23 @@ class PRISMTrainer:
 
     def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
         viz_dir = os.path.join(exp_dir, 'visualizations')
-        callbacks = [
-            PRISMPerformanceCallback(self.config, self.processor, viz_dir, "prism"),
-            keras.callbacks.EarlyStopping(
-                monitor='val_loss', patience=30, restore_best_weights=True, verbose=1),
-            keras.callbacks.ModelCheckpoint(
-                os.path.join(exp_dir, 'best_model.keras'),
-                monitor='val_loss', save_best_only=True, verbose=1),
-            keras.callbacks.TerminateOnNaN()
-        ]
 
-        if not self.config.use_warmup:
-            callbacks.append(keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7))
-
-        if self.config.perform_deep_analysis:
-            callbacks.append(EpochAnalyzerCallback(
-                output_dir=os.path.join(exp_dir, 'deep_analysis'),
-                analysis_config=AnalysisConfig(
-                    analyze_weights=True, analyze_spectral=True,
-                    analyze_calibration=False, analyze_information_flow=False,
-                    analyze_training_dynamics=False, verbose=False),
-                start_epoch=self.config.analysis_start_epoch,
-                epoch_frequency=self.config.analysis_frequency,
-                model_name="PRISM"
-            ))
+        callbacks, _ = create_common_callbacks(
+            model_name="PRISM",
+            results_dir_prefix=exp_dir,
+            monitor="val_loss",
+            patience=30,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        callbacks.append(PRISMPerformanceCallback(self.config, self.processor, viz_dir, "prism"))
 
         history = self.model.fit(
             data_pipeline['train_ds'],

@@ -27,7 +27,7 @@ import seaborn as sns
 import tensorflow as tf
 from scipy import stats
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.mdn import MDNModel
 from dl_techniques.datasets.time_series import (
@@ -461,17 +461,17 @@ class MDNTrainer:
 
     def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
         viz_dir = os.path.join(exp_dir, 'visualizations')
-        callbacks = [
-            MDNPerformanceCallback(self.config, viz_dir, data_pipeline['test_data_raw']),
-            keras.callbacks.EarlyStopping(
-                monitor='val_loss', patience=15, restore_best_weights=True, verbose=1),
-            keras.callbacks.ModelCheckpoint(
-                os.path.join(exp_dir, 'best_model.keras'),
-                monitor='val_loss', save_best_only=True, verbose=1),
-            keras.callbacks.TerminateOnNaN(),
-            keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7)
-        ]
+
+        callbacks, _ = create_common_callbacks(
+            model_name="MDN",
+            results_dir_prefix=exp_dir,
+            monitor="val_loss",
+            patience=15,
+            use_lr_schedule=False,
+            include_terminate_on_nan=True,
+            include_analyzer=False,
+        )
+        callbacks.append(MDNPerformanceCallback(self.config, viz_dir, data_pipeline['test_data_raw']))
 
         history = self.model.fit(
             data_pipeline['train_ds'],
