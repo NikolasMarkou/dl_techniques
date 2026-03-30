@@ -15,7 +15,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from typing import Dict, List, Optional, Tuple
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 
 from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
 from dl_techniques.models.fnet import FNet
@@ -23,8 +23,6 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.layers.nlp_heads.task_types import NLPTaskType
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
-
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -217,31 +215,20 @@ def compile_model(model: keras.Model, config: FinetuneConfig, learning_rate: flo
     logger.info(f"Compiled with lr={learning_rate}")
 
 
-def create_callbacks(config: FinetuneConfig) -> List[keras.callbacks.Callback]:
-    """Create training callbacks."""
-    os.makedirs(config.checkpoint_dir, exist_ok=True)
-    best_path = os.path.join(config.checkpoint_dir, "best_sentiment_model.keras")
-
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath=best_path, monitor="val_accuracy", mode="max",
-            save_best_only=True, verbose=1,
-        ),
-        keras.callbacks.TensorBoard(log_dir=config.log_dir),
-        keras.callbacks.CSVLogger(os.path.join(config.save_dir, "finetuning_log.csv")),
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss', patience=3, restore_best_weights=True, verbose=1,
-        ),
-    ]
-    if config.run_epoch_analysis:
-        callbacks.append(EpochAnalyzerCallback(
-            output_dir=config.analysis_dir,
-            start_epoch=config.analysis_start_epoch,
-            epoch_frequency=config.analysis_epoch_frequency,
-            model_name="FNet-Sentiment-Finetuned-Tiktoken",
-        ))
-    logger.info(f"Created {len(callbacks)} callbacks")
-    return callbacks
+def create_callbacks(config: FinetuneConfig) -> Tuple[List[keras.callbacks.Callback], str]:
+    """Create training callbacks using common callback factory."""
+    callbacks, results_dir = create_common_callbacks(
+        model_name="FNet-Sentiment-Finetuned-Tiktoken",
+        results_dir_prefix="fnet_finetune",
+        monitor='val_accuracy',
+        patience=3,
+        use_lr_schedule=True,
+        include_tensorboard=True,
+        include_analyzer=config.run_epoch_analysis,
+        analyzer_epoch_frequency=config.analysis_epoch_frequency,
+        analyzer_start_epoch=config.analysis_start_epoch,
+    )
+    return callbacks, results_dir
 
 
 def _merge_histories(base, new):
@@ -268,7 +255,7 @@ def finetune_sentiment_model(
     train_dataset = preprocess_dataset(load_dataset(config, "train"), preprocessor, config)
     val_dataset = preprocess_dataset(load_dataset(config, "test"), preprocessor, config)
     model, fnet_encoder = create_sentiment_model(config)
-    callbacks = create_callbacks(config)
+    callbacks, results_dir = create_callbacks(config)
 
     if config.run_two_stage_finetuning:
         # Stage 1: train head only

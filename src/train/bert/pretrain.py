@@ -13,7 +13,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 from typing import Dict, List, Optional, Tuple
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 
 from dl_techniques.models.bert import BERT
 from dl_techniques.models.masked_language_model import (
@@ -23,8 +23,6 @@ from dl_techniques.models.masked_language_model import (
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
-
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -233,40 +231,20 @@ def compile_model(mlm_model: MaskedLanguageModel, config: TrainingConfig, steps_
     logger.info(f"Compiled: AdamW, peak_lr={config.learning_rate}, wd={config.weight_decay}")
 
 
-def create_callbacks(config: TrainingConfig) -> List[keras.callbacks.Callback]:
-    """Create training callbacks."""
-    os.makedirs(config.checkpoint_dir, exist_ok=True)
-    os.makedirs(config.log_dir, exist_ok=True)
-    best_path = os.path.join(config.checkpoint_dir, "best_model.keras")
-
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath=best_path, monitor="val_loss", mode="min",
-            save_best_only=True, verbose=1,
-        ),
-        keras.callbacks.TensorBoard(
-            log_dir=config.log_dir, histogram_freq=1, write_graph=True, update_freq='epoch',
-        ),
-        keras.callbacks.CSVLogger(os.path.join(config.save_dir, "training_log.csv"), append=True),
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss', patience=15, restore_best_weights=True, verbose=1,
-        ),
-        keras.callbacks.LambdaCallback(
-            on_epoch_end=lambda epoch, logs: logger.info(
-                f"Epoch {epoch + 1}: loss={logs['loss']:.4f}, acc={logs['accuracy']:.4f}, "
-                f"val_loss={logs.get('val_loss', 'N/A'):.4f}, val_acc={logs.get('val_accuracy', 'N/A'):.4f}"
-            )
-        ),
-    ]
-    if config.run_epoch_analysis:
-        callbacks.append(EpochAnalyzerCallback(
-            output_dir=config.analysis_dir,
-            start_epoch=config.analysis_start_epoch,
-            epoch_frequency=config.analysis_epoch_frequency,
-            model_name=f"BERT-{config.bert_variant}",
-        ))
-    logger.info(f"Created {len(callbacks)} callbacks")
-    return callbacks
+def create_callbacks(config: TrainingConfig) -> Tuple[List[keras.callbacks.Callback], str]:
+    """Create training callbacks using common callback factory."""
+    callbacks, results_dir = create_common_callbacks(
+        model_name=f"BERT-{config.bert_variant}",
+        results_dir_prefix="bert_pretrain",
+        monitor='val_loss',
+        patience=15,
+        use_lr_schedule=True,
+        include_tensorboard=True,
+        include_analyzer=config.run_epoch_analysis,
+        analyzer_epoch_frequency=config.analysis_epoch_frequency,
+        analyzer_start_epoch=config.analysis_start_epoch,
+    )
+    return callbacks, results_dir
 
 
 def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.callbacks.History]:
@@ -286,7 +264,7 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     steps_per_epoch = config.max_samples // config.batch_size if config.max_samples else 1000
     mlm_model = create_bert_mlm_model(config)
     compile_model(mlm_model, config, steps_per_epoch)
-    callbacks = create_callbacks(config)
+    callbacks, results_dir = create_callbacks(config)
 
     logger.info("Starting training...")
     history = mlm_model.fit(

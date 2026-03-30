@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
@@ -441,12 +441,6 @@ def train_mnist_som_classifier(config: MNISTSOMConfig) -> keras.Model:
     """Train MNIST classifier with SoftSOM feature extraction."""
     logger.info(f"Starting training: {config.experiment_name}")
 
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
-
     (x_train, y_train), (x_test, y_test) = load_mnist_data(config)
     model = create_mnist_som_classifier(config)
 
@@ -456,18 +450,22 @@ def train_mnist_som_classifier(config: MNISTSOMConfig) -> keras.Model:
         metrics=['accuracy']
     )
 
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath=str(output_dir / "best_model.keras"),
-            monitor='val_accuracy', save_best_only=True, verbose=1
-        ),
-        keras.callbacks.EarlyStopping(
-            monitor='val_accuracy', patience=10, restore_best_weights=True, verbose=1
-        ),
-        keras.callbacks.CSVLogger(str(output_dir / "training_log.csv"), append=True),
-        keras.callbacks.TensorBoard(log_dir=str(output_dir / "tensorboard"), histogram_freq=1),
-        SOMVisualizationCallback(config, x_test, y_test)
-    ]
+    callbacks, results_dir = create_callbacks(
+        model_name=config.experiment_name,
+        results_dir_prefix="som_nd_soft",
+        monitor='val_loss',
+        patience=10,
+        use_lr_schedule=True,
+        include_tensorboard=True,
+        include_analyzer=True,
+    )
+    output_dir = Path(results_dir)
+
+    with open(output_dir / "config.json", 'w') as f:
+        json.dump(config.__dict__, f, indent=2, default=str)
+
+    # Domain-specific callback
+    callbacks.append(SOMVisualizationCallback(config, x_test, y_test))
 
     history = model.fit(
         x_train, y_train, batch_size=config.batch_size,

@@ -13,13 +13,12 @@ import tensorflow as tf
 matplotlib.use('Agg')
 import pandas as pd
 import seaborn as sns
-from datetime import datetime
 import matplotlib.pyplot as plt
 from typing import Tuple, Dict, Any, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.capsnet import create_capsnet
-from train.common import setup_gpu, create_base_argument_parser
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
@@ -480,7 +479,7 @@ def create_capsnet_callbacks(
         model_name: str,
         validation_data: Tuple[np.ndarray, np.ndarray],
         dataset: str,
-        monitor: str = 'val_loss',
+        monitor: str = 'val_accuracy',
         patience: int = 10,
         save_best_only: bool = True,
         viz_frequency: int = 1
@@ -490,39 +489,25 @@ def create_capsnet_callbacks(
     Returns:
         Tuple of (callbacks list, results directory path).
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"results/capsnet_{model_name}_{timestamp}"
-    os.makedirs(results_dir, exist_ok=True)
+    callbacks, results_dir = create_callbacks(
+        model_name=model_name,
+        results_dir_prefix="capsnet",
+        monitor=monitor,
+        patience=patience,
+        use_lr_schedule=False,
+        include_tensorboard=True,
+        include_analyzer=True,
+    )
 
-    mode = 'min' if 'loss' in monitor else 'max'
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor=monitor, patience=patience,
-            restore_best_weights=True, mode=mode, verbose=1
-        ),
-        keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(results_dir, 'best_model.keras'),
-            monitor=monitor, save_best_only=save_best_only,
-            save_weights_only=False, mode=mode, verbose=1
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1
-        ),
+    # CapsNet-specific callbacks
+    callbacks.extend([
         LearningRateLogger(),
-        keras.callbacks.CSVLogger(
-            filename=os.path.join(results_dir, 'training_log.csv'), append=False
-        ),
-        keras.callbacks.TensorBoard(
-            log_dir=os.path.join(results_dir, 'tensorboard'),
-            histogram_freq=1, write_graph=True, update_freq='epoch'
-        ),
         ReconstructionVisualizationCallback(
             validation_data=validation_data, save_dir=results_dir,
             dataset=dataset, n_samples=8, frequency=viz_frequency
-        )
-    ]
+        ),
+    ])
 
-    logger.info(f"Results directory: {results_dir}")
     return callbacks, results_dir
 
 
