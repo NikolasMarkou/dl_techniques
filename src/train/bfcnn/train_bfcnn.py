@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
@@ -423,30 +423,22 @@ class StreamingResultMonitor(keras.callbacks.Callback):
 
 
 def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List[keras.callbacks.Callback]:
-    """Create training callbacks (checkpoint, early stopping, CSV, visualization, monitoring, tensorboard)."""
-    callbacks = []
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Create training callbacks using common utilities plus domain-specific callbacks."""
+    common_callbacks, _ = create_common_callbacks(
+        model_name=config.experiment_name,
+        results_dir_prefix=str(Path(config.output_dir) / config.experiment_name),
+        monitor="val_loss",
+        patience=config.early_stopping_patience,
+        use_lr_schedule=True,
+        include_tensorboard=True,
+        include_analyzer=False,
+    )
 
-    if config.save_model_checkpoints:
-        callbacks.append(keras.callbacks.ModelCheckpoint(
-            filepath=str(output_dir / "best_model.keras"),
-            monitor='val_loss', save_best_only=config.save_best_only,
-            save_weights_only=False, verbose=1
-        ))
+    # Domain-specific callbacks
+    common_callbacks.append(MetricsVisualizationCallback(config))
+    common_callbacks.append(StreamingResultMonitor(config, val_directories))
 
-    callbacks.append(keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=config.early_stopping_patience,
-        restore_best_weights=True, verbose=1
-    ))
-    callbacks.append(keras.callbacks.CSVLogger(str(output_dir / "training_log.csv"), append=True))
-    callbacks.append(MetricsVisualizationCallback(config))
-    callbacks.append(StreamingResultMonitor(config, val_directories))
-    callbacks.append(keras.callbacks.TensorBoard(
-        log_dir=str(output_dir / "tensorboard"),
-        histogram_freq=1, write_graph=True, update_freq='epoch'
-    ))
-    return callbacks
+    return common_callbacks
 
 
 # ---------------------------------------------------------------------

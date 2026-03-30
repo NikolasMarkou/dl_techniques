@@ -22,7 +22,7 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder
 from dl_techniques.metrics.multi_label_metrics import MultiLabelMetrics
 from dl_techniques.losses.multi_labels_loss import create_multilabel_segmentation_loss
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 
 
 def setup_environment():
@@ -390,16 +390,16 @@ def run_mae_pretraining(
 
     viz_batch = next(iter(val_ds.take(1)))
     mae_viz_dir = os.path.join(results_dir, "mae_viz")
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, "best_mae_model.keras"),
-            save_best_only=True, monitor="val_loss"
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, "mae_history.csv")),
-        keras.callbacks.EarlyStopping(patience=args.patience, restore_best_weights=True),
-        MAEVisualizationCallback(viz_batch, mae_viz_dir, frequency=5),
-        ProgressLoggingCallback()
-    ]
+    callbacks, _ = create_common_callbacks(
+        model_name="ConvUNext-MAE",
+        results_dir_prefix=results_dir,
+        monitor="val_loss",
+        patience=args.patience,
+        use_lr_schedule=True,
+        include_analyzer=False,
+    )
+    callbacks.append(MAEVisualizationCallback(viz_batch, mae_viz_dir, frequency=5))
+    callbacks.append(ProgressLoggingCallback())
 
     mae_model.fit(train_ds, validation_data=val_ds, epochs=args.mae_epochs, callbacks=callbacks)
     logger.info("MAE Pretraining complete.")
@@ -458,25 +458,20 @@ def run_segmentation_finetuning(
     convunext_model.compile(optimizer=optimizer, loss=loss, loss_weights=loss_weights, metrics=metrics)
 
     viz_dir = os.path.join(results_dir, "seg_viz")
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, "best_seg_model.keras"),
-            save_best_only=True,
-            monitor="val_f1_scale_0" if convunext_model.enable_deep_supervision else "val_f1",
-            mode='max'
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, "seg_history.csv")),
-        keras.callbacks.EarlyStopping(
-            patience=args.patience, restore_best_weights=True,
-            monitor="val_dice_0" if convunext_model.enable_deep_supervision else "val_dice",
-            mode='max'
-        ),
-        MultiLabelSegmentationCallback(
-            val_batch=viz_batch, save_dir=viz_dir,
-            num_classes=args.num_classes, threshold=0.5
-        ),
-        ProgressLoggingCallback()
-    ]
+    seg_monitor = "val_f1_scale_0" if convunext_model.enable_deep_supervision else "val_f1"
+    callbacks, _ = create_common_callbacks(
+        model_name="ConvUNext-Seg",
+        results_dir_prefix=results_dir,
+        monitor=seg_monitor,
+        patience=args.patience,
+        use_lr_schedule=True,
+        include_analyzer=False,
+    )
+    callbacks.append(MultiLabelSegmentationCallback(
+        val_batch=viz_batch, save_dir=viz_dir,
+        num_classes=args.num_classes, threshold=0.5
+    ))
+    callbacks.append(ProgressLoggingCallback())
 
     convunext_model.fit(
         train_ds, validation_data=val_ds, epochs=args.finetune_epochs,
