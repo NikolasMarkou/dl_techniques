@@ -356,6 +356,10 @@ class DiffusionScheduler(keras.layers.Layer):
 
         return res
 
+    def compute_output_shape(self, input_shape):
+        """Scheduler utility methods preserve input data shape."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()

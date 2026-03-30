@@ -85,6 +85,10 @@ class TimestepEmbedding(layers.Layer):
 
         return embedding
 
+    def compute_output_shape(self, input_shape):
+        """Output shape: (batch,) -> (batch, embedding_dim)."""
+        return (input_shape[0], self.embedding_dim)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -247,6 +251,10 @@ class ConditionalDenoiser(layers.Layer):
 
         return output
 
+    def compute_output_shape(self, input_shape):
+        """Output shape matches noisy_data input shape."""
+        return input_shape[0] if isinstance(input_shape, (list, tuple)) else input_shape
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -326,6 +334,10 @@ class VisionDenoiser(layers.Layer):
         """
         return self.denoiser(noisy_vision, text_features, timesteps, training=training)
 
+    def compute_output_shape(self, input_shape):
+        """Output shape matches noisy_vision input shape."""
+        return input_shape[0] if isinstance(input_shape, (list, tuple)) else input_shape
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -398,6 +410,10 @@ class TextDenoiser(layers.Layer):
             Denoised text embeddings [batch, text_seq, text_dim]
         """
         return self.denoiser(noisy_text, vision_features, timesteps, training=training)
+
+    def compute_output_shape(self, input_shape):
+        """Output shape matches noisy_text input shape."""
+        return input_shape[0] if isinstance(input_shape, (list, tuple)) else input_shape
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -560,6 +576,10 @@ class JointDenoiser(layers.Layer):
         denoised_text = noisy_text + self.text_out(h_text)
 
         return denoised_vision, denoised_text
+
+    def compute_output_shape(self, input_shape):
+        """Returns tuple of (vision_shape, text_shape) matching inputs."""
+        return (input_shape[0], input_shape[1])
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
