@@ -1,13 +1,4 @@
-"""
-Training Script for Unified Conditional Bias-Free U-Net
-
-Supports training with multiple conditioning modalities:
-- Dense conditioning: RGB images → depth maps
-- Discrete conditioning: Class labels → images
-- Hybrid conditioning: RGB + class → depth maps
-
-Implements generalized conditional Miyasawa's theorem for all modalities.
-"""
+"""Training script for Unified Conditional Bias-Free U-Net (dense, discrete, hybrid conditioning)."""
 
 import gc
 import json
@@ -21,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 from enum import Enum
 
+from train.common import setup_gpu
 from dl_techniques.optimization.train_vision import (
     TrainingConfig,
     DatasetBuilder,
@@ -35,99 +27,17 @@ from dl_techniques.models.bias_free_denoisers.bfunet_conditional_unified import 
 from dl_techniques.analyzer import DataInput
 
 
-# =============================================================================
-# CONDITIONING MODE ENUM
-# =============================================================================
-
 class ConditioningMode(str, Enum):
-    """Enumeration of supported conditioning modes."""
-    DENSE_ONLY = 'dense_only'  # RGB → depth
-    DISCRETE_ONLY = 'discrete_only'  # class → image
-    HYBRID = 'hybrid'  # RGB + class → depth
+    DENSE_ONLY = 'dense_only'
+    DISCRETE_ONLY = 'discrete_only'
+    HYBRID = 'hybrid'
 
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
 
 @dataclass
 class UnifiedBFUNetConfig(TrainingConfig):
-    """
-    Configuration for unified conditional BFU-Net training.
+    """Configuration for unified conditional BFU-Net training."""
 
-    Supports three conditioning modes:
-    1. Dense only: RGB → depth (monocular depth estimation)
-    2. Discrete only: class → image (conditional generation)
-    3. Hybrid: RGB + class → depth (semantic-aware depth)
-
-    Attributes:
-        conditioning_mode: Type of conditioning ('dense_only', 'discrete_only', 'hybrid').
-
-        # Target signal
-        target_shape: Shape of target signal (depth or image).
-        target_channels: Number of channels in target.
-
-        # Dense conditioning (for RGB → depth)
-        dense_data_dirs: Directories containing paired (RGB, depth) data.
-        dense_rgb_dirs: Directories with RGB images.
-        dense_depth_dirs: Directories with depth maps.
-        dense_conditioning_shape: Shape of dense conditioning signal.
-        dense_conditioning_encoder_filters: Base filters for dense encoder.
-        dense_injection_method: Method for injecting dense features.
-
-        # Discrete conditioning (for class → image)
-        discrete_data_dirs: Directories with class-organized images.
-        num_classes: Number of discrete classes.
-        class_embedding_dim: Dimension of class embeddings.
-        discrete_injection_method: Method for injecting class embeddings.
-        organize_by_subfolders: Whether data is organized in class subfolders.
-
-        # Hybrid conditioning
-        hybrid_data_format: Format for hybrid data ('triplets', 'separate').
-
-        # CFG (for discrete conditioning)
-        enable_cfg_training: Enable classifier-free guidance.
-        cfg_dropout_prob: Probability of dropping class labels.
-        cfg_guidance_scales: CFG scales to test during synthesis.
-
-        # Common settings
-        patch_size: Size of training patches.
-        image_extensions: Valid image file extensions.
-        max_train_files: Limit on training files.
-        max_val_files: Limit on validation files.
-        parallel_reads: Parallel file reading threads.
-        dataset_shuffle_buffer: Shuffle buffer size.
-        noise_sigma_min: Minimum noise standard deviation.
-        noise_sigma_max: Maximum noise standard deviation.
-        noise_distribution: Noise sampling distribution.
-        patches_per_image: Patches to extract per image.
-        augment_data: Apply data augmentation.
-        normalize_input: Normalize input to [0, 1].
-
-        # Deep supervision
-        enable_deep_supervision: Use multi-scale supervision.
-        deep_supervision_schedule_type: Weight scheduling strategy.
-        deep_supervision_schedule_config: Schedule parameters.
-
-        # Model architecture
-        depth: Network depth.
-        blocks_per_level: Residual blocks per level.
-        filters: Base number of filters.
-        kernel_size: Convolutional kernel size.
-        activation: Activation function.
-
-        # Visualization
-        enable_synthesis: Enable synthesis monitoring.
-        synthesis_samples: Number of samples to generate.
-        synthesis_steps: Synthesis iteration steps.
-        monitor_every_n_epochs: Visualization frequency.
-        save_training_images: Save denoising samples.
-    """
-
-    # Conditioning mode
     conditioning_mode: ConditioningMode = ConditioningMode.DISCRETE_ONLY
-
-    # Target signal
     patch_size: int = 128
     target_channels: int = 1
 
@@ -147,7 +57,7 @@ class UnifiedBFUNetConfig(TrainingConfig):
     organize_by_subfolders: bool = True
 
     # Hybrid conditioning
-    hybrid_data_format: str = 'triplets'  # or 'separate'
+    hybrid_data_format: str = 'triplets'
 
     # CFG
     enable_cfg_training: bool = False
@@ -163,12 +73,12 @@ class UnifiedBFUNetConfig(TrainingConfig):
     parallel_reads: int = 8
     dataset_shuffle_buffer: int = 1000
 
-    # Noise configuration
+    # Noise
     noise_sigma_min: float = 0.0
     noise_sigma_max: float = 0.5
     noise_distribution: str = 'uniform'
 
-    # Training specifics
+    # Training
     patches_per_image: int = 16
     augment_data: bool = True
     normalize_input: bool = True
@@ -199,50 +109,34 @@ class UnifiedBFUNetConfig(TrainingConfig):
     save_training_images: bool = True
 
     def __post_init__(self):
-        """Initialize and validate configuration."""
-        # Determine shapes based on conditioning mode
         self.target_shape = (self.patch_size, self.patch_size, self.target_channels)
 
         if self.conditioning_mode in [ConditioningMode.DENSE_ONLY, ConditioningMode.HYBRID]:
             self.dense_conditioning_shape = (
-                self.patch_size,
-                self.patch_size,
-                self.dense_conditioning_channels
+                self.patch_size, self.patch_size, self.dense_conditioning_channels
             )
         else:
             self.dense_conditioning_shape = None
 
-        self.input_shape = self.target_shape  # For compatibility with base class
-
-        # Call parent
+        self.input_shape = self.target_shape
         super().__post_init__()
 
-        # Validation
         if self.noise_sigma_min < 0 or self.noise_sigma_max <= self.noise_sigma_min:
             raise ValueError("Invalid noise sigma range")
 
-        # Validate data directories based on mode
         if self.conditioning_mode == ConditioningMode.DENSE_ONLY:
             if not (self.dense_data_dirs or (self.dense_rgb_dirs and self.dense_depth_dirs)):
                 raise ValueError("Dense conditioning requires data directories")
-
         elif self.conditioning_mode == ConditioningMode.DISCRETE_ONLY:
             if not self.discrete_data_dirs:
                 raise ValueError("Discrete conditioning requires data directories")
-
         elif self.conditioning_mode == ConditioningMode.HYBRID:
             if not self.dense_data_dirs:
                 raise ValueError("Hybrid conditioning requires data directories")
 
 
-# =============================================================================
-# DATASET BUILDERS
-# =============================================================================
-
 class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
-    """
-    Unified dataset builder supporting all conditioning modalities.
-    """
+    """Unified dataset builder supporting all conditioning modalities."""
 
     def __init__(
             self,
@@ -250,14 +144,6 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
             model_output_dims: Optional[List[Tuple[int, int]]] = None,
             class_to_idx: Optional[Dict[str, int]] = None
     ):
-        """
-        Initialize unified dataset builder.
-
-        Args:
-            config: UnifiedBFUNetConfig instance.
-            model_output_dims: List of (height, width) for each output scale.
-            class_to_idx: Optional mapping from class names to indices.
-        """
         super().__init__(config)
         self.config: UnifiedBFUNetConfig = config
         self.model_output_dims = model_output_dims
@@ -265,17 +151,14 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
         self.unconditional_token = None
 
     def _discover_classes(self, directories: List[str]) -> Dict[str, int]:
-        """Discover class structure from directory organization."""
         if not self.config.organize_by_subfolders:
             raise ValueError("Class discovery requires subfolder organization")
 
         class_names = set()
-
         for directory in directories:
             dir_path = Path(directory)
             if not dir_path.is_dir():
                 continue
-
             subdirs = [d for d in dir_path.iterdir() if d.is_dir()]
             class_names.update([d.name for d in subdirs])
 
@@ -285,32 +168,25 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
         sorted_classes = sorted(class_names)
         class_to_idx = {name: idx for idx, name in enumerate(sorted_classes)}
 
-        # Reserve last index for unconditional token if CFG enabled
         if self.config.enable_cfg_training:
             self.unconditional_token = len(class_to_idx)
             class_to_idx['__unconditional__'] = self.unconditional_token
             logger.info(f"Reserved class {self.unconditional_token} as unconditional token")
 
         logger.info(f"Discovered {len(sorted_classes)} classes: {sorted_classes}")
-
         return class_to_idx
 
     def _load_and_preprocess_target(self, path: tf.Tensor) -> tf.Tensor:
-        """Load and preprocess target signal (depth or image)."""
         try:
             data_string = tf.io.read_file(path)
             data = tf.image.decode_image(
-                data_string,
-                channels=self.config.target_channels,
-                expand_animations=False
+                data_string, channels=self.config.target_channels, expand_animations=False
             )
             data.set_shape([None, None, self.config.target_channels])
-
             data = tf.cast(data, tf.float32)
             if self.config.normalize_input:
                 data = data / 255.0
 
-            # Handle small images
             shape = tf.shape(data)
             height, width = shape[0], shape[1]
             min_dim = tf.minimum(height, width)
@@ -324,80 +200,57 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
 
             data = tf.cond(
                 tf.logical_or(height < min_size, width < min_size),
-                true_fn=resize_if_small,
-                false_fn=lambda: data
+                true_fn=resize_if_small, false_fn=lambda: data
             )
-
             patch = tf.image.random_crop(
-                data,
-                [self.config.patch_size, self.config.patch_size, self.config.target_channels]
+                data, [self.config.patch_size, self.config.patch_size, self.config.target_channels]
             )
-
             return patch
 
         except tf.errors.InvalidArgumentError:
-            logger.warning(f"Failed to load target: {path}")
             return tf.zeros(
                 [self.config.patch_size, self.config.patch_size, self.config.target_channels],
                 dtype=tf.float32
             )
 
     def _load_and_preprocess_dense_condition(self, path: tf.Tensor) -> tf.Tensor:
-        """Load and preprocess dense conditioning signal (RGB image)."""
         try:
             data_string = tf.io.read_file(path)
             data = tf.image.decode_image(
-                data_string,
-                channels=self.config.dense_conditioning_channels,
+                data_string, channels=self.config.dense_conditioning_channels,
                 expand_animations=False
             )
             data.set_shape([None, None, self.config.dense_conditioning_channels])
-
             data = tf.cast(data, tf.float32)
             if self.config.normalize_input:
                 data = data / 255.0
-
-            # Resize to match target dimensions
             data = tf.image.resize(data, [self.config.patch_size, self.config.patch_size])
-
             return data
 
         except tf.errors.InvalidArgumentError:
-            logger.warning(f"Failed to load dense condition: {path}")
             return tf.zeros(
                 [self.config.patch_size, self.config.patch_size,
-                 self.config.dense_conditioning_channels],
-                dtype=tf.float32
+                 self.config.dense_conditioning_channels], dtype=tf.float32
             )
 
     def _augment_data(self, *data_tensors):
-        """Apply synchronized data augmentation."""
         if not self.config.augment_data:
             return data_tensors
 
-        # Horizontal flip
         if tf.random.uniform([]) > 0.5:
             data_tensors = tuple(tf.image.flip_left_right(d) for d in data_tensors)
-
-        # Vertical flip
         if tf.random.uniform([]) > 0.5:
             data_tensors = tuple(tf.image.flip_up_down(d) for d in data_tensors)
-
-        # 90-degree rotations
         k = tf.random.uniform([], 0, 4, dtype=tf.int32)
         data_tensors = tuple(tf.image.rot90(d, k) for d in data_tensors)
-
         return data_tensors
 
     def _add_noise(self, target: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Add Gaussian noise to target."""
         if self.config.noise_distribution == 'uniform':
             noise_level = tf.random.uniform(
-                [],
-                self.config.noise_sigma_min,
-                self.config.noise_sigma_max
+                [], self.config.noise_sigma_min, self.config.noise_sigma_max
             )
-        else:  # log_uniform
+        else:
             log_min = tf.math.log(tf.maximum(self.config.noise_sigma_min, 1e-6))
             log_max = tf.math.log(self.config.noise_sigma_max)
             log_noise = tf.random.uniform([], log_min, log_max)
@@ -406,43 +259,26 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
         noise = tf.random.normal(tf.shape(target)) * noise_level
         noisy_target = target + noise
         noisy_target = tf.clip_by_value(noisy_target, 0.0, 1.0)
-
         return noisy_target, target
 
     def _apply_cfg_dropout(self, class_label: tf.Tensor) -> tf.Tensor:
-        """Apply CFG dropout to class labels."""
         if not self.config.enable_cfg_training or self.unconditional_token is None:
             return class_label
 
         should_drop = tf.random.uniform([]) < self.config.cfg_dropout_prob
-
         return tf.cond(
             should_drop,
             lambda: tf.constant(self.unconditional_token, dtype=class_label.dtype),
             lambda: class_label
         )
 
-    def _create_multiscale_labels(
-            self,
-            target: tf.Tensor
-    ) -> Tuple[tf.Tensor, ...]:
-        """Create multi-scale labels for deep supervision."""
+    def _create_multiscale_labels(self, target: tf.Tensor) -> Tuple[tf.Tensor, ...]:
         if self.model_output_dims is None:
             return (target,)
-
-        labels = [
-            tf.image.resize(target, dim)
-            for dim in self.model_output_dims
-        ]
+        labels = [tf.image.resize(target, dim) for dim in self.model_output_dims]
         return tuple(labels)
 
-    def build(self) -> Tuple[
-        tf.data.Dataset,
-        tf.data.Dataset,
-        Optional[int],
-        Optional[int]
-    ]:
-        """Build datasets based on conditioning mode."""
+    def build(self) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int], Optional[int]]:
         logger.info(f"Building unified dataset: mode={self.config.conditioning_mode}")
 
         if self.config.conditioning_mode == ConditioningMode.DISCRETE_ONLY:
@@ -455,17 +291,11 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
             raise ValueError(f"Unknown conditioning mode: {self.config.conditioning_mode}")
 
     def _build_discrete_only(self):
-        """Build dataset for discrete conditioning (class → image)."""
-        logger.info("Building discrete-only conditioning dataset")
-
-        # Discover classes
         if self.class_to_idx is None:
             self.class_to_idx = self._discover_classes(self.config.discrete_data_dirs)
-
         if self.config.num_classes is None:
             self.config.num_classes = len(self.class_to_idx)
 
-        # Create file lists with labels
         def get_files_with_labels(dirs, limit):
             all_files = []
             all_labels = []
@@ -476,15 +306,12 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
                 dir_path = Path(directory)
                 if not dir_path.is_dir():
                     continue
-
                 for class_name, class_idx in self.class_to_idx.items():
                     if class_name == '__unconditional__':
                         continue
-
                     class_dir = dir_path / class_name
                     if not class_dir.is_dir():
                         continue
-
                     for file_path in class_dir.rglob("*"):
                         if file_path.is_file() and file_path.suffix in extensions_set:
                             all_files.append(str(file_path))
@@ -494,23 +321,18 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
                 indices = np.random.choice(len(all_files), limit, replace=False)
                 all_files = [all_files[i] for i in indices]
                 all_labels = [all_labels[i] for i in indices]
-
             return all_files, all_labels
 
         train_files, train_labels = get_files_with_labels(
-            self.config.discrete_data_dirs,
-            self.config.max_train_files
+            self.config.discrete_data_dirs, self.config.max_train_files
         )
-
-        # For validation, reuse training dirs (would typically be separate)
         val_files, val_labels = get_files_with_labels(
             self.config.discrete_data_dirs,
-            min(len(train_files) // 10, 1000)  # 10% or 1000 samples
+            min(len(train_files) // 10, 1000)
         )
-
         logger.info(f"Found {len(train_files)} training, {len(val_files)} validation samples")
 
-        # Build training dataset
+        # Training dataset
         train_ds = tf.data.Dataset.from_tensor_slices((train_files, train_labels))
         train_ds = train_ds.shuffle(
             buffer_size=min(self.config.dataset_shuffle_buffer, len(train_files)),
@@ -525,7 +347,6 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
                 )
             )
 
-        # Load and process
         def process_discrete(path, label):
             target = self._load_and_preprocess_target(path)
             target, = self._augment_data(target)
@@ -542,14 +363,13 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
         train_ds = train_ds.batch(self.config.batch_size, drop_remainder=True)
         train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
 
-        # Build validation dataset (similar but no CFG dropout)
+        # Validation dataset (no CFG dropout)
         val_ds = tf.data.Dataset.from_tensor_slices((val_files, val_labels))
         val_ds = val_ds.repeat()
 
         def process_val_discrete(path, label):
             target = self._load_and_preprocess_target(path)
             noisy, clean = self._add_noise(target)
-
             if self.config.enable_deep_supervision and self.model_output_dims:
                 clean_multiscale = self._create_multiscale_labels(clean)
                 return (noisy, label), clean_multiscale
@@ -562,38 +382,23 @@ class UnifiedBFUNetDatasetBuilder(DatasetBuilder):
 
         steps_per_epoch = len(train_files) * self.config.patches_per_image // self.config.batch_size
         val_steps = len(val_files) // self.config.batch_size
-
         return train_ds, val_ds, steps_per_epoch, val_steps
 
     def _build_dense_only(self):
-        """Build dataset for dense conditioning (RGB → depth)."""
-        logger.info("Building dense-only conditioning dataset")
-
-        # TODO: Implement paired (RGB, depth) data loading
-        # This requires specific dataset formats (e.g., NYU Depth V2, KITTI)
         raise NotImplementedError(
             "Dense-only conditioning requires custom dataset implementation. "
             "Please implement paired RGB-depth data loading for your specific dataset."
         )
 
     def _build_hybrid(self):
-        """Build dataset for hybrid conditioning (RGB + class → depth)."""
-        logger.info("Building hybrid conditioning dataset")
-
-        # TODO: Implement triplet (RGB, class, depth) data loading
         raise NotImplementedError(
             "Hybrid conditioning requires custom dataset implementation. "
             "Please implement RGB-class-depth triplet loading for your specific dataset."
         )
 
     def get_test_data(self) -> Optional[DataInput]:
-        """Get test data for analysis."""
         return None
 
-
-# =============================================================================
-# SYNTHESIS AND VISUALIZATION
-# =============================================================================
 
 def conditional_sampling_with_cfg(
         denoiser: keras.Model,
@@ -614,8 +419,6 @@ def conditional_sampling_with_cfg(
     if seed is not None:
         tf.random.set_seed(seed)
 
-    logger.info(f"Conditional sampling with CFG (w={guidance_scale})")
-
     y = tf.random.normal([num_samples] + list(image_shape), mean=0.5, stddev=0.3)
     y = tf.clip_by_value(y, 0.0, 1.0)
 
@@ -625,10 +428,8 @@ def conditional_sampling_with_cfg(
 
     class_labels_tf = tf.constant(class_labels, dtype=tf.int32)
     class_labels_tf = tf.reshape(class_labels_tf, (-1, 1))
-
     unconditional_labels = tf.constant(
-        [[unconditional_token]] * num_samples,
-        dtype=tf.int32
+        [[unconditional_token]] * num_samples, dtype=tf.int32
     )
 
     for t in range(num_steps):
@@ -642,7 +443,6 @@ def conditional_sampling_with_cfg(
         else:
             y_double = tf.concat([y, y], axis=0)
             labels_double = tf.concat([class_labels_tf, unconditional_labels], axis=0)
-
             output_double = denoiser([y_double, labels_double], training=False)
 
             if isinstance(output_double, list):
@@ -666,20 +466,11 @@ def conditional_sampling_with_cfg(
         if save_intermediate and (t % (num_steps // 10) == 0 or t == num_steps - 1):
             intermediate_steps.append(y.numpy().copy())
 
-        if t % (num_steps // 5) == 0:
-            logger.info(f"Step {t}/{num_steps}: h_t={h_t:.4f}, γ_t={gamma_t:.4f}")
-
-    logger.info("Sampling completed")
     return y, intermediate_steps
 
 
-# =============================================================================
-# METRICS
-# =============================================================================
-
 @keras.saving.register_keras_serializable()
 def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-    """PSNR metric for [0, 1] range."""
     return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=1.0))
 
 
@@ -691,12 +482,7 @@ class PrimaryOutputPSNR(keras.metrics.Metric):
         self.psnr_sum = self.add_weight(name='psnr_sum', initializer='zeros')
         self.count = self.add_weight(name='count', initializer='zeros')
 
-    def update_state(
-            self,
-            y_true: Union[tf.Tensor, List[tf.Tensor]],
-            y_pred: Union[tf.Tensor, List[tf.Tensor]],
-            sample_weight: Optional[tf.Tensor] = None
-    ):
+    def update_state(self, y_true, y_pred, sample_weight=None):
         if isinstance(y_pred, list):
             primary_pred = y_pred[0]
             primary_true = y_true[0]
@@ -716,10 +502,6 @@ class PrimaryOutputPSNR(keras.metrics.Metric):
         self.count.assign(0.0)
 
 
-# =============================================================================
-# CALLBACKS
-# =============================================================================
-
 class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
     """Dynamic weight scheduler for deep supervision."""
 
@@ -734,18 +516,13 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
             'config': config.deep_supervision_schedule_config
         }
         self.scheduler = deep_supervision_schedule_builder(
-            ds_config,
-            self.num_outputs,
-            invert_order=False
+            ds_config, self.num_outputs, invert_order=False
         )
-
-        logger.info("Deep supervision scheduler initialized")
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
         progress = min(1.0, epoch / max(1, self.total_epochs - 1))
         new_weights = self.scheduler(progress)
         self.model.loss_weights = new_weights
-
         weights_str = ", ".join([f"{w:.4f}" for w in new_weights])
         logger.info(f"Epoch {epoch + 1} - DS weights: [{weights_str}]")
 
@@ -766,56 +543,33 @@ class ConditionalSynthesisMonitorCallback(keras.callbacks.Callback):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.class_to_idx = class_to_idx
         self.unconditional_token = unconditional_token
-
-        if class_to_idx:
-            self.idx_to_class = {v: k for k, v in class_to_idx.items()}
-        else:
-            self.idx_to_class = {}
+        self.idx_to_class = {v: k for k, v in class_to_idx.items()} if class_to_idx else {}
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
         if not self.config.enable_synthesis:
             return
-
         if self.config.conditioning_mode != ConditioningMode.DISCRETE_ONLY:
             return
-
         if (epoch + 1) % self.config.monitor_every_n_epochs != 0:
             return
-
         if self.class_to_idx is None or self.unconditional_token is None:
             return
 
         try:
-            logger.info(f"Generating conditional samples at epoch {epoch + 1}")
+            shape = (self.config.patch_size, self.config.patch_size, self.config.target_channels)
 
-            shape = (
-                self.config.patch_size,
-                self.config.patch_size,
-                self.config.target_channels
-            )
-
-            # Select classes to visualize
             valid_classes = [
                 idx for idx in self.class_to_idx.values()
                 if idx != self.unconditional_token
             ]
             num_classes_to_viz = min(5, len(valid_classes))
             selected_classes = np.random.choice(
-                valid_classes,
-                size=num_classes_to_viz,
-                replace=False
+                valid_classes, size=num_classes_to_viz, replace=False
             )
 
-            # Generate for each CFG scale
             results = {}
             for cfg_scale in self.config.cfg_guidance_scales:
-                logger.info(f"  CFG scale {cfg_scale}")
-
-                class_labels = np.repeat(
-                    selected_classes,
-                    self.config.synthesis_samples
-                )
-
+                class_labels = np.repeat(selected_classes, self.config.synthesis_samples)
                 generated, intermediates = conditional_sampling_with_cfg(
                     denoiser=self.model,
                     class_labels=class_labels,
@@ -831,7 +585,6 @@ class ConditionalSynthesisMonitorCallback(keras.callbacks.Callback):
                     seed=epoch + int(cfg_scale * 100),
                     save_intermediate=True
                 )
-
                 results[cfg_scale] = (generated, class_labels, intermediates)
 
             self._visualize_synthesis(epoch + 1, results, selected_classes)
@@ -839,23 +592,15 @@ class ConditionalSynthesisMonitorCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Synthesis failed: {e}")
 
-    def _visualize_synthesis(
-            self,
-            epoch: int,
-            results: Dict[float, Tuple],
-            selected_classes: np.ndarray
-    ):
-        """Visualize synthesis results."""
+    def _visualize_synthesis(self, epoch: int, results: Dict[float, Tuple], selected_classes: np.ndarray):
         try:
             num_cfg_scales = len(results)
             num_classes = len(selected_classes)
 
             fig, axes = plt.subplots(
-                num_cfg_scales,
-                num_classes,
+                num_cfg_scales, num_classes,
                 figsize=(3 * num_classes, 3 * num_cfg_scales)
             )
-
             if num_cfg_scales == 1:
                 axes = axes.reshape(1, -1)
             if num_classes == 1:
@@ -870,29 +615,22 @@ class ConditionalSynthesisMonitorCallback(keras.callbacks.Callback):
 
                     if len(class_samples) > 0:
                         img = class_samples[0].numpy()
-
                         if img.shape[-1] == 1:
                             img = img.squeeze(-1)
                             cmap = 'gray'
                         else:
                             cmap = None
-
                         img = np.clip(img, 0, 1)
                         axes[row_idx, col_idx].imshow(img, cmap=cmap, vmin=0, vmax=1)
 
                     axes[row_idx, col_idx].axis('off')
-
                     if row_idx == 0:
                         class_name = self.idx_to_class.get(class_idx, f'Class {class_idx}')
                         axes[row_idx, col_idx].set_title(class_name, fontsize=10)
-
                     if col_idx == 0:
                         axes[row_idx, col_idx].set_ylabel(
-                            f'CFG={cfg_scale:.1f}',
-                            fontsize=10,
-                            rotation=0,
-                            ha='right',
-                            va='center'
+                            f'CFG={cfg_scale:.1f}', fontsize=10,
+                            rotation=0, ha='right', va='center'
                         )
 
             plt.tight_layout()
@@ -904,10 +642,6 @@ class ConditionalSynthesisMonitorCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Visualization failed: {e}")
 
-
-# =============================================================================
-# TRAINING PIPELINE
-# =============================================================================
 
 class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
     """Training pipeline for unified conditional BFU-Net."""
@@ -921,9 +655,6 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
         self.unconditional_token = None
 
     def _compile_model(self, model: keras.Model, total_steps: int):
-        """Compile model."""
-        logger.info("Compiling unified conditional BFU-Net")
-
         has_multiple_outputs = isinstance(model.output, list)
         self.num_outputs = len(model.output) if has_multiple_outputs else 1
 
@@ -931,7 +662,6 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
             self.model_output_dims = [
                 (out.shape[1], out.shape[2]) for out in model.output
             ]
-            logger.info(f"Multi-output model: {self.num_outputs} outputs")
 
         lr_schedule = self._create_lr_schedule(total_steps)
         optimizer = self._create_optimizer(lr_schedule)
@@ -939,12 +669,11 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
         if has_multiple_outputs:
             loss_fns = ['mse'] * self.num_outputs
             initial_weights = [1.0 / self.num_outputs] * self.num_outputs
-            metrics_for_primary = [
+            metrics = {'final_output': [
                 keras.metrics.MeanAbsoluteError(name='mae'),
                 keras.metrics.RootMeanSquaredError(name='rmse'),
                 PrimaryOutputPSNR()
-            ]
-            metrics = {'final_output': metrics_for_primary}
+            ]}
         else:
             loss_fns = 'mse'
             initial_weights = None
@@ -955,20 +684,15 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
             ]
 
         model.compile(
-            optimizer=optimizer,
-            loss=loss_fns,
-            loss_weights=initial_weights,
-            metrics=metrics
+            optimizer=optimizer, loss=loss_fns,
+            loss_weights=initial_weights, metrics=metrics
         )
-
-        logger.info("Model compiled")
 
     def _create_callbacks(
             self,
             lr_schedule: Optional[Any] = None,
             custom_callbacks: Optional[List[keras.callbacks.Callback]] = None
     ) -> List[keras.callbacks.Callback]:
-        """Create callbacks."""
         callbacks = super()._create_callbacks(lr_schedule, custom_callbacks)
 
         if self.config.enable_deep_supervision and self.num_outputs > 1:
@@ -980,10 +704,8 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
             if self.config.enable_synthesis and self.class_to_idx is not None:
                 callbacks.append(
                     ConditionalSynthesisMonitorCallback(
-                        self.config,
-                        self.experiment_dir,
-                        self.class_to_idx,
-                        self.unconditional_token
+                        self.config, self.experiment_dir,
+                        self.class_to_idx, self.unconditional_token
                     )
                 )
 
@@ -995,7 +717,6 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
             dataset_builder: DatasetBuilder,
             custom_callbacks: Optional[List[keras.callbacks.Callback]] = None
     ) -> Tuple[keras.Model, keras.callbacks.History]:
-        """Run training."""
         # Get class info if discrete conditioning
         if self.config.conditioning_mode in [ConditioningMode.DISCRETE_ONLY, ConditioningMode.HYBRID]:
             if isinstance(dataset_builder, UnifiedBFUNetDatasetBuilder):
@@ -1010,9 +731,7 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
                     if self.config.num_classes is None:
                         self.config.num_classes = len(self.class_to_idx)
 
-        # Build model to get output dimensions
         temp_model = model_builder(self.config)
-
         if isinstance(temp_model.output, list):
             self.model_output_dims = [
                 (out.shape[1], out.shape[2]) for out in temp_model.output
@@ -1023,21 +742,14 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
         del temp_model
         gc.collect()
 
-        # Run training
-        model, history = super().run(
-            model_builder,
-            dataset_builder,
-            custom_callbacks
-        )
+        model, history = super().run(model_builder, dataset_builder, custom_callbacks)
 
-        # Save artifacts
         self._save_inference_model(model, model_builder)
         self._save_metadata()
 
         return model, history
 
     def _save_metadata(self):
-        """Save conditioning metadata."""
         try:
             metadata = {
                 'conditioning_mode': self.config.conditioning_mode,
@@ -1057,17 +769,12 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
             metadata_path = self.experiment_dir / "metadata.json"
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
-
             logger.info(f"Metadata saved: {metadata_path}")
-
         except Exception as e:
             logger.warning(f"Failed to save metadata: {e}")
 
     def _save_inference_model(self, trained_model: keras.Model, model_builder: ModelBuilder):
-        """Save inference model."""
         try:
-            logger.info("Creating inference model")
-
             inference_config = UnifiedBFUNetConfig(**self.config.__dict__)
             inference_config.target_shape = (None, None, self.config.target_channels)
 
@@ -1080,7 +787,6 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
             inference_model_full.set_weights(trained_model.get_weights())
 
             if self.config.enable_deep_supervision and isinstance(inference_model_full.output, list):
-                logger.info("Creating single-output inference model")
                 inference_model = keras.Model(
                     inputs=inference_model_full.input,
                     outputs=inference_model_full.output[0],
@@ -1092,27 +798,18 @@ class UnifiedBFUNetTrainingPipeline(TrainingPipeline):
 
             inference_path = self.experiment_dir / "inference_model.keras"
             inference_model.save(inference_path)
-
             logger.info(f"Inference model saved: {inference_path}")
 
             del inference_model
             gc.collect()
-
         except Exception as e:
             logger.error(f"Failed to save inference model: {e}")
 
-
-# =============================================================================
-# MODEL BUILDER
-# =============================================================================
 
 def build_unified_bfunet(config: UnifiedBFUNetConfig) -> keras.Model:
     """Build unified conditional BFU-Net based on configuration."""
     variant = config.model_args.get('variant', 'custom')
 
-    logger.info(f"Building Unified BFU-Net: mode={config.conditioning_mode}")
-
-    # Determine conditioning shapes
     dense_shape = config.dense_conditioning_shape if config.conditioning_mode in [
         ConditioningMode.DENSE_ONLY, ConditioningMode.HYBRID
     ] else None
@@ -1121,7 +818,6 @@ def build_unified_bfunet(config: UnifiedBFUNetConfig) -> keras.Model:
         ConditioningMode.DISCRETE_ONLY, ConditioningMode.HYBRID
     ] else None
 
-    # Build appropriate model
     if variant == 'custom':
         model = create_unified_conditional_bfunet(
             target_shape=config.target_shape,
@@ -1148,122 +844,79 @@ def build_unified_bfunet(config: UnifiedBFUNetConfig) -> keras.Model:
     return model
 
 
-# =============================================================================
-# CLI
-# =============================================================================
-
 def create_argument_parser() -> argparse.ArgumentParser:
-    """Create argument parser."""
     parser = argparse.ArgumentParser(
         description='Train Unified Conditional BFU-Net',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-
     parser.add_argument(
-        '--conditioning-mode',
-        type=str,
+        '--conditioning-mode', type=str,
         choices=['dense_only', 'discrete_only', 'hybrid'],
-        default='discrete_only',
-        help='Conditioning modality'
+        default='discrete_only'
     )
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--patch-size', type=int, default=128)
     parser.add_argument('--target-channels', type=int, default=1)
-
     parser.add_argument('--enable-deep-supervision', action='store_true', default=True)
     parser.add_argument('--no-deep-supervision', dest='enable_deep_supervision', action='store_false')
-
     parser.add_argument('--enable-cfg-training', action='store_true', default=False)
     parser.add_argument('--cfg-dropout-prob', type=float, default=0.1)
-
     parser.add_argument('--enable-synthesis', action='store_true', default=True)
     parser.add_argument('--no-synthesis', dest='enable_synthesis', action='store_false')
-
     parser.add_argument('--output-dir', type=str, default='results')
     parser.add_argument('--experiment-name', type=str, default=None)
-
     return parser
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def main():
-    """Main training function."""
+    setup_gpu()
+
     parser = create_argument_parser()
     args = parser.parse_args()
 
-    # Example configuration for discrete-only (class-conditional)
     config = UnifiedBFUNetConfig(
-        # Conditioning mode
         conditioning_mode=ConditioningMode(args.conditioning_mode),
-
-        # Data paths - MODIFY FOR YOUR SETUP
-        discrete_data_dirs=[
-            '/path/to/class/organized/data',  # MODIFY
-        ],
-
-        # Target
+        discrete_data_dirs=['/path/to/class/organized/data'],
         patch_size=args.patch_size,
         target_channels=args.target_channels,
-
-        # Model
         model_args={'variant': 'custom'},
         depth=3,
         blocks_per_level=2,
         filters=64,
-
-        # Training
         epochs=args.epochs,
         batch_size=args.batch_size,
         patches_per_image=16,
-
-        # Conditioning
         enable_cfg_training=args.enable_cfg_training,
         cfg_dropout_prob=args.cfg_dropout_prob,
-
-        # Deep supervision
         enable_deep_supervision=args.enable_deep_supervision,
-
-        # Synthesis
         enable_synthesis=args.enable_synthesis,
         synthesis_samples=2,
         synthesis_steps=200,
-
-        # Optimization
         learning_rate=1e-3,
         optimizer_type='adamw',
         lr_schedule_type='cosine',
         weight_decay=1e-5,
-
-        # Output
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         enable_visualization=True,
         enable_analysis=False,
     )
 
-    logger.info("=== Unified Conditional BFU-Net Training ===")
-    logger.info(f"Conditioning mode: {config.conditioning_mode}")
-    logger.info(f"Deep supervision: {config.enable_deep_supervision}")
-    logger.info(f"CFG training: {config.enable_cfg_training}")
-    logger.info(f"Epochs: {config.epochs}")
+    logger.info(f"Unified BFU-Net: mode={config.conditioning_mode}, "
+                f"DS={config.enable_deep_supervision}, CFG={config.enable_cfg_training}, "
+                f"epochs={config.epochs}")
 
     try:
         dataset_builder = UnifiedBFUNetDatasetBuilder(config)
         pipeline = UnifiedBFUNetTrainingPipeline(config)
 
-        logger.info("Starting training...")
         model, history = pipeline.run(
             model_builder=build_unified_bfunet,
             dataset_builder=dataset_builder
         )
 
-        logger.info("Training completed successfully!")
-        logger.info(f"Results: {pipeline.experiment_dir}")
-
+        logger.info(f"Training completed. Results: {pipeline.experiment_dir}")
         model.summary(print_fn=logger.info)
 
     except Exception as e:
