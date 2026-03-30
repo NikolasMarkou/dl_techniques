@@ -14,7 +14,7 @@ from matplotlib import patches
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.vision_heads.task_types import TaskType
 from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
@@ -101,37 +101,22 @@ def create_coco_callbacks(
         save_best_only: bool = True, enable_visualizations: bool = True,
         visualization_freq: int = 5
 ) -> list:
-    """Create callbacks for COCO pre-training."""
-    os.makedirs(results_dir, exist_ok=True)
-
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor=monitor, patience=patience, restore_best_weights=True,
-            mode='min', verbose=1, min_delta=1e-4
-        ),
-        keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(results_dir, 'best_coco_model.keras'),
-            monitor=monitor, save_best_only=save_best_only,
-            save_weights_only=False, mode='min', verbose=1
-        ),
-        keras.callbacks.CSVLogger(
-            filename=os.path.join(results_dir, 'coco_training_log.csv'), append=False
-        ),
-        keras.callbacks.TensorBoard(
-            log_dir=os.path.join(results_dir, 'tensorboard'),
-            histogram_freq=0, write_graph=True, write_images=False,
-            update_freq='epoch', profile_batch=0
-        ),
-        ProgressLoggingCallback()
-    ]
+    """Create callbacks for COCO pre-training: common + domain-specific."""
+    callbacks, common_dir = create_common_callbacks(
+        model_name="coco_pretrain",
+        results_dir_prefix=results_dir,
+        monitor=monitor,
+        patience=patience,
+        use_lr_schedule=True,
+    )
+    callbacks.append(ProgressLoggingCallback())
 
     if enable_visualizations and validation_dataset is not None:
-        viz_callback = COCOVisualizationCallback(
-            validation_dataset=validation_dataset, results_dir=results_dir,
+        callbacks.append(COCOVisualizationCallback(
+            validation_dataset=validation_dataset, results_dir=common_dir,
             img_size=img_size, num_samples=4, visualization_freq=visualization_freq,
             confidence_threshold=0.3, reg_max=16
-        )
-        callbacks.append(viz_callback)
+        ))
         logger.info(f"COCO visualization callback added (every {visualization_freq} epochs)")
     elif enable_visualizations:
         logger.warning("Visualizations enabled but no validation dataset provided")

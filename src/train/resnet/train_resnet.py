@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -376,35 +376,21 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
             logger.warning(f"Failed to create metrics plots: {e}")
 
 
-def create_callbacks(config: TrainingConfig, num_outputs: int) -> List[keras.callbacks.Callback]:
-    """Create training callbacks."""
-    callbacks = []
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+def create_callbacks(config: TrainingConfig, num_outputs: int) -> Tuple[List[keras.callbacks.Callback], str]:
+    """Create training callbacks: common (checkpoint, early stop, CSV, analyzer) + domain-specific."""
+    callbacks, results_dir = create_common_callbacks(
+        model_name=config.experiment_name or config.model_variant,
+        results_dir_prefix="resnet",
+        monitor="val_loss",
+        patience=config.early_stopping_patience,
+        use_lr_schedule=True,
+    )
 
     if config.enable_deep_supervision and num_outputs > 1:
         callbacks.append(DeepSupervisionWeightScheduler(config, num_outputs))
-
-    if config.save_model_checkpoints:
-        callbacks.append(keras.callbacks.ModelCheckpoint(
-            filepath=str(output_dir / "best_model.keras"),
-            monitor='val_loss', save_best_only=config.save_best_only,
-            save_weights_only=False, verbose=1
-        ))
-
-    callbacks.append(keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=config.early_stopping_patience,
-        restore_best_weights=True, verbose=1
-    ))
-
-    callbacks.append(keras.callbacks.CSVLogger(str(output_dir / "training_log.csv"), append=True))
     callbacks.append(MetricsVisualizationCallback(config))
-    callbacks.append(keras.callbacks.TensorBoard(
-        log_dir=str(output_dir / "tensorboard"),
-        histogram_freq=1, write_graph=True, update_freq='epoch'
-    ))
 
-    return callbacks
+    return callbacks, results_dir
 
 
 # =============================================================================
@@ -457,9 +443,9 @@ def convert_keras_history_to_training_history(keras_history: keras.callbacks.His
 # MAIN TRAINING
 # =============================================================================
 
-def train_resnet_imagenet(config: TrainingConfig) -> keras.Model:
+def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) -> keras.Model:
     """Orchestrate the complete ResNet ImageNet training pipeline."""
-    setup_gpu()
+    setup_gpu(gpu_id)
 
     logger.info(f"Experiment: {config.experiment_name}, Variant: {config.model_variant}")
     logger.info(f"Deep Supervision: {'ENABLED (' + config.deep_supervision_schedule_type + ')' if config.enable_deep_supervision else 'DISABLED'}")
@@ -532,7 +518,7 @@ def train_resnet_imagenet(config: TrainingConfig) -> keras.Model:
     model.compile(optimizer=optimizer, loss=loss_fns, loss_weights=initial_weights, metrics=metrics)
 
     # Train
-    callbacks = create_callbacks(config, num_outputs)
+    callbacks, _ = create_callbacks(config, num_outputs)
 
     val_steps = config.validation_steps
     if val_steps is None:
@@ -613,6 +599,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--experiment-name', type=str, default=None)
     parser.add_argument('--monitor-every', type=int, default=5)
     parser.add_argument('--early-stopping-patience', type=int, default=15)
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
 
     return parser.parse_args()
 
@@ -644,7 +631,7 @@ def main() -> None:
                 f"{config.epochs} epochs, batch={config.batch_size}, lr={config.learning_rate}")
 
     try:
-        model = train_resnet_imagenet(config)
+        model = train_resnet_imagenet(config, gpu_id=args.gpu)
         logger.info("=== TRAINING COMPLETED SUCCESSFULLY ===")
     except Exception as e:
         logger.error(f"Training failed: {e}")

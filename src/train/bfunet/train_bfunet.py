@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import (
@@ -715,32 +715,20 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
 def create_callbacks(
     config: TrainingConfig, val_directories: List[str], num_outputs: int
 ) -> List[keras.callbacks.Callback]:
-    """Create training callbacks (DS scheduler, checkpoint, early stopping, CSV, visualization, monitoring, TB)."""
-    callbacks = []
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Create training callbacks: common (checkpoint, early stop, CSV, analyzer) + domain-specific."""
+    callbacks, _ = create_common_callbacks(
+        model_name=config.experiment_name or config.model_type,
+        results_dir_prefix="bfunet",
+        monitor="val_loss",
+        patience=config.early_stopping_patience,
+        use_lr_schedule=True,
+    )
 
     if config.enable_deep_supervision and num_outputs > 1:
         callbacks.append(DeepSupervisionWeightScheduler(config, num_outputs))
-
-    if config.save_model_checkpoints:
-        callbacks.append(keras.callbacks.ModelCheckpoint(
-            filepath=str(output_dir / "best_model.keras"),
-            monitor='val_loss', save_best_only=config.save_best_only,
-            save_weights_only=False, verbose=1
-        ))
-
-    callbacks.append(keras.callbacks.EarlyStopping(
-        monitor='val_loss', patience=config.early_stopping_patience,
-        restore_best_weights=True, verbose=1
-    ))
-    callbacks.append(keras.callbacks.CSVLogger(str(output_dir / "training_log.csv"), append=True))
     callbacks.append(MetricsVisualizationCallback(config))
     callbacks.append(StreamingResultMonitor(config, val_directories))
-    callbacks.append(keras.callbacks.TensorBoard(
-        log_dir=str(output_dir / "tensorboard"),
-        histogram_freq=1, write_graph=True, update_freq='epoch'
-    ))
+
     return callbacks
 
 
