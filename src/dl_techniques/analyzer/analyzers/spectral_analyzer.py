@@ -215,7 +215,7 @@ class SpectralAnalyzer(BaseAnalyzer):
             pl_pvalue = -1.0
             if status == "success" and alpha > 1.0:
                 pl_pvalue = spectral_metrics.powerlaw_goodness_of_fit(
-                    evals, alpha, xmin, n_bootstraps=50)
+                    evals, alpha, xmin, n_bootstraps=self.config.spectral_bootstraps)
 
             concentration_metrics = {}
             if self.config.spectral_concentration_analysis and Wmats:
@@ -259,8 +259,8 @@ class SpectralAnalyzer(BaseAnalyzer):
             - A pandas DataFrame with metadata for each analyzable layer.
             - The flat list of all layers discovered recursively.
         """
-        details = pd.DataFrame()
         all_layers = recursively_get_layers(model)
+        rows = []
 
         for layer_id, layer in enumerate(all_layers):
             layer_type = spectral_utils.infer_layer_type(layer)
@@ -272,14 +272,14 @@ class SpectralAnalyzer(BaseAnalyzer):
             if M < self.config.spectral_min_evals or M > self.config.spectral_max_evals:
                 continue
 
-            row_data = {
+            rows.append({
                 'layer_id': layer_id, 'name': layer.name, 'layer_type': layer_type.value,
                 'N': N, 'M': M, 'rf': rf, 'Q': N / M if M > 0 else -1,
                 'num_params': int(np.prod(weights.shape)),
                 MetricNames.NUM_EVALS: M * rf
-            }
-            details = pd.concat([details, pd.DataFrame([row_data])], ignore_index=True)
+            })
 
+        details = pd.DataFrame(rows)
         if not details.empty:
             details.set_index('layer_id', inplace=True)
 

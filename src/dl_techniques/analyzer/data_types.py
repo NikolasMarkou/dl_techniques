@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple, NamedTuple, Set
+from typing import Dict, List, Optional, Any, Tuple, Union, NamedTuple, Set
 
 
 class DataInput(NamedTuple):
     """Structured data input type."""
-    x_data: np.ndarray
+    x_data: Union[np.ndarray, Dict[str, Any]]
     y_data: np.ndarray
 
     @classmethod

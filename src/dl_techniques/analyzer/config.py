@@ -4,6 +4,7 @@ Configuration for Model Analyzer
 Configuration classes and plotting setup utilities.
 """
 
+import matplotlib
 import seaborn as sns
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ class AnalysisConfig:
 
     # NEW FLAG: Controls generation of individual layer plot files
     spectral_per_layer_diagnostics: bool = False
+    spectral_bootstraps: int = 50
 
     # Visualization settings
     plot_style: str = 'publication'
@@ -89,6 +91,9 @@ class AnalysisConfig:
 
     def setup_plotting_style(self) -> None:
         """Set up matplotlib style based on configuration."""
+        # Use non-interactive backend for file-based rendering
+        matplotlib.use('Agg')
+
         # Save current rcParams to restore later if needed
         self._original_rcParams = plt.rcParams.copy()
 

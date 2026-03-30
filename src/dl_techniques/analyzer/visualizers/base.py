@@ -72,17 +72,17 @@ class BaseVisualizer(ABC):
         all_models = set()
 
         # Collect models from various analysis results
-        if hasattr(self.results, 'model_metrics') and self.results.model_metrics:
+        if self.results.model_metrics:
             all_models.update(self.results.model_metrics.keys())
-        if hasattr(self.results, 'weight_stats') and self.results.weight_stats:
+        if self.results.weight_stats:
             all_models.update(self.results.weight_stats.keys())
-        if hasattr(self.results, 'calibration_metrics') and self.results.calibration_metrics:
+        if self.results.calibration_metrics:
             all_models.update(self.results.calibration_metrics.keys())
-        if hasattr(self.results, 'confidence_metrics') and self.results.confidence_metrics:
+        if self.results.confidence_metrics:
             all_models.update(self.results.confidence_metrics.keys())
-        if hasattr(self.results, 'information_flow') and self.results.information_flow:
+        if self.results.information_flow:
             all_models.update(self.results.information_flow.keys())
-        if hasattr(self.results, 'training_history') and self.results.training_history:
+        if self.results.training_history:
             all_models.update(self.results.training_history.keys())
 
         # Return alphabetically sorted list for consistency

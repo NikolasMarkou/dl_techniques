@@ -89,8 +89,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Union, Any, Set
 
-import matplotlib
-matplotlib.use('Agg')  # Use the 'Agg' backend for non-GUI rendering
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------
@@ -174,10 +172,8 @@ OUTPUT_DIR_PREFIX: str = "analysis_"
 
 # Status indicators for model processing
 STATUS_SUCCESS: str = 'success'
-STATUS_MULTI_INPUT_SKIPPED: str = 'multi_input_skipped'
 STATUS_EVALUATION_FAILED: str = 'evaluation_failed'
 STATUS_ERROR: str = 'error'
-STATUS_SKIPPED_MULTI_INPUT: str = 'skipped_multi_input'
 STATUS_UNKNOWN: str = 'unknown'
 
 # Cache entry keys

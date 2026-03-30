@@ -5,10 +5,10 @@ Common utility functions used throughout the analyzer module, including
 robust data sampling and metric extraction.
 """
 
+import re
 import keras
 import itertools
 import numpy as np
-import tensorflow as tf
 import matplotlib.colors as mcolors
 from typing import List, Optional, Dict, Tuple, Any, Iterator
 
@@ -51,8 +51,12 @@ class DataSampler:
         y_data = data.y_data
 
         # 1. Handle TensorFlow Datasets
-        if isinstance(x_data, (tf.data.Dataset, tf.distribute.DistributedDataset)):
-            return DataSampler._sample_tf_dataset(x_data, n_samples)
+        try:
+            import tensorflow as tf
+            if isinstance(x_data, (tf.data.Dataset, tf.distribute.DistributedDataset)):
+                return DataSampler._sample_tf_dataset(x_data, n_samples)
+        except ImportError:
+            pass
 
         # 2. Handle Dictionaries (Multi-input models)
         if isinstance(x_data, dict):
@@ -299,7 +303,6 @@ def find_metric_in_history(history: Dict[str, List[float]], patterns: List[str],
 
 def _split_metric_name(name: str) -> List[str]:
     """Split a metric name into its component parts for robust matching."""
-    import re
     parts = name.replace('_', ' ').replace('-', ' ').split()
     expanded_parts = []
     for part in parts:
@@ -458,8 +461,8 @@ def validate_training_history(history: Dict[str, List[float]]) -> Dict[str, List
         elif not isinstance(values, (list, np.ndarray)):
             report['errors'].append(f"Metric '{key}' is not a list or array")
 
-    has_train_loss = any(find_metric_in_history(history, ['loss'], exclude_prefixes=['val_']))
-    has_val_loss = any(find_metric_in_history(history, ['val_loss']))
+    has_train_loss = find_metric_in_history(history, ['loss'], exclude_prefixes=['val_']) is not None
+    has_val_loss = find_metric_in_history(history, ['val_loss']) is not None
 
     if not has_train_loss:
         report['warnings'].append("No training loss found")
