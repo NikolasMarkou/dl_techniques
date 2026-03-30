@@ -3,7 +3,7 @@ import numpy as np
 from typing import List
 
 # Import the classes to test
-from dl_techniques.datasets import (
+from dl_techniques.datasets.time_series import (
     TimeSeriesNormalizer,
     NormalizationMethod
 )
