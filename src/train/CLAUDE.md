@@ -52,7 +52,7 @@ There are 4 patterns depending on the domain. Pick the one closest to your model
 
 ### Pattern 1: Vision Classification (MNIST/CIFAR/ImageNet)
 
-**Used by:** ConvNeXt, CapsNet, CoshKan, CoshNet, CliffordNet, PowerMLP, KAN, ViT, SOM
+**Used by:** ConvNeXt, CapsNet, CoshKan, CoshNet, CliffordNet, PowerMLP, KAN, ViT, SOM, MobileNet (V1-V4)
 
 This is the most common pattern. Uses `load_dataset()`, `create_base_argument_parser()`, and the full evaluation pipeline.
 
@@ -299,6 +299,5 @@ These scripts have legitimate reasons for local callback management:
 | tabm | Custom TabMTrainer class, not standard Keras fit() |
 | ntm/train_multitask | 6 algorithmic task generators with task-specific evaluation |
 | bfunet/train_conditional* | TrainingPipeline inheritance with `_create_callbacks()` override |
-| mobilenet | Incomplete implementation (missing ModelConfig) |
 
 When writing a new script that genuinely can't use `create_callbacks()`, document the reason in a comment at the top of the callbacks section.
