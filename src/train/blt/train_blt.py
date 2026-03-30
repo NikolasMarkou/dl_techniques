@@ -23,6 +23,7 @@ from pathlib import Path
 from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.byte_latent_transformer.model import create_blt_model
+from dl_techniques.layers.blt_blocks import ByteTokenizer, EntropyModel
 
 
 # ---------------------------------------------------------------------
@@ -297,7 +298,7 @@ class BLTTrainer:
             logger.info("Mixed precision training enabled")
 
         if self.config.use_gpu:
-            setup_gpu()
+            pass  # GPU setup handled by main() via setup_gpu(gpu_id)
 
     def prepare_training_data(self) -> Tuple[np.ndarray, np.ndarray]:
         logger.info(f"Generating {self.config.num_training_samples} training samples...")
@@ -509,6 +510,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Train BLT Model")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     parser.add_argument("--config", type=str, help="Path to configuration file")
     parser.add_argument("--preset", type=str, choices=['quick', 'small', 'large'],
                         help="Use preset configuration")
@@ -518,6 +520,8 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, help="Override learning rate")
 
     args = parser.parse_args()
+
+    setup_gpu(gpu_id=args.gpu)
 
     if args.config:
         config = BLTTrainingConfig.load_from_file(args.config)
