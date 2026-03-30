@@ -73,6 +73,10 @@ class ByteTokenizer(keras.layers.Layer):
         except (UnicodeDecodeError, ValueError):
             return ""
 
+    def compute_output_shape(self, input_shape):
+        """ByteTokenizer is a utility layer; output shape equals input shape."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -196,6 +200,10 @@ class HashNGramEmbedding(keras.layers.Layer):
             self._compute_ngram_embeddings(inputs, n) for n in self.ngram_sizes
         ]
         return ops.sum(ops.stack(all_embeddings), axis=0)
+
+    def compute_output_shape(self, input_shape):
+        """Output shape: (batch_size, seq_len) -> (batch_size, seq_len, embed_dim)."""
+        return (*input_shape, self.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -400,6 +408,10 @@ class ModernBertBltEmbeddings(keras.layers.Layer):
         if hasattr(token_ids, 'numpy'):
             token_ids = token_ids.numpy()
         return self.tokenizer.tokens_to_text(token_ids.flatten().tolist())
+
+    def compute_output_shape(self, input_shape):
+        """Output shape: (batch_size, seq_len) -> (batch_size, seq_len, hidden_size)."""
+        return (*input_shape, self.hidden_size)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""

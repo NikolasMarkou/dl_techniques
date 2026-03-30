@@ -293,6 +293,10 @@ class HashNGramEmbedding(keras.layers.Layer):
 
         return ngram_embeddings
 
+    def compute_output_shape(self, input_shape):
+        """Output shape: (batch_size, seq_len) -> (batch_size, seq_len, embed_dim)."""
+        return (*input_shape, self.embed_dim)
+
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
@@ -506,6 +510,11 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
     def get_vocab_size(self) -> int:
         """Get vocabulary size from ByteTokenizer."""
         return self.tokenizer.vocab_size
+
+    def compute_output_shape(self, input_shape):
+        """Output shape: (batch_size, seq_len) -> (batch_size, total_seq_len, embed_dim)."""
+        batch_size = input_shape[0]
+        return (batch_size, self.total_seq_len, self.config.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
@@ -802,6 +811,21 @@ class ReasoningByteCore(keras.layers.Layer):
         }
 
         return new_carry, outputs
+
+    def compute_output_shape(self, input_shape):
+        """Output shape for carry dict and outputs dict."""
+        batch_size = input_shape[1][0]  # from embeddings shape
+        patch_shape = (batch_size, self.config.max_patches, self.config.embed_dim)
+        return (
+            {"z_h": patch_shape, "z_l": patch_shape},
+            {
+                "logits": (batch_size, self.config.vocab_size),
+                "q_halt_logits": (batch_size,),
+                "q_continue_logits": (batch_size,),
+                "patch_representations": patch_shape,
+                "entropy": (batch_size, self.config.seq_len),
+            }
+        )
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
