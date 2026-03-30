@@ -341,13 +341,18 @@ class BLTTrainer:
             dropout_rate=self.config.dropout_rate
         )
 
-        self.entropy_model.compile(
+        # Wrap Layer in a Model for compile/fit
+        entropy_input = keras.Input(shape=(train_x.shape[1],), dtype="int32", name="entropy_input")
+        entropy_output = self.entropy_model(entropy_input)
+        entropy_train_model = keras.Model(inputs=entropy_input, outputs=entropy_output, name="entropy_train_model")
+
+        entropy_train_model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=1e-3),
             loss='sparse_categorical_crossentropy',
             metrics=['accuracy']
         )
 
-        entropy_history = self.entropy_model.fit(
+        entropy_history = entropy_train_model.fit(
             train_x, train_y,
             epochs=self.config.entropy_model_epochs,
             batch_size=max(self.config.batch_size, 8),
@@ -357,7 +362,7 @@ class BLTTrainer:
         logger.info(f"Entropy model final loss: {entropy_history.history['loss'][-1]:.4f}")
 
         entropy_path = Path(self.config.output_dir) / "entropy_model.keras"
-        self.entropy_model.save(str(entropy_path))
+        entropy_train_model.save(str(entropy_path))
         return self.entropy_model
 
     def create_blt_model(self) -> keras.Model:
@@ -365,8 +370,14 @@ class BLTTrainer:
         model_config = self.config.get_model_config()
         model_config['entropy_model'] = self.entropy_model
 
-        self.blt_model = create_blt_model(
-            **model_config, compile_model=True, learning_rate=self.config.learning_rate
+        self.blt_model = create_blt_model(**model_config)
+        # Build by running a dummy forward pass
+        dummy_input = np.zeros((1, self.config.max_sequence_length), dtype=np.int32)
+        _ = self.blt_model(dummy_input, training=False)
+        self.blt_model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=self.config.learning_rate),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy'],
         )
         logger.info(f"BLT model: {self.blt_model.count_params():,} parameters")
         return self.blt_model

@@ -429,7 +429,7 @@ class EntropyModel(keras.layers.Layer):
                 hidden_size=self.hidden_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.hidden_dim * 4,
-                dropout=self.dropout_rate,
+                dropout_rate=self.dropout_rate,
                 name=f'transformer_layer_{i}'
             )
             self.transformer_layers.append(layer)
@@ -770,7 +770,7 @@ class PatchPooling(keras.layers.Layer):
         # Create sub-layers in __init__
         if self.pooling_method == 'attention':
             self.attention_layer = MultiHeadAttention(
-                embed_dim=self.output_dim,  # Will be adjusted in build if needed
+                dim=self.output_dim,
                 num_heads=8,
                 name='patch_attention'
             )
@@ -1059,7 +1059,7 @@ class LocalEncoder(keras.layers.Layer):
                 hidden_size=self.local_dim,
                 num_heads=self.num_heads_local,
                 intermediate_size=self.local_dim * 4,
-                dropout=self.dropout_rate,
+                dropout_rate=self.dropout_rate,
                 name=f'local_transformer_{i}'
             )
             self.transformer_layers.append(layer)
@@ -1222,7 +1222,7 @@ class GlobalTransformer(keras.layers.Layer):
                 hidden_size=self.global_dim,
                 num_heads=self.num_heads_global,
                 intermediate_size=self.global_dim * 4,
-                dropout=self.dropout_rate,
+                dropout_rate=self.dropout_rate,
                 name=f'global_transformer_{i}'
             )
             self.transformer_layers.append(layer)
@@ -1384,14 +1384,14 @@ class LocalDecoder(keras.layers.Layer):
                 hidden_size=self.local_dim,
                 num_heads=self.num_heads_local,
                 intermediate_size=self.local_dim * 4,
-                dropout=self.dropout_rate,
+                dropout_rate=self.dropout_rate,
                 name=f'decoder_transformer_{i}'
             )
             self.decoder_layers.append(decoder_layer)
 
             # Cross-attention to global patch context
             cross_attention = MultiHeadAttention(
-                embed_dim=self.local_dim,
+                dim=self.local_dim,
                 num_heads=self.num_heads_local,
                 dropout_rate=self.dropout_rate,
                 name=f'cross_attention_{i}'

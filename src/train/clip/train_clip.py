@@ -573,10 +573,42 @@ class CLIPInference:
 # Main
 # ---------------------------------------------------------------------
 
+def _create_synthetic_clip_data(num_samples: int = 64, image_size: int = 224):
+    """Create synthetic image/caption data for validation runs."""
+    import tempfile
+    from PIL import Image
+
+    tmp_dir = tempfile.mkdtemp(prefix="clip_synthetic_")
+    image_paths = []
+    captions = []
+    sample_captions = [
+        "a photo of a cat", "a photo of a dog", "a red car",
+        "a blue sky", "a green tree", "a white house",
+        "a black cat", "a brown dog", "a yellow flower",
+        "a purple sunset", "a silver plane", "an orange fruit",
+    ]
+
+    for i in range(num_samples):
+        img = Image.fromarray(np.random.randint(0, 255, (image_size, image_size, 3), dtype=np.uint8))
+        path = os.path.join(tmp_dir, f"img_{i:04d}.png")
+        img.save(path)
+        image_paths.append(path)
+        captions.append(sample_captions[i % len(sample_captions)])
+
+    return image_paths, captions
+
+
 def main():
     """Main entry point for CLIP training."""
     parser = argparse.ArgumentParser(description="Train CLIP model")
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--image-dir", type=str, default=None,
+                        help="Directory with images (uses synthetic data if not provided)")
+    parser.add_argument("--captions-file", type=str, default=None,
+                        help="Path to captions file (one caption per line, matching image order)")
     args = parser.parse_args()
 
     setup_gpu(gpu_id=args.gpu)
@@ -589,7 +621,7 @@ def main():
     loss_fn = CLIPContrastiveLoss()
     lr_schedule = learning_rate_schedule_builder({
         "type": "cosine_decay", "warmup_steps": 1000, "warmup_start_lr": 1e-8,
-        "learning_rate": 1e-4, "decay_steps": 50000, "alpha": 0.0001
+        "learning_rate": args.learning_rate, "decay_steps": 50000, "alpha": 0.0001
     })
     optimizer = optimizer_builder({
         "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
@@ -603,7 +635,27 @@ def main():
         metrics=metrics, gradient_clip_norm=1.0
     )
 
-    logger.info("CLIP training setup complete. Provide dataset to begin training.")
+    # Load or create dataset
+    if args.image_dir and args.captions_file:
+        import glob
+        image_paths = sorted(glob.glob(os.path.join(args.image_dir, "*.jpg")) +
+                             glob.glob(os.path.join(args.image_dir, "*.png")))
+        with open(args.captions_file, 'r') as f:
+            captions = [line.strip() for line in f.readlines()]
+        logger.info(f"Loaded {len(image_paths)} images and {len(captions)} captions")
+    else:
+        logger.info("No dataset provided, using synthetic data for validation")
+        image_paths, captions = _create_synthetic_clip_data(
+            num_samples=64, image_size=224,
+        )
+
+    data_loader = CLIPDataLoader(image_size=224, context_length=77)
+    train_dataset = data_loader.create_dataset(
+        image_paths, captions, batch_size=args.batch_size,
+    )
+
+    logger.info(f"Starting CLIP training: {args.epochs} epochs, batch_size={args.batch_size}")
+    trainer.fit(train_dataset, epochs=args.epochs)
 
 
 if __name__ == "__main__":
