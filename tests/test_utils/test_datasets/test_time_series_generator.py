@@ -10,16 +10,16 @@ import numpy as np
 
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesConfig
+    TimeSeriesGeneratorConfig,
 )
 
 
-class TestTimeSeriesConfig:
-    """Test suite for TimeSeriesConfig dataclass."""
+class TestTimeSeriesGeneratorConfig:
+    """Test suite for TimeSeriesGeneratorConfig dataclass."""
 
     def test_default_initialization(self):
         """Test default configuration initialization."""
-        config = TimeSeriesConfig()
+        config = TimeSeriesGeneratorConfig()
 
         # Check default values
         assert config.n_samples == 5000
@@ -30,7 +30,7 @@ class TestTimeSeriesConfig:
 
     def test_custom_initialization(self):
         """Test custom configuration initialization."""
-        config = TimeSeriesConfig(
+        config = TimeSeriesGeneratorConfig(
             n_samples=500,
             random_seed=123,
             default_noise_level=0.05,
@@ -49,7 +49,7 @@ class TestTimeSeriesGenerator:
     @pytest.fixture
     def default_config(self):
         """Create a default configuration for testing."""
-        return TimeSeriesConfig(n_samples=100, random_seed=42)
+        return TimeSeriesGeneratorConfig(n_samples=100, random_seed=42)
 
     @pytest.fixture
     def generator(self, default_config):
@@ -183,7 +183,7 @@ class TestTimeSeriesGenerator:
 
     def test_reproducibility(self):
         """Test that generator produces reproducible results."""
-        config = TimeSeriesConfig(n_samples=50, random_seed=123)
+        config = TimeSeriesGeneratorConfig(n_samples=50, random_seed=123)
 
         gen1 = TimeSeriesGenerator(config)
         gen2 = TimeSeriesGenerator(config)
@@ -195,8 +195,8 @@ class TestTimeSeriesGenerator:
 
     def test_different_seeds_produce_different_results(self):
         """Test that different seeds produce different results."""
-        config1 = TimeSeriesConfig(n_samples=50, random_seed=123)
-        config2 = TimeSeriesConfig(n_samples=50, random_seed=456)
+        config1 = TimeSeriesGeneratorConfig(n_samples=50, random_seed=123)
+        config2 = TimeSeriesGeneratorConfig(n_samples=50, random_seed=456)
 
         gen1 = TimeSeriesGenerator(config1)
         gen2 = TimeSeriesGenerator(config2)
@@ -374,7 +374,7 @@ class TestTimeSeriesGenerator:
 
     def test_edge_case_small_n_samples(self):
         """Test with very small n_samples."""
-        config = TimeSeriesConfig(n_samples=5, random_seed=42)
+        config = TimeSeriesGeneratorConfig(n_samples=5, random_seed=42)
         generator = TimeSeriesGenerator(config)
 
         data = generator.generate_task_data("linear_trend_strong")
@@ -383,7 +383,7 @@ class TestTimeSeriesGenerator:
 
     def test_edge_case_large_n_samples(self):
         """Test with large n_samples."""
-        config = TimeSeriesConfig(n_samples=5000, random_seed=42)
+        config = TimeSeriesGeneratorConfig(n_samples=5000, random_seed=42)
         generator = TimeSeriesGenerator(config)
 
         data = generator.generate_task_data("linear_trend_strong")

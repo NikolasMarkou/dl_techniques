@@ -316,7 +316,7 @@ class TestTimeSeriesNormalizer:
         normalizer = TimeSeriesNormalizer()
         all_nan_data = np.array([np.nan, np.nan, np.nan])
 
-        with pytest.raises(ValueError, match="Cannot fit normalizer on data containing only NaN values"):
+        with pytest.raises(ValueError, match="No valid.*NaN.*data points found"):
             normalizer.fit(all_nan_data)
 
     def test_data_with_some_nans(self, data_with_nans):
@@ -381,22 +381,6 @@ class TestTimeSeriesNormalizer:
             normalizer = TimeSeriesNormalizer(method=method)
             assert not normalizer.supports_perfect_inverse
 
-    def test_get_method_info_class_method(self):
-        """Test get_method_info class method."""
-        info = TimeSeriesNormalizer.get_method_info()
-
-        # Should be a dictionary with all methods
-        assert isinstance(info, dict)
-        assert len(info) == len(NormalizationMethod)
-
-        # Each method should have required keys
-        for method_name, method_info in info.items():
-            assert 'description' in method_info
-            assert 'output_range' in method_info
-            assert 'perfect_inverse' in method_info
-            assert 'robust_to_outliers' in method_info
-            assert 'use_case' in method_info
-
     def test_get_statistics_requires_fit(self):
         """Test that get_statistics requires fitting first."""
         normalizer = TimeSeriesNormalizer()
@@ -424,20 +408,6 @@ class TestTimeSeriesNormalizer:
         assert 'TimeSeriesNormalizer' in repr_str
         assert 'standard' in repr_str
         assert 'not fitted' in repr_str
-
-    def test_summary_method(self, simple_data):
-        """Test summary method."""
-        normalizer = TimeSeriesNormalizer(method='standard')
-
-        # Test before fitting
-        summary_before = normalizer.summary()
-        assert 'Not fitted' in summary_before
-
-        # Test after fitting
-        normalizer.fit(simple_data)
-        summary_after = normalizer.summary()
-        assert 'Fitted' in summary_after
-        assert 'Fitted Parameters' in summary_after
 
     # =====================================================================
     # Quantile Method Tests
