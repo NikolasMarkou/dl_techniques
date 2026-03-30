@@ -957,7 +957,8 @@ class PW_FNet(keras.Model):
         Returns:
             Dictionary containing all constructor parameters.
         """
-        config = {
+        config = super().get_config()
+        config.update({
             "img_channels": self.img_channels,
             "width": self.width,
             "middle_blk_num": self.middle_blk_num,
@@ -968,7 +969,7 @@ class PW_FNet(keras.Model):
             "use_spatial_ffn": self.use_spatial_ffn,
             "ffn_type": self.ffn_type,
             "ffn_kwargs": self.ffn_kwargs,
-        }
+        })
         return config
 
 # ---------------------------------------------------------------------

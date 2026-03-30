@@ -14,7 +14,7 @@ import numpy as np
 from dl_techniques.layers.transformers import TransformerLayer
 
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class JEPAPatchEmbedding(layers.Layer):
     """
     Advanced patch embedding layer for JEPA with support for different modalities.
@@ -135,7 +135,7 @@ class JEPAPatchEmbedding(layers.Layer):
         return config
 
 
-@keras.utils.register_keras_serializable(package="JEPA")
+@keras.saving.register_keras_serializable(package="JEPA")
 class JEPAEncoder(layers.Layer):
     """
     JEPA Encoder using Vision Transformer architecture with modern optimizations.
@@ -352,7 +352,7 @@ class JEPAEncoder(layers.Layer):
         return config
 
 
-@keras.utils.register_keras_serializable(package="JEPA")
+@keras.saving.register_keras_serializable(package="JEPA")
 class JEPAPredictor(layers.Layer):
     """
     JEPA Predictor network for masked token prediction.

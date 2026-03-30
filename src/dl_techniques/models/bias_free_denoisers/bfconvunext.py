@@ -55,6 +55,7 @@ from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormal
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class ConvUNextStem(keras.layers.Layer):
     """
     ConvUNext stem block for initial feature extraction using bias-free design.

@@ -108,6 +108,7 @@ def create_dense_conditioning_encoder(
 # CONDITIONING INJECTION MECHANISMS
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable()
 class DenseConditioningInjection(keras.layers.Layer):
     """
     Inject dense conditioning features into target features.
@@ -235,6 +236,7 @@ class DenseConditioningInjection(keras.layers.Layer):
         return config
 
 
+@keras.saving.register_keras_serializable()
 class DiscreteConditioningInjection(keras.layers.Layer):
     """
     Inject discrete conditioning (embeddings) into target features.
