@@ -1,0 +1,22 @@
+# .dockerignore
+
+# Ignore Python virtual environment
+.venv/
+venv/
+env/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore Git directory
+.git/
+
+# Ignore IDE/editor configuration
+.vscode/
+.idea/
+
+# It's also good practice to ignore results/data folders
+results/
+data/
+*.gz
