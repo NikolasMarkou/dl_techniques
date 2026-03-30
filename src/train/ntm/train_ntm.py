@@ -1,59 +1,12 @@
 """Neural Turing Machine training on the copy task."""
 
-import os
 import keras
 import numpy as np
-from datetime import datetime
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ntm import create_ntm
 from . import CopyTaskGenerator, CopyTaskConfig
-
-
-# =====================================================================
-# Configuration
-# =====================================================================
-
-# NTM Memory
-MEMORY_SIZE = 128
-MEMORY_DIM = 20
-
-# Controller
-CONTROLLER_DIM = 100
-CONTROLLER_TYPE = 'lstm'
-
-# Heads
-NUM_READ_HEADS = 1
-NUM_WRITE_HEADS = 1
-
-# Copy Task
-SEQUENCE_LENGTH = 20
-VECTOR_SIZE = 8
-NUM_SAMPLES = 100000
-
-# Training
-BATCH_SIZE = 64
-LEARNING_RATE = 1e-4
-CLIP_NORM = 1.0
-EPOCHS = 100
-VALIDATION_SPLIT = 0.1
-
-# LR Scheduler
-LR_REDUCE_FACTOR = 0.5
-LR_REDUCE_PATIENCE = 25
-MIN_LEARNING_RATE = 1e-6
-
-# Early Stopping
-EARLY_STOPPING_PATIENCE = 10
-
-# Checkpointing
-CHECKPOINT_DIR = "checkpoints"
-CHECKPOINT_MONITOR = "val_loss"
-
-# Evaluation
-NUM_EVAL_SAMPLES = 20
-SUCCESS_THRESHOLD = 0.9
 
 
 # =====================================================================
@@ -61,18 +14,38 @@ SUCCESS_THRESHOLD = 0.9
 # =====================================================================
 
 def main():
+    parser = create_base_argument_parser(
+        description="Train NTM on copy task",
+        default_dataset="copy",
+        dataset_choices=["copy"],
+    )
+    parser.add_argument('--memory-size', type=int, default=128)
+    parser.add_argument('--memory-dim', type=int, default=20)
+    parser.add_argument('--controller-dim', type=int, default=100)
+    parser.add_argument('--controller-type', type=str, default='lstm', choices=['lstm', 'mlp'])
+    parser.add_argument('--num-read-heads', type=int, default=1)
+    parser.add_argument('--num-write-heads', type=int, default=1)
+    parser.add_argument('--sequence-length', type=int, default=20)
+    parser.add_argument('--vector-size', type=int, default=8)
+    parser.add_argument('--num-samples', type=int, default=100000)
+    parser.add_argument('--clip-norm', type=float, default=1.0)
+    parser.add_argument('--validation-split', type=float, default=0.1)
+    parser.add_argument('--num-eval-samples', type=int, default=20)
+    parser.add_argument('--success-threshold', type=float, default=0.9)
+    args = parser.parse_args()
+
     if CopyTaskGenerator is None:
         logger.error("Cannot proceed without CopyTaskGenerator.")
         return
 
-    setup_gpu()
+    setup_gpu(args.gpu)
 
     # Generate data
     logger.info("Generating Copy Task data...")
     config = CopyTaskConfig(
-        sequence_length=SEQUENCE_LENGTH,
-        vector_size=VECTOR_SIZE,
-        num_samples=NUM_SAMPLES,
+        sequence_length=args.sequence_length,
+        vector_size=args.vector_size,
+        num_samples=args.num_samples,
     )
     generator = CopyTaskGenerator(config)
     data = generator.generate()
@@ -85,9 +58,9 @@ def main():
 
     inputs = keras.Input(shape=(seq_len, input_dim), name="input_sequence")
     ntm_layer = create_ntm(
-        memory_size=MEMORY_SIZE, memory_dim=MEMORY_DIM, output_dim=output_dim,
-        controller_dim=CONTROLLER_DIM, controller_type=CONTROLLER_TYPE,
-        num_read_heads=NUM_READ_HEADS, num_write_heads=NUM_WRITE_HEADS,
+        memory_size=args.memory_size, memory_dim=args.memory_dim, output_dim=output_dim,
+        controller_dim=args.controller_dim, controller_type=args.controller_type,
+        num_read_heads=args.num_read_heads, num_write_heads=args.num_write_heads,
         return_sequences=True,
     )
     x = ntm_layer(inputs)
@@ -96,53 +69,35 @@ def main():
 
     # Compile
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE, clipnorm=CLIP_NORM),
+        optimizer=keras.optimizers.Adam(learning_rate=args.learning_rate, clipnorm=args.clip_norm),
         loss='binary_crossentropy',
         metrics=[keras.metrics.BinaryAccuracy(name="acc")],
     )
     model.summary()
 
     # Callbacks
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filepath = f"{CHECKPOINT_DIR}/ntm_copy_{timestamp}.keras"
-
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath, monitor=CHECKPOINT_MONITOR, save_best_only=True, verbose=1
-        ),
-        keras.callbacks.EarlyStopping(
-            monitor=CHECKPOINT_MONITOR, patience=EARLY_STOPPING_PATIENCE,
-            restore_best_weights=True, verbose=1
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor=CHECKPOINT_MONITOR, factor=LR_REDUCE_FACTOR,
-            patience=LR_REDUCE_PATIENCE, min_lr=MIN_LEARNING_RATE, verbose=1
-        )
-    ]
+    callbacks, results_dir = create_callbacks(
+        model_name="copy_task",
+        results_dir_prefix="ntm",
+        monitor="val_loss",
+        patience=args.patience,
+        use_lr_schedule=False,
+    )
 
     # Train
     logger.info("Starting training...")
     history = model.fit(
         data.inputs, data.targets, sample_weight=data.masks,
-        batch_size=BATCH_SIZE, epochs=EPOCHS,
-        validation_split=VALIDATION_SPLIT,
+        batch_size=args.batch_size, epochs=args.epochs,
+        validation_split=args.validation_split,
         callbacks=callbacks, verbose=1,
     )
 
-    # Reload and evaluate
-    logger.info(f"Reloading model from {filepath}...")
-    try:
-        model = keras.models.load_model(filepath)
-        logger.info("Model reloaded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to reload model: {e}")
-        logger.warning("Continuing evaluation with in-memory model.")
-
-    evaluate_model(model, data)
+    evaluate_model(model, data, num_eval=args.num_eval_samples,
+                   success_threshold=args.success_threshold)
 
 
-def evaluate_model(model, data, num_eval=NUM_EVAL_SAMPLES):
+def evaluate_model(model, data, num_eval=20, success_threshold=0.9):
     """Detailed evaluation of NTM copy task performance."""
     indices = np.random.choice(len(data.inputs), num_eval, replace=False)
     eval_inputs = data.inputs[indices]
@@ -171,7 +126,7 @@ def evaluate_model(model, data, num_eval=NUM_EVAL_SAMPLES):
 
     logger.info(f"Evaluation (N={num_eval}): Bit Acc={mean_bit_acc:.2%}, Sequence Acc={mean_seq_acc:.2%}")
 
-    if mean_seq_acc > SUCCESS_THRESHOLD:
+    if mean_seq_acc > success_threshold:
         logger.info("SUCCESS: NTM has solved the copy task!")
     else:
         logger.info("STATUS: NTM needs more training or tuning.")

@@ -1,15 +1,14 @@
 """Multi-Task NTM Training Script."""
 
-import os
 import keras
 import numpy as np
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 from dataclasses import dataclass, field
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ntm.ntm_interface import NTMConfig
 from dl_techniques.models.ntm.model_multitask import NTMMultiTask
-from train.common import setup_gpu
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 
 from .data_generators import (
     CopyTaskGenerator, CopyTaskConfig,
@@ -184,29 +183,23 @@ def compile_model(model: keras.Model, config: MultitaskNTMConfig) -> None:
     )
 
 
-def create_callbacks(config: MultitaskNTMConfig) -> List[keras.callbacks.Callback]:
-    os.makedirs(config.checkpoint_dir, exist_ok=True)
-    os.makedirs(config.log_dir, exist_ok=True)
-    return [
-        keras.callbacks.ModelCheckpoint(filepath=os.path.join(config.checkpoint_dir, "best_model.keras"), monitor="val_loss", save_best_only=True, verbose=1),
-        keras.callbacks.TensorBoard(log_dir=config.log_dir, histogram_freq=1),
-        keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6, verbose=1),
-        keras.callbacks.EarlyStopping(monitor="val_loss", patience=15, restore_best_weights=True, verbose=1),
-        keras.callbacks.CSVLogger(filename=os.path.join(config.save_dir, "training_log.csv"), append=True)
-    ]
-
-
 def train_multitask_ntm(config: MultitaskNTMConfig) -> Tuple[keras.Model, keras.callbacks.History]:
     """Execute the full training pipeline."""
     train_gen, val_gen = create_generators(config)
     model = create_multitask_ntm_model(config)
     compile_model(model, config)
-    callbacks = create_callbacks(config)
+    callbacks, results_dir = create_callbacks(
+        model_name="multitask",
+        results_dir_prefix="ntm",
+        monitor="val_loss",
+        patience=15,
+        use_lr_schedule=False,
+    )
 
     logger.info("Starting training...")
     history = model.fit(train_gen, validation_data=val_gen, epochs=config.num_epochs, callbacks=callbacks, verbose=1)
 
-    final_path = os.path.join(config.save_dir, "multitask_ntm_final.keras")
+    final_path = f"{results_dir}/multitask_ntm_final.keras"
     model.save(final_path)
     logger.info(f"Final model saved to {final_path}")
     return model, history
@@ -241,7 +234,32 @@ def evaluate_tasks(model: keras.Model, config: MultitaskNTMConfig) -> None:
 
 
 def main() -> None:
-    config = MultitaskNTMConfig()
+    parser = create_base_argument_parser(
+        description="Train Multi-Task NTM",
+        default_dataset="ntm_tasks",
+        dataset_choices=["ntm_tasks"],
+    )
+    parser.add_argument('--memory-size', type=int, default=128)
+    parser.add_argument('--memory-dim', type=int, default=20)
+    parser.add_argument('--controller-dim', type=int, default=256)
+    parser.add_argument('--steps-per-epoch', type=int, default=1000)
+    parser.add_argument('--validation-steps', type=int, default=100)
+    parser.add_argument('--clip-norm', type=float, default=1.0)
+    args = parser.parse_args()
+
+    setup_gpu(args.gpu)
+
+    config = MultitaskNTMConfig(
+        memory_size=args.memory_size,
+        memory_dim=args.memory_dim,
+        controller_dim=args.controller_dim,
+        batch_size=args.batch_size,
+        num_epochs=args.epochs,
+        steps_per_epoch=args.steps_per_epoch,
+        validation_steps=args.validation_steps,
+        learning_rate=args.learning_rate,
+        clip_norm=args.clip_norm,
+    )
     logger.info(f"Tasks: {list(config.task_map.keys())}, Memory: {config.memory_size}x{config.memory_dim}, "
                 f"Batch: {config.batch_size}, Epochs: {config.num_epochs}")
 

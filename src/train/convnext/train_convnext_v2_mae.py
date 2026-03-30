@@ -6,15 +6,16 @@ import keras
 import argparse
 import numpy as np
 import tensorflow as tf
-from datetime import datetime
 from typing import Tuple, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 from dl_techniques.models.masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
-from train.common import setup_gpu, load_dataset, get_class_names
+from train.common import (
+    setup_gpu, load_dataset, get_class_names,
+    create_base_argument_parser, create_callbacks,
+)
 
 
 def create_convnext_encoder(
@@ -67,15 +68,15 @@ def create_mae_with_convnext(
 
 
 def create_mae_pretrain_callbacks(results_dir: str, patience: int = 10) -> List:
-    """Create callbacks for MAE pretraining."""
-    mae_dir = os.path.join(results_dir, "mae_pretraining")
-    os.makedirs(mae_dir, exist_ok=True)
-    return [
-        keras.callbacks.EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True, verbose=1, mode='min'),
-        keras.callbacks.ModelCheckpoint(filepath=os.path.join(mae_dir, 'best_mae.keras'), monitor='val_loss', save_best_only=True, verbose=1, mode='min'),
-        keras.callbacks.CSVLogger(filename=os.path.join(mae_dir, 'mae_training_log.csv')),
-        keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1)
-    ]
+    """Create callbacks for MAE pretraining using train.common."""
+    callbacks, mae_dir = create_callbacks(
+        model_name="mae_pretrain",
+        results_dir_prefix=os.path.join(results_dir, "mae"),
+        monitor="val_loss",
+        patience=patience,
+        use_lr_schedule=False,
+    )
+    return callbacks
 
 
 def visualize_mae_reconstructions(mae: MaskedAutoencoder, test_images: np.ndarray, results_dir: str, num_samples: int = 8):
@@ -148,16 +149,15 @@ def build_classifier_from_mae(mae: MaskedAutoencoder, num_classes: int, dropout_
 
 
 def create_finetune_callbacks(results_dir: str, stage: str, patience: int = 10) -> List:
-    """Create callbacks for fine-tuning."""
-    finetune_dir = os.path.join(results_dir, f"finetuning_{stage}")
-    os.makedirs(finetune_dir, exist_ok=True)
-    return [
-        keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=patience, restore_best_weights=True, verbose=1, mode='max'),
-        keras.callbacks.ModelCheckpoint(filepath=os.path.join(finetune_dir, f'best_model_{stage}.keras'), monitor='val_accuracy', save_best_only=True, verbose=1, mode='max'),
-        keras.callbacks.CSVLogger(filename=os.path.join(finetune_dir, f'training_log_{stage}.csv')),
-        keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
-        EpochAnalyzerCallback(output_dir=os.path.join(finetune_dir, "epoch_analysis"), model_name=f"convnext_v2_{stage}", epoch_frequency=1),
-    ]
+    """Create callbacks for fine-tuning using train.common."""
+    callbacks, _ = create_callbacks(
+        model_name=f"convnext_v2_{stage}",
+        results_dir_prefix=os.path.join(results_dir, f"finetune_{stage}"),
+        monitor="val_accuracy",
+        patience=patience,
+        use_lr_schedule=False,
+    )
+    return callbacks
 
 
 def finetune_classifier(
@@ -233,8 +233,9 @@ def run_comprehensive_analysis(
 
 def train_with_mae_pretraining(args: argparse.Namespace):
     """Main training function with MAE pretraining followed by fine-tuning."""
-    setup_gpu()
+    setup_gpu(args.gpu)
 
+    from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir = os.path.join("results", f"mae_convnext_{args.dataset}_{args.variant}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
@@ -308,9 +309,11 @@ def train_with_mae_pretraining(args: argparse.Namespace):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train ConvNeXt V2 with MAE pretraining.')
-
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['mnist', 'cifar10', 'cifar100'])
+    parser = create_base_argument_parser(
+        description='Train ConvNeXt V2 with MAE pretraining.',
+        default_dataset='cifar10',
+        dataset_choices=['mnist', 'cifar10', 'cifar100'],
+    )
     parser.add_argument('--variant', type=str, default='cifar10', choices=['cifar10', 'pico', 'nano', 'tiny', 'base'])
     parser.add_argument('--kernel-size', type=int, default=7)
     parser.add_argument('--strides', type=int, default=4)
@@ -326,7 +329,6 @@ def main():
     parser.add_argument('--finetune-lr-stage2', type=float, default=1e-4)
     parser.add_argument('--finetune-patience', type=int, default=25)
     parser.add_argument('--dropout-rate', type=float, default=0.1)
-    parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--run-analysis', action='store_true', default=True)
     parser.add_argument('--no-analysis', dest='run_analysis', action='store_false')
 

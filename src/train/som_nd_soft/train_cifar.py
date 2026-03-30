@@ -2,7 +2,6 @@
 
 import gc
 import json
-import argparse
 import keras
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,7 +10,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
@@ -562,23 +561,9 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
 # TRAINING
 # =============================================================================
 
-def create_learning_rate_schedule(config: CIFARSOMConfig, steps_per_epoch: int):
-    """Create learning rate schedule based on config."""
-    if config.lr_schedule == 'cosine':
-        return keras.optimizers.schedules.CosineDecay(
-            config.learning_rate, decay_steps=config.epochs * steps_per_epoch, alpha=0.01
-        )
-    return config.learning_rate
-
-
 def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     """Train CIFAR autoencoder with SoftSOM topological bottleneck."""
     logger.info(f"Starting training: {config.experiment_name}")
-
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
 
     (x_train, y_train), (x_test, y_test) = load_cifar_data(config)
     x_train_aug = create_augmentation_layer(config)(x_train, training=True) \
@@ -586,7 +571,14 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
 
     model = create_cifar_som_autoencoder(config)
     steps_per_epoch = len(x_train) // config.batch_size
-    lr_schedule = create_learning_rate_schedule(config, steps_per_epoch)
+
+    from train.common import create_learning_rate_schedule
+    lr_schedule = create_learning_rate_schedule(
+        initial_lr=config.learning_rate,
+        schedule_type=config.lr_schedule,
+        total_epochs=config.epochs,
+        steps_per_epoch=steps_per_epoch,
+    )
 
     if config.optimizer_type == 'adamw':
         optimizer = keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=config.weight_decay)
@@ -597,16 +589,20 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
 
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
 
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            filepath=str(output_dir / "best_model.keras"),
-            monitor='val_loss', save_best_only=True, verbose=1
-        ),
-        keras.callbacks.EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
-        keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
-        keras.callbacks.TensorBoard(log_dir=str(output_dir / "tensorboard")),
-        ComprehensiveMonitoringCallback(config, x_test, y_test)
-    ]
+    callbacks, results_dir = create_callbacks(
+        model_name=config.experiment_name,
+        results_dir_prefix="cifar_softsom",
+        monitor="val_loss",
+        patience=20,
+        use_lr_schedule=True,
+    )
+    # Update config output paths to match common results dir
+    config.output_dir = str(Path(results_dir).parent)
+    config.experiment_name = Path(results_dir).name
+    callbacks.append(ComprehensiveMonitoringCallback(config, x_test, y_test))
+
+    with open(Path(results_dir) / "config.json", 'w') as f:
+        json.dump(config.__dict__, f, indent=2, default=str)
 
     model.fit(
         x_train_aug, x_train, batch_size=config.batch_size,
@@ -623,25 +619,18 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
 # CLI
 # =============================================================================
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+def main() -> None:
+    parser = create_base_argument_parser(
         description='Train CIFAR autoencoder with SoftSOM bottleneck',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        default_dataset='cifar10',
+        dataset_choices=['cifar10', 'cifar100'],
     )
-    parser.add_argument('--dataset', choices=['cifar10', 'cifar100'], default='cifar10')
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch-size', type=int, default=64)
-    parser.add_argument('--learning-rate', type=float, default=1e-3)
     parser.add_argument('--grid-size', type=int, default=16)
     parser.add_argument('--som-temperature', type=float, default=1.0)
     parser.add_argument('--no-augmentation', action='store_true')
-    parser.add_argument('--output-dir', type=str, default='results')
-    return parser.parse_args()
+    args = parser.parse_args()
 
-
-def main() -> None:
-    args = parse_arguments()
-    setup_gpu()
+    setup_gpu(args.gpu)
 
     config = CIFARSOMConfig(
         dataset_name=args.dataset,
@@ -651,7 +640,7 @@ def main() -> None:
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
-        output_dir=args.output_dir
+        lr_schedule=args.lr_schedule,
     )
 
     aug_status = 'on' if config.use_data_augmentation else 'off'
