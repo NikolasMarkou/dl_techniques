@@ -30,7 +30,8 @@ from dl_techniques.visualization import (
     ModelComparisonBarChart,
     ROCPRCurves
 )
-from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
+from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
 
 # ---------------------------------------------------------------------
@@ -352,6 +353,11 @@ def create_callbacks(
         keras.callbacks.CSVLogger(
             filename=os.path.join(results_dir, 'training_log.csv')
         ),
+        EpochAnalyzerCallback(
+            output_dir=os.path.join(results_dir, "epoch_analysis"),
+            model_name=model_name,
+            epoch_frequency=1,
+        ),
     ]
 
     if not use_lr_schedule:
@@ -378,7 +384,6 @@ def convert_keras_history_to_training_history(history: keras.callbacks.History) 
         val_loss=history.history.get('val_loss', []),
         train_metrics={'accuracy': history.history.get('accuracy', [])},
         val_metrics={'accuracy': history.history.get('val_accuracy', [])},
-        learning_rates=history.history.get('lr', [])
     )
 
 
@@ -410,52 +415,45 @@ def generate_comprehensive_visualizations(
         model: keras.Model,
         show_plots: bool = False
 ) -> None:
-    """Generate comprehensive visualizations."""
+    """Generate comprehensive visualizations using the VisualizationManager."""
     logger.info("Generating comprehensive visualizations...")
 
     # Training curves
     logger.info("  - Training curves")
-    training_viz = TrainingCurvesVisualization(
-        plot_config=PlotConfig(
-            style=PlotStyle.PROFESSIONAL,
-            color_scheme=ColorScheme.VIBRANT
-        )
+    viz_manager.visualize(
+        data=training_history,
+        plugin_name="training_curves",
+        show=show_plots,
+        filename="training_curves"
     )
-    training_viz.plot(training_history, show=show_plots)
-    viz_manager.save_visualization(training_viz, "training_curves")
 
     # Confusion matrix
     logger.info("  - Confusion matrix")
-    cm_viz = ConfusionMatrixVisualization(
-        plot_config=PlotConfig(
-            style=PlotStyle.PROFESSIONAL,
-            color_scheme=ColorScheme.VIBRANT
-        )
+    viz_manager.visualize(
+        data=classification_results,
+        plugin_name="confusion_matrix",
+        show=show_plots,
+        filename="confusion_matrix"
     )
-    cm_viz.plot(classification_results, show=show_plots)
-    viz_manager.save_visualization(cm_viz, "confusion_matrix")
 
     # ROC and PR curves (only for binary or small multiclass)
     if len(classification_results.class_names) <= 10:
         logger.info("  - ROC and PR curves")
-        roc_pr_viz = ROCPRCurves(
-            plot_config=PlotConfig(
-                style=PlotStyle.PROFESSIONAL,
-                color_scheme=ColorScheme.VIBRANT
-            )
+        viz_manager.visualize(
+            data=classification_results,
+            plugin_name="roc_pr_curves",
+            show=show_plots,
+            filename="roc_pr_curves"
         )
-        roc_pr_viz.plot(classification_results, show=show_plots)
-        viz_manager.save_visualization(roc_pr_viz, "roc_pr_curves")
 
     # Network architecture
     logger.info("  - Network architecture")
-    arch_viz = NetworkArchitectureVisualization(
-        plot_config=PlotConfig(
-            style=PlotStyle.CLEAN
-        )
+    viz_manager.visualize(
+        data=model,
+        plugin_name="network_architecture",
+        show=show_plots,
+        filename="architecture"
     )
-    arch_viz.plot(model, show=show_plots)
-    viz_manager.save_visualization(arch_viz, "architecture")
 
     logger.info("Visualizations generated successfully")
 
@@ -473,24 +471,17 @@ def run_model_analysis(
     logger.info("Running model analysis...")
 
     analysis_config = AnalysisConfig(
-        analyze_gradients=False,  # Skip gradient analysis for speed
-        analyze_activations=False,
         analyze_weights=True,
-        analyze_performance=True,
-        generate_plots=True,
-        save_results=True
-    )
-
-    analyzer = ModelAnalyzer(
-        output_dir=os.path.join(results_dir, "model_analysis"),
-        config=analysis_config
+        analyze_calibration=True,
+        analyze_information_flow=True,
+        analyze_training_dynamics=True,
+        analyze_spectral=True,
     )
 
     try:
         # For ImageNet (tf.data.Dataset), extract subset for analysis
         if isinstance(test_data[0], tf.data.Dataset):
             logger.info("Extracting subset from tf.data.Dataset for analysis...")
-            # Take first batch for quick analysis
             for batch_images, batch_labels in test_data[0].take(1):
                 x_test_subset = batch_images.numpy()
                 y_test_subset = batch_labels.numpy()
@@ -499,18 +490,23 @@ def run_model_analysis(
             x_test_subset = test_data[0][:1000]
             y_test_subset = test_data[1][:1000]
 
-        analysis_results = analyzer.analyze_model(
-            model=model,
-            model_name=model_name,
-            test_data=(x_test_subset, y_test_subset),
-            history=training_history.history
+        analyzer = ModelAnalyzer(
+            models={model_name: model},
+            config=analysis_config,
+            output_dir=os.path.join(results_dir, "model_analysis"),
+            training_history={model_name: training_history.history},
         )
+
+        data = DataInput(x_data=x_test_subset, y_data=y_test_subset)
+        analysis_results = analyzer.analyze(data=data)
 
         logger.info("Model analysis completed successfully")
         return analysis_results
 
     except Exception as e:
         logger.warning(f"Model analysis failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
