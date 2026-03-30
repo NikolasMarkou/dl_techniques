@@ -297,21 +297,27 @@ class ByteLatentTransformer(keras.Model):
         Args:
             input_shape: Shape of input tensor (batch_size, sequence_length).
         """
-        # Build sub-layers explicitly for serialization robustness
-        self.tokenizer.build(input_shape)
-        self.entropy_model.build(input_shape)
-        self.patcher.build(input_shape[:-1] + (1,))  # Entropy has 1 feature per token
+        # Build sub-layers explicitly (skip if already built, e.g. pre-trained entropy model)
+        if not self.tokenizer.built:
+            self.tokenizer.build(input_shape)
+        if not self.entropy_model.built:
+            self.entropy_model.build(input_shape)
+        if not self.patcher.built:
+            self.patcher.build(input_shape[:-1] + (1,))
 
         # Build main components
-        self.local_encoder.build(input_shape)
+        if not self.local_encoder.built:
+            self.local_encoder.build(input_shape)
 
         # Compute patch representation shape for global transformer
         patch_shape = input_shape[:-1] + (self.max_patches, self.global_dim)
-        self.global_transformer.build(patch_shape)
+        if not self.global_transformer.built:
+            self.global_transformer.build(patch_shape)
 
         # Build decoder with global context shape
         global_context_shape = patch_shape
-        self.local_decoder.build([input_shape, global_context_shape, input_shape])
+        if not self.local_decoder.built:
+            self.local_decoder.build([input_shape, global_context_shape, input_shape])
 
         # Always call parent build at the end
         super().build(input_shape)

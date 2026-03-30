@@ -315,23 +315,19 @@ class MannLayer(keras.layers.Layer):
         norm_k = ops.normalize(k, axis=-1)
         norm_mem = ops.normalize(memory, axis=-1)
         # Cosine similarity -> (batch_size, memory_locations)
-        similarity = ops.einsum('bi,ni->bn', norm_k, norm_mem)
+        similarity = ops.einsum('bi,bni->bn', norm_k, norm_mem)
         w_c = ops.softmax(beta[:, None] * similarity, axis=-1)
 
         # 2. Interpolation gate
         w_g = g[:, None] * w_c + (1 - g[:, None]) * prev_weights
 
-        # 3. Convolutional shift
-        # We perform a 1D circular convolution
-        w_shifted = ops.zeros_like(w_g)
-        for i in range(w_g.shape[0]):  # Iterate over batch
-            # Convolve using indexing for circular shift
-            convolved = ops.convolve(
-                ops.expand_dims(ops.pad(w_g[i], [[1, 1]], mode="circular"), axis=[0, 2]),
-                ops.expand_dims(ops.flip(s[i]), axis=[0, 2]),
-                padding="valid",
-            )[0, :, 0]
-            w_shifted = ops.scatter_update(w_shifted, [i], convolved)
+        # 3. Convolutional shift (1D circular convolution with 3-element shift kernel)
+        # s has shape (batch, 3) representing shift weights for [-1, 0, +1]
+        w_shifted = (
+            s[:, 0:1] * ops.roll(w_g, shift=1, axis=-1) +
+            s[:, 1:2] * w_g +
+            s[:, 2:3] * ops.roll(w_g, shift=-1, axis=-1)
+        )
 
         # 4. Sharpening
         w_sharp = ops.power(w_shifted, gamma[:, None])
@@ -385,7 +381,7 @@ class MannLayer(keras.layers.Layer):
             # Run one step of the controller
             controller_output, *controller_state = self.controller(
                 ops.expand_dims(controller_input, 1),
-                states=controller_state,
+                initial_state=controller_state,
                 training=training
             )
             controller_output = ops.squeeze(controller_output, 1)

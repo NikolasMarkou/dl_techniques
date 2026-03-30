@@ -371,15 +371,12 @@ class BLTTrainer:
         model_config['entropy_model'] = self.entropy_model
 
         self.blt_model = create_blt_model(**model_config)
-        # Build by running a dummy forward pass
-        dummy_input = np.zeros((1, self.config.max_sequence_length), dtype=np.int32)
-        _ = self.blt_model(dummy_input, training=False)
         self.blt_model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=self.config.learning_rate),
             loss='sparse_categorical_crossentropy',
             metrics=['accuracy'],
         )
-        logger.info(f"BLT model: {self.blt_model.count_params():,} parameters")
+        logger.info("BLT model created and compiled")
         return self.blt_model
 
     def create_callbacks(self) -> List[keras.callbacks.Callback]:

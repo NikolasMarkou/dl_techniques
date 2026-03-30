@@ -612,41 +612,27 @@ class DynamicPatcher(keras.layers.Layer):
         seq_len = ops.shape(entropy)[1]
 
         # Simple patch creation: divide sequence into roughly equal parts
-        # In practice, this would use the entropy threshold for boundary detection
+        # Uses pure tensor ops for graph-mode compatibility
         avg_patch_size = ops.maximum(seq_len // self.max_patches, 1)
 
-        # Initialize patch lengths
-        patch_lengths = ops.zeros((batch_size, self.max_patches), dtype='int32')
+        # Each of the first (max_patches-1) patches gets avg_patch_size tokens
+        # Last patch gets the remainder
+        num_full_patches = ops.minimum(seq_len // avg_patch_size, self.max_patches - 1)
+        remainder = seq_len - num_full_patches * avg_patch_size
 
-        # Create patches by distributing sequence length
-        remaining_length = seq_len
-        for p in range(self.max_patches - 1):
-            if remaining_length <= avg_patch_size:
-                # Put all remaining length in current patch
-                patch_lengths = ops.slice_update(
-                    patch_lengths,
-                    [slice(None), p],
-                    ops.expand_dims(remaining_length, axis=1)
-                )
-                break
-            else:
-                # Regular patch size
-                patch_lengths = ops.slice_update(
-                    patch_lengths,
-                    [slice(None), p],
-                    ops.expand_dims(avg_patch_size, axis=1)
-                )
-                remaining_length -= avg_patch_size
+        # Build patch lengths: [avg, avg, ..., avg, remainder, 0, 0, ...]
+        patch_indices = ops.arange(self.max_patches)
+        full_mask = ops.cast(patch_indices < num_full_patches, 'int32')
+        last_mask = ops.cast(patch_indices == num_full_patches, 'int32')
+        single_row = full_mask * avg_patch_size + last_mask * remainder
 
-        # Put any remaining tokens in the last patch
-        if remaining_length > 0:
-            patch_lengths = ops.slice_update(
-                patch_lengths,
-                [slice(None), self.max_patches - 1],
-                ops.expand_dims(remaining_length, axis=1)
-            )
+        # Broadcast to batch dimension
+        patch_lengths = ops.broadcast_to(
+            ops.expand_dims(single_row, 0),
+            (batch_size, self.max_patches)
+        )
 
-        return patch_lengths
+        return ops.cast(patch_lengths, 'int32')
 
     def compute_patch_ids(
             self,
@@ -668,29 +654,24 @@ class DynamicPatcher(keras.layers.Layer):
         total_lengths = ops.sum(patch_lengths, axis=1)
         max_seq_len = ops.max(total_lengths)
 
-        # Initialize patch IDs
-        patch_ids = ops.zeros((batch_size, max_seq_len), dtype='int32')
-
-        # Fill patch IDs using cumulative sums
+        # Vectorized patch ID computation using cumulative sums
+        # cumulative_lengths[b, p] = sum of patch_lengths[b, :p+1]
         cumulative_lengths = ops.cumsum(patch_lengths, axis=1)
 
-        for b in range(batch_size):
-            current_pos = 0
-            for p in range(max_patches):
-                patch_len = patch_lengths[b, p]
-                if patch_len > 0:
-                    end_pos = current_pos + patch_len
-                    # Fill positions with patch ID
-                    for pos in range(current_pos, end_pos):
-                        if pos < max_seq_len:
-                            patch_ids = ops.slice_update(
-                                patch_ids,
-                                [b, pos],
-                                p
-                            )
-                    current_pos = end_pos
+        # For each position in the sequence, find which patch it belongs to
+        # Position i belongs to patch p if cumulative_lengths[b, p-1] <= i < cumulative_lengths[b, p]
+        # This is equivalent to: patch_id[i] = number of patches whose cumulative length <= i
+        positions = ops.arange(max_seq_len)  # (seq_len,)
+        positions = ops.expand_dims(ops.expand_dims(positions, 0), -1)  # (1, seq_len, 1)
+        cum_expanded = ops.expand_dims(cumulative_lengths, 1)  # (batch, 1, max_patches)
 
-        return patch_ids
+        # For each position, count how many patch boundaries are <= position
+        # patch_id = sum(cumulative_lengths <= position) - 1, clamped to [0, max_patches-1]
+        boundary_passed = ops.cast(cum_expanded <= positions, 'int32')
+        patch_ids = ops.sum(boundary_passed, axis=-1)  # (batch, seq_len)
+        patch_ids = ops.minimum(patch_ids, max_patches - 1)
+
+        return ops.cast(patch_ids, 'int32')
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
@@ -760,32 +741,33 @@ class PatchPooling(keras.layers.Layer):
             pooling_method: str = 'attention',
             output_dim: int = 768,
             num_queries: int = 4,
+            max_patches: int = 64,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.pooling_method = pooling_method
         self.output_dim = output_dim
         self.num_queries = num_queries
+        self.max_patches = max_patches
 
-        # Create sub-layers in __init__
-        if self.pooling_method == 'attention':
-            self.attention_layer = MultiHeadAttention(
-                dim=self.output_dim,
-                num_heads=8,
-                name='patch_attention'
-            )
-
-        # Output projection layer (will be created in build if needed)
+        # Sub-layers that depend on input_dim are created in build()
+        self.attention_layer = None
         self.output_projection = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build pooling layers."""
-        super().build(input_shape)
-
-        # Assume input_shape is for byte_hiddens
         input_dim = input_shape[-1]
 
         if self.pooling_method == 'attention':
+            # Use Keras built-in MHA for cross-attention (query → key/value)
+            num_heads = min(8, input_dim)
+            key_dim = max(input_dim // num_heads, 1)
+            self.attention_layer = keras.layers.MultiHeadAttention(
+                num_heads=num_heads,
+                key_dim=key_dim,
+                name='patch_attention'
+            )
+
             # Create learnable query embeddings
             self.query_embeddings = self.add_weight(
                 shape=(self.num_queries, input_dim),
@@ -794,19 +776,18 @@ class PatchPooling(keras.layers.Layer):
                 name='query_embeddings'
             )
 
-            # Build attention layer with correct dimensions
-            query_shape = (input_shape[0], self.num_queries, input_dim)
-            self.attention_layer.build([query_shape, input_shape, input_shape])
+            # Let Keras build attention lazily on first call
+            # (explicit build not needed for Keras built-in MHA)
 
-        # Create output projection if dimensions don't match
-        if input_dim != self.output_dim:
-            self.output_projection = keras.layers.Dense(
-                self.output_dim,
-                name='output_projection'
-            )
-            # Build projection layer
-            projection_input_shape = (input_shape[0], None, input_dim)
-            self.output_projection.build(projection_input_shape)
+        # Create and build output projection
+        self.output_projection = keras.layers.Dense(
+            self.output_dim,
+            name='output_projection'
+        )
+        projection_input_shape = (input_shape[0], None, input_dim)
+        self.output_projection.build(projection_input_shape)
+
+        super().build(input_shape)
 
     def call(
             self,
@@ -829,8 +810,8 @@ class PatchPooling(keras.layers.Layer):
         seq_len = ops.shape(byte_hiddens)[1]
         hidden_dim = ops.shape(byte_hiddens)[2]
 
-        # Determine number of patches from patch_ids
-        num_patches = ops.max(patch_ids) + 1
+        # Use static max_patches for graph-mode compatibility
+        num_patches = self.max_patches
 
         if self.pooling_method == 'max':
             return self._max_pooling(byte_hiddens, patch_ids, num_patches)
@@ -936,9 +917,9 @@ class PatchPooling(keras.layers.Layer):
 
             # Cross-attention: queries attend to patch hidden states
             attended = self.attention_layer(
-                queries,
-                patch_hiddens,
-                patch_hiddens,
+                query=queries,
+                value=patch_hiddens,
+                key=patch_hiddens,
                 training=training
             )
 
@@ -1068,6 +1049,7 @@ class LocalEncoder(keras.layers.Layer):
             pooling_method=self.patch_pooling_method,
             output_dim=self.global_dim,
             num_queries=self.cross_attention_queries,
+            max_patches=self.max_patches,
             name='patch_pooling'
         )
 
@@ -1389,11 +1371,11 @@ class LocalDecoder(keras.layers.Layer):
             )
             self.decoder_layers.append(decoder_layer)
 
-            # Cross-attention to global patch context
-            cross_attention = MultiHeadAttention(
-                dim=self.local_dim,
+            # Cross-attention to global patch context (Keras built-in for cross-attn)
+            cross_attention = keras.layers.MultiHeadAttention(
                 num_heads=self.num_heads_local,
-                dropout_rate=self.dropout_rate,
+                key_dim=max(self.local_dim // self.num_heads_local, 1),
+                dropout=self.dropout_rate,
                 name=f'cross_attention_{i}'
             )
             self.cross_attention_layers.append(cross_attention)
@@ -1440,8 +1422,7 @@ class LocalDecoder(keras.layers.Layer):
             decoder_layer.build(current_shape)
             decoder_output_shape = decoder_layer.compute_output_shape(current_shape)
 
-            # Build cross-attention layer
-            cross_attention.build([decoder_output_shape, cross_attention_kv_shape, cross_attention_kv_shape])
+            # Cross-attention builds lazily on first call (Keras built-in MHA)
 
             # Build cross-attention norm
             cross_norm.build(decoder_output_shape)
@@ -1523,31 +1504,18 @@ class LocalDecoder(keras.layers.Layer):
         seq_len = ops.shape(decoder_hidden)[1]
         num_patches = ops.shape(global_context)[1]
 
-        # For each position, gather the corresponding patch representation
-        batch_indices = ops.arange(batch_size)
-        batch_indices = ops.repeat(batch_indices, seq_len)
-
-        flat_patch_ids = ops.reshape(patch_ids, (-1,))
-        gather_indices = ops.stack([batch_indices, flat_patch_ids], axis=1)
-
-        # Gather the corresponding patch representations
-        gathered_context = ops.take_along_axis(
-            global_context,
-            ops.expand_dims(flat_patch_ids, axis=-1),
-            axis=1
-        )
-
-        # Reshape back to sequence format
-        position_context = ops.reshape(
-            gathered_context,
-            (batch_size, seq_len, ops.shape(global_context)[-1])
-        )
+        # For each byte position, gather its corresponding patch representation
+        # patch_ids shape: (batch, seq_len) -> expand for gathering from (batch, num_patches, dim)
+        gather_idx = ops.expand_dims(patch_ids, axis=-1)  # (batch, seq_len, 1)
+        global_dim = ops.shape(global_context)[-1]
+        gather_idx = ops.broadcast_to(gather_idx, (batch_size, seq_len, global_dim))  # (batch, seq_len, dim)
+        position_context = ops.take_along_axis(global_context, gather_idx, axis=1)  # (batch, seq_len, dim)
 
         # Apply cross-attention
         attended = cross_attention(
-            decoder_hidden,  # queries
-            position_context,  # keys
-            position_context,  # values
+            query=decoder_hidden,
+            value=position_context,
+            key=position_context,
             training=training
         )
 

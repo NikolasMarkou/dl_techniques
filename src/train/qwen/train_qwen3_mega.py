@@ -97,7 +97,7 @@ class MANNForcingTask:
     def associative_recall_task(batch_size: int, num_pairs: int,
                                 vocab_size: int, item_len: int = 3) -> Tuple[np.ndarray, np.ndarray]:
         """Associative recall: given key, recall value. Forces content-based addressing."""
-        max_len = num_pairs * item_len * 2 + item_len + 4
+        max_len = num_pairs * item_len * 2 + item_len * 2 + 4
         inputs = np.zeros((batch_size, max_len), dtype=np.int32)
         targets = np.zeros((batch_size, max_len), dtype=np.int32)
 
@@ -365,9 +365,11 @@ class ComponentMonitor:
                         targets: np.ndarray, outputs: Dict[str, np.ndarray]) -> ComponentMetrics:
         metrics = ComponentMetrics()
 
-        logits = outputs['logits']
-        memory_vectors = outputs['memory_vectors']
-        entity_embeddings = outputs['entity_embeddings']
+        logits = outputs['logits'].numpy() if hasattr(outputs['logits'], 'numpy') else outputs['logits']
+        memory_vectors = outputs['memory_vectors'].numpy() if hasattr(outputs['memory_vectors'], 'numpy') else outputs['memory_vectors']
+        entity_embeddings = outputs['entity_embeddings'].numpy() if hasattr(outputs['entity_embeddings'], 'numpy') else outputs['entity_embeddings']
+        if hasattr(targets, 'numpy'):
+            targets = targets.numpy()
 
         predictions = np.argmax(logits, axis=-1)
         metrics.task_accuracy = float(np.mean(predictions == targets))
@@ -496,7 +498,7 @@ class TrainingPhaseConfig:
     freeze_gnn: bool = False
     learning_rate: float = 1e-4
     auxiliary_loss_weight: float = 0.1
-    batch_size: int = 32
+    batch_size: int = 4
 
 
 class TrainingCurriculum:
@@ -631,8 +633,8 @@ class Qwen3MEGATrainer:
             entity_embeddings = outputs['entity_embeddings']
 
             main_loss = self.main_loss(targets, logits)
-            mann_loss = self.mann_aux_loss(targets, logits, memory_vectors)
-            gnn_loss = self.gnn_aux_loss(targets, logits, entity_embeddings)
+            mann_loss = self.mann_aux_loss.call(targets, logits, memory_vectors)
+            gnn_loss = self.gnn_aux_loss.call(targets, logits, entity_embeddings)
             total_loss = main_loss + aux_loss_weight * mann_loss + aux_loss_weight * gnn_loss
 
         gradients = tape.gradient(total_loss, self.model.trainable_variables)
