@@ -154,9 +154,9 @@ class MemoryIntegrationLayer(keras.layers.Layer):
         self.memory_query_proj.build(hidden_shape)
         self.entity_query_proj.build(hidden_shape)
 
-        # Build cross-attention layers
-        self.memory_cross_attn.build(hidden_shape, hidden_shape)
-        self.entity_cross_attn.build(hidden_shape, hidden_shape)
+        # Build cross-attention layers with correct query/key shapes
+        self.memory_cross_attn.build(hidden_shape, memory_shape)
+        self.entity_cross_attn.build(hidden_shape, entity_shape)
 
         # Build fusion layers
         fusion_input_shape = (
