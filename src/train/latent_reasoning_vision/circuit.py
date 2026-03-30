@@ -17,21 +17,7 @@ from typing import Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.logic.neural_circuit import LearnableNeuralCircuit
-
-# ---------------------------------------------------------------------
-
-def setup_gpu():
-    """Configure GPU settings for optimal training."""
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
-        except RuntimeError as e:
-            logger.error(f"GPU setup error: {e}")
-    else:
-        logger.info("No GPUs found, using CPU")
+from train.common import setup_gpu
 
 # ---------------------------------------------------------------------
 
