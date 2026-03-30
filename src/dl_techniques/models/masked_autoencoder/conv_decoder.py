@@ -200,6 +200,16 @@ class ConvDecoder(keras.layers.Layer):
 
         return x
 
+    def compute_output_shape(self, input_shape):
+        """Compute output shape: each decoder block upsamples 2x spatially."""
+        batch_size, height, width, _ = input_shape
+        num_upsamples = len(self.decoder_dims)
+        if height is not None:
+            height = height * (2 ** num_upsamples)
+        if width is not None:
+            width = width * (2 ** num_upsamples)
+        return (batch_size, height, width, self.output_channels)
+
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization."""
         config = super().get_config()

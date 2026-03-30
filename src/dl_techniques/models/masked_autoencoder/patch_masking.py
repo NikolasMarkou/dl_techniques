@@ -135,6 +135,10 @@ class PatchMasking(keras.layers.Layer):
 
         return masked_images, mask, num_patches
 
+    def compute_output_shape(self, input_shape):
+        """Masked images have the same spatial dimensions as input."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({

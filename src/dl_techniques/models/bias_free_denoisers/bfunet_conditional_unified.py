@@ -221,6 +221,13 @@ class DenseConditioningInjection(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown injection method: {self.method}")
 
+    def compute_output_shape(self, input_shape):
+        """Compute output shape based on injection method."""
+        target_shape, conditioning_shape = input_shape
+        if self.method == 'concatenation':
+            return (*target_shape[:-1], target_shape[-1] + conditioning_shape[-1])
+        return target_shape
+
     def get_config(self):
         """Get layer configuration."""
         config = super().get_config()
@@ -344,6 +351,13 @@ class DiscreteConditioningInjection(keras.layers.Layer):
 
         else:
             raise ValueError(f"Unknown injection method: {self.method}")
+
+    def compute_output_shape(self, input_shape):
+        """Compute output shape based on injection method."""
+        target_shape, _ = input_shape
+        if self.method == 'channel_concat' and self.projected_channels is not None:
+            return (*target_shape[:-1], target_shape[-1] + self.projected_channels)
+        return target_shape
 
     def get_config(self):
         """Get layer configuration."""
