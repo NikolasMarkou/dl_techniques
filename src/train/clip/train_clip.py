@@ -8,6 +8,7 @@ Reference: Radford et al. (2021) "Learning Transferable Visual Models from
 Natural Language Supervision" https://arxiv.org/abs/2103.00020
 """
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -566,3 +567,44 @@ class CLIPInference:
             text_preview = text[:50] + "..." if len(text) > 50 else text
             logger.info(f"  {rank}. '{text_preview}': {score:.4f}")
         return results
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+
+def main():
+    """Main entry point for CLIP training."""
+    parser = argparse.ArgumentParser(description="Train CLIP model")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    args = parser.parse_args()
+
+    setup_gpu(gpu_id=args.gpu)
+
+    # Create model
+    model = create_clip_model()
+    logger.info(f"Created CLIP model: {model.count_params():,} parameters")
+
+    # Create training components
+    loss_fn = CLIPContrastiveLoss()
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay", "warmup_steps": 1000, "warmup_start_lr": 1e-8,
+        "learning_rate": 1e-4, "decay_steps": 50000, "alpha": 0.0001
+    })
+    optimizer = optimizer_builder({
+        "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
+        "gradient_clipping_by_norm": 1.0
+    }, lr_schedule)
+
+    metrics = [CLIPAccuracy(), CLIPRecallAtK(k=5)]
+
+    trainer = CLIPTrainer(
+        model=model, loss_fn=loss_fn, optimizer=optimizer,
+        metrics=metrics, gradient_clip_norm=1.0
+    )
+
+    logger.info("CLIP training setup complete. Provide dataset to begin training.")
+
+
+if __name__ == "__main__":
+    main()

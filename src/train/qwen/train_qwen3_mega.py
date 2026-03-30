@@ -1,5 +1,6 @@
 """Qwen3-MEGA training framework with component-forcing curriculum to prevent collapse."""
 
+import argparse
 import keras
 import numpy as np
 import tensorflow as tf
@@ -8,6 +9,7 @@ from typing import Dict, List, Tuple, Optional, Any
 
 from train.common import setup_gpu
 from dl_techniques.models.qwen.qwen3_mega import create_qwen3_mega
+from dl_techniques.utils.logger import logger
 
 
 class MANNForcingTask:
@@ -543,11 +545,11 @@ class TrainingCurriculum:
         self.model.mann.trainable = not phase.freeze_mann
         self.model.gnn.trainable = not phase.freeze_gnn
 
-        print(f"\n{phase.name}")
-        print(f"Transformer: {'FROZEN' if phase.freeze_transformer else 'TRAINABLE'}")
-        print(f"MANN: {'FROZEN' if phase.freeze_mann else 'TRAINABLE'}")
-        print(f"GNN: {'FROZEN' if phase.freeze_gnn else 'TRAINABLE'}")
-        print(f"LR: {phase.learning_rate}, Aux Loss Weight: {phase.auxiliary_loss_weight}")
+        logger.info(f"\n{phase.name}")
+        logger.info(f"Transformer: {'FROZEN' if phase.freeze_transformer else 'TRAINABLE'}")
+        logger.info(f"MANN: {'FROZEN' if phase.freeze_mann else 'TRAINABLE'}")
+        logger.info(f"GNN: {'FROZEN' if phase.freeze_gnn else 'TRAINABLE'}")
+        logger.info(f"LR: {phase.learning_rate}, Aux Loss Weight: {phase.auxiliary_loss_weight}")
 
 
 class Qwen3MEGATrainer:
@@ -653,15 +655,15 @@ class Qwen3MEGATrainer:
             if step % self.monitor_frequency == 0:
                 outputs = self.model(inputs, training=False, return_dict=True)
                 metrics = self.monitor.compute_metrics(inputs, targets, outputs)
-                print(f"Step {self.global_step}: "
-                      f"Loss={losses['total_loss']:.4f}, "
-                      f"MANN={metrics.mann_utilization_score:.3f}, "
-                      f"GNN={metrics.gnn_utilization_score:.3f}, "
-                      f"Acc={metrics.task_accuracy:.3f}")
+                logger.info(f"Step {self.global_step}: "
+                            f"Loss={losses['total_loss']:.4f}, "
+                            f"MANN={metrics.mann_utilization_score:.3f}, "
+                            f"GNN={metrics.gnn_utilization_score:.3f}, "
+                            f"Acc={metrics.task_accuracy:.3f}")
 
                 if not metrics.is_healthy():
-                    print("WARNING: Component collapse detected!")
-                    print(self.monitor.get_summary())
+                    logger.warning("Component collapse detected!")
+                    logger.info(self.monitor.get_summary())
 
             self.global_step += 1
         self.epoch += 1
@@ -669,12 +671,12 @@ class Qwen3MEGATrainer:
     def train(self, steps_per_phase: int = 1000,
               checkpoint_dir: Optional[str] = None) -> None:
         """Full training with curriculum."""
-        print("=" * 60)
-        print("Qwen3-MEGA Training with Component-Forcing Curriculum")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("Qwen3-MEGA Training with Component-Forcing Curriculum")
+        logger.info("=" * 60)
 
         for phase_idx, phase in enumerate(self.curriculum.phases):
-            print(f"\nStarting {phase.name}")
+            logger.info(f"\nStarting {phase.name}")
             self.curriculum.configure_model_for_phase(phase)
 
             optimizer = keras.optimizers.AdamW(
@@ -682,24 +684,24 @@ class Qwen3MEGATrainer:
             )
 
             for epoch in range(phase.num_epochs):
-                print(f"\nEpoch {epoch + 1}/{phase.num_epochs}")
+                logger.info(f"\nEpoch {epoch + 1}/{phase.num_epochs}")
                 self.train_epoch(phase, optimizer, steps_per_phase)
 
                 if checkpoint_dir:
                     checkpoint_path = f"{checkpoint_dir}/phase{phase_idx}_epoch{epoch}.keras"
                     self.model.save(checkpoint_path)
-                    print(f"Saved checkpoint: {checkpoint_path}")
+                    logger.info(f"Saved checkpoint: {checkpoint_path}")
 
-            print(f"\n{phase.name} Complete!")
-            print(self.monitor.get_summary())
+            logger.info(f"\n{phase.name} Complete!")
+            logger.info(self.monitor.get_summary())
 
-        print("\nTraining Complete!")
-        print(self.monitor.get_summary())
+        logger.info("\nTraining Complete!")
+        logger.info(self.monitor.get_summary())
 
         if checkpoint_dir:
             final_path = f"{checkpoint_dir}/final_model.keras"
             self.model.save(final_path)
-            print(f"Saved final model: {final_path}")
+            logger.info(f"Saved final model: {final_path}")
 
         self.monitor.plot_history(
             save_path=f"{checkpoint_dir}/training_curves.png" if checkpoint_dir else None
@@ -708,16 +710,22 @@ class Qwen3MEGATrainer:
 
 def main():
     """Run the Qwen3-MEGA training framework."""
-    print("Creating Qwen3-MEGA model...")
+    parser = argparse.ArgumentParser(description="Train Qwen3-MEGA model")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    args = parser.parse_args()
+
+    setup_gpu(gpu_id=args.gpu)
+
+    logger.info("Creating Qwen3-MEGA model...")
     model = create_qwen3_mega(
         variant="tiny", memory_size="small", entity_graph_size="small"
     )
-    print("Model created!")
+    logger.info("Model created!")
 
-    print("\nInitializing trainer...")
+    logger.info("\nInitializing trainer...")
     trainer = Qwen3MEGATrainer(model=model, vocab_size=32000, monitor_frequency=50)
 
-    print("\nStarting training with curriculum...")
+    logger.info("\nStarting training with curriculum...")
     trainer.train(steps_per_phase=500, checkpoint_dir="./checkpoints")
 
 

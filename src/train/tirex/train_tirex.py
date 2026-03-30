@@ -646,12 +646,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
     parser.set_defaults(export_onnx=False)
     parser.add_argument("--onnx_opset_version", type=int, default=17)
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     return parser.parse_args()
 
 
 def main() -> None:
-    setup_gpu()
     args = parse_args()
+    setup_gpu(args.gpu)
 
     config = TiRexTrainingConfig(
         experiment_name=args.experiment_name,

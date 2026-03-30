@@ -226,7 +226,7 @@ def main():
     try:
         strategy = tf.distribute.MirroredStrategy()
         logger.info(f"Using MirroredStrategy on {strategy.num_replicas_in_sync} devices.")
-    except:
+    except Exception:
         strategy = tf.distribute.get_strategy()
         logger.info("Using default strategy.")
 

@@ -556,13 +556,14 @@ def main():
     parser.add_argument('--visualization-freq', type=int, default=1)
     parser.add_argument('--viz-samples', type=int, default=4)
     parser.add_argument('--confidence-threshold', type=float, default=0.3)
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
 
     args = parser.parse_args()
 
     if not check_dependencies():
         return
 
-    setup_gpu()
+    setup_gpu(gpu_id=args.gpu)
 
     np.random.seed(args.random_seed)
     tf.random.set_seed(args.random_seed)

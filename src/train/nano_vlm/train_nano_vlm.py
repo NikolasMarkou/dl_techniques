@@ -168,11 +168,12 @@ def configure_mixed_precision() -> None:
 
 def train_nanovlm(
     epochs: int = 10, batch_size: int = 8, use_multi_optimizer: bool = True,
-    checkpoint_frequency: int = 5, log_frequency: int = 10
+    checkpoint_frequency: int = 5, log_frequency: int = 10,
+    gpu_index: int = None,
 ) -> None:
     """Main training function for nanoVLM."""
     logger.info("Starting nanoVLM training")
-    setup_gpu()
+    setup_gpu(gpu_id=gpu_index)
     configure_mixed_precision()
 
     model = create_nanovlm()
@@ -243,13 +244,15 @@ def main():
     parser.add_argument("--no-multi-optimizer", dest="multi_optimizer", action="store_false")
     parser.add_argument("--checkpoint-frequency", type=int, default=5)
     parser.add_argument("--log-frequency", type=int, default=10)
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     args = parser.parse_args()
 
     train_nanovlm(
         epochs=args.epochs, batch_size=args.batch_size,
         use_multi_optimizer=args.multi_optimizer,
         checkpoint_frequency=args.checkpoint_frequency,
-        log_frequency=args.log_frequency
+        log_frequency=args.log_frequency,
+        gpu_index=args.gpu,
     )
 
 

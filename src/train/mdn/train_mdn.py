@@ -511,12 +511,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     return parser.parse_args()
 
 
 def main() -> None:
-    setup_gpu()
     args = parse_args()
+    setup_gpu(args.gpu)
 
     config = MDNTrainingConfig(
         window_size=args.window_size,

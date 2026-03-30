@@ -264,7 +264,7 @@ def plot_confusion_matrix(
 def train_model(args: argparse.Namespace) -> None:
     """Main training function."""
     logger.info("Starting PowerMLP training")
-    setup_gpu()
+    setup_gpu(gpu_id=args.gpu)
 
     # Load data (flattened + one-hot for MLP)
     train_data, val_data, test_data, num_classes = prepare_mlp_data(
@@ -427,6 +427,7 @@ def main():
                         help='Dropout rate')
     parser.add_argument('--batch-normalization', action='store_true',
                         help='Enable batch normalization')
+    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
 
     args = parser.parse_args()
 

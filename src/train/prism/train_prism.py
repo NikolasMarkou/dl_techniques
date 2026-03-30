@@ -660,12 +660,13 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(perform_deep_analysis=True)
     parser.add_argument("--analysis_frequency", type=int, default=10)
     parser.add_argument("--analysis_start_epoch", type=int, default=1)
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     return parser.parse_args()
 
 
 def main() -> None:
-    setup_gpu()
     args = parse_args()
+    setup_gpu(args.gpu)
 
     config = PRISMTrainingConfig(
         experiment_name=args.experiment_name,

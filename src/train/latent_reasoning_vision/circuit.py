@@ -5,6 +5,7 @@ This example shows how to use the neural circuit in a real-world scenario,
 including model creation, training, and evaluation.
 """
 
+import argparse
 import keras
 import numpy as np
 import tensorflow as tf
@@ -653,6 +654,12 @@ def run_comprehensive_demo():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Neural Circuit image classification demo")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    args = parser.parse_args()
+
+    setup_gpu(gpu_id=args.gpu)
+
     # Run the demonstration
     classifier, results = run_comprehensive_demo()
 

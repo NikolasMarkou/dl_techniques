@@ -381,7 +381,7 @@ class EnhancedMultiTaskCallback(keras.callbacks.Callback):
             try:
                 lr = float(self.model.optimizer.learning_rate)
                 logs['learning_rate'] = lr
-            except:
+            except Exception:
                 pass
 
         if (epoch + 1) % self.log_freq == 0:
