@@ -677,6 +677,44 @@ class CLIP(keras.Model):
 
         return results
 
+    def compute_output_shape(
+        self,
+        input_shape: Union[Dict[str, Any], Tuple]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute output shape for given input shape.
+
+        Args:
+            input_shape: Dictionary with 'image' and/or 'text' shapes,
+                or a tuple of shapes.
+
+        Returns:
+            Dictionary with output shapes for each returned tensor.
+        """
+        output_shapes = {}
+
+        if isinstance(input_shape, dict):
+            image_shape = input_shape.get('image')
+            text_shape = input_shape.get('text')
+        else:
+            image_shape = input_shape[0] if len(input_shape) > 0 else None
+            text_shape = input_shape[1] if len(input_shape) > 1 else None
+
+        if image_shape is not None:
+            batch_size = image_shape[0]
+            output_shapes['image_features'] = (batch_size, self.embed_dim)
+
+        if text_shape is not None:
+            batch_size = text_shape[0]
+            output_shapes['text_features'] = (batch_size, self.embed_dim)
+
+        if image_shape is not None and text_shape is not None:
+            batch_size = image_shape[0]
+            output_shapes['logits_per_image'] = (batch_size, batch_size)
+            output_shapes['logits_per_text'] = (batch_size, batch_size)
+            output_shapes['logit_scale'] = ()
+
+        return output_shapes
+
     def get_config(self) -> Dict[str, Any]:
         """
         Get model configuration for serialization.

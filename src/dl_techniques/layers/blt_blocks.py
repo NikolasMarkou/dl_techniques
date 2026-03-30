@@ -332,6 +332,26 @@ class ByteTokenizer(keras.layers.Layer):
 
         return text
 
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape.
+
+        ByteTokenizer processes text strings to byte sequences.
+        Output shape depends on the text length, so the sequence
+        dimension is dynamic (None).
+
+        Args:
+            input_shape: Input shape tuple (ignored for this utility layer).
+
+        Returns:
+            Output shape tuple: (batch_size, None) for variable-length byte sequences.
+        """
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 1:
+            return (input_shape[0], None)
+        return (None, None)
+
     def get_config(self) -> Dict[str, Any]:
         """Return layer configuration."""
         config = super().get_config()
@@ -948,7 +968,8 @@ class PatchPooling(keras.layers.Layer):
         config.update({
             'pooling_method': self.pooling_method,
             'output_dim': self.output_dim,
-            'num_queries': self.num_queries
+            'num_queries': self.num_queries,
+            'max_patches': self.max_patches
         })
         return config
 

@@ -70,7 +70,7 @@ language model to make a nuanced judgment about a query-document pair.
 
 import keras
 from keras import ops, layers
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -307,6 +307,25 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
             pooled_embeddings = ops.normalize(pooled_embeddings, axis=1)
 
         return pooled_embeddings
+
+    def compute_output_shape(
+        self,
+        input_shape: Union[Dict[str, Tuple], Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape.
+
+        Args:
+            input_shape: Either a dict with 'input_ids' shape or a tuple.
+
+        Returns:
+            Output shape: (batch_size, embedding_dimension).
+        """
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('input_ids', (None, None))[0]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+        output_dim = self.truncate_dim if self.truncate_dim else self.hidden_size
+        return (batch_size, output_dim)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
@@ -560,6 +579,24 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         scores = probabilities[:, 1]
 
         return scores
+
+    def compute_output_shape(
+        self,
+        input_shape: Union[Dict[str, Tuple], Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int]]:
+        """Compute output shape.
+
+        Args:
+            input_shape: Either a dict with 'input_ids' shape or a tuple.
+
+        Returns:
+            Output shape: (batch_size,) for relevance scores.
+        """
+        if isinstance(input_shape, dict):
+            batch_size = input_shape.get('input_ids', (None, None))[0]
+        else:
+            batch_size = input_shape[0] if input_shape else None
+        return (batch_size,)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""

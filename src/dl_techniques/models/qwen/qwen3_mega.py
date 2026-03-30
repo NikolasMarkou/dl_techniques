@@ -217,6 +217,23 @@ class MemoryIntegrationLayer(keras.layers.Layer):
 
         return output
 
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Tuple[Optional[int], ...], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape.
+
+        Output has the same shape as the hidden_states input (first element of the tuple).
+
+        Args:
+            input_shape: Tuple of (hidden_shape, memory_shape, entity_shape).
+
+        Returns:
+            Output shape: same as hidden_states shape (batch_size, seq_len, hidden_size).
+        """
+        hidden_shape = input_shape[0]
+        return hidden_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
         config = super().get_config()
