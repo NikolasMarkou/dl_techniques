@@ -9,7 +9,7 @@ from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.nano_vlm_loss import NanoVLMLoss
 from dl_techniques.models.nano_vlm.model import create_nanovlm
-from dl_techniques.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample
+from dl_techniques.datasets.vqa_dataset import VQADataProcessor, load_cauldron_sample, create_vqa_dataset
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
 
 
@@ -185,7 +185,7 @@ def train_nanovlm(
 
     data_processor = VQADataProcessor(image_size=224, max_text_length=512, vocab_size=32000)
     sample_data = load_cauldron_sample()
-    train_dataset = data_processor.create_tensorflow_dataset(sample_data, batch_size=batch_size, shuffle=True)
+    train_dataset = create_vqa_dataset(sample_data, data_processor, batch_size=batch_size, shuffle=True)
     steps_per_epoch = len(train_dataset)
 
     logger.info(f"Epochs: {epochs}, Batch: {batch_size}, Steps/epoch: {steps_per_epoch}")
