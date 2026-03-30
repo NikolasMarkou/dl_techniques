@@ -55,6 +55,7 @@ import matplotlib.pyplot as plt
 # local imports
 # ---------------------------------------------------------------------
 
+from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.vision_heads.task_types import (
     TaskType,
@@ -65,18 +66,6 @@ from dl_techniques.datasets.vision.coco import COCODatasetBuilder, COCO_CLASSES 
 
 # ---------------------------------------------------------------------
 
-def setup_gpu():
-    """Configure GPU settings for optimal training."""
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
-        except RuntimeError as e:
-            logger.error(f"GPU setup error: {e}")
-    else:
-        logger.info("No GPUs found, using CPU")
 
 # ---------------------------------------------------------------------
 
