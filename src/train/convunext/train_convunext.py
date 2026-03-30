@@ -19,7 +19,7 @@ import tensorflow as tf
 from typing import Tuple
 from datetime import datetime
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convunext import ConvUNextModel
 from dl_techniques.models.masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
@@ -163,18 +163,18 @@ def run_mae_pretraining(
 
     mae.compile(optimizer=optimizer)
 
-    callbacks = [
-        keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
-        keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, "mae_weights.keras"),
-            save_best_only=True, monitor="val_loss"
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, "mae_history.csv"))
-    ]
+    mae_callbacks, _ = create_callbacks(
+        model_name="convunext_mae",
+        results_dir_prefix="convunext_mae",
+        monitor='val_loss',
+        patience=5,
+        use_lr_schedule=True,
+        include_analyzer=False,
+    )
 
     mae.fit(
         train_data, epochs=args.mae_epochs, batch_size=args.batch_size,
-        validation_data=(val_data, val_data), callbacks=callbacks
+        validation_data=(val_data, val_data), callbacks=mae_callbacks
     )
 
     # Visualize reconstructions
@@ -258,19 +258,19 @@ def run_segmentation_finetuning(
         loss="sparse_categorical_crossentropy", metrics=["accuracy"]
     )
 
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, "best_segmentation.keras"),
-            save_best_only=True, monitor="val_loss"
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, "segmentation_history.csv")),
-        keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)
-    ]
+    seg_callbacks, _ = create_callbacks(
+        model_name="convunext_seg",
+        results_dir_prefix="convunext_seg",
+        monitor='val_loss',
+        patience=5,
+        use_lr_schedule=True,
+        include_analyzer=False,
+    )
 
     history = convunext_model.fit(
         x_train, y_train, validation_data=(x_val, y_val),
         epochs=args.finetune_epochs_stage2, batch_size=args.batch_size,
-        callbacks=callbacks
+        callbacks=seg_callbacks
     )
 
     return convunext_model, history

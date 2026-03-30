@@ -18,7 +18,7 @@ from typing import Tuple, Dict, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.logic.neural_circuit import LearnableNeuralCircuit
-from train.common import setup_gpu
+from train.common import setup_gpu, create_callbacks
 
 # ---------------------------------------------------------------------
 
@@ -273,24 +273,13 @@ class NeuralCircuitImageClassifier:
 
         # Default callbacks
         if callbacks is None:
-            callbacks = [
-                keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=50,
-                    restore_best_weights=True
-                ),
-                keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.5,
-                    patience=50,
-                    min_lr=1e-7
-                ),
-                keras.callbacks.ModelCheckpoint(
-                    'best_neural_circuit_model.keras',
-                    monitor='val_accuracy',
-                    save_best_only=True
-                )
-            ]
+            callbacks, _ = create_callbacks(
+                model_name="neural_circuit",
+                results_dir_prefix="circuit",
+                monitor='val_loss',
+                patience=50,
+                use_lr_schedule=False,
+            )
 
         # Record training time
         start_time = time.time()

@@ -25,6 +25,7 @@ from dl_techniques.layers.sampling import Sampling
 from train.common import (
     setup_gpu,
     create_base_argument_parser,
+    create_callbacks,
     load_dataset,
 )
 
@@ -215,20 +216,16 @@ def train_model(args):
     model.summary(print_fn=logger.info)
 
     # Callbacks — VAE monitors val_total_loss, not val_accuracy
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"vae_{args.dataset}_{timestamp}")
-    os.makedirs(results_dir, exist_ok=True)
-
-    callbacks = [
-        keras.callbacks.EarlyStopping(monitor='val_total_loss', patience=args.patience,
-                                       restore_best_weights=True, verbose=1, mode='min'),
-        keras.callbacks.ModelCheckpoint(os.path.join(results_dir, 'best_model.keras'),
-                                         monitor='val_total_loss', save_best_only=True, verbose=1, mode='min'),
-        keras.callbacks.ReduceLROnPlateau(monitor='val_total_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, 'training_log.csv')),
+    callbacks, results_dir = create_callbacks(
+        model_name=f"vae_{args.dataset}",
+        results_dir_prefix="vae",
+        monitor='val_total_loss',
+        patience=args.patience,
+        use_lr_schedule=False,
+    )
+    callbacks.append(
         VisualizationCallback((x_test, y_test), results_dir, args.dataset, args.viz_frequency, args.batch_size),
-    ]
+    )
 
     # Train
     history = model.fit(

@@ -10,11 +10,10 @@ import argparse
 import keras
 import numpy as np
 import tensorflow as tf
-from datetime import datetime
 from typing import Tuple, Dict, Any, Optional
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu, create_base_argument_parser
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.darkir.model import create_darkir_model
@@ -308,22 +307,16 @@ def train_model(args: argparse.Namespace):
     model.summary(print_fn=logger.info)
 
     # Callbacks
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"darkir_{args.variant}_{timestamp}")
-    os.makedirs(results_dir, exist_ok=True)
-
-    callbacks = [
-        keras.callbacks.ModelCheckpoint(
-            os.path.join(results_dir, 'best_model.keras'),
-            monitor='val_psnr', mode='max', save_best_only=True, verbose=1,
-        ),
-        keras.callbacks.CSVLogger(os.path.join(results_dir, 'log.csv')),
-        keras.callbacks.EarlyStopping(
-            monitor='val_psnr', patience=args.patience, mode='max',
-            verbose=1, restore_best_weights=True,
-        ),
+    callbacks, results_dir = create_callbacks(
+        model_name=f"darkir_{args.variant}",
+        results_dir_prefix="darkir",
+        monitor='val_psnr',
+        patience=args.patience,
+        use_lr_schedule=True,
+    )
+    callbacks.append(
         keras.callbacks.BackupAndRestore(os.path.join(results_dir, 'backup')),
-    ]
+    )
 
     # Visualization Manager
     viz_manager = VisualizationManager(
