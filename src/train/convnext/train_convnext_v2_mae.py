@@ -32,86 +32,18 @@ from dl_techniques.models.masked_autoencoder import (
     visualize_reconstruction,
 )
 
-# Model Analyzer imports
 from dl_techniques.analyzer import (
     ModelAnalyzer,
     AnalysisConfig,
     DataInput,
 )
+from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
-
-# ---------------------------------------------------------------------
-
-def setup_gpu():
-    """Configure GPU settings for optimal training."""
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info(f"Found {len(gpus)} GPU(s), memory growth enabled")
-        except RuntimeError as e:
-            logger.error(f"GPU setup error: {e}")
-    else:
-        logger.info("No GPUs found, using CPU")
-
-
-# ---------------------------------------------------------------------
-
-def load_dataset(
-        dataset_name: str
-) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray], Tuple[int, int, int], int]:
-    """Load and preprocess dataset."""
-    logger.info(f"Loading {dataset_name} dataset...")
-
-    if dataset_name.lower() == 'mnist':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-        # Convert grayscale to RGB
-        x_train = np.repeat(x_train[..., np.newaxis], 3, axis=-1)
-        x_test = np.repeat(x_test[..., np.newaxis], 3, axis=-1)
-        input_shape = (28, 28, 3)
-        num_classes = 10
-
-    elif dataset_name.lower() == 'cifar10':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-        y_train = y_train.flatten()
-        y_test = y_test.flatten()
-        input_shape = (32, 32, 3)
-        num_classes = 10
-
-    elif dataset_name.lower() == 'cifar100':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
-        y_train = y_train.flatten()
-        y_test = y_test.flatten()
-        input_shape = (32, 32, 3)
-        num_classes = 100
-
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-    # Normalize to [0, 1]
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-
-    logger.info(f"Dataset loaded: {x_train.shape[0]} train, {x_test.shape[0]} test samples")
-    logger.info(f"Input shape: {input_shape}, Classes: {num_classes}")
-
-    return (x_train, y_train), (x_test, y_test), input_shape, num_classes
-
-
-# ---------------------------------------------------------------------
-
-def get_class_names(dataset: str, num_classes: int) -> List[str]:
-    """Get class names for the dataset."""
-    if dataset.lower() == 'mnist':
-        return [str(i) for i in range(10)]
-    elif dataset.lower() == 'cifar10':
-        return ['airplane', 'automobile', 'bird', 'cat', 'deer',
-                'dog', 'frog', 'horse', 'ship', 'truck']
-    elif dataset.lower() == 'cifar100':
-        return [f'class_{i}' for i in range(num_classes)]
-    else:
-        return [f'class_{i}' for i in range(num_classes)]
+from train.common import (
+    setup_gpu,
+    load_dataset,
+    get_class_names,
+)
 
 
 # ---------------------------------------------------------------------
@@ -435,7 +367,12 @@ def create_finetune_callbacks(
             patience=5,
             min_lr=1e-7,
             verbose=1
-        )
+        ),
+        EpochAnalyzerCallback(
+            output_dir=os.path.join(finetune_dir, "epoch_analysis"),
+            model_name=f"convnext_v2_{stage}",
+            epoch_frequency=1,
+        ),
     ]
 
     return callbacks
