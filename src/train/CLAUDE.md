@@ -153,33 +153,57 @@ def main():
 
 **Used by:** BERT pretrain/finetune, FNet pretrain/finetune
 
-These scripts use their own tokenized datasets (not `load_dataset()`), need TensorBoard, and have custom EpochAnalyzerCallback settings. They wrap `create_callbacks()` in a local function that adds domain-specific behavior.
+These scripts use shared NLP utilities from `train.common.nlp` for tokenization, text dataset loading, preprocessing, warmup LR schedules, and NLP-specific callbacks. Model creation and training logic remain local.
 
 ```python
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu
+from train.common.nlp import (
+    create_tokenizer,              # TiktokenPreprocessor factory
+    load_text_dataset,             # TFDS text datasets (e.g., imdb_reviews)
+    preprocess_mlm_dataset,        # tokenize + batch for MLM pretraining
+    preprocess_classification_dataset,  # tokenize + batch for classification
+    create_warmup_lr_schedule,     # warmup + cosine decay
+    create_nlp_callbacks,          # common callbacks with NLP defaults
+)
 
-def create_callbacks(config):
-    """Wrap common callbacks with NLP-specific settings."""
-    callbacks, results_dir = create_common_callbacks(
-        model_name=config.model_name,
-        results_dir_prefix="bert",
-        monitor="val_loss",                  # NLP pretrain → val_loss
-        patience=config.patience,
-        use_lr_schedule=True,
-        include_tensorboard=True,            # NLP scripts use TensorBoard
-        analyzer_start_epoch=config.analysis_start_epoch,
-        analyzer_epoch_frequency=config.analysis_epoch_frequency,
+def train_model(config):
+    setup_gpu(args.gpu)
+
+    preprocessor = create_tokenizer(config.encoding_name, config.max_seq_length, ...)
+    train_ds = preprocess_mlm_dataset(
+        load_text_dataset(config.dataset_name, "train", config.max_samples),
+        preprocessor, config.max_seq_length, config.batch_size,
     )
-    return callbacks, results_dir
+
+    model = create_my_encoder_mlm_model(config)  # local — model-specific
+    lr = create_warmup_lr_schedule(config.learning_rate, config.num_epochs, steps, config.warmup_ratio)
+    model.compile(optimizer=keras.optimizers.AdamW(learning_rate=lr, ...))
+
+    callbacks, results_dir = create_nlp_callbacks(
+        model_name="BERT-tiny",
+        results_dir_prefix="bert_pretrain",
+        monitor="val_loss",          # NLP pretrain → val_loss
+    )
+    model.fit(train_ds, callbacks=callbacks, ...)
 
 def main():
-    # Local argparse — NLP-specific args (vocab, tokenizer, etc.)
     parser = argparse.ArgumentParser(description="Pretrain BERT")
     parser.add_argument("--gpu", type=int, default=None)
-    # ...
+    # ... NLP-specific args (variant, max-samples, etc.)
     args = parser.parse_args()
     setup_gpu(args.gpu)
 ```
+
+**`train.common.nlp` API:**
+| Function | Purpose |
+|----------|---------|
+| `create_tokenizer(encoding, max_len, ...)` | TiktokenPreprocessor with cl100k_base defaults |
+| `decode_text(text)` | TF tensor → Python string |
+| `load_text_dataset(name, split, max_samples, as_supervised)` | TFDS text dataset loading |
+| `preprocess_mlm_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch for MLM |
+| `preprocess_classification_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch with labels |
+| `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay |
+| `create_nlp_callbacks(name, prefix, ...)` | Common callbacks with TensorBoard enabled |
 
 ---
 
@@ -275,7 +299,9 @@ create_callbacks(
 - Numpy datasets: `(x_train, y_train), (x_test, y_test), input_shape, num_classes`
 - ImageNet (tf.data): `train_ds, val_ds, input_shape, num_classes`
 
-For non-standard data (NLP, time-series, file-based images), write local data loading. Do NOT try to force it through `load_dataset()`.
+For NLP text datasets, use `train.common.nlp`: `load_text_dataset()`, `preprocess_mlm_dataset()`, `preprocess_classification_dataset()`.
+
+For time-series, file-based images, or other non-standard data, write local data loading. Do NOT try to force it through `load_dataset()`.
 
 ## GPU Selection
 
