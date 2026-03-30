@@ -1,13 +1,11 @@
 """Training script for nanoVLM model with multi-optimizer support."""
 
+import argparse
 import keras
 from keras import ops
 from typing import Dict, List, Tuple, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
+from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.nano_vlm_loss import NanoVLMLoss
 from dl_techniques.models.nano_vlm.model import create_nanovlm
@@ -18,32 +16,16 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 # ---------------------------------------------------------------------
 
 def create_training_setup() -> Dict[str, Any]:
-    """Create training configuration for nanoVLM.
+    """Create training configuration (optimizer, LR schedule, loss)."""
+    lr_schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay", "warmup_steps": 1000, "warmup_start_lr": 1e-8,
+        "learning_rate": 1e-4, "decay_steps": 50000, "alpha": 0.0001
+    })
 
-    Returns:
-        Dict[str, Any]: Dictionary containing optimizer, learning rate schedule, and loss function.
-    """
-    # Learning rate schedule configuration
-    lr_config = {
-        "type": "cosine_decay",
-        "warmup_steps": 1000,
-        "warmup_start_lr": 1e-8,
-        "learning_rate": 1e-4,  # Base learning rate
-        "decay_steps": 50000,
-        "alpha": 0.0001
-    }
-
-    # Optimizer configuration
-    optimizer_config = {
-        "type": "adamw",
-        "beta_1": 0.9,
-        "beta_2": 0.999,
+    optimizer = optimizer_builder({
+        "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
         "gradient_clipping_by_norm": 1.0
-    }
-
-    # Build components
-    lr_schedule = learning_rate_schedule_builder(lr_config)
-    optimizer = optimizer_builder(optimizer_config, lr_schedule)
+    }, lr_schedule)
 
     return {
         "optimizer": optimizer,
@@ -51,18 +33,11 @@ def create_training_setup() -> Dict[str, Any]:
         "loss_fn": NanoVLMLoss(ignore_index=0, label_smoothing=0.1)
     }
 
+
 # ---------------------------------------------------------------------
 
 def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
-    """Setup different learning rates for different model components.
-
-    Args:
-        model (keras.Model): The nanoVLM model to configure optimizers for.
-
-    Returns:
-        Dict[str, Any]: Dictionary containing optimizers and parameter groups.
-    """
-    # Separate parameters by component
+    """Setup different learning rates for vision, language, and projection components."""
     vision_params: List[keras.Variable] = []
     language_params: List[keras.Variable] = []
     projection_params: List[keras.Variable] = []
@@ -76,372 +51,207 @@ def setup_different_learning_rates(model: keras.Model) -> Dict[str, Any]:
         else:
             language_params.extend(layer.trainable_variables)
 
-    # Create optimizers with different learning rates
-    vision_lr_config = {
-        "type": "cosine_decay",
-        "warmup_steps": 500,
-        "warmup_start_lr": 1e-9,
-        "learning_rate": 1e-5,  # Lower for pre-trained vision_heads
-        "decay_steps": 25000,
-        "alpha": 0.0001
-    }
-
-    language_lr_config = {
-        "type": "cosine_decay",
-        "warmup_steps": 500,
-        "warmup_start_lr": 1e-9,
-        "learning_rate": 1e-5,  # Lower for pre-trained language
-        "decay_steps": 25000,
-        "alpha": 0.0001
-    }
-
-    projection_lr_config = {
-        "type": "cosine_decay",
-        "warmup_steps": 1000,
-        "warmup_start_lr": 1e-8,
-        "learning_rate": 1e-4,  # Higher for new projection layers
-        "decay_steps": 50000,
-        "alpha": 0.0001
-    }
-
-    # Build optimizers
-    vision_lr_schedule = learning_rate_schedule_builder(vision_lr_config)
-    language_lr_schedule = learning_rate_schedule_builder(language_lr_config)
-    projection_lr_schedule = learning_rate_schedule_builder(projection_lr_config)
-
-    vision_optimizer_config = {
-        "type": "adamw",
-        "beta_1": 0.9,
-        "beta_2": 0.999,
-        "gradient_clipping_by_norm": 0.5
-    }
-
-    language_optimizer_config = {
-        "type": "adamw",
-        "beta_1": 0.9,
-        "beta_2": 0.999,
-        "gradient_clipping_by_norm": 0.5
-    }
-
-    projection_optimizer_config = {
-        "type": "adamw",
-        "beta_1": 0.9,
-        "beta_2": 0.999,
-        "gradient_clipping_by_norm": 1.0
-    }
-
-    vision_optimizer = optimizer_builder(vision_optimizer_config, vision_lr_schedule)
-    language_optimizer = optimizer_builder(language_optimizer_config, language_lr_schedule)
-    projection_optimizer = optimizer_builder(projection_optimizer_config, projection_lr_schedule)
+    def _build_optimizer(lr: float, decay_steps: int, warmup: int, clip: float):
+        lr_schedule = learning_rate_schedule_builder({
+            "type": "cosine_decay", "warmup_steps": warmup, "warmup_start_lr": 1e-9,
+            "learning_rate": lr, "decay_steps": decay_steps, "alpha": 0.0001
+        })
+        return optimizer_builder({
+            "type": "adamw", "beta_1": 0.9, "beta_2": 0.999,
+            "gradient_clipping_by_norm": clip
+        }, lr_schedule)
 
     return {
-        "vision_optimizer": vision_optimizer,
-        "language_optimizer": language_optimizer,
-        "projection_optimizer": projection_optimizer,
+        "vision_optimizer": _build_optimizer(1e-5, 25000, 500, 0.5),
+        "language_optimizer": _build_optimizer(1e-5, 25000, 500, 0.5),
+        "projection_optimizer": _build_optimizer(1e-4, 50000, 1000, 1.0),
         "vision_params": vision_params,
         "language_params": language_params,
         "projection_params": projection_params
     }
+
 
 # ---------------------------------------------------------------------
 
 class NanoVLMTrainer:
     """Custom trainer for nanoVLM with multi-optimizer support.
 
-    This trainer implements differential learning rates for different components
-    of the nanoVLM model (vision_heads encoder, language model, projection layers).
-
-    Args:
-        model (keras.Model): The nanoVLM model to train.
-        loss_fn (keras.losses.Loss): Loss function for training.
-        use_multi_optimizer (bool, optional): Whether to use multiple optimizers
-            with different learning rates. Defaults to True.
+    Implements differential learning rates for vision encoder,
+    language model, and projection layers.
     """
 
-    def __init__(
-            self,
-            model: keras.Model,
-            loss_fn: keras.losses.Loss,
-            use_multi_optimizer: bool = True
-    ) -> None:
+    def __init__(self, model: keras.Model, loss_fn: keras.losses.Loss,
+                 use_multi_optimizer: bool = True) -> None:
         self.model = model
         self.loss_fn = loss_fn
         self.use_multi_optimizer = use_multi_optimizer
 
-        # Setup optimizers
         if use_multi_optimizer:
             self.optimizers = setup_different_learning_rates(model)
         else:
-            training_setup = create_training_setup()
-            self.single_optimizer = training_setup["optimizer"]
+            self.single_optimizer = create_training_setup()["optimizer"]
 
-        # Initialize metrics
         self.train_loss = keras.metrics.Mean(name='train_loss')
         self.train_accuracy = keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
 
     def _apply_multi_optimizer_gradients(
-            self,
-            gradients: List[keras.Variable],
-            variables: List[keras.Variable]
+        self, gradients: List[keras.Variable], variables: List[keras.Variable]
     ) -> None:
-        """Apply gradients using multiple optimizers for different components.
-
-        Args:
-            gradients (List[keras.Variable]): Computed gradients.
-            variables (List[keras.Variable]): Model variables.
-        """
-        # Split gradients by component
-        vision_grads = []
-        language_grads = []
-        projection_grads = []
-
-        vision_vars = []
-        language_vars = []
-        projection_vars = []
+        """Apply gradients using component-specific optimizers."""
+        component_map = {
+            'vision': ([], [], self.optimizers['vision_optimizer'], self.optimizers['vision_params']),
+            'language': ([], [], self.optimizers['language_optimizer'], self.optimizers['language_params']),
+            'projection': ([], [], self.optimizers['projection_optimizer'], self.optimizers['projection_params']),
+        }
 
         for grad, var in zip(gradients, variables):
-            if grad is None:  # Skip None gradients
+            if grad is None:
                 continue
-
             if var in self.optimizers['vision_params']:
-                vision_grads.append(grad)
-                vision_vars.append(var)
+                component_map['vision'][0].append(grad)
+                component_map['vision'][1].append(var)
             elif var in self.optimizers['projection_params']:
-                projection_grads.append(grad)
-                projection_vars.append(var)
+                component_map['projection'][0].append(grad)
+                component_map['projection'][1].append(var)
             elif var in self.optimizers['language_params']:
-                language_grads.append(grad)
-                language_vars.append(var)
+                component_map['language'][0].append(grad)
+                component_map['language'][1].append(var)
 
-        # Apply gradients with respective optimizers
-        if vision_grads and vision_vars:
-            self.optimizers['vision_optimizer'].apply_gradients(
-                zip(vision_grads, vision_vars)
-            )
-        if language_grads and language_vars:
-            self.optimizers['language_optimizer'].apply_gradients(
-                zip(language_grads, language_vars)
-            )
-        if projection_grads and projection_vars:
-            self.optimizers['projection_optimizer'].apply_gradients(
-                zip(projection_grads, projection_vars)
-            )
+        for _, (grads, vars, opt, _) in component_map.items():
+            if grads and vars:
+                opt.apply_gradients(zip(grads, vars))
 
     def train_step(self, batch_data: Tuple[Any, Any]) -> Dict[str, keras.Variable]:
-        """Custom training step with support for multiple optimizers.
-
-        Args:
-            batch_data (Tuple[Any, Any]): Batch containing inputs and labels.
-
-        Returns:
-            Dict[str, keras.Variable]: Dictionary containing loss and accuracy metrics.
-        """
         inputs, labels = batch_data
 
         with keras.GradientTape() as tape:
             predictions = self.model(inputs, training=True)
             loss = self.loss_fn(labels, predictions)
 
-            # Apply loss scaling for mixed precision if enabled
             if isinstance(self.model.dtype_policy, keras.mixed_precision.Policy):
                 if self.model.dtype_policy.name == 'mixed_float16':
                     loss = ops.cast(loss, dtype='float32')
 
-        # Compute gradients
         trainable_vars = self.model.trainable_variables
         gradients = tape.gradient(loss, trainable_vars)
 
-        # Apply gradients
         if self.use_multi_optimizer:
             self._apply_multi_optimizer_gradients(gradients, trainable_vars)
         else:
-            # Filter out None gradients
-            filtered_grads_and_vars = [
-                (grad, var) for grad, var in zip(gradients, trainable_vars)
-                if grad is not None
-            ]
-            if filtered_grads_and_vars:
-                self.single_optimizer.apply_gradients(filtered_grads_and_vars)
+            filtered = [(g, v) for g, v in zip(gradients, trainable_vars) if g is not None]
+            if filtered:
+                self.single_optimizer.apply_gradients(filtered)
 
-        # Update metrics
         self.train_loss.update_state(loss)
         self.train_accuracy.update_state(labels, predictions)
 
-        return {
-            'loss': self.train_loss.result(),
-            'accuracy': self.train_accuracy.result()
-        }
+        return {'loss': self.train_loss.result(), 'accuracy': self.train_accuracy.result()}
 
     def reset_metrics(self) -> None:
-        """Reset training metrics."""
         self.train_loss.reset_states()
         self.train_accuracy.reset_states()
+
 
 # ---------------------------------------------------------------------
 
 def configure_mixed_precision() -> None:
-    """Configure mixed precision training for better performance."""
+    """Configure mixed precision training."""
     try:
-        # Check if mixed precision is supported
-        policy = keras.mixed_precision.Policy('mixed_float16')
-        keras.mixed_precision.set_global_policy(policy)
-        logger.info("Mixed precision training enabled (float16)")
+        keras.mixed_precision.set_global_policy(keras.mixed_precision.Policy('mixed_float16'))
+        logger.info("Mixed precision enabled (float16)")
     except Exception as e:
         logger.warning(f"Mixed precision not available: {e}. Using float32.")
-        # Fallback to float32
-        policy = keras.mixed_precision.Policy('float32')
-        keras.mixed_precision.set_global_policy(policy)
+        keras.mixed_precision.set_global_policy(keras.mixed_precision.Policy('float32'))
+
 
 # ---------------------------------------------------------------------
 
 def train_nanovlm(
-        epochs: int = 10,
-        batch_size: int = 8,
-        use_multi_optimizer: bool = True,
-        checkpoint_frequency: int = 5,
-        log_frequency: int = 10
+    epochs: int = 10, batch_size: int = 8, use_multi_optimizer: bool = True,
+    checkpoint_frequency: int = 5, log_frequency: int = 10
 ) -> None:
-    """Main training function for nanoVLM.
-
-    Args:
-        epochs (int, optional): Number of training epochs. Defaults to 10.
-        batch_size (int, optional): Training batch size. Defaults to 8.
-        use_multi_optimizer (bool, optional): Whether to use multiple optimizers. Defaults to True.
-        checkpoint_frequency (int, optional): Save checkpoint every N epochs. Defaults to 5.
-        log_frequency (int, optional): Log metrics every N steps. Defaults to 10.
-    """
+    """Main training function for nanoVLM."""
     logger.info("Starting nanoVLM training")
-
-    # Configure mixed precision
+    setup_gpu()
     configure_mixed_precision()
 
-    # Create model
-    try:
-        model = create_nanovlm()
-        logger.info("Created nanoVLM-222M model")
-        logger.info(f"Model has {model.count_params():,} parameters")
-    except Exception as e:
-        logger.error(f"Failed to create model: {e}")
-        raise
+    model = create_nanovlm()
+    logger.info(f"Created nanoVLM-222M: {model.count_params():,} parameters")
 
-    # Setup training
     training_setup = create_training_setup()
-    trainer = NanoVLMTrainer(
-        model,
-        training_setup['loss_fn'],
-        use_multi_optimizer=use_multi_optimizer
-    )
-
+    trainer = NanoVLMTrainer(model, training_setup['loss_fn'], use_multi_optimizer=use_multi_optimizer)
     logger.info(f"Using {'multi-optimizer' if use_multi_optimizer else 'single optimizer'} training")
 
-    # Prepare data
-    try:
-        data_processor = VQADataProcessor(
-            image_size=224,
-            max_text_length=512,
-            vocab_size=32000
-        )
+    data_processor = VQADataProcessor(image_size=224, max_text_length=512, vocab_size=32000)
+    sample_data = load_cauldron_sample()
+    train_dataset = data_processor.create_tensorflow_dataset(sample_data, batch_size=batch_size, shuffle=True)
+    steps_per_epoch = len(train_dataset)
 
-        # Load sample data (replace with real dataset)
-        sample_data = load_cauldron_sample()
-        train_dataset = data_processor.create_tensorflow_dataset(
-            sample_data,
-            batch_size=batch_size,
-            shuffle=True
-        )
+    logger.info(f"Epochs: {epochs}, Batch: {batch_size}, Steps/epoch: {steps_per_epoch}")
 
-        steps_per_epoch = len(train_dataset)
-        logger.info(f"Dataset prepared: {steps_per_epoch} steps per epoch")
-
-    except Exception as e:
-        logger.error(f"Failed to prepare dataset: {e}")
-        raise
-
-    logger.info(
-        f"Training configuration:\n"
-        f"  Epochs: {epochs}\n"
-        f"  Batch size: {batch_size}\n"
-        f"  Steps per epoch: {steps_per_epoch}\n"
-        f"  Total training steps: {epochs * steps_per_epoch}"
-    )
-
-    # Training loop
     try:
         for epoch in range(epochs):
-            logger.info(f"Starting epoch {epoch + 1}/{epochs}")
-
-            # Reset metrics
             trainer.reset_metrics()
 
-            # Train for one epoch
             for step, batch in enumerate(train_dataset):
                 try:
                     metrics = trainer.train_step(batch)
-
                     if step % log_frequency == 0:
                         logger.info(
                             f"Epoch {epoch + 1}/{epochs}, Step {step}/{steps_per_epoch}: "
-                            f"Loss = {float(metrics['loss']):.4f}, "
-                            f"Accuracy = {float(metrics['accuracy']):.4f}"
+                            f"Loss={float(metrics['loss']):.4f}, Acc={float(metrics['accuracy']):.4f}"
                         )
-
                 except Exception as e:
-                    logger.error(f"Error in training step {step}: {e}")
+                    logger.error(f"Error in step {step}: {e}")
                     continue
 
-            # End of epoch logging
-            final_loss = float(trainer.train_loss.result())
-            final_accuracy = float(trainer.train_accuracy.result())
-
             logger.info(
-                f"Epoch {epoch + 1} completed: "
-                f"Loss = {final_loss:.4f}, "
-                f"Accuracy = {final_accuracy:.4f}"
+                f"Epoch {epoch + 1} done: Loss={float(trainer.train_loss.result()):.4f}, "
+                f"Acc={float(trainer.train_accuracy.result()):.4f}"
             )
 
-            # Save checkpoint
             if checkpoint_frequency > 0 and (epoch + 1) % checkpoint_frequency == 0:
                 try:
-                    checkpoint_path = f"nanovlm_checkpoint_epoch_{epoch + 1}.keras"
-                    model.save(checkpoint_path)
-                    logger.info(f"Saved checkpoint: {checkpoint_path}")
+                    path = f"nanovlm_checkpoint_epoch_{epoch + 1}.keras"
+                    model.save(path)
+                    logger.info(f"Saved checkpoint: {path}")
                 except Exception as e:
                     logger.error(f"Failed to save checkpoint: {e}")
 
-        # Save final model
-        try:
-            final_model_path = "nanovlm_final.keras"
-            model.save(final_model_path)
-            logger.info(f"Training completed. Final model saved: {final_model_path}")
-        except Exception as e:
-            logger.error(f"Failed to save final model: {e}")
+        model.save("nanovlm_final.keras")
+        logger.info("Training completed. Final model saved: nanovlm_final.keras")
 
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
-        # Save emergency checkpoint
         try:
-            emergency_path = "nanovlm_emergency_checkpoint.keras"
-            model.save(emergency_path)
-            logger.info(f"Emergency checkpoint saved: {emergency_path}")
+            model.save("nanovlm_emergency_checkpoint.keras")
+            logger.info("Emergency checkpoint saved")
         except Exception as e:
             logger.error(f"Failed to save emergency checkpoint: {e}")
-
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise
 
+
 # ---------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Train nanoVLM")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--multi-optimizer", action="store_true", default=True)
+    parser.add_argument("--no-multi-optimizer", dest="multi_optimizer", action="store_false")
+    parser.add_argument("--checkpoint-frequency", type=int, default=5)
+    parser.add_argument("--log-frequency", type=int, default=10)
+    args = parser.parse_args()
+
+    train_nanovlm(
+        epochs=args.epochs, batch_size=args.batch_size,
+        use_multi_optimizer=args.multi_optimizer,
+        checkpoint_frequency=args.checkpoint_frequency,
+        log_frequency=args.log_frequency
+    )
+
 
 if __name__ == "__main__":
-    # Configure training parameters
-    training_config = {
-        "epochs": 10,
-        "batch_size": 8,
-        "use_multi_optimizer": True,
-        "checkpoint_frequency": 5,
-        "log_frequency": 10
-    }
-
-    train_nanovlm(**training_config)
-
-# ---------------------------------------------------------------------
+    main()

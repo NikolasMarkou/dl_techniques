@@ -1,23 +1,15 @@
 """
 Byte Latent Transformer (BLT) Training Script
 
-This script provides a complete training pipeline for BLT models, including:
-- Synthetic training data generation
-- Entropy model pre-training
-- Full BLT model training with dynamic patching
-- Text generation evaluation
-- Model checkpointing and metrics logging
-
-The script uses a comprehensive configuration dataclass to manage all hyperparameters
-and training settings, making it easy to experiment with different configurations.
+Training pipeline for BLT models with synthetic data generation,
+entropy model pre-training, dynamic patching, and text generation evaluation.
 
 Usage:
     python train_blt.py                    # Full training
     python train_blt.py --quick-test       # Quick functionality test
-    python train_blt.py --config custom_config.json  # Custom configuration
+    python train_blt.py --config config.json  # Custom configuration
 """
 
-import os
 import sys
 import time
 import json
@@ -28,80 +20,18 @@ from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
 
-# ---------------------------------------------------------------------
-# Local imports
-# ---------------------------------------------------------------------
-
+from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.byte_latent_transformer.model import create_blt_model
 
 
 # ---------------------------------------------------------------------
-# Configuration Dataclass
+# Configuration
 # ---------------------------------------------------------------------
 
 @dataclass
 class BLTTrainingConfig:
-    """
-    Comprehensive configuration for BLT model training.
-
-    This dataclass contains all hyperparameters and settings needed for
-    training a Byte Latent Transformer model, organized into logical groups.
-
-    Attributes:
-        Model Architecture:
-            vocab_size: Size of byte vocabulary (typically 256 + special tokens)
-            local_dim: Hidden dimension for local encoder/decoder
-            global_dim: Hidden dimension for global transformer
-            num_local_layers: Number of transformer layers in local components
-            num_global_layers: Number of transformer layers in global component
-            num_heads_local: Number of attention heads for local transformers
-            num_heads_global: Number of attention heads for global transformer
-            max_sequence_length: Maximum sequence length in bytes
-            max_patches: Maximum number of patches per sequence
-            cross_attention_queries: Number of queries for patch representation
-            dropout_rate: Dropout rate for all layers
-            patch_pooling_method: Method for patch pooling ('max', 'mean', 'attention')
-
-        Dynamic Patching:
-            entropy_threshold: Threshold for creating patch boundaries
-            entropy_model_hidden_dim: Hidden dimension for entropy model
-            entropy_model_layers: Number of layers in entropy model
-            entropy_model_heads: Number of attention heads in entropy model
-            entropy_model_epochs: Training epochs for entropy model
-
-        Training Parameters:
-            batch_size: Training batch size
-            epochs: Number of training epochs
-            learning_rate: Initial learning rate
-            validation_split: Fraction of data for validation
-            early_stopping_patience: Patience for early stopping
-            lr_reduction_factor: Factor for learning rate reduction
-            lr_reduction_patience: Patience for learning rate reduction
-            min_learning_rate: Minimum learning rate
-
-        Data Generation:
-            num_training_samples: Number of synthetic training samples
-            max_text_length: Maximum length of generated text samples
-            data_augmentation: Whether to use data augmentation techniques
-
-        Generation Parameters:
-            generation_temperature: Temperature for text generation
-            generation_top_p: Top-p threshold for nucleus sampling
-            generation_max_tokens: Maximum tokens to generate for evaluation
-
-        Output and Logging:
-            output_dir: Directory for saving models and logs
-            save_best_only: Whether to save only the best model
-            save_training_history: Whether to save training metrics
-            log_generation_examples: Whether to log generation examples
-            checkpoint_frequency: How often to save checkpoints (in epochs)
-
-        System:
-            random_seed: Random seed for reproducibility
-            mixed_precision: Whether to use mixed precision training
-            use_gpu: Whether to use GPU acceleration
-    """
+    """Configuration for BLT model training."""
 
     # Model Architecture
     vocab_size: int = 260
@@ -157,21 +87,15 @@ class BLTTrainingConfig:
     use_gpu: bool = True
 
     def save_to_file(self, filepath: str) -> None:
-        """Save configuration to JSON file."""
         with open(filepath, 'w') as f:
             json.dump(asdict(self), f, indent=2)
-        logger.info(f"Configuration saved to {filepath}")
 
     @classmethod
     def load_from_file(cls, filepath: str) -> 'BLTTrainingConfig':
-        """Load configuration from JSON file."""
         with open(filepath, 'r') as f:
-            config_dict = json.load(f)
-        logger.info(f"Configuration loaded from {filepath}")
-        return cls(**config_dict)
+            return cls(**json.load(f))
 
     def get_model_config(self) -> Dict[str, Any]:
-        """Get model-specific configuration parameters."""
         return {
             'vocab_size': self.vocab_size,
             'local_dim': self.local_dim,
@@ -190,86 +114,33 @@ class BLTTrainingConfig:
 
 
 # ---------------------------------------------------------------------
-# Quick Configuration Presets
+# Configuration Presets
 # ---------------------------------------------------------------------
 
 def get_quick_test_config() -> BLTTrainingConfig:
-    """Get configuration for quick testing."""
     return BLTTrainingConfig(
-        # Smaller model for quick testing
-        local_dim=128,
-        global_dim=192,
-        num_local_layers=2,
-        num_global_layers=2,
-        num_heads_local=4,
-        num_heads_global=4,
-        max_sequence_length=64,
-        max_patches=16,
-        cross_attention_queries=2,
-
-        # Minimal training
-        num_training_samples=10,
-        batch_size=1,
-        epochs=2,
-        entropy_model_epochs=1,
-
-        # Quick evaluation
-        generation_max_tokens=10,
-
-        # Output
-        output_dir="blt_quick_test"
+        local_dim=128, global_dim=192, num_local_layers=2, num_global_layers=2,
+        num_heads_local=4, num_heads_global=4, max_sequence_length=64, max_patches=16,
+        cross_attention_queries=2, num_training_samples=10, batch_size=1, epochs=2,
+        entropy_model_epochs=1, generation_max_tokens=10, output_dir="blt_quick_test"
     )
 
 
 def get_small_model_config() -> BLTTrainingConfig:
-    """Get configuration for a small production model."""
     return BLTTrainingConfig(
-        # Small but capable model
-        local_dim=384,
-        global_dim=512,
-        num_local_layers=6,
-        num_global_layers=8,
-        num_heads_local=6,
-        num_heads_global=8,
-        max_sequence_length=512,
-        max_patches=128,
-
-        # Extended training
-        num_training_samples=500,
-        batch_size=8,
-        epochs=20,
-        entropy_model_epochs=5,
-
-        # Output
+        local_dim=384, global_dim=512, num_local_layers=6, num_global_layers=8,
+        num_heads_local=6, num_heads_global=8, max_sequence_length=512, max_patches=128,
+        num_training_samples=500, batch_size=8, epochs=20, entropy_model_epochs=5,
         output_dir="blt_small_model"
     )
 
 
 def get_large_model_config() -> BLTTrainingConfig:
-    """Get configuration for a large production model."""
     return BLTTrainingConfig(
-        # Large model architecture
-        local_dim=768,
-        global_dim=1024,
-        num_local_layers=8,
-        num_global_layers=16,
-        num_heads_local=12,
-        num_heads_global=16,
-        max_sequence_length=2048,
-        max_patches=512,
-
-        # Extensive training
-        num_training_samples=1000,
-        batch_size=16,
-        epochs=50,
-        entropy_model_epochs=10,
-        learning_rate=5e-5,
-
-        # Advanced settings
-        mixed_precision=True,
-
-        # Output
-        output_dir="blt_large_model"
+        local_dim=768, global_dim=1024, num_local_layers=8, num_global_layers=16,
+        num_heads_local=12, num_heads_global=16, max_sequence_length=2048, max_patches=512,
+        num_training_samples=1000, batch_size=16, epochs=50, entropy_model_epochs=10,
+        learning_rate=5e-5, mixed_precision=True, output_dir="blt_large_model"
     )
 
 
@@ -284,7 +155,6 @@ class TrainingDataGenerator:
         self.config = config
         self.rng = random.Random(config.random_seed)
 
-        # Base content templates
         self.templates = {
             'technical': [
                 "Artificial intelligence systems use machine learning algorithms to process large datasets and extract meaningful patterns from complex information structures.",
@@ -333,97 +203,68 @@ class TrainingDataGenerator:
         ]
 
     def generate_samples(self) -> List[str]:
-        """Generate training text samples."""
         samples = []
-
         for _ in range(self.config.num_training_samples):
-            # Choose generation strategy
             strategy = self.rng.choice(['single', 'combined', 'extended', 'question_answer'])
-
             if strategy == 'single':
                 sample = self._generate_single_template()
             elif strategy == 'combined':
                 sample = self._generate_combined_template()
             elif strategy == 'extended':
                 sample = self._generate_extended_template()
-            else:  # question_answer
+            else:
                 sample = self._generate_qa_pair()
 
-            # Apply data augmentation if enabled
             if self.config.data_augmentation:
                 sample = self._apply_augmentation(sample)
-
             samples.append(sample)
-
         return samples
 
     def _generate_single_template(self) -> str:
-        """Generate sample from single template."""
         category = self.rng.choice(list(self.templates.keys()))
         return self.rng.choice(self.templates[category])
 
     def _generate_combined_template(self) -> str:
-        """Generate sample by combining multiple templates."""
         num_templates = self.rng.randint(2, 3)
         categories = self.rng.choices(list(self.templates.keys()), k=num_templates)
-
         parts = []
         for i, category in enumerate(categories):
             template = self.rng.choice(self.templates[category])
-
             if i > 0:
                 connector = self.rng.choice(self.connectors)
                 parts.append(f"{connector} {template.lower()}")
             else:
                 parts.append(template)
-
         return " ".join(parts)
 
     def _generate_extended_template(self) -> str:
-        """Generate extended sample with fragments."""
         base_template = self._generate_single_template()
         fragment = self.rng.choice(self.fragments)
         extension = self.rng.choice(self.templates['technical'][:3])
-
         return f"{base_template} {fragment.title()} {extension.lower()}"
 
     def _generate_qa_pair(self) -> str:
-        """Generate question-answer pairs."""
         questions = [
-            "What is the main purpose of",
-            "How does the process of",
-            "Why is it important to",
-            "What are the key benefits of",
-            "How can we improve"
+            "What is the main purpose of", "How does the process of",
+            "Why is it important to", "What are the key benefits of", "How can we improve"
         ]
-
         topics = [
-            "machine learning in modern applications",
-            "neural network training and optimization",
-            "sustainable energy development worldwide",
-            "scientific research and peer review",
+            "machine learning in modern applications", "neural network training and optimization",
+            "sustainable energy development worldwide", "scientific research and peer review",
             "biodiversity conservation efforts"
         ]
-
         question = f"{self.rng.choice(questions)} {self.rng.choice(topics)}?"
-        answer = self._generate_single_template()
-
-        return f"{question} {answer}"
+        return f"{question} {self._generate_single_template()}"
 
     def _apply_augmentation(self, text: str) -> str:
-        """Apply simple data augmentation techniques."""
-        # Random punctuation variation
         if self.rng.random() < 0.1:
             text = text.replace('.', '!')
-
-        # Random case variation for some words (simulate real-world noise)
         if self.rng.random() < 0.05:
             words = text.split()
             idx = self.rng.randint(0, len(words) - 1)
             if words[idx].islower():
                 words[idx] = words[idx].upper()
             text = ' '.join(words)
-
         return text
 
 
@@ -436,68 +277,43 @@ class BLTTrainer:
 
     def __init__(self, config: BLTTrainingConfig):
         self.config = config
-        self.setup_environment()
-
-        # Initialize components
+        self._setup_environment()
         self.tokenizer = ByteTokenizer(vocab_size=config.vocab_size)
         self.data_generator = TrainingDataGenerator(config)
-
-        # Training artifacts
         self.entropy_model: Optional[EntropyModel] = None
         self.blt_model: Optional[keras.Model] = None
         self.training_history: Optional[keras.callbacks.History] = None
 
-        # Create output directory
         Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
+        config.save_to_file(str(Path(self.config.output_dir) / "config.json"))
 
-        # Save configuration
-        config_path = Path(self.config.output_dir) / "config.json"
-        self.config.save_to_file(str(config_path))
-
-    def setup_environment(self) -> None:
-        """Set up training environment."""
-        # Set random seeds
+    def _setup_environment(self) -> None:
         random.seed(self.config.random_seed)
         np.random.seed(self.config.random_seed)
         keras.utils.set_random_seed(self.config.random_seed)
 
-        # Configure mixed precision
         if self.config.mixed_precision:
             keras.mixed_precision.set_global_policy('mixed_float16')
             logger.info("Mixed precision training enabled")
 
-        # GPU configuration
         if self.config.use_gpu:
-            gpus = keras.utils.list_physical_devices('GPU')
-            if gpus:
-                logger.info(f"Found {len(gpus)} GPU(s): {[gpu.name for gpu in gpus]}")
-            else:
-                logger.warning("No GPUs found, using CPU")
+            setup_gpu()
 
     def prepare_training_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Generate and prepare training data."""
         logger.info(f"Generating {self.config.num_training_samples} training samples...")
-
-        # Generate text samples
         texts = self.data_generator.generate_samples()
 
-        # Show sample examples
-        logger.info("Sample training texts:")
         for i, text in enumerate(texts[:3]):
-            logger.info(f"  {i + 1}: {text[:100]}...")
+            logger.info(f"  Sample {i + 1}: {text[:100]}...")
 
-        # Tokenize samples
         tokenized_samples = []
         for text in texts:
             tokens = self.tokenizer.text_to_bytes(text, add_bos=True, add_eos=True)
-
-            # Filter by length
             if 10 <= len(tokens) <= self.config.max_text_length:
                 tokenized_samples.append(tokens)
 
         logger.info(f"Kept {len(tokenized_samples)} samples after filtering")
 
-        # Pad sequences
         padded_sequences = []
         for tokens in tokenized_samples:
             if len(tokens) < self.config.max_sequence_length:
@@ -506,21 +322,15 @@ class BLTTrainer:
                 padded = tokens[:self.config.max_sequence_length]
             padded_sequences.append(padded)
 
-        # Convert to arrays
         input_tokens = np.array(padded_sequences, dtype=np.int32)
         target_tokens = np.roll(input_tokens, -1, axis=1)
-        target_tokens[:, -1] = 0  # Pad token
+        target_tokens[:, -1] = 0
 
-        logger.info(f"Training data shape: {input_tokens.shape}")
-        logger.info(f"Token range: [{np.min(input_tokens)}, {np.max(input_tokens)}]")
-
+        logger.info(f"Training data: {input_tokens.shape}, tokens [{np.min(input_tokens)}, {np.max(input_tokens)}]")
         return input_tokens, target_tokens
 
     def train_entropy_model(self, train_x: np.ndarray, train_y: np.ndarray) -> EntropyModel:
-        """Train the entropy model for dynamic patching."""
-        logger.info("Creating and training entropy model...")
-
-        # Create entropy model
+        logger.info("Training entropy model...")
         self.entropy_model = EntropyModel(
             vocab_size=self.config.vocab_size,
             hidden_dim=self.config.entropy_model_hidden_dim,
@@ -530,193 +340,122 @@ class BLTTrainer:
             dropout_rate=self.config.dropout_rate
         )
 
-        # Compile model
         self.entropy_model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=1e-3),
             loss='sparse_categorical_crossentropy',
             metrics=['accuracy']
         )
 
-        # Train model
-        logger.info(f"Training entropy model for {self.config.entropy_model_epochs} epochs...")
-
         entropy_history = self.entropy_model.fit(
             train_x, train_y,
             epochs=self.config.entropy_model_epochs,
-            batch_size=max(self.config.batch_size, 8),  # Ensure minimum batch size
-            validation_split=0.1,
-            verbose=1
+            batch_size=max(self.config.batch_size, 8),
+            validation_split=0.1, verbose=1
         )
 
-        final_loss = entropy_history.history['loss'][-1]
-        logger.info(f"Entropy model training completed. Final loss: {final_loss:.4f}")
+        logger.info(f"Entropy model final loss: {entropy_history.history['loss'][-1]:.4f}")
 
-        # Save entropy model
         entropy_path = Path(self.config.output_dir) / "entropy_model.keras"
         self.entropy_model.save(str(entropy_path))
-        logger.info(f"Entropy model saved to {entropy_path}")
-
         return self.entropy_model
 
     def create_blt_model(self) -> keras.Model:
-        """Create the main BLT model."""
         logger.info("Creating BLT model...")
-
         model_config = self.config.get_model_config()
         model_config['entropy_model'] = self.entropy_model
 
         self.blt_model = create_blt_model(
-            **model_config,
-            compile_model=True,
-            learning_rate=self.config.learning_rate
+            **model_config, compile_model=True, learning_rate=self.config.learning_rate
         )
-
-        param_count = self.blt_model.count_params()
-        logger.info(f"BLT model created with {param_count:,} parameters")
-
+        logger.info(f"BLT model: {self.blt_model.count_params():,} parameters")
         return self.blt_model
 
     def create_callbacks(self) -> List[keras.callbacks.Callback]:
-        """Create training callbacks."""
         callbacks = []
 
-        # Model checkpoint
         if self.config.save_best_only:
             checkpoint_path = Path(self.config.output_dir) / "blt_model_best.keras"
-            callbacks.append(
-                keras.callbacks.ModelCheckpoint(
-                    filepath=str(checkpoint_path),
-                    monitor='val_loss',
-                    save_best_only=True,
-                    verbose=1
-                )
-            )
+            callbacks.append(keras.callbacks.ModelCheckpoint(
+                filepath=str(checkpoint_path), monitor='val_loss',
+                save_best_only=True, verbose=1
+            ))
 
-        # Regular checkpoints
         if self.config.checkpoint_frequency > 0:
             checkpoint_dir = Path(self.config.output_dir) / "checkpoints"
             checkpoint_dir.mkdir(exist_ok=True)
-            callbacks.append(
-                keras.callbacks.ModelCheckpoint(
-                    filepath=str(checkpoint_dir / "epoch_{epoch:03d}.keras"),
-                    save_freq=self.config.checkpoint_frequency * self.config.batch_size,
-                    verbose=0
-                )
-            )
+            callbacks.append(keras.callbacks.ModelCheckpoint(
+                filepath=str(checkpoint_dir / "epoch_{epoch:03d}.keras"),
+                save_freq=self.config.checkpoint_frequency * self.config.batch_size, verbose=0
+            ))
 
-        # Early stopping
         if self.config.early_stopping_patience > 0:
-            callbacks.append(
-                keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=self.config.early_stopping_patience,
-                    verbose=1,
-                    restore_best_weights=True
-                )
-            )
+            callbacks.append(keras.callbacks.EarlyStopping(
+                monitor='val_loss', patience=self.config.early_stopping_patience,
+                verbose=1, restore_best_weights=True
+            ))
 
-        # Learning rate reduction
         if self.config.lr_reduction_patience > 0:
-            callbacks.append(
-                keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=self.config.lr_reduction_factor,
-                    patience=self.config.lr_reduction_patience,
-                    verbose=1,
-                    min_lr=self.config.min_learning_rate
-                )
-            )
+            callbacks.append(keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss', factor=self.config.lr_reduction_factor,
+                patience=self.config.lr_reduction_patience, verbose=1,
+                min_lr=self.config.min_learning_rate
+            ))
 
         return callbacks
 
     def train_blt_model(self, train_x: np.ndarray, train_y: np.ndarray) -> keras.callbacks.History:
-        """Train the main BLT model."""
         logger.info("Training BLT model...")
-
-        # Create train/validation split
         split_idx = int((1 - self.config.validation_split) * len(train_x))
         train_x_split, val_x = train_x[:split_idx], train_x[split_idx:]
         train_y_split, val_y = train_y[:split_idx], train_y[split_idx:]
 
-        logger.info(f"Training samples: {len(train_x_split)}")
-        logger.info(f"Validation samples: {len(val_x)}")
+        logger.info(f"Train: {len(train_x_split)}, Validation: {len(val_x)}")
 
-        # Create callbacks
-        callbacks = self.create_callbacks()
-
-        # Train model
         start_time = time.time()
-
         self.training_history = self.blt_model.fit(
             train_x_split, train_y_split,
             validation_data=(val_x, val_y),
             epochs=self.config.epochs,
             batch_size=self.config.batch_size,
-            callbacks=callbacks,
-            verbose=1
+            callbacks=self.create_callbacks(), verbose=1
         )
-
-        training_time = time.time() - start_time
-        logger.info(f"Training completed in {training_time:.2f} seconds")
-
+        logger.info(f"Training completed in {time.time() - start_time:.2f}s")
         return self.training_history
 
     def evaluate_model(self) -> None:
-        """Evaluate the trained model."""
         if not self.config.log_generation_examples:
             return
 
-        logger.info("Evaluating model with text generation...")
-
         test_prompts = [
-            "Artificial intelligence",
-            "The future of technology",
-            "Scientific research shows",
-            "Machine learning algorithms",
-            "In recent studies",
-            "Deep neural networks"
+            "Artificial intelligence", "The future of technology",
+            "Scientific research shows", "Machine learning algorithms",
+            "In recent studies", "Deep neural networks"
         ]
 
         logger.info("Generated text samples:")
-        logger.info("-" * 60)
-
         for prompt in test_prompts:
             try:
                 generated = self.blt_model.generate(
-                    prompt=prompt,
-                    max_new_tokens=self.config.generation_max_tokens,
+                    prompt=prompt, max_new_tokens=self.config.generation_max_tokens,
                     temperature=self.config.generation_temperature,
-                    top_p=self.config.generation_top_p,
-                    do_sample=True
+                    top_p=self.config.generation_top_p, do_sample=True
                 )
-
-                logger.info(f"Prompt: '{prompt}'")
-                logger.info(f"Generated: '{generated}'")
-                logger.info("-" * 60)
-
+                logger.info(f"  '{prompt}' -> '{generated}'")
             except Exception as e:
-                logger.warning(f"Generation failed for prompt '{prompt}': {e}")
+                logger.warning(f"Generation failed for '{prompt}': {e}")
 
     def save_final_artifacts(self) -> None:
-        """Save final model and training artifacts."""
-        logger.info("Saving final artifacts...")
-
-        # Save final model
         final_model_path = Path(self.config.output_dir) / "blt_model_final.keras"
         self.blt_model.save(str(final_model_path))
         logger.info(f"Final model saved to {final_model_path}")
 
-        # Save training history
         if self.config.save_training_history and self.training_history:
             history_path = Path(self.config.output_dir) / "training_history.npz"
             np.savez(str(history_path), **self.training_history.history)
-            logger.info(f"Training history saved to {history_path}")
 
-        # Save training summary
-        self.save_training_summary()
+        self._save_training_summary()
 
-    def save_training_summary(self) -> None:
-        """Save training summary and metrics."""
+    def _save_training_summary(self) -> None:
         if not self.training_history:
             return
 
@@ -733,49 +472,28 @@ class BLTTrainer:
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2)
 
-        logger.info(f"Training summary saved to {summary_path}")
-
-        # Log summary
-        logger.info("Training Summary:")
-        logger.info(f"  Final training loss: {summary['final_train_loss']:.4f}")
-        logger.info(f"  Final validation loss: {summary['final_val_loss']:.4f}")
-        logger.info(f"  Best validation loss: {summary['best_val_loss']:.4f}")
-        logger.info(f"  Epochs completed: {summary['epochs_completed']}")
+        logger.info(
+            f"Training summary: train_loss={summary['final_train_loss']:.4f}, "
+            f"val_loss={summary['final_val_loss']:.4f}, "
+            f"best_val_loss={summary['best_val_loss']:.4f}, "
+            f"epochs={summary['epochs_completed']}"
+        )
 
     def run_full_training(self) -> Tuple[keras.Model, keras.callbacks.History]:
-        """Run the complete training pipeline."""
-        logger.info("Starting BLT Full Training Pipeline")
+        logger.info("=" * 60)
+        logger.info("BLT Full Training Pipeline")
         logger.info("=" * 60)
 
         try:
-            # Step 1: Prepare training data
-            logger.info("Step 1: Preparing training data...")
             train_x, train_y = self.prepare_training_data()
-
-            # Step 2: Train entropy model
-            logger.info("Step 2: Training entropy model...")
             self.train_entropy_model(train_x, train_y)
-
-            # Step 3: Create BLT model
-            logger.info("Step 3: Creating BLT model...")
             self.create_blt_model()
-
-            # Step 4: Train BLT model
-            logger.info("Step 4: Training BLT model...")
             self.train_blt_model(train_x, train_y)
-
-            # Step 5: Evaluate model
-            logger.info("Step 5: Evaluating model...")
             self.evaluate_model()
-
-            # Step 6: Save artifacts
-            logger.info("Step 6: Saving final artifacts...")
             self.save_final_artifacts()
 
-            logger.info("=" * 60)
             logger.info("BLT Training Pipeline Completed Successfully!")
-            logger.info(f"All artifacts saved in: {self.config.output_dir}/")
-
+            logger.info(f"Artifacts saved in: {self.config.output_dir}/")
             return self.blt_model, self.training_history
 
         except Exception as e:
@@ -784,11 +502,10 @@ class BLTTrainer:
 
 
 # ---------------------------------------------------------------------
-# Main Functions
+# Main
 # ---------------------------------------------------------------------
 
 def main() -> None:
-    """Main training function."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Train BLT Model")
@@ -802,7 +519,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Load configuration
     if args.config:
         config = BLTTrainingConfig.load_from_file(args.config)
     elif args.preset == 'quick':
@@ -814,7 +530,6 @@ def main() -> None:
     else:
         config = BLTTrainingConfig()
 
-    # Apply command line overrides
     if args.output_dir:
         config.output_dir = args.output_dir
     if args.epochs:
@@ -824,19 +539,15 @@ def main() -> None:
     if args.learning_rate:
         config.learning_rate = args.learning_rate
 
-    # Run training
     trainer = BLTTrainer(config)
     trainer.run_full_training()
 
 
 def quick_test() -> None:
-    """Run a quick functionality test."""
     logger.info("Running BLT quick test...")
-
     config = get_quick_test_config()
     trainer = BLTTrainer(config)
     trainer.run_full_training()
-
     logger.info("Quick test completed successfully!")
 
 
