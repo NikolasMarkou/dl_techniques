@@ -209,8 +209,9 @@ class ConnectionLayer(keras.layers.Layer):
             Antisymmetric tensor.
         """
         # A - A^T along last two dimensions
-        return (tensor - ops.transpose(tensor,
-                                       list(range(len(ops.shape(tensor)) - 2)) + [-1, -2])) / 2.0
+        ndim = len(tensor.shape)
+        perm = list(range(ndim - 2)) + [ndim - 1, ndim - 2]
+        return (tensor - ops.transpose(tensor, perm)) / 2.0
 
     def _compute_yang_mills_connection(
             self,

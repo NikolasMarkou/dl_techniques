@@ -435,7 +435,8 @@ class CorrespondenceNetwork(keras.layers.Layer):
         combined_dim = local_shape[-1] + global_shape[-1]
 
         # Build the correspondence estimation network with combined feature dimension
-        self.mlp.build((None, combined_dim))
+        # Use 3D shape (batch, num_points, features) to match actual call input
+        self.mlp.build((None, None, combined_dim))
 
         super().build(input_shape)
 
