@@ -521,7 +521,8 @@ class TestPRISMModelBuild:
         for layer in model.prism_layers:
             assert layer.built
 
-        assert model.flatten.built
+        assert model.temporal_projector.built
+        assert model.head_dropout.built
         assert model.forecast_head.built
 
     def test_weights_created_after_build(self) -> None:
