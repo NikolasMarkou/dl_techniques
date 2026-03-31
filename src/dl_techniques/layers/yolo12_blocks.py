@@ -361,8 +361,12 @@ class AreaAttention(keras.layers.Layer):
         # Build sub-layers in computational order for robust serialization
         self.qk_conv.build(input_shape)
         self.v_conv.build(input_shape)
-        self.pe_conv.build(input_shape)
-        self.proj_conv.build(input_shape)
+
+        # pe_conv and proj_conv operate on v/output tensors with channels=self.dim,
+        # not on the raw input — build with the correct intermediate shape
+        v_output_shape = self.v_conv.compute_output_shape(input_shape)
+        self.pe_conv.build(v_output_shape)
+        self.proj_conv.build(v_output_shape)
 
         # Always call parent build at the end
         super().build(input_shape)

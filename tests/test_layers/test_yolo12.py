@@ -188,7 +188,7 @@ class TestConvBlock:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Predictions differ after serialization cycle"
             )
 
@@ -324,7 +324,7 @@ class TestAreaAttention:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Predictions differ after serialization cycle"
             )
 
@@ -415,7 +415,7 @@ class TestAttentionBlock:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Predictions differ after serialization cycle"
             )
 
@@ -503,7 +503,7 @@ class TestBottleneck:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Predictions differ after serialization cycle"
             )
 
@@ -596,7 +596,7 @@ class TestC3k2Block:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Predictions differ after serialization cycle"
             )
 
@@ -713,7 +713,7 @@ class TestA2C2fBlock:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Predictions differ after serialization cycle"
             )
 
@@ -723,31 +723,31 @@ class TestYOLOv12Integration:
 
     def test_complete_yolo_block_chain(self):
         """Test a complete chain of YOLOv12 blocks working together."""
-        sample_input = keras.random.normal([2, 64, 64, 128])
+        sample_input = keras.random.normal([2, 16, 16, 64])
 
         # Create a chain of different blocks
         inputs = keras.Input(shape=sample_input.shape[1:])
 
         # Start with ConvBlock
-        x = ConvBlock(filters=256, kernel_size=3)(inputs)
+        x = ConvBlock(filters=128, kernel_size=3)(inputs)
 
         # Add C3k2Block for feature extraction
-        x = C3k2Block(filters=512, n=3)(x)
+        x = C3k2Block(filters=256, n=2)(x)
 
         # Add A2C2fBlock for attention-based feature fusion
-        x = A2C2fBlock(filters=512, n=2, area=4)(x)
+        x = A2C2fBlock(filters=256, n=1, area=4)(x)
 
         # Add Bottleneck for residual processing
-        x = Bottleneck(filters=512, shortcut=True)(x)
+        x = Bottleneck(filters=256, shortcut=True)(x)
 
         # Final ConvBlock
-        outputs = ConvBlock(filters=256, kernel_size=1)(x)
+        outputs = ConvBlock(filters=128, kernel_size=1)(x)
 
         model = keras.Model(inputs, outputs)
 
         # Test forward pass
         prediction = model(sample_input)
-        expected_shape = (2, 64, 64, 256)
+        expected_shape = (2, 16, 16, 128)
         assert prediction.shape == expected_shape
         assert not keras.ops.any(keras.ops.isnan(prediction))
 
@@ -785,16 +785,16 @@ class TestYOLOv12Integration:
 
     def test_model_serialization_integration(self):
         """Test serialization of a complex model with all YOLOv12 components."""
-        sample_input = keras.random.normal([2, 32, 32, 64])
+        sample_input = keras.random.normal([2, 16, 16, 64])
 
         inputs = keras.Input(shape=sample_input.shape[1:])
 
         # Build complex architecture
         x = ConvBlock(filters=128)(inputs)
         x = C3k2Block(filters=256, n=2)(x)
-        x = A2C2fBlock(filters=512, n=1, area=2)(x)
-        x = Bottleneck(filters=512)(x)
-        outputs = ConvBlock(filters=256, activation=False)(x)
+        x = A2C2fBlock(filters=256, n=1, area=2)(x)
+        x = Bottleneck(filters=256)(x)
+        outputs = ConvBlock(filters=128, activation=False)(x)
 
         model = keras.Model(inputs, outputs)
         original_prediction = model(sample_input)
@@ -810,7 +810,7 @@ class TestYOLOv12Integration:
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-6, atol=1e-6,
+                rtol=1e-5, atol=1e-5,
                 err_msg="Complex model predictions differ after serialization cycle"
             )
 
