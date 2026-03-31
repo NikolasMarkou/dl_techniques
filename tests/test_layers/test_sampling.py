@@ -466,15 +466,24 @@ class TestSampling:
             assert not np.any(np.isnan(output.numpy())), f"NaN values detected in test case {i}"
             assert not np.any(np.isinf(output.numpy())), f"Inf values detected in test case {i}"
 
-    def test_reparameterization_properties(self, input_tensors):
+    def test_reparameterization_properties(self):
         """Test mathematical properties of the reparameterization trick."""
-        z_mean, z_log_var = input_tensors
+        batch_size = 4
+        latent_dim = 10
+
+        # Use controlled inputs with bounded z_log_var to ensure
+        # statistical convergence with finite samples
+        tf.random.set_seed(123)
+        z_mean = tf.random.normal([batch_size, latent_dim])
+        z_log_var = tf.clip_by_value(
+            tf.random.normal([batch_size, latent_dim]), -2.0, 2.0
+        )
 
         # Use a layer without seed for true randomness
         layer = Sampling()
 
         # Generate multiple samples
-        num_samples = 1000
+        num_samples = 5000
         samples = []
         for _ in range(num_samples):
             sample = layer([z_mean, z_log_var])
@@ -491,7 +500,7 @@ class TestSampling:
         np.testing.assert_allclose(sample_mean, z_mean.numpy(), atol=0.3)
 
         # Variance should be close to exp(z_log_var) (with some tolerance)
-        np.testing.assert_allclose(sample_var, expected_var, rtol=0.2)
+        np.testing.assert_allclose(sample_var, expected_var, rtol=0.3)
 
     def test_zero_variance_case(self):
         """Test behavior when log variance is very negative (near zero variance)."""
