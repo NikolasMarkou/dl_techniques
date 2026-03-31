@@ -101,6 +101,8 @@ def main():
 
 **`create_base_argument_parser()`** provides: `--dataset`, `--image-size`, `--epochs`, `--batch-size`, `--learning-rate`, `--weight-decay`, `--lr-schedule`, `--patience`, `--gpu`, `--show-plots`. Add model-specific args on top.
 
+> **Warning: Double Weight Decay** — When using `AdamW` (which applies decoupled weight decay internally), do **not** also pass `kernel_regularizer=L2(weight_decay)` to the model. This causes double weight decay: the L2 penalty inflates the loss and the optimizer applies weight decay again on the parameter update. Use either `AdamW(weight_decay=...)` alone (preferred, matches most paper recipes) or `Adam` + `kernel_regularizer=L2(...)` — never both.
+
 ---
 
 ### Pattern 2: Time-Series / Probabilistic (N-BEATS, PRISM, TiRex, MDN)
