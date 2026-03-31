@@ -272,7 +272,8 @@ class SOMLayer(keras.layers.Layer):
         self.sigma = sigma
         self.neighborhood_function = neighborhood_function
 
-        # Store raw initializer/regularizer for serialization
+        # Store raw config values for serialization
+        self._decay_function_config = decay_function
         self._weights_initializer_config = weights_initializer
         self._regularizer_config = regularizer
 
@@ -548,6 +549,7 @@ class SOMLayer(keras.layers.Layer):
             'grid_shape': self.grid_shape,
             'input_dim': self.input_dim,
             'initial_learning_rate': self.initial_learning_rate,
+            'decay_function': self._decay_function_config,
             'sigma': self.sigma,
             'neighborhood_function': self.neighborhood_function,
             'weights_initializer': self._weights_initializer_config,
