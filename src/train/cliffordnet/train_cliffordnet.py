@@ -485,6 +485,7 @@ def train_model(args) -> None:
         monitor="val_accuracy",
         patience=args.patience,
         use_lr_schedule=True,
+        include_analyzer=False,
     )
     callbacks.insert(0, keras.callbacks.TerminateOnNaN())
 
