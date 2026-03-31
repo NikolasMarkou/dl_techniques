@@ -9,7 +9,9 @@ from typing import Tuple, Any, List, Dict, Optional
 from dl_techniques.utils.logger import logger
 from dl_techniques.visualization import (
     VisualizationManager,
+    PlotConfig,
     TrainingHistory,
+    TrainingCurvesVisualization,
     ClassificationResults,
 )
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
@@ -111,6 +113,69 @@ def create_classification_results(
         y_prob=y_prob,
         class_names=class_names,
         model_name=model_name,
+    )
+
+
+# ---------------------------------------------------------------------
+
+def generate_training_curves(
+        history,
+        results_dir: str,
+        filename: str = "training_curves",
+) -> None:
+    """
+    Generate training curve plots using the visualization framework.
+
+    Accepts either a Keras History object or a raw dict of metric lists
+    (as used by in-training callbacks that track metrics manually).
+
+    Parameters
+    ----------
+    history : keras.callbacks.History or Dict[str, List[float]]
+        Keras training history from model.fit(), or a dict mapping
+        metric names to lists of per-epoch values. Dict keys follow
+        Keras convention: 'loss', 'val_loss', 'metric_name',
+        'val_metric_name'.
+    results_dir : str
+        Directory to save the plot.
+    filename : str
+        Filename for the saved plot (without extension).
+    """
+    if isinstance(history, dict):
+        history_dict = history
+    else:
+        history_dict = history.history
+
+    epochs = list(range(len(history_dict['loss'])))
+    train_metrics = {}
+    val_metrics = {}
+    for key, values in history_dict.items():
+        if key == 'loss' or key == 'val_loss':
+            continue
+        if key.startswith('val_'):
+            val_metrics[key[4:]] = values
+        else:
+            train_metrics[key] = values
+
+    training_history = TrainingHistory(
+        epochs=epochs,
+        train_loss=history_dict['loss'],
+        val_loss=history_dict.get('val_loss'),
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+    )
+
+    viz_manager = VisualizationManager(
+        experiment_name="training",
+        output_dir=results_dir,
+        config=PlotConfig(fig_size=(14, 10), save_dpi=150),
+    )
+    viz_manager.register_plugin(TrainingCurvesVisualization())
+    viz_manager.visualize(
+        data=training_history,
+        plugin_name="training_curves",
+        show=False,
+        filename=filename,
     )
 
 

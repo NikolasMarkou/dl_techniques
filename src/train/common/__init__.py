@@ -8,6 +8,7 @@ from train.common.evaluation import (
     validate_model_loading,
     convert_keras_history_to_training_history,
     create_classification_results,
+    generate_training_curves,
     generate_comprehensive_visualizations,
     run_model_analysis,
 )
