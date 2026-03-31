@@ -30,7 +30,7 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
@@ -337,25 +337,11 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
                 self._plot_prediction_samples(epoch)
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 4))
-        ep = range(1, len(self.training_history['loss']) + 1)
-
-        axes[0].plot(ep, self.training_history['loss'], label='Train')
-        axes[0].plot(ep, self.training_history['val_loss'], label='Val')
-        axes[0].set_title('Quantile Loss'); axes[0].set_ylabel('Loss'); axes[0].legend()
-
-        if self.training_history['mae_median']:
-            axes[1].plot(ep, self.training_history['mae_median'], label='Train')
-            axes[1].plot(ep, self.training_history['val_mae_median'], label='Val')
-            axes[1].set_title('MAE (Median Forecast)')
-        axes[1].set_ylabel('MAE'); axes[1].legend()
-
-        axes[2].plot(ep, self.training_history['lr'])
-        axes[2].set_title('Learning Rate'); axes[2].set_yscale('log')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch + 1:03d}.png'))
-        plt.close()
+        generate_training_curves(
+            history=self.training_history,
+            results_dir=self.save_dir,
+            filename=f"learning_curves_epoch_{epoch + 1:03d}",
+        )
 
     def _plot_prediction_samples(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data

@@ -27,7 +27,7 @@ import seaborn as sns
 import tensorflow as tf
 from scipy import stats
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.mdn import MDNModel
 from dl_techniques.datasets.time_series import (
@@ -322,15 +322,11 @@ class MDNPerformanceCallback(keras.callbacks.Callback):
             self._plot_probabilistic_predictions(epoch)
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        plt.figure(figsize=(10, 5))
-        epochs = range(1, len(self.history_log['loss']) + 1)
-        plt.plot(epochs, self.history_log['loss'], label='Train Loss')
-        plt.plot(epochs, self.history_log['val_loss'], label='Val Loss')
-        plt.title('MDN Negative Log-Likelihood')
-        plt.xlabel('Epochs'); plt.ylabel('Loss (NLL)'); plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch+1:03d}.png'))
-        plt.close()
+        generate_training_curves(
+            history=self.history_log,
+            results_dir=self.save_dir,
+            filename=f"learning_curves_epoch_{epoch+1:03d}",
+        )
 
     def _plot_probabilistic_predictions(self, epoch: int) -> None:
         """Visualize MDN outputs: context, target, and predicted distribution."""

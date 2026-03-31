@@ -28,7 +28,7 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.nbeats import create_nbeats_model
@@ -361,20 +361,11 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
                 self._plot_prediction_samples(epoch)
 
     def _plot_learning_curves(self, epoch: int) -> None:
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        axes[0].plot(self.training_history['loss'], label='Train Loss')
-        axes[0].plot(self.training_history['val_loss'], label='Val Loss')
-        axes[0].set_title(f'Total Loss (Epoch {epoch+1})')
-        axes[0].legend(); axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(self.training_history['forecast_mae'], label='Train MAE')
-        axes[1].plot(self.training_history['val_forecast_mae'], label='Val MAE')
-        axes[1].set_title('Forecast MAE')
-        axes[1].legend(); axes[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'learning_curves_epoch_{epoch+1:03d}.png'))
-        plt.close()
+        generate_training_curves(
+            history=self.training_history,
+            results_dir=self.save_dir,
+            filename=f"learning_curves_epoch_{epoch+1:03d}",
+        )
 
     def _plot_prediction_samples(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data
