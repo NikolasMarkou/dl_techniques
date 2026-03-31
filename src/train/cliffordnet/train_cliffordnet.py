@@ -3,14 +3,17 @@ Training script for CliffordNet vision backbone.
 
 Trains CliffordNet on CIFAR-10 or CIFAR-100 following the protocol from
 arXiv:2601.06793v2: AdamW optimiser, cosine LR schedule with linear warmup,
-random flip/crop, and random erasing (Cutout).
+AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalisation,
+and random erasing.
 """
 
 import os
+import math
 import numpy as np
 import tensorflow as tf
 import keras
 from typing import Dict, Any, List, Literal, Tuple, Optional
+from PIL import Image, ImageOps, ImageEnhance
 
 # ---------------------------------------------------------------------
 # local imports
@@ -41,99 +44,235 @@ Variant = Literal["nano", "lite", "lite_g", "custom"]
 
 
 # ---------------------------------------------------------------------
-# Custom augmentation layer
+# Per-channel normalisation constants (computed from training sets)
 # ---------------------------------------------------------------------
 
-
-@keras.saving.register_keras_serializable()
-class RandomCutout(keras.layers.Layer):
-    """Apply random Cutout / random erasing to a batch of images."""
-
-    def __init__(
-        self,
-        num_patches: int = 1,
-        patch_size: int = 8,
-        fill_value: float = 0.0,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        if num_patches < 0:
-            raise ValueError(f"num_patches must be >= 0, got {num_patches}")
-        if patch_size <= 0:
-            raise ValueError(f"patch_size must be positive, got {patch_size}")
-        self.num_patches = num_patches
-        self.patch_size = patch_size
-        self.fill_value = fill_value
-
-    def _erase_single(self, image: tf.Tensor) -> tf.Tensor:
-        h = tf.shape(image)[0]
-        w = tf.shape(image)[1]
-        half = self.patch_size // 2
-        result = image
-        for _ in range(self.num_patches):
-            cy = tf.random.uniform((), minval=0, maxval=h, dtype=tf.int32)
-            cx = tf.random.uniform((), minval=0, maxval=w, dtype=tf.int32)
-            y1 = tf.maximum(0, cy - half)
-            y2 = tf.minimum(h, cy + half)
-            x1 = tf.maximum(0, cx - half)
-            x2 = tf.minimum(w, cx + half)
-            y_in = tf.logical_and(tf.range(h) >= y1, tf.range(h) < y2)
-            x_in = tf.logical_and(tf.range(w) >= x1, tf.range(w) < x2)
-            region = tf.cast(
-                tf.logical_and(y_in[:, tf.newaxis], x_in[tf.newaxis, :]),
-                result.dtype,
-            )[:, :, tf.newaxis]
-            result = result * (1.0 - region) + self.fill_value * region
-        return result
-
-    def call(self, inputs, training=None):
-        if not training or self.num_patches == 0:
-            return inputs
-        return tf.map_fn(self._erase_single, inputs)
-
-    def compute_output_shape(self, input_shape):
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            "num_patches": self.num_patches,
-            "patch_size": self.patch_size,
-            "fill_value": self.fill_value,
-        })
-        return config
+_CIFAR_STATS: Dict[str, Dict[str, np.ndarray]] = {
+    "cifar10": {
+        "mean": np.array([0.4914, 0.4822, 0.4465], dtype=np.float32),
+        "std": np.array([0.2470, 0.2435, 0.2616], dtype=np.float32),
+    },
+    "cifar100": {
+        "mean": np.array([0.5071, 0.4867, 0.4408], dtype=np.float32),
+        "std": np.array([0.2675, 0.2565, 0.2761], dtype=np.float32),
+    },
+}
 
 
 # ---------------------------------------------------------------------
-# Augmentation pipeline
+# CIFAR-10 AutoAugment policy (from the original AutoAugment paper)
+# Each sub-policy is a list of (op_name, probability, magnitude_index).
+# Magnitude indices map to operation-specific ranges (num_bins=31).
 # ---------------------------------------------------------------------
 
+_CIFAR10_POLICIES = [
+    [("Invert", 0.1, 7), ("Contrast", 0.2, 6)],
+    [("Rotate", 0.7, 2), ("TranslateX", 0.3, 9)],
+    [("Sharpness", 0.8, 1), ("Sharpness", 0.9, 3)],
+    [("ShearY", 0.5, 8), ("TranslateY", 0.7, 9)],
+    [("AutoContrast", 0.5, 8), ("Equalize", 0.9, 2)],
+    [("ShearY", 0.7, 2), ("Invert", 0.4, 7)],
+    [("Color", 0.6, 1), ("Equalize", 1.0, 2)],
+    [("Invert", 0.6, 4), ("Rotate", 0.6, 4)],
+    [("Solarize", 0.3, 5), ("AutoContrast", 0.1, 12)],
+    [("Equalize", 0.2, 4), ("Rotate", 0.6, 8)],
+    [("Color", 0.1, 0), ("Brightness", 0.7, 2)],
+    [("Sharpness", 0.4, 7), ("TranslateX", 0.9, 9)],
+    [("ShearX", 0.6, 5), ("Rotate", 0.7, 2)],
+    [("AutoContrast", 0.8, 4), ("Solarize", 0.4, 5)],
+    [("TranslateY", 0.9, 9), ("TranslateY", 0.7, 9)],
+    [("AutoContrast", 0.9, 2), ("Solarize", 0.8, 3)],
+    [("Equalize", 0.8, 8), ("Invert", 0.1, 3)],
+    [("TranslateY", 0.7, 9), ("AutoContrast", 0.9, 1)],
+    [("Solarize", 0.4, 5), ("AutoContrast", 0.9, 3)],
+    [("TranslateY", 0.7, 9), ("TranslateY", 0.7, 9)],
+    [("AutoContrast", 0.9, 0), ("Solarize", 0.4, 3)],
+    [("Equalize", 0.7, 5), ("Invert", 0.1, 3)],
+    [("Equalize", 0.7, 8), ("TranslateY", 0.3, 9)],
+    [("Rotate", 0.8, 7), ("TranslateY", 0.7, 9)],
+    [("ShearX", 0.7, 5), ("Equalize", 0.8, 5)],
+]
 
-def build_augmentation_pipeline(
-    input_shape: Tuple[int, int, int],
-    cutout_patches: int = 1,
-    cutout_size: int = 8,
-) -> keras.Sequential:
-    """Build training augmentation: random flip, pad-then-crop, cutout."""
-    h, w, _ = input_shape
-    pad = 4
+_NUM_MAGNITUDE_BINS = 31
 
-    aug_layers: List[keras.layers.Layer] = [
-        keras.layers.RandomFlip("horizontal"),
-        keras.layers.ZeroPadding2D(padding=pad),
-        keras.layers.RandomCrop(h, w),
-    ]
 
-    if cutout_patches > 0:
-        aug_layers.append(
-            RandomCutout(
-                num_patches=cutout_patches,
-                patch_size=cutout_size,
-                name="random_cutout",
-            )
+def _apply_autoaugment_op(
+    pil_img: Image.Image, op_name: str, magnitude_idx: int, img_size: int,
+) -> Image.Image:
+    """Apply a single AutoAugment operation to a PIL image.
+
+    Magnitude mapping matches torchvision AutoAugment with num_bins=31.
+    """
+    m = magnitude_idx
+    n = _NUM_MAGNITUDE_BINS - 1  # 30
+
+    # --- Unsigned ops (no magnitude or special handling) ---
+    if op_name == "Invert":
+        return ImageOps.invert(pil_img)
+    if op_name == "AutoContrast":
+        return ImageOps.autocontrast(pil_img)
+    if op_name == "Equalize":
+        return ImageOps.equalize(pil_img)
+    if op_name == "Posterize":
+        bits = max(1, int(8 - round(m / (n / 4.0))))
+        return ImageOps.posterize(pil_img, bits)
+    if op_name == "Solarize":
+        threshold = int(255 - m / n * 255)
+        return ImageOps.solarize(pil_img, threshold)
+
+    # --- Compute base magnitude ---
+    if op_name in ("ShearX", "ShearY"):
+        magnitude = m / n * 0.3
+    elif op_name in ("TranslateX", "TranslateY"):
+        magnitude = m / n * (150.0 / 331.0 * img_size)
+    elif op_name == "Rotate":
+        magnitude = m / n * 30.0
+    elif op_name in ("Brightness", "Color", "Contrast", "Sharpness"):
+        magnitude = m / n * 0.9
+    else:
+        return pil_img
+
+    # --- Random sign for signed operations ---
+    if np.random.random() > 0.5:
+        magnitude = -magnitude
+
+    # --- Enhancement operations ---
+    if op_name == "Brightness":
+        return ImageEnhance.Brightness(pil_img).enhance(1.0 + magnitude)
+    if op_name == "Color":
+        return ImageEnhance.Color(pil_img).enhance(1.0 + magnitude)
+    if op_name == "Contrast":
+        return ImageEnhance.Contrast(pil_img).enhance(1.0 + magnitude)
+    if op_name == "Sharpness":
+        return ImageEnhance.Sharpness(pil_img).enhance(1.0 + magnitude)
+
+    # --- Geometric operations ---
+    fill = (128, 128, 128)
+
+    if op_name == "Rotate":
+        return pil_img.rotate(magnitude, fillcolor=fill)
+    if op_name == "ShearX":
+        return pil_img.transform(
+            pil_img.size, Image.AFFINE, (1, magnitude, 0, 0, 1, 0),
+            fillcolor=fill,
+        )
+    if op_name == "ShearY":
+        return pil_img.transform(
+            pil_img.size, Image.AFFINE, (1, 0, 0, magnitude, 1, 0),
+            fillcolor=fill,
+        )
+    if op_name == "TranslateX":
+        pixels = int(round(magnitude))
+        return pil_img.transform(
+            pil_img.size, Image.AFFINE, (1, 0, pixels, 0, 1, 0),
+            fillcolor=fill,
+        )
+    if op_name == "TranslateY":
+        pixels = int(round(magnitude))
+        return pil_img.transform(
+            pil_img.size, Image.AFFINE, (1, 0, 0, 0, 1, pixels),
+            fillcolor=fill,
         )
 
-    return keras.Sequential(aug_layers, name="augmentation")
+    return pil_img
+
+
+def _autoaugment_cifar10(image_np: np.ndarray) -> np.ndarray:
+    """Apply CIFAR-10 AutoAugment policy to a float32 [0,1] HWC array."""
+    pil_img = Image.fromarray(
+        np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
+    )
+    img_size = pil_img.size[0]
+
+    idx = np.random.randint(len(_CIFAR10_POLICIES))
+    sub_policy = _CIFAR10_POLICIES[idx]
+
+    for op_name, prob, mag_idx in sub_policy:
+        if np.random.random() > prob:
+            continue
+        pil_img = _apply_autoaugment_op(pil_img, op_name, mag_idx, img_size)
+
+    return np.array(pil_img, dtype=np.float32) / 255.0
+
+
+# ---------------------------------------------------------------------
+# Random erasing (matches torchvision.transforms.RandomErasing defaults)
+# Applied AFTER normalisation so fill_value=0 corresponds to the mean.
+# ---------------------------------------------------------------------
+
+
+def _random_erase(
+    image_np: np.ndarray,
+    sl: float = 0.02,
+    sh: float = 0.33,
+    r1: float = 0.3,
+    r2: float = 3.3,
+) -> np.ndarray:
+    """Erase a random rectangle from a normalised image, filling with 0."""
+    h, w, _ = image_np.shape
+    area = h * w
+
+    for _ in range(100):
+        target_area = np.random.uniform(sl, sh) * area
+        log_ratio = np.random.uniform(math.log(r1), math.log(r2))
+        aspect = math.exp(log_ratio)
+
+        eh = int(round(math.sqrt(target_area * aspect)))
+        ew = int(round(math.sqrt(target_area / aspect)))
+
+        if 0 < eh < h and 0 < ew < w:
+            top = np.random.randint(0, h - eh)
+            left = np.random.randint(0, w - ew)
+            image_np = image_np.copy()
+            image_np[top : top + eh, left : left + ew, :] = 0.0
+            return image_np
+
+    return image_np
+
+
+# ---------------------------------------------------------------------
+# Per-image augmentation (train) — matches the reference PyTorch recipe:
+#   RandomCrop(32, pad=4) → RandomHFlip → AutoAugment → Normalize → RandomErasing
+# ---------------------------------------------------------------------
+
+
+def _make_train_augment_fn(
+    dataset_name: str, random_erasing_prob: float = 0.25,
+):
+    """Create a per-image train augmentation function (numpy-level).
+
+    Returned callable takes a float32 [0,1] HWC array and returns
+    a normalised float32 HWC array with augmentations applied.
+    """
+    stats = _CIFAR_STATS[dataset_name]
+    mean = stats["mean"]
+    std = stats["std"]
+    erasing_prob = random_erasing_prob
+
+    def augment(image_np: np.ndarray) -> np.ndarray:
+        # 1. Random horizontal flip
+        if np.random.random() > 0.5:
+            image_np = image_np[:, ::-1, :].copy()
+
+        # 2. Pad-4 + random crop back to 32×32
+        padded = np.pad(image_np, ((4, 4), (4, 4), (0, 0)), mode="constant")
+        top = np.random.randint(0, 9)  # 0..8 inclusive (40-32=8)
+        left = np.random.randint(0, 9)
+        image_np = padded[top : top + 32, left : left + 32, :]
+
+        # 3. AutoAugment (CIFAR-10 policy, applied on [0,1] images)
+        image_np = _autoaugment_cifar10(image_np)
+
+        # 4. Per-channel normalisation
+        image_np = (image_np - mean) / std
+
+        # 5. Random erasing (on normalised images, fill=0 = dataset mean)
+        if np.random.random() < erasing_prob:
+            image_np = _random_erase(image_np)
+
+        return image_np.astype(np.float32)
+
+    return augment
 
 
 # ---------------------------------------------------------------------
@@ -142,25 +281,44 @@ def build_augmentation_pipeline(
 
 
 def build_train_dataset(
-    x: np.ndarray, y: np.ndarray, batch_size: int,
-    augmentation: keras.Sequential,
+    x: np.ndarray,
+    y: np.ndarray,
+    batch_size: int,
+    dataset_name: str,
+    random_erasing_prob: float = 0.25,
 ) -> tf.data.Dataset:
-    """Build a shuffled, augmented training dataset."""
+    """Build a shuffled, augmented, normalised training dataset."""
+    augment_fn = _make_train_augment_fn(dataset_name, random_erasing_prob)
+
     ds = tf.data.Dataset.from_tensor_slices((x, y))
     ds = ds.shuffle(buffer_size=len(x), reshuffle_each_iteration=True)
+
+    def _map_fn(image, label):
+        [image] = tf.numpy_function(augment_fn, [image], [tf.float32])
+        image.set_shape([32, 32, 3])
+        return image, label
+
+    ds = ds.map(_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=True)
-    ds = ds.map(
-        lambda imgs, labels: (augmentation(imgs, training=True), labels),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
     return ds.prefetch(tf.data.AUTOTUNE)
 
 
 def build_eval_dataset(
-    x: np.ndarray, y: np.ndarray, batch_size: int,
+    x: np.ndarray,
+    y: np.ndarray,
+    batch_size: int,
+    dataset_name: str,
 ) -> tf.data.Dataset:
-    """Build a non-shuffled evaluation dataset."""
+    """Build a normalised (no augmentation) evaluation dataset."""
+    stats = _CIFAR_STATS[dataset_name]
+    mean = tf.constant(stats["mean"])
+    std = tf.constant(stats["std"])
+
+    def _normalize(image, label):
+        return (image - mean) / std, label
+
     ds = tf.data.Dataset.from_tensor_slices((x, y))
+    ds = ds.map(_normalize, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size)
     return ds.prefetch(tf.data.AUTOTUNE)
 
@@ -236,13 +394,11 @@ def train_model(args) -> None:
         args.dataset, batch_size=args.batch_size
     )
 
-    augmentation = build_augmentation_pipeline(
-        input_shape,
-        cutout_patches=args.cutout_patches,
-        cutout_size=args.cutout_size,
+    train_ds = build_train_dataset(
+        x_train, y_train, args.batch_size, args.dataset,
+        random_erasing_prob=args.random_erasing_prob,
     )
-    train_ds = build_train_dataset(x_train, y_train, args.batch_size, augmentation)
-    val_ds = build_eval_dataset(x_test, y_test, args.batch_size)
+    val_ds = build_eval_dataset(x_test, y_test, args.batch_size, args.dataset)
     steps_per_epoch = len(x_train) // args.batch_size
 
     # ---- Shifts parsing ----------------------------------------------
@@ -320,7 +476,7 @@ def train_model(args) -> None:
     )
 
     # ---- Callbacks ---------------------------------------------------
-    custom_objects = {"CliffordNet": CliffordNet, "RandomCutout": RandomCutout}
+    custom_objects = {"CliffordNet": CliffordNet}
     callbacks, results_dir = create_callbacks(
         model_name=f"{args.variant}_{args.dataset}",
         results_dir_prefix="cliffordnet",
@@ -396,7 +552,8 @@ def train_model(args) -> None:
         f.write(f"Num classes: {num_classes}\n")
         f.write(f"Parameters: {model.count_params():,}\n\n")
         f.write(f"Epochs: {trained_epochs}, Batch: {args.batch_size}\n")
-        f.write(f"LR: {args.learning_rate}, Weight decay: {args.weight_decay}\n\n")
+        f.write(f"LR: {args.learning_rate}, Weight decay: {args.weight_decay}\n")
+        f.write(f"Stochastic depth: {args.stochastic_depth_rate}\n\n")
         f.write("Test Results:\n")
         for key, val in test_results.items():
             f.write(f"  {key}: {val:.4f}\n")
@@ -420,12 +577,12 @@ def main() -> None:
     )
 
     # Model variant
-    parser.add_argument('--variant', type=str, default='lite',
+    parser.add_argument('--variant', type=str, default='nano',
                         choices=['nano', 'lite', 'lite_g', 'custom'],
                         help='Pre-defined variant or custom.')
 
     # Custom variant overrides
-    parser.add_argument('--channels', type=int, default=64,
+    parser.add_argument('--channels', type=int, default=128,
                         help='Feature dimension D (custom variant only).')
     parser.add_argument('--depth', type=int, default=12,
                         help='Number of blocks L (custom variant only).')
@@ -443,20 +600,25 @@ def main() -> None:
     # Regularisation
     parser.add_argument('--layer-scale-init', type=float, default=1e-5,
                         dest='layer_scale_init')
-    parser.add_argument('--stochastic-depth-rate', type=float, default=0.1,
+    parser.add_argument('--stochastic-depth-rate', type=float, default=0.3,
                         dest='stochastic_depth_rate')
     parser.add_argument('--dropout-rate', type=float, default=0.0,
                         dest='dropout_rate')
 
     # Augmentation
-    parser.add_argument('--cutout-patches', type=int, default=1, dest='cutout_patches')
-    parser.add_argument('--cutout-size', type=int, default=8, dest='cutout_size')
+    parser.add_argument('--random-erasing-prob', type=float, default=0.25,
+                        dest='random_erasing_prob')
 
     # Warmup
     parser.add_argument('--warmup-epochs', type=int, default=5, dest='warmup_epochs')
 
-    # Override defaults from base parser
-    parser.set_defaults(weight_decay=0.05, batch_size=128, epochs=200, patience=30)
+    # Override defaults from base parser to match the reference recipe
+    parser.set_defaults(
+        weight_decay=0.1,
+        batch_size=128,
+        epochs=200,
+        patience=30,
+    )
 
     args = parser.parse_args()
 

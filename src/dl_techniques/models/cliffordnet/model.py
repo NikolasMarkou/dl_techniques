@@ -45,6 +45,9 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.utils.logger import logger
 
+# Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
+_DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
+
 
 # ---------------------------------------------------------------------------
 # Helper: stochastic-depth rate schedule
@@ -589,6 +592,7 @@ class CliffordNet(keras.Model):
             ctx_mode="diff",
             use_global_context=False,
             layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "lite": dict(
             channels=128,
@@ -599,6 +603,7 @@ class CliffordNet(keras.Model):
             ctx_mode="diff",
             use_global_context=False,
             layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "lite_g": dict(
             channels=128,
@@ -609,6 +614,7 @@ class CliffordNet(keras.Model):
             ctx_mode="diff",
             use_global_context=True,
             layer_scale_init=1e-5,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
     }
 
