@@ -14,6 +14,8 @@ This test suite provides thorough coverage of the SAM model, including:
 Run with: pytest test_sam_model.py -v
 """
 
+import gc
+
 import pytest
 import keras
 import numpy as np
@@ -46,6 +48,10 @@ class TestSAMInstantiation:
         assert model.image_encoder.depth == 12
         assert model.image_encoder.num_heads == 12
 
+        del model
+        keras.backend.clear_session()
+        gc.collect()
+
     def test_from_variant_vit_l(self):
         """Test creating SAM with vit_l variant."""
         model = SAM.from_variant('vit_l')
@@ -54,6 +60,10 @@ class TestSAMInstantiation:
         assert model.image_encoder.depth == 24
         assert model.image_encoder.num_heads == 16
 
+        del model
+        keras.backend.clear_session()
+        gc.collect()
+
     def test_from_variant_vit_h(self):
         """Test creating SAM with vit_h variant."""
         model = SAM.from_variant('vit_h')
@@ -61,6 +71,10 @@ class TestSAMInstantiation:
         assert model.image_encoder.embed_dim == 1280
         assert model.image_encoder.depth == 32
         assert model.image_encoder.num_heads == 16
+
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_from_variant_invalid(self):
         """Test that invalid variant raises error."""
@@ -81,6 +95,10 @@ class TestSAMInstantiation:
             keras.ops.convert_to_numpy(model.pixel_mean),
             [120.0, 115.0, 100.0]
         )
+
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_direct_instantiation(self):
         """Test direct instantiation with custom components."""
@@ -198,11 +216,15 @@ class TestSAMForwardPass:
             num_multimask_outputs=3
         )
 
-        return SAM(
+        model = SAM(
             image_encoder=image_encoder,
             prompt_encoder=prompt_encoder,
             mask_decoder=mask_decoder
         )
+        yield model
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_forward_with_points(self, small_model):
         """Test forward pass with point prompts."""
@@ -384,11 +406,15 @@ class TestSAMSerialization:
             num_multimask_outputs=3
         )
 
-        return SAM(
+        model = SAM(
             image_encoder=image_encoder,
             prompt_encoder=prompt_encoder,
             mask_decoder=mask_decoder
         )
+        yield model
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_get_config(self, small_model):
         """Test that get_config returns complete configuration."""
@@ -489,11 +515,15 @@ class TestSAMPreprocessing:
         )
         mask_decoder = MaskDecoder(transformer_dim=32, transformer=transformer)
 
-        return SAM(
+        model = SAM(
             image_encoder=image_encoder,
             prompt_encoder=prompt_encoder,
             mask_decoder=mask_decoder
         )
+        yield model
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_preprocess_normalization(self, model):
         """Test that preprocessing normalizes images correctly."""
@@ -554,11 +584,15 @@ class TestSAMPostprocessing:
         )
         mask_decoder = MaskDecoder(transformer_dim=32, transformer=transformer)
 
-        return SAM(
+        model = SAM(
             image_encoder=image_encoder,
             prompt_encoder=prompt_encoder,
             mask_decoder=mask_decoder
         )
+        yield model
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_postprocess_upscaling(self, model):
         """Test that postprocessing upscales masks correctly."""
@@ -624,11 +658,15 @@ class TestSAMShapeConsistency:
         )
         mask_decoder = MaskDecoder(transformer_dim=64, transformer=transformer)
 
-        return SAM(
+        model = SAM(
             image_encoder=image_encoder,
             prompt_encoder=prompt_encoder,
             mask_decoder=mask_decoder
         )
+        yield model
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_batch_size_consistency(self, model):
         """Test that batch size is preserved throughout."""
@@ -719,11 +757,15 @@ class TestSAMEdgeCases:
         )
         mask_decoder = MaskDecoder(transformer_dim=32, transformer=transformer)
 
-        return SAM(
+        model = SAM(
             image_encoder=image_encoder,
             prompt_encoder=prompt_encoder,
             mask_decoder=mask_decoder
         )
+        yield model
+        del model
+        keras.backend.clear_session()
+        gc.collect()
 
     def test_single_point(self, model):
         """Test with a single point prompt."""
