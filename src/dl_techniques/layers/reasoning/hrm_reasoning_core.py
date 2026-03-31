@@ -467,13 +467,14 @@ class HierarchicalReasoningCore(keras.layers.Layer):
             puzzle_input_shape = (None,)
             self.puzzle_embedding.build(puzzle_input_shape)
 
-        # Positional embeddings
+        # Positional embeddings - explicitly build for robust serialization
         if self.position_embedding is not None:
-            # PositionalEmbedding doesn't need explicit building
-            pass
+            pos_input_shape = (None, self.total_seq_len, self.embed_dim)
+            self.position_embedding.build(pos_input_shape)
         if self.rope is not None:
-            # RoPE doesn't need explicit building for its parameters
-            pass
+            head_dim = self.embed_dim // self.num_heads
+            rope_input_shape = (None, self.num_heads, self.total_seq_len, head_dim)
+            self.rope.build(rope_input_shape)
 
         # Reasoning modules expect (batch_size, seq_len, embed_dim)
         reasoning_input_shape = (None, self.total_seq_len, self.embed_dim)
@@ -529,7 +530,7 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         # Add positional embeddings
         if self.pos_encodings == "learned" and self.position_embedding is not None:
             # Scale by 1/sqrt(2) to maintain variance as in original
-            embeddings = 0.707106781 * (embeddings + self.position_embedding.position_embeddings)
+            embeddings = 0.707106781 * (embeddings + self.position_embedding.pos_embedding)
 
         # Scale embeddings
         return self.embed_scale * embeddings
@@ -615,15 +616,15 @@ class HierarchicalReasoningCore(keras.layers.Layer):
                 for l_step in range(self.l_cycles):
                     # Skip last L step of last H cycle (will be done with gradients)
                     if not (h_step == self.h_cycles - 1 and l_step == self.l_cycles - 1):
-                        z_l = self.l_reasoning(z_l, z_h + input_emb, training=training)
+                        z_l = self.l_reasoning([z_l, z_h + input_emb], training=training)
 
                 # Skip last H step (will be done with gradients)
                 if h_step != self.h_cycles - 1:
-                    z_h = self.h_reasoning(z_h, z_l, training=training)
+                    z_h = self.h_reasoning([z_h, z_l], training=training)
 
         # Final step with gradients
-        z_l = self.l_reasoning(z_l, z_h + input_emb, training=training)
-        z_h = self.h_reasoning(z_h, z_l, training=training)
+        z_l = self.l_reasoning([z_l, z_h + input_emb], training=training)
+        z_h = self.h_reasoning([z_h, z_l], training=training)
 
         # Generate outputs
         # Language modeling head (skip puzzle embedding positions)
