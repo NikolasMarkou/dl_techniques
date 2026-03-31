@@ -213,19 +213,19 @@ def train_nanovlm(
 
             if checkpoint_frequency > 0 and (epoch + 1) % checkpoint_frequency == 0:
                 try:
-                    path = f"nanovlm_checkpoint_epoch_{epoch + 1}.keras"
+                    path = f"results/nanovlm_checkpoint_epoch_{epoch + 1}.keras"
                     model.save(path)
                     logger.info(f"Saved checkpoint: {path}")
                 except Exception as e:
                     logger.error(f"Failed to save checkpoint: {e}")
 
-        model.save("nanovlm_final.keras")
-        logger.info("Training completed. Final model saved: nanovlm_final.keras")
+        model.save("results/nanovlm_final.keras")
+        logger.info("Training completed. Final model saved: results/nanovlm_final.keras")
 
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
         try:
-            model.save("nanovlm_emergency_checkpoint.keras")
+            model.save("results/nanovlm_emergency_checkpoint.keras")
             logger.info("Emergency checkpoint saved")
         except Exception as e:
             logger.error(f"Failed to save emergency checkpoint: {e}")

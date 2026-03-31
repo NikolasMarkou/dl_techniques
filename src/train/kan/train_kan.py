@@ -226,7 +226,7 @@ def create_visualization_manager(experiment_name: str) -> VisualizationManager:
     """Creates visualization manager with KAN-specific plugins."""
     viz_manager = VisualizationManager(
         experiment_name=experiment_name,
-        output_dir="kan_visualizations"
+        output_dir="results"
     )
     viz_manager.register_template("training_curves", TrainingCurvesVisualization)
     viz_manager.register_template("function_approximation", FunctionApproximationVisualization)

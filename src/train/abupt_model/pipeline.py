@@ -47,7 +47,7 @@ from .inference import (
 )
 
 
-def setup_experiment_directory(base_dir: str = "experiments") -> str:
+def setup_experiment_directory(base_dir: str = "results") -> str:
     """Create a timestamped experiment directory."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_dir = os.path.join(base_dir, f"abupt_experiment_{timestamp}")

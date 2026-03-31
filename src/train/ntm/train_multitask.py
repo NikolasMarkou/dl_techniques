@@ -89,8 +89,8 @@ CLIP_NORM = 10.0
 NUM_EVAL_SAMPLES = 100
 
 # --- Paths ---
-CHECKPOINT_DIR = "checkpoints/multitask_ntm"
-LOG_DIR = "logs/multitask_ntm"
+CHECKPOINT_DIR = "results/multitask_ntm/checkpoints"
+LOG_DIR = "results/multitask_ntm/logs"
 
 
 # =====================================================================

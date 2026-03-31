@@ -76,7 +76,7 @@ class BLTTrainingConfig:
     generation_max_tokens: int = 40
 
     # Output and Logging
-    output_dir: str = "blt_training_output"
+    output_dir: str = "results"
     save_best_only: bool = True
     save_training_history: bool = True
     log_generation_examples: bool = True
@@ -123,7 +123,7 @@ def get_quick_test_config() -> BLTTrainingConfig:
         local_dim=128, global_dim=192, num_local_layers=2, num_global_layers=2,
         num_heads_local=4, num_heads_global=4, max_sequence_length=64, max_patches=16,
         cross_attention_queries=2, num_training_samples=10, batch_size=1, epochs=2,
-        entropy_model_epochs=1, generation_max_tokens=10, output_dir="blt_quick_test"
+        entropy_model_epochs=1, generation_max_tokens=10, output_dir="results/blt_quick_test"
     )
 
 
@@ -132,7 +132,7 @@ def get_small_model_config() -> BLTTrainingConfig:
         local_dim=384, global_dim=512, num_local_layers=6, num_global_layers=8,
         num_heads_local=6, num_heads_global=8, max_sequence_length=512, max_patches=128,
         num_training_samples=500, batch_size=8, epochs=20, entropy_model_epochs=5,
-        output_dir="blt_small_model"
+        output_dir="results/blt_small_model"
     )
 
 
@@ -141,7 +141,7 @@ def get_large_model_config() -> BLTTrainingConfig:
         local_dim=768, global_dim=1024, num_local_layers=8, num_global_layers=16,
         num_heads_local=12, num_heads_global=16, max_sequence_length=2048, max_patches=512,
         num_training_samples=1000, batch_size=16, epochs=50, entropy_model_epochs=10,
-        learning_rate=5e-5, mixed_precision=True, output_dir="blt_large_model"
+        learning_rate=5e-5, mixed_precision=True, output_dir="results/blt_large_model"
     )
 
 

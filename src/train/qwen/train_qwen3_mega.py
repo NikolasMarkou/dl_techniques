@@ -728,7 +728,7 @@ def main():
     trainer = Qwen3MEGATrainer(model=model, vocab_size=32000, monitor_frequency=50)
 
     logger.info("\nStarting training with curriculum...")
-    trainer.train(steps_per_phase=500, checkpoint_dir="./checkpoints")
+    trainer.train(steps_per_phase=500, checkpoint_dir="results/qwen3_mega")
 
 
 if __name__ == "__main__":

@@ -327,7 +327,7 @@ class CFDTrainer:
             train_generator: CFDDataGenerator,
             val_generator: CFDDataGenerator,
             epochs: int = 100,
-            save_dir: str = "checkpoints",
+            save_dir: str = "results",
             save_best_only: bool = True,
             patience: int = 10,
             verbose: int = 1
@@ -518,7 +518,7 @@ def main():
             train_generator=train_generator,
             val_generator=val_generator,
             epochs=10,
-            save_dir="abupt_checkpoints",
+            save_dir="results",
             save_best_only=True,
             patience=5,
             verbose=1

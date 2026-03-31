@@ -330,7 +330,7 @@ def main():
     parser.add_argument('--num-puzzle-ids', type=int, default=10, help='Number of puzzle identifiers')
     parser.add_argument('--num-train-batches', type=int, default=200, help='Number of training batches')
     parser.add_argument('--num-val-batches', type=int, default=50, help='Number of validation batches')
-    parser.add_argument('--save-dir', type=str, default='hrm_checkpoints', help='Checkpoint save directory')
+    parser.add_argument('--save-dir', type=str, default='results', help='Checkpoint save directory')
     parser.add_argument('--eval-freq', type=int, default=2, help='Evaluation frequency (epochs)')
     parser.add_argument('--save-freq', type=int, default=5, help='Checkpoint save frequency (epochs)')
     parser.add_argument('--lm-loss-type', type=str, default='stable_max', help='Language model loss type')
