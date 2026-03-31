@@ -10,6 +10,7 @@ import json
 import numpy as np
 import keras
 from keras import ops
+from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
@@ -333,6 +334,8 @@ class CFDTrainer:
             verbose: int = 1
     ):
         """Train the model with early stopping and checkpointing."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join(save_dir, f"abupt_{timestamp}")
         os.makedirs(save_dir, exist_ok=True)
         best_val_loss = float('inf')
         patience_counter = 0

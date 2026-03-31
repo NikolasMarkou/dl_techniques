@@ -89,8 +89,7 @@ CLIP_NORM = 10.0
 NUM_EVAL_SAMPLES = 100
 
 # --- Paths ---
-CHECKPOINT_DIR = "results/multitask_ntm/checkpoints"
-LOG_DIR = "results/multitask_ntm/logs"
+# Output goes to results/multitask_ntm_{timestamp}/ (created at runtime)
 
 
 # =====================================================================
@@ -452,19 +451,22 @@ def main() -> None:
     val_gen = UnifiedTaskGenerator(BATCH_SIZE, VALIDATION_STEPS, mode='val')
 
     # 5. Callbacks
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("results", f"multitask_ntm_{timestamp}")
+    checkpoint_dir = os.path.join(run_dir, "checkpoints")
+    log_dir = os.path.join(run_dir, "logs")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     callbacks = [
         keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(CHECKPOINT_DIR, "best_model.keras"),
+            filepath=os.path.join(checkpoint_dir, "best_model.keras"),
             monitor="val_loss",
             save_best_only=True,
             verbose=1
         ),
         keras.callbacks.TensorBoard(
-            log_dir=os.path.join(LOG_DIR, timestamp),
+            log_dir=log_dir,
             histogram_freq=1
         ),
         keras.callbacks.ReduceLROnPlateau(
@@ -495,7 +497,7 @@ def main() -> None:
         logger.info("Training complete.")
     except KeyboardInterrupt:
         logger.warning("Training interrupted by user. Saving current state...")
-        model.save(os.path.join(CHECKPOINT_DIR, "interrupted_model.keras"))
+        model.save(os.path.join(checkpoint_dir, "interrupted_model.keras"))
 
     # 7. Final Evaluation
     evaluate_all_tasks(model, num_samples=NUM_EVAL_SAMPLES)

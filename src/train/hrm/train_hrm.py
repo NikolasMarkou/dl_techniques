@@ -6,6 +6,7 @@ Uses a custom GradientTape training loop for ACT (Adaptive Computation Time).
 import os
 import json
 import numpy as np
+from datetime import datetime
 from typing import Dict, Tuple, Optional, Any
 
 import keras
@@ -246,6 +247,8 @@ class HRMTrainer:
             save_freq: int = 5
     ):
         """Train the model for the specified number of epochs."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = os.path.join(save_dir, f"hrm_{timestamp}")
         os.makedirs(save_dir, exist_ok=True)
 
         config_path = os.path.join(save_dir, "config.json")

@@ -1,8 +1,10 @@
 """Training script for nanoVLM model with multi-optimizer support."""
 
+import os
 import argparse
 import keras
 from keras import ops
+from datetime import datetime
 from typing import Dict, List, Tuple, Any
 
 from train.common import setup_gpu
@@ -190,6 +192,10 @@ def train_nanovlm(
 
     logger.info(f"Epochs: {epochs}, Batch: {batch_size}, Steps/epoch: {steps_per_epoch}")
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = os.path.join("results", f"nanovlm_{timestamp}")
+    os.makedirs(results_dir, exist_ok=True)
+
     try:
         for epoch in range(epochs):
             trainer.reset_metrics()
@@ -213,19 +219,20 @@ def train_nanovlm(
 
             if checkpoint_frequency > 0 and (epoch + 1) % checkpoint_frequency == 0:
                 try:
-                    path = f"results/nanovlm_checkpoint_epoch_{epoch + 1}.keras"
+                    path = os.path.join(results_dir, f"checkpoint_epoch_{epoch + 1}.keras")
                     model.save(path)
                     logger.info(f"Saved checkpoint: {path}")
                 except Exception as e:
                     logger.error(f"Failed to save checkpoint: {e}")
 
-        model.save("results/nanovlm_final.keras")
-        logger.info("Training completed. Final model saved: results/nanovlm_final.keras")
+        final_path = os.path.join(results_dir, "final_model.keras")
+        model.save(final_path)
+        logger.info(f"Training completed. Final model saved: {final_path}")
 
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
         try:
-            model.save("results/nanovlm_emergency_checkpoint.keras")
+            model.save(os.path.join(results_dir, "emergency_checkpoint.keras"))
             logger.info("Emergency checkpoint saved")
         except Exception as e:
             logger.error(f"Failed to save emergency checkpoint: {e}")

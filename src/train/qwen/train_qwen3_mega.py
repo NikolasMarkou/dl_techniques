@@ -1,9 +1,11 @@
 """Qwen3-MEGA training framework with component-forcing curriculum to prevent collapse."""
 
+import os
 import argparse
 import keras
 import numpy as np
 import tensorflow as tf
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
 
@@ -673,6 +675,10 @@ class Qwen3MEGATrainer:
     def train(self, steps_per_phase: int = 1000,
               checkpoint_dir: Optional[str] = None) -> None:
         """Full training with curriculum."""
+        if checkpoint_dir:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_dir = os.path.join(checkpoint_dir, timestamp)
+            os.makedirs(checkpoint_dir, exist_ok=True)
         logger.info("=" * 60)
         logger.info("Qwen3-MEGA Training with Component-Forcing Curriculum")
         logger.info("=" * 60)

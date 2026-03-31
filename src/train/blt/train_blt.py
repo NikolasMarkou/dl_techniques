@@ -16,6 +16,7 @@ import json
 import keras
 import random
 import numpy as np
+from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
@@ -285,6 +286,8 @@ class BLTTrainer:
         self.blt_model: Optional[keras.Model] = None
         self.training_history: Optional[keras.callbacks.History] = None
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.config.output_dir = str(Path(self.config.output_dir) / f"blt_{timestamp}")
         Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
         config.save_to_file(str(Path(self.config.output_dir) / "config.json"))
 
