@@ -342,9 +342,12 @@ def build_model(
     dropout_rate: float,
     weight_decay: float,
 ) -> CliffordNet:
-    """Instantiate a CliffordNet model."""
-    reg = keras.regularizers.L2(weight_decay) if weight_decay > 0.0 else None
+    """Instantiate a CliffordNet model.
 
+    Note: weight decay is handled solely by the AdamW optimiser
+    (decoupled weight decay), matching the reference PyTorch recipe.
+    No L2 kernel regularizer is applied — that would double-penalise.
+    """
     shared_kwargs: Dict[str, Any] = dict(
         cli_mode=cli_mode,
         ctx_mode=ctx_mode,
@@ -352,7 +355,6 @@ def build_model(
         layer_scale_init=layer_scale_init,
         stochastic_depth_rate=stochastic_depth_rate,
         dropout_rate=dropout_rate,
-        kernel_regularizer=reg,
     )
 
     if variant == "nano":
