@@ -42,7 +42,7 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 # local imports
 # ---------------------------------------------------------------------
 
-from ..transformer import (
+from ..transformers import (
     TransformerLayer,
     AttentionType,
     NormalizationType,
@@ -178,7 +178,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     def call(
         self,
         inputs: List[keras.KerasTensor],
-        mask: Optional[keras.KerasTensor] = None,
+        attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
@@ -186,7 +186,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
 
         Args:
             inputs: A list of two tensors: `[hidden_states, input_injection]`.
-            mask: Optional attention mask to apply to all layers.
+            attention_mask: Optional attention mask to apply to all layers.
             training: Boolean indicating training mode.
 
         Returns:
@@ -199,7 +199,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         x = hidden_states + input_injection
 
         for block in self.blocks:
-            x = block(x, attention_mask=mask, training=training)
+            x = block(x, attention_mask=attention_mask, training=training)
 
         return x
 

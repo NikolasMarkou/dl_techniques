@@ -476,10 +476,10 @@ class HierarchicalReasoningCore(keras.layers.Layer):
             rope_input_shape = (None, self.num_heads, self.total_seq_len, head_dim)
             self.rope.build(rope_input_shape)
 
-        # Reasoning modules expect (batch_size, seq_len, embed_dim)
+        # Reasoning modules expect list of two shapes: [hidden_states, input_injection]
         reasoning_input_shape = (None, self.total_seq_len, self.embed_dim)
-        self.h_reasoning.build(reasoning_input_shape)
-        self.l_reasoning.build(reasoning_input_shape)
+        self.h_reasoning.build([reasoning_input_shape, reasoning_input_shape])
+        self.l_reasoning.build([reasoning_input_shape, reasoning_input_shape])
 
         # Output heads
         # LM head expects (batch_size, seq_len, embed_dim)
@@ -611,16 +611,19 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         z_h, z_l = carry["z_h"], carry["z_l"]
 
         # Forward iterations (detached for efficiency as in original)
-        with keras.ops.stop_gradient():
-            for h_step in range(self.h_cycles):
-                for l_step in range(self.l_cycles):
-                    # Skip last L step of last H cycle (will be done with gradients)
-                    if not (h_step == self.h_cycles - 1 and l_step == self.l_cycles - 1):
-                        z_l = self.l_reasoning([z_l, z_h + input_emb], training=training)
+        for h_step in range(self.h_cycles):
+            for l_step in range(self.l_cycles):
+                # Skip last L step of last H cycle (will be done with gradients)
+                if not (h_step == self.h_cycles - 1 and l_step == self.l_cycles - 1):
+                    z_l = self.l_reasoning([z_l, z_h + input_emb], training=training)
 
-                # Skip last H step (will be done with gradients)
-                if h_step != self.h_cycles - 1:
-                    z_h = self.h_reasoning([z_h, z_l], training=training)
+            # Skip last H step (will be done with gradients)
+            if h_step != self.h_cycles - 1:
+                z_h = self.h_reasoning([z_h, z_l], training=training)
+
+        # Detach states before final step (truncated BPTT)
+        z_h = keras.ops.stop_gradient(z_h)
+        z_l = keras.ops.stop_gradient(z_l)
 
         # Final step with gradients
         z_l = self.l_reasoning([z_l, z_h + input_emb], training=training)
