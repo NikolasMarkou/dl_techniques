@@ -164,6 +164,13 @@ class BaseActivation(keras.layers.Layer):
             **kwargs
         )
 
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape — element-wise activation preserves shape."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """
         Returns the configuration of the layer.
