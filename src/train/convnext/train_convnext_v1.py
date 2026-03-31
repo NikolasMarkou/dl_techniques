@@ -4,8 +4,7 @@ import os
 import keras
 import argparse
 import numpy as np
-import tensorflow as tf
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
