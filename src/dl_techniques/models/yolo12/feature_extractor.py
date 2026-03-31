@@ -204,7 +204,7 @@ class YOLOv12FeatureExtractor(keras.Model):
         self.h1 = A2C2fBlock(
             filters=self.filters['c5'],
             n=self.n_a2c2f_head,
-            area=-1,  # Adaptive area
+            area=1,
             kernel_initializer=self.kernel_initializer,
             name="neck_h1"
         )
@@ -218,7 +218,7 @@ class YOLOv12FeatureExtractor(keras.Model):
         self.h2 = A2C2fBlock(
             filters=self.filters['c3'],
             n=self.n_a2c2f_head,
-            area=-1,
+            area=1,
             kernel_initializer=self.kernel_initializer,
             name="neck_h2"
         )
@@ -234,7 +234,7 @@ class YOLOv12FeatureExtractor(keras.Model):
         self.h3 = A2C2fBlock(
             filters=self.filters['c5'],
             n=self.n_a2c2f_head,
-            area=-1,
+            area=1,
             kernel_initializer=self.kernel_initializer,
             name="neck_h3"
         )
