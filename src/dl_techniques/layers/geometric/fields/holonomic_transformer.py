@@ -151,6 +151,22 @@ class FieldNormalization(keras.layers.Layer):
 
         return normalized
 
+    def compute_output_shape(
+            self,
+            input_shape: Union[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape.
+
+        Args:
+            input_shape: Input shape or tuple of (embedding_shape, curvature_shape).
+
+        Returns:
+            Output shape (same as embedding input shape).
+        """
+        if isinstance(input_shape, list):
+            return input_shape[0]
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""
         config = super().get_config()

@@ -285,6 +285,32 @@ class PointCloudAutoencoder(keras.layers.Layer):
         # Return all intermediate representations for downstream tasks
         return (x_rec, y_rec), (local_x, local_y), (global_x, global_y)
 
+    def compute_output_shape(
+        self, input_shape: Tuple[Tuple, Tuple]
+    ) -> Tuple[Tuple, Tuple, Tuple]:
+        """Compute output shape.
+
+        Args:
+            input_shape: Tuple of (source_shape, target_shape) where each is
+                (batch_size, num_points, 3).
+
+        Returns:
+            Tuple of three tuples:
+                1. Reconstructions: ((B, N_src, 3), (B, N_tgt, 3))
+                2. Local features: ((B, N_src, 1024), (B, N_tgt, 1024))
+                3. Global features: ((B, 2048), (B, 2048))
+        """
+        source_shape, target_shape = input_shape
+        batch = source_shape[0]
+        n_src = source_shape[1]
+        n_tgt = target_shape[1]
+
+        reconstructions = ((batch, n_src, 3), (batch, n_tgt, 3))
+        local_features = ((batch, n_src, 1024), (batch, n_tgt, 1024))
+        global_features = ((batch, 2048), (batch, 2048))
+
+        return reconstructions, local_features, global_features
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({'k_neighbors': self.k_neighbors})
@@ -455,6 +481,22 @@ class CorrespondenceNetwork(keras.layers.Layer):
         gamma = keras.activations.softmax(logits, axis=-1)  # → (B, N, K)
 
         return gamma
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Tuple, Tuple]
+    ) -> Tuple:
+        """Compute output shape.
+
+        Args:
+            input_shape: Tuple of (local_shape, global_shape) where:
+                - local_shape: (batch_size, num_points, F_local)
+                - global_shape: (batch_size, F_global)
+
+        Returns:
+            Output shape (batch_size, num_points, num_gaussians).
+        """
+        local_shape, global_shape = input_shape
+        return (local_shape[0], local_shape[1], self.num_gaussians)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
