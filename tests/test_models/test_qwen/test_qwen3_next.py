@@ -901,8 +901,12 @@ class TestQwen3NextIntegration:
 
     def test_end_to_end_training_simulation(self):
         """Test complete training simulation on tiny model."""
+        # Create tiny dataset
+        batch_size, seq_len = 2, 16
+        vocab_size = 1024
+
         # Create very small model for training test
-        model = create_qwen3_next("tiny", task_type="generation")
+        model = create_qwen3_next("tiny", task_type="generation", vocab_size=vocab_size)
 
         # Compile model
         model.compile(
@@ -910,10 +914,6 @@ class TestQwen3NextIntegration:
             loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=['accuracy']
         )
-
-        # Create tiny dataset
-        batch_size, seq_len = 2, 16
-        vocab_size = 1024
 
         inputs = [
             keras.ops.convert_to_tensor(
