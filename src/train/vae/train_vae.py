@@ -26,6 +26,7 @@ from train.common import (
     setup_gpu,
     create_base_argument_parser,
     create_callbacks,
+    generate_training_curves,
     load_dataset,
 )
 
@@ -154,29 +155,11 @@ class VisualizationCallback(keras.callbacks.Callback):
 
 def plot_training_history(history, save_dir):
     """Plot VAE training loss curves."""
-    h = history.history
-    if 'total_loss' not in h:
-        logger.error(f"'total_loss' not in history. Keys: {list(h.keys())}")
-        return
-
-    epochs = range(1, len(h['total_loss']) + 1)
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-    fig.suptitle("VAE Training Loss", fontsize=16, fontweight='bold')
-
-    for ax, key, title in zip(axes, ['total_loss', 'reconstruction_loss', 'kl_loss'],
-                                    ['Total Loss', 'Reconstruction Loss', 'KL Divergence']):
-        if key in h:
-            ax.plot(epochs, h[key], 'b-', label='Train')
-            if f'val_{key}' in h:
-                ax.plot(epochs, h[f'val_{key}'], 'r-', label='Val')
-            ax.set_title(title)
-            ax.set_xlabel('Epoch')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.savefig(os.path.join(save_dir, 'training_history.png'), dpi=150)
-    plt.close()
+    generate_training_curves(
+        history=history,
+        results_dir=save_dir,
+        filename="training_history",
+    )
 
 
 # ---------------------------------------------------------------------

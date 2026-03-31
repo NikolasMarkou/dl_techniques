@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
@@ -270,30 +270,12 @@ class MetricsVisualizationCallback(keras.callbacks.Callback):
 
     def _create_metrics_plots(self, epoch: int):
         try:
-            epochs_range = range(1, len(self.train_metrics['loss']) + 1)
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle(f'Training and Validation Metrics - Epoch {epoch}', fontsize=16)
-
-            plot_configs = [
-                (axes[0, 0], 'loss', 'val_loss', 'Mean Squared Error (MSE)', 'MSE'),
-                (axes[0, 1], 'mae', 'val_mae', 'Mean Absolute Error (MAE)', 'MAE'),
-                (axes[1, 0], 'rmse', 'val_rmse', 'Root Mean Squared Error (RMSE)', 'RMSE'),
-                (axes[1, 1], 'psnr_metric', 'val_psnr_metric', 'Peak Signal-to-Noise Ratio (PSNR)', 'PSNR (dB)'),
-            ]
-            for ax, train_key, val_key, title, ylabel in plot_configs:
-                ax.plot(epochs_range, self.train_metrics[train_key], 'b-', label=f'Training {ylabel}', linewidth=2)
-                if self.val_metrics[val_key]:
-                    ax.plot(epochs_range, self.val_metrics[val_key], 'r-', label=f'Validation {ylabel}', linewidth=2)
-                ax.set_title(title)
-                ax.set_xlabel('Epoch')
-                ax.set_ylabel(ylabel)
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            plt.savefig(self.visualization_dir / f"epoch_{epoch:03d}_metrics.png", dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            plt.clf()
+            history_dict = {**self.train_metrics, **self.val_metrics}
+            generate_training_curves(
+                history=history_dict,
+                results_dir=str(self.visualization_dir),
+                filename=f"epoch_{epoch:03d}_metrics",
+            )
             gc.collect()
 
             metrics_data = {'epoch': epoch, 'train_metrics': self.train_metrics, 'val_metrics': self.val_metrics}
