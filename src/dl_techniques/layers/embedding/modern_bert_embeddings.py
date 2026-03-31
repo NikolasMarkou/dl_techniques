@@ -151,6 +151,12 @@ class ModernBertEmbeddings(keras.layers.Layer):
         embeddings = self.dropout(embeddings, training=training)
         return embeddings
 
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape: (batch_size, sequence_length, hidden_size)."""
+        return input_shape + (self.hidden_size,)
+
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""
         config = super().get_config()
