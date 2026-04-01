@@ -7,102 +7,51 @@ import tensorflow as tf  # Using TF backend for GradientTape
 @keras.saving.register_keras_serializable()
 class LagrangianNeuralNetworkLayer(keras.layers.Layer):
     """
-    Physics-informed layer modeling system dynamics through learned Lagrangian mechanics.
+    Physics-informed layer modeling dynamics through learned Lagrangian mechanics.
 
-    This layer implements the principles of "Lagrangian Neural Networks" (LNNs)
-    as described in Cranmer et al. (arXiv:2003.04630). It uses an internal neural
-    network to approximate the scalar Lagrangian `L` of a physical system from its
-    generalized coordinates `q` and velocities `q_dot`, then computes accelerations
-    `q_ddot` by numerically solving the Euler-Lagrange equation using automatic
-    differentiation.
+    Implements "Lagrangian Neural Networks" (Cranmer et al., arXiv:2003.04630).
+    An internal MLP approximates the scalar Lagrangian ``L(q, q_dot)`` from
+    generalized coordinates and velocities. Accelerations are computed by
+    numerically solving the Euler-Lagrange equation using automatic differentiation:
+    ``q_ddot = [d^2L/dq_dot^2]^{-1} * [dL/dq - d/dq(dL/dq_dot) * q_dot]``.
+    The pseudoinverse is used for numerical stability.
 
-    **Intent**: Provide a physics-informed layer that preserves energy conservation
-    by structure while learning system dynamics. Particularly useful when canonical
-    momenta are unknown or difficult to compute, addressing limitations of
-    Hamiltonian Neural Networks.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Inputs: q (coordinates), q_dot (velocities)
-              ↓
-    Concatenate: [q, q_dot]
-              ↓
-    MLP: [Hidden Layers] → Dense(1) → L (scalar Lagrangian)
-              ↓
-    Automatic Differentiation:
-    - ∂L/∂q, ∂L/∂q̇
-    - ∂²L/∂q̇² (Hessian)
-    - ∂/∂q(∂L/∂q̇) (mixed derivatives)
-              ↓
-    Euler-Lagrange Solver: q̈ = H⁻¹[∂L/∂q - ∂/∂q(∂L/∂q̇)·q̇]
-              ↓
-    Output: q_ddot (accelerations)
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    The layer solves the vectorized Euler-Lagrange equation:
+        ┌───────────────────────────────────────────────────┐
+        │       LagrangianNeuralNetworkLayer                │
+        │                                                   │
+        │  q, q_dot ──► Concatenate([q, q_dot])             │
+        │                    │                              │
+        │                    ▼                              │
+        │              ┌───────────┐                        │
+        │              │ MLP → L   │  (scalar Lagrangian)   │
+        │              └─────┬─────┘                        │
+        │                    │                              │
+        │                    ▼                              │
+        │         Automatic Differentiation                 │
+        │         ├─ dL/dq        (gradient)                │
+        │         ├─ d²L/dq_dot²  (Hessian)                │
+        │         └─ d/dq(dL/dq_dot) (mixed)               │
+        │                    │                              │
+        │                    ▼                              │
+        │         Euler-Lagrange Solver                     │
+        │         q_ddot = H^{-1} * [dL/dq - J*q_dot]      │
+        │                    │                              │
+        │                    ▼                              │
+        │              Output: q_ddot                       │
+        └───────────────────────────────────────────────────┘
 
-    ```
-    q̈ = [∂²L/∂q̇²]⁻¹ · [∂L/∂q - ∂/∂q(∂L/∂q̇) · q̇]
-    ```
-
-    Where:
-    - `L(q, q̇)` is the learned scalar Lagrangian
-    - `∂L/∂q` is the gradient w.r.t. coordinates
-    - `∂²L/∂q̇²` is the Hessian matrix w.r.t. velocities
-    - `∂/∂q(∂L/∂q̇)` represents mixed partial derivatives
-    - `·` denotes matrix multiplication
-    - `⁻¹` denotes the pseudoinverse for numerical stability
-
-    Args:
-        hidden_dims: List of integers specifying units in each hidden layer
-            of the internal MLP that approximates the Lagrangian. Must be
-            non-empty with positive values.
-        activation: Activation function for hidden layers. The paper recommends
-            'softplus' as its second derivative is non-zero, unlike 'relu'.
-            Defaults to 'softplus'.
-        **kwargs: Additional arguments for the Layer base class.
-
-    Input shape:
-        A list/tuple of two tensors: `[q, q_dot]`.
-        - `q`: Generalized coordinates, shape `(batch_size, ..., coord_dim)`
-        - `q_dot`: Generalized velocities, shape `(batch_size, ..., coord_dim)`
-        Both tensors must have identical shapes.
-
-    Output shape:
-        Generalized accelerations `q_ddot` with same shape as inputs:
-        `(batch_size, ..., coord_dim)`.
-
-    Attributes:
-        mlp: Internal Sequential model learning the scalar Lagrangian.
-
-    Example:
-        ```python
-        # Create layer for 2D system
-        lnn_layer = LagrangianNeuralNetworkLayer(
-            hidden_dims=[128, 64, 32],
-            activation='softplus'
-        )
-
-        # Define model inputs
-        q = keras.Input(shape=(2,), name="coordinates")
-        q_dot = keras.Input(shape=(2,), name="velocities")
-
-        # Compute accelerations
-        q_ddot = lnn_layer([q, q_dot])
-
-        # Build complete model
-        model = keras.Model(inputs=[q, q_dot], outputs=q_ddot)
-        model.compile(optimizer='adam', loss='mse')
-        ```
-
-    Raises:
-        ValueError: If hidden_dims is empty or contains non-positive integers.
-        ValueError: If input shapes are incompatible during build/call.
-
-    References:
-        Cranmer, M., et al. "Lagrangian Neural Networks."
-        arXiv preprint arXiv:2003.04630 (2020).
+    :param hidden_dims: List of integers specifying units in each hidden layer
+        of the internal MLP. Must be non-empty with positive values.
+    :type hidden_dims: List[int]
+    :param activation: Activation function for hidden layers. ``'softplus'``
+        recommended as its second derivative is non-zero. Defaults to ``'softplus'``.
+    :type activation: str
+    :param kwargs: Additional arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -141,15 +90,9 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         """
         Build the internal MLP sub-layer with explicit shape information.
 
-        This method follows modern Keras best practices by explicitly building
-        sub-layers to ensure robust serialization and weight management.
-
-        Args:
-            input_shape: List of two shape tuples for [q, q_dot] inputs.
-
-        Raises:
-            ValueError: If input_shape format is incorrect or coordinate
-                dimensions don't match.
+        :param input_shape: List of two shape tuples for ``[q, q_dot]`` inputs.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :raises ValueError: If input_shape format is incorrect or dimensions don't match.
         """
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
@@ -184,17 +127,10 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         automatic differentiation to compute required derivatives of the
         learned Lagrangian function.
 
-        Args:
-            inputs: List containing [q, q_dot] where:
-                - q: Generalized coordinates
-                - q_dot: Generalized velocities
-
-        Returns:
-            q_ddot: Computed generalized accelerations
-
-        Note:
-            Uses persistent GradientTape for multiple derivative computations.
-            The tape is properly cleaned up after use to prevent memory leaks.
+        :param inputs: List containing ``[q, q_dot]``.
+        :type inputs: List[keras.KerasTensor]
+        :return: Computed generalized accelerations ``q_ddot``.
+        :rtype: keras.KerasTensor
         """
         q, q_dot = inputs
 
@@ -256,11 +192,10 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         """
         Compute output shape for accelerations.
 
-        Args:
-            input_shape: List of input shapes [q_shape, q_dot_shape].
-
-        Returns:
-            Output shape tuple, identical to coordinate input shape.
+        :param input_shape: List of input shapes ``[q_shape, q_dot_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape tuple, identical to coordinate input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         q_shape = input_shape[0]
         return q_shape
@@ -269,9 +204,8 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         """
         Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters needed
-            to recreate this layer instance.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

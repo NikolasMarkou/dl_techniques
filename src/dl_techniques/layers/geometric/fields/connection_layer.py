@@ -34,42 +34,63 @@ ConnectionType = Literal['levi_civita', 'yang_mills', 'affine']
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class ConnectionLayer(keras.layers.Layer):
-    """
-    Computes the gauge connection from field representations.
+    """Computes the gauge connection from field representations.
 
-    The connection is a tensor that describes how vectors transform under
-    parallel transport. This layer learns to compute the connection from
-    the input field, enabling geometric operations like parallel transport
-    and holonomy computation.
+    The connection tensor describes how vectors transform under parallel
+    transport on the semantic manifold. It combines embedding and curvature
+    information through a two-layer network: hidden = tanh(concat(emb, curv) W_1 + b_1),
+    then computes type-specific output. Yang-Mills connections are valued in
+    a Lie algebra with learnable antisymmetric generators; Levi-Civita connections
+    are metric-compatible and torsion-free; affine connections are general.
 
-    The connection can be computed in several ways:
-    - 'levi_civita': Metric-compatible, torsion-free connection
-    - 'yang_mills': Non-abelian gauge connection (more general)
-    - 'affine': General affine connection
+    **Architecture Overview:**
 
-    Args:
-        hidden_dim: Dimension of the hidden representation.
-        connection_dim: Dimension of the connection (output per position pair).
-            If None, uses hidden_dim.
-        connection_type: Type of connection to compute.
-        num_generators: Number of Lie algebra generators for yang_mills type.
-        use_metric: Whether to compute metric-compatible connection.
-        antisymmetric: Whether to enforce antisymmetry (for gauge connections).
-        connection_regularization: Strength of connection smoothness regularization.
-        kernel_initializer: Initializer for kernel weights.
-        bias_initializer: Initializer for bias weights.
-        kernel_regularizer: Regularizer for kernel weights.
+    .. code-block:: text
 
-    Example:
-        >>> connection_layer = ConnectionLayer(
-        ...     hidden_dim=256,
-        ...     connection_type='yang_mills',
-        ...     num_generators=8
-        ... )
-        >>> embeddings = keras.ops.random.normal((2, 10, 256))
-        >>> curvature = keras.ops.random.normal((2, 10, 256))
-        >>> connection = connection_layer([embeddings, curvature])
-        >>> print(connection.shape)  # (2, 10, 256, 8) for yang_mills
+        ┌─────────────────┐  ┌─────────────────┐
+        │ Embeddings      │  │ Curvature       │
+        │ [B, S, D]       │  │ [B, S, D]       │
+        └────────┬────────┘  └────────┬────────┘
+                 └──────────┬─────────┘
+                            ▼
+        ┌────────────────────────────────────┐
+        │ Concat → [B, S, 2D]               │
+        │ Dense + tanh → [B, S, H]           │
+        └───────────────┬────────────────────┘
+                        ▼
+        ┌────────────────────────────────────┐
+        │ Type-specific projection:          │
+        │ ├─ yang_mills: coeffs × generators │
+        │ ├─ levi_civita: symmetrised affine │
+        │ └─ affine: raw matrix              │
+        │ → Connection [B, S, C, C]          │
+        └────────────────────────────────────┘
+
+    :param hidden_dim: Dimension of the hidden representation.
+    :type hidden_dim: int
+    :param connection_dim: Dimension of the connection output. Defaults to ``hidden_dim``.
+    :type connection_dim: Optional[int]
+    :param connection_type: Type of connection
+        (``'levi_civita'``, ``'yang_mills'``, ``'affine'``). Defaults to ``'yang_mills'``.
+    :type connection_type: ConnectionType
+    :param num_generators: Number of Lie algebra generators for Yang-Mills.
+        Defaults to 8.
+    :type num_generators: int
+    :param use_metric: Whether to compute metric-compatible connection.
+        Defaults to ``True``.
+    :type use_metric: bool
+    :param antisymmetric: Whether to enforce antisymmetry. Defaults to ``True``.
+    :type antisymmetric: bool
+    :param connection_regularization: Strength of smoothness regularization.
+        Defaults to 0.001.
+    :type connection_regularization: float
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -86,7 +107,7 @@ class ConnectionLayer(keras.layers.Layer):
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the ConnectionLayer."""
+        """Initialise the ConnectionLayer."""
         super().__init__(**kwargs)
 
         if hidden_dim <= 0:
@@ -121,11 +142,10 @@ class ConnectionLayer(keras.layers.Layer):
             self.output_dim = self.connection_dim * self.connection_dim
 
     def build(self, input_shape: Tuple[Tuple[int, ...], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Args:
-            input_shape: Tuple of (embedding_shape, curvature_shape).
+        :param input_shape: Tuple of (embedding_shape, curvature_shape).
+        :type input_shape: Tuple[Tuple[int, ...], ...]
         """
         # Determine input dimension from embedding shape
         if isinstance(input_shape, list):
@@ -196,17 +216,15 @@ class ConnectionLayer(keras.layers.Layer):
             self,
             tensor: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Make a tensor antisymmetric in its last two dimensions.
+        """Make a tensor antisymmetric in its last two dimensions.
 
         For gauge connections, antisymmetry corresponds to the Lie algebra
         structure, ensuring the connection values are proper gauge fields.
 
-        Args:
-            tensor: Input tensor with at least 2 dimensions.
-
-        Returns:
-            Antisymmetric tensor.
+        :param tensor: Input tensor with at least 2 dimensions.
+        :type tensor: keras.KerasTensor
+        :return: Antisymmetric tensor.
+        :rtype: keras.KerasTensor
         """
         # A - A^T along last two dimensions
         ndim = len(tensor.shape)
@@ -217,17 +235,15 @@ class ConnectionLayer(keras.layers.Layer):
             self,
             hidden: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute Yang-Mills gauge connection.
+        """Compute Yang-Mills gauge connection.
 
         The Yang-Mills connection is valued in the Lie algebra of the gauge group.
         Each connection component is a linear combination of Lie algebra generators.
 
-        Args:
-            hidden: Hidden representation.
-
-        Returns:
-            Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :param hidden: Hidden representation.
+        :type hidden: keras.KerasTensor
+        :return: Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(hidden)[0]
         seq_len = ops.shape(hidden)[1]
@@ -256,17 +272,15 @@ class ConnectionLayer(keras.layers.Layer):
             self,
             hidden: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute general affine connection.
+        """Compute general affine connection.
 
         The affine connection Γ^k_{ij} has three indices. We compute it as
         a tensor that can be used for parallel transport.
 
-        Args:
-            hidden: Hidden representation.
-
-        Returns:
-            Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :param hidden: Hidden representation.
+        :type hidden: keras.KerasTensor
+        :return: Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(hidden)[0]
         seq_len = ops.shape(hidden)[1]
@@ -291,18 +305,17 @@ class ConnectionLayer(keras.layers.Layer):
             embeddings: keras.KerasTensor,
             hidden: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute Levi-Civita connection (metric-compatible, torsion-free).
+        """Compute Levi-Civita connection (metric-compatible, torsion-free).
 
         The Levi-Civita connection is uniquely determined by the metric.
         We compute an approximation based on learned metric structure.
 
-        Args:
-            embeddings: Original embeddings for metric computation.
-            hidden: Hidden representation.
-
-        Returns:
-            Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :param embeddings: Original embeddings for metric computation.
+        :type embeddings: keras.KerasTensor
+        :param hidden: Hidden representation.
+        :type hidden: keras.KerasTensor
+        :return: Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(hidden)[0]
         seq_len = ops.shape(hidden)[1]
@@ -336,16 +349,15 @@ class ConnectionLayer(keras.layers.Layer):
             inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Compute the connection from input field.
+        """Compute the connection from input field.
 
-        Args:
-            inputs: Either a single tensor or tuple of (embeddings, curvature).
-                If single tensor, curvature is assumed to be zeros.
-            training: Whether the layer is in training mode.
-
-        Returns:
-            Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :param inputs: Either a single tensor or tuple of (embeddings, curvature).
+            If single tensor, curvature is assumed to be zeros.
+        :type inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Connection tensor of shape (batch, seq_len, connection_dim, connection_dim).
+        :rtype: keras.KerasTensor
         """
         # Handle input formats
         if isinstance(inputs, (list, tuple)):
@@ -403,14 +415,12 @@ class ConnectionLayer(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape.
+        """Compute the output shape.
 
-        Args:
-            input_shape: Input shape or tuple of input shapes.
-
-        Returns:
-            Output shape.
+        :param input_shape: Input shape or tuple of input shapes.
+        :type input_shape: Union[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]
+        :return: Output shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, list):
             embed_shape = input_shape[0]

@@ -32,42 +32,58 @@ LoopType = Literal['rectangular', 'triangular', 'circular', 'adaptive']
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class HolonomyLayer(keras.layers.Layer):
-    """
-    Computes holonomy (path-ordered exponential around loops).
+    """Computes holonomy (path-ordered exponential around closed loops).
 
-    Holonomy is a fundamental gauge-invariant quantity that measures the
-    curvature enclosed by a loop. This layer computes holonomy for various
-    loop geometries and uses it to create gauge-invariant representations.
+    Holonomy H[gamma] = P exp(-oint_gamma Gamma) is a gauge-invariant quantity
+    measuring the curvature enclosed by a loop. This layer computes holonomy
+    for multiple loop geometries (rectangular, triangular, circular, or
+    learned adaptive shapes) at each sequence position. When ``use_trace``
+    is True, extracts the Wilson loop Tr(H) as a scalar feature per loop;
+    otherwise returns the full holonomy matrix. All features are projected
+    to ``hidden_dim`` via a learnable output projection.
 
-    The holonomy around a loop depends only on the curvature enclosed,
-    not on the specific path taken. This makes it robust to local
-    perturbations and gauge transformations.
+    **Architecture Overview:**
 
-    Loop types:
-    - 'rectangular': Axis-aligned rectangular loops
-    - 'triangular': Triangular loops (simpler, captures curvature)
-    - 'circular': Approximate circular loops
-    - 'adaptive': Learned loop shapes
+    .. code-block:: text
 
-    Args:
-        hidden_dim: Dimension of the representation.
-        loop_sizes: List of loop sizes to compute holonomy for.
-        loop_type: Type of loops to use.
-        num_loops: Number of loop orientations per size.
-        use_trace: Whether to use trace of holonomy (Wilson loop).
-        holonomy_regularization: Regularization for holonomy smoothness.
-        kernel_initializer: Initializer for kernel weights.
+        ┌─────────────────┐  ┌──────────────────┐
+        │ Embeddings      │  │ Connection       │
+        │ [B, S, D]       │  │ [B, S, D, D]     │
+        └────────┬────────┘  └────────┬─────────┘
+                 └───────────┬────────┘
+                             ▼
+        ┌────────────────────────────────────────┐
+        │  For each (loop_size, orientation):    │
+        │  ┌──────────────────────────────────┐  │
+        │  │ Path-ordered product around loop │  │
+        │  │ → Holonomy matrix [B, D, D]      │  │
+        │  │ → Trace (Wilson) or flatten      │  │
+        │  └──────────────────────────────────┘  │
+        └────────────────┬───────────────────────┘
+                         ▼
+        ┌────────────────────────────────────────┐
+        │  Stack features [B, S, num_features]   │
+        │  Output projection → [B, S, D]         │
+        └────────────────────────────────────────┘
 
-    Example:
-        >>> holonomy_layer = HolonomyLayer(
-        ...     hidden_dim=256,
-        ...     loop_sizes=[2, 4, 8],
-        ...     loop_type='rectangular'
-        ... )
-        >>> embeddings = keras.ops.random.normal((2, 16, 256))
-        >>> connection = keras.ops.random.normal((2, 16, 256, 256)) * 0.01
-        >>> holonomy = holonomy_layer([embeddings, connection])
-        >>> print(holonomy.shape)  # (2, 16, num_holonomy_features)
+    :param hidden_dim: Dimension of the representation. Must be positive.
+    :type hidden_dim: int
+    :param loop_sizes: List of loop sizes. Defaults to ``[2, 4, 8]``.
+    :type loop_sizes: List[int]
+    :param loop_type: Type of loops
+        (``'rectangular'``, ``'triangular'``, ``'circular'``, ``'adaptive'``).
+        Defaults to ``'rectangular'``.
+    :type loop_type: LoopType
+    :param num_loops: Loop orientations per size. Defaults to 4.
+    :type num_loops: int
+    :param use_trace: Whether to use trace (Wilson loop). Defaults to ``True``.
+    :type use_trace: bool
+    :param holonomy_regularization: Regularization strength. Defaults to 0.001.
+    :type holonomy_regularization: float
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to ``'orthogonal'``.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -114,11 +130,10 @@ class HolonomyLayer(keras.layers.Layer):
             self.output_dim = len(loop_sizes) * num_loops * hidden_dim
 
     def build(self, input_shape: Tuple[Tuple[int, ...], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Args:
-            input_shape: Tuple of (embeddings_shape, connection_shape).
+        :param input_shape: Tuple of (embeddings_shape, connection_shape).
+        :type input_shape: Tuple[Tuple[int, ...], ...]
         """
         # For adaptive loops: learnable loop parameters
         if self.loop_type == 'adaptive':
@@ -153,19 +168,18 @@ class HolonomyLayer(keras.layers.Layer):
             connection: keras.KerasTensor,
             path_indices: List[Tuple[int, int]]
     ) -> keras.KerasTensor:
-        """
-        Compute path-ordered integral along a discrete path.
+        """Compute path-ordered integral along a discrete path.
 
         The path-ordered product is:
         P = P_n * P_{n-1} * ... * P_1
         where P_i is the transport operator at step i.
 
-        Args:
-            connection: Connection tensor, shape (batch, seq_len, dim, dim).
-            path_indices: List of (position, direction) tuples defining the path.
-
-        Returns:
-            Path-ordered product as matrix, shape (batch, dim, dim).
+        :param connection: Connection tensor, shape (batch, seq_len, dim, dim).
+        :type connection: keras.KerasTensor
+        :param path_indices: List of (position, direction) tuples defining the path.
+        :type path_indices: List[Tuple[int, int]]
+        :return: Path-ordered product as matrix, shape (batch, dim, dim).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(connection)[0]
 
@@ -203,20 +217,20 @@ class HolonomyLayer(keras.layers.Layer):
             center_pos: int,
             size: int
     ) -> keras.KerasTensor:
-        """
-        Compute holonomy around a rectangular loop.
+        """Compute holonomy around a rectangular loop.
 
         The rectangular loop goes:
-        center → center+size → center+size (same) → center → center
+        center -> center+size -> center+size (same) -> center -> center
         In 1D sequence, this degenerates but still captures curvature.
 
-        Args:
-            connection: Connection tensor.
-            center_pos: Center position of the loop.
-            size: Size of the loop.
-
-        Returns:
-            Holonomy matrix.
+        :param connection: Connection tensor.
+        :type connection: keras.KerasTensor
+        :param center_pos: Center position of the loop.
+        :type center_pos: int
+        :param size: Size of the loop.
+        :type size: int
+        :return: Holonomy matrix.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(connection)[0]
         seq_len = ops.shape(connection)[1]
@@ -256,18 +270,18 @@ class HolonomyLayer(keras.layers.Layer):
             center_pos: int,
             size: int
     ) -> keras.KerasTensor:
-        """
-        Compute holonomy around a triangular path.
+        """Compute holonomy around a triangular path.
 
         Simpler than rectangular, uses three segments.
 
-        Args:
-            connection: Connection tensor.
-            center_pos: Center position.
-            size: Size of the triangle.
-
-        Returns:
-            Holonomy matrix.
+        :param connection: Connection tensor.
+        :type connection: keras.KerasTensor
+        :param center_pos: Center position.
+        :type center_pos: int
+        :param size: Size of the triangle.
+        :type size: int
+        :return: Holonomy matrix.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(connection)[0]
         seq_len = ops.shape(connection)[1]
@@ -299,17 +313,15 @@ class HolonomyLayer(keras.layers.Layer):
             self,
             holonomy: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Extract features from holonomy matrix.
+        """Extract features from holonomy matrix.
 
         If use_trace is True, returns the trace (Wilson loop).
         Otherwise, returns the full matrix flattened.
 
-        Args:
-            holonomy: Holonomy matrix, shape (batch, dim, dim).
-
-        Returns:
-            Holonomy features.
+        :param holonomy: Holonomy matrix, shape (batch, dim, dim).
+        :type holonomy: keras.KerasTensor
+        :return: Holonomy features.
+        :rtype: keras.KerasTensor
         """
         if self.use_trace:
             # Wilson loop: Tr(H)
@@ -325,17 +337,16 @@ class HolonomyLayer(keras.layers.Layer):
             inputs: Tuple[keras.KerasTensor, keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Compute holonomy features for the input field.
+        """Compute holonomy features for the input field.
 
-        Args:
-            inputs: Tuple of (embeddings, connection).
-                - embeddings: shape (batch, seq_len, dim)
-                - connection: shape (batch, seq_len, dim, dim)
-            training: Whether in training mode.
-
-        Returns:
-            Holonomy features of shape (batch, seq_len, hidden_dim).
+        :param inputs: Tuple of (embeddings, connection).
+            - embeddings: shape (batch, seq_len, dim)
+            - connection: shape (batch, seq_len, dim, dim)
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Holonomy features of shape (batch, seq_len, hidden_dim).
+        :rtype: keras.KerasTensor
         """
         embeddings, connection = inputs
 
@@ -406,14 +417,12 @@ class HolonomyLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Tuple[int, ...], Tuple[int, ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: Tuple of (embeddings_shape, connection_shape).
-
-        Returns:
-            Output shape.
+        :param input_shape: Tuple of (embeddings_shape, connection_shape).
+        :type input_shape: Tuple[Tuple[int, ...], Tuple[int, ...]]
+        :return: Output shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         embed_shape = input_shape[0]
         batch_size = embed_shape[0]

@@ -77,76 +77,65 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class LearnableArithmeticOperator(keras.layers.Layer):
-    """A learnable arithmetic operator that can perform various arithmetic operations.
+    """
+    Differentiable learnable arithmetic operator layer.
 
-    This layer implements differentiable arithmetic operations with learnable parameters
-    to control the operation type and behavior. The layer learns to combine different
-    arithmetic operations (add, multiply, subtract, divide, power, max, min) based on
-    the input data and training objectives.
+    Implements a soft selection over a set of primitive arithmetic operations
+    (add, multiply, subtract, divide, power, max, min) using learnable weights
+    passed through a temperature-scaled softmax:
+    ``p_i = exp(w_i / T) / sum_j(exp(w_j / T))``. The output is a convex
+    combination ``Y = s * sum_i(p_i * f_i(X))`` where ``s`` is a learnable
+    scaling factor. This formulation makes the operation selection end-to-end
+    differentiable, inspired by DARTS-style continuous relaxation.
 
-    The layer applies a weighted combination of all selected operations, where the weights
-    are learned during training. A scaling factor is also learned to control the magnitude
-    of the output, which helps with numerical stability and gradient flow.
+    **Architecture Overview:**
 
-    Args:
-        operation_types: List of operation types to choose from. Available operations:
-            ['add', 'multiply', 'subtract', 'divide', 'power', 'max', 'min']. If None,
-            all operations are included.
-        use_temperature: Boolean, whether to use temperature scaling for soft operation
-            selection. Temperature scaling helps control the sharpness of operation
-            selection during training.
-        temperature_init: Float, initial temperature value. Higher values lead to
-            more uniform operation selection, lower values lead to sharper selection.
-            Must be positive.
-        use_scaling: Boolean, whether to use a learnable scaling factor for the output.
-            The scaling factor helps with numerical stability and gradient flow.
-        scaling_init: Float, initial scaling factor value. Should be positive.
-        operation_initializer: Initializer for the operation weights. If None,
-            uses 'random_uniform'.
-        temperature_initializer: Initializer for the temperature parameter. If None,
-            uses 'constant' with the temperature_init value.
-        scaling_initializer: Initializer for the scaling factor. If None,
-            uses 'constant' with the scaling_init value.
-        epsilon: Float, small constant for numerical stability in division operations.
-        power_clip_range: Tuple of two floats, (min_base, max_base) for clipping the
-            base in power operations to ensure numerical stability.
-        exponent_clip_range: Tuple of two floats, (min_exp, max_exp) for clipping the
-            exponent in power operations.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        - Single tensor: A tensor of any shape `(batch_size, ...)`
-        - List of two tensors: Two tensors of the same shape `[(batch_size, ...), (batch_size, ...)]`
+        ┌─────────────────────────────────────────────────┐
+        │        LearnableArithmeticOperator               │
+        │                                                  │
+        │  Input(s): x1, x2                                │
+        │         │                                        │
+        │         ▼                                        │
+        │  ┌─────┬─────────┬──────┬───────┬─────┬─────┐   │
+        │  │ add │multiply │ sub  │divide │power│max/min│  │
+        │  └──┬──┴────┬────┴───┬──┴───┬───┴──┬──┴──┬───┘  │
+        │     │       │       │      │      │     │       │
+        │     ▼       ▼       ▼      ▼      ▼     ▼       │
+        │  Weighted sum: p_i * f_i(x1, x2)                │
+        │         │                                        │
+        │         ├──► * scaling_factor                     │
+        │         ▼                                        │
+        │  Output (same shape as input)                    │
+        └─────────────────────────────────────────────────┘
 
-    Output shape:
-        Same as input shape. If input is a list, output shape matches the first tensor.
-
-    Returns:
-        A tensor of the same shape as the input containing the result of the
-        learnable arithmetic operations.
-
-    Raises:
-        ValueError: If operation_types contains invalid operation names.
-        ValueError: If temperature_init is not positive.
-        ValueError: If scaling_init is not positive.
-        ValueError: If epsilon is not positive.
-        ValueError: If input tensors have different shapes when using binary operations.
-
-    Example:
-        Single input:
-        >>> x = np.random.rand(4, 10, 10, 16)
-        >>> arith_op = LearnableArithmeticOperator(operation_types=['add', 'multiply'])
-        >>> y = arith_op(x)
-        >>> print(y.shape)
-        (4, 10, 10, 16)
-
-        Two inputs:
-        >>> x1 = np.random.rand(4, 10, 10, 16)
-        >>> x2 = np.random.rand(4, 10, 10, 16)
-        >>> arith_op = LearnableArithmeticOperator(operation_types=['add', 'multiply', 'max'])
-        >>> y = arith_op([x1, x2])
-        >>> print(y.shape)
-        (4, 10, 10, 16)
+    :param operation_types: List of operation types. Available:
+        ``['add', 'multiply', 'subtract', 'divide', 'power', 'max', 'min']``.
+        If None, all operations are included.
+    :type operation_types: Optional[List[str]]
+    :param use_temperature: Whether to use temperature scaling for soft selection.
+    :type use_temperature: bool
+    :param temperature_init: Initial temperature value. Must be positive.
+    :type temperature_init: float
+    :param use_scaling: Whether to use a learnable output scaling factor.
+    :type use_scaling: bool
+    :param scaling_init: Initial scaling factor value. Must be positive.
+    :type scaling_init: float
+    :param operation_initializer: Initializer for operation weights.
+    :type operation_initializer: Union[str, keras.initializers.Initializer]
+    :param temperature_initializer: Initializer for temperature parameter.
+    :type temperature_initializer: Optional[Union[str, keras.initializers.Initializer]]
+    :param scaling_initializer: Initializer for scaling factor.
+    :type scaling_initializer: Optional[Union[str, keras.initializers.Initializer]]
+    :param epsilon: Small constant for numerical stability in division.
+    :type epsilon: float
+    :param power_clip_range: ``(min_base, max_base)`` for clipping in power operations.
+    :type power_clip_range: Tuple[float, float]
+    :param exponent_clip_range: ``(min_exp, max_exp)`` for clipping exponents.
+    :type exponent_clip_range: Tuple[float, float]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -230,11 +219,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         )
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> None:
-        """Build the layer weights.
+        """
+        Build the layer weights.
 
-        Args:
-            input_shape: Shape of the input tensor(s). Can be a single shape tuple
-                or a list of shape tuples for multiple inputs.
+        :param input_shape: Shape of the input tensor(s).
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
         # Validate input shapes for binary operations
         if isinstance(input_shape, list):
@@ -276,17 +265,15 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         super().build(input_shape)
 
     def _safe_divide(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Safe division with epsilon-based numerical stability.
+        """
+        Safe division with epsilon-based numerical stability.
 
-        This method modifies the denominator to avoid zero by ensuring its
-        magnitude is at least epsilon.
-
-        Args:
-            x1: Numerator tensor.
-            x2: Denominator tensor.
-
-        Returns:
-            Result of the safe division.
+        :param x1: Numerator tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Denominator tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of the safe division.
+        :rtype: keras.KerasTensor
         """
         # Get the sign of the denominator, treating 0 as positive
         sign_x2 = ops.sign(x2)
@@ -300,14 +287,15 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         return ops.divide(x1, safe_x2)
 
     def _safe_power(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Safe power operation with clipping for numerical stability.
+        """
+        Safe power operation with clipping for numerical stability.
 
-        Args:
-            x1: Base tensor
-            x2: Exponent tensor
-
-        Returns:
-            Result of safe power operation
+        :param x1: Base tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Exponent tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of safe power operation.
+        :rtype: keras.KerasTensor
         """
         # Clip base to prevent numerical issues
         x1_safe = ops.clip(ops.abs(x1), self.power_clip_range[0], self.power_clip_range[1])
@@ -316,26 +304,28 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         return ops.power(x1_safe, x2_safe)
 
     def _soft_max(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Element-wise maximum operation.
+        """
+        Element-wise maximum operation.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Element-wise maximum of the inputs
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Element-wise maximum of the inputs.
+        :rtype: keras.KerasTensor
         """
         return ops.maximum(x1, x2)
 
     def _soft_min(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Element-wise minimum operation.
+        """
+        Element-wise minimum operation.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Element-wise minimum of the inputs
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Element-wise minimum of the inputs.
+        :rtype: keras.KerasTensor
         """
         return ops.minimum(x1, x2)
 
@@ -344,17 +334,15 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the arithmetic operator.
+        """
+        Forward pass through the arithmetic operator.
 
-        Args:
-            inputs: Input tensor(s). Can be single tensor or list of two tensors.
-                For single tensor input, the same tensor is used for both operands
-                in binary operations.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor after applying learnable arithmetic operations.
+        :param inputs: Input tensor(s). Single tensor or list of two tensors.
+        :type inputs: Union[keras.KerasTensor, List[keras.KerasTensor]]
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor after applying learnable arithmetic operations.
+        :rtype: keras.KerasTensor
         """
         # Handle input parsing
         if isinstance(inputs, list):
@@ -423,13 +411,13 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape.
+        """
+        Compute output shape.
 
-        Args:
-            input_shape: Shape of the input(s).
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape of the input(s).
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, list):
             return input_shape[0]
@@ -437,10 +425,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """
+        Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

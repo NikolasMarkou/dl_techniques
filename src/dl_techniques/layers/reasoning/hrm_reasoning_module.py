@@ -58,36 +58,67 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     """
     Configurable multi-layer reasoning module with input injection.
 
-    This composite layer implements a stack of `TransformerLayer` instances. It is highly
-    configurable, allowing for experimentation with different transformer architectures,
-    while defaulting to a high-performance configuration suitable for hierarchical reasoning
-    (post-norm, RMSNorm, SwiGLU). It features an input injection mechanism to integrate
-    fresh information at the start of each reasoning cycle.
+    Implements a stack of ``TransformerLayer`` instances with an input injection
+    mechanism: ``x = hidden_states + input_injection`` is processed sequentially
+    through ``num_layers`` transformer blocks. Defaults to a high-performance
+    configuration for hierarchical reasoning (post-norm RMSNorm, SwiGLU FFN,
+    multi-head attention) but is fully configurable.
 
-    **Intent**: Provide a general-purpose, stackable module for building deep transformer-based
-    models, with an opinionated default configuration optimized for reasoning tasks.
+    **Architecture Overview:**
 
-    Args:
-        num_layers: Integer, number of transformer layers in the stack.
-        embed_dim: Integer, embedding dimension.
-        num_heads: Integer, number of attention heads. Defaults to 8.
-        ffn_expansion_factor: Integer, expansion factor for FFN. Defaults to 4.
-        attention_type: The type of attention mechanism to use. Defaults to 'multi_head'.
-        normalization_type: The type of normalization layer to use. Defaults to 'rms_norm'.
-        normalization_position: Position of the norm layer ('pre' or 'post'). Defaults to 'post'.
-        ffn_type: The type of feed-forward network to use. Defaults to 'swiglu'.
-        dropout_rate: Float (0-1), dropout rate for attention and FFN. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias terms. Defaults to False.
-        kernel_initializer: String or Initializer for weights. Defaults to "he_normal".
-        kernel_regularizer: Optional regularizer for weights. Defaults to None.
-        **kwargs: Additional Layer base class arguments.
+    .. code-block:: text
 
-    Input shape:
-        A list of two identical 3D tensors: `[hidden_states, input_injection]`
-        of shape `(batch_size, sequence_length, embed_dim)`.
+        ┌────────────────────────────────────────────────┐
+        │       HierarchicalReasoningModule              │
+        │                                                │
+        │  [hidden_states, input_injection]              │
+        │         │               │                      │
+        │         └──── + ────────┘                      │
+        │              │                                 │
+        │              ▼                                 │
+        │  ┌────────────────────────┐                    │
+        │  │ TransformerLayer_0     │                    │
+        │  └───────────┬────────────┘                    │
+        │              ▼                                 │
+        │  ┌────────────────────────┐                    │
+        │  │ TransformerLayer_1     │                    │
+        │  └───────────┬────────────┘                    │
+        │              ▼                                 │
+        │            ...                                 │
+        │              ▼                                 │
+        │  ┌────────────────────────┐                    │
+        │  │ TransformerLayer_N     │                    │
+        │  └───────────┬────────────┘                    │
+        │              ▼                                 │
+        │  Output(batch, seq_len, embed_dim)             │
+        └────────────────────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape `(batch_size, sequence_length, embed_dim)`.
+    :param num_layers: Number of transformer layers in the stack.
+    :type num_layers: int
+    :param embed_dim: Embedding dimension.
+    :type embed_dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param ffn_expansion_factor: FFN expansion factor. Defaults to 4.
+    :type ffn_expansion_factor: int
+    :param attention_type: Attention mechanism type. Defaults to ``'multi_head'``.
+    :type attention_type: AttentionType
+    :param normalization_type: Normalization layer type. Defaults to ``'rms_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: Norm position (``'pre'`` or ``'post'``). Defaults to ``'post'``.
+    :type normalization_position: NormalizationPositionType
+    :param ffn_type: Feed-forward network type. Defaults to ``'swiglu'``.
+    :type ffn_type: FFNType
+    :param dropout_rate: Dropout rate. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias terms. Defaults to False.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for weights. Defaults to ``"he_normal"``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional Layer base class arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -184,13 +215,14 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         """
         Forward pass with input injection and sequential refinement.
 
-        Args:
-            inputs: A list of two tensors: `[hidden_states, input_injection]`.
-            attention_mask: Optional attention mask to apply to all layers.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Refined hidden states tensor.
+        :param inputs: List of ``[hidden_states, input_injection]``.
+        :type inputs: List[keras.KerasTensor]
+        :param attention_mask: Optional attention mask for all layers.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Refined hidden states tensor.
+        :rtype: keras.KerasTensor
         """
         if not isinstance(inputs, list) or len(inputs) != 2:
             raise ValueError("Input must be a list of two tensors: [hidden_states, input_injection]")

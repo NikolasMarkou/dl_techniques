@@ -48,8 +48,26 @@ class NTMMemory(BaseMemory):
     """
     Standard NTM Memory Matrix.
 
-    Manages read/write operations on the memory matrix using the
-    erase-then-add mechanism from the original NTM paper.
+    Manages read/write operations on the memory matrix using the erase-then-add
+    mechanism: ``M_t = M_{t-1} * (1 - w_t e_t^T) + w_t a_t^T`` where ``w_t`` are
+    write weights, ``e_t`` is the erase vector, and ``a_t`` is the add vector.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────┐
+        │  Memory M (batch, N, M)      │
+        └──────────┬───────────────────┘
+                   │
+           ┌───────┴───────┐
+           ▼               ▼
+        ┌──────┐     ┌──────────┐
+        │ Read │     │  Write   │
+        │w^T M │     │ Erase+Add│
+        └──┬───┘     └────┬─────┘
+           ▼              ▼
+        read_vec     updated M
 
     :param memory_size: Number of memory slots.
     :type memory_size: int
@@ -169,8 +187,33 @@ class NTMReadHead(BaseHead):
     """
     Standard NTM Read Head.
 
-    Projects controller output to addressing parameters and computes
-    attention weights for reading from memory.
+    Projects controller output to addressing parameters (key, beta, gate,
+    shift, gamma) and computes attention weights for reading from memory
+    using the full NTM hybrid addressing mechanism.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────┐
+        │  controller_output        │
+        └──────────┬────────────────┘
+                   ▼
+        ┌───────────────────────────┐
+        │  Dense projections:       │
+        │  key, beta, gate,         │
+        │  shift, gamma             │
+        └──────────┬────────────────┘
+                   ▼
+        ┌───────────────────────────┐
+        │  Hybrid Addressing:       │
+        │  content ─► gate ─►       │
+        │  shift ─► sharpen         │
+        └──────────┬────────────────┘
+                   ▼
+        ┌───────────────────────────┐
+        │  weights (batch, N)       │
+        └───────────────────────────┘
 
     :param memory_size: Number of memory slots.
     :type memory_size: int

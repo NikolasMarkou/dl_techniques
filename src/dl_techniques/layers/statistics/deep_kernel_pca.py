@@ -65,122 +65,79 @@ class DeepKernelPCA(keras.layers.Layer):
     This layer implements DKPCA, which extends traditional Kernel PCA to multiple
     hierarchical levels with coupled optimization. It creates both forward and backward
     dependencies across levels to extract more informative features than shallow KPCA.
+    The optimization minimizes ``min sum_j ||X^(j) - K^(j) alpha^(j)||^2_F + lambda sum_j ||alpha^(j)||^2_2``
+    where ``K^(j)`` is the kernel matrix at level ``j`` and ``alpha^(j)`` are the
+    principal component coefficients. Forward coupling passes components from level
+    ``j-1`` as input to level ``j``, while backward coupling refines shallower
+    representations using information from deeper levels through gated residual
+    connections.
 
-    **Intent**: Extract hierarchical nonlinear principal components through coupled
-    multi-level kernel transformations, enabling better disentangled representations
-    with higher explained variance in fewer components.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, features])
-           ↓
-    Level 1: Kernel Transform K¹ → PCA → Components α¹
-           ↓ (forward coupling)
-    Level 2: Kernel Transform K² → PCA → Components α²
-           ↓ (forward coupling)
-          ...
-           ↑ (backward coupling)
-    Level L: Kernel Transform K^L → PCA → Components α^L
-           ↓
-    Output(shape=[batch, total_components])
-    ```
+    .. code-block:: text
 
-    **Mathematical Framework**:
-    The optimization minimizes:
-    ```
-    min Σ_j ||X^(j) - K^(j)α^(j)||²_F + λΣ_j ||α^(j)||²_2
-    ```
+        ┌───────────────────────────────────┐
+        │         Input (batch, features)   │
+        └──────────────┬────────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Level 1: Kernel K^1 ─► PCA ─► alpha^1  │
+        └──────────────┬───────────────────┘
+                       │ forward coupling
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Level 2: Kernel K^2 ─► PCA ─► alpha^2  │
+        └──────────────┬───────────────────┘
+                       │ forward coupling
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Level L: Kernel K^L ─► PCA ─► alpha^L  │
+        └──────────────┬───────────────────┘
+                       │
+               ┌───────┴───────┐
+               │ Backward Pass │ (refine via gated coupling)
+               └───────┬───────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Weighted Concat ─► Output       │
+        │  (batch, sum(components))         │
+        └──────────────────────────────────┘
 
-    Where:
-    - K^(j) = φ^(j)(X^(j-1))[φ^(j)(X^(j-1))]^T is the kernel matrix at level j
-    - X^(j) represents features at level j
-    - α^(j) are the principal component coefficients at level j
-    - λ is the regularization parameter
-
-    The layer achieves 15-25% improvement in explained variance compared to shallow
-    KPCA and requires 40% fewer components for equivalent reconstruction quality.
-
-    Args:
-        num_levels: Integer, number of hierarchical KPCA levels. Must be positive.
-            Controls the depth of feature extraction. Defaults to 3.
-        components_per_level: List of integers specifying number of principal components
-            to extract at each level. Length must match num_levels. If None, uses
-            adaptive sizing: [input_dim//2, input_dim//4, ...].
-        kernel_type: String or List of strings, kernel function(s) to use.
-            Options: 'rbf', 'polynomial', 'linear', 'sigmoid', 'cosine'.
-            If single string, uses same kernel for all levels. If list, must match
-            num_levels. Defaults to 'rbf'.
-        kernel_params: Dict or List of dicts with kernel-specific parameters.
-            For 'rbf': {'gamma': float} (default: 1.0/n_features)
-            For 'polynomial': {'degree': int, 'coef0': float} (default: 3, 1.0)
-            For 'sigmoid': {'gamma': float, 'coef0': float} (default: 0.01, 1.0)
-            If single dict, uses same params for all levels. Defaults to None.
-        regularization_lambda: Float, L2 regularization strength for principal
-            components. Higher values promote smoother components. Defaults to 0.01.
-        coupling_strength: Float between 0 and 1, strength of forward-backward
-            coupling between levels. 0 means no coupling (independent levels),
-            1 means full coupling. Defaults to 0.5.
-        use_backward_coupling: Boolean, whether to include backward dependencies
-            from deeper levels to shallower ones. This is a key innovation of DKPCA.
-            Defaults to True.
-        center_kernel: Boolean, whether to center the kernel matrix. This is
-            important for proper kernel PCA behavior. Defaults to True.
-        kernel_regularizer: Optional regularizer for kernel parameters.
-        projection_regularizer: Optional regularizer for projection matrices.
-        coupling_regularizer: Optional regularizer for coupling weights.
-        trainable_kernels: Boolean, whether kernel parameters are trainable.
-            Defaults to False for traditional KPCA behavior.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        2D tensor with shape: `(batch_size, input_features)`.
-
-    Output shape:
-        2D tensor with shape: `(batch_size, total_components)` where
-        total_components = sum(components_per_level).
-
-    Attributes:
-        kernel_weights: List of weight matrices for kernel computations at each level.
-        projection_matrices: List of projection matrices for PCA at each level.
-        eigenvalues: List of eigenvalue vectors for variance tracking at each level.
-        coupling_weights: List of coupling matrices between levels.
-
-    Example:
-        ```python
-        # Basic DKPCA with 3 levels
-        dkpca = DeepKernelPCA(
-            num_levels=3,
-            components_per_level=[64, 32, 16],
-            kernel_type='rbf'
-        )
-
-        # Advanced configuration with different kernels per level
-        dkpca_advanced = DeepKernelPCA(
-            num_levels=4,
-            components_per_level=[128, 64, 32, 16],
-            kernel_type=['rbf', 'polynomial', 'rbf', 'linear'],
-            kernel_params=[
-                {'gamma': 0.1},
-                {'degree': 3, 'coef0': 1.0},
-                {'gamma': 0.05},
-                {}
-            ],
-            coupling_strength=0.7,
-            regularization_lambda=0.001
-        )
-
-        # Process input data
-        inputs = keras.Input(shape=(256,))
-        features = dkpca_advanced(inputs)  # Shape: (batch, 240)
-        ```
-
-    References:
-        - Deep Kernel Principal Component Analysis for Multi-level Feature Learning
-          (Tonin et al., 2023): https://arxiv.org/abs/2302.11220
-
-    Note:
-        The forward-backward coupling is crucial for extracting informative features
-        and is a key innovation that distinguishes DKPCA from stacked shallow KPCA.
+    :param num_levels: Number of hierarchical KPCA levels. Must be positive.
+        Controls the depth of feature extraction. Defaults to 3.
+    :type num_levels: int
+    :param components_per_level: Number of principal components to extract at
+        each level. Length must match ``num_levels``. If ``None``, uses adaptive
+        sizing with golden-ratio reduction.
+    :type components_per_level: list[int] | None
+    :param kernel_type: Kernel function(s) to use. Options: ``'rbf'``,
+        ``'polynomial'``, ``'linear'``, ``'sigmoid'``, ``'cosine'``. If a single
+        string, uses same kernel for all levels. Defaults to ``'rbf'``.
+    :type kernel_type: str | list[str]
+    :param kernel_params: Kernel-specific parameters. If a single dict, uses
+        same params for all levels. Defaults to ``None``.
+    :type kernel_params: dict[str, Any] | list[dict[str, Any]] | None
+    :param regularization_lambda: L2 regularization strength for principal
+        components. Defaults to 0.01.
+    :type regularization_lambda: float
+    :param coupling_strength: Strength of forward-backward coupling between
+        levels, in ``[0, 1]``. Defaults to 0.5.
+    :type coupling_strength: float
+    :param use_backward_coupling: Whether to include backward dependencies
+        from deeper levels to shallower ones. Defaults to ``True``.
+    :type use_backward_coupling: bool
+    :param center_kernel: Whether to center the kernel matrix. Defaults to ``True``.
+    :type center_kernel: bool
+    :param kernel_regularizer: Optional regularizer for kernel parameters.
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
+    :param projection_regularizer: Optional regularizer for projection matrices.
+    :type projection_regularizer: keras.regularizers.Regularizer | None
+    :param coupling_regularizer: Optional regularizer for coupling weights.
+    :type coupling_regularizer: keras.regularizers.Regularizer | None
+    :param trainable_kernels: Whether kernel parameters are trainable.
+        Defaults to ``False``.
+    :type trainable_kernels: bool
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -253,11 +210,10 @@ class DeepKernelPCA(keras.layers.Layer):
         self.coupling_weights_backward = []
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create weights for multi-level kernel PCA.
+        """Create weights for multi-level kernel PCA.
 
-        This method creates the projection matrices, eigenvalues, and coupling
-        weights needed for hierarchical feature extraction with proper PCA behavior.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -410,15 +366,14 @@ class DeepKernelPCA(keras.layers.Layer):
             x: keras.KerasTensor,
             level: int
     ) -> keras.KerasTensor:
-        """
-        Compute kernel matrix for a given level with numerical stability.
+        """Compute kernel matrix for a given level with numerical stability.
 
-        Args:
-            x: Input tensor of shape (batch_size, features)
-            level: Level index for kernel computation
-
-        Returns:
-            Kernel matrix of shape (batch_size, batch_size)
+        :param x: Input tensor of shape ``(batch_size, features)``.
+        :type x: keras.KerasTensor
+        :param level: Level index for kernel computation.
+        :type level: int
+        :return: Kernel matrix of shape ``(batch_size, batch_size)``.
+        :rtype: keras.KerasTensor
         """
         kernel_type = self.kernel_types[level]
         params = self.kernel_params[level].copy()
@@ -494,18 +449,20 @@ class DeepKernelPCA(keras.layers.Layer):
             num_components: int,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Extract principal components using kernel PCA with eigendecomposition.
+        """Extract principal components using kernel PCA with eigendecomposition.
 
-        Args:
-            kernel_matrix: Kernel matrix of shape (batch_size, batch_size)
-            projection_matrix: Projection matrix of shape (feature_dim, num_components)
-            eigenvalues: Eigenvalues for this level
-            num_components: Number of components to extract
-            training: Whether in training mode
-
-        Returns:
-            Principal components of shape (batch_size, num_components)
+        :param kernel_matrix: Kernel matrix of shape ``(batch_size, batch_size)``.
+        :type kernel_matrix: keras.KerasTensor
+        :param projection_matrix: Projection matrix of shape ``(feature_dim, num_components)``.
+        :type projection_matrix: keras.KerasTensor
+        :param eigenvalues: Eigenvalues for this level.
+        :type eigenvalues: keras.KerasTensor
+        :param num_components: Number of components to extract.
+        :type num_components: int
+        :param training: Whether in training mode.
+        :type training: bool | None
+        :return: Principal components of shape ``(batch_size, num_components)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(kernel_matrix)[0]
 
@@ -536,15 +493,14 @@ class DeepKernelPCA(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through hierarchical kernel PCA levels with coupled optimization.
+        """Forward pass through hierarchical kernel PCA levels with coupled optimization.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_features)
-            training: Boolean flag for training mode
-
-        Returns:
-            Concatenated principal components from all levels
+        :param inputs: Input tensor of shape ``(batch_size, input_features)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean flag for training mode.
+        :type training: bool | None
+        :return: Concatenated principal components from all levels.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(inputs)[0]
         current_features = inputs
@@ -651,11 +607,10 @@ class DeepKernelPCA(keras.layers.Layer):
         return (batch_size, total_components)
 
     def get_explained_variance_ratio(self) -> List[float]:
-        """
-        Get the explained variance ratio for each level.
+        """Get the explained variance ratio for each level.
 
-        Returns:
-            List of explained variance ratios (as percentages) for each level
+        :return: Explained variance ratios (as percentages) for each level.
+        :rtype: list[float]
         """
         ratios = []
         for level in range(self.num_levels):
@@ -667,7 +622,11 @@ class DeepKernelPCA(keras.layers.Layer):
         return ratios
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_levels': self.num_levels,

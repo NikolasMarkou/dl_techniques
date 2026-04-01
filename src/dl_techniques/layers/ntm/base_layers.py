@@ -38,32 +38,46 @@ class DifferentiableAddressingHead(keras.layers.Layer):
     """
     Differentiable addressing head implementing NTM-style memory addressing.
 
-    This head computes attention weights over memory locations using a
-    combination of content-based and location-based addressing mechanisms.
+    Computes attention weights over memory locations using content-based similarity
+    (cosine between key and memory rows, scaled by beta), interpolation gating
+    between content and previous weights, circular convolution shift, and gamma
+    sharpening. The full pipeline implements the original NTM addressing mechanism.
 
-    **Architecture**::
+    **Architecture Overview:**
 
-        controller_state (batch, controller_dim)
-               |
-               +-> key_proj -> key (batch, content_dim)
-               |                    |
-               |              cosine_similarity(key, memory)
-               |                    |
-               +-> beta_proj -> beta * similarity -> softmax -> content_weights
-               |
-               +-> gate_proj -> gate
-               |                 |
-               |         gate * content_weights + (1-gate) * prev_weights
-               |                 |
-               +-> shift_proj -> shift_kernel
-               |                    |
-               |            circular_convolve(gated_weights, shift_kernel)
-               |                    |
-               +-> gamma_proj -> gamma
-                                  |
-                           weights^gamma / sum(weights^gamma)
-                                  |
-                           output_weights (batch, memory_size)
+    .. code-block:: text
+
+        ┌───────────────────────────────────┐
+        │  controller_state (batch, dim)    │
+        └───┬───┬───┬───┬───┬──────────────┘
+            │   │   │   │   │
+            ▼   │   │   │   │
+        ┌──────┐│   │   │   │
+        │key   ││   │   │   │
+        │proj  ││   │   │   │
+        └──┬───┘│   │   │   │
+           ▼    ▼   │   │   │
+        cosine  beta│   │   │
+        sim ──► *  ─┤   │   │
+                ▼   │   │   │
+             softmax│   │   │
+                ▼   ▼   │   │
+             content gate│  │
+             weights  │  │  │
+                ├─────┘  │  │
+                ▼        ▼  │
+              gated   shift │
+              weights kernel│
+                ├────────┘  │
+                ▼           ▼
+            circ_conv    gamma
+                ├──────────┘
+                ▼
+             sharpened weights
+                ▼
+        ┌───────────────────────────────────┐
+        │  output_weights (batch, mem_size) │
+        └───────────────────────────────────┘
 
     :param memory_size: Number of memory slots to address.
     :type memory_size: int

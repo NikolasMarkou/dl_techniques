@@ -57,84 +57,67 @@ MIN_SIGMA_DEFAULT = 1e-3      # Default minimum sigma value
 
 @keras.saving.register_keras_serializable()
 class MDNLayer(keras.layers.Layer):
-    """Mixture Density Network Layer with separated processing paths.
+    """Mixture Density Network layer with separated processing paths.
 
-    This layer outputs parameters for a mixture of Gaussian distributions,
-    implementing several practical improvements for training stability. Each
-    parameter head (means, sigmas, weights) has its own intermediate
-    processing path for better representation learning. This architecture
-    follows modern Keras 3 best practices for robust serialization.
+    Outputs parameters for a mixture of Gaussian distributions with the predicted
+    density ``p(y|x) = sum_i pi_i(x) N(y | mu_i(x), sigma_i(x))``. Each parameter
+    head (means mu, standard deviations sigma, mixture weights pi) has its own
+    intermediate processing path consisting of Dense, optional BatchNormalization,
+    and activation layers before the final projection, enabling specialized
+    representation learning per parameter type. Diversity regularization penalizes
+    component collapse by adding ``exp(-||mu_i - mu_j||^2)`` terms.
 
-    Key features:
-    - Independent processing paths for μ, σ, and π for specialized learning.
-    - Optional batch normalization in each path for training stability.
-    - Diversity regularization to prevent component collapse.
-    - Configurable minimum sigma to prevent overconfident (zero-variance) predictions.
-    - Fully serializable and compliant with the Keras 3 API.
+    **Architecture Overview:**
 
-    Args:
-        output_dimension: Integer, the dimensionality of the target output space.
-            Must be positive.
-        num_mixtures: Integer, the number of Gaussian mixture components to use.
-            Must be positive.
-        use_bias: Boolean, whether to use bias vectors in the Dense layers.
-            Defaults to True.
-        diversity_regularizer_strength: Float, strength of diversity regularization
-            to prevent component collapse. A value > 0 adds a penalty for
-            component means being too close. Defaults to 0.0.
-        intermediate_units: Integer, number of units in the intermediate dense
-            layers for each path. Must be positive. Defaults to 32.
-        use_batch_norm: Boolean, whether to include BatchNormalization layers
-            in each intermediate path. Defaults to True.
-        intermediate_activation: String or callable, the activation function for
-            the intermediate layers. Defaults to "relu".
-        kernel_initializer: Initializer for kernel weights. Defaults to 'glorot_normal'.
-        bias_initializer: Initializer for bias vectors. Defaults to 'zeros'.
-        kernel_regularizer: Regularizer for kernel weights. Defaults to L2(1e-5).
-        bias_regularizer: Regularizer for bias vectors. Defaults to L2(1e-6).
-        min_sigma: Float, the minimum value for the standard deviation (σ) outputs.
-            Helps prevent numerical instability and overconfidence. Defaults to 1e-3.
-        **kwargs: Additional Layer base class arguments.
+    .. code-block:: text
 
-    Input shape:
-        A 2D tensor with shape `(batch_size, input_dim)`.
+        ┌──────────────────────────┐
+        │  Input (batch, input_dim)│
+        └────┬─────┬─────┬────────┘
+             │     │     │
+             ▼     ▼     ▼
+        ┌────┐ ┌────┐ ┌────┐
+        │ mu │ │ sig│ │ pi │   Intermediate Dense + BN + Act
+        │path│ │path│ │path│
+        └──┬─┘ └──┬─┘ └──┬─┘
+           ▼      ▼      ▼
+        ┌────┐ ┌────┐ ┌────┐
+        │ mu │ │sig │ │ pi │   Final Dense projections
+        │out│ │out │ │out │
+        └──┬─┘ └──┬─┘ └──┬─┘
+           └──┬───┘──┬───┘
+              ▼
+        ┌──────────────────────────┐
+        │  Concatenate [mu,sig,pi] │
+        │  (batch, total_params)   │
+        └──────────────────────────┘
 
-    Output shape:
-        A 2D tensor with shape `(batch_size, total_params)`, where
-        `total_params = (2 * num_mixtures * output_dimension) + num_mixtures`.
-        The output is a concatenation of the flattened means, sigmas, and mixture logits.
-
-    Attributes:
-        intermediate_mu_dense: Dense layer for the mean (μ) path.
-        intermediate_sigma_dense: Dense layer for the sigma (σ) path.
-        intermediate_pi_dense: Dense layer for the mixture weight (π) path.
-        mdn_mus: Final Dense layer for producing mean (μ) parameters.
-        mdn_sigmas: Final Dense layer for producing sigma (σ) parameters.
-        mdn_pi: Final Dense layer for producing mixture weight (π) logits.
-
-    Example:
-        ```python
-        # Create an MDN layer
-        mdn_layer = MDNLayer(
-            output_dimension=2,
-            num_mixtures=5,
-            intermediate_units=64,
-            diversity_regularizer_strength=0.01
-        )
-
-        # Build a model
-        inputs = keras.Input(shape=(128,))
-        x = keras.layers.Dense(256, activation='relu')(inputs)
-        mdn_params = mdn_layer(x)
-        model = keras.Model(inputs, mdn_params)
-
-        # Compile with the MDN loss function
-        model.compile(optimizer='adam', loss=mdn_layer.loss_func)
-        ```
-
-    Raises:
-        ValueError: If `output_dimension`, `num_mixtures`, or `intermediate_units`
-            are not positive, or if `diversity_regularizer_strength` is negative.
+    :param output_dimension: Dimensionality of the target output space. Must be positive.
+    :type output_dimension: int
+    :param num_mixtures: Number of Gaussian mixture components. Must be positive.
+    :type num_mixtures: int
+    :param use_bias: Whether to use bias vectors in Dense layers. Defaults to ``True``.
+    :type use_bias: bool
+    :param diversity_regularizer_strength: Strength of diversity regularization.
+        Defaults to 0.0.
+    :type diversity_regularizer_strength: float
+    :param intermediate_units: Units in intermediate dense layers. Defaults to 32.
+    :type intermediate_units: int
+    :param use_batch_norm: Whether to include BatchNormalization. Defaults to ``True``.
+    :type use_batch_norm: bool
+    :param intermediate_activation: Activation for intermediate layers. Defaults to ``"relu"``.
+    :type intermediate_activation: str
+    :param kernel_initializer: Initializer for kernel weights. Defaults to ``'glorot_normal'``.
+    :type kernel_initializer: str | keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :type bias_initializer: str | keras.initializers.Initializer
+    :param kernel_regularizer: Regularizer for kernel weights. Defaults to ``L2(1e-5)``.
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
+    :param bias_regularizer: Regularizer for bias vectors. Defaults to ``L2(1e-6)``.
+    :type bias_regularizer: keras.regularizers.Regularizer | None
+    :param min_sigma: Minimum standard deviation value. Defaults to 1e-3.
+    :type min_sigma: float
+    :param kwargs: Additional Layer base class arguments.
     """
 
     def __init__(
@@ -238,8 +221,8 @@ class MDNLayer(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer's weights and sub-layers.
 
-        This method explicitly builds each sub-layer created in `__init__`,
-        which is critical for robust serialization and weight restoration.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
         """
         # Build intermediate dense layers, which take the primary input
         self.intermediate_mu_dense.build(input_shape)
@@ -269,11 +252,14 @@ class MDNLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass of the layer with separate processing paths.
+        """Forward pass through three parallel processing paths for mu, sigma, and pi.
 
-        The input is processed through three parallel paths to compute the
-        mixture parameters (μ, σ, π), which are then concatenated into
-        a single output tensor.
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean flag for training mode.
+        :type training: bool | None
+        :return: Concatenated mixture parameters ``[mu, sigma, pi]``.
+        :rtype: keras.KerasTensor
         """
         # === Process MU (Means) Path ===
         mu_intermediate = self.intermediate_mu_dense(inputs, training=training)
@@ -311,10 +297,12 @@ class MDNLayer(keras.layers.Layer):
         self,
         mu_output: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Computes diversity loss to prevent component collapse.
+        """Compute diversity loss to prevent component collapse.
 
-        This loss penalizes mixture components for having similar means,
-        encouraging them to capture different modes of the data distribution.
+        :param mu_output: Mean outputs of shape ``(batch_size, num_mix * output_dim)``.
+        :type mu_output: keras.KerasTensor
+        :return: Scalar diversity loss.
+        :rtype: keras.KerasTensor
         """
         if self.num_mix <= 1:
             return ops.cast(0.0, dtype=mu_output.dtype)
@@ -333,7 +321,13 @@ class MDNLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Computes the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
+        :return: Output shape tuple.
+        :rtype: tuple[int | None, ...]
+        """
         output_size = (2 * self.output_dim * self.num_mix) + self.num_mix
         return tuple(list(input_shape)[:-1] + [output_size])
 
@@ -341,7 +335,13 @@ class MDNLayer(keras.layers.Layer):
             self,
             y_pred: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """Splits the concatenated network output into parameter tensors."""
+        """Split the concatenated network output into parameter tensors.
+
+        :param y_pred: Concatenated prediction tensor.
+        :type y_pred: keras.KerasTensor
+        :return: Tuple of ``(mu, sigma, pi)`` tensors.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
+        """
         mu_end = self.num_mix * self.output_dim
         sigma_end = mu_end + (self.num_mix * self.output_dim)
 
@@ -360,11 +360,14 @@ class MDNLayer(keras.layers.Layer):
             y_true: keras.KerasTensor,
             y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """MDN loss function using negative log-likelihood.
+        """Compute MDN negative log-likelihood loss ``L = -log(sum_i pi_i N(y | mu_i, sigma_i))``.
 
-        Computes the loss L = -log(Σᵢ πᵢ * N(y_true | μᵢ, σᵢ)), which represents
-        the negative log-likelihood of the true data under the predicted
-        mixture distribution.
+        :param y_true: Ground truth targets.
+        :type y_true: keras.KerasTensor
+        :param y_pred: Concatenated prediction parameters from ``call()``.
+        :type y_pred: keras.KerasTensor
+        :return: Scalar loss value.
+        :rtype: keras.KerasTensor
         """
         y_true = ops.reshape(y_true, [-1, self.output_dim])
         out_mu, out_sigma, out_pi = self.split_mixture_params(y_pred)
@@ -384,10 +387,14 @@ class MDNLayer(keras.layers.Layer):
         return loss
 
     def sample(self, y_pred: keras.KerasTensor, temperature: float = 1.0) -> keras.KerasTensor:
-        """Samples from the predicted mixture distribution.
+        """Sample from the predicted mixture distribution via ancestral sampling.
 
-        Performs ancestral sampling: first, a mixture component is chosen based
-        on the π weights, and then a sample is drawn from the selected Gaussian.
+        :param y_pred: Concatenated prediction parameters.
+        :type y_pred: keras.KerasTensor
+        :param temperature: Sampling temperature controlling diversity. Defaults to 1.0.
+        :type temperature: float
+        :return: Sampled values of shape ``(batch_size, output_dim)``.
+        :rtype: keras.KerasTensor
         """
         out_mu, out_sigma, out_pi = self.split_mixture_params(y_pred)
         out_sigma = ops.maximum(out_sigma, self.min_sigma)
@@ -412,7 +419,11 @@ class MDNLayer(keras.layers.Layer):
         return samples
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization."""
+        """Return the layer configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "output_dimension": self.output_dim,
@@ -441,23 +452,16 @@ def get_point_estimate(
     x_data: np.ndarray,
     mdn_layer: MDNLayer
 ) -> np.ndarray:
-    """Calculate point estimates from MDN outputs as the weighted average of means.
+    """Calculate point estimates as ``E[y|x] = sum_i pi_i(x) mu_i(x)``.
 
-    Computes the expected value E[y|x] = Σᵢ πᵢ(x) * μᵢ(x).
-
-    Parameters
-    ----------
-    model : keras.Model
-        Trained model with an MDNLayer.
-    x_data : np.ndarray
-        Input data for which to generate predictions.
-    mdn_layer : MDNLayer
-        The MDNLayer instance from the model.
-
-    Returns
-    -------
-    np.ndarray
-        Point estimates with shape [batch_size, output_dim].
+    :param model: Trained model with an MDNLayer.
+    :type model: keras.Model
+    :param x_data: Input data for which to generate predictions.
+    :type x_data: np.ndarray
+    :param mdn_layer: The MDNLayer instance from the model.
+    :type mdn_layer: MDNLayer
+    :return: Point estimates with shape ``[batch_size, output_dim]``.
+    :rtype: np.ndarray
     """
     y_pred = model.predict(x_data)
     mu, _, pi_logits = mdn_layer.split_mixture_params(y_pred)
@@ -479,29 +483,18 @@ def get_uncertainty(
     mdn_layer: MDNLayer,
     point_estimates: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Calculate and decompose predictive uncertainty from an MDN.
+    """Decompose predictive uncertainty via the law of total variance.
 
-    Uses the law of total variance to split uncertainty into:
-    - Aleatoric (data noise): E[Var[y|x,θ]] = Σᵢ πᵢ * σᵢ²
-    - Epistemic (model uncertainty): Var[E[y|x,θ]] = Σᵢ πᵢ * (μᵢ - E[y])²
-
-    Parameters
-    ----------
-    model : keras.Model
-        Trained model with an MDNLayer.
-    x_data : np.ndarray
-        Input data for prediction.
-    mdn_layer : MDNLayer
-        The MDNLayer instance from the model.
-    point_estimates : np.ndarray
-        Point estimates (weighted average of means).
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        A tuple containing (total_variance, aleatoric_variance), each with
-        shape [batch_size, output_dim]. Epistemic variance can be computed as
-        `total_variance - aleatoric_variance`.
+    :param model: Trained model with an MDNLayer.
+    :type model: keras.Model
+    :param x_data: Input data for prediction.
+    :type x_data: np.ndarray
+    :param mdn_layer: The MDNLayer instance from the model.
+    :type mdn_layer: MDNLayer
+    :param point_estimates: Point estimates (weighted average of means).
+    :type point_estimates: np.ndarray
+    :return: Tuple of ``(total_variance, aleatoric_variance)``.
+    :rtype: tuple[np.ndarray, np.ndarray]
     """
     y_pred = model.predict(x_data)
     mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
@@ -531,27 +524,16 @@ def get_prediction_intervals(
     total_variance: np.ndarray,
     confidence_level: float = 0.95
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Calculate prediction intervals from MDN outputs.
+    """Calculate Gaussian prediction intervals ``mu +/- z * sigma``.
 
-    Assumes the total predictive distribution is approximately Gaussian. The
-    interval is computed as `μ ± z * σ`.
-
-    Note:
-        This function requires `scipy` to be installed.
-
-    Parameters
-    ----------
-    point_estimates : np.ndarray
-        Point estimates from the model.
-    total_variance : np.ndarray
-        Total predictive variance from the model.
-    confidence_level : float, optional
-        The desired confidence level (e.g., 0.95 for 95%). Defaults to 0.95.
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        A tuple containing (lower_bound, upper_bound) of the intervals.
+    :param point_estimates: Point estimates from the model.
+    :type point_estimates: np.ndarray
+    :param total_variance: Total predictive variance from the model.
+    :type total_variance: np.ndarray
+    :param confidence_level: Desired confidence level. Defaults to 0.95.
+    :type confidence_level: float
+    :return: Tuple of ``(lower_bound, upper_bound)`` arrays.
+    :rtype: tuple[np.ndarray, np.ndarray]
     """
     try:
         from scipy import stats
@@ -573,24 +555,16 @@ def check_component_diversity(
     x_data: np.ndarray,
     mdn_layer: MDNLayer
 ) -> Dict[str, Any]:
-    """Analyzes the diversity of mixture components for trained MDN.
+    """Analyze mixture component diversity to diagnose collapse.
 
-    This utility helps diagnose issues like component collapse by reporting
-    metrics on component separation, variance, and weight distribution.
-
-    Parameters
-    ----------
-    model : keras.Model
-        Trained model with an MDNLayer.
-    x_data : np.ndarray
-        A sample of input data for analysis.
-    mdn_layer : MDNLayer
-        The MDNLayer instance from the model.
-
-    Returns
-    -------
-    Dict[str, Any]
-        A dictionary containing various diversity metrics.
+    :param model: Trained model with an MDNLayer.
+    :type model: keras.Model
+    :param x_data: Sample input data for analysis.
+    :type x_data: np.ndarray
+    :param mdn_layer: The MDNLayer instance from the model.
+    :type mdn_layer: MDNLayer
+    :return: Dictionary containing diversity metrics.
+    :rtype: dict[str, Any]
     """
     y_pred = model.predict(x_data)
     mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)

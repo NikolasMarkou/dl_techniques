@@ -48,39 +48,49 @@ class SystemicGraphFilter(keras.layers.Layer):
     """
     A principled, graph-based filter for correlation matrices.
 
-    This layer denoises a correlation matrix by performing two main operations:
+    Denoises a correlation matrix by building a sparse, soft adjacency graph
+    via top-k attention on distance-transformed affinities, then propagating
+    and smoothing values along the learned graph structure using residual
+    graph convolutions.
 
-    1. **Builds a sparse, soft adjacency graph:** Identifies the most
-       significant connections for each variable using a top-k sparse
-       attention mechanism.
+    **Architecture Overview:**
 
-    2. **Propagates values:** Smooths the correlation matrix by
-       diffusing values along the learned graph structure, using an
-       efficient, residual-based graph convolution.
+    .. code-block:: text
 
-    Parameters
-    ----------
-    top_k_neighbors : int
-        The number of strongest neighbors to connect for each node in the graph.
-        A value of 2-3 is recommended to create an MST-like sparse structure.
-        Default is 2.
-    n_propagation_steps : int
-        The number of graph smoothing/propagation iterations.
-        Default is 3.
-    distance_metric : str
-        Method to convert correlations to distances.
-        Options: 'sqrt' (sqrt(2*(1-corr))), 'linear' (1-corr).
-        Default is 'sqrt'.
-    initial_temperature : float
-        Initial temperature for the attention softmax. Higher values lead to
-        softer attention. Default is 0.1.
-    learnable_temperature : bool
-        Whether the temperature parameter should be trainable.
-        Default is True.
-    epsilon : float
-        Small constant for numerical stability. Default is 1e-8.
+        ┌──────────────────────────────┐
+        │  Correlation Matrix (n x n)  │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Distance Transform          │
+        │  ─► Affinity ─► Top-k Mask   │
+        │  ─► Soft Adjacency Graph     │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Graph Convolution (N steps) │
+        │  Residual smoothing along    │
+        │  sparse graph edges          │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Symmetrize + Unit Diagonal  │
+        │  ─► Filtered Correlation     │
+        └──────────────────────────────┘
+
+    :param top_k_neighbors: The number of strongest neighbors to connect for each node in the graph. A value of 2-3 is recommended to create an MST-like sparse structure. Default is 2.
+    :type top_k_neighbors: int
+    :param n_propagation_steps: The number of graph smoothing/propagation iterations. Default is 3.
+    :type n_propagation_steps: int
+    :param distance_metric: Method to convert correlations to distances. Options: 'sqrt' (sqrt(2*(1-corr))), 'linear' (1-corr). Default is 'sqrt'.
+    :type distance_metric: str
+    :param initial_temperature: Initial temperature for the attention softmax. Higher values lead to softer attention. Default is 0.1.
+    :type initial_temperature: float
+    :param learnable_temperature: Whether the temperature parameter should be trainable. Default is True.
+    :type learnable_temperature: bool
     **kwargs
-        Additional keyword arguments for the base Layer class.
+    :param epsilon: Small constant for numerical stability. Default is 1e-8. Additional keyword arguments for the base Layer class.
+    :type epsilon: float
 
     Attributes
     ----------
@@ -112,22 +122,19 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Initialize the SystemicGraphFilter layer.
 
-        Parameters
-        ----------
-        top_k_neighbors : int
-            Number of neighbors for graph construction.
-        n_propagation_steps : int
-            Number of value propagation iterations.
-        distance_metric : str
-            Distance metric type ('sqrt' or 'linear').
-        initial_temperature : float
-            Initial softmax temperature.
-        learnable_temperature : bool
-            Whether temperature is trainable.
-        epsilon : float
-            Numerical stability constant.
+        :param top_k_neighbors: Number of neighbors for graph construction.
+        :type top_k_neighbors: int
+        :param n_propagation_steps: Number of value propagation iterations.
+        :type n_propagation_steps: int
+        :param distance_metric: Distance metric type ('sqrt' or 'linear').
+        :type distance_metric: str
+        :param initial_temperature: Initial softmax temperature.
+        :type initial_temperature: float
+        :param learnable_temperature: Whether temperature is trainable.
+        :type learnable_temperature: bool
         **kwargs
-            Additional Layer arguments.
+        :param epsilon: Numerical stability constant. Additional Layer arguments.
+        :type epsilon: float
         """
         super().__init__(**kwargs)
 
@@ -147,10 +154,8 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Build the layer and create trainable weights.
 
-        Parameters
-        ----------
-        input_shape : Union[Tuple[int, ...], keras.KerasTensorShape]
-            Shape of input tensor.
+        :param input_shape: Shape of input tensor.
+        :type input_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
         """
         super().build(input_shape)
 
@@ -170,10 +175,8 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -193,15 +196,11 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Convert correlation matrix to distance matrix.
 
-        Parameters
-        ----------
-        correlation_matrix : keras.KerasTensor
-            Input correlation matrix.
+        :param correlation_matrix: Input correlation matrix.
+        :type correlation_matrix: keras.KerasTensor
 
-        Returns
-        -------
-        keras.KerasTensor
-            Distance matrix.
+        :return: Distance matrix.
+        :rtype: keras.KerasTensor
         """
         if self.distance_metric == 'sqrt':
             distances = keras.ops.sqrt(
@@ -218,15 +217,11 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Build sparse soft adjacency graph using top-k attention.
 
-        Parameters
-        ----------
-        correlation_matrix : keras.KerasTensor
-            Input correlation matrix.
+        :param correlation_matrix: Input correlation matrix.
+        :type correlation_matrix: keras.KerasTensor
 
-        Returns
-        -------
-        keras.KerasTensor
-            Soft adjacency matrix.
+        :return: Soft adjacency matrix.
+        :rtype: keras.KerasTensor
         """
         n = keras.ops.shape(correlation_matrix)[-1]
 
@@ -276,17 +271,13 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Propagate and smooth values along graph structure.
 
-        Parameters
-        ----------
-        correlation_matrix : keras.KerasTensor
-            Original correlation values.
-        adjacency : keras.KerasTensor
-            Graph adjacency matrix.
+        :param correlation_matrix: Original correlation values.
+        :type correlation_matrix: keras.KerasTensor
+        :param adjacency: Graph adjacency matrix.
+        :type adjacency: keras.KerasTensor
 
-        Returns
-        -------
-        keras.KerasTensor
-            Smoothed correlation matrix.
+        :return: Smoothed correlation matrix.
+        :rtype: keras.KerasTensor
         """
         filtered = correlation_matrix
 
@@ -314,17 +305,13 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Execute forward pass of the layer.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input correlation matrix of shape (batch_size, n, n) or (n, n).
-        training : Optional[bool]
-            Whether in training mode.
+        :param inputs: Input correlation matrix of shape (batch_size, n, n) or (n, n).
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
 
-        Returns
-        -------
-        keras.KerasTensor
-            Filtered correlation matrix with same shape as input.
+        :return: Filtered correlation matrix with same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Ensure valid correlation range
         inputs_clipped = keras.ops.clip(
@@ -363,15 +350,11 @@ class SystemicGraphFilter(keras.layers.Layer):
         """
         Compute output shape of the layer.
 
-        Parameters
-        ----------
-        input_shape : Union[Tuple[int, ...], keras.KerasTensorShape]
-            Shape of input tensor.
+        :param input_shape: Shape of input tensor.
+        :type input_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
 
-        Returns
-        -------
-        Union[Tuple[int, ...], keras.KerasTensorShape]
-            Shape of output tensor (same as input).
+        :return: Shape of output tensor (same as input).
+        :rtype: Union[Tuple[int, ...], keras.KerasTensorShape]
         """
         return input_shape
 
@@ -384,18 +367,15 @@ class StructuredAttention(keras.layers.MultiHeadAttention):
     through a SystemicGraphFilter, enforcing sparse and structurally consistent
     dependency graphs between tokens.
 
-    Parameters
-    ----------
-    num_heads : int
-        Number of attention heads.
-    key_dim : int
-        Size of each attention head for query and key.
-    sgf_top_k : int
-        Top-k neighbors for SystemicGraphFilter. Default is 2.
-    sgf_propagation_steps : int
-        Propagation steps for SystemicGraphFilter. Default is 3.
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param key_dim: Size of each attention head for query and key.
+    :type key_dim: int
+    :param sgf_top_k: Top-k neighbors for SystemicGraphFilter. Default is 2.
+    :type sgf_top_k: int
     **kwargs
-        Additional arguments for MultiHeadAttention.
+    :param sgf_propagation_steps: Propagation steps for SystemicGraphFilter. Default is 3. Additional arguments for MultiHeadAttention.
+    :type sgf_propagation_steps: int
 
     Attributes
     ----------
@@ -424,18 +404,15 @@ class StructuredAttention(keras.layers.MultiHeadAttention):
         """
         Initialize StructuredAttention layer.
 
-        Parameters
-        ----------
-        num_heads : int
-            Number of attention heads.
-        key_dim : int
-            Dimension of each attention head.
-        sgf_top_k : int
-            Top-k parameter for graph filter.
-        sgf_propagation_steps : int
-            Propagation steps for graph filter.
+        :param num_heads: Number of attention heads.
+        :type num_heads: int
+        :param key_dim: Dimension of each attention head.
+        :type key_dim: int
+        :param sgf_top_k: Top-k parameter for graph filter.
+        :type sgf_top_k: int
         **kwargs
-            Additional MultiHeadAttention arguments.
+        :param sgf_propagation_steps: Propagation steps for graph filter. Additional MultiHeadAttention arguments.
+        :type sgf_propagation_steps: int
         """
         super().__init__(num_heads=num_heads, key_dim=key_dim, **kwargs)
 
@@ -452,14 +429,12 @@ class StructuredAttention(keras.layers.MultiHeadAttention):
         """
         Build the layer and initialize sublayers.
 
-        Parameters
-        ----------
-        query_shape : Union[Tuple[int, ...], keras.KerasTensorShape]
-            Shape of query input.
-        value_shape : Optional[Union[Tuple[int, ...], keras.KerasTensorShape]]
-            Shape of value input.
-        key_shape : Optional[Union[Tuple[int, ...], keras.KerasTensorShape]]
-            Shape of key input.
+        :param query_shape: Shape of query input.
+        :type query_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
+        :param value_shape: Shape of value input.
+        :type value_shape: Optional[Union[Tuple[int, ...], keras.KerasTensorShape]]
+        :param key_shape: Shape of key input.
+        :type key_shape: Optional[Union[Tuple[int, ...], keras.KerasTensorShape]]
         """
         super().build(query_shape, value_shape, key_shape)
 
@@ -481,23 +456,19 @@ class StructuredAttention(keras.layers.MultiHeadAttention):
         """
         Compute attention with structural filtering.
 
-        Parameters
-        ----------
-        query : keras.KerasTensor
-            Query tensor.
-        key : keras.KerasTensor
-            Key tensor.
-        value : keras.KerasTensor
-            Value tensor.
-        attention_mask : Optional[keras.KerasTensor]
-            Attention mask tensor.
-        training : Optional[bool]
-            Whether in training mode.
+        :param query: Query tensor.
+        :type query: keras.KerasTensor
+        :param key: Key tensor.
+        :type key: keras.KerasTensor
+        :param value: Value tensor.
+        :type value: keras.KerasTensor
+        :param attention_mask: Attention mask tensor.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
 
-        Returns
-        -------
-        Tuple[keras.KerasTensor, keras.KerasTensor]
-            Output tensor and attention weights.
+        :return: Output tensor and attention weights.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Compute scaled dot-product attention scores
         attention_scores = keras.ops.matmul(
@@ -551,10 +522,8 @@ class StructuredAttention(keras.layers.MultiHeadAttention):
         """
         Get layer configuration for serialization.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

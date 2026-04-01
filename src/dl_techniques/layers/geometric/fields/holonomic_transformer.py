@@ -36,18 +36,47 @@ NormalizationType = Literal['layer_norm', 'rms_norm', 'field_norm']
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class FieldNormalization(keras.layers.Layer):
-    """
-    Field-aware normalization that respects curvature.
+    """Field-aware normalization that respects curvature.
 
-    Unlike standard layer normalization, this normalization accounts for
-    the local curvature of the field, providing more geometrically
-    meaningful normalization.
+    Extends standard layer normalization by scaling the normalized output
+    with the inverse of local curvature magnitude: high-curvature regions
+    receive less aggressive normalization. The curvature factor is
+    1 / (1 + alpha * ||curvature||) where alpha is a learnable scalar.
 
-    Args:
-        epsilon: Small constant for numerical stability.
-        use_curvature_scaling: Whether to scale by local curvature.
-        center: Whether to center the outputs.
-        scale: Whether to scale the outputs.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────┐  ┌──────────────────┐
+        │ Embeddings       │  │ Curvature (opt)  │
+        │ [B, S, D]        │  │ [B, S, ...]      │
+        └────────┬─────────┘  └────────┬─────────┘
+                 ▼                     │
+        ┌──────────────────┐           │
+        │ LayerNorm        │           │
+        │ (mean, variance) │           │
+        └────────┬─────────┘           │
+                 ▼                     ▼
+        ┌──────────────────────────────────────┐
+        │ Curvature scaling (if available)     │
+        │ × 1/(1 + α·||curv||)                │
+        └────────────────┬─────────────────────┘
+                         ▼
+        ┌──────────────────────────────────────┐
+        │ γ · normalized + β                   │
+        │ → Output [B, S, D]                   │
+        └──────────────────────────────────────┘
+
+    :param epsilon: Numerical stability constant. Defaults to 1e-6.
+    :type epsilon: float
+    :param use_curvature_scaling: Whether to scale by local curvature.
+        Defaults to ``True``.
+    :type use_curvature_scaling: bool
+    :param center: Whether to center outputs. Defaults to ``True``.
+    :type center: bool
+    :param scale: Whether to scale outputs. Defaults to ``True``.
+    :type scale: bool
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -104,15 +133,14 @@ class FieldNormalization(keras.layers.Layer):
             inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply field-aware normalization.
+        """Apply field-aware normalization.
 
-        Args:
-            inputs: Either embeddings tensor or tuple of (embeddings, curvature).
-            training: Whether in training mode.
-
-        Returns:
-            Normalized embeddings.
+        :param inputs: Either embeddings tensor or tuple of (embeddings, curvature).
+        :type inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Normalized embeddings.
+        :rtype: keras.KerasTensor
         """
         if isinstance(inputs, (list, tuple)):
             embeddings, curvature = inputs
@@ -157,11 +185,10 @@ class FieldNormalization(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Input shape or tuple of (embedding_shape, curvature_shape).
-
-        Returns:
-            Output shape (same as embedding input shape).
+        :param input_shape: Input shape or tuple of (embedding_shape, curvature_shape).
+        :type input_shape: Union[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]
+        :return: Output shape (same as embedding input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, list):
             return input_shape[0]
@@ -181,48 +208,89 @@ class FieldNormalization(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class HolonomicTransformerLayer(keras.layers.Layer):
-    """
-    Complete Holonomic Transformer Layer.
+    """Complete Holonomic Transformer Layer.
 
-    This layer implements a full transformer block using holonomic principles:
-    1. Input passes through connection computation
-    2. Gauge-invariant attention processes the field
-    3. Parallel transport ensures geometric consistency
-    4. Holonomy features capture global structure
-    5. FFN with field-aware normalization
-    6. Manifold stress provides anomaly detection
+    Implements a full transformer block using holonomic principles: curvature
+    computation, gauge-invariant attention, parallel transport for residuals,
+    optional holonomy features for global structure, a two-layer FFN with
+    field-aware normalisation, and optional manifold stress for anomaly
+    detection. The pipeline is:
+    curvature = tanh(Dense(x)) * 0.1,
+    connection = ConnectionLayer([x, curvature]),
+    attn_out = GaugeInvariantAttention([norm(x), curvature, connection]),
+    x = ParallelTransport([x, connection]) + Dropout(attn_out),
+    x += 0.1 * HolonomyProj(Holonomy([x, connection])) (optional),
+    x += Dropout(FFN(norm(x))),
+    stress = ManifoldStress([x, curvature, connection]) (optional).
 
-    The layer provides several advantages over standard transformers:
-    - Natural robustness to adversarial inputs
-    - Geometric regularization through curvature constraints
-    - Built-in anomaly detection
-    - Richer representations through field structure
+    **Architecture Overview:**
 
-    Args:
-        hidden_dim: Hidden dimension size.
-        num_heads: Number of attention heads.
-        ffn_dim: Dimension of feed-forward network. If None, uses 4 * hidden_dim.
-        curvature_type: Type of curvature ('ricci', 'scalar', 'metric').
-        connection_type: Type of connection ('yang_mills', 'levi_civita', 'affine').
-        attention_metric: Metric for attention ('hybrid', 'holonomy', 'geodesic').
-        use_holonomy_features: Whether to include holonomy features.
-        use_anomaly_detection: Whether to compute manifold stress.
-        dropout_rate: Dropout rate.
-        normalization_type: Type of normalization.
-        activation: Activation function for FFN.
-        kernel_initializer: Initializer for kernel weights.
-        kernel_regularizer: Regularizer for kernel weights.
+    .. code-block:: text
 
-    Example:
-        >>> layer = HolonomicTransformerLayer(
-        ...     hidden_dim=256,
-        ...     num_heads=8,
-        ...     use_holonomy_features=True,
-        ...     use_anomaly_detection=True
-        ... )
-        >>> x = keras.ops.random.normal((2, 16, 256))
-        >>> output, anomaly_scores = layer(x)
-        >>> print(output.shape)  # (2, 16, 256)
+        ┌──────────────────────────────┐
+        │  Input  [B, S, D]            │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Curvature Projection (Dense) │
+        │ Connection Layer             │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Pre-Norm → Gauge-Invariant   │
+        │ Attention                    │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Parallel Transport + Residual│
+        │ (+ optional Holonomy feats)  │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Pre-Norm → FFN + Residual    │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ (optional) Manifold Stress   │
+        │ → anomaly scores             │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Output [B, S, D]            │
+        │ (+ stress [B, S, 1] if on)  │
+        └──────────────────────────────┘
+
+    :param hidden_dim: Hidden dimension size. Must be positive.
+    :type hidden_dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param ffn_dim: FFN dimension. Defaults to ``4 * hidden_dim``.
+    :type ffn_dim: Optional[int]
+    :param curvature_type: Type of curvature. Defaults to ``'ricci'``.
+    :type curvature_type: str
+    :param connection_type: Type of connection. Defaults to ``'yang_mills'``.
+    :type connection_type: str
+    :param attention_metric: Attention metric. Defaults to ``'hybrid'``.
+    :type attention_metric: str
+    :param use_holonomy_features: Whether to include holonomy features.
+        Defaults to ``True``.
+    :type use_holonomy_features: bool
+    :param use_anomaly_detection: Whether to compute manifold stress.
+        Defaults to ``True``.
+    :type use_anomaly_detection: bool
+    :param dropout_rate: Dropout rate. Defaults to 0.1.
+    :type dropout_rate: float
+    :param normalization_type: Type of normalisation
+        (``'field_norm'``, ``'rms_norm'``, ``'layer_norm'``).
+        Defaults to ``'field_norm'``.
+    :type normalization_type: NormalizationType
+    :param activation: FFN activation function. Defaults to ``'gelu'``.
+    :type activation: str
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -374,11 +442,10 @@ class HolonomicTransformerLayer(keras.layers.Layer):
         self.dropout = keras.layers.Dropout(self.dropout_rate)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer.
+        """Build the layer.
 
-        Args:
-            input_shape: Shape of input tensor.
+        :param input_shape: Shape of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build all sub-layers
         self.connection_layer.build([input_shape, input_shape])
@@ -419,20 +486,19 @@ class HolonomicTransformerLayer(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             return_attention_weights: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """
-        Forward pass through the holonomic transformer layer.
+        """Forward pass through the holonomic transformer layer.
 
-        Args:
-            inputs: Input tensor of shape (batch, seq_len, hidden_dim).
-            training: Whether in training mode.
-            attention_mask: Optional attention mask.
-            return_attention_weights: Whether to return attention weights.
-
-        Returns:
-            If use_anomaly_detection:
-                Tuple of (output, anomaly_scores)
-            Else:
-                Output tensor
+        :param inputs: Input tensor of shape (batch, seq_len, hidden_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param return_attention_weights: Whether to return attention weights.
+        :type return_attention_weights: bool
+        :return: If use_anomaly_detection, tuple of (output, anomaly_scores);
+            otherwise output tensor.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         # Step 1: Compute curvature from input
         curvature = self.curvature_dense(inputs, training=training)
@@ -501,14 +567,12 @@ class HolonomicTransformerLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: Shape of input tensor.
-
-        Returns:
-            Output shape(s).
+        :param input_shape: Shape of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape(s).
+        :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]
         """
         if self.use_anomaly_detection:
             # Returns (output, stress)

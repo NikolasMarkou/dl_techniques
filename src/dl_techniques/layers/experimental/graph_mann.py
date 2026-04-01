@@ -17,22 +17,23 @@ class GraphMannLayer(keras.layers.Layer):
     scene understanding, or structured data processing. This implementation follows
     modern Keras 3 best practices for robust serialization and composability.
 
-    **Architecture**:
-    ```
-          ┌───────────────────┐
-    Input─► Controller (RNN)  ├─► Head Parameter Generator (Dense)
-      ▲   │ (LSTM/GRU)        │               │
-      │   └───────────────────┘               ▼
-      │           ▲          ┌──────────────────────────────────┐
-      │           │          │           Addressing Logic       │
-      │       Read Vectors   │ ┌─────────┐  ┌───────────┐ ┌─────┤
-      │           │          │ │ Content │► │ Graph     │►│ Final Weights │
-      │           │          │ └─────────┘  └───────────┘ └─────┤
-      │   ┌───────┴───────┐  └──────────────────────────────────┘
-      └─ ─┤ Graph Memory  ◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
-          │ (Read/Write)  │            Write/Erase Operations
-          └───────────────┘
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+                  ┌───────────────────┐
+            Input─► Controller (RNN)  ├─► Head Parameter Generator (Dense)
+              ▲   │ (LSTM/GRU)        │               │
+              │   └───────────────────┘               ▼
+              │           ▲          ┌──────────────────────────────────┐
+              │           │          │           Addressing Logic       │
+              │       Read Vectors   │ ┌─────────┐  ┌───────────┐ ┌─────┤
+              │           │          │ │ Content │► │ Graph     │►│ Final Weights │
+              │           │          │ └─────────┘  └───────────┘ └─────┤
+              │   ┌───────┴───────┐  └──────────────────────────────────┘
+              └─ ─┤ Graph Memory  ◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+                  │ (Read/Write)  │            Write/Erase Operations
+                  └───────────────┘
+
 
     **Data Flow per Timestep**:
     1. The `Controller` (LSTM/GRU) receives the current input and the read vectors
@@ -52,44 +53,16 @@ class GraphMannLayer(keras.layers.Layer):
     6. The final output of the layer at each timestep is a concatenation of the
        controller's output and all read vectors.
 
-    Args:
-        num_memory_nodes: Integer, the number of nodes in the memory graph.
-            Must be a positive integer.
-        memory_dim: Integer, the dimensionality of each memory node's state vector.
-            Must be a positive integer.
-        controller_units: Integer, the number of units in the recurrent controller.
-            Must be a positive integer.
-        num_read_heads: Integer, the number of read heads to interact with memory.
-        num_write_heads: Integer, the number of write heads to interact with memory.
-        controller_type: Literal['lstm', 'gru'], the type of recurrent cell to use
-            as the controller. Defaults to 'lstm'.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
+    :param num_memory_nodes: Integer, the number of nodes in the memory graph. Must be a positive integer.
+    :param memory_dim: Integer, the dimensionality of each memory node's state vector. Must be a positive integer.
+    :param controller_units: Integer, the number of units in the recurrent controller. Must be a positive integer.
+    :param num_read_heads: Integer, the number of read heads to interact with memory.
+    :param num_write_heads: Integer, the number of write heads to interact with memory.
+    :param controller_type: Literal['lstm', 'gru'], the type of recurrent cell to use as the controller. Defaults to 'lstm'. **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, input_dim)`.
 
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length,
-        controller_units + num_read_heads * memory_dim)`.
 
-    Attributes:
-        memory_nodes: The primary state of the memory graph of shape
-            (num_memory_nodes, memory_dim).
-        adjacency_matrix: The learnable graph structure of shape
-            (num_memory_nodes, num_memory_nodes).
-        controller: The recurrent controller sub-layer (LSTM or GRU).
-        param_generator: The dense layer that generates head parameters.
 
-    Example:
-        ```python
-        # Configure a GMANN layer for a relational reasoning task
-        gmann_layer = GraphMannLayer(
-            num_memory_nodes=128,
-            memory_dim=40,
-            controller_units=100,
-            num_read_heads=1,
-            num_write_heads=1
-        )
 
         # Build a model
         inputs = keras.Input(shape=(None, 20)) # (batch, seq_len, features)

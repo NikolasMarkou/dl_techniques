@@ -65,49 +65,40 @@ class HierarchicalMemorySystem(keras.layers.Layer):
 
     Creates a hierarchy of SOM layers that process input data at multiple levels
     of abstraction, from abstract (small grids) to fine-grained (large grids).
-    Each level captures different scales of patterns in the input data, providing
-    a multi-resolution memory organization.
+    Each level captures different scales of patterns, providing multi-resolution
+    memory organization where all levels process the same input.
 
-    The system organizes memory hierarchically where:
-    - Abstract levels (smaller grids) capture broad, general patterns
-    - Fine-grained levels (larger grids) capture detailed, specific patterns
-    - Each level maintains topological organization of its input space
-    - All levels process the same input but at different resolutions
+    **Architecture Overview:**
 
-    Args:
-        input_dim: Integer, the dimensionality of the input data vectors.
-            Must be positive.
-        levels: Integer, the number of hierarchy levels in the memory system.
-            Must be at least 1. Defaults to 3.
-        grid_dimensions: Integer, the number of dimensions for each SOM grid
-            (e.g., 2 for 2D grids). Must be at least 1. Defaults to 2.
-        base_grid_size: Integer, the grid size for the most abstract level (Level 1).
-            Subsequent levels will have larger grids based on the expansion factor.
-            Must be at least 1. Defaults to 5.
-        grid_expansion_factor: Float, factor by which the grid size increases at each level.
-            For example, with base_grid_size=5 and expansion_factor=2.0:
-            Level 1: 5x5, Level 2: 10x10, Level 3: 20x20. Must be positive. Defaults to 2.0.
-        initial_learning_rate: Float, the starting learning rate for all SOM layers.
-            Must be positive. Defaults to 0.1.
-        decay_function: Optional callable for learning rate decay. Applied to all SOM layers.
-            Defaults to None (uses linear decay).
-        sigma: Float, the initial neighborhood radius for all SOM layers.
-            Must be positive. Defaults to 1.0.
-        neighborhood_function: String, the neighborhood function type ('gaussian' or 'bubble')
-            for all SOM layers. Defaults to 'gaussian'.
-        weights_initializer: String or keras.initializers.Initializer, weight initialization
-            method for all SOM layers. Defaults to 'random'.
-        regularizer: Optional keras.regularizers.Regularizer applied to all SOM layers.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        2D tensor with shape: `(batch_size, input_dim)`.
+        ┌──────────────────────────────┐
+        │  Input (batch, input_dim)    │
+        └──────┬───────┬───────┬───────┘
+               │       │       │
+               ▼       ▼       ▼
+        ┌──────┐ ┌──────┐ ┌──────┐
+        │ SOM  │ │ SOM  │ │ SOM  │
+        │ L1   │ │ L2   │ │ L3   │
+        │(5x5) │ │(10x10│ │(20x20│
+        └──┬───┘ └──┬───┘ └──┬───┘
+           ▼        ▼        ▼
+        BMU+err  BMU+err  BMU+err
+        abstract  medium  fine-grained
 
-    Output shape:
-        A tuple containing results from each hierarchy level:
-        - bmu_indices_list: List of (batch_size, grid_dimensions) tensors
-        - quantization_errors_list: List of (batch_size,) tensors
+    :param input_dim: Integer, the dimensionality of the input data vectors. Must be positive.
+    :param levels: Integer, the number of hierarchy levels in the memory system. Must be at least 1. Defaults to 3.
+    :param grid_dimensions: Integer, the number of dimensions for each SOM grid (e.g., 2 for 2D grids). Must be at least 1. Defaults to 2.
+    :param base_grid_size: Integer, the grid size for the most abstract level (Level 1). Subsequent levels will have larger grids based on the expansion factor. Must be at least 1. Defaults to 5.
+    :param grid_expansion_factor: Float, factor by which the grid size increases at each level. For example, with base_grid_size=5 and expansion_factor=2.0: Level 1: 5x5, Level 2: 10x10, Level 3: 20x20. Must be positive. Defaults to 2.0.
+    :param initial_learning_rate: Float, the starting learning rate for all SOM layers. Must be positive. Defaults to 0.1.
+    :param decay_function: Optional callable for learning rate decay. Applied to all SOM layers. Defaults to None (uses linear decay).
+    :param sigma: Float, the initial neighborhood radius for all SOM layers. Must be positive. Defaults to 1.0.
+    :param neighborhood_function: String, the neighborhood function type ('gaussian' or 'bubble') for all SOM layers. Defaults to 'gaussian'.
+    :param weights_initializer: String or keras.initializers.Initializer, weight initialization method for all SOM layers. Defaults to 'random'.
+    :param regularizer: Optional keras.regularizers.Regularizer applied to all SOM layers. Defaults to None. **kwargs: Additional keyword arguments for the Layer base class.
+
+
 
     Returns:
         Tuple of (List[keras.KerasTensor], List[keras.KerasTensor]) containing:
@@ -123,15 +114,6 @@ class HierarchicalMemorySystem(keras.layers.Layer):
         ValueError: If initial_learning_rate is not positive.
         ValueError: If sigma is not positive.
 
-    Example:
-        ```python
-        # Create a 3-level hierarchical memory system
-        hierarchical_memory = HierarchicalMemorySystem(
-            input_dim=784,  # For MNIST
-            levels=3,
-            base_grid_size=5,
-            grid_expansion_factor=2.0
-        )
 
         # Process input data
         inputs = keras.Input(shape=(784,))
@@ -253,8 +235,7 @@ class HierarchicalMemorySystem(keras.layers.Layer):
         This method explicitly builds each SOM layer to ensure proper
         serialization and weight management following modern Keras 3 patterns.
 
-        Args:
-            input_shape: Shape tuple (tuple of integers), indicating the
+                input_shape: Shape tuple (tuple of integers), indicating the
                 input shape of the layer.
         """
         logger.debug(f"Building HierarchicalMemorySystem with input_shape: {input_shape}")
@@ -281,8 +262,7 @@ class HierarchicalMemorySystem(keras.layers.Layer):
         fine-grained. Each level finds its Best Matching Units (BMUs) and
         updates its weights if in training mode.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim).
+                inputs: Input tensor of shape (batch_size, input_dim).
             training: Boolean indicating whether to perform weight updates.
 
         Returns:
@@ -306,8 +286,7 @@ class HierarchicalMemorySystem(keras.layers.Layer):
         """
         Get the weight map for a specific hierarchy level.
 
-        Args:
-            level: The hierarchy level (0-indexed) to get weights for.
+                level: The hierarchy level (0-indexed) to get weights for.
 
         Returns:
             The weight map for the specified level.
@@ -345,8 +324,7 @@ class HierarchicalMemorySystem(keras.layers.Layer):
         """
         Compute the output shape of the hierarchical memory system.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+                input_shape: Shape tuple of the input tensor.
 
         Returns:
             Tuple containing:

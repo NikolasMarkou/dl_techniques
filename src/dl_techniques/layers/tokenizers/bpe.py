@@ -27,18 +27,20 @@ def train_bpe(
         do_lower_case: bool = True,
         handle_punctuation: bool = True
 ) -> Tuple[Dict[str, int], List[Tuple[str, str]]]:
-    """
-    Train BPE tokenizer on a corpus of texts with optimized performance.
+    """Train BPE tokenizer on a corpus of texts.
 
-    Args:
-        texts: List of text strings to train on
-        vocab_size: Target vocabulary size
-        min_frequency: Minimum frequency for a pair to be considered for merging
-        do_lower_case: Whether to lowercase text during training
-        handle_punctuation: Whether to separate punctuation as distinct tokens
-
-    Returns:
-        Tuple of (vocabulary dict, list of merge operations)
+    :param texts: List of text strings to train on.
+    :type texts: list[str]
+    :param vocab_size: Target vocabulary size. Defaults to 50000.
+    :type vocab_size: int
+    :param min_frequency: Minimum pair frequency for merging. Defaults to 2.
+    :type min_frequency: int
+    :param do_lower_case: Whether to lowercase text. Defaults to ``True``.
+    :type do_lower_case: bool
+    :param handle_punctuation: Whether to separate punctuation. Defaults to ``True``.
+    :type handle_punctuation: bool
+    :return: Tuple of ``(vocabulary_dict, merge_operations)``.
+    :rtype: tuple[dict[str, int], list[tuple[str, str]]]
     """
     logger.info(f"Training BPE tokenizer with vocab_size={vocab_size}")
 
@@ -124,38 +126,57 @@ class BPETokenizer(keras.layers.Layer):
     """
     Byte-Pair Encoding (BPE) tokenizer layer for Keras 3.x.
 
-    This layer implements BPE tokenization in a backend-agnostic way,
-    compatible with TensorFlow, JAX, and PyTorch backends.
+    Implements backend-agnostic BPE tokenization for preprocessing and model
+    serialization. The ``call()`` method is not implemented for in-graph string
+    processing; use ``tokenize_texts()`` for actual tokenization. Merges are
+    applied greedily in priority order, and sequences are truncated or padded
+    to ``max_length``.
 
-    IMPORTANT: This layer is designed for preprocessing and model serialization.
-    The call() method is not implemented for in-graph string processing.
-    Use tokenize_texts() for actual tokenization.
+    **Architecture Overview:**
 
-    Args:
-        vocab_dict: Dictionary mapping tokens to IDs
-        merges: List of merge operations from BPE training
-        max_length: Maximum sequence length (sequences will be truncated/padded)
-        pad_token: Token used for padding
-        unk_token: Token used for unknown words
-        eos_token: End of sequence token
-        do_lower_case: Whether to lowercase input text
-        **kwargs: Additional keyword arguments for the Layer base class
+    .. code-block:: text
 
-    Example:
-        >>> # Train BPE on texts
-        >>> texts = ["hello world", "how are you"]
-        >>> vocab_dict, merges = train_bpe(texts, vocab_size=1000)
-        >>>
-        >>> # Create tokenizer
-        >>> tokenizer = BPETokenizer(vocab_dict=vocab_dict, merges=merges)
-        >>>
-        >>> # Tokenize text (preprocessing step)
-        >>> token_sequences = tokenizer.tokenize_texts(["this is a test"])
-        >>>
-        >>> # Use in model with pre-tokenized input
-        >>> inputs = keras.Input(shape=(None,), dtype='int32')  # Pre-tokenized IDs
-        >>> embeddings = keras.layers.Embedding(len(vocab_dict), 256)(inputs)
-        >>> model = keras.Model(inputs=inputs, outputs=embeddings)
+        ┌──────────────────────────────┐
+        │  Input Text String           │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Lowercase (optional)        │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Split into words            │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Character split + </w>      │
+        │  Apply BPE merges greedily   │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Map tokens ─► IDs + EOS     │
+        │  Truncate/Pad to max_length  │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Token IDs (max_length,)     │
+        └──────────────────────────────┘
+
+    :param vocab_dict: Dictionary mapping tokens to IDs.
+    :type vocab_dict: dict[str, int] | None
+    :param merges: List of merge operations from BPE training.
+    :type merges: list[tuple[str, str]] | None
+    :param max_length: Maximum sequence length. Defaults to 512.
+    :type max_length: int
+    :param pad_token: Padding token. Defaults to ``"<pad>"``.
+    :type pad_token: str
+    :param unk_token: Unknown token. Defaults to ``"<unk>"``.
+    :type unk_token: str
+    :param eos_token: End-of-sequence token. Defaults to ``"<eos>"``.
+    :type eos_token: str
+    :param do_lower_case: Whether to lowercase input. Defaults to ``True``.
+    :type do_lower_case: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -201,14 +222,12 @@ class BPETokenizer(keras.layers.Layer):
         return set(zip(tokens, tokens[1:]))
 
     def _apply_bpe(self, word: str) -> List[str]:
-        """
-        Apply BPE merges to a single word using optimized algorithm.
+        """Apply BPE merges to a single word.
 
-        Args:
-            word: Word to tokenize
-
-        Returns:
-            List of subword tokens
+        :param word: Word to tokenize.
+        :type word: str
+        :return: List of subword tokens.
+        :rtype: list[str]
         """
         if not word:
             return []
@@ -259,14 +278,12 @@ class BPETokenizer(keras.layers.Layer):
         return word_tokens
 
     def _tokenize_text(self, text: str) -> List[int]:
-        """
-        Tokenize a single text string to token IDs.
+        """Tokenize a single text string to token IDs.
 
-        Args:
-            text: Input text string
-
-        Returns:
-            List of token IDs
+        :param text: Input text string.
+        :type text: str
+        :return: List of token IDs.
+        :rtype: list[int]
         """
         if self.do_lower_case:
             text = text.lower()
@@ -294,15 +311,13 @@ class BPETokenizer(keras.layers.Layer):
         return token_ids
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """
-        Forward pass placeholder - not implemented for string processing.
+        """Forward pass placeholder (not implemented for string processing).
 
-        Args:
-            inputs: Input tensor
-            training: Training mode flag
-
-        Raises:
-            NotImplementedError: This layer requires preprocessing with tokenize_texts()
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: bool | None
+        :raises NotImplementedError: Always; use ``tokenize_texts()`` instead.
         """
         raise NotImplementedError(
             "The BPETokenizer layer does not support in-graph string tokenization "
@@ -315,26 +330,22 @@ class BPETokenizer(keras.layers.Layer):
         )
 
     def tokenize_texts(self, texts: List[str]) -> List[List[int]]:
-        """
-        Tokenize a list of text strings (preprocessing method).
+        """Tokenize a list of text strings.
 
-        Args:
-            texts: List of text strings to tokenize
-
-        Returns:
-            List of token ID sequences
+        :param texts: List of text strings to tokenize.
+        :type texts: list[str]
+        :return: List of token ID sequences.
+        :rtype: list[list[int]]
         """
         return [self._tokenize_text(text) for text in texts]
 
     def decode_tokens(self, token_ids: List[int]) -> str:
-        """
-        Decode token IDs back to text.
+        """Decode token IDs back to text.
 
-        Args:
-            token_ids: List of token IDs
-
-        Returns:
-            Decoded text string
+        :param token_ids: List of token IDs.
+        :type token_ids: list[int]
+        :return: Decoded text string.
+        :rtype: str
         """
         tokens = []
         for token_id in token_ids:
@@ -352,23 +363,20 @@ class BPETokenizer(keras.layers.Layer):
         return text.strip()
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], int]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input
-
-        Returns:
-            Output shape (batch_size, max_length)
+        :param input_shape: Shape of the input.
+        :type input_shape: tuple[int | None, ...]
+        :return: Output shape ``(batch_size, max_length)``.
+        :rtype: tuple[int | None, int]
         """
         return (input_shape[0], self.max_length)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -386,17 +394,37 @@ class BPETokenizer(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class TokenEmbedding(keras.layers.Layer):
     """
-    Token embedding layer that converts token IDs to dense vectors.
+    Token embedding layer converting token IDs to dense vectors.
 
-    This is a convenience wrapper around keras.layers.Embedding with
-    additional configuration for common NLP patterns.
+    Convenience wrapper around ``keras.layers.Embedding`` with common NLP
+    configuration patterns including zero-masking for padding tokens.
 
-    Args:
-        vocab_size: Size of the vocabulary
-        embedding_dim: Dimension of the embedding vectors
-        mask_zero: Whether to mask padding tokens (ID 0)
-        embeddings_initializer: Initializer for embeddings
-        **kwargs: Additional keyword arguments for the Layer base class
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────┐
+        │  Token IDs (batch, seq)   │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  Embedding Lookup         │
+        │  (vocab_size, embed_dim)  │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  Vectors (batch, seq, d)  │
+        └───────────────────────────┘
+
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param embedding_dim: Dimension of the embedding vectors.
+    :type embedding_dim: int
+    :param mask_zero: Whether to mask padding tokens (ID 0). Defaults to ``True``.
+    :type mask_zero: bool
+    :param embeddings_initializer: Initializer for embeddings. Defaults to ``"uniform"``.
+    :type embeddings_initializer: str
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -424,37 +452,32 @@ class TokenEmbedding(keras.layers.Layer):
         )
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """
-        Forward pass of the embedding layer.
+        """Forward pass of the embedding layer.
 
-        Args:
-            inputs: Input tensor of token IDs
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode
-
-        Returns:
-            Tensor of embeddings with shape (batch_size, sequence_length, embedding_dim)
+        :param inputs: Input tensor of token IDs.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: bool | None
+        :return: Embeddings of shape ``(batch_size, seq_len, embedding_dim)``.
+        :rtype: keras.KerasTensor
         """
         return self.embedding(inputs, training=training)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input
-
-        Returns:
-            Output shape
+        :param input_shape: Shape of the input.
+        :type input_shape: tuple[int | None, ...]
+        :return: Output shape.
+        :rtype: tuple[int | None, ...]
         """
         return input_shape + (self.embedding_dim,)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -474,19 +497,22 @@ def create_bpe_pipeline(
         do_lower_case: bool = True,
         min_frequency: int = 2
 ) -> Tuple[BPETokenizer, TokenEmbedding]:
-    """
-    Create a complete BPE tokenization and embedding pipeline.
+    """Create a complete BPE tokenization and embedding pipeline.
 
-    Args:
-        texts: Training texts for BPE
-        vocab_size: Target vocabulary size
-        embedding_dim: Embedding dimension
-        max_length: Maximum sequence length
-        do_lower_case: Whether to lowercase text
-        min_frequency: Minimum frequency for BPE merges
-
-    Returns:
-        Tuple of (tokenizer, embedding layer)
+    :param texts: Training texts for BPE.
+    :type texts: list[str]
+    :param vocab_size: Target vocabulary size. Defaults to 50000.
+    :type vocab_size: int
+    :param embedding_dim: Embedding dimension. Defaults to 512.
+    :type embedding_dim: int
+    :param max_length: Maximum sequence length. Defaults to 512.
+    :type max_length: int
+    :param do_lower_case: Whether to lowercase text. Defaults to ``True``.
+    :type do_lower_case: bool
+    :param min_frequency: Minimum frequency for merges. Defaults to 2.
+    :type min_frequency: int
+    :return: Tuple of ``(tokenizer, embedding_layer)``.
+    :rtype: tuple[BPETokenizer, TokenEmbedding]
     """
     logger.info("Creating BPE pipeline")
 

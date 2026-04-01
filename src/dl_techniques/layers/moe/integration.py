@@ -28,33 +28,49 @@ class MoETrainingConfig:
     """
     Training configuration specifically optimized for MoE models.
 
-    This configuration provides recommended settings for training MoE models,
-    including optimizer choices, learning rate schedules, and regularization
-    optimized for the FFN-only expert system.
+    Provides recommended settings for training MoE models, including optimizer
+    choices, learning rate schedules, and regularization optimized for the
+    FFN-only expert system.
 
-    Attributes:
-        optimizer_type: Type of optimizer to use ('adamw' recommended for MoE).
-        base_learning_rate: Base learning rate for the model.
-        expert_learning_rate_multiplier: Learning rate multiplier for expert FFN parameters.
-        gating_learning_rate_multiplier: Learning rate multiplier for gating parameters.
-        warmup_steps: Number of warmup steps.
-        decay_steps: Number of decay steps for learning rate schedule.
-        weight_decay: Weight decay coefficient (important for FFN experts).
-        gradient_clipping_norm: Global gradient clipping norm.
-        aux_loss_weight: Weight for auxiliary load balancing loss.
-        z_loss_weight: Weight for router z-loss.
-        dropout_rate: Dropout rate for FFN experts.
-        use_mixed_precision: Whether to use mixed precision training.
+    **Architecture Overview:**
 
-    Example:
-        ```python
-        config = MoETrainingConfig(
-            base_learning_rate=1e-4,
-            expert_learning_rate_multiplier=0.1,  # Lower LR for FFN experts
-            warmup_steps=1000,
-            aux_loss_weight=0.01
-        )
-        ```
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │        MoETrainingConfig             │
+        │                                      │
+        │  optimizer_type ──► AdamW (default)  │
+        │  base_learning_rate                  │
+        │  expert_lr_multiplier                │
+        │  gating_lr_multiplier                │
+        │  warmup_steps / decay_steps          │
+        │  aux_loss_weight / z_loss_weight     │
+        └──────────────────────────────────────┘
+
+    :param optimizer_type: Type of optimizer (``'adamw'`` recommended for MoE).
+    :type optimizer_type: str
+    :param base_learning_rate: Base learning rate for the model.
+    :type base_learning_rate: float
+    :param expert_learning_rate_multiplier: LR multiplier for expert FFN parameters.
+    :type expert_learning_rate_multiplier: float
+    :param gating_learning_rate_multiplier: LR multiplier for gating parameters.
+    :type gating_learning_rate_multiplier: float
+    :param warmup_steps: Number of warmup steps.
+    :type warmup_steps: int
+    :param decay_steps: Number of decay steps for learning rate schedule.
+    :type decay_steps: int
+    :param weight_decay: Weight decay coefficient (important for FFN experts).
+    :type weight_decay: float
+    :param gradient_clipping_norm: Global gradient clipping norm.
+    :type gradient_clipping_norm: float
+    :param aux_loss_weight: Weight for auxiliary load balancing loss.
+    :type aux_loss_weight: float
+    :param z_loss_weight: Weight for router z-loss.
+    :type z_loss_weight: float
+    :param dropout_rate: Dropout rate for FFN experts.
+    :type dropout_rate: float
+    :param use_mixed_precision: Whether to use mixed precision training.
+    :type use_mixed_precision: bool
     """
     optimizer_type: str = 'adamw'
     base_learning_rate: float = 1e-4
@@ -75,18 +91,25 @@ class MoEOptimizerBuilder:
     """
     Builder for creating optimizers optimized for MoE training with FFN experts.
 
-    This class integrates with the dl_techniques optimization module to create
-    optimizers with MoE-specific configurations, including different learning
-    rates for FFN expert parameters vs. gating parameters.
+    Integrates with the dl_techniques optimization module to create optimizers
+    with MoE-specific configurations, including differential learning rates for
+    FFN expert parameters vs. gating parameters.
 
-    Example:
-        ```python
-        builder = MoEOptimizerBuilder()
-        optimizer = builder.build_moe_optimizer(
-            model=model,
-            config=MoETrainingConfig(base_learning_rate=1e-4)
-        )
-        ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────────────────────────┐
+        │          MoEOptimizerBuilder                  │
+        │                                               │
+        │  MoETrainingConfig ──► LR Schedule Builder    │
+        │                    ──► Optimizer Builder       │
+        │                    ──► LR Multipliers          │
+        │                         ├─ expert params       │
+        │                         └─ gating params       │
+        │                                               │
+        │  Output: Configured Optimizer                  │
+        └───────────────────────────────────────────────┘
     """
 
     def __init__(self):
@@ -101,12 +124,12 @@ class MoEOptimizerBuilder:
         """
         Build an optimizer optimized for MoE training with FFN experts.
 
-        Args:
-            model: The model containing MoE layers.
-            config: Training configuration for MoE.
-
-        Returns:
-            Configured optimizer with MoE-specific settings.
+        :param model: The model containing MoE layers.
+        :type model: keras.Model
+        :param config: Training configuration for MoE.
+        :type config: MoETrainingConfig
+        :return: Configured optimizer with MoE-specific settings.
+        :rtype: keras.optimizers.Optimizer
         """
         # Create learning rate schedule
         lr_schedule_config = {

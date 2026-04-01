@@ -34,44 +34,56 @@ StressType = Literal['curvature', 'connection', 'holonomy', 'metric', 'combined'
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class ManifoldStressLayer(keras.layers.Layer):
-    """
-    Computes manifold stress for anomaly and adversarial detection.
+    """Computes manifold stress for anomaly and adversarial detection.
 
-    This layer measures the geometric stress in the field representation,
-    which indicates how well the input conforms to the expected manifold
-    structure. High stress values indicate potential anomalies.
+    Measures geometric stress (inconsistency) in the field representation
+    to detect inputs that violate expected manifold structure. Computes
+    multiple stress components: curvature deviation ||R - R_expected||,
+    connection smoothness ||nabla Gamma||, holonomy deviation (commutator
+    magnitude), and metric distortion. Components are combined via learnable
+    softmax weights, and an adaptive threshold flags anomalies.
 
-    Stress types:
-    - 'curvature': Deviation of curvature from expected values
-    - 'connection': Smoothness/consistency of the connection
-    - 'holonomy': Deviation of holonomy from identity (flat space)
-    - 'metric': Distortion of the induced metric
-    - 'combined': Weighted combination of all stress types
+    **Architecture Overview:**
 
-    The stress can be used to:
-    1. Flag potentially adversarial inputs
-    2. Downweight anomalous data during training
-    3. Provide confidence scores for predictions
+    .. code-block:: text
 
-    Args:
-        hidden_dim: Hidden dimension size.
-        stress_types: List of stress types to compute.
-        stress_threshold: Threshold for anomaly flagging.
-        use_learnable_baseline: Whether to learn baseline (expected) values.
-        return_components: Whether to return individual stress components.
-        kernel_initializer: Initializer for kernel weights.
+        ┌─────────────┐ ┌──────────────┐ ┌──────────────┐
+        │ Embeddings  │ │ Curvature    │ │ Connection   │
+        │ [B, S, D]   │ │ [B, S, ...]  │ │ [B, S, D, D] │
+        └──────┬──────┘ └──────┬───────┘ └──────┬───────┘
+               └───────────────┼─────────────────┘
+                               ▼
+        ┌──────────────────────────────────────────┐
+        │  Per-type stress computation:            │
+        │  ├─ curvature: ||curv - baseline||       │
+        │  ├─ connection: local variation + mag    │
+        │  ├─ holonomy: commutator magnitude       │
+        │  ├─ metric: embedding gradient variation │
+        │  └─ combined: mean of available          │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Weighted combination (softmax weights)  │
+        │  → total stress [B, S, 1]                │
+        │  → anomaly mask (stress > threshold)     │
+        └──────────────────────────────────────────┘
 
-    Example:
-        >>> stress_layer = ManifoldStressLayer(
-        ...     hidden_dim=256,
-        ...     stress_types=['curvature', 'connection'],
-        ...     stress_threshold=0.5
-        ... )
-        >>> embeddings = keras.ops.random.normal((2, 16, 256))
-        >>> curvature = keras.ops.random.normal((2, 16, 256))
-        >>> connection = keras.ops.random.normal((2, 16, 256, 256)) * 0.01
-        >>> stress, anomaly_mask = stress_layer([embeddings, curvature, connection])
-        >>> print(stress.shape)  # (2, 16, 1)
+    :param hidden_dim: Hidden dimension size. Must be positive.
+    :type hidden_dim: int
+    :param stress_types: List of stress types to compute. Defaults to
+        ``['curvature', 'connection', 'combined']``.
+    :type stress_types: List[str]
+    :param stress_threshold: Threshold for anomaly flagging. Defaults to 0.5.
+    :type stress_threshold: float
+    :param use_learnable_baseline: Whether to learn baseline values.
+        Defaults to ``True``.
+    :type use_learnable_baseline: bool
+    :param return_components: Whether to return individual stress components.
+        Defaults to ``False``.
+    :type return_components: bool
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -109,11 +121,10 @@ class ManifoldStressLayer(keras.layers.Layer):
         self.num_components = len(stress_types)
 
     def build(self, input_shape: Tuple[Tuple[int, ...], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Args:
-            input_shape: Tuple of shapes for inputs.
+        :param input_shape: Tuple of shapes for inputs.
+        :type input_shape: Tuple[Tuple[int, ...], ...]
         """
         # Learnable stress weights for combining components
         self.stress_weights = self.add_weight(
@@ -171,17 +182,15 @@ class ManifoldStressLayer(keras.layers.Layer):
             self,
             curvature: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute stress from curvature deviation.
+        """Compute stress from curvature deviation.
 
         High curvature or curvature inconsistent with the baseline
         indicates potential anomalies.
 
-        Args:
-            curvature: Curvature tensor.
-
-        Returns:
-            Curvature stress, shape (batch, seq_len, 1).
+        :param curvature: Curvature tensor.
+        :type curvature: keras.KerasTensor
+        :return: Curvature stress, shape (batch, seq_len, 1).
+        :rtype: keras.KerasTensor
         """
         # Flatten curvature if needed
         curv_shape = ops.shape(curvature)
@@ -217,17 +226,15 @@ class ManifoldStressLayer(keras.layers.Layer):
             self,
             connection: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute stress from connection inconsistency.
+        """Compute stress from connection inconsistency.
 
         A smooth, consistent connection has low variation between
         adjacent positions. High variation indicates stress.
 
-        Args:
-            connection: Connection tensor, shape (batch, seq_len, dim, dim).
-
-        Returns:
-            Connection stress, shape (batch, seq_len, 1).
+        :param connection: Connection tensor, shape (batch, seq_len, dim, dim).
+        :type connection: keras.KerasTensor
+        :return: Connection stress, shape (batch, seq_len, 1).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(connection)[0]
         seq_len = ops.shape(connection)[1]
@@ -261,17 +268,15 @@ class ManifoldStressLayer(keras.layers.Layer):
             self,
             connection: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute stress from holonomy deviation.
+        """Compute stress from holonomy deviation.
 
         For a flat space (no curvature), holonomy should be the identity.
         Deviation from identity indicates curvature and potential anomalies.
 
-        Args:
-            connection: Connection tensor.
-
-        Returns:
-            Holonomy stress, shape (batch, seq_len, 1).
+        :param connection: Connection tensor.
+        :type connection: keras.KerasTensor
+        :return: Holonomy stress, shape (batch, seq_len, 1).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(connection)[0]
         seq_len = ops.shape(connection)[1]
@@ -316,18 +321,17 @@ class ManifoldStressLayer(keras.layers.Layer):
             embeddings: keras.KerasTensor,
             curvature: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
-        """
-        Compute stress from metric distortion.
+        """Compute stress from metric distortion.
 
         The induced metric from embeddings should be smooth and consistent.
         Distortions indicate geometric anomalies.
 
-        Args:
-            embeddings: Embedding tensor.
-            curvature: Optional curvature tensor.
-
-        Returns:
-            Metric stress, shape (batch, seq_len, 1).
+        :param embeddings: Embedding tensor.
+        :type embeddings: keras.KerasTensor
+        :param curvature: Optional curvature tensor.
+        :type curvature: Optional[keras.KerasTensor]
+        :return: Metric stress, shape (batch, seq_len, 1).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(embeddings)[0]
         seq_len = ops.shape(embeddings)[1]
@@ -362,21 +366,19 @@ class ManifoldStressLayer(keras.layers.Layer):
             inputs: Tuple[keras.KerasTensor, ...],
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Compute manifold stress and anomaly mask.
+        """Compute manifold stress and anomaly mask.
 
-        Args:
-            inputs: Tuple of (embeddings, curvature, connection).
-                - embeddings: shape (batch, seq_len, dim)
-                - curvature: shape (batch, seq_len, ...) - optional
-                - connection: shape (batch, seq_len, dim, dim) - optional
-            training: Whether in training mode.
-
-        Returns:
-            Tuple of:
-                - stress: Total stress tensor, shape (batch, seq_len, 1) or
-                  (batch, seq_len, num_components) if return_components=True
-                - anomaly_mask: Boolean mask, True where stress > threshold
+        :param inputs: Tuple of (embeddings, curvature, connection).
+            - embeddings: shape (batch, seq_len, dim)
+            - curvature: shape (batch, seq_len, ...) - optional
+            - connection: shape (batch, seq_len, dim, dim) - optional
+        :type inputs: Tuple[keras.KerasTensor, ...]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (stress, anomaly_mask). stress is shape (batch, seq_len, 1)
+            or (batch, seq_len, num_components) if return_components=True.
+            anomaly_mask is boolean, True where stress > threshold.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Parse inputs
         if isinstance(inputs, (list, tuple)):
@@ -444,14 +446,12 @@ class ManifoldStressLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Tuple[int, ...], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """
-        Compute output shapes.
+        """Compute output shapes.
 
-        Args:
-            input_shape: Tuple of input shapes.
-
-        Returns:
-            Tuple of (stress_shape, mask_shape).
+        :param input_shape: Tuple of input shapes.
+        :type input_shape: Tuple[Tuple[int, ...], ...]
+        :return: Tuple of (stress_shape, mask_shape).
+        :rtype: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
         """
         if isinstance(input_shape, list):
             embed_shape = input_shape[0]

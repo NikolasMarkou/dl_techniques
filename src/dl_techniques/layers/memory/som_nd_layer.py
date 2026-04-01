@@ -140,100 +140,70 @@ from dl_techniques.utils.logger import logger
 @keras.saving.register_keras_serializable()
 class SOMLayer(keras.layers.Layer):
     """
-    N-Dimensional Self-Organizing Map (SOM) layer implementation for Keras.
+    N-Dimensional Self-Organizing Map layer for unsupervised topological learning.
 
-    This layer implements a Self-Organizing Map (SOM), an unsupervised neural
-    network that maps high-dimensional input data onto a lower-dimensional
-    discretized grid. It functions as a content-addressable memory that
-    preserves the topological properties of the input space.
+    Implements a fully vectorized SOM that maps high-dimensional input data onto an
+    N-dimensional discretized grid (1D, 2D, 3D, etc.) via competitive learning. For
+    each input ``x``, the Best Matching Unit is found via
+    ``BMU = argmin_i ||x - w_i||^2``, then the BMU and its neighbors are updated:
+    ``w_i(t+1) = w_i(t) + alpha(t) * h_i(t) * (x - w_i(t))`` where ``h_i`` is
+    the neighborhood function (Gaussian or bubble). Weights are not updated via
+    backpropagation but through the custom competitive learning rule in ``call()``.
 
-    The SOM organizes neurons in an N-dimensional grid (e.g., 1D line,
-    2D plane, 3D cube). For each input vector, a "Best Matching Unit" (BMU)
-    is found, and the weights of the BMU and its neighbors are updated to
-    move closer to the input vector. This process, repeated over many
-    iterations, results in a topologically ordered map where similar inputs
-    activate nearby neurons on the grid.
+    **Architecture Overview:**
 
-    This implementation is fully vectorized for efficient training on modern
-    hardware and does not use Python loops for weight updates. The layer's
-    weights are not updated via backpropagation and must be trained using
-    a custom training loop or by repeatedly calling the layer on input data
-    in training mode.
+    .. code-block:: text
 
-    Parameters
-    ----------
-    grid_shape : Tuple[int, ...]
-        The shape of the SOM neuron grid. For example, `(10, 10)` for a 2D grid
-        or `(5, 5, 5)` for a 3D grid.
-    input_dim : int
-        The dimensionality of the input data vectors.
-    initial_learning_rate : float, optional
-        The starting learning rate for weight updates. Defaults to 0.1.
-    decay_function : Callable, optional
-        Optional callable that takes the current iteration and max iterations
-        and returns a new learning rate. If `None`, a linear decay is used.
-        Defaults to `None`.
-    sigma : float, optional
-        The initial radius of the neighborhood function. Defaults to 1.0.
-    neighborhood_function : str, optional
-        The type of neighborhood function to use. Can be either `'gaussian'`
-        or `'bubble'`. Defaults to `'gaussian'`.
-    weights_initializer : str or keras.initializers.Initializer, optional
-        Initialization method for the SOM weights. Supports standard Keras
-        initializers as well as special strings `'random'` (uniform in [0, 1])
-        and `'sample'` (falls back to `'random'`). Defaults to `'random_uniform'`.
-    regularizer : keras.regularizers.Regularizer, optional
-        Optional regularizer function applied to the weights. Defaults to `None`.
-    name : str, optional
-        The name of the layer. Defaults to `None`.
-    **kwargs : Any
-        Additional keyword arguments for the base layer.
+        ┌────────────────────────────────────────────┐
+        │               SOMLayer                     │
+        │                                            │
+        │  Input(batch, input_dim)                   │
+        │         │                                  │
+        │         ▼                                  │
+        │  Distance: ||x - w_i||^2  (vectorized)    │
+        │         │                                  │
+        │         ▼                                  │
+        │  BMU = argmin_i (distances)                │
+        │         │                                  │
+        │         ▼                                  │
+        │  Neighborhood: h_i(BMU, sigma)             │
+        │  (Gaussian or Bubble)                      │
+        │         │                                  │
+        │         ▼                                  │
+        │  Weight Update: w += alpha * h * (x - w)   │
+        │         │                                  │
+        │         ▼                                  │
+        │  Output: BMU_coords(batch, grid_dim),      │
+        │          quant_errors(batch,)               │
+        └────────────────────────────────────────────┘
 
-    Input shape:
-        A 2D tensor with shape: `(batch_size, input_dim)`.
-
-    Output shape:
-        A tuple of two tensors:
-        - `bmu_indices`: `(batch_size, len(grid_shape))` containing integer
-          coordinates of the BMU for each input.
-        - `quantization_errors`: `(batch_size,)` containing the Euclidean
-          distance between each input and its BMU's weights.
-
-    Returns
-    -------
-    Tuple[keras.KerasTensor, keras.KerasTensor]
-        A tuple containing:
-        - BMU coordinates of shape (batch_size, len(grid_shape))
-        - Quantization error of shape (batch_size,)
-
-    Raises
-    ------
-    ValueError
-        If `grid_shape` contains non-positive integers.
-    ValueError
-        If `input_dim` is not a positive integer.
-    ValueError
-        If `initial_learning_rate` is not positive.
-    ValueError
-        If `sigma` is not positive.
-    ValueError
-        If `neighborhood_function` is not 'gaussian' or 'bubble'.
-
-    Example
-    -------
-    >>> # Create a 10x10 SOM for 784-dimensional MNIST data
-    >>> som_layer = SOMLayer(grid_shape=(10, 10), input_dim=784)
-    >>> input_data = keras.random.uniform((128, 784))
-    >>>
-    >>> # Forward pass to find BMUs and update weights
-    >>> bmu_coords, q_error = som_layer(input_data, training=True)
-    >>> print(bmu_coords.shape, q_error.shape)
-    (128, 2) (128,)
-    >>>
-    >>> # Get the learned weight map
-    >>> weights_map = som_layer.get_weights_map()
-    >>> print(weights_map.shape)
-    (10, 10, 784)
+    :param grid_shape: Shape of the SOM neuron grid, e.g. ``(10, 10)`` for 2D
+        or ``(5, 5, 5)`` for 3D.
+    :type grid_shape: Tuple[int, ...]
+    :param input_dim: Dimensionality of the input data vectors.
+    :type input_dim: int
+    :param initial_learning_rate: Starting learning rate for weight updates.
+        Defaults to 0.1.
+    :type initial_learning_rate: float
+    :param decay_function: Callable for learning rate decay taking
+        ``(iteration, max_iterations)`` and returning a new rate. If None,
+        linear decay is used. Defaults to None.
+    :type decay_function: Optional[Callable]
+    :param sigma: Initial radius of the neighborhood function. Defaults to 1.0.
+    :type sigma: float
+    :param neighborhood_function: Type of neighborhood function
+        (``'gaussian'`` or ``'bubble'``). Defaults to ``'gaussian'``.
+    :type neighborhood_function: str
+    :param weights_initializer: Initialization method for the SOM weights.
+        Defaults to ``'random_uniform'``.
+    :type weights_initializer: Union[str, keras.initializers.Initializer]
+    :param regularizer: Optional regularizer applied to the weights.
+        Defaults to None.
+    :type regularizer: Optional[keras.regularizers.Regularizer]
+    :param name: Name of the layer. Defaults to None.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the base layer.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -303,10 +273,8 @@ class SOMLayer(keras.layers.Layer):
         """
         Build the SOM layer by initializing the weight vectors.
 
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple
         """
         # Store input shape for serialization
         self._build_input_shape = input_shape
@@ -366,11 +334,8 @@ class SOMLayer(keras.layers.Layer):
         """
         Initialize the N-dimensional grid positions for the SOM.
 
-        Returns
-        -------
-        keras.KerasTensor
-            A tensor of shape (*grid_shape, len(grid_shape)) containing
-            the coordinates of each neuron in the N-dimensional grid.
+        :return: Tensor of shape ``(*grid_shape, grid_dim)`` with neuron coordinates.
+        :rtype: keras.KerasTensor
         """
         coord_ranges = [ops.cast(ops.arange(d), "float32") for d in self.grid_shape]
         mesh_coords = ops.meshgrid(*coord_ranges, indexing='ij')
@@ -384,20 +349,12 @@ class SOMLayer(keras.layers.Layer):
         """
         Forward pass for the SOM layer.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Boolean indicating whether the layer should behave in
-            training mode or inference mode.
-
-        Returns
-        -------
-        Tuple[keras.KerasTensor, keras.KerasTensor]
-            A tuple containing:
-            - BMU coordinates of shape (batch_size, len(grid_shape))
-            - Quantization error of shape (batch_size,)
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (BMU coordinates, quantization errors).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Find the Best Matching Units (BMUs) for each input
         bmu_indices, quantization_errors = self._find_bmu(inputs)
@@ -417,17 +374,10 @@ class SOMLayer(keras.layers.Layer):
         """
         Find the Best Matching Unit (BMU) for each input vector.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-
-        Returns
-        -------
-        Tuple[keras.KerasTensor, keras.KerasTensor]
-            A tuple containing:
-            - BMU coordinates of shape (batch_size, len(grid_shape))
-            - Quantization error of shape (batch_size,)
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Tuple of (BMU coordinates, quantization errors).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Reshape weights to [total_neurons, input_dim]
         flat_weights = ops.reshape(self.weights_map, (-1, self.input_dim))
@@ -456,12 +406,10 @@ class SOMLayer(keras.layers.Layer):
         """
         Update the SOM weights using a vectorized learning rule.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        bmu_indices : keras.KerasTensor
-            BMU coordinates of shape (batch_size, len(grid_shape)).
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param bmu_indices: BMU coordinates of shape ``(batch_size, grid_dim)``.
+        :type bmu_indices: keras.KerasTensor
         """
         # Update learning rate and sigma based on iteration
         current_learning_rate = self.decay_function(self.iterations, self.max_iterations)
@@ -502,11 +450,8 @@ class SOMLayer(keras.layers.Layer):
         """
         Get the current weights organized as an N-dimensional map.
 
-        Returns
-        -------
-        keras.KerasTensor
-            The SOM weights as an N-dimensional grid of shape 
-            (*grid_shape, input_dim).
+        :return: SOM weights of shape ``(*grid_shape, input_dim)``.
+        :rtype: keras.KerasTensor
         """
         return self.weights_map
 
@@ -514,17 +459,10 @@ class SOMLayer(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Parameters
-        ----------
-        input_shape : Tuple
-            Shape of the input tensor.
-
-        Returns
-        -------
-        Tuple[Tuple, Tuple]
-            A tuple containing:
-            - BMU coordinates shape: (batch_size, len(grid_shape))
-            - Quantization error shape: (batch_size,)
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple
+        :return: Tuple of (BMU shape, quantization error shape).
+        :rtype: Tuple[Tuple, Tuple]
         """
         # Convert to list for consistent manipulation
         input_shape_list = list(input_shape)
@@ -539,10 +477,8 @@ class SOMLayer(keras.layers.Layer):
         """
         Get configuration for the layer.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Configuration dictionary for the layer.
+        :return: Configuration dictionary for the layer.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -561,10 +497,8 @@ class SOMLayer(keras.layers.Layer):
         """
         Get build configuration for the layer.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Build configuration dictionary.
+        :return: Build configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         return {
             "input_shape": self._build_input_shape,
@@ -574,10 +508,8 @@ class SOMLayer(keras.layers.Layer):
         """
         Build the layer from a configuration.
 
-        Parameters
-        ----------
-        config : Dict[str, Any]
-            Build configuration dictionary.
+        :param config: Build configuration dictionary.
+        :type config: Dict[str, Any]
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
@@ -587,15 +519,10 @@ class SOMLayer(keras.layers.Layer):
         """
         Create a layer from its configuration.
 
-        Parameters
-        ----------
-        config : Dict[str, Any]
-            Configuration dictionary.
-
-        Returns
-        -------
-        SOMLayer
-            A new SOMLayer instance.
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: A new SOMLayer instance.
+        :rtype: SOMLayer
         """
         # Handle complex object deserialization
         if 'weights_initializer' in config:

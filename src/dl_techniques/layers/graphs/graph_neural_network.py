@@ -95,128 +95,97 @@ from ..norms.rms_norm import RMSNorm
 
 @keras.saving.register_keras_serializable()
 class GraphNeuralNetworkLayer(keras.layers.Layer):
-    """
-    Complete configurable Graph Neural Network for concept relationship modeling.
+    """Configurable multi-paradigm Graph Neural Network layer.
 
-    This layer implements various GNN architectures including GCN (Graph Convolutional Network),
-    GraphSAGE (Graph Sample and Aggregate), GAT (Graph Attention Network), and GIN (Graph
-    Isomorphism Network) with configurable message passing, aggregation, and normalization.
-    It demonstrates proper sub-layer management and serialization patterns for complex
-    composite layers in Keras 3.
+    Provides a unified framework for graph representation learning by stacking
+    multiple message-passing blocks with configurable paradigms (GCN, GraphSAGE,
+    GAT, GIN). Each block performs neighborhood aggregation H' = f(A, H, W),
+    followed by activation, dropout, optional residual connection, and
+    normalization. The layer supports four message-passing schemes:
+    GCN uses spectral convolution H' = sigma(D^{-1/2} A D^{-1/2} H W),
+    GraphSAGE separates self and neighbor transforms H' = sigma(W_self H + W_neigh AGG(AH)),
+    GAT applies learnable attention H' = sigma(sum_j alpha_{ij} W h_j),
+    and GIN maximises expressiveness H' = MLP((1+eps) h_i + sum_j h_j).
 
-    **Intent**: Provide a flexible, production-ready GNN implementation that can be easily
-    configured for different graph learning tasks while maintaining proper Keras patterns
-    for serialization and weight management.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input: (node_features, adjacency_matrix)
-           ↓
-    [For each GNN layer i=1..num_layers]:
-        Message Passing (GCN/GraphSAGE/GAT/GIN)
-               ↓
-        Activation Function
-               ↓
-        Dropout(dropout_rate)
-               ↓
-        Residual Addition (if use_residual=True)
-               ↓
-        Normalization (Layer/RMS/Batch)
-           ↓
-    Final Aggregation (mean/max/sum/attention)
-           ↓
-    Output: Updated node embeddings
-    ```
+    .. code-block:: text
 
-    **Message Passing Schemes**:
-    - **GCN**: H' = σ(ÂHW) where Â is normalized adjacency
-    - **GraphSAGE**: H' = σ(W_self·H + W_neighbor·AGG(A·H))
-    - **GAT**: H' = AttentionHeads(H, H) with graph structure
-    - **GIN**: H' = MLP((1+ε)·H + Σ_neighbors)
+        ┌──────────────────────────────────────────────────┐
+        │  Input: (node_features, adjacency_matrix)        │
+        │         [B, N, D]        [B, N, N]               │
+        └─────────────────────┬────────────────────────────┘
+                              ▼
+        ┌──────────────────────────────────────────────────┐
+        │  Adjacency Normalisation  D⁻¹ A                  │
+        └─────────────────────┬────────────────────────────┘
+                              ▼
+        ┌──────────────────────────────────────────────────┐
+        │  For i = 1 .. num_layers:                        │
+        │  ┌────────────────────────────────────────────┐  │
+        │  │ Message Passing (GCN/GraphSAGE/GAT/GIN)   │  │
+        │  └──────────────────┬─────────────────────────┘  │
+        │                     ▼                            │
+        │  ┌────────────────────────────────────────────┐  │
+        │  │ Activation  σ(·)                           │  │
+        │  └──────────────────┬─────────────────────────┘  │
+        │                     ▼                            │
+        │  ┌────────────────────────────────────────────┐  │
+        │  │ Dropout                                    │  │
+        │  └──────────────────┬─────────────────────────┘  │
+        │                     ▼                            │
+        │  ┌────────────────────────────────────────────┐  │
+        │  │ Residual  h = h_in + h_new                 │  │
+        │  └──────────────────┬─────────────────────────┘  │
+        │                     ▼                            │
+        │  ┌────────────────────────────────────────────┐  │
+        │  │ Normalisation (Layer / RMS / Batch)        │  │
+        │  └──────────────────┬─────────────────────────┘  │
+        └─────────────────────┼────────────────────────────┘
+                              ▼
+        ┌──────────────────────────────────────────────────┐
+        │  Final Aggregation (mean/max/sum/attention/none) │
+        └─────────────────────┬────────────────────────────┘
+                              ▼
+        ┌──────────────────────────────────────────────────┐
+        │  Output  [B, N or 1, D]                          │
+        └──────────────────────────────────────────────────┘
 
-    Args:
-        concept_dim: Integer, dimension of concept/node embeddings. Must be positive.
-            This determines the feature dimension throughout the network.
-        num_layers: Integer, number of GNN layers to stack. Must be positive.
-            More layers allow learning higher-order graph structures. Defaults to 3.
-        message_passing: String, type of message passing mechanism to use.
-            Options: 'gcn', 'graphsage', 'gat', 'gin'. Each has different
-            inductive biases and computational costs. Defaults to 'gcn'.
-        aggregation: String, type of final aggregation over nodes.
-            Options: 'mean', 'max', 'attention', 'sum', 'none'.
-            Determines how node features are pooled. Defaults to 'attention'.
-        normalization: String, type of normalization to apply after each layer.
-            Options: 'none', 'batch', 'layer', 'rms'. Helps with training
-            stability and convergence. Defaults to 'layer'.
-        activation: String or callable, activation function to use.
-            Standard Keras activation names or custom functions. Defaults to 'relu'.
-        dropout_rate: Float between 0 and 1, dropout probability during training.
-            Helps prevent overfitting on graph structure. Defaults to 0.1.
-        use_residual: Boolean, whether to use residual connections between layers.
-            Helps with gradient flow in deep networks. Defaults to True.
-        num_attention_heads: Integer, number of attention heads for GAT and
-            attention aggregation. More heads capture different relationships.
-            Must be positive and divide concept_dim. Defaults to 4.
-        epsilon: Float, small constant for numerical stability in GIN.
-            Controls the weight of self-loops. Defaults to 0.0.
-        kernel_initializer: Initializer for weight matrices. Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias vectors. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for weight matrices.
-        bias_regularizer: Optional regularizer for bias vectors.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        Tuple of (node_features, adjacency_matrix):
-        - node_features: Tensor with shape `(batch_size, num_nodes, concept_dim)`
-        - adjacency_matrix: Tensor with shape `(batch_size, num_nodes, num_nodes)`
-          Should contain normalized adjacency values (typically 0-1 range).
-
-    Output shape:
-        Updated node embeddings with shape:
-        - If aggregation='none': `(batch_size, num_nodes, concept_dim)`
-        - If aggregation in ['mean','max','sum']: `(batch_size, 1, concept_dim)`
-        - If aggregation='attention': `(batch_size, num_nodes, concept_dim)`
-
-    Attributes:
-        gnn_layers: List of message passing layers for each GNN layer.
-        dropout_layers: List of dropout layers for regularization.
-        norm_layers: List of normalization layers (or None if normalization='none').
-        aggregation_attention: Attention layer for final aggregation (if aggregation='attention').
-        gin_epsilon: Learnable epsilon parameter for GIN (if message_passing='gin').
-
-    Example:
-        ```python
-        # Create a 3-layer Graph Attention Network with attention aggregation
-        gnn = GraphNeuralNetworkLayer(
-            concept_dim=256,
-            num_layers=3,
-            message_passing='gat',
-            aggregation='attention',
-            normalization='layer',
-            dropout_rate=0.2,
-            num_attention_heads=8
-        )
-
-        # Use in a model
-        node_features = keras.Input(shape=(100, 256))  # 100 nodes, 256 features
-        adjacency = keras.Input(shape=(100, 100))      # Adjacency matrix
-        outputs = gnn((node_features, adjacency))
-        model = keras.Model(inputs=[node_features, adjacency], outputs=outputs)
-
-        # Switch to GraphSAGE for inductive learning
-        gnn_sage = GraphNeuralNetworkLayer(
-            concept_dim=256,
-            num_layers=2,
-            message_passing='graphsage',
-            aggregation='mean'
-        )
-        ```
-
-    Note:
-        The adjacency matrix should be pre-normalized for stable training.
-        For GCN, use symmetric normalization: D^(-1/2) * A * D^(-1/2)
-        For other methods, row normalization (D^(-1) * A) often works well.
-        The implementation handles the normalization internally for consistency.
+    :param concept_dim: Dimension of concept/node embeddings. Must be positive.
+    :type concept_dim: int
+    :param num_layers: Number of GNN layers to stack. Defaults to 3.
+    :type num_layers: int
+    :param message_passing: Message-passing paradigm
+        (``'gcn'``, ``'graphsage'``, ``'gat'``, ``'gin'``). Defaults to ``'gcn'``.
+    :type message_passing: str
+    :param aggregation: Final node aggregation
+        (``'mean'``, ``'max'``, ``'attention'``, ``'sum'``, ``'none'``).
+        Defaults to ``'attention'``.
+    :type aggregation: str
+    :param normalization: Per-block normalisation
+        (``'none'``, ``'batch'``, ``'layer'``, ``'rms'``). Defaults to ``'layer'``.
+    :type normalization: str
+    :param activation: Activation function name or callable. Defaults to ``'relu'``.
+    :type activation: Union[str, Callable]
+    :param dropout_rate: Dropout probability in ``[0, 1]``. Defaults to 0.1.
+    :type dropout_rate: float
+    :param use_residual: Whether to add residual connections. Defaults to ``True``.
+    :type use_residual: bool
+    :param num_attention_heads: Attention heads for GAT / attention aggregation.
+        Must divide ``concept_dim``. Defaults to 4.
+    :type num_attention_heads: int
+    :param epsilon: Learnable self-loop weight for GIN. Defaults to 0.0.
+    :type epsilon: float
+    :param kernel_initializer: Initializer for weight matrices.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for weight matrices.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias vectors.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -383,10 +352,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         self.gin_epsilon = None
 
     def build(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        :param input_shape: Tuple of (node_features_shape, adjacency_shape).
+        :type input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
         """
         node_shape, adjacency_shape = input_shape
 
@@ -437,17 +406,14 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             inputs: Tuple[keras.KerasTensor, keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Process concept graph through GNN layers.
+        """Process concept graph through GNN layers.
 
-        Args:
-            inputs: Tuple of (node_features, adjacency_matrix)
-                - node_features: Shape (batch_size, num_nodes, concept_dim)
-                - adjacency_matrix: Shape (batch_size, num_nodes, num_nodes)
-            training: Whether in training mode
-
-        Returns:
-            Updated node embeddings based on aggregation type
+        :param inputs: Tuple of ``(node_features, adjacency_matrix)``.
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Updated node embeddings based on aggregation type.
+        :rtype: keras.KerasTensor
         """
         node_features, adjacency_matrix = inputs
 
@@ -536,7 +502,13 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> Tuple[
         Optional[int], ...]:
-        """Compute output shape based on aggregation type."""
+        """Compute output shape based on aggregation type.
+
+        :param input_shape: Tuple of (node_features_shape, adjacency_shape).
+        :type input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         node_shape, _ = input_shape
         batch_size = node_shape[0]
         num_nodes = node_shape[1]
@@ -549,7 +521,11 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
             return (batch_size, num_nodes, self.concept_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'concept_dim': self.concept_dim,

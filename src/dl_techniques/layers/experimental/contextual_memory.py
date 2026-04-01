@@ -30,9 +30,8 @@ def normalize_adjacency_matrix(adjacency: keras.KerasTensor,
                                normalization: str = 'symmetric') -> keras.KerasTensor:
     """Normalize adjacency matrix for stable GNN training.
 
-    Args:
-        adjacency: Adjacency matrix of shape (batch_size, num_nodes, num_nodes)
-        normalization: Type of normalization ('row', 'symmetric', or 'none')
+    :param adjacency: Adjacency matrix of shape (batch_size, num_nodes, num_nodes)
+    :param normalization: Type of normalization ('row', 'symmetric', or 'none')
 
     Returns:
         Normalized adjacency matrix
@@ -83,23 +82,22 @@ def normalize_adjacency_matrix(adjacency: keras.KerasTensor,
 class MemoryBankConfig:
     """Configuration for the Contextual Memory Bank.
 
-    Args:
-        memory_dim: Dimension of memory embeddings
-        concept_dim: Dimension of concept embeddings in the graph
-        temporal_dim: Dimension of temporal embeddings
-        num_memory_slots: Number of memory slots in KV store
-        num_graph_layers: Number of GNN layers
-        num_temporal_heads: Number of attention heads in temporal encoder
-        num_temporal_layers: Number of transformer layers for temporal encoding
-        max_sequence_length: Maximum length of temporal sequences
-        dropout_rate: Dropout rate for regularization
-        use_layer_norm: Whether to use layer normalization
-        memory_update_rate: Learning rate for memory updates
-        graph_aggregation: Type of graph aggregation ('mean', 'max', 'attention', 'sum')
-        graph_message_passing: Type of message passing ('gcn', 'graphsage', 'gat', 'gin')
-        graph_normalization: Graph normalization type ('none', 'batch', 'layer', 'rms')
-        graph_activation: Activation function for graph layers
-        temporal_normalization: Temporal normalization type ('layer', 'rms', 'batch')
+    :param memory_dim: Dimension of memory embeddings
+    :param concept_dim: Dimension of concept embeddings in the graph
+    :param temporal_dim: Dimension of temporal embeddings
+    :param num_memory_slots: Number of memory slots in KV store
+    :param num_graph_layers: Number of GNN layers
+    :param num_temporal_heads: Number of attention heads in temporal encoder
+    :param num_temporal_layers: Number of transformer layers for temporal encoding
+    :param max_sequence_length: Maximum length of temporal sequences
+    :param dropout_rate: Dropout rate for regularization
+    :param use_layer_norm: Whether to use layer normalization
+    :param memory_update_rate: Learning rate for memory updates
+    :param graph_aggregation: Type of graph aggregation ('mean', 'max', 'attention', 'sum')
+    :param graph_message_passing: Type of message passing ('gcn', 'graphsage', 'gat', 'gin')
+    :param graph_normalization: Graph normalization type ('none', 'batch', 'layer', 'rms')
+    :param graph_activation: Activation function for graph layers
+    :param temporal_normalization: Temporal normalization type ('layer', 'rms', 'batch')
     """
     memory_dim: int = 512
     concept_dim: int = 256
@@ -124,35 +122,37 @@ class MemoryBankConfig:
 class KeyValueMemoryStore(keras.layers.Layer):
     """Key-Value Memory Store for long-term associations.
 
-    This layer implements a differentiable key-value memory system
-    that can store and retrieve associative memories.
+    Implements a differentiable key-value memory system that stores and retrieves
+    associative memories using attention-based soft lookup.
 
-    Args:
-        num_slots: Number of memory slots. Must be positive.
-        memory_dim: Dimension of memory embeddings. Must be positive.
-        key_dim: Dimension of keys. Must be positive.
-        temperature: Temperature for attention softmax. Defaults to 1.0.
-        use_bias: Whether to use bias in projections. Defaults to True.
-        kernel_initializer: Initializer for kernel weights.
-        bias_initializer: Initializer for bias weights.
-        **kwargs: Additional keyword arguments for Layer base class
+    **Architecture Overview:**
 
-    Input shape:
-        Query tensor of shape (batch_size, key_dim)
+    .. code-block:: text
 
-    Output shape:
-        Retrieved memory tensor of shape (batch_size, memory_dim)
+        ┌───────────────────────────┐
+        │  Query (batch, key_dim)   │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  Attention: Q @ K^T / tau │
+        │  ─► softmax ─► weights    │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  weights @ Values         │
+        │  ─► Retrieved Memory      │
+        └───────────────────────────┘
 
-    Example:
-        ```python
-        memory_store = KeyValueMemoryStore(
-            num_slots=1000,
-            memory_dim=512,
-            key_dim=256
-        )
-        query = keras.Input(shape=(256,))
-        retrieved = memory_store(query)
-        ```
+    :param num_slots: Number of memory slots. Must be positive.
+    :param memory_dim: Dimension of memory embeddings. Must be positive.
+    :param key_dim: Dimension of keys. Must be positive.
+    :param temperature: Temperature for attention softmax. Defaults to 1.0.
+    :param use_bias: Whether to use bias in projections. Defaults to True.
+    :param kernel_initializer: Initializer for kernel weights.
+    :param bias_initializer: Initializer for bias weights. **kwargs: Additional keyword arguments for Layer base class
+
+
+
     """
 
     def __init__(
@@ -212,8 +212,7 @@ class KeyValueMemoryStore(keras.layers.Layer):
     def call(self, query: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Retrieve memories based on query.
 
-        Args:
-            query: Query tensor of shape (batch_size, key_dim)
+                query: Query tensor of shape (batch_size, key_dim)
             training: Whether in training mode
 
         Returns:
@@ -262,35 +261,19 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
     Implements various GNN architectures including GCN, GraphSAGE, GAT, and GIN
     with configurable message passing, aggregation, and normalization.
 
-    Args:
-        concept_dim: Dimension of concept embeddings. Must be positive.
-        num_layers: Number of GNN layers. Must be positive. Defaults to 3.
-        message_passing: Type of message passing ('gcn', 'graphsage', 'gat', 'gin'). Defaults to 'gcn'.
-        aggregation: Type of aggregation ('mean', 'max', 'attention', 'sum'). Defaults to 'attention'.
-        normalization: Type of normalization ('none', 'batch', 'layer', 'rms'). Defaults to 'layer'.
-        activation: Activation function. Defaults to 'relu'.
-        dropout_rate: Dropout rate. Must be between 0 and 1. Defaults to 0.1.
-        use_residual: Whether to use residual connections. Defaults to True.
-        use_layer_norm: Whether to use layer normalization. Defaults to True.
-        num_attention_heads: Number of attention heads for GAT and attention aggregation. Defaults to 4.
-        **kwargs: Additional keyword arguments for Layer base class
+    :param concept_dim: Dimension of concept embeddings. Must be positive.
+    :param num_layers: Number of GNN layers. Must be positive. Defaults to 3.
+    :param message_passing: Type of message passing ('gcn', 'graphsage', 'gat', 'gin'). Defaults to 'gcn'.
+    :param aggregation: Type of aggregation ('mean', 'max', 'attention', 'sum'). Defaults to 'attention'.
+    :param normalization: Type of normalization ('none', 'batch', 'layer', 'rms'). Defaults to 'layer'.
+    :param activation: Activation function. Defaults to 'relu'.
+    :param dropout_rate: Dropout rate. Must be between 0 and 1. Defaults to 0.1.
+    :param use_residual: Whether to use residual connections. Defaults to True.
+    :param use_layer_norm: Whether to use layer normalization. Defaults to True.
+    :param num_attention_heads: Number of attention heads for GAT and attention aggregation. Defaults to 4. **kwargs: Additional keyword arguments for Layer base class
 
-    Input shape:
-        Tuple of (node_features, adjacency_matrix):
-        - node_features: Shape (batch_size, num_nodes, concept_dim)
-        - adjacency_matrix: Shape (batch_size, num_nodes, num_nodes)
 
-    Output shape:
-        Updated node embeddings of shape (batch_size, num_nodes, concept_dim)
 
-    Example:
-        ```python
-        gnn = GraphNeuralNetworkLayer(
-            concept_dim=256,
-            num_layers=3,
-            message_passing='gat',
-            aggregation='attention'
-        )
 
         node_features = keras.Input(shape=(10, 256))
         adjacency = keras.Input(shape=(10, 10))
@@ -440,8 +423,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
              training: Optional[bool] = None) -> keras.KerasTensor:
         """Process concept graph.
 
-        Args:
-            inputs: Tuple of (node_features, adjacency_matrix)
+                inputs: Tuple of (node_features, adjacency_matrix)
                 - node_features: Shape (batch_size, num_nodes, concept_dim)
                 - adjacency_matrix: Shape (batch_size, num_nodes, num_nodes)
             training: Whether in training mode
@@ -543,29 +525,16 @@ class TemporalContextEncoder(keras.layers.Layer):
     Encodes temporal sequences using the framework's TransformerLayer
     to capture temporal dependencies and patterns.
 
-    Args:
-        temporal_dim: Dimension of temporal embeddings. Must be positive.
-        num_heads: Number of attention heads. Must be positive. Defaults to 8.
-        num_layers: Number of transformer layers. Must be positive. Defaults to 6.
-        max_sequence_length: Maximum sequence length. Must be positive. Defaults to 128.
-        dropout_rate: Dropout rate. Must be between 0 and 1. Defaults to 0.1.
-        normalization_type: Type of normalization ('layer_norm', 'rms_norm'). Defaults to 'layer_norm'.
-        ffn_type: Type of FFN ('mlp', 'swiglu'). Defaults to 'mlp'.
-        **kwargs: Additional keyword arguments for Layer base class
+    :param temporal_dim: Dimension of temporal embeddings. Must be positive.
+    :param num_heads: Number of attention heads. Must be positive. Defaults to 8.
+    :param num_layers: Number of transformer layers. Must be positive. Defaults to 6.
+    :param max_sequence_length: Maximum sequence length. Must be positive. Defaults to 128.
+    :param dropout_rate: Dropout rate. Must be between 0 and 1. Defaults to 0.1.
+    :param normalization_type: Type of normalization ('layer_norm', 'rms_norm'). Defaults to 'layer_norm'.
+    :param ffn_type: Type of FFN ('mlp', 'swiglu'). Defaults to 'mlp'. **kwargs: Additional keyword arguments for Layer base class
 
-    Input shape:
-        Temporal sequence tensor of shape (batch_size, seq_length, temporal_dim)
 
-    Output shape:
-        Encoded sequence tensor of shape (batch_size, seq_length, temporal_dim)
 
-    Example:
-        ```python
-        encoder = TemporalContextEncoder(
-            temporal_dim=512,
-            num_heads=8,
-            num_layers=6
-        )
 
         sequence = keras.Input(shape=(128, 512))
         encoded = encoder(sequence)
@@ -645,8 +614,7 @@ class TemporalContextEncoder(keras.layers.Layer):
     def call(self, sequence: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Encode temporal sequence.
 
-        Args:
-            sequence: Input sequence of shape (batch_size, seq_length, temporal_dim)
+                sequence: Input sequence of shape (batch_size, seq_length, temporal_dim)
             training: Whether in training mode
 
         Returns:
@@ -699,27 +667,10 @@ class ContextualMemoryBank(keras.layers.Layer):
     - Transformer encoder for temporal patterns
     - Integration layer for combining all modalities
 
-    Args:
-        config: MemoryBankConfig object with system parameters. If None, uses default config.
-        **kwargs: Additional keyword arguments for Layer base class
+    :param config: MemoryBankConfig object with system parameters. If None, uses default config. **kwargs: Additional keyword arguments for Layer base class
 
-    Input shape:
-        Dictionary containing:
-        - 'query': Query tensor for memory retrieval (batch_size, concept_dim)
-        - 'concept_graph': Tuple of (node_features, adjacency_matrix)
-        - 'temporal_sequence': Temporal sequence (batch_size, seq_len, temporal_dim)
 
-    Output shape:
-        Dictionary containing:
-        - 'integrated_output': Final integrated contextual output (batch_size, memory_dim)
-        - 'memory_output': Retrieved memory (batch_size, memory_dim)
-        - 'graph_output': Graph neural network output (batch_size, num_nodes, concept_dim)
-        - 'temporal_output': Temporal encoder output (batch_size, seq_len, temporal_dim)
 
-    Example:
-        ```python
-        config = MemoryBankConfig(memory_dim=512, concept_dim=256)
-        memory_bank = ContextualMemoryBank(config=config)
 
         # Define inputs
         query = keras.Input(shape=(256,))
@@ -819,8 +770,7 @@ class ContextualMemoryBank(keras.layers.Layer):
              training: Optional[bool] = None) -> Dict[str, keras.KerasTensor]:
         """Process inputs through the contextual memory bank.
 
-        Args:
-            inputs: Dictionary containing:
+                inputs: Dictionary containing:
                 - 'query': Query tensor for memory retrieval (batch_size, concept_dim)
                 - 'concept_graph': Tuple of (node_features, adjacency_matrix)
                 - 'temporal_sequence': Temporal sequence (batch_size, seq_len, temporal_dim)
@@ -939,17 +889,12 @@ def create_contextual_memory_model(
 ) -> keras.Model:
     """Create a complete model with Contextual Memory Bank.
 
-    Args:
-        config: Memory bank configuration. If None, uses default config.
-        include_downstream_modules: Whether to include example downstream modules
+    :param config: Memory bank configuration. If None, uses default config.
+    :param include_downstream_modules: Whether to include example downstream modules
 
     Returns:
         Keras model with contextual memory bank
 
-    Example:
-        ```python
-        # Create with default configuration
-        model = create_contextual_memory_model()
 
         # Create with custom configuration
         config = MemoryBankConfig(

@@ -98,64 +98,54 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class LearnableLogicOperator(keras.layers.Layer):
-    """A learnable logic operator that can perform various logical operations.
+    """
+    Differentiable learnable logic operator layer using fuzzy logic.
 
-    This layer implements differentiable logic operations with learnable parameters
-    to control the operation type and behavior. The layer learns to combine different
-    logical operations (AND, OR, XOR, NOT, NAND, NOR) based on the input data and
-    training objectives.
+    Embeds principles of fuzzy logic into a neural network layer, implementing
+    soft differentiable versions of Boolean gates. Inputs are first normalized
+    to ``[0, 1]`` via sigmoid, then soft operations are applied:
+    ``AND(p,q) = p*q``, ``OR(p,q) = p+q-p*q``, ``XOR(p,q) = p+q-2*p*q``,
+    ``NOT(p) = 1-p``, ``NAND(p,q) = 1-p*q``, ``NOR(p,q) = 1-(p+q-p*q)``.
+    The output is a weighted combination
+    ``Y = sum_i(alpha_i * f_i(X))`` where ``alpha_i = softmax(w_i / T)``.
 
-    The layer normalizes inputs to [0, 1] range using sigmoid activation and applies
-    soft differentiable versions of logical operations. The final output is a weighted
-    combination of all selected operations, where the weights are learned during training.
+    **Architecture Overview:**
 
-    Args:
-        operation_types: List of operation types to choose from. Available operations:
-            ['and', 'or', 'xor', 'not', 'nand', 'nor']. If None, all operations
-            are included.
-        use_temperature: Boolean, whether to use temperature scaling for soft operation
-            selection. Temperature scaling helps control the sharpness of operation
-            selection during training.
-        temperature_init: Float, initial temperature value. Higher values lead to
-            more uniform operation selection, lower values lead to sharper selection.
-            Must be positive.
-        operation_initializer: Initializer for the operation weights. If None,
-            uses 'random_uniform'.
-        temperature_initializer: Initializer for the temperature parameter. If None,
-            uses 'constant' with the temperature_init value.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        - Single tensor: A tensor of any shape `(batch_size, ...)`
-        - List of two tensors: Two tensors of the same shape `[(batch_size, ...), (batch_size, ...)]`
+        ┌──────────────────────────────────────────┐
+        │       LearnableLogicOperator             │
+        │                                          │
+        │  Input(s): x1, x2                        │
+        │         │                                │
+        │         ▼                                │
+        │  sigmoid(x1), sigmoid(x2)                │
+        │         │                                │
+        │         ▼                                │
+        │  ┌────┬────┬────┬────┬─────┬────┐       │
+        │  │AND │ OR │XOR │NOT │NAND │NOR │       │
+        │  └─┬──┴─┬──┴─┬──┴─┬──┴──┬──┴─┬──┘      │
+        │    │    │    │    │     │    │           │
+        │    ▼    ▼    ▼    ▼     ▼    ▼           │
+        │  Weighted sum: alpha_i * f_i(p, q)      │
+        │         │                                │
+        │         ▼                                │
+        │  Output (same shape as input)            │
+        └──────────────────────────────────────────┘
 
-    Output shape:
-        Same as input shape. If input is a list, output shape matches the first tensor.
-
-    Returns:
-        A tensor of the same shape as the input containing the result of the
-        learnable logic operations.
-
-    Raises:
-        ValueError: If operation_types contains invalid operation names.
-        ValueError: If temperature_init is not positive.
-        ValueError: If input tensors have different shapes when using binary operations.
-
-    Example:
-        Single input (unary operations):
-        >>> x = np.random.rand(4, 10, 10, 16)
-        >>> logic_op = LearnableLogicOperator(operation_types=['not', 'and'])
-        >>> y = logic_op(x)
-        >>> print(y.shape)
-        (4, 10, 10, 16)
-
-        Two inputs (binary operations):
-        >>> x1 = np.random.rand(4, 10, 10, 16)
-        >>> x2 = np.random.rand(4, 10, 10, 16)
-        >>> logic_op = LearnableLogicOperator(operation_types=['and', 'or', 'xor'])
-        >>> y = logic_op([x1, x2])
-        >>> print(y.shape)
-        (4, 10, 10, 16)
+    :param operation_types: List of operation types. Available:
+        ``['and', 'or', 'xor', 'not', 'nand', 'nor']``. If None, all included.
+    :type operation_types: Optional[List[str]]
+    :param use_temperature: Whether to use temperature scaling for soft selection.
+    :type use_temperature: bool
+    :param temperature_init: Initial temperature value. Must be positive.
+    :type temperature_init: float
+    :param operation_initializer: Initializer for operation weights.
+    :type operation_initializer: Union[str, keras.initializers.Initializer]
+    :param temperature_initializer: Initializer for temperature parameter.
+    :type temperature_initializer: Optional[Union[str, keras.initializers.Initializer]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -208,11 +198,11 @@ class LearnableLogicOperator(keras.layers.Layer):
         )
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> None:
-        """Build the layer weights.
+        """
+        Build the layer weights.
 
-        Args:
-            input_shape: Shape of the input tensor(s). Can be a single shape tuple
-                or a list of shape tuples for multiple inputs.
+        :param input_shape: Shape of the input tensor(s).
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
         # A single shape can be a list (e.g., from serialization), but a list
         # of shapes will be a list of lists/tuples/TensorShapes.
@@ -256,73 +246,78 @@ class LearnableLogicOperator(keras.layers.Layer):
         super().build(input_shape)
 
     def _soft_logic_and(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Soft differentiable AND operation.
+        """
+        Soft differentiable AND: ``p * q``.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Result of soft AND operation
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of soft AND operation.
+        :rtype: keras.KerasTensor
         """
         return ops.multiply(x1, x2)
 
     def _soft_logic_or(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Soft differentiable OR operation.
+        """
+        Soft differentiable OR: ``p + q - p*q``.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Result of soft OR operation
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of soft OR operation.
+        :rtype: keras.KerasTensor
         """
         return ops.add(ops.add(x1, x2), ops.negative(ops.multiply(x1, x2)))
 
     def _soft_logic_xor(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Soft differentiable XOR operation.
+        """
+        Soft differentiable XOR: ``p + q - 2*p*q``.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Result of soft XOR operation
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of soft XOR operation.
+        :rtype: keras.KerasTensor
         """
         return ops.subtract(ops.add(x1, x2), ops.multiply(2.0, ops.multiply(x1, x2)))
 
     def _soft_logic_not(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Soft differentiable NOT operation.
+        """
+        Soft differentiable NOT: ``1 - p``.
 
-        Args:
-            x: Input tensor
-
-        Returns:
-            Result of soft NOT operation
+        :param x: Input tensor.
+        :type x: keras.KerasTensor
+        :return: Result of soft NOT operation.
+        :rtype: keras.KerasTensor
         """
         return ops.subtract(1.0, x)
 
     def _soft_logic_nand(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Soft differentiable NAND operation.
+        """
+        Soft differentiable NAND: ``1 - p*q``.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Result of soft NAND operation
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of soft NAND operation.
+        :rtype: keras.KerasTensor
         """
         return ops.subtract(1.0, ops.multiply(x1, x2))
 
     def _soft_logic_nor(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
-        """Soft differentiable NOR operation.
+        """
+        Soft differentiable NOR: ``1 - (p + q - p*q)``.
 
-        Args:
-            x1: First input tensor
-            x2: Second input tensor
-
-        Returns:
-            Result of soft NOR operation
+        :param x1: First input tensor.
+        :type x1: keras.KerasTensor
+        :param x2: Second input tensor.
+        :type x2: keras.KerasTensor
+        :return: Result of soft NOR operation.
+        :rtype: keras.KerasTensor
         """
         or_result = ops.add(ops.add(x1, x2), ops.negative(ops.multiply(x1, x2)))
         return ops.subtract(1.0, or_result)
@@ -332,17 +327,15 @@ class LearnableLogicOperator(keras.layers.Layer):
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the logic operator.
+        """
+        Forward pass through the logic operator.
 
-        Args:
-            inputs: Input tensor(s). Can be single tensor or list of two tensors.
-                For single tensor input, the same tensor is used for both operands
-                in binary operations.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor after applying learnable logic operations.
+        :param inputs: Input tensor(s). Single tensor or list of two tensors.
+        :type inputs: Union[keras.KerasTensor, List[keras.KerasTensor]]
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor after applying learnable logic operations.
+        :rtype: keras.KerasTensor
         """
         # Handle input parsing
         if isinstance(inputs, list):
@@ -407,13 +400,13 @@ class LearnableLogicOperator(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape.
+        """
+        Compute output shape.
 
-        Args:
-            input_shape: Shape of the input(s).
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape of the input(s).
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         is_list_of_shapes = (
             isinstance(input_shape, list)
@@ -426,10 +419,11 @@ class LearnableLogicOperator(keras.layers.Layer):
             return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """
+        Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

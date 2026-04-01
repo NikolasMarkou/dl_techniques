@@ -6,109 +6,51 @@ from typing import List, Dict, Any, Tuple
 
 @keras.saving.register_keras_serializable()
 class PointCloudAutoencoder(keras.layers.Layer):
-    """
-    Modified DGCNN-based autoencoder for point cloud feature extraction.
+    """DGCNN-based autoencoder for point cloud feature extraction.
 
-    This layer implements the Feature Extraction Module from the paper. It uses
-    shared EdgeConv-style blocks to extract local and global features from two
-    point clouds and then reconstructs them using a decoder.
+    Uses shared EdgeConv-style blocks to extract multi-scale local and global
+    features from two point clouds and reconstructs them via a shared MLP
+    decoder. Three EdgeConv blocks capture progressively abstract geometric
+    structure; their outputs are concatenated and projected to 1024-D local
+    features, then max- and average-pooled to form a 2048-D global descriptor.
 
-    **Intent**: To learn distinctive and pose-attentive features from point clouds
-    in a semi-supervised manner, forming the foundation for the registration task.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Input: (Source PC, Target PC)                               │
-    │         Shape: (B, N, 3) each                                │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Shared Encoder (DGCNN-style, processes each PC separately)  │
-    │                                                              │
-    │  EdgeConv Block 1:                                           │
-    │  ├─ KNN Graph Construction (k neighbors)                     │
-    │  ├─ MLP [64, 64]                                             │
-    │  └─ Max Pooling → f1  (B, N, 64)                             │
-    │                                                              │
-    │  EdgeConv Block 2:                                           │
-    │  ├─ KNN Graph from f1                                        │
-    │  ├─ MLP [64, 64]                                             │
-    │  └─ Max Pooling → f2  (B, N, 64)                             │
-    │                                                              │
-    │  EdgeConv Block 3:                                           │
-    │  ├─ KNN Graph from f2                                        │
-    │  ├─ MLP [64]                                                 │
-    │  └─ Max Pooling → f3  (B, N, 64)                             │
-    │                                                              │
-    │  Feature Aggregation:                                        │
-    │  ├─ Concatenate [f1, f2, f3] → (B, N, 192)                   │
-    │  └─ MLP [1024] → local_features  (B, N, 1024)                │
-    │                                                              │
-    │  Global Feature Extraction:                                  │
-    │  ├─ Max Pooling(local_features) → (B, 1024)                  │
-    │  ├─ Avg Pooling(local_features) → (B, 1024)                  │
-    │  └─ Concatenate → global_features  (B, 2048)                 │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Shared Decoder (processes global features separately)       │
-    │                                                              │
-    │  ├─ Dense [2048] + LeakyReLU                                 │
-    │  ├─ Dense [1024] + LeakyReLU                                 │
-    │  ├─ Dense [N×3] (linear)                                     │
-    │  └─ Reshape → reconstruction  (B, N, 3)                      │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Output Tuple                                                │
-    │  ├─ Reconstructions: (x_rec, y_rec)  [(B,N,3), (B,N,3)]      │
-    │  ├─ Local Features: (local_x, local_y)  [(B,N,1024), ...]    │
-    │  └─ Global Features: (global_x, global_y)  [(B,2048), ...]   │
-    └──────────────────────────────────────────────────────────────┘
+    .. code-block:: text
 
-    Legend: B=batch_size, N=num_points
-    Note: Encoder and Decoder are shared (same weights) for both point clouds
-    ```
+        ┌───────────────────────────────────────────┐
+        │  Input: (Source PC, Target PC)  [B,N,3]   │
+        └──────────────────┬────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────┐
+        │  Shared Encoder (per PC)                  │
+        │  ┌─────────────────────────────────────┐  │
+        │  │ EdgeConv 1  KNN→MLP[64,64]→Max→f1  │  │
+        │  │ EdgeConv 2  KNN→MLP[64,64]→Max→f2  │  │
+        │  │ EdgeConv 3  KNN→MLP[64]→Max→f3     │  │
+        │  └──────────────────┬──────────────────┘  │
+        │                     ▼                     │
+        │  Concat[f1,f2,f3]→MLP[1024]→local [B,N,1024]│
+        │  MaxPool + AvgPool → global [B, 2048]     │
+        └──────────────────┬────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────┐
+        │  Shared Decoder (per PC)                  │
+        │  Dense[2048]→Dense[1024]→Dense[N*3]       │
+        │  → Reshape → reconstruction [B, N, 3]     │
+        └──────────────────┬────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────┐
+        │  Output: (reconstructions, locals, globals)│
+        └───────────────────────────────────────────┘
 
-    Args:
-        k_neighbors (int): Number of neighbors for the k-NN graph in EdgeConv blocks.
-        **kwargs: Additional arguments for Layer base class.
-
-    Call arguments:
-        inputs: A tuple of two Tensors (source_pc, target_pc).
-            - source_pc: Source point cloud. Shape: (batch, num_points_x, 3).
-            - target_pc: Target point cloud. Shape: (batch, num_points_y, 3).
-
-    Output:
-        A tuple containing:
-        - reconstructions: Tuple of (X_rec, Y_rec).
-        - local_features: Tuple of (local_X, local_Y).
-        - global_features: Tuple of (global_X, global_Y).
-
-    Examples:
-        >>> autoencoder = PointCloudAutoencoder(k_neighbors=20)
-        >>> source = keras.random.normal((8, 1024, 3))
-        >>> target = keras.random.normal((8, 1024, 3))
-        >>> (x_rec, y_rec), (local_x, local_y), (global_x, global_y) = autoencoder((source, target))
-        >>> print(x_rec.shape, local_x.shape, global_x.shape)
-        (8, 1024, 3) (8, 1024, 1024) (8, 2048)
+    :param k_neighbors: Number of neighbours for k-NN graphs. Defaults to 20.
+    :type k_neighbors: int
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(self, k_neighbors: int = 20, **kwargs):
-        """Initialize PointCloudAutoencoder.
-
-        Args:
-            k_neighbors: Number of neighbors for the k-NN graph in EdgeConv blocks.
-                Must be positive. Default is 20.
-            **kwargs: Additional arguments for Layer base class.
-
-        Raises:
-            ValueError: If k_neighbors is not positive.
-        """
+        """Initialise PointCloudAutoencoder."""
         super().__init__(**kwargs)
 
         if k_neighbors <= 0:
@@ -133,29 +75,22 @@ class PointCloudAutoencoder(keras.layers.Layer):
     def _make_mlp(self, units: List[int], name: str) -> keras.Sequential:
         """Create a Sequential MLP with ReLU activations.
 
-        Args:
-            units: List of hidden unit sizes for each Dense layer.
-            name: Name for the Sequential model.
-
-        Returns:
-            Sequential model with Dense layers and ReLU activations.
+        :param units: List of hidden unit sizes.
+        :type units: List[int]
+        :param name: Name for the Sequential model.
+        :type name: str
+        :return: Sequential MLP.
+        :rtype: keras.Sequential
         """
         return keras.Sequential([
             keras.layers.Dense(u, activation='relu') for u in units
         ], name=name)
 
     def build(self, input_shape: Tuple[Tuple, Tuple]):
-        """Build the layer by creating shape-dependent sub-layers.
+        """Build shape-dependent sub-layers.
 
-        The decoder's final layer depends on the number of points, so it must
-        be created here rather than in __init__.
-
-        Args:
-            input_shape: Tuple of (source_shape, target_shape) where each is
-                (batch_size, num_points, 3).
-
-        Raises:
-            ValueError: If num_points dimension is not defined.
+        :param input_shape: Tuple of ``(source_shape, target_shape)``.
+        :type input_shape: Tuple[Tuple, Tuple]
         """
         source_shape, target_shape = input_shape
         # Assuming both clouds are padded/sampled to the same number of points
@@ -185,19 +120,12 @@ class PointCloudAutoencoder(keras.layers.Layer):
         super().build(input_shape)
 
     def _encode(self, pc: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Shared encoder logic using DGCNN-style EdgeConv blocks.
+        """Shared encoder using DGCNN-style EdgeConv blocks.
 
-        EdgeConv captures local geometric structures by constructing a k-NN graph
-        and learning edge features between each point and its neighbors. Multiple
-        EdgeConv blocks capture features at different scales.
-
-        Args:
-            pc: Input point cloud of shape (batch_size, num_points, 3).
-
-        Returns:
-            Tuple of (local_features, global_features) where:
-                - local_features: Per-point features (batch_size, num_points, 1024)
-                - global_features: Point cloud descriptor (batch_size, 2048)
+        :param pc: Point cloud ``(B, N, 3)``.
+        :type pc: keras.KerasTensor
+        :return: Tuple of (local_features ``(B, N, 1024)``, global_features ``(B, 2048)``).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # EdgeConv Block 1: Extract first-level geometric features
         # Constructs k-NN graph and computes edge features for each point-neighbor pair
@@ -232,18 +160,14 @@ class PointCloudAutoencoder(keras.layers.Layer):
         return local_features, global_features
 
     def _decode(self, global_feature: keras.KerasTensor, num_points: int) -> keras.KerasTensor:
-        """Shared decoder logic to reconstruct point cloud from global features.
+        """Shared decoder reconstructing point cloud from global features.
 
-        The decoder is a simple MLP that expands the global feature vector
-        back to the original point cloud dimensionality. This reconstruction
-        loss encourages the encoder to preserve geometric information.
-
-        Args:
-            global_feature: Global descriptor of shape (batch_size, 2048).
-            num_points: Number of points to reconstruct.
-
-        Returns:
-            Reconstructed point cloud of shape (batch_size, num_points, 3).
+        :param global_feature: Global descriptor ``(B, 2048)``.
+        :type global_feature: keras.KerasTensor
+        :param num_points: Number of points to reconstruct.
+        :type num_points: int
+        :return: Reconstructed point cloud ``(B, N, 3)``.
+        :rtype: keras.KerasTensor
         """
         # Progressive expansion from global feature to full point cloud
         x = self.decoder_mlp1(global_feature)  # → (B, 2048)
@@ -256,17 +180,10 @@ class PointCloudAutoencoder(keras.layers.Layer):
     def call(self, inputs: Tuple[keras.KerasTensor, keras.KerasTensor]) -> Tuple[Tuple, Tuple, Tuple]:
         """Forward pass through the autoencoder for both point clouds.
 
-        Processes both source and target point clouds through shared encoder-decoder,
-        extracting features at multiple levels and reconstructing the inputs.
-
-        Args:
-            inputs: Tuple of (source_pc, target_pc) point clouds.
-
-        Returns:
-            Tuple of three tuples:
-                1. Reconstructions: (x_rec, y_rec)
-                2. Local features: (local_x, local_y) - per-point features
-                3. Global features: (global_x, global_y) - point cloud descriptors
+        :param inputs: Tuple of ``(source_pc, target_pc)``.
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :return: Tuple of (reconstructions, local_features, global_features).
+        :rtype: Tuple[Tuple, Tuple, Tuple]
         """
         source_pc, target_pc = inputs
         num_points_source = ops.shape(source_pc)[1]
@@ -290,15 +207,14 @@ class PointCloudAutoencoder(keras.layers.Layer):
     ) -> Tuple[Tuple, Tuple, Tuple]:
         """Compute output shape.
 
-        Args:
-            input_shape: Tuple of (source_shape, target_shape) where each is
-                (batch_size, num_points, 3).
-
-        Returns:
-            Tuple of three tuples:
-                1. Reconstructions: ((B, N_src, 3), (B, N_tgt, 3))
-                2. Local features: ((B, N_src, 1024), (B, N_tgt, 1024))
-                3. Global features: ((B, 2048), (B, 2048))
+        :param input_shape: Tuple of (source_shape, target_shape) where each is
+            (batch_size, num_points, 3).
+        :type input_shape: Tuple[Tuple, Tuple]
+        :return: Tuple of three tuples:
+            1. Reconstructions: ((B, N_src, 3), (B, N_tgt, 3))
+            2. Local features: ((B, N_src, 1024), (B, N_tgt, 1024))
+            3. Global features: ((B, 2048), (B, 2048))
+        :rtype: Tuple[Tuple, Tuple, Tuple]
         """
         source_shape, target_shape = input_shape
         batch = source_shape[0]
@@ -319,88 +235,47 @@ class PointCloudAutoencoder(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class CorrespondenceNetwork(keras.layers.Layer):
-    """
-    Augmented regression network to estimate point-to-GMM correspondences.
+    """Correspondence network estimating point-to-GMM soft assignments.
 
-    This layer takes local and global features from a point cloud and outputs
-    a probability distribution over the latent GMM components for each point.
+    Replaces the iterative E-step of a traditional GMM with a learned feed-forward
+    network. Local per-point features are concatenated with tiled global features
+    and passed through a 4-layer MLP followed by softmax, yielding per-point
+    probability distributions over K Gaussian components:
+    gamma[b,i,k] = P(point i belongs to component k | features).
 
-    **Intent**: To replace the iterative E-step of a traditional GMM with a
-    fast, learned correspondence estimation.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Input: (Local Features, Global Features)                    │
-    │         (B, N, F_local), (B, F_global)                       │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Feature Combination                                         │
-    │  ├─ Tile global_features to (B, N, F_global)                 │
-    │  └─ Concatenate with local_features                          │
-    │      → combined  (B, N, F_local + F_global)                  │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  4-Layer MLP (Correspondence Estimation Network)             │
-    │                                                              │
-    │  ├─ Dense(1024) + ReLU                                       │
-    │  ├─ Dense(256) + ReLU                                        │
-    │  ├─ Dense(128) + ReLU                                        │
-    │  └─ Dense(K) [no activation]                                 │
-    │      → logits  (B, N, K)                                     │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Softmax (per point, over K components)                      │
-    │  → gamma  (B, N, K)                                          │
-    │                                                              │
-    │  gamma[b,i,k] = probability that point i belongs to          │
-    │                 Gaussian component k in batch b              │
-    └──────────────────────────────────────────────────────────────┘
+    .. code-block:: text
 
-    Legend: B=batch_size, N=num_points, K=num_gaussians
-           F_local=local_feature_dim, F_global=global_feature_dim
-    ```
+        ┌───────────────────┐  ┌──────────────────┐
+        │ Local Features    │  │ Global Features   │
+        │ [B, N, F_local]   │  │ [B, F_global]     │
+        └────────┬──────────┘  └────────┬─────────┘
+                 │                      ▼
+                 │            ┌──────────────────┐
+                 │            │ Tile → [B,N,F_g] │
+                 │            └────────┬─────────┘
+                 └──────────┬──────────┘
+                            ▼
+                 ┌─────────────────────────────┐
+                 │ Concat → [B, N, F_l + F_g]  │
+                 └────────────┬────────────────┘
+                              ▼
+                 ┌─────────────────────────────┐
+                 │ MLP: 1024→256→128→K         │
+                 └────────────┬────────────────┘
+                              ▼
+                 ┌─────────────────────────────┐
+                 │ Softmax → gamma [B, N, K]   │
+                 └─────────────────────────────┘
 
-    Args:
-        num_gaussians (int): The number of latent GMM components (J).
-        **kwargs: Additional arguments for Layer base class.
-
-    Call arguments:
-        inputs: A tuple of (local_features, global_features).
-            - local_features: Shape (batch, num_points, feat_dim).
-            - global_features: Shape (batch, global_feat_dim).
-
-    Output:
-        Correspondence matrix gamma. Shape: (batch, num_points, num_gaussians).
-
-    Examples:
-        >>> corr_net = CorrespondenceNetwork(num_gaussians=32)
-        >>> local_feat = keras.random.normal((8, 1024, 1024))
-        >>> global_feat = keras.random.normal((8, 2048))
-        >>> gamma = corr_net((local_feat, global_feat))
-        >>> print(gamma.shape)
-        (8, 1024, 32)
-        >>> # Verify each row sums to 1 (probability distribution)
-        >>> print(keras.ops.sum(gamma, axis=-1)[0, 0])  # Should be ~1.0
+    :param num_gaussians: Number of latent GMM components K. Must be positive.
+    :type num_gaussians: int
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(self, num_gaussians: int, **kwargs):
-        """Initialize CorrespondenceNetwork.
-
-        Args:
-            num_gaussians: The number of latent GMM components (K). Must be positive.
-                Determines the expressiveness of the correspondence space.
-            **kwargs: Additional arguments for Layer base class.
-
-        Raises:
-            ValueError: If num_gaussians is not positive.
-        """
+        """Initialise CorrespondenceNetwork."""
         super().__init__(**kwargs)
 
         if num_gaussians <= 0:
@@ -421,13 +296,8 @@ class CorrespondenceNetwork(keras.layers.Layer):
     def build(self, input_shape: Tuple[Tuple, Tuple]):
         """Build the MLP with the correct input dimension.
 
-        The MLP input size depends on the concatenation of local and global features,
-        so it must be built here after shapes are known.
-
-        Args:
-            input_shape: Tuple of (local_shape, global_shape) where:
-                - local_shape: (batch_size, num_points, F_local)
-                - global_shape: (batch_size, F_global)
+        :param input_shape: Tuple of ``(local_shape, global_shape)``.
+        :type input_shape: Tuple[Tuple, Tuple]
         """
         local_shape, global_shape = input_shape
 
@@ -443,18 +313,10 @@ class CorrespondenceNetwork(keras.layers.Layer):
     def call(self, inputs: Tuple[keras.KerasTensor, keras.KerasTensor]) -> keras.KerasTensor:
         """Compute soft point-to-GMM component assignments.
 
-        For each point, computes a probability distribution over K Gaussian components,
-        effectively replacing the E-step of traditional GMM with a learned function.
-
-        Args:
-            inputs: Tuple of (local_features, global_features) where:
-                - local_features: Per-point features (B, N, F_local)
-                - global_features: Point cloud descriptor (B, F_global)
-
-        Returns:
-            Soft assignment matrix gamma of shape (B, N, K) where:
-                gamma[b,i,k] represents the probability that point i in batch b
-                belongs to Gaussian component k. Each row sums to 1.
+        :param inputs: Tuple of ``(local_features, global_features)``.
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :return: Soft assignment matrix gamma ``(B, N, K)``.
+        :rtype: keras.KerasTensor
         """
         local_features, global_features = inputs
         num_points = ops.shape(local_features)[1]
@@ -488,13 +350,12 @@ class CorrespondenceNetwork(keras.layers.Layer):
     ) -> Tuple:
         """Compute output shape.
 
-        Args:
-            input_shape: Tuple of (local_shape, global_shape) where:
-                - local_shape: (batch_size, num_points, F_local)
-                - global_shape: (batch_size, F_global)
-
-        Returns:
-            Output shape (batch_size, num_points, num_gaussians).
+        :param input_shape: Tuple of (local_shape, global_shape) where:
+            - local_shape: (batch_size, num_points, F_local)
+            - global_shape: (batch_size, F_global)
+        :type input_shape: Tuple[Tuple, Tuple]
+        :return: Output shape (batch_size, num_points, num_gaussians).
+        :rtype: Tuple
         """
         local_shape, global_shape = input_shape
         return (local_shape[0], local_shape[1], self.num_gaussians)

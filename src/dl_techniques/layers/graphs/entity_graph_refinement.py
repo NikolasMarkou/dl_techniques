@@ -94,141 +94,93 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class EntityGraphRefinement(keras.layers.Layer):
-    """
-    Entity-Graph Refinement Component for learning hierarchical relationships in embedding space.
+    """Entity-graph refinement layer for learning relational structure from embeddings.
 
-    This layer processes sequences of n-dimensional embeddings through a sophisticated pipeline:
+    Discovers abstract entities within an embedding sequence via a learnable entity
+    library queried through multi-head attention, then iteratively constructs a
+    sparse directed relationship graph. Each refinement step updates edge (i, j) as
+    G_{t+1}[i,j] = tanh(MLP([E_i, E_j, G_t[i,j], C])) where C = mean(X) is a
+    global context vector. Learned sparsification gates Gate[i,j] = sigmoid(MLP([E_i, E_j]))
+    prune irrelevant connections to produce the final graph.
 
-    1. **Entity Extraction**: Uses multi-head attention to dynamically identify entities
-       from input sequences by attending to a learnable entity library
-    2. **Dense Graph Construction**: Initializes a fully-connected directional relationship
-       matrix between all potential entity pairs
-    3. **Iterative Refinement**: Progressively refines relationships through multiple steps,
-       where each step conditions on entity representations, current graph state, and
-       global input context
-    4. **Learned Sparsification**: Applies trainable gating to focus on most salient
-       relationships while removing noise and irrelevant connections
+    **Architecture Overview:**
 
-    **Detailed Architecture Flow**:
-    ```
-    Input Embeddings [B, S, D]
-         │
-         ├─→ Positional Encoding (optional)
-         │
-         ├─→ Entity Extraction via Multi-Head Attention
-         │   ├─→ Query: Entity Library [M, D_e]
-         │   ├─→ Key/Value: Input Embeddings [B, S, D]
-         │   └─→ Output: Extracted Entities [B, M, D_e]
-         │
-         ├─→ Global Context: mean(Input Embeddings) [B, D]
-         │
-         ├─→ Dense Graph Initialization [B, M, M]
-         │
-         ├─→ Iterative Refinement (N steps)
-         │   ├─→ Pairwise Entity Features [B, M, M, 2*D_e]
-         │   ├─→ Current Edge Weights [B, M, M, 1]
-         │   ├─→ Global Context Tiled [B, M, M, D]
-         │   ├─→ MLP([entity_i, entity_j, edge_weight, context])
-         │   └─→ Updated Graph [B, M, M]
-         │
-         ├─→ Learned Sparsification
-         │   ├─→ Gate MLP([entity_i, entity_j]) → [0,1]
-         │   └─→ Graph * Gates [B, M, M]
-         │
-         └─→ Output: (Entities, Sparse Graph, Entity Mask)
-    ```
+    .. code-block:: text
 
-    Args:
-        max_entities: Maximum number of entities in the learnable entity library.
-            Controls the size of the relationship graph (max_entities × max_entities).
-        entity_dim: Dimensionality of entity representations. Should typically match
-            or be close to input embedding dimension for effective attention.
-        num_refinement_steps: Number of iterative refinement passes through the graph.
-            More steps allow learning of more complex relationship patterns but increase
-            computational cost. Defaults to 3.
-        initial_density: Controls the magnitude of initial random graph weights,
-            sampled from U(-initial_density, initial_density). Higher values create
-            denser initial graphs. Defaults to 0.8.
-        attention_heads: Number of attention heads for entity extraction. More heads
-            can capture diverse relationship patterns but increase parameters. Defaults to 8.
-        dropout_rate: Dropout probability applied in refinement and sparsification MLPs
-            for regularization. Defaults to 0.1.
-        refinement_activation: Activation function used in refinement MLP hidden layers.
-            'gelu' provides smooth gradients for better convergence. Defaults to 'gelu'.
-        entity_activity_threshold: Minimum attention score required for an entity to be
-            considered "active". Entities below this threshold are masked out. Defaults to 0.1.
-        use_positional_encoding: Whether to add learnable positional encodings to input
-            embeddings. Useful for sequence-order-dependent tasks. Defaults to True.
-        max_sequence_length: Maximum sequence length supported for positional encoding.
-            Should be >= typical input sequence lengths. Defaults to 1000.
-        regularization_weight: Strength of L1 sparsity regularization applied to final
-            graph weights. Higher values encourage sparser graphs. Defaults to 0.01.
-        activity_regularization_target: Target average activity level for graph weights.
-            Used to prevent dead or overly active graphs. Defaults to 0.1.
-        **kwargs: Additional arguments passed to Layer base class.
+        ┌──────────────────────────────────────────┐
+        │  Input Embeddings  [B, S, D]             │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  (Optional) Positional Encoding          │
+        └──────────────────┬───────────────────────┘
+                           ├──────────────────────┐
+                           ▼                      ▼
+        ┌─────────────────────────┐  ┌────────────────────┐
+        │  Entity Extraction      │  │  Global Context    │
+        │  MHA(Q=Library, KV=X)   │  │  C = mean(X)      │
+        │  → Entities [B, M, D_e] │  │  [B, D]           │
+        │  → Activity Mask [B, M] │  └─────────┬──────────┘
+        └────────────┬────────────┘            │
+                     ├─────────────────────────┤
+                     ▼                         ▼
+        ┌──────────────────────────────────────────┐
+        │  Dense Graph Init  [B, M, M]             │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Iterative Refinement (N steps)          │
+        │  MLP([E_i, E_j, edge, context]) → tanh   │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Learned Sparsification                  │
+        │  Gate = sigmoid(MLP([E_i, E_j]))         │
+        │  G_final = G_refined * Gate              │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Masking (activity + diagonal removal)   │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Output: (Entities, Graph, Entity Mask)  │
+        └──────────────────────────────────────────┘
 
-    Input Shape:
-        3D tensor: `(batch_size, sequence_length, embedding_dim)`
-
-        - batch_size: Number of sequences in the batch
-        - sequence_length: Length of each input sequence
-        - embedding_dim: Dimensionality of input embeddings
-
-    Output Shape:
-        Tuple of three tensors:
-
-        - **entities**: `(batch_size, max_entities, entity_dim)` - Extracted entity
-          representations from attention over input embeddings
-        - **graph**: `(batch_size, max_entities, max_entities)` - Sparse directional
-          relationship matrix where graph[b,i,j] represents strength of relationship
-          from entity i to entity j in batch b
-        - **entity_mask**: `(batch_size, max_entities)` - Binary mask indicating which
-          entities are active (attention score > threshold) for each batch
-
-    Examples:
-        ```python
-        # Basic usage for text sequence modeling
-        seq_len, embed_dim = 128, 768
-        embeddings = keras.Input(shape=(seq_len, embed_dim))
-
-        entity_layer = EntityGraphRefinement(
-            max_entities=50,           # Support up to 50 entities
-            entity_dim=embed_dim,      # Match input embedding dimension
-            num_refinement_steps=4,    # 4 iterative refinement steps
-            attention_heads=12         # 12-head attention for entity extraction
-        )
-
-        entities, graph, mask = entity_layer(embeddings)
-        model = keras.Model(inputs=embeddings, outputs=[entities, graph, mask])
-
-        # Advanced usage with custom hyperparameters
-        entity_layer = EntityGraphRefinement(
-            max_entities=100,
-            entity_dim=512,
-            num_refinement_steps=6,
-            initial_density=0.5,        # Sparser initial graphs
-            attention_heads=16,
-            dropout_rate=0.15,          # Higher dropout for regularization
-            entity_activity_threshold=0.05,  # Lower threshold for more entities
-            regularization_weight=0.02       # Stronger sparsity regularization
-        )
-
-        # Integration with transformer models
-        transformer_output = transformer_layer(input_embeddings)  # [B, S, D]
-        entities, relationships, active_mask = entity_layer(transformer_output)
-
-        # Use extracted relationships for downstream tasks
-        relationship_features = keras.layers.GlobalAveragePooling2D()(relationships)
-        classifier_output = keras.layers.Dense(num_classes)(relationship_features)
-        ```
-
-    Notes:
-        - The layer automatically handles variable sequence lengths through masking
-        - Entity library weights are learned end-to-end during training
-        - Graph weights are directional: graph[i,j] != graph[j,i] in general
-        - Sparsification is learned, not hand-tuned, adapting to data patterns
-        - Regularization terms are automatically added to model losses during training
-        - All sublayers are explicitly built for reliable serialization
+    :param max_entities: Size of the learnable entity library.
+    :type max_entities: int
+    :param entity_dim: Dimensionality of entity representations.
+    :type entity_dim: int
+    :param num_refinement_steps: Number of iterative graph refinement passes.
+        Defaults to 3.
+    :type num_refinement_steps: int
+    :param initial_density: Magnitude of initial random graph weights in
+        ``[-initial_density, initial_density]``. Defaults to 0.8.
+    :type initial_density: float
+    :param attention_heads: Number of heads for entity extraction attention.
+        Defaults to 8.
+    :type attention_heads: int
+    :param dropout_rate: Dropout probability for MLPs. Defaults to 0.1.
+    :type dropout_rate: float
+    :param refinement_activation: Activation for refinement MLP hidden layers.
+        Defaults to ``'gelu'``.
+    :type refinement_activation: str
+    :param entity_activity_threshold: Minimum attention score for an entity
+        to be considered active. Defaults to 0.1.
+    :type entity_activity_threshold: float
+    :param use_positional_encoding: Whether to add learnable positional encoding.
+        Defaults to ``True``.
+    :type use_positional_encoding: bool
+    :param max_sequence_length: Maximum supported sequence length for positional
+        encoding. Defaults to 1000.
+    :type max_sequence_length: int
+    :param regularization_weight: Strength of L1 sparsity regularization on
+        graph weights. Defaults to 0.01.
+    :type regularization_weight: float
+    :param activity_regularization_target: Target average activity level.
+        Defaults to 0.1.
+    :type activity_regularization_target: float
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -277,17 +229,11 @@ class EntityGraphRefinement(keras.layers.Layer):
                    f"{entity_dim} entity dimensions, {num_refinement_steps} refinement steps")
 
     def _validate_hyperparameters(self, params: Dict[str, Any]) -> None:
-        """
-        Comprehensive validation of all constructor hyperparameters.
+        """Validate all constructor hyperparameters.
 
-        Ensures all parameters are within valid ranges and compatible with each other.
-        Raises ValueError with descriptive messages for any invalid configurations.
-
-        Args:
-            params: Dictionary of parameter names and values from constructor locals()
-
-        Raises:
-            ValueError: If any parameter is invalid or incompatible
+        :param params: Dictionary of parameter names and values from constructor ``locals()``.
+        :type params: Dict[str, Any]
+        :raises ValueError: If any parameter is invalid or incompatible.
         """
         # Define validation rules as (condition, error_message) tuples
         validation_rules = [
@@ -322,18 +268,11 @@ class EntityGraphRefinement(keras.layers.Layer):
         logger.debug("All hyperparameters validated successfully")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build all sublayers and weights for the entity-graph refinement component.
+        """Build all sublayers and weights.
 
-        This method creates and explicitly builds all sublayers to ensure proper
-        serialization and weight initialization. The build order is carefully
-        designed to handle dependencies between components.
-
-        Args:
-            input_shape: Shape of input tensor (batch_size, sequence_length, embedding_dim)
-
-        Raises:
-            ValueError: If embedding dimension is not specified in input shape
+        :param input_shape: Shape ``(batch_size, sequence_length, embedding_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If embedding dimension is not specified.
         """
         # Extract and validate input dimensions
         _batch_size, sequence_length, embedding_dim = input_shape
@@ -421,20 +360,12 @@ class EntityGraphRefinement(keras.layers.Layer):
         logger.info("EntityGraphRefinement layer built successfully")
 
     def _get_edge_features(self, entities: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Create pairwise feature representations for all potential edges in the graph.
+        """Create pairwise feature representations for all potential edges.
 
-        For each pair of entities (i,j), concatenates their representations to create
-        edge features that will be used by the refinement and sparsification MLPs.
-        This creates a [batch, max_entities, max_entities, 2*entity_dim] tensor where
-        each element contains the concatenated features for one potential edge.
-
-        Args:
-            entities: Entity representations [batch_size, max_entities, entity_dim]
-
-        Returns:
-            Edge features tensor [batch_size, max_entities, max_entities, 2*entity_dim]
-            where edge_features[b,i,j] = concat(entities[b,i], entities[b,j])
+        :param entities: Entity representations ``[B, M, D_e]``.
+        :type entities: keras.KerasTensor
+        :return: Edge features ``[B, M, M, 2*D_e]``.
+        :rtype: keras.KerasTensor
         """
         # Create all pairwise combinations using broadcasting
         # entities_i[b,i,j] = entities[b,i] for all j
@@ -453,21 +384,14 @@ class EntityGraphRefinement(keras.layers.Layer):
             embeddings: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Extract entity representations from input embeddings using multi-head attention.
+        """Extract entity representations from input embeddings via multi-head attention.
 
-        Uses the learnable entity library as queries to attend over input embeddings.
-        Entities with high attention scores (> threshold) are considered "active" and
-        will participate in graph construction and refinement.
-
-        Args:
-            embeddings: Input embedding sequences [batch_size, seq_length, embed_dim]
-            training: Whether layer is in training mode (affects dropout)
-
-        Returns:
-            Tuple of:
-            - extracted_entities: [batch_size, max_entities, entity_dim]
-            - entity_mask: [batch_size, max_entities] binary mask for active entities
+        :param embeddings: Input sequences ``[B, S, D]``.
+        :type embeddings: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (extracted_entities ``[B, M, D_e]``, entity_mask ``[B, M]``).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         batch_size = ops.shape(embeddings)[0]
 
@@ -504,19 +428,12 @@ class EntityGraphRefinement(keras.layers.Layer):
         return extracted_entities, entity_mask
 
     def _initialize_dense_graph(self, batch_size: int) -> keras.KerasTensor:
-        """
-        Initialize dense relationship graph with random weights.
+        """Initialise dense relationship graph with random weights.
 
-        Creates a fully-connected directional graph where each edge weight is
-        randomly sampled from a uniform distribution. The initial density parameter
-        controls the magnitude of these initial weights.
-
-        Args:
-            batch_size: Number of graphs to create (one per batch element)
-
-        Returns:
-            Dense graph tensor [batch_size, max_entities, max_entities] with
-            random edge weights in range [-initial_density, initial_density]
+        :param batch_size: Number of graphs to create.
+        :type batch_size: int
+        :return: Dense graph ``[batch_size, M, M]``.
+        :rtype: keras.KerasTensor
         """
         graph_shape = (batch_size, self.max_entities, self.max_entities)
 
@@ -539,25 +456,18 @@ class EntityGraphRefinement(keras.layers.Layer):
             context: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Perform one iterative refinement step on the relationship graph.
+        """Perform one iterative refinement step on the relationship graph.
 
-        Uses a shared MLP to update each edge weight based on:
-        1. Source and target entity representations
-        2. Current edge weight
-        3. Global context vector from input embeddings
-
-        This allows the model to learn complex relationship patterns that depend
-        on both local entity properties and global input context.
-
-        Args:
-            graph: Current graph state [batch_size, max_entities, max_entities]
-            entities: Entity representations [batch_size, max_entities, entity_dim]
-            context: Global context vector [batch_size, embedding_dim]
-            training: Whether layer is in training mode
-
-        Returns:
-            Refined graph [batch_size, max_entities, max_entities] with updated edge weights
+        :param graph: Current graph state ``[B, M, M]``.
+        :type graph: keras.KerasTensor
+        :param entities: Entity representations ``[B, M, D_e]``.
+        :type entities: keras.KerasTensor
+        :param context: Global context vector ``[B, D]``.
+        :type context: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Refined graph ``[B, M, M]``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(graph)[0]
         embedding_dim = ops.shape(context)[-1]
@@ -604,21 +514,16 @@ class EntityGraphRefinement(keras.layers.Layer):
             entities: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply learned sparsification to focus on most important relationships.
+        """Apply learned sparsification to focus on important relationships.
 
-        Uses a separate MLP to predict gate probabilities for each edge based on
-        the source and target entity representations. Edges with low gate values
-        are effectively removed from the final graph.
-
-        Args:
-            graph: Dense refined graph [batch_size, max_entities, max_entities]
-            entities: Entity representations [batch_size, max_entities, entity_dim]
-            training: Whether layer is in training mode
-
-        Returns:
-            Sparsified graph [batch_size, max_entities, max_entities] where
-            each edge is multiplied by its learned gate probability
+        :param graph: Dense refined graph ``[B, M, M]``.
+        :type graph: keras.KerasTensor
+        :param entities: Entity representations ``[B, M, D_e]``.
+        :type entities: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Sparsified graph ``[B, M, M]``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(graph)[0]
 
@@ -655,20 +560,14 @@ class EntityGraphRefinement(keras.layers.Layer):
             graph: keras.KerasTensor,
             entity_mask: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Apply entity activity mask and remove self-connections from graph.
+        """Apply entity activity mask and remove self-connections.
 
-        Ensures that:
-        1. Only active entities (with high attention scores) participate in relationships
-        2. Self-connections are removed (diagonal elements set to 0)
-        3. Connections involving inactive entities are zeroed out
-
-        Args:
-            graph: Sparsified graph [batch_size, max_entities, max_entities]
-            entity_mask: Binary activity mask [batch_size, max_entities]
-
-        Returns:
-            Final masked graph [batch_size, max_entities, max_entities]
+        :param graph: Sparsified graph ``[B, M, M]``.
+        :type graph: keras.KerasTensor
+        :param entity_mask: Binary activity mask ``[B, M]``.
+        :type entity_mask: keras.KerasTensor
+        :return: Final masked graph ``[B, M, M]``.
+        :rtype: keras.KerasTensor
         """
         # Create connection mask: only allow edges between active entities
         mask_i = ops.expand_dims(entity_mask, axis=-1)    # [B, M, 1]
@@ -689,26 +588,15 @@ class EntityGraphRefinement(keras.layers.Layer):
             embeddings: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """
-        Forward pass through the complete entity-graph refinement pipeline.
+        """Forward pass through the entity-graph refinement pipeline.
 
-        Executes the full processing pipeline:
-        1. Optional positional encoding of input embeddings
-        2. Entity extraction via attention over learnable entity library
-        3. Dense graph initialization with random weights
-        4. Iterative graph refinement using entity and context information
-        5. Learned sparsification to focus on important relationships
-        6. Final masking to remove inactive entities and self-connections
-
-        Args:
-            embeddings: Input embedding sequences [batch_size, seq_length, embed_dim]
-            training: Whether layer is in training mode (affects dropout and logging)
-
-        Returns:
-            Tuple containing:
-            - entities: Extracted entity representations [batch_size, max_entities, entity_dim]
-            - graph: Final sparse relationship matrix [batch_size, max_entities, max_entities]
-            - entity_mask: Binary mask for active entities [batch_size, max_entities]
+        :param embeddings: Input embedding sequences ``[B, S, D]``.
+        :type embeddings: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (entities ``[B, M, D_e]``, graph ``[B, M, M]``,
+            entity_mask ``[B, M]``).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
         """
         batch_size = ops.shape(embeddings)[0]
 
@@ -778,14 +666,12 @@ class EntityGraphRefinement(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], ...]:
-        """
-        Compute output tensor shapes for the three returned tensors.
+        """Compute output tensor shapes for the three returned tensors.
 
-        Args:
-            input_shape: Shape of input tensor (batch_size, sequence_length, embedding_dim)
-
-        Returns:
-            Tuple of three shapes for (entities, graph, entity_mask)
+        :param input_shape: Shape ``(batch_size, sequence_length, embedding_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Tuple of shapes for (entities, graph, entity_mask).
+        :rtype: Tuple[Tuple[Optional[int], ...], ...]
         """
         batch_size = input_shape[0]
         entities_shape = (batch_size, self.max_entities, self.entity_dim)
@@ -794,13 +680,10 @@ class EntityGraphRefinement(keras.layers.Layer):
         return entities_shape, graph_shape, mask_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns all hyperparameters needed to reconstruct the layer.
-
-        Returns:
-            Dictionary containing all layer configuration parameters
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -830,28 +713,18 @@ def get_graph_statistics(
         entity_mask: np.ndarray,
         threshold: float = 0.1
 ) -> Dict[str, Any]:
-    """
-    Compute comprehensive statistics for an extracted entity graph.
+    """Compute comprehensive statistics for an extracted entity graph.
 
-    Analyzes the graph structure to provide insights into learned relationships,
-    sparsity patterns, and entity activity levels. Useful for debugging and
-    understanding model behavior.
-
-    Args:
-        entities: Entity representations [max_entities, entity_dim]
-        graph: Relationship matrix [max_entities, max_entities]
-        entity_mask: Binary activity mask [max_entities]
-        threshold: Minimum edge weight magnitude to consider as "strong" edge
-
-    Returns:
-        Dictionary containing detailed graph statistics:
-        - active_entities: Number of entities above activity threshold
-        - total_edges: Number of strong edges (above threshold)
-        - sparsity: Fraction of possible edges that are weak/absent
-        - avg_edge_weight: Average magnitude of strong edge weights
-        - max_edge_weight: Maximum edge weight magnitude
-        - positive_edges: Number of positive strong edges
-        - negative_edges: Number of negative strong edges
+    :param entities: Entity representations ``[max_entities, entity_dim]``.
+    :type entities: np.ndarray
+    :param graph: Relationship matrix ``[max_entities, max_entities]``.
+    :type graph: np.ndarray
+    :param entity_mask: Binary activity mask ``[max_entities]``.
+    :type entity_mask: np.ndarray
+    :param threshold: Minimum edge weight magnitude for a "strong" edge.
+    :type threshold: float
+    :return: Dictionary of graph statistics.
+    :rtype: Dict[str, Any]
     """
     # Find indices of active entities
     active_indices = np.where(entity_mask > 0.5)[0]
@@ -895,20 +768,17 @@ def extract_hierarchies(
         entity_mask: np.ndarray,
         threshold: float = 0.3
 ) -> List[Tuple[int, int, float]]:
-    """
-    Extract hierarchical relationships from the learned entity graph.
+    """Extract hierarchical relationships from the learned entity graph.
 
-    Identifies directed relationships where entity A strongly influences entity B
-    but not vice versa, suggesting a hierarchical or causal relationship.
-
-    Args:
-        graph: Relationship matrix [max_entities, max_entities]
-        entity_mask: Binary activity mask [max_entities]
-        threshold: Minimum edge weight to consider as significant relationship
-
-    Returns:
-        List of (parent_idx, child_idx, strength) tuples representing hierarchies,
-        sorted by relationship strength in descending order
+    :param graph: Relationship matrix ``[max_entities, max_entities]``.
+    :type graph: np.ndarray
+    :param entity_mask: Binary activity mask ``[max_entities]``.
+    :type entity_mask: np.ndarray
+    :param threshold: Minimum edge weight for a significant relationship.
+    :type threshold: float
+    :return: List of ``(parent_idx, child_idx, strength)`` tuples, sorted
+        by strength descending.
+    :rtype: List[Tuple[int, int, float]]
     """
     # Get active entity indices
     active_indices = np.where(entity_mask > 0.5)[0]

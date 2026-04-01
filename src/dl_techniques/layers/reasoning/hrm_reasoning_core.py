@@ -80,181 +80,93 @@ from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 @keras.saving.register_keras_serializable()
 class HierarchicalReasoningCore(keras.layers.Layer):
     """
-    Stateful hierarchical reasoning core for complex multi-step reasoning tasks.
+    Stateful hierarchical reasoning core for multi-step cognitive tasks.
 
-    This layer implements the central engine of the Hierarchical Reasoning Model (HRM),
-    featuring dual-level reasoning modules, persistent state management, and adaptive
-    computation capabilities. The core performs iterative refinement of high-level and
-    low-level representations through multiple reasoning cycles, enabling sophisticated
-    reasoning patterns for complex problem solving.
+    Implements the central engine of the Hierarchical Reasoning Model (HRM),
+    maintaining dual persistent states: ``z_h`` (high-level abstract plans)
+    and ``z_l`` (low-level detailed features). Each forward pass performs
+    iterative reasoning cycles where ``z_l = L_Module(z_l, z_h + input_emb)``
+    and ``z_h = H_Module(z_h, z_l)`` refine both representations. Only the
+    final cycle accumulates gradients (truncated BPTT), enabling deep
+    reasoning without prohibitive memory cost. An adaptive computation
+    ``q_head`` produces halt/continue logits for dynamic depth control.
 
-    **Intent**: Provide a recurrent reasoning architecture that can perform variable-depth
-    computation through hierarchical reasoning cycles, with integrated puzzle context and
-    adaptive computation mechanisms for complex cognitive tasks.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input: {token_ids, puzzle_ids} + Carry: {z_h, z_l}
-           ↓
-    Token Embedding + Puzzle Embedding (optional)
-           ↓
-    Positional Encoding (Learned or RoPE)
-           ↓
-    ┌─────── Reasoning Cycles (with stop_gradient) ──────┐
-    │  for h_cycle in range(h_cycles):                   │
-    │    for l_cycle in range(l_cycles):                 │
-    │      z_l = L_Reasoning(z_l, z_h + input_emb)       │
-    │    z_h = H_Reasoning(z_h, z_l)                     │
-    └────────────────────────────────────────────────────┘
-           ↓
-    Final Step (with gradients):
-      z_l = L_Reasoning(z_l, z_h + input_emb)
-      z_h = H_Reasoning(z_h, z_l)
-           ↓
-    Output Heads:
-      - LM Head: z_h → logits (language modeling)
-      - Q Head: z_h[0] → {halt, continue} (adaptive computation)
-           ↓
-    New Carry: {z_h, z_l} (detached) + Outputs
-    ```
+    .. code-block:: text
 
-    **Key Components**:
-    1. **Stateful Operation**: Maintains z_h (high-level) and z_l (low-level) states
-    2. **Hierarchical Reasoning**: Separate H and L reasoning modules for multi-level processing
-    3. **Iterative Cycles**: Multiple reasoning cycles with gradient control for efficiency
-    4. **Puzzle Context**: Optional sparse puzzle embeddings for task-specific context
-    5. **Adaptive Computation**: Q-learning head for halt/continue decisions
-    6. **Efficient Training**: Gradient detachment for all but final reasoning step
+        ┌──────────────────────────────────────────────────────┐
+        │           HierarchicalReasoningCore                  │
+        │                                                      │
+        │  {token_ids, puzzle_ids} + Carry: {z_h, z_l}        │
+        │              │                                       │
+        │              ▼                                       │
+        │  Token Embedding + Puzzle Embedding (optional)       │
+        │  + Positional Encoding (Learned / RoPE)              │
+        │              │                                       │
+        │              ▼                                       │
+        │  ┌─── Reasoning Cycles (stop_gradient) ───┐         │
+        │  │  for h in h_cycles:                     │         │
+        │  │    for l in l_cycles:                   │         │
+        │  │      z_l ← L_Reasoning(z_l, z_h+emb)   │         │
+        │  │    z_h ← H_Reasoning(z_h, z_l)         │         │
+        │  └─────────────────────────────────────────┘         │
+        │              │                                       │
+        │              ▼                                       │
+        │  Final Step (with gradients):                        │
+        │    z_l ← L_Reasoning(z_l, z_h + emb)                │
+        │    z_h ← H_Reasoning(z_h, z_l)                      │
+        │              │                                       │
+        │         ┌────┴────┐                                  │
+        │         ▼         ▼                                  │
+        │  LM Head(logits)  Q Head(halt/continue)              │
+        │              │                                       │
+        │              ▼                                       │
+        │  New Carry: {z_h, z_l} (detached)                    │
+        └──────────────────────────────────────────────────────┘
 
-    **Reasoning Cycle Details**:
-    - **High-level cycles** (h_cycles): Abstract reasoning steps
-    - **Low-level cycles** (l_cycles): Detailed processing steps
-    - **Gradient Management**: Only final step trains to prevent vanishing gradients
-    - **State Updates**: Progressive refinement of both z_h and z_l representations
-
-    Args:
-        vocab_size: Integer, size of the vocabulary for token embeddings.
-            Must be positive. Determines the input space for language modeling.
-        seq_len: Integer, maximum sequence length for input tokens.
-            Must be positive. Defines the temporal processing window.
-        embed_dim: Integer, embedding dimension throughout the model.
-            Must be positive and typically divisible by num_heads.
-        num_puzzle_identifiers: Integer, number of unique puzzle identifiers.
-            Must be positive. Used for task-specific context embedding.
-        puzzle_emb_dim: Integer, dimension of puzzle embeddings.
-            Use 0 to disable puzzle embeddings. When > 0, provides task context.
-        batch_size: Integer, batch size for training and state management.
-            Must be positive. Used for stateful operations and initialization.
-        h_layers: Integer, number of layers in high-level reasoning module.
-            Must be positive. Controls depth of abstract reasoning.
-        l_layers: Integer, number of layers in low-level reasoning module.
-            Must be positive. Controls depth of detailed processing.
-        h_cycles: Integer, number of high-level reasoning cycles per forward pass.
-            Must be positive. More cycles enable deeper abstract reasoning.
-        l_cycles: Integer, number of low-level reasoning cycles per h_cycle.
-            Must be positive. More cycles enable more detailed processing.
-        num_heads: Integer, number of attention heads in reasoning modules.
-            Must be positive and divide embed_dim evenly.
-        ffn_expansion_factor: Integer, expansion factor for feed-forward networks.
-            Must be positive. Typically 4 for standard transformer scaling.
-        pos_encodings: String, type of positional encoding to use.
-            Must be "rope" or "learned". Affects how sequence positions are encoded.
-        rope_theta: Float, theta parameter for rotary position embeddings.
-            Only used when pos_encodings="rope". Defaults to 10000.0.
-        dropout_rate: Float between 0 and 1, dropout rate for regularization.
-            Applied throughout reasoning modules. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias parameters in linear layers.
-            Defaults to False following modern practices.
-        embeddings_initializer: String or Initializer, initialization for embeddings.
-            Defaults to 'truncated_normal' for stable training.
-        kernel_initializer: String or Initializer, initialization for kernel weights.
-            Defaults to 'he_normal' for good gradient flow.
-        embeddings_regularizer: Optional Regularizer for embedding weights.
-        kernel_regularizer: Optional Regularizer for kernel weights.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        Dictionary with:
-        - carry: Dict with "z_h" and "z_l" tensors of shape
-          `(batch_size, total_seq_len, embed_dim)`
-        - inputs: Dict with:
-          - "token_ids": `(batch_size, seq_len)`
-          - "puzzle_ids": `(batch_size,)` if puzzle_emb_dim > 0
-
-    Output shape:
-        Tuple of (new_carry, outputs) where:
-        - new_carry: Dict with "z_h", "z_l" of shape `(batch_size, total_seq_len, embed_dim)`
-        - outputs: Dict with:
-          - "logits": `(batch_size, seq_len, vocab_size)`
-          - "q_halt_logits": `(batch_size,)`
-          - "q_continue_logits": `(batch_size,)`
-
-    Attributes:
-        token_embedding: Embedding layer for input tokens.
-        puzzle_embedding: SparsePuzzleEmbedding for task context (if enabled).
-        position_embedding: PositionalEmbedding for learned positions (if used).
-        rope: RotaryPositionEmbedding for rotary positions (if used).
-        h_reasoning: HierarchicalReasoningModule for high-level processing.
-        l_reasoning: HierarchicalReasoningModule for low-level processing.
-        lm_head: Dense layer for language modeling predictions.
-        q_head: Dense layer for adaptive computation decisions.
-        h_init: Initial high-level state parameter.
-        l_init: Initial low-level state parameter.
-
-    Methods:
-        empty_carry(batch_size): Create empty carry state for initialization.
-        reset_carry(reset_flag, carry): Reset carry state based on halt decisions.
-
-    Example:
-        ```python
-        # Basic configuration
-        core = HierarchicalReasoningCore(
-            vocab_size=10000,
-            seq_len=128,
-            embed_dim=512,
-            num_puzzle_identifiers=100,
-            puzzle_emb_dim=64,
-            batch_size=32
-        )
-
-        # Initialize carry state
-        carry = core.empty_carry(batch_size=32)
-
-        # Prepare inputs
-        inputs = {
-            "token_ids": keras.random.randint((32, 128), 0, 10000),
-            "puzzle_ids": keras.random.randint((32,), 0, 100)
-        }
-
-        # Forward pass
-        new_carry, outputs = core(carry, inputs)
-
-        # Access outputs
-        logits = outputs["logits"]  # (32, 128, 10000)
-        halt_logits = outputs["q_halt_logits"]  # (32,)
-
-        # Advanced configuration with more reasoning cycles
-        advanced_core = HierarchicalReasoningCore(
-            vocab_size=32000,
-            seq_len=256,
-            embed_dim=768,
-            num_puzzle_identifiers=500,
-            puzzle_emb_dim=128,
-            batch_size=16,
-            h_layers=6,
-            l_layers=6,
-            h_cycles=3,
-            l_cycles=3,
-            num_heads=12,
-            pos_encodings="rope",
-            dropout_rate=0.1
-        )
-        ```
-
-    Note:
-        This layer implements sophisticated gradient management where only the final
-        reasoning step accumulates gradients, making training efficient across many
-        cycles while still learning effective reasoning patterns.
+    :param vocab_size: Size of the vocabulary for token embeddings.
+    :type vocab_size: int
+    :param seq_len: Maximum sequence length for input tokens.
+    :type seq_len: int
+    :param embed_dim: Embedding dimension throughout the model.
+    :type embed_dim: int
+    :param num_puzzle_identifiers: Number of unique puzzle identifiers.
+    :type num_puzzle_identifiers: int
+    :param puzzle_emb_dim: Dimension of puzzle embeddings. Use 0 to disable.
+    :type puzzle_emb_dim: int
+    :param batch_size: Batch size for stateful operations.
+    :type batch_size: int
+    :param h_layers: Number of layers in high-level reasoning module.
+    :type h_layers: int
+    :param l_layers: Number of layers in low-level reasoning module.
+    :type l_layers: int
+    :param h_cycles: Number of high-level reasoning cycles per forward pass.
+    :type h_cycles: int
+    :param l_cycles: Number of low-level reasoning cycles per h_cycle.
+    :type l_cycles: int
+    :param num_heads: Number of attention heads in reasoning modules.
+    :type num_heads: int
+    :param ffn_expansion_factor: FFN expansion factor. Defaults to 4.
+    :type ffn_expansion_factor: int
+    :param pos_encodings: Positional encoding type (``"rope"`` or ``"learned"``).
+    :type pos_encodings: Literal["rope", "learned"]
+    :param rope_theta: Theta parameter for RoPE. Defaults to 10000.0.
+    :type rope_theta: float
+    :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear layers. Defaults to False.
+    :type use_bias: bool
+    :param embeddings_initializer: Initialization for embeddings.
+    :type embeddings_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_initializer: Initialization for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param embeddings_regularizer: Optional regularizer for embeddings.
+    :type embeddings_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -501,12 +413,12 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         """
         Create input embeddings from token and puzzle IDs.
 
-        Args:
-            token_ids: Token ID tensor of shape (batch_size, seq_len).
-            puzzle_ids: Puzzle ID tensor of shape (batch_size,) or None.
-
-        Returns:
-            Combined embeddings tensor of shape (batch_size, total_seq_len, embed_dim).
+        :param token_ids: Token ID tensor of shape ``(batch_size, seq_len)``.
+        :type token_ids: keras.KerasTensor
+        :param puzzle_ids: Puzzle ID tensor of shape ``(batch_size,)`` or None.
+        :type puzzle_ids: Optional[keras.KerasTensor]
+        :return: Combined embeddings of shape ``(batch_size, total_seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Token embeddings
         token_emb = self.token_embedding(token_ids)
@@ -539,11 +451,10 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         """
         Create empty carry state for initialization.
 
-        Args:
-            batch_size: Batch size for state tensors.
-
-        Returns:
-            Dictionary with "z_h" and "z_l" zero-initialized tensors.
+        :param batch_size: Batch size for state tensors.
+        :type batch_size: int
+        :return: Dictionary with ``"z_h"`` and ``"z_l"`` zero-initialized tensors.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         return {
             "z_h": keras.ops.zeros((batch_size, self.total_seq_len, self.embed_dim)),
@@ -558,13 +469,13 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         """
         Reset carry state for halted sequences.
 
-        Args:
-            reset_flag: Boolean tensor of shape (batch_size,) indicating which
-                sequences to reset.
-            carry: Current carry state dictionary.
-
-        Returns:
-            Updated carry state with reset sequences reinitialized.
+        :param reset_flag: Boolean tensor of shape ``(batch_size,)`` indicating
+            which sequences to reset.
+        :type reset_flag: keras.KerasTensor
+        :param carry: Current carry state dictionary.
+        :type carry: Dict[str, keras.KerasTensor]
+        :return: Updated carry state with reset sequences reinitialized.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         batch_size = keras.ops.shape(reset_flag)[0]
 
@@ -594,15 +505,14 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         """
         Forward pass through the hierarchical reasoning core.
 
-        Args:
-            carry: Current carry state dict with "z_h" and "z_l" tensors.
-            inputs: Input dict with "token_ids" and optionally "puzzle_ids".
-            training: Boolean indicating training mode.
-
-        Returns:
-            Tuple of (new_carry, outputs) where:
-            - new_carry: Updated carry state dict (detached from gradients)
-            - outputs: Dict with "logits", "q_halt_logits", "q_continue_logits"
+        :param carry: Current carry state dict with ``"z_h"`` and ``"z_l"`` tensors.
+        :type carry: Dict[str, keras.KerasTensor]
+        :param inputs: Input dict with ``"token_ids"`` and optionally ``"puzzle_ids"``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (new_carry, outputs).
+        :rtype: Tuple[Dict[str, keras.KerasTensor], Dict[str, keras.KerasTensor]]
         """
         # Get input embeddings
         puzzle_ids = inputs.get("puzzle_ids") if self.puzzle_emb_dim > 0 else None
@@ -659,11 +569,10 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         """
         Compute output shapes for new_carry and outputs.
 
-        Args:
-            input_shape: Input shape dictionary.
-
-        Returns:
-            Tuple of (new_carry_shape, outputs_shape) dictionaries.
+        :param input_shape: Input shape dictionary.
+        :type input_shape: Dict[str, Tuple[Optional[int], ...]]
+        :return: Tuple of (new_carry_shape, outputs_shape) dictionaries.
+        :rtype: Tuple[Dict, Dict]
         """
         batch_size = None
         if "token_ids" in input_shape:
@@ -686,8 +595,8 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         """
         Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters for proper serialization.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

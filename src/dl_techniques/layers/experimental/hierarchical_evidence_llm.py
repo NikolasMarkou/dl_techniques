@@ -28,14 +28,15 @@ class EvidenceEncoder(keras.layers.Layer):
     - Global evidence: document-level semantics, topic coherence, discourse structure
     - External evidence: retrieved knowledge, factual support, world knowledge
 
-    **Architecture**:
-    ```
-    Input Context → [Local Encoder, Global Encoder, External Encoder]
-                           ↓              ↓              ↓
-                    Local Evidence  Global Evidence  External Evidence
-                           ↓              ↓              ↓
-                    Evidence Fusion → Combined Evidence Representation
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+            Input Context → [Local Encoder, Global Encoder, External Encoder]
+                                   ↓              ↓              ↓
+                            Local Evidence  Global Evidence  External Evidence
+                                   ↓              ↓              ↓
+                            Evidence Fusion → Combined Evidence Representation
+
 
     **Mathematical Operations**:
     - Local: e_local = LocalEncoder(context[-window:])
@@ -43,30 +44,13 @@ class EvidenceEncoder(keras.layers.Layer):
     - External: e_external = ExternalEncoder(retrieved_docs)
     - Fusion: evidence = MLP([e_local; e_global; e_external])
 
-    Args:
-        embed_dim: Integer, embedding dimension for all evidence types.
-            Must be positive. Defaults to 768.
-        local_window: Integer, context window size for local evidence.
-            Must be positive. Defaults to 32.
-        num_heads: Integer, number of attention heads for evidence encoding.
-            Must be positive. Defaults to 12.
-        dropout_rate: Float, dropout rate for regularization.
-            Must be between 0 and 1. Defaults to 0.1.
-        use_external: Boolean, whether to include external evidence encoding.
-            Defaults to True.
-        **kwargs: Additional arguments for Layer base class.
+    :param embed_dim: Integer, embedding dimension for all evidence types. Must be positive. Defaults to 768.
+    :param local_window: Integer, context window size for local evidence. Must be positive. Defaults to 32.
+    :param num_heads: Integer, number of attention heads for evidence encoding. Must be positive. Defaults to 12.
+    :param dropout_rate: Float, dropout rate for regularization. Must be between 0 and 1. Defaults to 0.1.
+    :param use_external: Boolean, whether to include external evidence encoding. Defaults to True. **kwargs: Additional arguments for Layer base class.
 
-    Input shape:
-        Dictionary with keys:
-        - 'context': 3D tensor (batch_size, seq_len, embed_dim) - input context
-        - 'external': 3D tensor (batch_size, num_docs, embed_dim) - external docs (optional)
 
-    Output shape:
-        Dictionary with keys:
-        - 'local': 3D tensor (batch_size, seq_len, embed_dim) - local evidence
-        - 'global': 3D tensor (batch_size, seq_len, embed_dim) - global evidence
-        - 'external': 3D tensor (batch_size, seq_len, embed_dim) - external evidence
-        - 'combined': 3D tensor (batch_size, seq_len, embed_dim) - fused evidence
     """
 
     def __init__(
@@ -262,16 +246,17 @@ class HierarchicalEvidenceAggregator(keras.layers.Layer):
     at multiple temporal and semantic scales. It builds evidence pyramids that
     capture reasoning patterns at different levels of abstraction.
 
-    **Architecture**:
-    ```
-    Evidence Input → [Token-level, Phrase-level, Sentence-level, Document-level]
-                           ↓              ↓              ↓              ↓
-                    Hierarchical Pooling and Attention Across Scales
-                           ↓
-                    Multi-scale Evidence Representation
-                           ↓
-                    Support Score Computation → Evidence Weights
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+            Evidence Input → [Token-level, Phrase-level, Sentence-level, Document-level]
+                                   ↓              ↓              ↓              ↓
+                            Hierarchical Pooling and Attention Across Scales
+                                   ↓
+                            Multi-scale Evidence Representation
+                                   ↓
+                            Support Score Computation → Evidence Weights
+
 
     **Hierarchy Levels**:
     1. **Token-level**: Individual token evidence and local dependencies
@@ -279,24 +264,13 @@ class HierarchicalEvidenceAggregator(keras.layers.Layer):
     3. **Sentence-level**: Sentence semantics and discourse relations
     4. **Document-level**: Global coherence and topic consistency
 
-    Args:
-        embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
-        num_levels: Integer, number of hierarchy levels. Must be positive. Defaults to 4.
-        pooling_sizes: List of integers, pooling window sizes for each level.
-            Length must match num_levels. Defaults to [1, 4, 16, 64].
-        num_heads: Integer, attention heads for cross-level attention.
-            Must be positive. Defaults to 8.
-        dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1.
-        **kwargs: Additional arguments for Layer base class.
+    :param embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
+    :param num_levels: Integer, number of hierarchy levels. Must be positive. Defaults to 4.
+    :param pooling_sizes: List of integers, pooling window sizes for each level. Length must match num_levels. Defaults to [1, 4, 16, 64].
+    :param num_heads: Integer, attention heads for cross-level attention. Must be positive. Defaults to 8.
+    :param dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1. **kwargs: Additional arguments for Layer base class.
 
-    Input shape:
-        3D tensor with shape: (batch_size, seq_len, embed_dim)
 
-    Output shape:
-        Dictionary with keys:
-        - 'hierarchical_evidence': 4D tensor (batch_size, num_levels, seq_len, embed_dim)
-        - 'support_scores': 3D tensor (batch_size, seq_len, num_levels)
-        - 'aggregated_support': 3D tensor (batch_size, seq_len, embed_dim)
     """
 
     def __init__(
@@ -442,16 +416,17 @@ class SupportEmbeddingLayer(keras.layers.Layer):
     confidence scores, uncertainty estimates, and reasoning chain representations
     to provide comprehensive support for generation decisions.
 
-    **Architecture**:
-    ```
-    [Combined Evidence, Hierarchical Support]
-                    ↓
-    Support Embedding Computation
-                    ↓
-    [Confidence, Uncertainty, Reasoning] → Support Representation
-                    ↓
-    Token Support Scores → Generation Support
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+            [Combined Evidence, Hierarchical Support]
+                            ↓
+            Support Embedding Computation
+                            ↓
+            [Confidence, Uncertainty, Reasoning] → Support Representation
+                            ↓
+            Token Support Scores → Generation Support
+
 
     **Support Components**:
     - **Confidence**: How certain the model is about each token choice
@@ -459,26 +434,13 @@ class SupportEmbeddingLayer(keras.layers.Layer):
     - **Reasoning**: Chain-of-thought style reasoning embeddings
     - **Evidence**: Source and quality of supporting evidence
 
-    Args:
-        vocab_size: Integer, vocabulary size for token support. Must be positive.
-        embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
-        support_dim: Integer, support embedding dimension. Must be positive. Defaults to 256.
-        num_reasoning_steps: Integer, reasoning chain length. Must be positive. Defaults to 4.
-        dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1.
-        **kwargs: Additional arguments for Layer base class.
+    :param vocab_size: Integer, vocabulary size for token support. Must be positive.
+    :param embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
+    :param support_dim: Integer, support embedding dimension. Must be positive. Defaults to 256.
+    :param num_reasoning_steps: Integer, reasoning chain length. Must be positive. Defaults to 4.
+    :param dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1. **kwargs: Additional arguments for Layer base class.
 
-    Input shape:
-        Dictionary with keys:
-        - 'evidence': 3D tensor (batch_size, seq_len, embed_dim) - evidence embeddings
-        - 'hierarchical_support': 3D tensor (batch_size, seq_len, embed_dim) - hierarchical support
 
-    Output shape:
-        Dictionary with keys:
-        - 'token_support': 3D tensor (batch_size, seq_len, vocab_size) - per-token support scores
-        - 'confidence': 2D tensor (batch_size, seq_len) - confidence scores
-        - 'uncertainty': 2D tensor (batch_size, seq_len) - uncertainty estimates
-        - 'reasoning_chain': 4D tensor (batch_size, seq_len, num_reasoning_steps, support_dim)
-        - 'support_embeddings': 3D tensor (batch_size, seq_len, support_dim) - final support
     """
 
     def __init__(
@@ -646,30 +608,16 @@ class EvidenceSupportedTokenGeneration(keras.layers.Layer):
     - Support for external knowledge integration
     - Hierarchical evidence aggregation across temporal scales
 
-    Args:
-        vocab_size: Integer, vocabulary size. Must be positive.
-        embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
-        max_seq_len: Integer, maximum sequence length. Must be positive. Defaults to 512.
-        num_heads: Integer, attention heads. Must be positive. Defaults to 12.
-        num_evidence_levels: Integer, evidence hierarchy levels. Defaults to 4.
-        support_dim: Integer, support embedding dimension. Defaults to 256.
-        dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1.
-        use_external_evidence: Boolean, enable external evidence. Defaults to True.
-        **kwargs: Additional arguments for Layer base class.
+    :param vocab_size: Integer, vocabulary size. Must be positive.
+    :param embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
+    :param max_seq_len: Integer, maximum sequence length. Must be positive. Defaults to 512.
+    :param num_heads: Integer, attention heads. Must be positive. Defaults to 12.
+    :param num_evidence_levels: Integer, evidence hierarchy levels. Defaults to 4.
+    :param support_dim: Integer, support embedding dimension. Defaults to 256.
+    :param dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.1.
+    :param use_external_evidence: Boolean, enable external evidence. Defaults to True. **kwargs: Additional arguments for Layer base class.
 
-    Input shape:
-        Dictionary with keys:
-        - 'input_ids': 2D tensor (batch_size, seq_len) - input token ids
-        - 'external_docs': 3D tensor (batch_size, num_docs, embed_dim) - external docs (optional)
 
-    Output shape:
-        Dictionary with keys:
-        - 'logits': 3D tensor (batch_size, seq_len, vocab_size) - token probabilities
-        - 'evidence_support': 3D tensor (batch_size, seq_len, embed_dim) - evidence embeddings
-        - 'confidence_scores': 2D tensor (batch_size, seq_len) - confidence per position
-        - 'uncertainty_scores': 2D tensor (batch_size, seq_len) - uncertainty per position
-        - 'reasoning_chains': 4D tensor (batch_size, seq_len, steps, support_dim) - reasoning
-        - 'hierarchical_evidence': 4D tensor (batch_size, levels, seq_len, embed_dim) - evidence pyramid
     """
 
     def __init__(
@@ -836,10 +784,9 @@ def analyze_evidence_support(
     """
     Analyze evidence support for generated tokens for the first item in a batch.
 
-    Args:
-        outputs: Output dictionary from EvidenceSupportedTokenGeneration
-        input_tokens: List of input token strings
-        vocab: Vocabulary mapping from token IDs to strings
+    :param outputs: Output dictionary from EvidenceSupportedTokenGeneration
+    :param input_tokens: List of input token strings
+    :param vocab: Vocabulary mapping from token IDs to strings
 
     Returns:
         Dictionary with evidence analysis results
@@ -908,11 +855,9 @@ def create_evidence_supported_language_model(
     """
     Create a complete evidence-supported language model.
 
-    Args:
-        vocab_size: Vocabulary size
-        embed_dim: Embedding dimension
-        max_seq_len: Maximum sequence length
-        **kwargs: Additional arguments for EvidenceSupportedTokenGeneration
+    :param vocab_size: Vocabulary size
+    :param embed_dim: Embedding dimension
+    :param max_seq_len: Maximum sequence length **kwargs: Additional arguments for EvidenceSupportedTokenGeneration
 
     Returns:
         Keras Model with evidence-supported token generation

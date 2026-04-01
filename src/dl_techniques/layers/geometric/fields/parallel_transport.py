@@ -31,38 +31,60 @@ TransportMethod = Literal['direct', 'iterative', 'path_ordered']
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class ParallelTransportLayer(keras.layers.Layer):
-    """
-    Parallel transport of vectors along paths using the gauge connection.
+    """Parallel transport of vectors along paths using the gauge connection.
 
-    This layer implements parallel transport, which moves vectors from one
-    position to another while preserving their geometric properties according
-    to the connection. This is fundamental for holonomic processing where
-    information must respect manifold structure.
+    Moves vectors from one position to another while preserving geometric
+    properties according to the transport equation dV^k/dt + Gamma^k_{ij}
+    (dgamma^i/dt) V^j = 0. Three methods are supported: 'direct' applies a
+    single Euler step V' = V - h * Gamma(T, V), 'iterative' uses multiple
+    small Euler steps for higher accuracy, and 'path_ordered' computes the
+    full path-ordered exponential P exp(-int Gamma dt). A learnable correction
+    matrix improves numerical stability.
 
-    Transport methods:
-    - 'direct': Single-step transport (efficient but less accurate)
-    - 'iterative': Multi-step transport with small increments
-    - 'path_ordered': Full path-ordered exponential (most accurate)
+    **Architecture Overview:**
 
-    Args:
-        transport_dim: Dimension of vectors being transported.
-        num_steps: Number of integration steps for iterative transport.
-        transport_method: Method for computing transport.
-        step_size: Step size for iterative integration.
-        use_adaptive_steps: Whether to adaptively adjust step size.
-        transport_regularization: Regularization for transport stability.
-        kernel_initializer: Initializer for kernel weights.
+    .. code-block:: text
 
-    Example:
-        >>> transport_layer = ParallelTransportLayer(
-        ...     transport_dim=256,
-        ...     num_steps=10,
-        ...     transport_method='iterative'
-        ... )
-        >>> vectors = keras.ops.random.normal((2, 10, 256))
-        >>> connection = keras.ops.random.normal((2, 10, 256, 256)) * 0.01
-        >>> transported = transport_layer([vectors, connection])
-        >>> print(transported.shape)  # (2, 10, 256)
+        ┌─────────────────┐  ┌──────────────────┐
+        │ Vectors         │  │ Connection       │
+        │ [B, S, D]       │  │ [B, S, D, D]     │
+        └────────┬────────┘  └────────┬─────────┘
+                 └───────────┬────────┘
+                             ▼
+        ┌────────────────────────────────────────┐
+        │ Compute tangent (finite differences)   │
+        └────────────────┬───────────────────────┘
+                         ▼
+        ┌────────────────────────────────────────┐
+        │ Transport (direct/iterative/path_ord)  │
+        │ V' = V - h·Γ(T,V) (per step)          │
+        └────────────────┬───────────────────────┘
+                         ▼
+        ┌────────────────────────────────────────┐
+        │ Learnable correction (small residual)  │
+        │ → Transported vectors [B, S, D]        │
+        └────────────────────────────────────────┘
+
+    :param transport_dim: Dimension of vectors being transported. Must be positive.
+    :type transport_dim: int
+    :param num_steps: Integration steps for iterative transport. Defaults to 10.
+    :type num_steps: int
+    :param transport_method: Transport method
+        (``'direct'``, ``'iterative'``, ``'path_ordered'``).
+        Defaults to ``'iterative'``.
+    :type transport_method: TransportMethod
+    :param step_size: Step size for integration. Defaults to 0.1.
+    :type step_size: float
+    :param use_adaptive_steps: Whether to adaptively adjust step size.
+        Defaults to ``False``.
+    :type use_adaptive_steps: bool
+    :param transport_regularization: Regularization for norm preservation.
+        Defaults to 0.0.
+    :type transport_regularization: float
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to ``'orthogonal'``.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -99,11 +121,10 @@ class ParallelTransportLayer(keras.layers.Layer):
         self.kernel_initializer = initializers.get(kernel_initializer)
 
     def build(self, input_shape: Tuple[Tuple[int, ...], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Args:
-            input_shape: Tuple of (vectors_shape, connection_shape).
+        :param input_shape: Tuple of (vectors_shape, connection_shape).
+        :type input_shape: Tuple[Tuple[int, ...], ...]
         """
         # Learnable transport correction for numerical stability
         self.transport_correction = self.add_weight(
@@ -130,18 +151,18 @@ class ParallelTransportLayer(keras.layers.Layer):
             connection: keras.KerasTensor,
             tangent: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Direct single-step parallel transport.
+        """Direct single-step parallel transport.
 
-        Approximates transport as: V' = V - Γ(T, V) where T is tangent vector.
+        Approximates transport as: V' = V - Gamma(T, V) where T is tangent vector.
 
-        Args:
-            vectors: Vectors to transport, shape (batch, seq_len, dim).
-            connection: Connection tensor, shape (batch, seq_len, dim, dim).
-            tangent: Tangent vectors for transport direction.
-
-        Returns:
-            Transported vectors.
+        :param vectors: Vectors to transport, shape (batch, seq_len, dim).
+        :type vectors: keras.KerasTensor
+        :param connection: Connection tensor, shape (batch, seq_len, dim, dim).
+        :type connection: keras.KerasTensor
+        :param tangent: Tangent vectors for transport direction.
+        :type tangent: keras.KerasTensor
+        :return: Transported vectors.
+        :rtype: keras.KerasTensor
         """
         # Compute connection action: Γ^k_{ij} T^i V^j
         # connection: (batch, seq_len, dim, dim) as Γ^k_j with i contracted with T
@@ -171,18 +192,18 @@ class ParallelTransportLayer(keras.layers.Layer):
             connection: keras.KerasTensor,
             tangent: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Iterative multi-step parallel transport.
+        """Iterative multi-step parallel transport.
 
         Uses multiple small steps for more accurate transport.
 
-        Args:
-            vectors: Vectors to transport.
-            connection: Connection tensor.
-            tangent: Tangent vectors.
-
-        Returns:
-            Transported vectors.
+        :param vectors: Vectors to transport.
+        :type vectors: keras.KerasTensor
+        :param connection: Connection tensor.
+        :type connection: keras.KerasTensor
+        :param tangent: Tangent vectors.
+        :type tangent: keras.KerasTensor
+        :return: Transported vectors.
+        :rtype: keras.KerasTensor
         """
         step = self.step_size / self.num_steps
         if self.use_adaptive_steps:
@@ -211,21 +232,21 @@ class ParallelTransportLayer(keras.layers.Layer):
             connection: keras.KerasTensor,
             tangent: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Path-ordered exponential transport.
+        """Path-ordered exponential transport.
 
         Computes the path-ordered exponential of the connection, which is
         the exact solution to the parallel transport equation.
 
-        P exp(-∫ Γ dt) V
+        P exp(-int Gamma dt) V
 
-        Args:
-            vectors: Vectors to transport.
-            connection: Connection tensor.
-            tangent: Tangent vectors.
-
-        Returns:
-            Transported vectors.
+        :param vectors: Vectors to transport.
+        :type vectors: keras.KerasTensor
+        :param connection: Connection tensor.
+        :type connection: keras.KerasTensor
+        :param tangent: Tangent vectors.
+        :type tangent: keras.KerasTensor
+        :return: Transported vectors.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(vectors)[0]
         seq_len = ops.shape(vectors)[1]
@@ -271,19 +292,19 @@ class ParallelTransportLayer(keras.layers.Layer):
             training: Optional[bool] = None,
             tangent: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
-        """
-        Perform parallel transport of vectors.
+        """Perform parallel transport of vectors.
 
-        Args:
-            inputs: Tuple of (vectors, connection).
-                - vectors: shape (batch, seq_len, dim)
-                - connection: shape (batch, seq_len, dim, dim)
-            training: Whether in training mode.
-            tangent: Optional tangent vectors. If None, uses difference between
-                adjacent positions as tangent.
-
-        Returns:
-            Transported vectors of shape (batch, seq_len, dim).
+        :param inputs: Tuple of (vectors, connection).
+            - vectors: shape (batch, seq_len, dim)
+            - connection: shape (batch, seq_len, dim, dim)
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :param tangent: Optional tangent vectors. If None, uses difference between
+            adjacent positions as tangent.
+        :type tangent: Optional[keras.KerasTensor]
+        :return: Transported vectors of shape (batch, seq_len, dim).
+        :rtype: keras.KerasTensor
         """
         vectors, connection = inputs
 
@@ -328,14 +349,12 @@ class ParallelTransportLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Tuple[int, ...], Tuple[int, ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: Tuple of (vectors_shape, connection_shape).
-
-        Returns:
-            Output shape (same as vectors input).
+        :param input_shape: Tuple of (vectors_shape, connection_shape).
+        :type input_shape: Tuple[Tuple[int, ...], Tuple[int, ...]]
+        :return: Output shape (same as vectors input).
+        :rtype: Tuple[Optional[int], ...]
         """
         vectors_shape = input_shape[0]
         return vectors_shape

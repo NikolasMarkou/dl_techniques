@@ -23,17 +23,26 @@ class BaseExpert(keras.layers.Layer, ABC):
     """
     Abstract base class for MoE expert networks.
 
-    This class defines the interface that all expert implementations must follow,
+    Defines the interface that all expert implementations must follow,
     ensuring consistency across different expert types and enabling polymorphic
-    usage in MoE layers.
+    usage in MoE layers. Subclasses must implement ``call`` and
+    ``compute_output_shape``.
 
-    Args:
-        name: Name for the expert layer.
-        **kwargs: Additional keyword arguments for the base Layer class.
+    **Architecture Overview:**
 
-    Methods:
-        call: Abstract method for forward computation.
-        compute_output_shape: Abstract method for output shape computation.
+    .. code-block:: text
+
+        ┌─────────────────────────┐
+        │     BaseExpert (ABC)    │
+        │                         │
+        │  call(inputs) ──────►  output
+        │  compute_output_shape() │
+        └─────────────────────────┘
+
+    :param name: Name for the expert layer.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the base Layer class.
+    :type kwargs: Any
     """
 
     def __init__(self, name: Optional[str] = None, **kwargs: Any) -> None:
@@ -46,12 +55,12 @@ class BaseExpert(keras.layers.Layer, ABC):
         """
         Forward computation for the expert.
 
-        Args:
-            inputs: Input tensor.
-            training: Whether the layer is in training mode.
-
-        Returns:
-            Expert output tensor.
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Expert output tensor.
+        :rtype: keras.KerasTensor
         """
         pass
 
@@ -60,11 +69,10 @@ class BaseExpert(keras.layers.Layer, ABC):
         """
         Compute the output shape of the expert.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Shape of the output tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape of the output tensor.
+        :rtype: Tuple[Optional[int], ...]
         """
         pass
 
@@ -81,55 +89,31 @@ class BaseExpert(keras.layers.Layer, ABC):
 @keras.saving.register_keras_serializable()
 class FFNExpert(BaseExpert):
     """
-    Feed-Forward Network expert for MoE layers using dl_techniques FFN factory.
+    Feed-Forward Network expert for MoE layers using the dl_techniques FFN factory.
 
-    This expert acts as a container that leverages the existing dl_techniques FFN
-    factory system to create various FFN architectures (MLP, SwiGLU, GeGLU, etc.).
-    All FFN validation, parameter handling, and layer creation is delegated to
-    the FFN factory, eliminating code duplication.
+    Wraps the dl_techniques FFN factory system to create various FFN architectures
+    (MLP, SwiGLU, GeGLU, etc.) as expert networks within a Mixture-of-Experts layer.
+    The FFN block is constructed lazily in ``build()`` via ``create_ffn_from_config()``,
+    with all validation delegated to the factory, ensuring consistency and zero code
+    duplication.
 
-    Args:
-        ffn_config: Dictionary containing FFN configuration that will be passed
-            to create_ffn_from_config(). Must include 'type' and appropriate
-            parameters for the specified FFN type.
-        **kwargs: Additional keyword arguments for the base Layer class.
+    **Architecture Overview:**
 
-    Example:
-        ```python
-        # Create SwiGLU expert
-        expert = FFNExpert(
-            ffn_config={
-                "type": "swiglu",
-                "d_model": 768,
-                "ffn_expansion_factor": 4
-            }
-        )
+    .. code-block:: text
 
-        # Create MLP expert
-        expert = FFNExpert(
-            ffn_config={
-                "type": "mlp",
-                "hidden_dim": 2048,
-                "output_dim": 768,
-                "activation": "gelu",
-                "dropout_rate": 0.1
-            }
-        )
+        ┌───────────────────────────────────┐
+        │           FFNExpert               │
+        │                                   │
+        │  Input ──► FFN Block (factory) ──► Output
+        │            (MLP / SwiGLU / GeGLU) │
+        └───────────────────────────────────┘
 
-        # Create GeGLU expert
-        expert = FFNExpert(
-            ffn_config={
-                "type": "geglu",
-                "hidden_dim": 3072,
-                "output_dim": 768
-            }
-        )
-        ```
-
-    Note:
-        All FFN creation, validation, and parameter handling is performed by the
-        dl_techniques FFN factory system. This ensures consistency across the
-        framework and automatic support for new FFN types as they're added.
+    :param ffn_config: Dictionary containing FFN configuration passed to
+        ``create_ffn_from_config()``. Must include ``'type'`` and appropriate
+        parameters for the specified FFN type.
+    :type ffn_config: Dict[str, Any]
+    :param kwargs: Additional keyword arguments for the base Layer class.
+    :type kwargs: Any
     """
 
     def __init__(self, ffn_config: Dict[str, Any], **kwargs: Any) -> None:
@@ -211,44 +195,17 @@ def create_expert(expert_type: str, **kwargs) -> BaseExpert:
     """
     Factory function to create FFN expert networks.
 
-    This simplified factory only supports FFN experts, leveraging the existing
-    dl_techniques FFN factory system for all FFN creation and validation.
+    Only supports FFN experts, leveraging the dl_techniques FFN factory system
+    for all FFN creation and validation.
 
-    Args:
-        expert_type: Type of expert to create. Must be 'ffn'.
-        **kwargs: Configuration parameters for the expert. Should include
-            'ffn_config' dictionary with FFN parameters.
-
-    Returns:
-        Configured FFN expert network.
-
-    Raises:
-        ValueError: If expert_type is not 'ffn' or if configuration is invalid.
-
-    Example:
-        ```python
-        # Create SwiGLU expert
-        expert = create_expert(
-            'ffn',
-            ffn_config={
-                "type": "swiglu",
-                "d_model": 768,
-                "ffn_expansion_factor": 4
-            }
-        )
-
-        # Create MLP expert with custom parameters
-        expert = create_expert(
-            'ffn',
-            ffn_config={
-                "type": "mlp",
-                "hidden_dim": 2048,
-                "output_dim": 768,
-                "activation": "relu",
-                "dropout_rate": 0.2
-            }
-        )
-        ```
+    :param expert_type: Type of expert to create. Must be ``'ffn'``.
+    :type expert_type: str
+    :param kwargs: Configuration parameters for the expert. Should include
+        ``'ffn_config'`` dictionary with FFN parameters.
+    :type kwargs: Any
+    :return: Configured FFN expert network.
+    :rtype: BaseExpert
+    :raises ValueError: If expert_type is not ``'ffn'`` or if configuration is invalid.
     """
     if expert_type == 'ffn':
         return FFNExpert(**kwargs)

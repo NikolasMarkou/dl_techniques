@@ -61,119 +61,58 @@ class AffineCouplingLayer(keras.layers.Layer):
     """
     Affine coupling transformation layer for normalizing flows with conditional context.
 
-    This layer implements a single invertible transformation step in a normalizing flow,
-    using the affine coupling architecture. It splits the input into two parts, keeps
-    one part unchanged, and transforms the other using learned scale and shift parameters
-    that depend on both the unchanged part and external context.
+    Implements a single invertible transformation step using the Real NVP coupling
+    architecture. The input is split at dimension ``input_dim // 2``; one half remains
+    unchanged while the other is transformed via ``y_b = z_b * s(z_a, ctx) + t(z_a, ctx)``
+    where ``s`` and ``t`` are scale and shift functions computed by a neural network
+    conditioned on the static half and external context. The log-determinant of the
+    Jacobian is ``sum(log(s))``, computed in ``O(d)`` time. Alternating which half
+    is transformed across stacked layers ensures all dimensions are eventually
+    transformed.
 
-    The transformation is designed to be:
-    - **Invertible**: Enables exact likelihood computation and sampling
-    - **Efficient**: Jacobian determinant computation is O(d) instead of O(d³)
-    - **Stable**: Uses careful numerical stabilization to prevent overflow/underflow
-    - **Flexible**: Conditioning on external context enables complex dependencies
+    **Architecture Overview:**
 
-    Architecture details:
-    - Input splitting avoids the need for matrix determinant computation
-    - Neural network parameterizes transformation based on unchanged input and context
-    - Alternating which half is transformed across layers increases expressiveness
-    - Tanh stabilization prevents numerical instabilities in scale parameters
+    .. code-block:: text
 
-    Mathematical formulation:
-        Forward (z → y):
-        - y_a = z_a (unchanged)
-        - y_b = z_b * s(z_a, context) + t(z_a, context) (transformed)
+        ┌──────────────────────────────────────┐
+        │  Input z (batch, input_dim)          │
+        │  + Context (batch, context_dim)      │
+        └────────────┬─────────────────────────┘
+                     ▼
+        ┌────────────────────────┐
+        │  Split: z_a | z_b     │
+        └───┬────────────┬──────┘
+            │            │
+            ▼            │
+        ┌────────────┐   │
+        │ [z_a; ctx] │   │
+        │  ─► Net    │   │
+        │  ─► s, t   │   │
+        └───┬────────┘   │
+            │            ▼
+            │   ┌────────────────┐
+            └──►│ y_b = z_b*s+t │
+                └───────┬────────┘
+                        ▼
+        ┌────────────────────────┐
+        │  Concat: z_a | y_b    │
+        │  ─► Output y          │
+        └────────────────────────┘
 
-        Inverse (y → z):
-        - z_a = y_a (unchanged)
-        - z_b = (y_b - t(y_a, context)) / s(y_a, context) (inverse transform)
-
-        Log-determinant: log|det(J)| = Σ log(s(z_a, context))
-
-    Args:
-        input_dim: int, dimensionality of the input data. Must be >= 2 to allow
-            splitting into two parts. Determines the size of vectors being transformed.
-        context_dim: int, dimensionality of the conditioning context vector. Must be >= 1.
-            Larger context dimensions allow more complex conditioning relationships.
-        hidden_units: int, number of hidden units in the transformation neural network.
-            Larger values increase expressiveness but also computational cost.
-            Defaults to 64.
-        reverse: bool, if True, transforms the second half based on the first half
-            instead of the first half based on the second. Used to alternate
-            transformations across coupling layers. Defaults to False.
-        activation: Union[str, callable], activation function for hidden layers in
-            the transformation network. Common choices: 'relu', 'tanh', 'gelu'.
-            Defaults to 'relu'.
-        use_tanh_stabilization: bool, whether to apply tanh stabilization to log-scale
-            parameters before exponentiation. Prevents numerical overflow but may
-            limit the range of scale factors. Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        List of two tensors:
-        - data: ``(batch_size, input_dim)`` - The data to be transformed
-        - context: ``(batch_size, context_dim)`` - Conditioning context vector
-
-    Output shape:
-        Forward pass: ``(batch_size, input_dim)`` - Transformed data
-        Inverse pass: Tuple of:
-        - ``(batch_size, input_dim)`` - Inverse transformed data
-        - ``(batch_size,)`` - Log-determinant of Jacobian
-
-    Attributes:
-        transformation_net: keras.Sequential, neural network that computes scale and
-            shift parameters from the unchanged input part and context.
-        split_dim: int, dimension at which to split the input (input_dim // 2).
-
-    Example:
-        ```python
-        # Basic coupling layer setup
-        coupling_layer = AffineCouplingLayer(
-            input_dim=4,
-            context_dim=8,
-            hidden_units=128,
-            activation='gelu'
-        )
-
-        # Build and use
-        data = keras.random.normal((32, 4))
-        context = keras.random.normal((32, 8))
-
-        # Forward transformation (z → y) for sampling
-        y = coupling_layer.forward(data, context)
-
-        # Inverse transformation (y → z) for likelihood computation
-        z, log_det_jac = coupling_layer.inverse(y, context)
-
-        # High-dimensional example with stabilization
-        high_dim_layer = AffineCouplingLayer(
-            input_dim=256,
-            context_dim=64,
-            hidden_units=512,
-            use_tanh_stabilization=True,  # Important for high dimensions
-            activation='swish'
-        )
-
-        # Multi-step flow alternating transformations
-        layers = [
-            AffineCouplingLayer(input_dim=10, context_dim=5, reverse=False),
-            AffineCouplingLayer(input_dim=10, context_dim=5, reverse=True),
-            AffineCouplingLayer(input_dim=10, context_dim=5, reverse=False),
-        ]
-        ```
-
-    Raises:
-        ValueError: If input_dim < 2 (cannot split for coupling).
-        ValueError: If context_dim < 1 (no conditioning information).
-        ValueError: If hidden_units < 1 (invalid network architecture).
-
-    Note:
-        This layer implements the Real NVP coupling architecture, which has proven
-        highly effective for density modeling tasks. The alternating reverse pattern
-        across multiple layers is crucial for ensuring that all input dimensions
-        are eventually transformed.
-
-        For very high-dimensional inputs, consider using larger hidden_units and
-        enabling tanh_stabilization to maintain numerical stability during training.
+    :param input_dim: Dimensionality of the input data. Must be >= 2.
+    :type input_dim: int
+    :param context_dim: Dimensionality of the conditioning context. Must be >= 1.
+    :type context_dim: int
+    :param hidden_units: Hidden units in the transformation network. Defaults to 64.
+    :type hidden_units: int
+    :param reverse: Whether to reverse the split ordering. Defaults to ``False``.
+    :type reverse: bool
+    :param activation: Activation function for hidden layers. Defaults to ``'relu'``.
+    :type activation: str | callable
+    :param use_tanh_stabilization: Whether to apply tanh to log-scale parameters.
+        Defaults to ``True``.
+    :type use_tanh_stabilization: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -233,14 +172,10 @@ class AffineCouplingLayer(keras.layers.Layer):
         ], name="transformation_net")
 
     def build(self, input_shapes: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Build the layer and its transformation network.
+        """Build the layer and its transformation network.
 
-        Args:
-            input_shapes: List of two shape tuples for [data, context].
-
-        Raises:
-            ValueError: If input_shapes is not a list of exactly 2 shapes.
+        :param input_shapes: List of two shape tuples for ``[data, context]``.
+        :type input_shapes: list[tuple[int | None, ...]]
         """
         if not isinstance(input_shapes, list) or len(input_shapes) != 2:
             raise ValueError("input_shapes must be a list of two shape tuples")
@@ -268,15 +203,14 @@ class AffineCouplingLayer(keras.layers.Layer):
         static_part: keras.KerasTensor,
         context: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Compute scale and shift parameters from static input part and context.
+        """Compute scale and shift parameters from static input part and context.
 
-        Args:
-            static_part: The unchanged part of the input.
-            context: The conditioning context vector.
-
-        Returns:
-            Tuple of (scale, shift) parameters.
+        :param static_part: The unchanged part of the input.
+        :type static_part: keras.KerasTensor
+        :param context: The conditioning context vector.
+        :type context: keras.KerasTensor
+        :return: Tuple of ``(scale, shift)`` parameters.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Concatenate static part and context for transformation network input
         net_input = ops.concatenate([static_part, context], axis=-1)
@@ -304,15 +238,14 @@ class AffineCouplingLayer(keras.layers.Layer):
         z: keras.KerasTensor,
         context: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Forward transformation z → y for sampling.
+        """Forward transformation z to y for sampling.
 
-        Args:
-            z: Input tensor from base distribution, shape ``(batch_size, input_dim)``.
-            context: Conditioning context, shape ``(batch_size, context_dim)``.
-
-        Returns:
-            Transformed tensor y, shape ``(batch_size, input_dim)``.
+        :param z: Input from base distribution, shape ``(batch_size, input_dim)``.
+        :type z: keras.KerasTensor
+        :param context: Conditioning context, shape ``(batch_size, context_dim)``.
+        :type context: keras.KerasTensor
+        :return: Transformed tensor y.
+        :rtype: keras.KerasTensor
         """
         # Apply permutation if this layer reverses the split
         z = self._apply_split_and_reverse(z)
@@ -338,17 +271,14 @@ class AffineCouplingLayer(keras.layers.Layer):
         y: keras.KerasTensor,
         context: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Inverse transformation y → z with log-determinant for likelihood computation.
+        """Inverse transformation y to z with log-determinant for likelihood.
 
-        Args:
-            y: Transformed data tensor, shape ``(batch_size, input_dim)``.
-            context: Conditioning context, shape ``(batch_size, context_dim)``.
-
-        Returns:
-            Tuple containing:
-            - z: Original data tensor, shape ``(batch_size, input_dim)``
-            - log_det_jacobian: Log-determinant of Jacobian, shape ``(batch_size,)``
+        :param y: Transformed data tensor, shape ``(batch_size, input_dim)``.
+        :type y: keras.KerasTensor
+        :param context: Conditioning context, shape ``(batch_size, context_dim)``.
+        :type context: keras.KerasTensor
+        :return: Tuple of ``(z, log_det_jacobian)``.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Apply permutation if this layer reverses the split
         y = self._apply_split_and_reverse(y)
@@ -376,24 +306,21 @@ class AffineCouplingLayer(keras.layers.Layer):
         self,
         input_shapes: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (same as data input shape).
+        """Compute output shape (same as data input shape).
 
-        Args:
-            input_shapes: List of input shapes [data_shape, context_shape].
-
-        Returns:
-            Output shape tuple (same as data input shape).
+        :param input_shapes: List of input shapes ``[data_shape, context_shape]``.
+        :type input_shapes: list[tuple[int | None, ...]]
+        :return: Output shape tuple.
+        :rtype: tuple[int | None, ...]
         """
         data_shape = input_shapes[0]
         return data_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -415,164 +342,63 @@ class NormalizingFlowLayer(keras.layers.Layer):
     """
     Conditional normalizing flow layer using stacked affine coupling transformations.
 
-    This layer implements a complete normalizing flow model that learns complex
-    conditional probability distributions p(y|x) by composing multiple invertible
-    affine coupling transformations. It provides a powerful alternative to
-    traditional parametric density models with exact likelihood computation
-    and efficient sampling capabilities.
+    Implements a complete normalizing flow model that learns ``p(y|x)`` by composing
+    ``K`` invertible affine coupling transformations: ``y = f_K . f_{K-1} . ... . f_1(z)``
+    where ``z ~ N(0, I)``. The exact log-likelihood is computed via the change of
+    variables formula: ``log p(y|ctx) = log p(z) + sum_i log|det(df_i / dz_{i-1})|``.
+    During training, the inverse pass maps observed data to latent space for
+    likelihood evaluation; during sampling, the forward pass generates new data
+    from the base distribution.
 
-    The layer operates through two primary modes:
-    - **Training mode**: Inverse pass (y → z) to compute likelihood for observed data
-    - **Sampling mode**: Forward pass (z → y) to generate new samples from learned distribution
+    **Architecture Overview:**
 
-    Architecture design principles:
-    - **Alternating coupling patterns**: Each layer transforms different input dimensions
-    - **Context conditioning**: All transformations depend on external context
-    - **Numerical stability**: Careful handling of scale parameters and determinants
-    - **Scalable depth**: Configurable number of coupling layers for complexity control
+    .. code-block:: text
 
-    The model learns transformations f₁, f₂, ..., fₖ such that:
-        y = fₖ ∘ fₖ₋₁ ∘ ... ∘ f₁(z)
+        Training (Inverse: y ─► z):
+        ┌──────────────────────────────┐
+        │ Data y + Context             │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Coupling_K^{-1} ─► ldj_K    │
+        ├──────────────────────────────┤
+        │ Coupling_{K-1}^{-1} ─► ...  │
+        ├──────────────────────────────┤
+        │ Coupling_1^{-1} ─► ldj_1    │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ z, total_log_det_jacobian    │
+        └──────────────────────────────┘
 
-    Where z ~ N(0, I) and the likelihood is computed as:
-        log p(y|context) = log p(z) + Σᵢ log|det(∂fᵢ/∂zᵢ₋₁)|
+        Sampling (Forward: z ─► y):
+        ┌──────────────────────────────┐
+        │ z ~ N(0, I) + Context        │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Coupling_1 ─► Coupling_2     │
+        │ ─► ... ─► Coupling_K         │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ Samples y                    │
+        └──────────────────────────────┘
 
-    Key advantages over mixture density networks:
-    - **Exact likelihood**: No approximation errors in probability computation
-    - **Complex distributions**: Can model multimodal, skewed, bounded distributions
-    - **Efficient sampling**: Direct sampling without rejection or MCMC
-    - **Principled training**: Maximum likelihood objective with exact gradients
-
-    Args:
-        output_dimension: int, dimensionality of the target distribution. Must be >= 2
-            to enable coupling layer splits. Determines the size of generated samples.
-        num_flow_steps: int, number of coupling layers to stack. More layers enable
-            more complex distributions but increase computational cost. Must be >= 1.
-            Typical values: 4-16 depending on data complexity.
-        context_dim: int, dimensionality of the conditioning context vector. Must be >= 1.
-            Should match the output dimension of upstream network layers.
-        hidden_units_coupling: int, number of hidden units in each coupling layer's
-            transformation network. Larger values increase expressiveness but also
-            computational cost. Defaults to 64.
-        activation: Union[str, callable], activation function for coupling layer networks.
-            Common effective choices: 'relu', 'gelu', 'swish'. Defaults to 'relu'.
-        use_tanh_stabilization: bool, whether to apply tanh stabilization to scale
-            parameters. Recommended for high-dimensional or numerically sensitive
-            applications. Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        List of two tensors:
-        - data: ``(batch_size, output_dimension)`` - Target data for likelihood computation
-        - context: ``(batch_size, context_dim)`` - Conditioning context from upstream layers
-
-    Output shape:
-        Training (inverse pass): Tuple of:
-        - z: ``(batch_size, output_dimension)`` - Latent variables
-        - log_det_jacobian: ``(batch_size,)`` - Log-determinant for likelihood
-
-        Sampling: ``(batch_size, num_samples, output_dimension)`` - Generated samples
-
-    Attributes:
-        coupling_layers: List[AffineCouplingLayer], the sequence of coupling
-            transformations that define the normalizing flow.
-
-    Example:
-        ```python
-        # Basic regression with uncertainty quantification
-        inputs = keras.Input(shape=(10,))
-        features = keras.layers.Dense(64, activation='relu')(inputs)
-        context = keras.layers.Dense(32)(features)  # Context for flow
-
-        # Create normalizing flow layer
-        flow = NormalizingFlowLayer(
-            output_dimension=2,  # Predict 2D target to allow splits
-            num_flow_steps=6,
-            context_dim=32,
-            hidden_units_coupling=128
-        )
-
-        # Training setup
-        targets = keras.Input(shape=(2,))
-        z, log_det_jac = flow([targets, context])
-
-        # Custom training model with likelihood loss
-        model = keras.Model([inputs, targets], [z, log_det_jac])
-
-        # Custom loss function
-        def flow_loss(y_true, y_pred):
-            z, ldj = y_pred
-            return flow.loss_func(y_true, (z, ldj))
-
-        model.compile(optimizer='adam', loss=flow_loss)
-
-        # Multi-dimensional time series forecasting
-        time_series_flow = NormalizingFlowLayer(
-            output_dimension=5,    # 5-dimensional forecasts
-            num_flow_steps=8,      # More complex for multi-dim
-            context_dim=128,       # Rich context from LSTM
-            hidden_units_coupling=256
-        )
-
-        # Financial modeling with complex distributions
-        financial_flow = NormalizingFlowLayer(
-            output_dimension=3,    # Price, volume, volatility
-            num_flow_steps=12,     # Very complex for finance
-            context_dim=64,
-            activation='gelu',     # Better for finance
-            use_tanh_stabilization=True  # Important for stability
-        )
-
-        # Sampling usage after training
-        context_test = keras.random.normal((100, 32))
-        samples = flow.sample(num_samples=10, context=context_test)
-        # Shape: (100, 10, 2) - 10 samples for each of 100 contexts
-
-        # Complete end-to-end example
-        def create_flow_model(input_dim, output_dim, context_dim=64):
-            inputs = keras.Input(shape=(input_dim,))
-
-            # Feature extraction
-            x = keras.layers.Dense(128, activation='relu')(inputs)
-            x = keras.layers.Dense(128, activation='relu')(x)
-            context = keras.layers.Dense(context_dim)(x)
-
-            # Normalizing flow
-            flow_layer = NormalizingFlowLayer(
-                output_dimension=output_dim,
-                num_flow_steps=8,
-                context_dim=context_dim
-            )
-
-            # Training inputs
-            targets = keras.Input(shape=(output_dim,))
-            z, ldj = flow_layer([targets, context])
-
-            # Create models
-            training_model = keras.Model([inputs, targets], [z, ldj])
-            prediction_model = keras.Model(inputs, context)
-
-            return training_model, prediction_model, flow_layer
-        ```
-
-    Raises:
-        ValueError: If output_dimension < 2 (cannot split for coupling layers).
-        ValueError: If num_flow_steps < 1 (need at least one transformation).
-        ValueError: If context_dim < 1 (need conditioning information).
-        ValueError: If hidden_units_coupling < 1 (invalid network size).
-
-    Note:
-        This implementation uses the Real NVP architecture with alternating coupling
-        patterns. For optimal performance:
-
-        1. **Layer depth**: Start with 4-8 layers, increase for complex distributions
-        2. **Hidden units**: Scale with problem complexity, typical range 64-512
-        3. **Numerical stability**: Always use tanh_stabilization for training stability
-        4. **Context design**: Ensure context captures all relevant conditioning information
-
-        The loss_func method implements exact negative log-likelihood, providing
-        principled probabilistic training. The sample method enables efficient
-        generation of new data points from the learned conditional distribution.
+    :param output_dimension: Dimensionality of the target distribution. Must be >= 2.
+    :type output_dimension: int
+    :param num_flow_steps: Number of coupling layers. Must be >= 1.
+    :type num_flow_steps: int
+    :param context_dim: Dimensionality of the conditioning context. Must be >= 1.
+    :type context_dim: int
+    :param hidden_units_coupling: Hidden units per coupling layer. Defaults to 64.
+    :type hidden_units_coupling: int
+    :param activation: Activation for coupling networks. Defaults to ``'relu'``.
+    :type activation: str | callable
+    :param use_tanh_stabilization: Whether to apply tanh stabilization.
+        Defaults to ``True``.
+    :type use_tanh_stabilization: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -621,14 +447,10 @@ class NormalizingFlowLayer(keras.layers.Layer):
             self.coupling_layers.append(layer)
 
     def build(self, input_shapes: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Build the layer and all coupling layers.
+        """Build the layer and all coupling layers.
 
-        Args:
-            input_shapes: List of two shape tuples for [data, context].
-
-        Raises:
-            ValueError: If input_shapes is not a list of exactly 2 shapes.
+        :param input_shapes: List of two shape tuples for ``[data, context]``.
+        :type input_shapes: list[tuple[int | None, ...]]
         """
         if not isinstance(input_shapes, list) or len(input_shapes) != 2:
             raise ValueError("input_shapes must be a list of two shape tuples")
@@ -645,25 +467,14 @@ class NormalizingFlowLayer(keras.layers.Layer):
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Inverse transformation y → z for likelihood computation during training.
+        """Inverse transformation y to z for likelihood computation.
 
-        This method performs the inverse pass through the normalizing flow,
-        transforming observed data into the latent space for likelihood evaluation.
-
-        Args:
-            inputs: List of [data, context] tensors where:
-                - data: Target data tensor, shape ``(batch_size, output_dim)``
-                - context: Conditioning context, shape ``(batch_size, context_dim)``
-            training: Boolean indicating training mode (unused but included for API consistency).
-
-        Returns:
-            Tuple containing:
-            - z: Latent variables in base distribution space, shape ``(batch_size, output_dim)``
-            - total_log_det_jacobian: Accumulated log-determinant, shape ``(batch_size,)``
-
-        Raises:
-            ValueError: If inputs doesn't contain exactly 2 tensors.
+        :param inputs: List of ``[data, context]`` tensors.
+        :type inputs: list[keras.KerasTensor]
+        :param training: Boolean for training mode.
+        :type training: bool | None
+        :return: Tuple of ``(z, total_log_det_jacobian)``.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         if len(inputs) != 2:
             raise ValueError("Expected exactly 2 inputs: [data, context]")
@@ -687,18 +498,14 @@ class NormalizingFlowLayer(keras.layers.Layer):
         y_true: keras.KerasTensor,
         y_pred: Tuple[keras.KerasTensor, keras.KerasTensor]
     ) -> keras.KerasTensor:
-        """
-        Compute negative log-likelihood loss for maximum likelihood training.
+        """Compute exact negative log-likelihood loss.
 
-        This function implements the exact negative log-likelihood using the
-        change of variables formula for normalizing flows.
-
-        Args:
-            y_true: True data (used for shape compatibility, values not used directly).
-            y_pred: Tuple of (z, total_log_det_jacobian) from the call method.
-
-        Returns:
-            Negative log-likelihood loss as scalar tensor for minimization.
+        :param y_true: True data (for shape compatibility).
+        :type y_true: keras.KerasTensor
+        :param y_pred: Tuple of ``(z, total_log_det_jacobian)`` from call.
+        :type y_pred: tuple[keras.KerasTensor, keras.KerasTensor]
+        :return: Scalar negative log-likelihood loss.
+        :rtype: keras.KerasTensor
         """
         z, total_log_det_jacobian = y_pred
 
@@ -720,21 +527,14 @@ class NormalizingFlowLayer(keras.layers.Layer):
         num_samples: int,
         context: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Generate samples from the learned conditional distribution.
+        """Generate samples from the learned conditional distribution.
 
-        This method performs the forward pass through the normalizing flow,
-        transforming samples from the base distribution into the target space.
-
-        Args:
-            num_samples: Number of samples to generate per context. Must be >= 1.
-            context: Conditioning context, shape ``(batch_size, context_dim)``.
-
-        Returns:
-            Generated samples, shape ``(batch_size, num_samples, output_dim)``.
-
-        Raises:
-            ValueError: If num_samples < 1.
+        :param num_samples: Number of samples per context. Must be >= 1.
+        :type num_samples: int
+        :param context: Conditioning context, shape ``(batch_size, context_dim)``.
+        :type context: keras.KerasTensor
+        :return: Samples of shape ``(batch_size, num_samples, output_dim)``.
+        :rtype: keras.KerasTensor
         """
         if num_samples < 1:
             raise ValueError("num_samples must be >= 1")
@@ -772,14 +572,12 @@ class NormalizingFlowLayer(keras.layers.Layer):
         self,
         input_shapes: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """
-        Compute output shapes for the tuple (z, log_det_jacobian).
+        """Compute output shapes for ``(z, log_det_jacobian)``.
 
-        Args:
-            input_shapes: List of input shapes [data_shape, context_shape].
-
-        Returns:
-            Tuple of output shapes: (z_shape, log_det_jacobian_shape).
+        :param input_shapes: List of input shapes.
+        :type input_shapes: list[tuple[int | None, ...]]
+        :return: Tuple of output shapes.
+        :rtype: tuple[tuple[int | None, ...], tuple[int | None, ...]]
         """
         data_shape = input_shapes[0]
         batch_size = data_shape[0] if data_shape else None
@@ -787,11 +585,10 @@ class NormalizingFlowLayer(keras.layers.Layer):
         return data_shape, ldj_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({

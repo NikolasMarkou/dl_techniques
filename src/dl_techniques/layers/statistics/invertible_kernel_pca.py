@@ -78,137 +78,80 @@ class InvertibleKernelPCA(keras.layers.Layer):
     """
     Invertible Kernel PCA layer using Random Fourier Features approximation.
 
-    This layer implements ikPCA, which solves the kernel PCA reconstruction problem
-    through Random Fourier Features (RFF) approximation. Unlike traditional kernel PCA
-    that requires supervised learning for reconstruction, ikPCA enables natural
-    invertibility through explicit feature mapping.
+    Implements ikPCA, which solves the kernel PCA reconstruction problem through
+    Random Fourier Features (RFF) approximation based on Bochner's theorem. The
+    kernel ``k(x, y)`` is approximated as ``z(x)^T z(y)`` where
+    ``z(x) = sqrt(2/D) cos(omega^T x + b)`` with random frequencies ``omega``
+    sampled from the Fourier transform of the kernel and phases ``b`` sampled
+    uniformly from ``[0, 2pi]``. Standard PCA is then performed in this explicit
+    feature space, making the entire transformation analytically invertible by
+    applying ``arccos`` and solving a linear system involving the pseudo-inverse
+    of the frequency matrix.
 
-    **Intent**: Provide a kernel PCA transformation that is naturally invertible
-    without requiring supervised reconstruction, enabling efficient denoising,
-    compression, and feature extraction with exact reconstruction capabilities.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, input_dim])
-           ↓
-    Random Fourier Features: z(x) = √(2/D) cos(ωᵀx + b)
-           ↓
-    Feature Matrix Z ∈ ℝⁿˣᴰ
-           ↓
-    Kernel Approximation: K ≈ ZZᵀ
-           ↓
-    PCA in RFF Space → Principal Components
-           ↓
-    Output(shape=[batch, n_components])
+    .. code-block:: text
 
-    Reconstruction Path:
-    Components → RFF Space → Inverse Transform → Original Space
-    ```
+        ┌─────────────────────────────┐
+        │   Input (batch, input_dim)  │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │  RFF: z(x) = sqrt(2/D)     │
+        │       cos(omega^T x + b)   │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │  Center Features (optional) │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │  PCA Projection in RFF      │
+        │  Space ─► Components        │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │  Output (batch, n_comp)     │
+        └─────────────────────────────┘
 
-    **Mathematical Framework**:
-    Using Random Fourier Features approximation:
-    ```
-    k(x,y) ≈ z(x)ᵀz(y)
-    ```
-    where:
-    ```
-    z(x) = √(2/D) cos(ωᵀx + b)
-    ```
-    - ω ∈ ℝᵈˣᴰ: Random frequencies sampled from p(ω)
-    - b ∈ ℝᴰ: Random phases sampled from Uniform(0, 2π)
-    - D: Number of random features
+        Reconstruction (inverse_transform):
+        ┌──────────┐    ┌──────────┐    ┌──────────┐
+        │Components├──►│RFF Space ├──►│ arccos + │──► Original
+        │          │    │(unproject)│   │ pseudo-inv│    Space
+        └──────────┘    └──────────┘    └──────────┘
 
-    The transformation is invertible in the subdomain where cos⁻¹ is well-defined.
-
-    Args:
-        n_components: Integer, number of principal components to extract.
-            Must be positive and typically less than n_random_features.
-            Defaults to None (keep all components).
-        n_random_features: Integer, number of random Fourier features.
-            Higher values give better kernel approximation but increase
-            computational cost. Defaults to 256.
-        kernel_type: String, type of kernel to approximate.
-            Options: 'rbf', 'laplacian', 'cauchy'. Defaults to 'rbf'.
-        gamma: Float, kernel bandwidth parameter. For RBF: k(x,y) = exp(-γ||x-y||²).
-            If None, defaults to 1.0/input_dim. Defaults to None.
-        center_features: Boolean, whether to center the RFF features before PCA.
-            Important for proper PCA behavior. Defaults to True.
-        whiten: Boolean, whether to whiten the principal components
-            (divide by sqrt of eigenvalues). Defaults to False.
-        regularization: Float, regularization parameter for numerical stability
-            in the inverse computation. Defaults to 1e-6.
-        random_seed: Integer, random seed for reproducibility of random features.
-            If None, uses random initialization. Defaults to None.
-        trainable_frequencies: Boolean, whether random frequencies are trainable.
-            Allows adaptation but may lose theoretical guarantees. Defaults to False.
-        use_bias: Boolean, whether to include bias term in reconstruction.
-            Defaults to True.
-        kernel_regularizer: Optional regularizer for frequency weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        2D tensor with shape: `(batch_size, input_features)`.
-
-    Output shape:
-        - Forward pass: 2D tensor with shape: `(batch_size, n_components)`.
-        - Reconstruction: 2D tensor with shape: `(batch_size, input_features)`.
-
-    Attributes:
-        frequencies: Random frequency matrix ω of shape (input_dim, n_random_features).
-        phases: Random phase vector b of shape (n_random_features,).
-        projection_matrix: PCA projection matrix in RFF space.
-        eigenvalues: Eigenvalues from PCA decomposition.
-        feature_mean: Mean of RFF features for centering.
-
-    Methods:
-        call(inputs, training=None): Forward transformation to principal components.
-        transform(inputs): Alias for forward transformation.
-        inverse_transform(components): Reconstruct from principal components.
-        fit_transform(inputs): Fit the model and transform in one step.
-
-    Example:
-        ```python
-        # Basic ikPCA for dimensionality reduction
-        ikpca = InvertibleKernelPCA(
-            n_components=50,
-            n_random_features=512,
-            kernel_type='rbf',
-            gamma=0.1
-        )
-
-        # Forward transformation
-        inputs = keras.Input(shape=(784,))  # e.g., flattened MNIST
-        components = ikpca(inputs)  # Shape: (batch, 50)
-
-        # Reconstruction capability
-        reconstructed = ikpca.inverse_transform(components)  # Shape: (batch, 784)
-
-        # For denoising applications
-        ikpca_denoising = InvertibleKernelPCA(
-            n_components=100,
-            n_random_features=1000,
-            kernel_type='rbf',
-            whiten=True,  # Better for denoising
-            regularization=1e-4
-        )
-
-        # Process noisy data
-        clean_components = ikpca_denoising(noisy_data)
-        denoised_data = ikpca_denoising.inverse_transform(clean_components)
-        ```
-
-    References:
-        - Invertible Kernel PCA with Random Fourier Features
-          (Gedon et al., 2023): https://arxiv.org/abs/2303.05043
-        - Random Features for Large-Scale Kernel Machines
-          (Rahimi & Recht, 2007): https://papers.nips.cc/paper/2007/hash/013a006f03dbc5392effeb8f18fda755-Abstract.html
-
-    Note:
-        The invertibility is achieved without supervised learning, making ikPCA
-        a strong alternative to traditional kernel PCA for denoising and
-        reconstruction tasks. The approximation quality depends on the number
-        of random features D.
+    :param n_components: Number of principal components to extract.
+        Defaults to ``None`` (keep all components).
+    :type n_components: int | None
+    :param n_random_features: Number of random Fourier features. Defaults to 256.
+    :type n_random_features: int
+    :param kernel_type: Type of kernel to approximate. Options: ``'rbf'``,
+        ``'laplacian'``, ``'cauchy'``. Defaults to ``'rbf'``.
+    :type kernel_type: str
+    :param gamma: Kernel bandwidth parameter. If ``None``, defaults to
+        ``1.0 / input_dim``.
+    :type gamma: float | None
+    :param center_features: Whether to center the RFF features before PCA.
+        Defaults to ``True``.
+    :type center_features: bool
+    :param whiten: Whether to whiten the principal components. Defaults to ``False``.
+    :type whiten: bool
+    :param regularization: Regularization parameter for numerical stability.
+        Defaults to 1e-6.
+    :type regularization: float
+    :param random_seed: Random seed for reproducibility. Defaults to ``None``.
+    :type random_seed: int | None
+    :param trainable_frequencies: Whether random frequencies are trainable.
+        Defaults to ``False``.
+    :type trainable_frequencies: bool
+    :param use_bias: Whether to include bias term in reconstruction.
+        Defaults to ``True``.
+    :type use_bias: bool
+    :param kernel_regularizer: Optional regularizer for frequency weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer | None
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -264,11 +207,10 @@ class InvertibleKernelPCA(keras.layers.Layer):
         self.reconstruction_bias = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create Random Fourier Features and PCA projection weights.
+        """Create Random Fourier Features and PCA projection weights.
 
-        This method initializes the random frequencies, phases, and projection
-        matrices needed for invertible kernel PCA.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -393,14 +335,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute Random Fourier Features for the input.
+        """Compute Random Fourier Features for the input.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim)
-
-        Returns:
-            RFF tensor of shape (batch_size, n_random_features)
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: RFF tensor of shape ``(batch_size, n_random_features)``.
+        :rtype: keras.KerasTensor
         """
         # Compute linear projections: Xω
         linear_proj = ops.matmul(inputs, self.frequencies)
@@ -422,12 +362,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             rff_features: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> None:
-        """
-        Update PCA components using eigendecomposition of RFF features.
+        """Update PCA components using eigendecomposition of RFF features.
 
-        Args:
-            rff_features: RFF features of shape (batch_size, n_random_features)
-            training: Whether in training mode
+        :param rff_features: RFF features of shape ``(batch_size, n_random_features)``.
+        :type rff_features: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool | None
         """
         if not training:
             return
@@ -468,15 +408,14 @@ class InvertibleKernelPCA(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass: transform inputs to principal components.
+        """Forward pass transforming inputs to principal components.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim)
-            training: Boolean flag for training mode
-
-        Returns:
-            Principal components of shape (batch_size, n_components)
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean flag for training mode.
+        :type training: bool | None
+        :return: Principal components of shape ``(batch_size, n_components)``.
+        :rtype: keras.KerasTensor
         """
         # Compute Random Fourier Features
         rff_features = self.compute_random_features(inputs)
@@ -503,14 +442,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Transform inputs to principal components (alias for call).
+        """Transform inputs to principal components (alias for call).
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim)
-
-        Returns:
-            Principal components of shape (batch_size, n_components)
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Principal components of shape ``(batch_size, n_components)``.
+        :rtype: keras.KerasTensor
         """
         return self.call(inputs, training=False)
 
@@ -518,18 +455,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             components: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Reconstruct original data from principal components.
+        """Reconstruct original data from principal components.
 
-        This is the key innovation of ikPCA - reconstruction without
-        supervised learning by exploiting the invertibility of the
-        cosine transformation in a subdomain.
-
-        Args:
-            components: Principal components of shape (batch_size, n_components)
-
-        Returns:
-            Reconstructed data of shape (batch_size, input_dim)
+        :param components: Principal components of shape ``(batch_size, n_components)``.
+        :type components: keras.KerasTensor
+        :return: Reconstructed data of shape ``(batch_size, input_dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(components)[0]
 
@@ -589,14 +520,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Fit the model and transform inputs in one step.
+        """Fit the model and transform inputs in one step.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim)
-
-        Returns:
-            Principal components of shape (batch_size, n_components)
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Principal components of shape ``(batch_size, n_components)``.
+        :rtype: keras.KerasTensor
         """
         # First pass to fit the model
         _ = self.call(inputs, training=True)
@@ -608,14 +537,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute reconstruction error for the inputs.
+        """Compute reconstruction error for the inputs.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim)
-
-        Returns:
-            Reconstruction error (MSE) for each sample
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Reconstruction error (MSE) for each sample.
+        :rtype: keras.KerasTensor
         """
         # Transform to components
         components = self.transform(inputs)
@@ -658,39 +585,55 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
     """
     Denoising layer based on Invertible Kernel PCA.
 
-    This layer uses ikPCA for denoising by projecting to a lower-dimensional
-    space and reconstructing, effectively removing noise components.
+    Uses ikPCA for denoising by projecting to a lower-dimensional principal
+    component space and reconstructing, effectively removing noise components
+    that correspond to small eigenvalues. The noise level can be estimated
+    via median absolute deviation (MAD) or standard deviation, and the number
+    of retained components can be set adaptively based on this estimate.
 
-    **Intent**: Provide an efficient denoising layer that leverages the natural
-    invertibility of ikPCA without requiring supervised training.
+    **Architecture Overview:**
 
-    Args:
-        n_components: Integer or float. If integer, number of components to keep.
-            If float between 0 and 1, fraction of variance to preserve.
-            Defaults to 0.95 (keep 95% variance).
-        n_random_features: Integer, number of random Fourier features.
-            Defaults to 512.
-        kernel_type: String, type of kernel. Defaults to 'rbf'.
-        gamma: Float, kernel bandwidth. Defaults to None (auto).
-        adaptive_components: Boolean, whether to adaptively select components
-            based on noise level estimation. Defaults to False.
-        noise_estimation: String, method for noise estimation.
-            Options: 'mad' (median absolute deviation), 'std' (standard deviation).
-            Defaults to 'mad'.
-        **kwargs: Additional arguments passed to InvertibleKernelPCA.
+    .. code-block:: text
 
-    Example:
-        ```python
-        # Create denoising layer
-        denoiser = InvertibleKernelPCADenoiser(
-            n_components=0.95,  # Keep 95% variance
-            n_random_features=1000,
-            kernel_type='rbf'
-        )
+        ┌───────────────────────────┐
+        │  Noisy Input (batch, dim) │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  ikPCA Forward Transform  │
+        │  (project to components)  │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  Adaptive Thresholding    │
+        │  (optional noise filter)  │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  ikPCA Inverse Transform  │
+        │  (reconstruct denoised)   │
+        └────────────┬──────────────┘
+                     ▼
+        ┌───────────────────────────┐
+        │  Denoised Output          │
+        └───────────────────────────┘
 
-        # Denoise data
-        clean_data = denoiser(noisy_data)
-        ```
+    :param n_components: Number of components to keep (int) or fraction of
+        variance to preserve (float in ``(0, 1]``). Defaults to 0.95.
+    :type n_components: int | float
+    :param n_random_features: Number of random Fourier features. Defaults to 512.
+    :type n_random_features: int
+    :param kernel_type: Type of kernel. Defaults to ``'rbf'``.
+    :type kernel_type: str
+    :param gamma: Kernel bandwidth. Defaults to ``None`` (auto).
+    :type gamma: float | None
+    :param adaptive_components: Whether to adaptively select components
+        based on noise level estimation. Defaults to ``False``.
+    :type adaptive_components: bool
+    :param noise_estimation: Method for noise estimation. Options: ``'mad'``,
+        ``'std'``. Defaults to ``'mad'``.
+    :type noise_estimation: str
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -727,7 +670,11 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         self.ikpca = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the denoising layer."""
+        """Build the denoising layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
+        """
         super().build(input_shape)
 
         # Determine number of components if using variance threshold
@@ -756,14 +703,12 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Estimate noise level in the input.
+        """Estimate noise level in the input.
 
-        Args:
-            inputs: Input tensor
-
-        Returns:
-            Estimated noise level
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :return: Estimated noise level.
+        :rtype: keras.KerasTensor
         """
         if self.noise_estimation == 'mad':
             # Median Absolute Deviation
@@ -785,15 +730,14 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Denoise inputs using ikPCA.
+        """Denoise inputs using ikPCA.
 
-        Args:
-            inputs: Noisy input tensor
-            training: Training flag
-
-        Returns:
-            Denoised tensor
+        :param inputs: Noisy input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Training flag.
+        :type training: bool | None
+        :return: Denoised tensor.
+        :rtype: keras.KerasTensor
         """
         # Transform to principal components
         components = self.ikpca(inputs, training=training)

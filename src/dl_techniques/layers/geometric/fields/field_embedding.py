@@ -28,55 +28,62 @@ CurvatureType = Literal['metric', 'riemann', 'ricci', 'scalar']
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class FieldEmbedding(keras.layers.Layer):
-    """
-    Field Embedding layer that maps tokens to fields with curvature.
+    """Field Embedding layer that maps tokens to fields with curvature.
 
-    Instead of mapping tokens to point vectors, this layer maps tokens to
-    field representations that include both a position vector and local
-    curvature information. The curvature captures how the semantic meaning
-    varies in the local neighborhood of each token.
+    Instead of mapping tokens to point vectors in R^d, maps them to
+    (R^d, C) pairs where C is a local curvature tensor capturing how
+    semantic meaning varies in the neighbourhood of each token. The
+    curvature is computed as tanh(embedding @ W_curv + b) * scale, with
+    shape depending on curvature_type: metric and riemann yield (B, S, D, D),
+    ricci yields (B, S, D), and scalar yields (B, S, 1). Curvature
+    smoothness regularisation encourages adjacent tokens to have similar
+    local geometry.
 
-    This provides several advantages:
-    1. Adversarial robustness: perturbations must respect curvature consistency
-    2. Richer representations: captures both position and local geometry
-    3. Natural regularization: curvature smoothness acts as implicit regularizer
+    **Architecture Overview:**
 
-    The output is a tuple of (embedding, curvature) where:
-    - embedding: shape (batch, seq_len, embed_dim)
-    - curvature: shape depends on curvature_type
-        - 'metric': (batch, seq_len, embed_dim, embed_dim) - full metric tensor
-        - 'riemann': (batch, seq_len, embed_dim, embed_dim) - Riemann curvature
-        - 'ricci': (batch, seq_len, embed_dim) - Ricci curvature (diagonal)
-        - 'scalar': (batch, seq_len, 1) - scalar curvature
+    .. code-block:: text
 
-    Args:
-        vocab_size: Size of the vocabulary.
-        embed_dim: Dimension of the embedding vectors.
-        curvature_dim: Dimension for curvature representation. If None, uses embed_dim.
-        curvature_type: Type of curvature to compute. One of:
-            - 'metric': Full metric tensor (most expressive, highest memory)
-            - 'riemann': Riemann curvature tensor
-            - 'ricci': Ricci curvature (diagonal approximation)
-            - 'scalar': Scalar curvature (most efficient)
-        curvature_scale: Initial scale for curvature values.
-        curvature_regularization: Strength of curvature smoothness regularization.
-        embed_initializer: Initializer for embedding weights.
-        curvature_initializer: Initializer for curvature projection weights.
-        embed_regularizer: Regularizer for embedding weights.
-        curvature_regularizer: Regularizer for curvature weights.
+        ┌─────────────────────────┐
+        │ Token IDs  [B, S]       │
+        └────────────┬────────────┘
+                     ▼
+        ┌─────────────────────────┐
+        │ Embedding Lookup        │
+        │ → embeddings [B, S, D]  │
+        └────────┬────────────────┘
+                 ├──────────────────────┐
+                 ▼                      ▼
+        ┌────────────────┐   ┌──────────────────────┐
+        │ Output:        │   │ Curvature Projection  │
+        │ embeddings     │   │ emb @ W + b → tanh    │
+        │ [B, S, D]      │   │ × scale               │
+        └────────────────┘   │ → curvature            │
+                             └──────────────────────┘
 
-    Example:
-        >>> # Create field embedding for a vocabulary of 10000 tokens
-        >>> field_embed = FieldEmbedding(
-        ...     vocab_size=10000,
-        ...     embed_dim=256,
-        ...     curvature_type='ricci',
-        ...     curvature_regularization=0.01
-        ... )
-        >>> tokens = keras.ops.convert_to_tensor([[1, 2, 3], [4, 5, 6]])
-        >>> embedding, curvature = field_embed(tokens)
-        >>> print(embedding.shape)  # (2, 3, 256)
-        >>> print(curvature.shape)  # (2, 3, 256) for ricci type
+    :param vocab_size: Size of the vocabulary. Must be positive.
+    :type vocab_size: int
+    :param embed_dim: Dimension of embedding vectors. Must be positive.
+    :type embed_dim: int
+    :param curvature_dim: Dimension for curvature. Defaults to ``embed_dim``.
+    :type curvature_dim: Optional[int]
+    :param curvature_type: Type of curvature
+        (``'metric'``, ``'riemann'``, ``'ricci'``, ``'scalar'``).
+        Defaults to ``'ricci'``.
+    :type curvature_type: CurvatureType
+    :param curvature_scale: Initial scale for curvature values. Defaults to 0.1.
+    :type curvature_scale: float
+    :param curvature_regularization: Smoothness regularization strength.
+        Defaults to 0.01.
+    :type curvature_regularization: float
+    :param embed_initializer: Initializer for embedding weights.
+    :type embed_initializer: Union[str, initializers.Initializer]
+    :param curvature_initializer: Initializer for curvature projection.
+    :type curvature_initializer: Union[str, initializers.Initializer]
+    :param embed_regularizer: Regularizer for embedding weights.
+    :type embed_regularizer: Optional[regularizers.Regularizer]
+    :param curvature_regularizer: Regularizer for curvature weights.
+    :type curvature_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -136,11 +143,10 @@ class FieldEmbedding(keras.layers.Layer):
         self.curvature_bias = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Args:
-            input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Main embedding weights
         self.embedding_weights = self.add_weight(
@@ -173,18 +179,16 @@ class FieldEmbedding(keras.layers.Layer):
             self,
             embeddings: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute curvature from embeddings.
+        """Compute curvature from embeddings.
 
         The curvature is computed as a nonlinear function of the embedding,
         ensuring that it captures the local geometric structure of the
         representation space.
 
-        Args:
-            embeddings: Embedding tensor of shape (batch, seq_len, embed_dim).
-
-        Returns:
-            Curvature tensor with shape depending on curvature_type.
+        :param embeddings: Embedding tensor of shape (batch, seq_len, embed_dim).
+        :type embeddings: keras.KerasTensor
+        :return: Curvature tensor with shape depending on curvature_type.
+        :rtype: keras.KerasTensor
         """
         # Project embedding to curvature space
         # Shape: (batch, seq_len, curvature_output_dim)
@@ -235,18 +239,16 @@ class FieldEmbedding(keras.layers.Layer):
             self,
             curvature: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute curvature smoothness regularization loss.
+        """Compute curvature smoothness regularization loss.
 
         Encourages neighboring tokens to have similar curvature,
         providing implicit regularization and preventing sharp
         discontinuities in the geometric structure.
 
-        Args:
-            curvature: Curvature tensor.
-
-        Returns:
-            Scalar regularization loss.
+        :param curvature: Curvature tensor.
+        :type curvature: keras.KerasTensor
+        :return: Scalar regularization loss.
+        :rtype: keras.KerasTensor
         """
         if self.curvature_regularization <= 0:
             return ops.zeros(())
@@ -276,17 +278,16 @@ class FieldEmbedding(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Forward pass: embed tokens as fields with curvature.
+        """Forward pass: embed tokens as fields with curvature.
 
-        Args:
-            inputs: Integer tensor of token indices with shape (batch, seq_len).
-            training: Whether the layer is in training mode.
-
-        Returns:
-            Tuple of (embeddings, curvature):
-                - embeddings: shape (batch, seq_len, embed_dim)
-                - curvature: shape depends on curvature_type
+        :param inputs: Integer tensor of token indices with shape (batch, seq_len).
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (embeddings, curvature):
+            - embeddings: shape (batch, seq_len, embed_dim)
+            - curvature: shape depends on curvature_type
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Look up embeddings
         embeddings = ops.take(self.embedding_weights, inputs, axis=0)
@@ -305,14 +306,12 @@ class FieldEmbedding(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """
-        Compute the output shapes.
+        """Compute the output shapes.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Tuple of (embedding_shape, curvature_shape).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Tuple of (embedding_shape, curvature_shape).
+        :rtype: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
         """
         batch_size = input_shape[0]
         seq_len = input_shape[1] if len(input_shape) > 1 else None

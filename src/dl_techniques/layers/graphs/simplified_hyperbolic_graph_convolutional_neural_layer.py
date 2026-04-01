@@ -37,109 +37,72 @@ _poincare_math = PoincareMath(eps=1e-5)
 
 @keras.saving.register_keras_serializable()
 class SHGCNLayer(keras.layers.Layer):
-    """
-    Simplified Hyperbolic Graph Convolutional Layer.
+    """Simplified Hyperbolic Graph Convolutional Layer.
 
-    This layer implements efficient hyperbolic graph convolution by performing
-    neighbor aggregation in Euclidean tangent space while using hyperbolic geometry
-    specifically for bias addition, capturing hierarchical structure.
+    Implements efficient hyperbolic graph convolution (Eq. 14 of Arevalo et al.)
+    by performing neighbourhood aggregation in Euclidean tangent space while
+    using hyperbolic geometry only for bias addition. The full forward pass is
+    H^l = sigma(A_tilde log_0^c(exp_0^c(W H^{l-1}) oplus_c exp_0^c(b))), where
+    oplus_c is Mobius addition, exp_0^c / log_0^c are the exponential / logarithmic
+    maps at the origin, A_tilde is the normalised adjacency, and sigma is the
+    Euclidean activation.
 
-    **Key Innovation**: Unlike standard HGCN which performs expensive aggregation
-    in hyperbolic space (Fréchet means), sHGCN performs aggregation in Euclidean
-    space after geometric bias transformation, achieving better speed and stability.
+    **Architecture Overview:**
 
-    **Architecture Flow**:
-    ```
-    Input Features [N, D_in]
-            ↓
-    1. Euclidean Transform: Z = X @ W
-            ↓
-    2. Map to Hyperbolic: Z_hyp = exp₀^c(Z)
-            ↓
-    3. Möbius Bias: H_hyp = Z_hyp ⊕_c b_hyp
-            ↓
-    4. Project (stability): H_hyp = project(H_hyp)
-            ↓
-    5. Map to Tangent: H_tan = log₀^c(H_hyp)
-            ↓
-    6. Aggregate Neighbors: Y = Ã @ H_tan
-            ↓
-    7. Activation: Output = σ(Y)
-            ↓
-    Output [N, D_out]
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-        1. Linear: Z = XW where Z ∈ ℝ^{N×units}
-        2. Exponential: Z_hyp = exp₀^c(Z) maps to 𝔻^n_c
-        3. Bias: H_hyp = Z_hyp ⊕_c exp₀^c(b)
-        4. Logarithmic: H_tan = log₀^c(H_hyp) maps back to tangent space
-        5. Aggregation: Y = ÃH_tan leverages sparse matrix operations
-        6. Activation: Out = σ(Y) applies element-wise nonlinearity
+        ┌───────────────────────────────────────┐
+        │  Input: [features, adjacency]         │
+        │         [N, D_in]    [N, N] (sparse)  │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  1. Euclidean Linear   Z = X @ W      │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  2. Exp Map   Z_hyp = exp₀^c(Z)      │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  3. Moebius Bias  H = Z_hyp ⊕_c b    │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  4. Project (numerical stability)     │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  5. Log Map   H_tan = log₀^c(H)      │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  6. Aggregate   Y = Ã @ H_tan         │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  7. Activation  Output = σ(Y)         │
+        │     [N, units]                        │
+        └───────────────────────────────────────┘
 
-    Args:
-        units: Output dimensionality (number of features per node). Must be positive.
-        activation: Euclidean activation function name or callable. Applied after
-            aggregation in tangent space. Defaults to 'relu'.
-        use_bias: Whether to include learnable hyperbolic bias. When True, adds
-            Möbius translation in hyperbolic space. Defaults to True.
-        use_curvature: Whether curvature c is learnable. When True, c is optimized
-            during training. When False, fixed at c=1. Defaults to True.
-        dropout_rate: Dropout probability applied to input features before
-            transformation. Range [0, 1]. Defaults to 0.0 (no dropout).
-        kernel_initializer: Initializer for weight matrix W. Defaults to
-            'glorot_uniform'.
-        bias_initializer: Initializer for bias vector b. Only used when
-            use_bias=True. Defaults to 'zeros'.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input:
-        List of two tensors:
-        - features: Dense tensor of shape (num_nodes, input_dim) with node features
-        - adjacency: Sparse tensor of shape (num_nodes, num_nodes) representing
-            normalized adjacency matrix Ã. Must be a tf.sparse.SparseTensor.
-
-    Output:
-        Dense tensor of shape (num_nodes, units) with updated node embeddings
-        in Euclidean tangent space.
-
-    Attributes:
-        kernel: Weight matrix of shape (input_dim, units).
-        bias: Bias vector of shape (units,) if use_bias=True.
-        c_theta: Curvature parameter θ where c = softplus(θ).
-        dropout: Dropout layer instance.
-
-    Example:
-        ```python
-        # Single sHGCN layer
-        layer = SHGCNLayer(units=64, dropout_rate=0.3)
-
-        # Prepare inputs
-        features = ops.random.normal((100, 32))  # 100 nodes, 32 features
-        adj_sparse = create_normalized_adjacency(...)  # Sparse tensor
-
-        # Forward pass
-        output = layer([features, adj_sparse], training=True)
-        print(output.shape)  # (100, 64)
-
-        # Multi-layer graph network
-        x = features
-        for units in [64, 32, 16]:
-            layer = SHGCNLayer(units=units, activation='relu', dropout_rate=0.5)
-            x = layer([x, adj_sparse], training=True)
-        ```
-
-    Note:
-        - Adjacency matrix should be pre-normalized (e.g., D^{-1/2}AD^{-1/2})
-        - Sparse adjacency is required for scalability on large graphs
-        - Output embeddings are in Euclidean space, not hyperbolic
-        - Curvature c is constrained > 0 via softplus transformation
-
-    References:
-        Arevalo et al. "Simplified Hyperbolic Graph Convolutional Neural Networks"
-        Equation 14 (main forward pass)
-        Equation 17 (Möbius addition)
-        Equation 19 (exponential/logarithmic maps)
+    :param units: Output dimensionality (features per node). Must be positive.
+    :type units: int
+    :param activation: Euclidean activation function. Defaults to ``'relu'``.
+    :type activation: Union[str, callable]
+    :param use_bias: Whether to add Mobius bias in hyperbolic space.
+        Defaults to ``True``.
+    :type use_bias: bool
+    :param use_curvature: Whether curvature *c* is learnable. Defaults to ``True``.
+    :type use_curvature: bool
+    :param dropout_rate: Dropout probability in ``[0, 1)``. Defaults to 0.0.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for weight matrix *W*.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vector *b*.
+        Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -153,7 +116,7 @@ class SHGCNLayer(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
             **kwargs: Any
     ) -> None:
-        """Initialize sHGCN layer with configuration."""
+        """Initialise the sHGCN layer."""
         super().__init__(**kwargs)
 
         if units <= 0:
@@ -173,13 +136,10 @@ class SHGCNLayer(keras.layers.Layer):
         self.dropout = keras.layers.Dropout(dropout_rate)
 
     def build(self, input_shape: Union[Tuple, List[Tuple]]) -> None:
-        """
-        Create layer weights based on input shape.
+        """Create layer weights based on input shape.
 
-        Args:
-            input_shape: List of two shapes:
-                - features_shape: (num_nodes, input_dim)
-                - adjacency_shape: (num_nodes, num_nodes)
+        :param input_shape: List of ``[features_shape, adjacency_shape]``.
+        :type input_shape: Union[Tuple, List[Tuple]]
         """
         # Input is [features, adjacency]
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
@@ -227,11 +187,10 @@ class SHGCNLayer(keras.layers.Layer):
 
     @property
     def curvature(self) -> keras.KerasTensor:
-        """
-        Get current curvature value c > 0.
+        """Get current curvature value c > 0.
 
-        Returns:
-            Scalar tensor representing curvature c = softplus(c_theta).
+        :return: Scalar tensor representing curvature ``c = softplus(c_theta)``.
+        :rtype: keras.KerasTensor
         """
         return keras.ops.softplus(self.c_theta)
 
@@ -240,17 +199,14 @@ class SHGCNLayer(keras.layers.Layer):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass implementing Equation 14.
+        """Forward pass implementing Equation 14.
 
-        Args:
-            inputs: List containing:
-                - features: [num_nodes, input_dim] dense tensor
-                - adjacency: [num_nodes, num_nodes] sparse tensor (normalized)
-            training: Whether in training mode (affects dropout).
-
-        Returns:
-            Updated node embeddings of shape [num_nodes, units] in Euclidean space.
+        :param inputs: List of ``[features, adjacency]`` tensors.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether in training mode (affects dropout).
+        :type training: Optional[bool]
+        :return: Updated node embeddings of shape ``[num_nodes, units]``.
+        :rtype: keras.KerasTensor
         """
         x, adj = inputs
 
@@ -302,24 +258,21 @@ class SHGCNLayer(keras.layers.Layer):
             self,
             input_shape: Union[Tuple, List[Tuple]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape given input shape.
+        """Compute output shape given input shape.
 
-        Args:
-            input_shape: List of [features_shape, adjacency_shape].
-
-        Returns:
-            Output shape tuple (num_nodes, units).
+        :param input_shape: List of ``[features_shape, adjacency_shape]``.
+        :type input_shape: Union[Tuple, List[Tuple]]
+        :return: Output shape tuple ``(num_nodes, units)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         feat_shape = input_shape[0]
         return (feat_shape[0], self.units)
 
     def get_config(self) -> dict:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

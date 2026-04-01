@@ -24,26 +24,27 @@ class ContextualCounterFFN(keras.layers.Layer):
     positional information through learnable counting operations, useful for tasks
     requiring awareness of token occurrence patterns or sequence structure.
 
-    **Architecture**:
-    ```
-    Input(batch, seq, input_dim)
-           ↓
-    [Sense] Key Projection → Countable Events (sigmoid)
-           ↓
-    [Aggregate] Count by Scope:
-      - global: DC offset (all positions same)
-      - causal: Low-pass filter (cumsum forward)
-      - bidirectional: Band-pass (forward + backward cumsum)
-           ↓
-    [Transform] Count → Output Dim (with activation)
-           ↓
-    [Modulate] Gate Control:
-      - blend: gate*counts + (1-gate)*input (if dims match)
-      - project: gate*counts + projection(input)
-      - gate_only: gate*counts
-           ↓
-    Output(batch, seq, output_dim)
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+            Input(batch, seq, input_dim)
+                   ↓
+            [Sense] Key Projection → Countable Events (sigmoid)
+                   ↓
+            [Aggregate] Count by Scope:
+              - global: DC offset (all positions same)
+              - causal: Low-pass filter (cumsum forward)
+              - bidirectional: Band-pass (forward + backward cumsum)
+                   ↓
+            [Transform] Count → Output Dim (with activation)
+                   ↓
+            [Modulate] Gate Control:
+              - blend: gate*counts + (1-gate)*input (if dims match)
+              - project: gate*counts + projection(input)
+              - gate_only: gate*counts
+                   ↓
+            Output(batch, seq, output_dim)
+
 
     **Mathematical Operations**:
     1. Events = σ(W_key @ X + b_key)
@@ -59,77 +60,29 @@ class ContextualCounterFFN(keras.layers.Layer):
     - Aggregate varies by counting_scope
     - Modulate varies by residual_mode
 
-    Args:
-        output_dim: Integer, final output dimension. Must be positive.
-            Determines the feature space after modulation.
-        count_dim: Integer, intermediate counting dimension. Must be positive.
-            Controls complexity of countable features.
-        counting_scope: Literal['global', 'causal', 'bidirectional'], scope of counting.
-            - 'global': Zero-frequency, all tokens get same global signal
-            - 'causal': Integrator sensitive to sequence history
-            - 'bidirectional': Encodes position relative to entire sequence
-            Defaults to 'bidirectional'.
-        residual_mode: Literal['blend', 'project', 'gate_only'], integration mode.
-            - 'blend': If dims match: gate*counts + (1-gate)*input
-            - 'project': Always: gate*counts + linear(input)
-            - 'gate_only': Pure gated counts: gate*counts
-            Defaults to 'blend'.
-        activation: Activation for count transformation. String name or callable.
-            Common choices: 'gelu', 'relu', 'tanh'. Defaults to 'gelu'.
-        use_bias: Boolean, whether to use bias in dense layers. Defaults to True.
-        kernel_initializer: Initializer for kernel weights. Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias weights. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, input_dim)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, output_dim)`.
-
-    Attributes:
-        key_projection: Dense layer identifying countable events.
-        count_transform: Dense layer transforming aggregated counts.
-        gate: Dense layer controlling modulation strength.
-        residual_projection: Optional Dense layer for input projection.
-
-    Example:
-        ```python
-        # Standard bidirectional counting with residual
-        layer = ContextualCounterFFN(
-            output_dim=768,
-            count_dim=128,
-            counting_scope='bidirectional',
-            residual_mode='blend'
-        )
-
-        # Causal counting for autoregressive models
-        layer = ContextualCounterFFN(
-            output_dim=512,
-            count_dim=64,
-            counting_scope='causal',
-            residual_mode='project',
-            activation='tanh'
-        )
-
-        # Pure counting features without residual
-        layer = ContextualCounterFFN(
-            output_dim=256,
-            count_dim=32,
-            counting_scope='global',
-            residual_mode='gate_only'
-        )
-        ```
-
-    Raises:
-        ValueError: If configuration parameters are invalid.
-
-    Note:
-        The bidirectional counting scope concatenates forward and backward counts,
-        doubling the feature dimension before transformation. This provides richer
-        positional information but increases computation.
+    :param output_dim: Final output dimension. Must be positive.
+    :type output_dim: int
+    :param count_dim: Intermediate counting dimension. Must be positive.
+    :type count_dim: int
+    :param counting_scope: Scope of counting: ``'global'``, ``'causal'``, or
+        ``'bidirectional'``. Defaults to ``'bidirectional'``.
+    :type counting_scope: str
+    :param residual_mode: Integration mode: ``'blend'``, ``'project'``, or
+        ``'gate_only'``. Defaults to ``'blend'``.
+    :type residual_mode: str
+    :param activation: Activation for count transformation. Defaults to ``'gelu'``.
+    :type activation: str | callable
+    :param use_bias: Whether to use bias in dense layers. Defaults to ``True``.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer. Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str | keras.initializers.Initializer
+    :param bias_initializer: Bias initializer. Defaults to ``'zeros'``.
+    :type bias_initializer: str | keras.initializers.Initializer
+    :param kernel_regularizer: Optional kernel regularizer.
+    :type kernel_regularizer: keras.regularizers.Regularizer | None
+    :param bias_regularizer: Optional bias regularizer.
+    :type bias_regularizer: keras.regularizers.Regularizer | None
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -233,17 +186,10 @@ class ContextualCounterFFN(keras.layers.Layer):
             self.residual_projection = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all sub-layers with proper shape inference.
+        """Build the layer and all sub-layers.
 
-        Following Modern Keras 3 best practices: explicitly build each sub-layer
-        for robust serialization support.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
         """
         if self.built:
             return
@@ -290,15 +236,14 @@ class ContextualCounterFFN(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass implementing sense-aggregate-transform-modulate protocol.
+        """Forward pass implementing sense-aggregate-transform-modulate protocol.
 
-        Args:
-            inputs: Input tensor of shape (batch, sequence, features).
-            training: Boolean flag for training mode, affects regularization.
-
-        Returns:
-            Output tensor of shape (batch, sequence, output_dim).
+        :param inputs: Input tensor of shape ``(batch, sequence, features)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean for training mode.
+        :type training: bool | None
+        :return: Output tensor of shape ``(batch, sequence, output_dim)``.
+        :rtype: keras.KerasTensor
         """
         # 1. SENSE: Identify countable events through key projection
         countable_events = self.key_projection(inputs, training=training)
@@ -369,24 +314,20 @@ class ContextualCounterFFN(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Shape tuple of the output with last dimension as output_dim.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: tuple[int | None, ...]
+        :return: Output shape tuple.
+        :rtype: tuple[int | None, ...]
         """
         return tuple(input_shape[:-1]) + (self.output_dim,)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters needed
-            to reconstruct this layer.
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({

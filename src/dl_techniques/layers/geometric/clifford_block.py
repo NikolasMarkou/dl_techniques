@@ -55,42 +55,56 @@ _GLOBAL_CLI_MODE: CliMode = "full"
 class SparseRollingGeometricProduct(keras.layers.Layer):
     """Sparse rolling realisation of the Clifford geometric product.
 
-    For each shift offset *s* in ``shifts`` (after filtering to ``s < channels``),
-    computes element-wise scalar (dot) and/or bivector (wedge) interaction terms
-    between the *detail* stream ``Z_det`` and the *context* stream ``Z_ctx``,
-    then projects the concatenated result back to ``channels``.
+    For each shift offset *s* in ``shifts`` (filtered to ``s < channels``),
+    computes element-wise scalar (dot) and/or bivector (wedge) interaction
+    terms between a detail stream Z_det and a context stream Z_ctx, then
+    projects the concatenated result back to ``channels``. The dot component
+    is D_s[c] = SiLU(Z_det[c] * Z_ctx[(c+s) % D]) and the wedge component is
+    W_s[c] = Z_det[c] * Z_ctx[(c+s)%D] - Z_ctx[c] * Z_det[(c+s)%D].
 
-    Dot  (inner) component at offset s::
+    **Architecture Overview:**
 
-        D_s[c] = SiLU( Z_det[c] * Z_ctx[(c+s) % D] )
+    .. code-block:: text
 
-    Wedge (bivector) component at offset s::
+        ┌────────────────┐  ┌────────────────┐
+        │ Z_det [B,H,W,D]│  │ Z_ctx [B,H,W,D]│
+        └───────┬────────┘  └───────┬────────┘
+                │                   │
+                └────────┬──────────┘
+                         ▼
+        ┌────────────────────────────────────┐
+        │  For each shift s:                 │
+        │  ├─ Wedge: Z_det·roll(Z_ctx,s)    │
+        │  │         - Z_ctx·roll(Z_det,s)   │
+        │  └─ Dot:  SiLU(Z_det·roll(Z_ctx,s))│
+        └───────────────┬────────────────────┘
+                        ▼
+        ┌────────────────────────────────────┐
+        │  Concatenate all components        │
+        └───────────────┬────────────────────┘
+                        ▼
+        ┌────────────────────────────────────┐
+        │  Dense projection → [B,H,W,D]     │
+        └────────────────────────────────────┘
 
-        W_s[c] = Z_det[c] * Z_ctx[(c+s)%D]  -  Z_ctx[c] * Z_det[(c+s)%D]
-
-    Shifts ``>= channels`` are silently discarded (cyclic roll with such offsets
-    is a no-op and contributes no new information).
-
-    Args:
-        channels: Feature dimensionality ``D``.  Must match the last
-            dimension of both input tensors.
-        shifts: List of cyclic channel offsets.  Values ``>= channels`` are
-            filtered out.  Exponential shifts ``[1, 2, 4, 8, 16]`` give
-            logarithmic mixing depth.
-        cli_mode: Which algebraic components to retain.
-            ``"inner"`` | ``"wedge"`` | ``"full"`` (default).
-        use_bias: Whether the projection Dense layer uses a bias.
-        kernel_initializer: Initializer for the projection kernel.
-        bias_initializer: Initializer for the projection bias.
-        kernel_regularizer: Regularizer for the projection kernel.
-        bias_regularizer: Regularizer for the projection bias.
-        **kwargs: Passed to :class:`keras.layers.Layer`.
-
-    Input shape:
-        Two tensors of shape ``(B, H, W, channels)``.
-
-    Output shape:
-        ``(B, H, W, channels)``
+    :param channels: Feature dimensionality D.
+    :type channels: int
+    :param shifts: Cyclic channel offsets; values ``>= channels`` are filtered.
+    :type shifts: List[int]
+    :param cli_mode: Components to retain
+        (``"inner"``, ``"wedge"``, ``"full"``). Defaults to ``"full"``.
+    :type cli_mode: CliMode
+    :param use_bias: Whether the projection Dense uses a bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the projection kernel.
+    :type kernel_initializer: Any
+    :param bias_initializer: Initializer for the projection bias.
+    :type bias_initializer: Any
+    :param kernel_regularizer: Regularizer for the projection kernel.
+    :type kernel_regularizer: Optional[Any]
+    :param bias_regularizer: Regularizer for the projection bias.
+    :type bias_regularizer: Optional[Any]
+    :param kwargs: Passed to ``keras.layers.Layer``.
     """
 
     def __init__(
@@ -150,8 +164,8 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
     def build(self, input_shape: Tuple) -> None:
         """Build the projection layer.
 
-        Args:
-            input_shape: Shape of a *single* input tensor ``(B, H, W, D)``.
+        :param input_shape: Shape of a *single* input tensor ``(B, H, W, D)``.
+        :type input_shape: Tuple
         """
         self.proj.build((*input_shape[:-1], self._proj_input_dim))
         super().build(input_shape)
@@ -165,12 +179,12 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Compute sparse geometric product and project.
 
-        Args:
-            z_det: Detail stream  ``(B, H, W, D)``.
-            z_ctx: Context stream ``(B, H, W, D)``.
-
-        Returns:
-            Projected interaction tensor ``(B, H, W, channels)``.
+        :param z_det: Detail stream  ``(B, H, W, D)``.
+        :type z_det: keras.KerasTensor
+        :param z_ctx: Context stream ``(B, H, W, D)``.
+        :type z_ctx: keras.KerasTensor
+        :return: Projected interaction tensor ``(B, H, W, channels)``.
+        :rtype: keras.KerasTensor
         """
         components: List[keras.KerasTensor] = []
 
@@ -197,11 +211,10 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape of one input stream ``(B, H, W, D)``.
-
-        Returns:
-            Output shape ``(B, H, W, channels)``.
+        :param input_shape: Shape of one input stream ``(B, H, W, D)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ``(B, H, W, channels)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         return (*input_shape[:-1], self.channels)
 
@@ -209,8 +222,8 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
-        Returns:
-            Dictionary with all constructor arguments.
+        :return: Dictionary with all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update(
@@ -239,35 +252,60 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
 class GatedGeometricResidual(keras.layers.Layer):
     """Gated Geometric Residual (GGR) update.
 
-    Implements the Euler-discretised ODE step::
+    Implements the Euler-discretised ODE step
+    H_out = H_prev + gamma * (SiLU(H_norm) + alpha * G_feat), where alpha
+    is a learned sigmoid gate on concat(H_norm, G_feat) and gamma is a
+    LayerScale scalar initialised near zero. DropPath is applied to the
+    combined term before residual addition when ``drop_path_rate > 0``.
 
-        H_out = H_prev + gamma * ( SiLU(H_norm) + alpha * G_feat )
+    **Architecture Overview:**
 
-    where ``alpha`` is a learned sigmoid gate that depends on the
-    concatenation of ``H_norm`` and ``G_feat``, and ``gamma`` is a
-    learnable LayerScale scalar initialised near zero.
+    .. code-block:: text
 
-    DropPath (stochastic depth) is applied to the combined term before
-    the residual addition when ``drop_path_rate > 0``.
+        ┌──────────────────┐  ┌──────────────────┐
+        │ H_norm [B,H,W,D] │  │ G_feat [B,H,W,D] │
+        └────────┬─────────┘  └────────┬─────────┘
+                 │                     │
+                 ├─────────┬───────────┤
+                 │         ▼           │
+                 │  ┌─────────────┐    │
+                 │  │ Concat→Gate │    │
+                 │  │ α=sigmoid() │    │
+                 │  └──────┬──────┘    │
+                 │         ▼           │
+                 ▼    ┌──────────┐     ▼
+        ┌────────┐    │ α·G_feat │   (add)
+        │SiLU(H) │    └────┬─────┘     │
+        └───┬────┘         │           │
+            └──────┬───────┘           │
+                   ▼                   │
+            ┌─────────────┐            │
+            │ γ · (sum)   │            │
+            └──────┬──────┘            │
+                   ▼                   │
+            ┌─────────────┐            │
+            │  DropPath   │            │
+            └──────┬──────┘            │
+                   ▼                   │
+            Output (residual term)     │
+                   [B, H, W, D]        │
+        ───────────────────────────────┘
 
-    Args:
-        channels: Feature dimensionality ``D``.
-        layer_scale_init: Initial value for the LayerScale parameter
-            ``gamma``.  Defaults to ``1e-5``.
-        drop_path_rate: Stochastic-depth drop probability.
-            ``0.0`` disables DropPath.
-        kernel_initializer: Initializer for the gate Dense kernel.
-        bias_initializer: Initializer for the gate Dense bias.
-        kernel_regularizer: Regularizer for the gate Dense kernel.
-        bias_regularizer: Regularizer for the gate Dense bias.
-        **kwargs: Passed to :class:`keras.layers.Layer`.
-
-    Input shape:
-        ``H_norm``: ``(B, H, W, channels)`` -- normalised input features.
-        ``G_feat``: ``(B, H, W, channels)`` -- geometric interaction output.
-
-    Output shape:
-        ``(B, H, W, channels)``
+    :param channels: Feature dimensionality D.
+    :type channels: int
+    :param layer_scale_init: Initial LayerScale gamma. Defaults to 1e-5.
+    :type layer_scale_init: float
+    :param drop_path_rate: Stochastic-depth probability. Defaults to 0.0.
+    :type drop_path_rate: float
+    :param kernel_initializer: Initializer for the gate kernel.
+    :type kernel_initializer: Any
+    :param bias_initializer: Initializer for the gate bias.
+    :type bias_initializer: Any
+    :param kernel_regularizer: Regularizer for the gate kernel.
+    :type kernel_regularizer: Optional[Any]
+    :param bias_regularizer: Regularizer for the gate bias.
+    :type bias_regularizer: Optional[Any]
+    :param kwargs: Passed to ``keras.layers.Layer``.
     """
 
     def __init__(
@@ -319,8 +357,8 @@ class GatedGeometricResidual(keras.layers.Layer):
     def build(self, input_shape: Tuple) -> None:
         """Build LayerScale and the gate projection.
 
-        Args:
-            input_shape: Shape of a single input stream ``(B, H, W, D)``.
+        :param input_shape: Shape of a single input stream ``(B, H, W, D)``.
+        :type input_shape: Tuple
         """
         self.gamma = self.add_weight(
             name="gamma",
@@ -341,13 +379,14 @@ class GatedGeometricResidual(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply GGR update.
 
-        Args:
-            h_norm: Normalised input features ``(B, H, W, D)``.
-            g_feat: Geometric interaction features ``(B, H, W, D)``.
-            training: Whether in training mode (affects DropPath).
-
-        Returns:
-            Scaled residual term ``(B, H, W, D)``; caller adds to H_prev.
+        :param h_norm: Normalised input features ``(B, H, W, D)``.
+        :type h_norm: keras.KerasTensor
+        :param g_feat: Geometric interaction features ``(B, H, W, D)``.
+        :type g_feat: keras.KerasTensor
+        :param training: Whether in training mode (affects DropPath).
+        :type training: Optional[bool]
+        :return: Scaled residual term ``(B, H, W, D)``; caller adds to H_prev.
+        :rtype: keras.KerasTensor
         """
         gate_input = keras.ops.concatenate([h_norm, g_feat], axis=-1)
         alpha = keras.activations.sigmoid(self.gate_dense(gate_input))
@@ -366,11 +405,10 @@ class GatedGeometricResidual(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape of a single input stream ``(B, H, W, D)``.
-
-        Returns:
-            Output shape ``(B, H, W, channels)``.
+        :param input_shape: Shape of a single input stream ``(B, H, W, D)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ``(B, H, W, channels)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         return (*input_shape[:-1], self.channels)
 
@@ -378,8 +416,8 @@ class GatedGeometricResidual(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
-        Returns:
-            Dictionary with all constructor arguments.
+        :return: Dictionary with all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update(
@@ -405,54 +443,77 @@ class GatedGeometricResidual(keras.layers.Layer):
 class CliffordNetBlock(keras.layers.Layer):
     """Full isotropic CliffordNet block (no FFN).
 
-    Implements the algorithm described in §9 of arXiv:2601.06793v2::
+    Implements the geometric-algebra vision block from arXiv:2601.06793v2 par. 9.
+    A dual-stream architecture generates detail Z_det = Linear(X_norm) and
+    context Z_ctx = SiLU(BN(DWConv(DWConv(X_norm)))) streams, optionally
+    applying a discrete Laplacian (Z_ctx -= Z_det). The streams interact via
+    a sparse rolling geometric product, are combined through a Gated Geometric
+    Residual (GGR) update, and added back as a residual. An optional global
+    branch uses GAP-based context with hardcoded shifts=[1,2] and cli_mode='full'.
 
-        Step 1  LayerNorm(X_prev)
-        Step 2  Dual-stream generation:
-                  detail  : Z_det = Linear(X_norm)
-                  context : Z_ctx = SiLU( BN( DWConv( DWConv(X_norm) ) ) )
-                  if ctx_mode == 'diff': Z_ctx -= Z_det  (Laplacian)
-        Step 3  Sparse rolling geometric product -> G_feat
-        Step 4  Optional gFFN-G:  C_glo = GAP(X_norm) - Z_det  (always diff)
-                                  G_glo = SparseGP(Z_det, C_glo)
-                                  G_feat += G_glo
-                                  (global branch: shifts=[1,2], cli_mode='full')
-        Step 5  Gated Geometric Residual (GGR) -> H_mix
-        Step 6  X_out = X_prev + H_mix     (DropPath inside GGR)
+    **Architecture Overview:**
 
-    Context stream uses **two stacked 3×3 depthwise convolutions** (effective
-    7×7 receptive field) followed by a single ``BatchNormalization``, matching
-    the original factorised-Laplacian design.
+    .. code-block:: text
 
-    The global interaction branch always uses ``shifts=[1, 2]`` and
-    ``cli_mode='full'`` regardless of the block's local settings, and always
-    applies differential context (``C_glo = GAP(X_norm) - Z_det``).
+        ┌────────────────────────────────┐
+        │  X_prev  [B, H, W, D]         │
+        └───────────────┬────────────────┘
+                        ▼
+        ┌────────────────────────────────┐
+        │  LayerNorm → X_norm            │
+        └───────┬───────────────┬────────┘
+                ▼               ▼
+        ┌──────────────┐ ┌──────────────────┐
+        │ Detail       │ │ Context           │
+        │ Z_det=       │ │ DWConv→DWConv→    │
+        │  Linear(X)   │ │ BN→SiLU→Z_ctx    │
+        └──────┬───────┘ └────────┬─────────┘
+               │    (diff: Z_ctx -= Z_det)
+               ├──────────┬───────┘
+               ▼          ▼
+        ┌────────────────────────────────┐
+        │ Local Sparse Geometric Product │
+        │ → G_feat                       │
+        └───────────────┬────────────────┘
+                        │  (+ optional global branch)
+                        ▼
+        ┌────────────────────────────────┐
+        │ GGR(X_norm, G_feat) → H_mix   │
+        └───────────────┬────────────────┘
+                        ▼
+        ┌────────────────────────────────┐
+        │ X_out = X_prev + H_mix        │
+        │ [B, H, W, D]                  │
+        └────────────────────────────────┘
 
-    Args:
-        channels: Feature dimensionality ``D`` (constant throughout).
-        shifts: Channel-shift offsets for the local sparse rolling product.
-            E.g. ``[1, 2]`` (Nano) or ``[1, 2, 4, 8, 16]`` (Lite).
-            Values ``>= channels`` are silently discarded.
-        cli_mode: ``"inner"`` | ``"wedge"`` | ``"full"`` (default).
-            Applies to the **local** interaction only.
-        ctx_mode: ``"diff"`` (default, Laplacian / differential) or
-            ``"abs"`` (absolute local context).
-        use_global_context: If ``True``, add a global-average-pool branch
-            (gFFN-G).  Defaults to ``False``.
-        layer_scale_init: Initial LayerScale value.  Defaults to ``1e-5``.
-        drop_path_rate: DropPath probability.  Defaults to ``0.0``.
-        use_bias: Whether Dense layers use bias.  Defaults to ``True``.
-        kernel_initializer: Kernel initializer for Dense layers.
-        bias_initializer: Bias initializer for Dense layers.
-        kernel_regularizer: Kernel regularizer for Dense layers.
-        bias_regularizer: Bias regularizer for Dense layers.
-        **kwargs: Passed to :class:`keras.layers.Layer`.
-
-    Input shape:
-        ``(B, H, W, channels)``
-
-    Output shape:
-        ``(B, H, W, channels)``
+    :param channels: Feature dimensionality D (constant throughout).
+    :type channels: int
+    :param shifts: Channel-shift offsets for the local interaction.
+    :type shifts: List[int]
+    :param cli_mode: Algebraic components for the local interaction
+        (``"inner"``, ``"wedge"``, ``"full"``). Defaults to ``"full"``.
+    :type cli_mode: CliMode
+    :param ctx_mode: Context mode (``"diff"`` or ``"abs"``).
+        Defaults to ``"diff"``.
+    :type ctx_mode: CtxMode
+    :param use_global_context: Whether to add a global-average-pool branch.
+        Defaults to ``False``.
+    :type use_global_context: bool
+    :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
+    :type layer_scale_init: float
+    :param drop_path_rate: DropPath probability. Defaults to 0.0.
+    :type drop_path_rate: float
+    :param use_bias: Whether Dense layers use bias. Defaults to ``True``.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel initializer for Dense layers.
+    :type kernel_initializer: Any
+    :param bias_initializer: Bias initializer for Dense layers.
+    :type bias_initializer: Any
+    :param kernel_regularizer: Kernel regularizer for Dense layers.
+    :type kernel_regularizer: Optional[Any]
+    :param bias_regularizer: Bias regularizer for Dense layers.
+    :type bias_regularizer: Optional[Any]
+    :param kwargs: Passed to ``keras.layers.Layer``.
     """
 
     def __init__(
@@ -573,8 +634,8 @@ class CliffordNetBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple) -> None:
         """Build all sub-layers in dependency order.
 
-        Args:
-            input_shape: ``(B, H, W, D)``
+        :param input_shape: ``(B, H, W, D)``
+        :type input_shape: Tuple
         """
         spatial_shape = input_shape
 
@@ -612,12 +673,12 @@ class CliffordNetBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass.
 
-        Args:
-            inputs: Feature tensor ``(B, H, W, D)``.
-            training: Whether in training mode.
-
-        Returns:
-            Updated feature tensor ``(B, H, W, D)``.
+        :param inputs: Feature tensor ``(B, H, W, D)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Updated feature tensor ``(B, H, W, D)``.
+        :rtype: keras.KerasTensor
         """
         x_prev = inputs
 
@@ -659,11 +720,10 @@ class CliffordNetBlock(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Input shape ``(B, H, W, D)``.
-
-        Returns:
-            Same as input shape.
+        :param input_shape: Input shape ``(B, H, W, D)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Same as input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
@@ -671,8 +731,8 @@ class CliffordNetBlock(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
-        Returns:
-            Dictionary with all constructor arguments.
+        :return: Dictionary with all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update(

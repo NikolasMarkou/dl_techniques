@@ -49,160 +49,62 @@ from dl_techniques.utils.logger import logger
 @keras.saving.register_keras_serializable()
 class ResidualACFLayer(keras.layers.Layer):
     """
-    Residual Autocorrelation Function analysis and regularization layer for time series models.
+    Residual Autocorrelation Function analysis and regularization layer.
 
-    This layer monitors and optionally regularizes the autocorrelation structure of
-    residuals in time series forecasting models. It helps ensure that model residuals
-    are closer to white noise, which is a key assumption for good forecasting performance
-    and reliable uncertainty estimates.
+    Pass-through diagnostic layer that computes residuals ``r_t = pred_t - target_t``,
+    calculates their ACF up to ``max_lag``, and optionally adds regularization loss
+    ``lambda * (sum_k ACF(k)^2 + sum_k max(0, |ACF(k)| - threshold)^2)`` to
+    encourage white-noise residuals. The ACF at lag ``k`` is computed as
+    ``Cov(r_t, r_{t-k}) / Var(r_t)``. Predictions pass through unchanged, making
+    the layer easy to insert into existing models for monitoring or regularization.
 
-    The layer operates as a pass-through diagnostic tool that computes residuals
-    (predictions - targets), calculates their autocorrelation function (ACF), and
-    can add regularization terms to minimize unwanted temporal dependencies in residuals.
+    **Architecture Overview:**
 
-    Key diagnostic capabilities:
-    - **ACF computation**: Efficient calculation using Keras operations for GPU acceleration
-    - **Lag-specific targeting**: Focus regularization on specific temporal patterns
-    - **Threshold-based penalties**: Additional penalties for ACF values exceeding thresholds
-    - **Real-time monitoring**: ACF statistics available during training for diagnostics
-    - **Pass-through design**: Predictions flow unchanged, enabling easy model insertion
+    .. code-block:: text
 
-    Regularization strategies:
-    - **L2 penalty**: Quadratic penalty on ACF values to encourage white noise residuals
-    - **Threshold penalty**: Additional penalty for ACF values exceeding significance thresholds
-    - **Selective targeting**: Focus on specific lags relevant to domain patterns (daily, weekly, etc.)
-    - **Absolute vs signed**: Option to penalize both positive and negative autocorrelations
+        ┌────────────────────────────────────┐
+        │ [Predictions, Targets]             │
+        └──────────┬─────────────────────────┘
+                   ▼
+        ┌────────────────────────────────────┐
+        │ Residuals = Predictions - Targets  │
+        └──────────┬─────────────────────────┘
+                   ▼
+        ┌────────────────────────────────────┐
+        │ Compute ACF(0..max_lag)            │
+        │ Center, autocovariance, normalize  │
+        └──────────┬─────────────────────────┘
+                   │
+           ┌───────┴───────┐
+           ▼               ▼
+        ┌──────────┐ ┌──────────────────┐
+        │ Store    │ │ Regularization   │
+        │ ACF for  │ │ L2 + threshold   │
+        │ monitor  │ │ penalty (train)  │
+        └──────────┘ └──────────────────┘
+                   │
+                   ▼
+        ┌────────────────────────────────────┐
+        │ Output = Predictions (pass-through)│
+        └────────────────────────────────────┘
 
-    Mathematical formulation:
-        For residuals r_t = predictions_t - targets_t:
-
-        - ``ACF(k) = Cov(r_t, r_{t-k}) / Var(r_t)`` (autocorrelation at lag k)
-        - ``L2_loss = Σ_k (ACF(k))²`` (basic regularization)
-        - ``Threshold_loss = Σ_k max(0, |ACF(k)| - threshold)²`` (threshold penalty)
-        - ``Total_loss = λ * (L2_loss + Threshold_loss)`` (combined regularization)
-
-    Args:
-        max_lag: int, maximum lag to compute ACF for. Should be chosen based on
-            expected temporal patterns in your domain. For daily data, consider
-            7 (weekly), 30 (monthly), etc. Must be >= 1. Defaults to 40.
-        regularization_weight: Optional[float], weight for ACF regularization loss.
-            If None, layer operates in monitoring-only mode. Should be tuned based
-            on main loss magnitude. Typical values: 0.01-1.0. Defaults to None.
-        target_lags: Optional[List[int]], specific lags to target for regularization.
-            If None, targets all lags from 1 to max_lag. Use to focus on domain-specific
-            patterns (e.g., [1, 7, 30] for daily data with weekly/monthly patterns).
-            All values must be between 1 and max_lag. Defaults to None.
-        acf_threshold: float, threshold above which ACF values are considered
-            statistically significant and penalized more heavily. Typical values
-            based on white noise bounds: ~0.1 for large samples. Must be >= 0.
-            Defaults to 0.1.
-        use_absolute_acf: bool, whether to use absolute ACF values for regularization.
-            When True, penalizes both positive and negative autocorrelations equally.
-            When False, preserves sign information. Defaults to True.
-        epsilon: float, small constant added for numerical stability in variance
-            calculations. Should be much smaller than expected residual variance.
-            Defaults to 1e-7.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        List of two tensors:
-        - predictions: (..., sequence_length, features) - Model predictions
-        - targets: (..., sequence_length, features) - Ground truth targets
-
-        Both tensors must have identical shapes.
-
-    Output shape:
-        Same as predictions input: (..., sequence_length, features)
-        The layer is pass-through - predictions are returned unchanged.
-
-    Attributes:
-        acf_values: keras.KerasTensor or None, most recent ACF computation results.
-            Shape: (..., max_lag + 1, features) where index 0 is lag 0 (always 1.0).
-            Available after forward pass for monitoring and diagnostics.
-
-    Example:
-        ```python
-        # Basic ACF monitoring without regularization
-        inputs = keras.Input(shape=(100, 1))
-        lstm = keras.layers.LSTM(64, return_sequences=True)(inputs)
-        predictions = keras.layers.Dense(1)(lstm)
-        targets = keras.Input(shape=(100, 1))
-
-        # Add monitoring layer
-        monitored_preds = ResidualACFLayer(
-            max_lag=20,
-            regularization_weight=None  # Monitoring only
-        )([predictions, targets])
-
-        model = keras.Model([inputs, targets], monitored_preds)
-
-        # Financial time series with specific pattern targeting
-        financial_acf = ResidualACFLayer(
-            max_lag=30,
-            regularization_weight=0.1,
-            target_lags=[1, 5, 22],  # Daily, weekly, monthly patterns
-            acf_threshold=0.05,      # Stricter threshold for financial data
-            use_absolute_acf=True
-        )
-
-        # Weather forecasting with seasonal patterns
-        weather_acf = ResidualACFLayer(
-            max_lag=365,
-            target_lags=[1, 7, 30, 90, 365],  # Multi-scale patterns
-            regularization_weight=0.05,
-            acf_threshold=0.15
-        )
-
-        # Complete training setup with callback monitoring
-        from dl_techniques.layers.statistics.residual_acf import ACFMonitorCallback
-
-        # Build model with ACF layer
-        acf_layer = ResidualACFLayer(
-            max_lag=24,
-            regularization_weight=0.2,
-            target_lags=[1, 2, 3, 6, 12, 24]
-        )
-        monitored_predictions = acf_layer([predictions, targets])
-
-        model = keras.Model([inputs, targets], monitored_predictions)
-        model.compile(optimizer='adam', loss='mse')
-
-        # Train with ACF monitoring
-        acf_callback = ACFMonitorCallback('residual_acf', log_frequency=50)
-        model.fit(
-            [train_x, train_y], train_y,
-            validation_data=([val_x, val_y], val_y),
-            epochs=100,
-            callbacks=[acf_callback]
-        )
-
-        # Access ACF statistics after training
-        acf_summary = acf_layer.get_acf_summary()
-        print(f"Mean |ACF|: {acf_summary['mean_abs_acf']:.4f}")
-        print(f"Significant lags: {acf_summary['significant_lags']}")
-        ```
-
-    Raises:
-        ValueError: If max_lag < 1.
-        ValueError: If regularization_weight < 0.
-        ValueError: If acf_threshold < 0.
-        ValueError: If target_lags contains values outside [1, max_lag].
-        ValueError: If input shapes don't match or aren't lists of 2 tensors.
-
-    Note:
-        This layer is particularly valuable in:
-        - **Economic forecasting**: Where autocorrelated residuals violate efficiency assumptions
-        - **Supply chain**: Where residual patterns indicate systematic forecasting bias
-        - **Energy demand**: Where autocorrelations suggest missing seasonal components
-        - **Medical monitoring**: Where residual patterns may indicate model inadequacy
-
-        The regularization weight should be tuned carefully - too high values can
-        over-constrain the model, while too low values provide insufficient regularization.
-        Start with small values (0.01-0.1) and increase based on validation performance.
-
-        For computational efficiency with very long sequences, consider using
-        target_lags to focus on the most important temporal patterns rather than
-        all lags up to max_lag.
+    :param max_lag: Maximum lag to compute ACF for. Must be >= 1. Defaults to 40.
+    :type max_lag: int
+    :param regularization_weight: Weight for ACF regularization loss. If ``None``,
+        monitoring-only mode. Defaults to ``None``.
+    :type regularization_weight: float | None
+    :param target_lags: Specific lags to target for regularization. If ``None``,
+        targets all lags from 1 to ``max_lag``. Defaults to ``None``.
+    :type target_lags: list[int] | None
+    :param acf_threshold: Threshold above which ACF values receive extra penalty.
+        Defaults to 0.1.
+    :type acf_threshold: float
+    :param use_absolute_acf: Whether to use absolute ACF values for regularization.
+        Defaults to ``True``.
+    :type use_absolute_acf: bool
+    :param epsilon: Small constant for numerical stability. Defaults to 1e-7.
+    :type epsilon: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -246,14 +148,10 @@ class ResidualACFLayer(keras.layers.Layer):
                      f"regularization_weight={regularization_weight}")
 
     def build(self, input_shape: Union[List[Tuple], Tuple[Tuple]]) -> None:
-        """
-        Build the layer and validate input shapes.
+        """Build the layer and validate input shapes.
 
-        Args:
-            input_shape: Tuple of shapes for (predictions, targets).
-
-        Raises:
-            ValueError: If input_shape is not a list/tuple of 2 shapes or shapes don't match.
+        :param input_shape: Tuple of shapes for ``(predictions, targets)``.
+        :type input_shape: list[tuple] | tuple[tuple]
         """
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError("ResidualACFLayer expects a list of 2 inputs: [predictions, targets]")
@@ -270,19 +168,12 @@ class ResidualACFLayer(keras.layers.Layer):
         super().build(input_shape)
 
     def compute_acf(self, residuals: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Compute autocorrelation function of residuals using efficient Keras operations.
+        """Compute autocorrelation function of residuals.
 
-        This method implements the ACF computation entirely with Keras ops for GPU
-        acceleration and backend compatibility. It handles variable sequence lengths
-        and multiple features efficiently.
-
-        Args:
-            residuals: Input residuals tensor of shape (..., sequence_length, features).
-
-        Returns:
-            ACF values tensor of shape (..., max_lag + 1, features) where the
-            first dimension (index 0) corresponds to lag 0 (always 1.0).
+        :param residuals: Residuals of shape ``(..., sequence_length, features)``.
+        :type residuals: keras.KerasTensor
+        :return: ACF values of shape ``(..., max_lag + 1, features)``.
+        :rtype: keras.KerasTensor
         """
         # Get tensor dimensions using Keras ops
         shape = ops.shape(residuals)
@@ -341,19 +232,14 @@ class ResidualACFLayer(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass: compute ACF statistics and optional regularization loss.
+        """Forward pass computing ACF statistics and optional regularization.
 
-        Args:
-            inputs: List of [predictions, targets] tensors with matching shapes.
-            training: Boolean indicating training mode. Regularization is only
-                applied during training.
-
-        Returns:
-            The predictions tensor unchanged (pass-through behavior).
-
-        Raises:
-            ValueError: If inputs is not a list/tuple of exactly 2 tensors.
+        :param inputs: List of ``[predictions, targets]`` tensors.
+        :type inputs: list[keras.KerasTensor] | tuple[keras.KerasTensor]
+        :param training: Boolean for training mode.
+        :type training: bool | None
+        :return: Predictions tensor unchanged (pass-through).
+        :rtype: keras.KerasTensor
         """
         if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
             raise ValueError("ResidualACFLayer expects a list of 2 inputs: [predictions, targets]")
@@ -405,29 +291,10 @@ class ResidualACFLayer(keras.layers.Layer):
         return predictions
 
     def get_acf_summary(self) -> Optional[Dict[str, float]]:
-        """
-        Get comprehensive summary statistics of the most recent ACF computation.
+        """Get summary statistics of the most recent ACF computation.
 
-        This method provides detailed diagnostics about the autocorrelation structure
-        of residuals, useful for model evaluation and hyperparameter tuning.
-
-        Returns:
-            Dictionary with ACF statistics or None if no ACF has been computed yet.
-            Contains keys:
-            - 'mean_abs_acf': Mean absolute ACF value across all lags > 0
-            - 'max_abs_acf': Maximum absolute ACF value across all lags > 0
-            - 'significant_lags': Number of lags with |ACF| > threshold
-            - 'acf_lag_N': ACF value at specific lags (first 5 target lags)
-
-        Example:
-            ```python
-            # After forward pass
-            summary = layer.get_acf_summary()
-            if summary:
-                print(f"Mean |ACF|: {summary['mean_abs_acf']:.4f}")
-                print(f"Significant lags: {summary['significant_lags']}")
-                print(f"ACF at lag 1: {summary.get('acf_lag_1', 'N/A'):.4f}")
-            ```
+        :return: Dictionary with ACF statistics, or ``None`` if not yet computed.
+        :rtype: dict[str, float] | None
         """
         if self.acf_values is None:
             return None
@@ -459,25 +326,21 @@ class ResidualACFLayer(keras.layers.Layer):
         self,
         input_shape: Union[List[Tuple], Tuple[Tuple]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Tuple of shapes for (predictions, targets).
-
-        Returns:
-            Output shape tuple (same as predictions shape since layer is pass-through).
+        :param input_shape: Tuple of shapes for ``(predictions, targets)``.
+        :type input_shape: list[tuple] | tuple[tuple]
+        :return: Output shape (same as predictions).
+        :rtype: tuple[int | None, ...]
         """
         # Return the shape of predictions (first input) - pass-through behavior
         return input_shape[0]
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters needed
-            for reconstruction during model loading.
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -497,35 +360,31 @@ class ACFMonitorCallback(keras.callbacks.Callback):
     """
     Callback to monitor and log ACF statistics during training.
 
-    This callback works with ResidualACFLayer to provide real-time monitoring
-    of residual autocorrelation patterns throughout the training process,
-    helping diagnose model performance and convergence issues.
+    Works with ``ResidualACFLayer`` to provide real-time monitoring of residual
+    autocorrelation patterns, helping diagnose model convergence issues.
 
-    Args:
-        layer_name: str, name of the ResidualACFLayer to monitor. Must match
-            the name assigned to the layer in the model.
-        log_frequency: int, frequency (in batches) at which to log ACF statistics.
-            Higher values reduce logging overhead but provide less granular monitoring.
-            Defaults to 100.
+    **Architecture Overview:**
 
-    Example:
-        ```python
-        # Setup model with named ACF layer
-        acf_layer = ResidualACFLayer(max_lag=20, name='residual_acf')
+    .. code-block:: text
 
-        # Create monitoring callback
-        monitor = ACFMonitorCallback(
-            layer_name='residual_acf',
-            log_frequency=50  # Log every 50 batches
-        )
+        ┌──────────────────────────┐
+        │  on_train_batch_end      │
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │  Retrieve ACF layer      │
+        │  by name from model      │
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │  get_acf_summary()       │
+        │  ─► Log statistics       │
+        └──────────────────────────┘
 
-        # Train with monitoring
-        model.fit(
-            [train_x, train_y], train_y,
-            callbacks=[monitor],
-            epochs=100
-        )
-        ```
+    :param layer_name: Name of the ResidualACFLayer to monitor.
+    :type layer_name: str
+    :param log_frequency: Frequency (in batches) for logging. Defaults to 100.
+    :type log_frequency: int
     """
 
     def __init__(
@@ -540,12 +399,12 @@ class ACFMonitorCallback(keras.callbacks.Callback):
         self.batch_count = 0
 
     def on_train_batch_end(self, batch: int, logs: Optional[Dict] = None) -> None:
-        """
-        Log ACF statistics at specified intervals during training.
+        """Log ACF statistics at specified intervals during training.
 
-        Args:
-            batch: Current batch number.
-            logs: Dictionary of training metrics (unused but required by API).
+        :param batch: Current batch number.
+        :type batch: int
+        :param logs: Training metrics dictionary.
+        :type logs: dict | None
         """
         self.batch_count += 1
 

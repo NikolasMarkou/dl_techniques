@@ -36,100 +36,57 @@ from ..norms import create_normalization_layer
 
 @keras.saving.register_keras_serializable()
 class LightweightGNNLayer(keras.layers.Layer):
-    """
-    Lightweight Graph Convolutional Network layer for structural encoding.
+    """Lightweight GCN layer for structural positional encoding.
 
-    This layer performs a single step of message passing on a local subgraph,
-    implementing symmetric normalization of the adjacency matrix for stable
-    information propagation between connected nodes.
+    Performs a single message-passing step with symmetric normalisation of the
+    adjacency matrix: H' = sigma(D_tilde^{-1/2} A_tilde D_tilde^{-1/2} H W),
+    where A_tilde = A + I includes self-loops, D_tilde is its degree matrix,
+    W is a learnable weight matrix, and sigma is the activation function.
 
-    **Intent**: Serve as the GNN(A_local, Z_random) component within the
-    RELGTTokenEncoder to capture structural positional information purely
-    from local graph topology without relying on node features.
+    **Architecture Overview:**
 
-    **Architecture**::
+    .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────┐
-        │                  LightweightGNNLayer                        │
-        ├─────────────────────────────────────────────────────────────┤
-        │                                                             │
-        │   ┌───────────┐     ┌──────────────┐     ┌───────────────┐  │
-        │   │  Node     │     │  Adjacency   │     │   Identity    │  │
-        │   │  Features │     │   Matrix     │     │    Matrix     │  │
-        │   │  H [B,N,D]│     │  A [B,N,N]   │     │   I [N,N]     │  │
-        │   └─────┬─────┘     └──────┬───────┘     └───────┬───────┘  │
-        │         │                  │                     │          │
-        │         │                  └──────────┬──────────┘          │
-        │         │                             ▼                     │
-        │         │                    ┌────────────────┐             │
-        │         │                    │  Add Self-Loops│             │
-        │         │                    │   Ã = A + I    │             │
-        │         │                    └────────┬───────┘             │
-        │         │                             ▼                     │
-        │         │                    ┌────────────────┐             │
-        │         │                    │   Symmetric    │             │
-        │         │                    │ Normalization  │             │
-        │         │                    │ D̃⁻¹/² Ã D̃⁻¹/²  │             │
-        │         │                    └────────┬───────┘             │
-        │         ▼                             │                     │
-        │   ┌───────────┐                       │                     │
-        │   │  Linear   │                       │                     │
-        │   │  H @ W    │                       │                     │
-        │   └─────┬─────┘                       │                     │
-        │         │                             │                     │
-        │         └──────────────┬──────────────┘                     │
-        │                        ▼                                    │
-        │               ┌────────────────┐                            │
-        │               │ Message Passing│                            │
-        │               │  Ã_norm @ H'   │                            │
-        │               └────────┬───────┘                            │
-        │                        ▼                                    │
-        │               ┌────────────────┐                            │
-        │               │   Activation   │                            │
-        │               │     σ(·)       │                            │
-        │               └────────┬───────┘                            │
-        │                        ▼                                    │
-        │               ┌────────────────┐                            │
-        │               │    Output      │                            │
-        │               │  [B, N, units] │                            │
-        │               └────────────────┘                            │
-        └─────────────────────────────────────────────────────────────┘
+        ┌──────────────┐  ┌──────────────┐
+        │ Node Features│  │  Adjacency   │
+        │  [B, N, D]   │  │  [B, N, N]   │
+        └──────┬───────┘  └──────┬───────┘
+               │                 ▼
+               │        ┌────────────────┐
+               │        │ Ã = A + I      │
+               │        └───────┬────────┘
+               │                ▼
+               │        ┌────────────────┐
+               │        │ D̃⁻¹/² Ã D̃⁻¹/² │
+               │        └───────┬────────┘
+               ▼                │
+        ┌──────────────┐        │
+        │ Linear H @ W │        │
+        └──────┬───────┘        │
+               └───────┬────────┘
+                       ▼
+               ┌────────────────┐
+               │ Ã_norm @ H'    │
+               └───────┬────────┘
+                       ▼
+               ┌────────────────┐
+               │ Activation σ   │
+               └───────┬────────┘
+                       ▼
+               ┌────────────────┐
+               │ Output [B,N,U] │
+               └────────────────┘
 
-    **Mathematical Operation**::
-
-        H' = σ(D̃⁻¹/² Ã D̃⁻¹/² H W)
-
-    Where:
-        - Ã = A + I (adjacency with self-loops)
-        - D̃ is the degree matrix of Ã
-        - W is learnable weight matrix of shape (input_dim, units)
-        - σ is the activation function
-
-    Args:
-        units: Integer, dimensionality of output feature space. Must be positive.
-        activation: String or callable activation function. Defaults to 'relu'.
-        kernel_initializer: String or initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        List of two tensors:
-            - node_features: ``(batch_size, num_nodes, input_dim)``
-            - adjacency_matrix: ``(batch_size, num_nodes, num_nodes)``
-
-    Output shape:
-        Tensor with shape ``(batch_size, num_nodes, units)``.
-
-    Raises:
-        ValueError: If units is not positive.
-        ValueError: If last dimension of node_features is not defined.
-
-    References:
-        - Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification
-          with Graph Convolutional Networks. ICLR.
-        - Hamilton, W. L., et al. (2017). Inductive Representation Learning
-          on Large Graphs. NeurIPS.
+    :param units: Dimensionality of output feature space. Must be positive.
+    :type units: int
+    :param activation: Activation function. Defaults to ``'relu'``.
+    :type activation: Optional[Union[str, Callable]]
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -154,11 +111,10 @@ class LightweightGNNLayer(keras.layers.Layer):
         self.kernel = None
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Create the layer's learnable weights.
+        """Create the layer's learnable weights.
 
-        Args:
-            input_shape: List of shapes [node_features_shape, adjacency_shape].
+        :param input_shape: List of ``[node_features_shape, adjacency_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         feature_shape, _ = input_shape
         input_dim = feature_shape[-1]
@@ -181,15 +137,14 @@ class LightweightGNNLayer(keras.layers.Layer):
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the GNN layer.
+        """Forward pass of the GNN layer.
 
-        Args:
-            inputs: List of [node_features, adjacency_matrix].
-            training: Boolean indicating training mode (unused but kept for API).
-
-        Returns:
-            Transformed node features after message passing.
+        :param inputs: List of ``[node_features, adjacency_matrix]``.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Transformed node features after message passing.
+        :rtype: keras.KerasTensor
         """
         node_features, adjacency_matrix = inputs
         num_nodes = keras.ops.shape(adjacency_matrix)[1]
@@ -229,14 +184,12 @@ class LightweightGNNLayer(keras.layers.Layer):
         self,
         input_shape: List[Tuple[Optional[int], ...]],
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: List of shapes [node_features_shape, adjacency_shape].
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: List of ``[node_features_shape, adjacency_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         feature_shape, _ = input_shape
         return (*feature_shape[:-1], self.units)
@@ -258,137 +211,79 @@ class LightweightGNNLayer(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class RELGTTokenEncoder(keras.layers.Layer):
-    """
-    Multi-element tokenization encoder for heterogeneous graph nodes.
+    """Multi-element tokenisation encoder for heterogeneous graph nodes.
 
-    This layer implements the core tokenization strategy of the RELGT model,
-    decomposing each node into five fundamental components and learning
-    specialized representations for each before combining them into unified
-    token embeddings suitable for transformer processing.
+    Decomposes each graph node into five fundamental components (features, type,
+    hop distance, relative time, structural position) and learns specialised
+    representations for each before combining them via element-wise addition:
+    T = Norm(Dropout(E_feat(x) + E_type(t) + E_hop(h) + E_time(tau) + E_pe(A))).
+    The structural component E_pe uses a lightweight GNN stack operating on
+    random features propagated through the subgraph adjacency.
 
-    **Intent**: Transform heterogeneous, temporal, and topological graph
-    information into unified token embeddings without expensive precomputation,
-    enabling efficient encoding of relational data complexity.
+    **Architecture Overview:**
 
-    **Architecture**::
+    .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │                      RELGTTokenEncoder                              │
-        ├─────────────────────────────────────────────────────────────────────┤
-        │                                                                     │
-        │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌────────────┐  │
-        │  │    Node     │  │    Node     │  │    Hop      │  │  Relative  │  │
-        │  │  Features   │  │   Types     │  │  Distances  │  │   Times    │  │
-        │  │ [B,K,F]     │  │  [B,K]      │  │  [B,K]      │  │ [B,K,1]    │  │
-        │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬──────┘  │
-        │         │                │                │               │         │
-        │         ▼                ▼                ▼               ▼         │
-        │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌────────────┐  │
-        │  │    Dense     │ │  Embedding   │ │  Embedding   │ │   Dense    │  │
-        │  │  Projection  │ │    Lookup    │ │    Lookup    │ │ Projection │  │
-        │  │   → [B,K,E]  │ │  → [B,K,E]   │ │  → [B,K,E]   │ │ → [B,K,E]  │  │
-        │  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └─────┬──────┘  │
-        │         │                │                │               │         │
-        │         │     ┌──────────────────────┐    │               │         │
-        │         │     │  Subgraph Adjacency  │    │               │         │
-        │         │     │      [B, K, K]       │    │               │         │
-        │         │     └──────────┬───────────┘    │               │         │
-        │         │                │                │               │         │
-        │         │                ▼                │               │         │
-        │         │     ┌──────────────────────┐    │               │         │
-        │         │     │   Random Features    │    │               │         │
-        │         │     │  Z ~ N(0,1) [B,K,P]  │    │               │         │
-        │         │     └──────────┬───────────┘    │               │         │
-        │         │                │                │               │         │
-        │         │                ▼                │               │         │
-        │         │     ┌──────────────────────┐    │               │         │
-        │         │     │   GNN Stack (L×)     │    │               │         │
-        │         │     │  Structural Encoder  │    │               │         │
-        │         │     └──────────┬───────────┘    │               │         │
-        │         │                │                │               │         │
-        │         │                ▼                │               │         │
-        │         │     ┌──────────────────────┐    │               │         │
-        │         │     │   Dense Projection   │    │               │         │
-        │         │     │      → [B,K,E]       │    │               │         │
-        │         │     └──────────┬───────────┘    │               │         │
-        │         │                │                │               │         │
-        │         └────────┬───────┴───────┬────────┴──────┬────────┘         │
-        │                  │               │               │                  │
-        │                  ▼               ▼               ▼                  │
-        │         ┌────────────────────────────────────────────────┐          │
-        │         │              Element-wise Addition             │          │
-        │         │   E_feat + E_type + E_hop + E_time + E_pe      │          │
-        │         └────────────────────────┬───────────────────────┘          │
-        │                                  │                                  │
-        │                                  ▼                                  │
-        │                       ┌────────────────────┐                        │
-        │                       │   Normalization    │                        │
-        │                       └─────────┬──────────┘                        │
-        │                                 │                                   │
-        │                                 ▼                                   │
-        │                       ┌────────────────────┐                        │
-        │                       │      Dropout       │                        │
-        │                       └─────────┬──────────┘                        │
-        │                                 │                                   │
-        │                                 ▼                                   │
-        │                       ┌────────────────────┐                        │
-        │                       │   Token Output     │                        │
-        │                       │    [B, K, E]       │                        │
-        │                       └────────────────────┘                        │
-        └─────────────────────────────────────────────────────────────────────┘
+        ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌────────────┐
+        │ Node Feats  │ │ Node Types  │ │ Hop Dists   │ │ Rel Times  │
+        │ [B,K,F]     │ │ [B,K]       │ │ [B,K]       │ │ [B,K,1]    │
+        └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └─────┬──────┘
+               ▼               ▼               ▼              ▼
+        ┌────────────┐  ┌────────────┐  ┌────────────┐ ┌────────────┐
+        │  Dense     │  │ Embedding  │  │ Embedding  │ │  Dense     │
+        │  → [B,K,E] │  │ → [B,K,E]  │  │ → [B,K,E]  │ │ → [B,K,E]  │
+        └──────┬─────┘  └──────┬─────┘  └──────┬─────┘ └─────┬──────┘
+               │               │               │             │
+               │  ┌────────────────────┐        │             │
+               │  │ Subgraph Adj [B,K,K]│       │             │
+               │  └─────────┬──────────┘        │             │
+               │            ▼                   │             │
+               │  ┌────────────────────┐        │             │
+               │  │ Z ~ N(0,1) [B,K,P] │       │             │
+               │  └─────────┬──────────┘        │             │
+               │            ▼                   │             │
+               │  ┌────────────────────┐        │             │
+               │  │ GNN Stack (L layers)│       │             │
+               │  └─────────┬──────────┘        │             │
+               │            ▼                   │             │
+               │  ┌────────────────────┐        │             │
+               │  │ Dense → [B,K,E]    │        │             │
+               │  └─────────┬──────────┘        │             │
+               │            │                   │             │
+               └─────┬──────┴──────┬────────────┴─────┬───────┘
+                     ▼             ▼                   ▼
+               ┌──────────────────────────────────────────┐
+               │  Element-wise Addition                    │
+               └──────────────────┬───────────────────────┘
+                                  ▼
+               ┌────────────────────────┐
+               │  Norm → Dropout        │
+               └──────────┬─────────────┘
+                          ▼
+               ┌────────────────────────┐
+               │  Token Output [B,K,E]  │
+               └────────────────────────┘
 
-        Legend: B=batch, K=k_neighbors, F=feature_dim, E=embedding_dim, P=gnn_pe_dim
-
-    **Mathematical Operation**::
-
-        T = Norm(Dropout(E_feat(x) + E_type(t) + E_hop(h) + E_time(τ) + E_pe(A)))
-
-    Where:
-        - E_feat: Dense projection of node features
-        - E_type: Embedding lookup for node types
-        - E_hop: Embedding lookup for hop distances
-        - E_time: Dense projection of relative times
-        - E_pe: GNN-based positional encoding from structure
-
-    Args:
-        embedding_dim: Integer, dimensionality of final token embedding.
-            Must be positive.
-        num_node_types: Integer, total number of unique entity types.
-            Must be positive.
-        max_hops: Integer, maximum hop distance to encode. Defaults to 2.
-        gnn_pe_dim: Integer, output dimension for GNN layers. Defaults to 32.
-        gnn_pe_layers: Integer, number of GNN layers. Defaults to 2.
-        dropout_rate: Float between 0 and 1. Defaults to 0.1.
-        normalization_type: String, type of normalization. Defaults to 'layer_norm'.
-        kernel_initializer: String or initializer for Dense layers.
-            Defaults to 'glorot_uniform'.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        Dictionary with keys:
-            - ``'node_features'``: ``(batch_size, k_neighbors, feature_dim)``
-            - ``'node_types'``: ``(batch_size, k_neighbors)`` integer-encoded
-            - ``'hop_distances'``: ``(batch_size, k_neighbors)`` integer-encoded
-            - ``'relative_times'``: ``(batch_size, k_neighbors, 1)``
-            - ``'subgraph_adjacency'``: ``(batch_size, k_neighbors, k_neighbors)``
-
-    Output shape:
-        Tensor with shape ``(batch_size, k_neighbors, embedding_dim)``.
-
-    Raises:
-        ValueError: If embedding_dim is not positive.
-        ValueError: If num_node_types is not positive.
-        ValueError: If max_hops is negative.
-        ValueError: If gnn_pe_dim is not positive.
-        ValueError: If gnn_pe_layers is not positive.
-        ValueError: If dropout_rate is not in [0, 1].
-
-    References:
-        - Vaswani, A., et al. (2017). Attention Is All You Need. NeurIPS.
-        - Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification
-          with Graph Convolutional Networks. ICLR.
-        - Ying, C., et al. (2021). Do Transformers Really Perform Bad for
-          Graph Representation? (Graphormer). NeurIPS.
+    :param embedding_dim: Dimensionality of final token embedding. Must be positive.
+    :type embedding_dim: int
+    :param num_node_types: Total number of unique entity types. Must be positive.
+    :type num_node_types: int
+    :param max_hops: Maximum hop distance to encode. Defaults to 2.
+    :type max_hops: int
+    :param gnn_pe_dim: Output dimension for GNN positional encoding layers.
+        Defaults to 32.
+    :type gnn_pe_dim: int
+    :param gnn_pe_layers: Number of GNN layers for positional encoding.
+        Defaults to 2.
+    :type gnn_pe_layers: int
+    :param dropout_rate: Dropout probability in ``[0, 1]``. Defaults to 0.1.
+    :type dropout_rate: float
+    :param normalization_type: Type of normalization. Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param kernel_initializer: Initializer for Dense layers.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -477,11 +372,10 @@ class RELGTTokenEncoder(keras.layers.Layer):
         self.dropout = keras.layers.Dropout(dropout_rate, name="TokenDropout")
 
     def build(self, input_shape: Dict[str, Tuple[Optional[int], ...]]) -> None:
-        """
-        Build all sub-layers.
+        """Build all sub-layers.
 
-        Args:
-            input_shape: Dictionary of input shapes keyed by input name.
+        :param input_shape: Dictionary of input shapes keyed by input name.
+        :type input_shape: Dict[str, Tuple[Optional[int], ...]]
         """
         feature_shape = input_shape["node_features"]
         adjacency_shape = input_shape["subgraph_adjacency"]
@@ -514,15 +408,15 @@ class RELGTTokenEncoder(keras.layers.Layer):
         inputs: Dict[str, keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass for multi-element tokenization.
+        """Forward pass for multi-element tokenisation.
 
-        Args:
-            inputs: Dictionary containing node features, types, hops, times, and adjacency.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Token embeddings of shape (batch_size, k_neighbors, embedding_dim).
+        :param inputs: Dictionary with keys ``node_features``, ``node_types``,
+            ``hop_distances``, ``relative_times``, ``subgraph_adjacency``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Token embeddings ``(batch_size, k_neighbors, embedding_dim)``.
+        :rtype: keras.KerasTensor
         """
         node_features = inputs["node_features"]
         node_types = inputs["node_types"]
@@ -576,14 +470,12 @@ class RELGTTokenEncoder(keras.layers.Layer):
         self,
         input_shape: Dict[str, Tuple[Optional[int], ...]],
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: Dictionary of input shapes.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Dictionary of input shapes.
+        :type input_shape: Dict[str, Tuple[Optional[int], ...]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         feature_shape = input_shape["node_features"]
         return (*feature_shape[:-1], self.embedding_dim)
@@ -609,156 +501,73 @@ class RELGTTokenEncoder(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class RELGTTransformerBlock(keras.layers.Layer):
-    """
-    Hybrid local-global Transformer block for relational graph processing.
+    """Hybrid local-global Transformer block for relational graph processing.
 
-    This block implements the core architectural innovation of RELGT: combining
-    local attention over sampled subgraphs with global attention to learnable
-    centroids. The local module captures fine-grained structural patterns while
-    the global module enables database-wide context integration.
+    Combines local self-attention over sampled subgraph tokens with global
+    cross-attention to learnable centroid prototypes. The combined representation
+    is computed as: output = Norm(FFN([h_local; h_global]) + ResidualProj([h_local; h_global]))
+    where h_local = MeanPool(TransformerLayer(tokens)) and
+    h_global = Squeeze(CrossAttention(Q=seed, K=V=centroids)).
 
-    **Intent**: Capture both fine-grained local structural patterns and broad
-    global database patterns by integrating detailed local context with
-    learnable global prototype representations.
+    **Architecture Overview:**
 
-    **Architecture**::
+    .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │                    RELGTTransformerBlock                            │
-        ├─────────────────────────────────────────────────────────────────────┤
-        │                                                                     │
-        │  ┌─────────────────────┐          ┌─────────────────────────────┐   │
-        │  │    Local Tokens     │          │      Seed Node Features     │   │
-        │  │     [B, K, E]       │          │          [B, 1, E]          │   │
-        │  └──────────┬──────────┘          └──────────────┬──────────────┘   │
-        │             │                                    │                  │
-        │             ▼                                    │                  │
-        │  ┌─────────────────────┐                         │                  │
-        │  │  LOCAL MODULE       │                         │                  │
-        │  │                     │                         │                  │
-        │  │  ┌───────────────┐  │                         │                  │
-        │  │  │ Transformer   │  │                         │                  │
-        │  │  │    Layer      │  │                         │                  │
-        │  │  │ (Self-Attn +  │  │                         │                  │
-        │  │  │     FFN)      │  │                         │                  │
-        │  │  └───────┬───────┘  │                         │                  │
-        │  │          │          │                         │                  │
-        │  │          ▼          │                         │                  │
-        │  │  ┌───────────────┐  │                         │                  │
-        │  │  │  Mean Pooling │  │                         │                  │
-        │  │  │   over K dim  │  │                         │                  │
-        │  │  └───────┬───────┘  │                         │                  │
-        │  └──────────┼──────────┘                         │                  │
-        │             │                                    │                  │
-        │             ▼                                    ▼                  │
-        │      ┌────────────┐                   ┌────────────────────────┐    │
-        │      │  h_local   │                   │     GLOBAL MODULE      │    │
-        │      │  [B, E]    │                   │                        │    │
-        │      └──────┬─────┘                   │  ┌──────────────────┐  │    │
-        │             │                         │  │ Global Centroids │  │    │
-        │             │                         │  │   (Learnable)    │  │    │
-        │             │                         │  │    [G, E]        │  │    │
-        │             │                         │  └────────┬─────────┘  │    │
-        │             │                         │           │            │    │
-        │             │                         │           ▼            │    │
-        │             │                         │  ┌──────────────────┐  │    │
-        │             │                         │  │  Cross-Attention │  │    │
-        │             │                         │  │ Q=Seed, K,V=Cent │  │    │
-        │             │                         │  └────────┬─────────┘  │    │
-        │             │                         │           │            │    │
-        │             │                         │           ▼            │    │
-        │             │                         │  ┌──────────────────┐  │    │
-        │             │                         │  │     Squeeze      │  │    │
-        │             │                         │  │    [B,1,E]→[B,E] │  │    │
-        │             │                         │  └────────┬─────────┘  │    │
-        │             │                         └───────────┼────────────┘    │
-        │             │                                     │                 │
-        │             │                                     ▼                 │
-        │             │                              ┌────────────┐           │
-        │             │                              │  h_global  │           │
-        │             │                              │   [B, E]   │           │
-        │             │                              └──────┬─────┘           │
-        │             │                                     │                 │
-        │             └───────────────┬─────────────────────┘                 │
-        │                             │                                       │
-        │                             ▼                                       │
-        │                  ┌─────────────────────┐                            │
-        │                  │     Concatenate     │                            │
-        │                  │   [h_local, h_glob] │                            │
-        │                  │      [B, 2E]        │                            │
-        │                  └──────────┬──────────┘                            │
-        │                             │                                       │
-        │            ┌────────────────┼───────────────┐                       │
-        │            │                │               │                       │
-        │            ▼                ▼               │                       │
-        │  ┌──────────────────┐  ┌──────────────┐     │                       │
-        │  │ Residual Dense   │  │     FFN      │     │                       │
-        │  │   [2E] → [E]     │  │  [2E] → [E]  │     │                       │
-        │  └────────┬─────────┘  └──────┬───────┘     │                       │
-        │           │                   │             │                       │
-        │           │                   ▼             │                       │
-        │           │           ┌────────────┐        │                       │
-        │           │           │  Dropout   │        │                       │
-        │           │           └──────┬─────┘        │                       │
-        │           │                  │              │                       │
-        │           └────────┬─────────┘              │                       │
-        │                    │                        │                       │
-        │                    ▼                        │                       │
-        │           ┌─────────────────┐               │                       │
-        │           │  Add & Norm     │               │                       │
-        │           │  (Residual)     │               │                       │
-        │           └────────┬────────┘               │                       │
-        │                    │                        │                       │
-        │                    ▼                        │                       │
-        │           ┌─────────────────┐               │                       │
-        │           │     Output      │               │                       │
-        │           │     [B, E]      │               │                       │
-        │           └─────────────────┘               │                       │
-        └─────────────────────────────────────────────────────────────────────┘
+        ┌──────────────────┐        ┌──────────────────┐
+        │ Local Tokens     │        │ Seed Node Feats  │
+        │ [B, K, E]        │        │ [B, 1, E]        │
+        └────────┬─────────┘        └────────┬─────────┘
+                 ▼                           │
+        ┌──────────────────┐                 │
+        │ LOCAL MODULE     │                 │
+        │ TransformerLayer │                 │
+        │   → Mean Pool    │                 │
+        │   → h_local [B,E]│                 │
+        └────────┬─────────┘                 │
+                 │                           ▼
+                 │              ┌──────────────────────┐
+                 │              │ GLOBAL MODULE         │
+                 │              │ Centroids [G, E]      │
+                 │              │ CrossAttn(Q=Seed,     │
+                 │              │   K=V=Centroids)      │
+                 │              │ → h_global [B, E]     │
+                 │              └──────────┬───────────┘
+                 └──────────┬──────────────┘
+                            ▼
+                 ┌─────────────────────┐
+                 │ Concat [B, 2E]      │
+                 └──────────┬──────────┘
+                    ┌───────┴───────┐
+                    ▼               ▼
+             ┌────────────┐  ┌────────────┐
+             │ Residual   │  │ FFN+Drop   │
+             │ Dense→[E]  │  │ → [E]      │
+             └──────┬─────┘  └──────┬─────┘
+                    └───────┬───────┘
+                            ▼
+                 ┌─────────────────────┐
+                 │ Add & Norm → [B, E] │
+                 └─────────────────────┘
 
-        Legend: B=batch, K=k_neighbors, E=embedding_dim, G=num_global_centroids
-
-    **Mathematical Operation**::
-
-        h_local  = MeanPool(TransformerLayer(local_tokens))
-        h_global = Squeeze(CrossAttention(Q=seed, K=V=centroids))
-        output   = Norm(FFN([h_local; h_global]) + ResidualProj([h_local; h_global]))
-
-    Args:
-        embedding_dim: Integer, dimensionality of token and output embeddings.
-            Must be positive.
-        num_heads: Integer, number of attention heads for both local and global
-            attention. Must be positive and divide embedding_dim evenly.
-        num_global_centroids: Integer, number of learnable global centroid tokens.
-            Must be positive.
-        ffn_dim: Integer, hidden dimension for feed-forward networks. Must be positive.
-        dropout_rate: Float between 0 and 1. Defaults to 0.1.
-        ffn_type: String, type of FFN to use. Defaults to 'mlp'.
-        normalization_type: String, type of normalization. Defaults to 'layer_norm'.
-        kernel_initializer: String or initializer for Dense layers.
-            Defaults to 'glorot_uniform'.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        List of two tensors:
-            - local_tokens: ``(batch_size, k_neighbors, embedding_dim)``
-            - seed_node_features: ``(batch_size, 1, embedding_dim)``
-
-    Output shape:
-        Tensor with shape ``(batch_size, embedding_dim)``.
-
-    Raises:
-        ValueError: If embedding_dim is not positive.
-        ValueError: If num_heads is not positive.
-        ValueError: If embedding_dim is not divisible by num_heads.
-        ValueError: If num_global_centroids is not positive.
-        ValueError: If ffn_dim is not positive.
-        ValueError: If dropout_rate is not in [0, 1].
-
-    References:
-        - Vaswani, A., et al. (2017). Attention Is All You Need. NeurIPS.
-        - Ying, C., et al. (2021). Do Transformers Really Perform Bad for
-          Graph Representation? (Graphormer). NeurIPS.
+    :param embedding_dim: Dimensionality of token and output embeddings.
+        Must be positive.
+    :type embedding_dim: int
+    :param num_heads: Number of attention heads. Must divide ``embedding_dim``.
+    :type num_heads: int
+    :param num_global_centroids: Number of learnable global centroid tokens.
+    :type num_global_centroids: int
+    :param ffn_dim: Hidden dimension for feed-forward networks. Must be positive.
+    :type ffn_dim: int
+    :param dropout_rate: Dropout probability in ``[0, 1]``. Defaults to 0.1.
+    :type dropout_rate: float
+    :param ffn_type: Type of FFN. Defaults to ``'mlp'``.
+    :type ffn_type: str
+    :param normalization_type: Type of normalization. Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param kernel_initializer: Initializer for Dense layers.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -845,11 +654,10 @@ class RELGTTransformerBlock(keras.layers.Layer):
         self.global_centroids = None
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Build sub-layers and create global centroid weights.
+        """Build sub-layers and create global centroid weights.
 
-        Args:
-            input_shape: List of shapes [local_tokens_shape, seed_features_shape].
+        :param input_shape: List of ``[local_tokens_shape, seed_features_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         local_tokens_shape, seed_features_shape = input_shape
 
@@ -897,15 +705,14 @@ class RELGTTransformerBlock(keras.layers.Layer):
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass for hybrid local-global processing.
+        """Forward pass for hybrid local-global processing.
 
-        Args:
-            inputs: List of [local_tokens, seed_node_features].
-            training: Boolean indicating training mode.
-
-        Returns:
-            Combined representation of shape (batch_size, embedding_dim).
+        :param inputs: List of ``[local_tokens, seed_node_features]``.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Combined representation ``(batch_size, embedding_dim)``.
+        :rtype: keras.KerasTensor
         """
         local_tokens, seed_node_features = inputs
         batch_size = keras.ops.shape(seed_node_features)[0]
@@ -953,14 +760,12 @@ class RELGTTransformerBlock(keras.layers.Layer):
         self,
         input_shape: List[Tuple[Optional[int], ...]],
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: List of shapes [local_tokens_shape, seed_features_shape].
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: List of ``[local_tokens_shape, seed_features_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         local_tokens_shape, _ = input_shape
         batch_size = local_tokens_shape[0]

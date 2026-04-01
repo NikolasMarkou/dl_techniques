@@ -18,14 +18,29 @@ class BaseGating(layers.Layer, ABC):
     """
     Abstract base class for MoE gating networks.
 
-    This class defines the interface for all gating implementations,
-    ensuring consistent behavior across different routing strategies.
-    Follows modern Keras 3 patterns with proper serialization support.
+    Defines the interface for all gating implementations, ensuring consistent
+    behavior across different routing strategies. Each gating subclass computes
+    expert selection weights, indices, and auxiliary information for load-balancing
+    losses. Follows modern Keras 3 patterns with proper serialization support.
 
-    Args:
-        num_experts: Number of expert networks to route to.
-        name: Name for the gating layer.
-        **kwargs: Additional keyword arguments for the base Layer class.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────┐
+        │      BaseGating (ABC)     │
+        │                           │
+        │  Input ──► call() ──────► (expert_weights,
+        │                            expert_indices,
+        │                            auxiliary_info)
+        └───────────────────────────┘
+
+    :param num_experts: Number of expert networks to route to.
+    :type num_experts: int
+    :param name: Name for the gating layer.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the base Layer class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -52,15 +67,12 @@ class BaseGating(layers.Layer, ABC):
         """
         Compute gating scores and routing information.
 
-        Args:
-            inputs: Input tensor to route.
-            training: Whether the layer is in training mode.
-
-        Returns:
-            Tuple containing:
-            - expert_weights: Weights for combining expert outputs
-            - expert_indices: Indices of selected experts
-            - auxiliary_info: Additional information for loss computation
+        :param inputs: Input tensor to route.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (expert_weights, expert_indices, auxiliary_info).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor, Dict[str, keras.KerasTensor]]
         """
         pass
 
@@ -76,43 +88,50 @@ class BaseGating(layers.Layer, ABC):
 @keras.saving.register_keras_serializable()
 class LinearGating(BaseGating):
     """
-    Linear gating network with optional noise and top-k selection.
+    Linear gating network with optional noise and top-k expert selection.
 
-    This is the most common gating mechanism, using a linear transformation
-    followed by softmax and top-k selection. It supports noise injection
-    for improved load balancing during training.
+    Implements the most common gating mechanism using a linear transformation
+    ``W * x + b`` followed by softmax normalization and top-k selection. During
+    training, Gaussian noise can be injected into the gating logits via a
+    learned noise scaling network to improve load balancing across experts:
+    ``logits = W_g * x + softplus(W_n * x) * N(0, noise_std)``.
 
-    Args:
-        num_experts: Number of expert networks.
-        top_k: Number of experts to select per token. Must be <= num_experts.
-        use_bias: Whether to use bias in the linear transformation.
-        add_noise: Whether to add noise to gating logits during training.
-        noise_std: Standard deviation of the noise.
-        kernel_initializer: Weight initialization strategy for gate weights.
-        bias_initializer: Bias initialization strategy.
-        **kwargs: Additional keyword arguments.
+    **Architecture Overview:**
 
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
+    .. code-block:: text
 
-    Output shape:
-        Tuple of:
-        - expert_weights: `(batch_size, ..., num_experts)`
-        - expert_indices: `(batch_size, ..., top_k)`
-        - auxiliary_info: Dict with routing statistics
+        ┌─────────────────────────────────────────┐
+        │            LinearGating                  │
+        │                                          │
+        │  Input ──► Dense (gate_logits)           │
+        │              │                           │
+        │              ├─► + Noise (training only) │
+        │              ▼                           │
+        │           Top-K Selection                │
+        │              │                           │
+        │              ▼                           │
+        │           Softmax (masked)               │
+        │              │                           │
+        │              ▼                           │
+        │  (expert_weights, expert_indices, aux)   │
+        └─────────────────────────────────────────┘
 
-    Example:
-        ```python
-        gating = LinearGating(
-            num_experts=8,
-            top_k=2,
-            add_noise=True,
-            noise_std=1.0
-        )
-
-        inputs = keras.Input(shape=(512, 768))
-        weights, indices, info = gating(inputs)
-        ```
+    :param num_experts: Number of expert networks.
+    :type num_experts: int
+    :param top_k: Number of experts to select per token. Must be <= num_experts.
+    :type top_k: int
+    :param use_bias: Whether to use bias in the linear transformation.
+    :type use_bias: bool
+    :param add_noise: Whether to add noise to gating logits during training.
+    :type add_noise: bool
+    :param noise_std: Standard deviation of the noise.
+    :type noise_std: float
+    :param kernel_initializer: Weight initialization strategy for gate weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Bias initialization strategy.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional keyword arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -264,37 +283,52 @@ class LinearGating(BaseGating):
 @keras.saving.register_keras_serializable()
 class CosineGating(BaseGating):
     """
-    Cosine similarity-based gating network.
+    Cosine similarity-based gating network for hypersphere expert routing.
 
-    This gating mechanism operates in a hypersphere space, using cosine similarity
-    between the input representation and learnable expert embeddings. This can
-    provide better domain generalization compared to linear gating.
+    Operates in a normalized embedding space, computing cosine similarity
+    ``cos(theta) = (x_proj / ||x_proj||) . (e_k / ||e_k||)`` between input
+    representations and learnable expert embeddings. The similarity scores
+    are scaled by a (optionally learnable) temperature ``tau`` before top-k
+    selection and softmax normalization. This can provide better domain
+    generalization compared to linear gating.
 
-    Args:
-        num_experts: Number of expert networks.
-        embedding_dim: Dimension of expert embeddings.
-        top_k: Number of experts to select per token.
-        temperature: Temperature parameter for softmax scaling.
-        learnable_temperature: Whether temperature is a learnable parameter.
-        kernel_initializer: Weight initialization strategy.
-        **kwargs: Additional keyword arguments.
+    **Architecture Overview:**
 
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
+    .. code-block:: text
 
-    Output shape:
-        Same as LinearGating output format.
+        ┌────────────────────────────────────────────┐
+        │             CosineGating                   │
+        │                                            │
+        │  Input ──► Dense (project to embed_dim)    │
+        │              │                             │
+        │              ▼                             │
+        │  L2-normalize ──► cosine_sim(x, E_experts) │
+        │              │                             │
+        │              ├──► * temperature             │
+        │              ▼                             │
+        │           Top-K Selection                  │
+        │              │                             │
+        │              ▼                             │
+        │           Softmax (masked)                 │
+        │              │                             │
+        │              ▼                             │
+        │  (expert_weights, expert_indices, aux)     │
+        └────────────────────────────────────────────┘
 
-    Example:
-        ```python
-        gating = CosineGating(
-            num_experts=8,
-            embedding_dim=256,
-            top_k=1,
-            temperature=0.1,
-            learnable_temperature=True
-        )
-        ```
+    :param num_experts: Number of expert networks.
+    :type num_experts: int
+    :param embedding_dim: Dimension of expert embeddings.
+    :type embedding_dim: int
+    :param top_k: Number of experts to select per token.
+    :type top_k: int
+    :param temperature: Temperature parameter for softmax scaling.
+    :type temperature: float
+    :param learnable_temperature: Whether temperature is a learnable parameter.
+    :type learnable_temperature: bool
+    :param kernel_initializer: Weight initialization strategy.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional keyword arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -450,31 +484,46 @@ class CosineGating(BaseGating):
 @keras.saving.register_keras_serializable()
 class SoftMoEGating(BaseGating):
     """
-    SoftMoE gating that creates soft input slots for experts.
+    Soft Mixture-of-Experts gating via differentiable slot assignment.
 
     Unlike traditional hard routing, SoftMoE computes weighted combinations
-    of all input tokens to create "soft slots" for each expert. This avoids
-    token dropping and load balancing issues at the cost of increased computation.
+    of all input tokens to create ``num_slots`` "soft slots" per expert via
+    ``phi_weights = softmax(Dense(x), axis=seq)`` followed by a weighted sum
+    ``slot_k = sum_t(phi_t,k * x_t)``. This avoids token dropping and load
+    balancing issues at the cost of increased computation proportional to
+    ``seq_len * num_experts * num_slots``.
 
-    Args:
-        num_experts: Number of expert networks.
-        num_slots: Number of input slots per expert.
-        kernel_initializer: Weight initialization strategy.
-        **kwargs: Additional keyword arguments.
+    **Architecture Overview:**
 
-    Input shape:
-        3D tensor with shape: `(batch_size, seq_len, hidden_dim)`.
+    .. code-block:: text
 
-    Output shape:
-        Same format as other gating mechanisms, but includes soft slot information.
+        ┌──────────────────────────────────────────┐
+        │            SoftMoEGating                 │
+        │                                          │
+        │  Input(batch, seq, dim)                  │
+        │         │                                │
+        │         ▼                                │
+        │  Dense(num_experts * num_slots) ──► phi  │
+        │         │                                │
+        │         ▼                                │
+        │  softmax(phi, axis=seq_len)              │
+        │         │                                │
+        │         ▼                                │
+        │  Weighted Sum ──► soft_slots             │
+        │  (batch, num_experts, slots*dim)         │
+        │         │                                │
+        │         ▼                                │
+        │  (expert_weights, expert_indices, aux)   │
+        └──────────────────────────────────────────┘
 
-    Example:
-        ```python
-        gating = SoftMoEGating(
-            num_experts=8,
-            num_slots=4
-        )
-        ```
+    :param num_experts: Number of expert networks.
+    :type num_experts: int
+    :param num_slots: Number of input slots per expert.
+    :type num_slots: int
+    :param kernel_initializer: Weight initialization strategy.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional keyword arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -597,17 +646,21 @@ def compute_auxiliary_loss(
     """
     Compute auxiliary load balancing loss for MoE training.
 
-    This loss encourages uniform distribution of tokens across experts
-    to prevent expert collapse and improve hardware utilization.
+    Encourages uniform token distribution across experts via
+    ``L_aux = aux_weight * N * sum(f_i * P_i)`` where ``f_i`` is the
+    fraction of tokens dispatched to expert *i* and ``P_i`` is the average
+    gate probability for expert *i*.
 
-    Args:
-        expert_weights: Expert selection weights [batch, ..., num_experts].
-        gate_probs: Raw gating probabilities [batch, ..., num_experts].
-        num_experts: Total number of experts.
-        aux_loss_weight: Weight for the auxiliary loss.
-
-    Returns:
-        Auxiliary load balancing loss scalar.
+    :param expert_weights: Expert selection weights ``[batch, ..., num_experts]``.
+    :type expert_weights: keras.KerasTensor
+    :param gate_probs: Raw gating probabilities ``[batch, ..., num_experts]``.
+    :type gate_probs: keras.KerasTensor
+    :param num_experts: Total number of experts.
+    :type num_experts: int
+    :param aux_loss_weight: Weight for the auxiliary loss.
+    :type aux_loss_weight: float
+    :return: Auxiliary load balancing loss scalar.
+    :rtype: keras.KerasTensor
     """
     # Determine axes for token-wise mean calculation (all but the last axis)
     num_token_axes = len(ops.shape(expert_weights)) - 1
@@ -634,15 +687,15 @@ def compute_z_loss(
     """
     Compute router z-loss for entropy regularization.
 
-    The z-loss encourages the router to produce confident decisions
-    by penalizing the squared logsumexp of the gate logits.
+    Penalizes ``mean(logsumexp(logits)^2)`` to encourage confident routing
+    decisions and prevent logit explosion.
 
-    Args:
-        gate_logits: Raw gate logits [batch, seq_len, num_experts].
-        z_loss_weight: Weight for the z-loss.
-
-    Returns:
-        Router z-loss scalar.
+    :param gate_logits: Raw gate logits ``[batch, seq_len, num_experts]``.
+    :type gate_logits: keras.KerasTensor
+    :param z_loss_weight: Weight for the z-loss.
+    :type z_loss_weight: float
+    :return: Router z-loss scalar.
+    :rtype: keras.KerasTensor
     """
     # Compute logsumexp for each token
     logsumexp = ops.logsumexp(gate_logits, axis=-1, keepdims=False)  # [batch, seq_len]
@@ -658,28 +711,15 @@ def create_gating(gating_type: str, num_experts: int, **kwargs) -> BaseGating:
     """
     Factory function to create gating networks.
 
-    Args:
-        gating_type: Type of gating to create ('linear', 'cosine', 'softmoe').
-        num_experts: Number of expert networks.
-        **kwargs: Configuration parameters for the gating network.
-
-    Returns:
-        Configured gating network.
-
-    Raises:
-        ValueError: If gating_type is not supported.
-
-    Example:
-        ```python
-        # Create linear gating
-        gating = create_gating('linear', num_experts=8, top_k=2)
-
-        # Create cosine gating
-        gating = create_gating('cosine', num_experts=8, embedding_dim=256)
-
-        # Create SoftMoE gating
-        gating = create_gating('softmoe', num_experts=8, num_slots=4)
-        ```
+    :param gating_type: Type of gating to create (``'linear'``, ``'cosine'``, ``'softmoe'``).
+    :type gating_type: str
+    :param num_experts: Number of expert networks.
+    :type num_experts: int
+    :param kwargs: Configuration parameters for the gating network.
+    :type kwargs: Any
+    :return: Configured gating network.
+    :rtype: BaseGating
+    :raises ValueError: If gating_type is not supported.
     """
     if gating_type == 'linear':
         linear_keys = ['top_k', 'use_bias', 'add_noise', 'noise_std',

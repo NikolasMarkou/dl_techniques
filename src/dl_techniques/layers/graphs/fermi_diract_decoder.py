@@ -15,97 +15,50 @@ from typing import List, Any, Union, Tuple, Optional
 
 @keras.saving.register_keras_serializable()
 class FermiDiracDecoder(keras.layers.Layer):
-    """
-    Fermi-Dirac decoder for edge probability prediction using Euclidean distances.
+    """Fermi-Dirac decoder for edge probability prediction.
 
-    This decoder computes the probability of an edge existing between two nodes
-    based on the Euclidean distance between their embeddings. The formulation is
-    inspired by the Fermi-Dirac distribution from physics, providing a smooth
-    sigmoid-like transition around a learnable threshold.
+    Computes the probability of an edge between two nodes from the Euclidean
+    distance of their embeddings, inspired by the Fermi-Dirac distribution.
+    Given embeddings u, v in R^D the probability is
+    p = sigmoid(-(d^2 - r) / t) where d^2 = ||u - v||^2, *r* is a learnable
+    threshold and *t* is a learnable temperature controlling transition
+    sharpness. When d^2 < r the probability tends to 1 (likely edge);
+    when d^2 > r it tends to 0 (Eq. 30, Arevalo et al.).
 
-    **Intent**: Provide a differentiable link prediction decoder that maps pairwise
-    node distances to edge probabilities via learnable threshold and temperature
-    parameters, enabling end-to-end training of graph neural networks for link
-    prediction tasks.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ::
+    .. code-block:: text
 
-        Inputs: [u_embeddings, v_embeddings]
-                      │              │
-                      └──────┬───────┘
-                             │
-                             ▼
-               ┌─────────────────────────┐
-               │  Squared Euclidean Dist │
-               │    d² = ||u - v||²      │
-               └─────────────────────────┘
-                             │
-                             ▼
-               ┌─────────────────────────┐
-               │    Score Computation    │
-               │    s = (d² - r) / t     │
-               │                         │
-               │  r: learnable threshold │
-               │  t: learnable temp      │
-               └─────────────────────────┘
-                             │
-                             ▼
-               ┌─────────────────────────┐
-               │   Sigmoid Activation    │
-               │    p = sigmoid(-s)      │
-               └─────────────────────────┘
-                             │
-                             ▼
-                   Output: probabilities
-                     shape (batch,)
+        ┌──────────────┐   ┌──────────────┐
+        │ u embeddings │   │ v embeddings │
+        │  [B, D]      │   │  [B, D]      │
+        └──────┬───────┘   └──────┬───────┘
+               └──────────┬───────┘
+                          ▼
+               ┌─────────────────────┐
+               │  d² = ||u - v||²    │
+               └──────────┬──────────┘
+                          ▼
+               ┌─────────────────────┐
+               │  s = (d² - r) / t   │
+               │  r, t: learnable    │
+               └──────────┬──────────┘
+                          ▼
+               ┌─────────────────────┐
+               │  p = sigmoid(-s)    │
+               └──────────┬──────────┘
+                          ▼
+               ┌─────────────────────┐
+               │  Output  [B]        │
+               └─────────────────────┘
 
-    **Mathematical Operations**:
-        Given embeddings u, v in R^D:
-
-        1. **Squared Distance**: d² = sum((u_i - v_i)²)
-        2. **Score**: s = (d² - r) / t
-        3. **Probability**: p = sigmoid(-s) = 1 / (1 + exp(s))
-
-    **Intuition**:
-        - When d² < r: Nodes are close, p -> 1 (likely edge)
-        - When d² > r: Nodes are far, p -> 0 (unlikely edge)
-        - t controls how sharp this transition is
-
-    Args:
-        r_initializer: Initializer for threshold parameter r. Accepts string names
-            ('zeros', 'ones') or Initializer instances. Defaults to Constant(2.0),
-            assuming normalized embeddings.
-        t_initializer: Initializer for temperature parameter t. Accepts string names
-            or Initializer instances. Defaults to Constant(1.0).
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        List of two tensors:
-            - embeddings_u: Shape ``(batch_size, feature_dim)`` for source nodes.
-            - embeddings_v: Shape ``(batch_size, feature_dim)`` for target nodes.
-        Both tensors must have matching feature dimensions.
-
-    Output shape:
-        1D tensor with shape ``(batch_size,)`` containing edge probabilities
-        in range [0, 1].
-
-    Attributes:
-        r: Threshold parameter, scalar tensor. Represents optimal distance for edges.
-        t: Temperature parameter, scalar tensor. Controls transition sharpness.
-
-    Raises:
-        ValueError: If input is not a list/tuple of exactly two tensors.
-        ValueError: If embedding dimensions do not match between u and v.
-
-    References:
-        Arevalo et al., Equation 30: Link prediction with Euclidean distance.
-
-    Note:
-        - Embeddings should be from the same model to ensure consistency.
-        - Works with any embedding dimension.
-        - Both r and t are learned during training.
-        - Output can be directly used with binary cross-entropy loss.
+    :param r_initializer: Initializer for threshold *r*.
+        Defaults to ``Constant(2.0)``.
+    :type r_initializer: Union[str, keras.initializers.Initializer]
+    :param t_initializer: Initializer for temperature *t*.
+        Defaults to ``Constant(1.0)``.
+    :type t_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -114,14 +67,7 @@ class FermiDiracDecoder(keras.layers.Layer):
             t_initializer: Union[str, keras.initializers.Initializer] = None,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize Fermi-Dirac decoder with learnable parameters.
-
-        Args:
-            r_initializer: Initializer for threshold parameter r.
-            t_initializer: Initializer for temperature parameter t.
-            **kwargs: Additional keyword arguments for Layer base class.
-        """
+        """Initialise Fermi-Dirac decoder with learnable parameters."""
         super().__init__(**kwargs)
 
         # Store initializers with defaults
@@ -135,16 +81,10 @@ class FermiDiracDecoder(keras.layers.Layer):
         )
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Create learnable parameters.
+        """Create learnable parameters.
 
-        Args:
-            input_shape: List of two shapes for [u_embeddings, v_embeddings].
-                Both should have the same feature dimension.
-
-        Raises:
-            ValueError: If input_shape is not a list/tuple of two shapes.
-            ValueError: If embedding dimensions do not match.
+        :param input_shape: List of two shapes for ``[u_embeddings, v_embeddings]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         # Validate input shapes
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
@@ -182,16 +122,14 @@ class FermiDiracDecoder(keras.layers.Layer):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Compute edge probabilities from embedding pairs.
+        """Compute edge probabilities from embedding pairs.
 
-        Args:
-            inputs: List of [u_embeddings, v_embeddings], both shape (batch, dim).
-            training: Boolean flag for training mode (unused but included for
-                API consistency).
-
-        Returns:
-            Edge probabilities of shape (batch,) with values in [0, 1].
+        :param inputs: List of ``[u_embeddings, v_embeddings]``, both shape ``(batch, dim)``.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether in training mode (unused, kept for API consistency).
+        :type training: Optional[bool]
+        :return: Edge probabilities of shape ``(batch,)`` in ``[0, 1]``.
+        :rtype: keras.KerasTensor
         """
         u, v = inputs
 
@@ -217,25 +155,21 @@ class FermiDiracDecoder(keras.layers.Layer):
             self,
             input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int]]:
-        """
-        Compute output shape given input shapes.
+        """Compute output shape given input shapes.
 
-        Args:
-            input_shape: List of [u_shape, v_shape].
-
-        Returns:
-            Output shape tuple (batch_size,).
+        :param input_shape: List of ``[u_shape, v_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape tuple ``(batch_size,)``.
+        :rtype: Tuple[Optional[int]]
         """
         u_shape = input_shape[0]
         return (u_shape[0],)
 
     def get_config(self) -> dict:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor arguments needed to
-            reconstruct the layer.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

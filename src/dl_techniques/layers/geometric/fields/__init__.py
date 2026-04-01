@@ -26,27 +26,6 @@ These layers are based on concepts from differential geometry and gauge theory:
 - Curvature and torsion
 - Gauge invariance
 
-Example Usage:
-    >>> from dl_techniques.layers.geometric.fields import (
-    ...     create_field_layer,
-    ...     HolonomicTransformerLayer,
-    ...     FieldEmbedding
-    ... )
-    >>>
-    >>> # Create a complete holonomic transformer layer
-    >>> layer = create_field_layer(
-    ...     'holonomic_transformer',
-    ...     hidden_dim=256,
-    ...     num_heads=8
-    ... )
-    >>>
-    >>> # Or create individual components
-    >>> embedding = create_field_layer(
-    ...     'field_embedding',
-    ...     vocab_size=10000,
-    ...     embed_dim=256,
-    ...     curvature_type='ricci'
-    ... )
 """
 
 from typing import Optional, Dict, Any, Literal, Union
@@ -157,15 +136,12 @@ def validate_field_config(
         layer_type: FieldLayerType,
         **kwargs: Any
 ) -> None:
-    """
-    Validate configuration for a field layer type.
+    """Validate configuration for a field layer type.
 
-    Args:
-        layer_type: Type of field layer.
-        **kwargs: Configuration parameters.
-
-    Raises:
-        ValueError: If layer_type is unknown or required parameters are missing.
+    :param layer_type: Type of field layer.
+    :type layer_type: FieldLayerType
+    :param kwargs: Configuration parameters.
+    :raises ValueError: If layer_type is unknown or required parameters are missing.
     """
     if layer_type not in _FIELD_LAYER_REGISTRY:
         raise ValueError(
@@ -187,57 +163,24 @@ def create_field_layer(
         name: Optional[str] = None,
         **kwargs: Any
 ) -> keras.layers.Layer:
-    """
-    Factory function to create field-based layers.
+    """Factory function to create field-based layers.
 
     This is the recommended way to create field layers, as it provides:
     - Automatic parameter validation
     - Default parameter filling
     - Consistent interface across all layer types
 
-    Args:
-        layer_type: Type of field layer to create. Options:
-            - 'field_embedding': Field embedding with curvature
-            - 'connection': Gauge connection computation
-            - 'parallel_transport': Parallel transport of vectors
-            - 'holonomy': Holonomy (path integral) computation
-            - 'gauge_attention': Gauge-invariant attention
-            - 'manifold_stress': Anomaly detection via stress
-            - 'holonomic_transformer': Complete transformer layer
-            - 'field_norm': Field-aware normalization
-        name: Optional name for the layer.
-        **kwargs: Layer-specific parameters.
-
-    Returns:
-        Configured field layer instance.
-
-    Raises:
-        ValueError: If layer_type is unknown or required parameters missing.
-
-    Example:
-        >>> # Create a holonomic transformer layer
-        >>> layer = create_field_layer(
-        ...     'holonomic_transformer',
-        ...     hidden_dim=256,
-        ...     num_heads=8,
-        ...     use_holonomy_features=True
-        ... )
-
-        >>> # Create a field embedding
-        >>> embedding = create_field_layer(
-        ...     'field_embedding',
-        ...     vocab_size=10000,
-        ...     embed_dim=256,
-        ...     curvature_type='ricci'
-        ... )
-
-        >>> # Create gauge-invariant attention
-        >>> attention = create_field_layer(
-        ...     'gauge_attention',
-        ...     hidden_dim=256,
-        ...     num_heads=8,
-        ...     attention_metric='hybrid'
-        ... )
+    :param layer_type: Type of field layer to create. Options:
+        ``'field_embedding'``, ``'connection'``, ``'parallel_transport'``,
+        ``'holonomy'``, ``'gauge_attention'``, ``'manifold_stress'``,
+        ``'holonomic_transformer'``, ``'field_norm'``.
+    :type layer_type: FieldLayerType
+    :param name: Optional name for the layer.
+    :type name: Optional[str]
+    :param kwargs: Layer-specific parameters.
+    :return: Configured field layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If layer_type is unknown or required parameters missing.
     """
     # Validate configuration
     validate_field_config(layer_type, **kwargs)
@@ -258,23 +201,12 @@ def create_field_layer(
 
 
 def create_field_layer_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
-    """
-    Create a field layer from a configuration dictionary.
+    """Create a field layer from a configuration dictionary.
 
-    Args:
-        config: Configuration dictionary containing 'type' and layer parameters.
-
-    Returns:
-        Configured field layer instance.
-
-    Example:
-        >>> config = {
-        ...     'type': 'holonomic_transformer',
-        ...     'hidden_dim': 256,
-        ...     'num_heads': 8,
-        ...     'use_holonomy_features': True
-        ... }
-        >>> layer = create_field_layer_from_config(config)
+    :param config: Configuration dictionary containing 'type' and layer parameters.
+    :type config: Dict[str, Any]
+    :return: Configured field layer instance.
+    :rtype: keras.layers.Layer
     """
     config = config.copy()
     layer_type = config.pop('type')
@@ -282,19 +214,11 @@ def create_field_layer_from_config(config: Dict[str, Any]) -> keras.layers.Layer
 
 
 def get_field_layer_info() -> Dict[str, Dict[str, Any]]:
-    """
-    Get information about all available field layer types.
+    """Get information about all available field layer types.
 
-    Returns:
-        Dictionary mapping layer types to their information including:
-        - 'class': The layer class
-        - 'required_params': List of required parameters
-        - 'default_params': Dictionary of default parameter values
-        - 'description': Brief description of the layer
-
-    Example:
-        >>> info = get_field_layer_info()
-        >>> print(info['holonomic_transformer']['description'])
+    :return: Dictionary mapping layer types to their information including
+        'class', 'required_params', 'default_params', and 'description'.
+    :rtype: Dict[str, Dict[str, Any]]
     """
     descriptions = {
         'field_embedding': 'Embeds tokens as fields with curvature information',

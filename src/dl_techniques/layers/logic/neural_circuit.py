@@ -79,58 +79,55 @@ from .arithmetic_operators import LearnableArithmeticOperator
 
 @keras.saving.register_keras_serializable()
 class CircuitDepthLayer(keras.layers.Layer):
-    """A single depth layer of the neural circuit.
+    """
+    Single depth layer of a neural circuit with parallel expert operators.
 
-    This layer implements a single depth level with parallel logic and arithmetic
-    operators, featuring learnable routing and combination mechanisms. The layer
-    processes inputs through multiple parallel operators and combines their outputs
-    using learnable weights.
+    Implements a MoE-inspired computational stage containing parallel logic and
+    arithmetic operator "experts" with learnable soft routing and output fusion.
+    Input is distributed via ``alpha = softmax(w_routing)`` and outputs are
+    combined via ``beta = softmax(w_combination)``:
+    ``Y = sum_i(beta_i * f_i(alpha_i * X)) [+ X]`` (optional residual).
 
-    The layer creates multiple logic and arithmetic operators that run in parallel,
-    each receiving a weighted portion of the input. The outputs are then combined
-    using another set of learnable weights, with an optional residual connection.
+    **Architecture Overview:**
 
-    Args:
-        num_logic_ops: Integer, number of logic operators to run in parallel.
-            Must be positive.
-        num_arithmetic_ops: Integer, number of arithmetic operators to run in parallel.
-            Must be positive.
-        use_residual: Boolean, whether to use residual connections to add the
-            input to the output.
-        logic_op_types: Optional list of logic operation types to use in the
-            logic operators. If None, uses all available logic operations.
-        arithmetic_op_types: Optional list of arithmetic operation types to use
-            in the arithmetic operators. If None, uses all available arithmetic operations.
-        routing_initializer: Initializer for the routing weights that distribute
-            input to different operators.
-        combination_initializer: Initializer for the combination weights that
-            combine operator outputs.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        ┌──────────────────────────────────────────────┐
+        │           CircuitDepthLayer                  │
+        │                                              │
+        │  Input(batch, H, W, C)                       │
+        │         │                                    │
+        │         ▼                                    │
+        │  Routing: alpha = softmax(w_r)               │
+        │         │                                    │
+        │    ┌────┴────┬────────┬────────┐             │
+        │    ▼         ▼        ▼        ▼             │
+        │  Logic_0  Logic_1  Arith_0  Arith_1          │
+        │    │         │        │        │             │
+        │    ▼         ▼        ▼        ▼             │
+        │  Combination: beta = softmax(w_c)            │
+        │         │                                    │
+        │         ├──► + Input (residual, optional)    │
+        │         ▼                                    │
+        │  Output(batch, H, W, C)                      │
+        └──────────────────────────────────────────────┘
 
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Returns:
-        A 4D tensor with the same shape as the input, containing the processed
-        features from the parallel operators.
-
-    Raises:
-        ValueError: If num_logic_ops or num_arithmetic_ops is not positive.
-        ValueError: If input is not a 4D tensor.
-
-    Example:
-        >>> x = np.random.rand(4, 32, 32, 64)
-        >>> depth_layer = CircuitDepthLayer(
-        ...     num_logic_ops=2,
-        ...     num_arithmetic_ops=2,
-        ...     use_residual=True
-        ... )
-        >>> y = depth_layer(x)
-        >>> print(y.shape)
-        (4, 32, 32, 64)
+    :param num_logic_ops: Number of logic operators to run in parallel.
+    :type num_logic_ops: int
+    :param num_arithmetic_ops: Number of arithmetic operators to run in parallel.
+    :type num_arithmetic_ops: int
+    :param use_residual: Whether to use residual connections.
+    :type use_residual: bool
+    :param logic_op_types: Optional list of logic operation types.
+    :type logic_op_types: Optional[List[str]]
+    :param arithmetic_op_types: Optional list of arithmetic operation types.
+    :type arithmetic_op_types: Optional[List[str]]
+    :param routing_initializer: Initializer for routing weights.
+    :type routing_initializer: Union[str, keras.initializers.Initializer]
+    :param combination_initializer: Initializer for combination weights.
+    :type combination_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -173,10 +170,11 @@ class CircuitDepthLayer(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer components.
+        """
+        Build the layer components.
 
-        Args:
-            input_shape: Shape of the input tensor. Must be a 4D shape.
+        :param input_shape: Shape of the input tensor. Must be a 4D shape.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -228,15 +226,15 @@ class CircuitDepthLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the circuit depth layer.
+        """
+        Forward pass through the circuit depth layer.
 
-        Args:
-            inputs: Input tensor of shape [batch, height, width, features]
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor after processing through parallel operators.
+        :param inputs: Input tensor of shape ``[batch, height, width, features]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor after processing through parallel operators.
+        :rtype: keras.KerasTensor
         """
         # Normalize routing and combination weights
         routing_probs = ops.softmax(self.routing_weights)
@@ -285,21 +283,22 @@ class CircuitDepthLayer(keras.layers.Layer):
         return combined_output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape.
+        """
+        Compute output shape.
 
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape tuple (same as input shape).
+        :param input_shape: Shape of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """
+        Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -318,60 +317,64 @@ class CircuitDepthLayer(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class LearnableNeuralCircuit(keras.layers.Layer):
-    """A learnable neural circuit with configurable depth and parallel operators.
+    """
+    Deep learnable neural circuit with stacked parallel operator layers.
 
-    This layer implements a neural circuit that processes 4D tensors through
-    multiple depth levels, each containing parallel logic and arithmetic operators.
-    The circuit features learnable routing, operation selection, and combination
-    mechanisms at each depth level.
+    Implements a multi-depth neural circuit where each depth level is a
+    ``CircuitDepthLayer`` containing parallel logic and arithmetic experts
+    with learnable routing and combination. Stacking *D* depth layers creates
+    a compositional pipeline where each stage refines features through diverse
+    learned operations with optional layer normalization for training stability.
 
-    Each depth level contains multiple parallel operators that process the input
-    independently, with learnable weights controlling how the input is distributed
-    to each operator and how their outputs are combined. Optional layer normalization
-    can be applied after each depth level for better training stability.
+    **Architecture Overview:**
 
-    Args:
-        circuit_depth: Integer, number of depth levels in the circuit. Must be positive.
-        num_logic_ops_per_depth: Integer, number of logic operators per depth level.
-            Must be positive.
-        num_arithmetic_ops_per_depth: Integer, number of arithmetic operators per
-            depth level. Must be positive.
-        use_residual: Boolean, whether to use residual connections in each depth layer.
-        use_layer_norm: Boolean, whether to apply layer normalization after each
-            depth level.
-        logic_op_types: Optional list of logic operation types to use in the
-            logic operators. If None, uses all available logic operations.
-        arithmetic_op_types: Optional list of arithmetic operation types to use
-            in the arithmetic operators. If None, uses all available arithmetic operations.
-        routing_initializer: Initializer for the routing weights in each depth layer.
-        combination_initializer: Initializer for the combination weights in each depth layer.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        ┌──────────────────────────────────────────┐
+        │        LearnableNeuralCircuit            │
+        │                                          │
+        │  Input(batch, H, W, C)                   │
+        │         │                                │
+        │         ▼                                │
+        │  ┌─────────────────────┐                 │
+        │  │ CircuitDepthLayer_0 │                 │
+        │  └─────────┬───────────┘                 │
+        │            ├──► LayerNorm (optional)      │
+        │            ▼                             │
+        │  ┌─────────────────────┐                 │
+        │  │ CircuitDepthLayer_1 │                 │
+        │  └─────────┬───────────┘                 │
+        │            ├──► LayerNorm (optional)      │
+        │            ▼                             │
+        │          ...                             │
+        │            ▼                             │
+        │  ┌─────────────────────┐                 │
+        │  │ CircuitDepthLayer_D │                 │
+        │  └─────────┬───────────┘                 │
+        │            ▼                             │
+        │  Output(batch, H, W, C)                  │
+        └──────────────────────────────────────────┘
 
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Returns:
-        A 4D tensor with the same shape as the input, containing the features
-        processed through the full neural circuit.
-
-    Raises:
-        ValueError: If circuit_depth, num_logic_ops_per_depth, or
-            num_arithmetic_ops_per_depth is not positive.
-        ValueError: If input is not a 4D tensor.
-
-    Example:
-        >>> circuit = LearnableNeuralCircuit(
-        ...     circuit_depth=3,
-        ...     num_logic_ops_per_depth=2,
-        ...     num_arithmetic_ops_per_depth=2
-        ... )
-        >>> x = np.random.rand(4, 32, 32, 64)
-        >>> output = circuit(x)
-        >>> print(output.shape)
-        (4, 32, 32, 64)
+    :param circuit_depth: Number of depth levels in the circuit.
+    :type circuit_depth: int
+    :param num_logic_ops_per_depth: Number of logic operators per depth level.
+    :type num_logic_ops_per_depth: int
+    :param num_arithmetic_ops_per_depth: Number of arithmetic operators per depth level.
+    :type num_arithmetic_ops_per_depth: int
+    :param use_residual: Whether to use residual connections in each depth layer.
+    :type use_residual: bool
+    :param use_layer_norm: Whether to apply layer normalization after each depth level.
+    :type use_layer_norm: bool
+    :param logic_op_types: Optional list of logic operation types.
+    :type logic_op_types: Optional[List[str]]
+    :param arithmetic_op_types: Optional list of arithmetic operation types.
+    :type arithmetic_op_types: Optional[List[str]]
+    :param routing_initializer: Initializer for routing weights.
+    :type routing_initializer: Union[str, keras.initializers.Initializer]
+    :param combination_initializer: Initializer for combination weights.
+    :type combination_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -420,10 +423,11 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the neural circuit layers.
+        """
+        Build the neural circuit layers.
 
-        Args:
-            input_shape: Shape of the input tensor. Must be a 4D shape.
+        :param input_shape: Shape of the input tensor. Must be a 4D shape.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -464,15 +468,15 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the neural circuit.
+        """
+        Forward pass through the neural circuit.
 
-        Args:
-            inputs: Input tensor of shape [batch, height, width, features]
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor after processing through the full circuit.
+        :param inputs: Input tensor of shape ``[batch, height, width, features]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor after processing through the full circuit.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -488,21 +492,22 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape.
+        """
+        Compute output shape.
 
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape tuple (same as input shape).
+        :param input_shape: Shape of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """
+        Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

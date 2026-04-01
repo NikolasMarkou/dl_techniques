@@ -15,90 +15,74 @@ from ..embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
 class SupernodePooling(keras.layers.Layer):
     """Supernode pooling layer with message passing for point clouds.
 
-    This layer implements a graph-based pooling mechanism that:
-    1. Selects supernode positions from input points
-    2. Finds neighbors of supernodes within a radius or k-NN
-    3. Aggregates information from neighbors using message passing
-    4. Outputs aggregated features for each supernode
+    Selects supernode positions from input points, finds their neighbours
+    (within a radius or via k-NN), creates positional messages using
+    continuous sin/cos embeddings, and aggregates them through a two-layer
+    MLP. The aggregated messages are concatenated with supernode position
+    embeddings and projected to the output dimension.
 
-    This is particularly useful for point cloud processing where you need
-    to pool information from local neighborhoods while preserving spatial
-    relationships through learned embeddings.
+    **Architecture Overview:**
 
-    Args:
-        hidden_dim: Integer, output dimension of the pooled features. Must be positive.
-        ndim: Integer, number of coordinate dimensions (2 for 2D, 3 for 3D).
-            Must be positive.
-        radius: Optional float, radius for neighbor selection. If provided,
-            all points within this radius of each supernode are considered.
-            Cannot be used together with k_neighbors. Must be positive if specified.
-        k_neighbors: Optional integer, number of nearest neighbors to consider
-            for each supernode. Cannot be used together with radius.
-            Must be positive if specified.
-        max_neighbors: Integer, maximum number of neighbors per supernode
-            to prevent memory issues. Must be positive. Defaults to 32.
-        mode: String, positional encoding mode. Either "abspos" (absolute
-            positions) or "relpos" (relative positions). Defaults to "relpos".
-        activation: String or callable, activation function for message MLP.
-            Defaults to "gelu".
-        use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer, initializer for bias vectors.
-            Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        Dictionary with keys:
-        - "positions": 2D tensor with shape `(num_points, ndim)` - point coordinates
-        - "supernode_indices": 1D tensor with shape `(num_supernodes,)` - indices
-          of points that should serve as supernodes
+        ┌───────────────────────────────────┐
+        │  Inputs (dict)                    │
+        │  positions     [P, ndim]          │
+        │  supernode_idx [S]                │
+        └───────────────┬───────────────────┘
+                        ▼
+        ┌───────────────────────────────────┐
+        │  Neighbour Selection              │
+        │  (radius or k-NN) → mask [P, S]   │
+        └───────────────┬───────────────────┘
+                        ▼
+        ┌───────────────────────────────────┐
+        │  Message Creation                 │
+        │  Pos Embed (abs or rel)           │
+        │  → Message MLP [P, S, H]          │
+        │  × mask                           │
+        └───────────────┬───────────────────┘
+                        ▼
+        ┌───────────────────────────────────┐
+        │  Mean Aggregation → [S, H]        │
+        └───────────────┬───────────────────┘
+                        ▼
+        ┌───────────────────────────────────┐
+        │  Concat(agg, pos_embed) → [S, 2H] │
+        │  Dense → [S, H]                   │
+        │  Expand → [1, S, H]               │
+        └───────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, num_supernodes, hidden_dim)`
-
-    Call arguments:
-        inputs: Dictionary containing:
-            - positions: Point coordinates tensor of shape (num_points, ndim)
-            - supernode_indices: Supernode indices tensor of shape (num_supernodes,)
-        training: Boolean indicating training mode.
-
-    Returns:
-        Pooled supernode features tensor.
-
-    Example:
-        ```python
-        # 3D point cloud with 1000 points
-        positions = keras.random.uniform((1000, 3)) * 10
-        supernode_indices = keras.random.uniform((100,), 0, 1000, seed=42)
-        supernode_indices = ops.cast(supernode_indices, "int32")
-
-        pooling = SupernodePooling(
-            hidden_dim=256,
-            ndim=3,
-            radius=2.0,
-            mode="relpos"
-        )
-
-        features = pooling({
-            "positions": positions,
-            "supernode_indices": supernode_indices
-        })
-        print(features.shape)  # (1, 100, 256)
-        ```
-
-    Raises:
-        ValueError: If exactly one of radius or k_neighbors is not specified.
-        ValueError: If hidden_dim, ndim, or max_neighbors are not positive.
-        ValueError: If radius or k_neighbors are specified but not positive.
-        ValueError: If mode is not "abspos" or "relpos".
-
-    Notes:
-        This implementation approximates graph operations using dense computations
-        for Keras compatibility. For very large point clouds, consider using
-        specialized graph neural network libraries.
+    :param hidden_dim: Output dimension of pooled features. Must be positive.
+    :type hidden_dim: int
+    :param ndim: Number of coordinate dimensions (2 or 3). Must be positive.
+    :type ndim: int
+    :param radius: Radius for neighbour selection. Mutually exclusive with
+        ``k_neighbors``.
+    :type radius: Optional[float]
+    :param k_neighbors: Number of nearest neighbours. Mutually exclusive with
+        ``radius``.
+    :type k_neighbors: Optional[int]
+    :param max_neighbors: Maximum neighbours per supernode. Defaults to 32.
+    :type max_neighbors: int
+    :param mode: Positional encoding mode (``"abspos"`` or ``"relpos"``).
+        Defaults to ``"relpos"``.
+    :type mode: str
+    :param activation: Activation for message MLP. Defaults to ``"gelu"``.
+    :type activation: Union[str, callable]
+    :param use_bias: Whether to use bias. Defaults to ``True``.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to ``"glorot_uniform"``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors.
+        Defaults to ``"zeros"``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -268,12 +252,12 @@ class SupernodePooling(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply supernode pooling with message passing.
 
-        Args:
-            inputs: Dictionary containing positions and supernode_indices.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Pooled supernode features.
+        :param inputs: Dictionary with ``positions`` and ``supernode_indices``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Pooled supernode features ``(1, num_supernodes, hidden_dim)``.
+        :rtype: keras.KerasTensor
         """
         positions = inputs["positions"]  # (num_points, ndim)
         supernode_indices = inputs["supernode_indices"]  # (num_supernodes,)

@@ -33,41 +33,70 @@ AttentionMetric = Literal['holonomy', 'geodesic', 'curvature', 'hybrid']
 
 @keras.saving.register_keras_serializable(package='holonomic')
 class GaugeInvariantAttention(keras.layers.Layer):
-    """
-    Attention mechanism that respects gauge invariance.
+    """Attention mechanism that respects gauge invariance.
 
-    This layer computes attention scores using gauge-invariant quantities
-    derived from the field representation. The attention is based on:
-    - Holonomy between positions (path-dependent transport)
-    - Geodesic distance (curvature-weighted distance)
-    - Local curvature agreement
+    Computes attention scores using gauge-invariant quantities from the
+    field representation: holonomy between positions (path-dependent
+    transport), geodesic distance (curvature-weighted), and local curvature
+    agreement. The gauge-invariant score between positions i and j is
+    a_{ij} = f(H[gamma_{ij}], R_i, R_j) where H is holonomy and R is
+    curvature. Standard Q/K/V projections are augmented with geometric
+    corrections, curvature gating, and optional parallel transport of values.
 
-    Unlike standard attention which can be manipulated by adversarial
-    perturbations, gauge-invariant attention is robust because it depends
-    only on quantities that are invariant under local transformations.
+    **Architecture Overview:**
 
-    Args:
-        hidden_dim: Hidden dimension size.
-        num_heads: Number of attention heads.
-        key_dim: Dimension of keys (per head). If None, uses hidden_dim // num_heads.
-        attention_metric: Type of gauge-invariant metric to use for attention.
-        use_curvature_gating: Whether to gate attention by curvature agreement.
-        use_parallel_transport: Whether to parallel transport values before aggregation.
-        dropout_rate: Dropout rate for attention weights.
-        kernel_initializer: Initializer for kernel weights.
-        kernel_regularizer: Regularizer for kernel weights.
+    .. code-block:: text
 
-    Example:
-        >>> attention = GaugeInvariantAttention(
-        ...     hidden_dim=256,
-        ...     num_heads=8,
-        ...     attention_metric='hybrid'
-        ... )
-        >>> embeddings = keras.ops.random.normal((2, 16, 256))
-        >>> curvature = keras.ops.random.normal((2, 16, 256))
-        >>> connection = keras.ops.random.normal((2, 16, 256, 256)) * 0.01
-        >>> output = attention([embeddings, curvature, connection])
-        >>> print(output.shape)  # (2, 16, 256)
+        ┌─────────────┐ ┌──────────────┐ ┌──────────────┐
+        │ Embeddings  │ │ Curvature    │ │ Connection   │
+        │ [B, S, D]   │ │ [B, S, ...]  │ │ [B, S, D, D] │
+        └──────┬──────┘ └──────┬───────┘ └──────┬───────┘
+               ▼               │                │
+        ┌────────────────┐     │                │
+        │ Q, K, V proj   │     │                │
+        └──────┬─────────┘     │                │
+               ▼               ▼                ▼
+        ┌────────────────────────────────────────────┐
+        │ Gauge-invariant scores                     │
+        │ (holonomy / geodesic / curvature / hybrid) │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │ Temperature × Curvature Gate × Mask        │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │ Softmax → Dropout → Attend values          │
+        │ (optional parallel transport of V)          │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │ Output projection → [B, S, D]              │
+        └────────────────────────────────────────────┘
+
+    :param hidden_dim: Hidden dimension size. Must be positive.
+    :type hidden_dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param key_dim: Key dimension per head. Defaults to ``hidden_dim // num_heads``.
+    :type key_dim: Optional[int]
+    :param attention_metric: Gauge-invariant metric type
+        (``'holonomy'``, ``'geodesic'``, ``'curvature'``, ``'hybrid'``).
+        Defaults to ``'hybrid'``.
+    :type attention_metric: AttentionMetric
+    :param use_curvature_gating: Whether to gate attention by curvature.
+        Defaults to ``True``.
+    :type use_curvature_gating: bool
+    :param use_parallel_transport: Whether to transport values before aggregation.
+        Defaults to ``True``.
+    :type use_parallel_transport: bool
+    :param dropout_rate: Dropout rate for attention weights. Defaults to 0.0.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -114,11 +143,10 @@ class GaugeInvariantAttention(keras.layers.Layer):
         self.head_dim = hidden_dim // num_heads
 
     def build(self, input_shape: Tuple[Tuple[int, ...], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Args:
-            input_shape: Tuple of shapes for (embeddings, curvature, connection).
+        :param input_shape: Tuple of shapes for (embeddings, curvature, connection).
+        :type input_shape: Tuple[Tuple[int, ...], ...]
         """
         if isinstance(input_shape, list):
             embed_shape = input_shape[0]
@@ -203,19 +231,19 @@ class GaugeInvariantAttention(keras.layers.Layer):
             keys: keras.KerasTensor,
             connection: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute attention scores based on holonomy.
+        """Compute attention scores based on holonomy.
 
         The attention between positions i and j depends on the holonomy
         along the path connecting them.
 
-        Args:
-            queries: Query tensor, shape (batch, seq_len, num_heads, key_dim).
-            keys: Key tensor, shape (batch, seq_len, num_heads, key_dim).
-            connection: Connection tensor, shape (batch, seq_len, dim, dim).
-
-        Returns:
-            Attention scores, shape (batch, num_heads, seq_len, seq_len).
+        :param queries: Query tensor, shape (batch, seq_len, num_heads, key_dim).
+        :type queries: keras.KerasTensor
+        :param keys: Key tensor, shape (batch, seq_len, num_heads, key_dim).
+        :type keys: keras.KerasTensor
+        :param connection: Connection tensor, shape (batch, seq_len, dim, dim).
+        :type connection: keras.KerasTensor
+        :return: Attention scores, shape (batch, num_heads, seq_len, seq_len).
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(queries)[0]
         seq_len = ops.shape(queries)[1]
@@ -262,19 +290,19 @@ class GaugeInvariantAttention(keras.layers.Layer):
             keys: keras.KerasTensor,
             curvature: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute attention scores based on geodesic distance.
+        """Compute attention scores based on geodesic distance.
 
         The geodesic distance accounts for curvature - paths through
         high-curvature regions are effectively longer.
 
-        Args:
-            queries: Query tensor.
-            keys: Key tensor.
-            curvature: Curvature tensor, shape (batch, seq_len, dim) or similar.
-
-        Returns:
-            Attention scores.
+        :param queries: Query tensor.
+        :type queries: keras.KerasTensor
+        :param keys: Key tensor.
+        :type keys: keras.KerasTensor
+        :param curvature: Curvature tensor, shape (batch, seq_len, dim) or similar.
+        :type curvature: keras.KerasTensor
+        :return: Attention scores.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(queries)[0]
         seq_len = ops.shape(queries)[1]
@@ -314,18 +342,18 @@ class GaugeInvariantAttention(keras.layers.Layer):
             keys: keras.KerasTensor,
             curvature: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute attention scores based on curvature agreement.
+        """Compute attention scores based on curvature agreement.
 
         Positions with similar local curvature attend to each other more.
 
-        Args:
-            queries: Query tensor.
-            keys: Key tensor.
-            curvature: Curvature tensor.
-
-        Returns:
-            Attention scores.
+        :param queries: Query tensor.
+        :type queries: keras.KerasTensor
+        :param keys: Key tensor.
+        :type keys: keras.KerasTensor
+        :param curvature: Curvature tensor.
+        :type curvature: keras.KerasTensor
+        :return: Attention scores.
+        :rtype: keras.KerasTensor
         """
         # Standard attention
         base_scores = ops.einsum('bihd,bjhd->bhij', queries, keys)
@@ -355,19 +383,19 @@ class GaugeInvariantAttention(keras.layers.Layer):
             attention_weights: keras.KerasTensor,
             connection: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Parallel transport values before aggregation.
+        """Parallel transport values before aggregation.
 
         When aggregating values from different positions, we first transport
         them to a common frame using the connection.
 
-        Args:
-            values: Value tensor, shape (batch, seq_len, num_heads, head_dim).
-            attention_weights: Attention weights, shape (batch, num_heads, seq_len, seq_len).
-            connection: Connection tensor.
-
-        Returns:
-            Transported and aggregated values.
+        :param values: Value tensor, shape (batch, seq_len, num_heads, head_dim).
+        :type values: keras.KerasTensor
+        :param attention_weights: Attention weights, shape (batch, num_heads, seq_len, seq_len).
+        :type attention_weights: keras.KerasTensor
+        :param connection: Connection tensor.
+        :type connection: keras.KerasTensor
+        :return: Transported and aggregated values.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(values)[0]
         seq_len = ops.shape(values)[1]
@@ -401,16 +429,16 @@ class GaugeInvariantAttention(keras.layers.Layer):
             training: Optional[bool] = None,
             attention_mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
-        """
-        Compute gauge-invariant attention.
+        """Compute gauge-invariant attention.
 
-        Args:
-            inputs: Either single tensor or tuple of (embeddings, curvature, connection).
-            training: Whether in training mode.
-            attention_mask: Optional mask for attention (True = attend, False = mask).
-
-        Returns:
-            Attention output of shape (batch, seq_len, hidden_dim).
+        :param inputs: Either single tensor or tuple of (embeddings, curvature, connection).
+        :type inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :param attention_mask: Optional mask for attention (True = attend, False = mask).
+        :type attention_mask: Optional[keras.KerasTensor]
+        :return: Attention output of shape (batch, seq_len, hidden_dim).
+        :rtype: keras.KerasTensor
         """
         # Parse inputs
         if isinstance(inputs, (list, tuple)):
@@ -523,14 +551,12 @@ class GaugeInvariantAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: Input shape or tuple of input shapes.
-
-        Returns:
-            Output shape.
+        :param input_shape: Input shape or tuple of input shapes.
+        :type input_shape: Union[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]
+        :return: Output shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, list):
             embed_shape = input_shape[0]

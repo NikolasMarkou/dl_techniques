@@ -27,89 +27,45 @@ from .gating import create_gating, compute_auxiliary_loss, compute_z_loss
 @keras.saving.register_keras_serializable()
 class MixtureOfExperts(keras.layers.Layer):
     """
-    Mixture of Experts (MoE) layer for sparse neural networks using FFN experts.
+    Mixture of Experts layer for sparse neural networks using FFN experts.
 
-    This layer implements a complete MoE mechanism that routes inputs to a subset
-    of FFN expert networks based on learned gating functions. It supports various
-    FFN types through the dl_techniques FFN factory, routing strategies, and load
-    balancing mechanisms.
+    Implements a complete MoE mechanism that routes inputs to a subset of FFN
+    expert networks based on learned gating functions. The MoE layer replaces
+    dense FFN blocks with a sparse alternative where only top-k experts are
+    activated per token, giving ``O(k/N)`` computational cost relative to running
+    all *N* experts while maintaining full model capacity.
 
-    The MoE layer replaces dense FFN blocks with a sparse alternative where only
-    a subset of FFN experts are activated for each input, providing computational
-    efficiency and model specialization.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, hidden_dim])
-           ↓
-    Gating Network → expert_weights, expert_indices
-           ↓
-    Route to FFN Experts (top_k selection)
-           ↓
-    Expert₁(FFN) Expert₂(FFN) ... ExpertN(FFN)
-           ↓
-    Weighted Combination
-           ↓
-    Output(shape=[batch, seq_len, output_dim])
-    ```
+    .. code-block:: text
 
-    **Key Features**:
-    - FFN-only experts using dl_techniques FFN factory
-    - Multiple gating strategies (linear, cosine, softmoe)
-    - Load balancing with auxiliary losses
-    - Token capacity management and dropout
-    - Proper Keras 3 serialization support
+        ┌──────────────────────────────────────────────────┐
+        │              MixtureOfExperts                    │
+        │                                                  │
+        │  Input(batch, seq, dim)                          │
+        │         │                                        │
+        │         ▼                                        │
+        │  ┌─────────────────┐                             │
+        │  │ Gating Network  │──► weights, indices, aux    │
+        │  └─────────────────┘                             │
+        │         │                                        │
+        │         ▼                                        │
+        │  ┌─────┬─────┬─────┬─────┐                      │
+        │  │FFN_0│FFN_1│ ... │FFN_N│  (top-k activated)   │
+        │  └──┬──┴──┬──┴─────┴──┬──┘                      │
+        │     │     │           │                          │
+        │     ▼     ▼           ▼                          │
+        │  Weighted Combination (weights * outputs)        │
+        │         │                                        │
+        │         ▼                                        │
+        │  Output(batch, seq, output_dim)                  │
+        │  + aux_loss + z_loss (training)                  │
+        └──────────────────────────────────────────────────┘
 
-    Args:
-        config: MoE configuration containing expert and gating settings.
-        **kwargs: Additional keyword arguments for the base Layer class.
-
-    Input shape:
-        - Sequence input: (batch_size, seq_len, hidden_dim)
-        - Token input: (batch_size, hidden_dim)
-
-    Output shape:
-        Same as input shape, with last dimension determined by FFN expert output_dim.
-
-    Attributes:
-        experts: List of FFN expert networks.
-        gating_network: Gating mechanism for routing decisions.
-
-    Example:
-        ```python
-        # Basic FFN MoE with SwiGLU experts
-        config = MoEConfig(
-            num_experts=8,
-            expert_config=ExpertConfig(
-                ffn_config={
-                    "type": "swiglu",
-                    "output_dim": 768,
-                    "ffn_expansion_factor": 4
-                }
-            ),
-            gating_config=GatingConfig(gating_type='linear', top_k=2)
-        )
-        moe_layer = MixtureOfExperts(config)
-
-        # MLP expert MoE
-        config = MoEConfig(
-            num_experts=16,
-            expert_config=ExpertConfig(
-                ffn_config={
-                    "type": "mlp",
-                    "hidden_dim": 2048,
-                    "output_dim": 768,
-                    "activation": "gelu"
-                }
-            )
-        )
-        moe_layer = MixtureOfExperts(config)
-        ```
-
-    References:
-        - Switch Transformer: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity
-        - GLaM: Efficient Scaling of Language Models with Mixture-of-Experts
-        - PaLM: Scaling Language Modeling with Pathways
+    :param config: MoE configuration containing expert and gating settings.
+    :type config: MoEConfig
+    :param kwargs: Additional keyword arguments for the base Layer class.
+    :type kwargs: Any
     """
 
     def __init__(self, config: MoEConfig, **kwargs: Any) -> None:
@@ -497,8 +453,8 @@ class MixtureOfExperts(keras.layers.Layer):
         """
         Get statistics about expert utilization and configuration.
 
-        Returns:
-            Dictionary containing expert utilization statistics.
+        :return: Dictionary containing expert utilization statistics.
+        :rtype: Dict[str, Any]
         """
         return {
             'num_experts': self.num_experts,
@@ -541,44 +497,20 @@ def create_ffn_moe(
     """
     Convenience function to create FFN-based MoE layers.
 
-    Args:
-        num_experts: Number of FFN expert networks.
-        ffn_config: FFN configuration dictionary (passed to FFN factory).
-        top_k: Number of experts to select per token.
-        gating_type: Type of gating mechanism ('linear', 'cosine', 'softmoe').
-        aux_loss_weight: Weight for auxiliary load balancing loss.
-        **kwargs: Additional configuration parameters.
-
-    Returns:
-        Configured MixtureOfExperts layer with FFN experts.
-
-    Example:
-        ```python
-        # SwiGLU MoE
-        moe = create_ffn_moe(
-            num_experts=8,
-            ffn_config={
-                "type": "swiglu",
-                "output_dim": 768,
-                "ffn_expansion_factor": 4
-            },
-            top_k=2,
-            gating_type='linear'
-        )
-
-        # MLP MoE
-        moe = create_ffn_moe(
-            num_experts=16,
-            ffn_config={
-                "type": "mlp",
-                "hidden_dim": 2048,
-                "output_dim": 768,
-                "activation": "gelu"
-            },
-            top_k=1,
-            aux_loss_weight=0.02
-        )
-        ```
+    :param num_experts: Number of FFN expert networks.
+    :type num_experts: int
+    :param ffn_config: FFN configuration dictionary (passed to FFN factory).
+    :type ffn_config: Dict[str, Any]
+    :param top_k: Number of experts to select per token.
+    :type top_k: int
+    :param gating_type: Type of gating mechanism (``'linear'``, ``'cosine'``, ``'softmoe'``).
+    :type gating_type: str
+    :param aux_loss_weight: Weight for auxiliary load balancing loss.
+    :type aux_loss_weight: float
+    :param kwargs: Additional configuration parameters.
+    :type kwargs: Any
+    :return: Configured MixtureOfExperts layer with FFN experts.
+    :rtype: MixtureOfExperts
     """
 
     # Create expert configuration using FFN factory

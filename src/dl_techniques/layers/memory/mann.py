@@ -114,98 +114,61 @@ from typing import Optional, Tuple, Dict, Any, Literal
 @keras.saving.register_keras_serializable()
 class MannLayer(keras.layers.Layer):
     """
-    Memory-Augmented Neural Network (MANN) layer based on Neural Turing Machines.
+    Memory-Augmented Neural Network layer based on Neural Turing Machines.
 
-    This layer implements a Neural Turing Machine (NTM), which enhances a standard
-    recurrent controller with an external memory matrix. The controller learns to
-    interact with the memory through differentiable read and write operations,
-    enabling it to solve tasks requiring long-term memory and algorithmic reasoning.
+    Implements a Neural Turing Machine (NTM), enhancing a standard recurrent
+    controller with an external memory matrix of shape ``(N, M)`` where *N* is
+    the number of memory slots and *M* is the slot dimensionality. The controller
+    learns to interact with memory through differentiable read/write heads that
+    combine content-based addressing ``w_c = softmax(beta * cosine(k, M))``
+    with location-based addressing via interpolation gating, convolutional shift,
+    and sharpening: ``w_final = (w_shifted)^gamma / sum((w_shifted)^gamma)``.
 
-    **Intent**: Provide a state-of-the-art, configurable MANN component for tasks
-    where standard RNNs/LSTMs fail due to limited memory, such as sequence copying,
-    sorting, and complex reasoning over long time-dependencies.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-          ┌───────────────────┐
-   Input─►│ Controller (RNN)  ├─► Head Parameter Generator (Dense)
-      ▲   │ (LSTM/GRU)        │               │
-      │   └───────────────────┘               ▼
-      │           ▲          ┌────────────────────────────────────────────┐
-      │           │          │           Addressing Logic                 │
-      │       Read Vectors   │ ┌─────────┐  ┌───────────┐ ┌──────────────┐│
-      │           │          │ │ Content │► │ Location  │►│ Final Weights││
-      │           │          │ └─────────┘  └───────────┘ └──────────────┘│
-      │   ┌───────┴───────┐  └────────────────────────────────────────────┘
-      └─ ─┤External Memory│ ◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
-          │ (Read/Write)  │            Write/Erase Operations
-          └───────────────┘
-    ```
+    .. code-block:: text
 
-    **Data Flow per Timestep**:
-    1. The `Controller` (LSTM/GRU) receives the current input and the read vectors
-       from the previous timestep.
-    2. The controller's output is passed to a `Dense` layer to generate a parameter
-       vector for all read and write heads.
-    3. **Addressing**: For each head, a final attention weighting over memory
-       locations is computed through a combination of:
-        a. **Content-based addressing**: Similarity (cosine) between a generated
-           `key` and memory content.
-        b. **Location-based addressing**: Interpolating with previous weights and
-           applying a convolutional shift to iterate through memory.
-    4. **Write Operations**: Write heads update the memory using the computed
-       weights, an `erase` vector, and an `add` vector.
-    5. **Read Operations**: Read heads retrieve information from the updated memory,
-       producing `read vectors` for the next timestep.
-    6. The final output of the layer at each timestep is a concatenation of the
-       controller's output and all read vectors.
+        ┌──────────────────────────────────────────────────────┐
+        │                    MannLayer                         │
+        │                                                      │
+        │  Input(t) + prev_read_vectors                        │
+        │         │                                            │
+        │         ▼                                            │
+        │  ┌─────────────────────┐                             │
+        │  │ Controller (LSTM/GRU)│──► Dense (param_generator)  │
+        │  └─────────────────────┘         │                   │
+        │                                  ▼                   │
+        │                    ┌──────────────────────┐          │
+        │                    │  Addressing Logic     │          │
+        │                    │  ├─ Content (cosine)  │          │
+        │                    │  ├─ Interpolation (g) │          │
+        │                    │  ├─ Conv Shift (s)    │          │
+        │                    │  └─ Sharpen (gamma)   │          │
+        │                    └──────────┬───────────┘          │
+        │                               │                      │
+        │                    ┌──────────▼───────────┐          │
+        │                    │  External Memory      │          │
+        │                    │  Write: M*(1-e)+a     │          │
+        │                    │  Read: w^T * M        │          │
+        │                    └──────────────────────┘          │
+        │                               │                      │
+        │         Output = [controller_out; read_vectors]      │
+        └──────────────────────────────────────────────────────┘
 
-    Args:
-        memory_locations: Integer, the number of memory slots (rows) in the
-            external memory matrix.
-        memory_dim: Integer, the dimensionality of each memory slot (columns).
-        controller_units: Integer, the number of units in the recurrent controller.
-        num_read_heads: Integer, the number of read heads to interact with memory.
-        num_write_heads: Integer, the number of write heads to interact with memory.
-        controller_type: Literal['lstm', 'gru'], the type of recurrent cell to use
-            as the controller. Defaults to 'lstm'.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, input_dim)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, controller_units + num_read_heads * memory_dim)`.
-
-    Attributes:
-        memory_matrix: The learnable external memory bank of shape
-            (memory_locations, memory_dim). Created in `build()`.
-        controller: The recurrent controller sub-layer (LSTM or GRU).
-        param_generator: The dense layer that generates head parameters.
-
-    Example:
-        ```python
-        # Configure a MANN layer for a sequence processing task
-        mann_layer = MannLayer(
-            memory_locations=128,
-            memory_dim=40,
-            controller_units=100,
-            num_read_heads=1,
-            num_write_heads=1
-        )
-
-        # Build a model
-        inputs = keras.Input(shape=(None, 784)) # (batch, seq_len, features)
-        mann_output = mann_layer(inputs)
-        # The output can be processed by subsequent layers
-        outputs = layers.Dense(10, activation='softmax')(mann_output)
-
-        model = keras.Model(inputs, outputs)
-        model.summary()
-        ```
-
-    References:
-        - Graves, et al., 2014. "Neural Turing Machines". https://arxiv.org/abs/1410.5401
+    :param memory_locations: Number of memory slots (rows) in the external memory matrix.
+    :type memory_locations: int
+    :param memory_dim: Dimensionality of each memory slot (columns).
+    :type memory_dim: int
+    :param controller_units: Number of units in the recurrent controller.
+    :type controller_units: int
+    :param num_read_heads: Number of read heads to interact with memory.
+    :type num_read_heads: int
+    :param num_write_heads: Number of write heads to interact with memory.
+    :type num_write_heads: int
+    :param controller_type: Type of recurrent cell (``'lstm'`` or ``'gru'``). Defaults to ``'lstm'``.
+    :type controller_type: Literal['lstm', 'gru']
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(

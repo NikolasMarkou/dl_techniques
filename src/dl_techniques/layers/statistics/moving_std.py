@@ -37,119 +37,51 @@ class MovingStd(keras.layers.Layer):
     """
     Applies a 2D moving standard deviation filter to input images for texture analysis.
 
-    This layer computes the local standard deviation over sliding windows using the
-    mathematically stable formula: ``std = sqrt(E[X²] - (E[X])²)``. It leverages
-    average pooling operations to efficiently compute expectations, processing each
-    channel independently for multi-channel inputs.
+    Computes local standard deviation over sliding windows using the stable formula
+    ``std = sqrt(E[X^2] - (E[X])^2 + epsilon)``. Average pooling operations
+    efficiently compute the local expectations ``E[X]`` and ``E[X^2]``, and each
+    channel is processed independently. The variance is clamped to be non-negative
+    before taking the square root to handle floating-point precision errors.
 
-    The layer is designed for computer vision_heads applications where local variability
-    information is crucial, such as texture classification, edge detection, and
-    feature extraction for medical imaging. It provides a differentiable alternative
-    to traditional sliding window standard deviation implementations.
+    **Architecture Overview:**
 
-    Key computational features:
-    - **Efficient implementation**: Uses average pooling for fast expectation computation
-    - **Numerical stability**: Includes epsilon term and non-negative variance clamping
-    - **Channel independence**: Processes each channel separately for multi-channel inputs
-    - **Flexible windowing**: Configurable window size and stride patterns
-    - **Memory efficient**: Vectorized operations minimize memory overhead
+    .. code-block:: text
 
-    Mathematical formulation:
-        For a sliding window W over input X:
+        ┌────────────────────────────────────┐
+        │  Input (batch, H, W, C)            │
+        └──────────┬─────────┬───────────────┘
+                   │         │
+                   ▼         ▼
+        ┌──────────────┐ ┌──────────────────┐
+        │ AvgPool(X)   │ │ AvgPool(X^2)     │
+        │ ─► E[X]      │ │ ─► E[X^2]        │
+        └──────┬───────┘ └────────┬──────────┘
+               │                  │
+               ▼                  ▼
+        ┌──────────────────────────────────┐
+        │  Var = E[X^2] - (E[X])^2        │
+        │  Var = max(0, Var)               │
+        │  Std = sqrt(Var + epsilon)       │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output (batch, H', W', C)       │
+        └──────────────────────────────────┘
 
-        - ``μ = E[X] = (1/|W|) Σ(x ∈ W) x`` (local mean)
-        - ``σ² = E[X²] - (E[X])² = (1/|W|) Σ(x ∈ W) x² - μ²`` (local variance)  
-        - ``σ = sqrt(max(0, σ² + ε))`` (local standard deviation with stability)
-
-    Args:
-        pool_size: Tuple[int, int], size of the 2D pooling window as (height, width).
-            Larger windows capture broader texture patterns but reduce spatial resolution.
-            Must contain exactly 2 positive integers. Defaults to (3, 3).
-        strides: Union[Tuple[int, int], List[int]], strides for the pooling operation
-            as (height_stride, width_stride). Controls output spatial resolution and
-            computational overlap. Must contain exactly 2 positive integers.
-            Defaults to (1, 1).
-        padding: str, padding mode for the pooling operation. Either:
-            - 'valid': No padding, output size depends on window size and strides
-            - 'same': Pad input to preserve spatial dimensions when stride=1
-            Case-insensitive. Defaults to 'same'.
-        data_format: Optional[str], data layout format. Either:
-            - 'channels_last': (batch, height, width, channels) - TensorFlow format
-            - 'channels_first': (batch, channels, height, width) - PyTorch format
-            If None, uses keras.config.image_data_format(). Defaults to None.
-        epsilon: float, small positive value added to variance before square root
-            to prevent numerical instabilities from floating-point precision errors.
-            Should be small but non-zero. Defaults to 1e-7.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        4D tensor with format determined by data_format:
-        - If data_format='channels_last': ``(batch_size, height, width, channels)``
-        - If data_format='channels_first': ``(batch_size, channels, height, width)``
-
-    Output shape:
-        4D tensor with same format as input:
-        - If data_format='channels_last': ``(batch_size, new_height, new_width, channels)``
-        - If data_format='channels_first': ``(batch_size, channels, new_height, new_width)``
-
-        Where new_height and new_width depend on pool_size, strides, and padding.
-
-    Attributes:
-        pooler: keras.layers.AveragePooling2D instance used for computing local means
-            and expectations. Configured with the same spatial parameters as the layer.
-
-    Example:
-        ```python
-        # Basic texture analysis
-        layer = MovingStd(pool_size=(5, 5), padding='same')
-        inputs = keras.Input(shape=(224, 224, 3))
-        texture_features = layer(inputs)
-
-        # Edge detection with larger windows
-        edge_detector = MovingStd(
-            pool_size=(7, 7),
-            strides=(2, 2),  # Downsample for efficiency
-            padding='valid'
-        )
-
-        # Multi-scale texture analysis
-        inputs = keras.Input(shape=(256, 256, 1))
-        fine_texture = MovingStd(pool_size=(3, 3))(inputs)
-        coarse_texture = MovingStd(pool_size=(9, 9))(inputs)
-        combined = keras.layers.Concatenate()([fine_texture, coarse_texture])
-
-        # Medical imaging application
-        medical_inputs = keras.Input(shape=(512, 512, 1))
-        tissue_boundaries = MovingStd(
-            pool_size=(5, 5),
-            epsilon=1e-6,  # Higher precision for medical data
-            padding='same'
-        )(medical_inputs)
-
-        # Complete texture classification model
-        model_inputs = keras.Input(shape=(128, 128, 3))
-        std_features = MovingStd(pool_size=(7, 7))(model_inputs)
-        pooled = keras.layers.GlobalAveragePooling2D()(std_features)
-        outputs = keras.layers.Dense(10, activation='softmax')(pooled)
-        model = keras.Model(model_inputs, outputs)
-        ```
-
-    Raises:
-        ValueError: If pool_size is not a tuple/list of exactly 2 positive integers.
-        ValueError: If strides is not a tuple/list of exactly 2 positive integers.
-        ValueError: If padding is not 'valid' or 'same' (case-insensitive).
-        ValueError: If data_format is not 'channels_first' or 'channels_last'.
-        ValueError: If epsilon is negative.
-        ValueError: If input tensor is not 4-dimensional.
-
-    Note:
-        This layer is particularly effective when combined with other texture analysis
-        techniques such as local binary patterns or Gabor filters. The epsilon parameter
-        should be chosen based on the expected dynamic range of your input data -
-        smaller values provide higher precision but may be less numerically stable.
-
-        For very large images, consider using larger strides to reduce computational
-        cost while maintaining texture characterization capability.
+    :param pool_size: Size of the 2D pooling window as ``(height, width)``.
+        Defaults to ``(3, 3)``.
+    :type pool_size: tuple[int, int]
+    :param strides: Strides for the pooling operation. Defaults to ``(1, 1)``.
+    :type strides: tuple[int, int] | list[int]
+    :param padding: Padding mode, ``'valid'`` or ``'same'``. Defaults to ``'same'``.
+    :type padding: str
+    :param data_format: Data layout format. If ``None``, uses
+        ``keras.config.image_data_format()``. Defaults to ``None``.
+    :type data_format: str | None
+    :param epsilon: Small value added to variance before square root.
+        Defaults to 1e-7.
+    :type epsilon: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -223,14 +155,10 @@ class MovingStd(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and its internal average pooling component.
+        """Build the layer and its internal average pooling component.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input is not a 4D tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -255,18 +183,14 @@ class MovingStd(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply the moving standard deviation filter to the input tensor.
+        """Apply the moving standard deviation filter to the input tensor.
 
-        Args:
-            inputs: Input tensor with shape determined by data_format.
-            training: Boolean indicating whether in training mode. Included for
-                API consistency but does not affect layer behavior.
-
-        Returns:
-            Tensor representing local standard deviation at each spatial location.
-            Same format as input with potentially different spatial dimensions
-            based on pooling parameters.
+        :param inputs: Input tensor with shape determined by ``data_format``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean for training mode (unused, for API consistency).
+        :type training: bool | None
+        :return: Local standard deviation at each spatial location.
+        :rtype: keras.KerasTensor
         """
         # Compute E[X] - local mean over the pooling window
         mean_x = self.pooler(inputs, training=training)
@@ -290,15 +214,12 @@ class MovingStd(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple. Same as the output shape of the internal
-            average pooling operation.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
+        :return: Output shape tuple.
+        :rtype: tuple[int | None, ...]
         """
         # Use the pooling layer's compute_output_shape method
         # Create a temporary pooling layer if not built yet
@@ -316,12 +237,10 @@ class MovingStd(keras.layers.Layer):
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters needed
-            for reconstruction during model loading.
+        :return: Configuration dictionary.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({

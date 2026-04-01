@@ -8,98 +8,45 @@ class ApproximatedLNNLayer(keras.layers.Layer):
     """
     Gradient-tape-free approximation of Lagrangian Neural Network dynamics.
 
-    This layer provides a computationally efficient alternative to traditional
-    Lagrangian Neural Networks by directly learning the components required for
-    the Euler-Lagrange equation without relying on automatic differentiation.
-    It uses separate neural networks to approximate the gradient of the Lagrangian,
-    the inverse Hessian matrix, and mixed partial derivatives, then assembles
-    these components to solve for system accelerations.
+    Provides a computationally efficient alternative to gradient-tape-based LNNs
+    by directly learning the three components of the Euler-Lagrange equation
+    with separate MLPs: ``dL/dq``, ``(d^2L/dq_dot^2)^{-1}``, and
+    ``d/dq(dL/dq_dot)``. These are assembled as
+    ``q_ddot = H^{-1} * [dL/dq - J * q_dot]`` without nested automatic
+    differentiation, trading increased parameter count (3x MLP) for significantly
+    faster inference.
 
-    **Intent**: Deliver performance improvements over gradient-tape-based LNNs,
-    especially on hardware where higher-order automatic differentiation is not
-    optimized, while maintaining the physics-informed structure that preserves
-    energy conservation properties.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Inputs: q (coordinates), q_dot (velocities)
-              ↓
-    Concatenate: [q, q_dot] → shared_input
-              ↓
-    ┌─ MLP_grad_L_q → ∂L/∂q
-    ├─ MLP_inv_hessian → (∂²L/∂q̇²)⁻¹
-    └─ MLP_mixed_derivs → ∂/∂q(∂L/∂q̇)
-              ↓
-    Euler-Lagrange Assembly:
-    q̈ = (∂²L/∂q̇²)⁻¹ · [∂L/∂q - ∂/∂q(∂L/∂q̇) · q̇]
-              ↓
-    Output: q_ddot (accelerations)
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    The layer directly approximates the components of the Euler-Lagrange equation:
+        ┌──────────────────────────────────────────────┐
+        │          ApproximatedLNNLayer                │
+        │                                              │
+        │  q, q_dot ──► Concatenate([q, q_dot])        │
+        │                    │                         │
+        │           ┌───────┼───────┐                  │
+        │           ▼       ▼       ▼                  │
+        │     ┌─────────┐┌──────┐┌─────────┐          │
+        │     │MLP_grad ││MLP_H ││MLP_mixed│          │
+        │     │ dL/dq   ││H^{-1}││ J_mixed │          │
+        │     └────┬────┘└──┬───┘└────┬────┘          │
+        │          │        │         │                │
+        │          ▼        ▼         ▼                │
+        │     Euler-Lagrange Assembly:                 │
+        │     q_ddot = H^{-1} * [dL/dq - J * q_dot]   │
+        │                    │                         │
+        │                    ▼                         │
+        │              Output: q_ddot                  │
+        └──────────────────────────────────────────────┘
 
-    1. **Gradient approximation**: `∂L/∂q ≈ MLP_grad(q, q̇)`
-    2. **Inverse Hessian approximation**: `(∂²L/∂q̇²)⁻¹ ≈ MLP_inv_hess(q, q̇)`
-    3. **Mixed derivatives**: `∂/∂q(∂L/∂q̇) ≈ MLP_mixed(q, q̇)`
-    4. **Assembly**: `q̈ = H⁻¹ · [∇_q L - J_q(∇_{q̇} L) · q̇]`
-
-    Where each MLP learns its respective component directly from training data,
-    avoiding the computational overhead of nested automatic differentiation.
-
-    Args:
-        hidden_dims: List of integers specifying the number of units in each
-            hidden layer for all internal MLPs. Must be non-empty with positive
-            values. All three approximation networks share this architecture.
-        activation: Activation function for hidden layers across all MLPs.
-            Defaults to 'softplus' for consistency with Lagrangian mechanics
-            where second derivatives should be well-defined.
-        **kwargs: Additional arguments for the Layer base class.
-
-    Input shape:
-        A list/tuple of two tensors: `[q, q_dot]`.
-        - `q`: Generalized coordinates, shape `(batch_size, ..., coord_dim)`
-        - `q_dot`: Generalized velocities, shape `(batch_size, ..., coord_dim)`
-        Both tensors must have identical shapes.
-
-    Output shape:
-        Generalized accelerations `q_ddot` with same shape as inputs:
-        `(batch_size, ..., coord_dim)`.
-
-    Attributes:
-        grad_L_q_mlp: Sequential model approximating ∂L/∂q.
-        inverse_hessian_mlp: Sequential model approximating (∂²L/∂q̇²)⁻¹.
-        jac_q_grad_q_dot_mlp: Sequential model approximating ∂/∂q(∂L/∂q̇).
-
-    Example:
-        ```python
-        # Create approximated LNN for 3D system
-        approx_lnn = ApproximatedLNNLayer(
-            hidden_dims=[256, 128, 64],
-            activation='softplus'
-        )
-
-        # Define system inputs
-        q = keras.Input(shape=(3,), name="coordinates")
-        q_dot = keras.Input(shape=(3,), name="velocities")
-
-        # Compute approximated accelerations
-        q_ddot = approx_lnn([q, q_dot])
-
-        # Build and compile model
-        model = keras.Model(inputs=[q, q_dot], outputs=q_ddot)
-        model.compile(optimizer='adam', loss='mse')
-        ```
-
-    Performance Notes:
-        - Significantly faster than gradient-tape-based LNNs during inference
-        - Requires more parameters (3 × MLP parameters vs 1 × MLP)
-        - Training may require careful initialization and loss weighting
-        - Best suited for systems where gradient computation is expensive
-
-    Raises:
-        ValueError: If hidden_dims is empty or contains non-positive integers.
-        ValueError: If input shapes are incompatible during build/call.
+    :param hidden_dims: List of integers specifying units in each hidden layer
+        for all three internal MLPs. Must be non-empty with positive values.
+    :type hidden_dims: List[int]
+    :param activation: Activation function for hidden layers. Defaults to ``'softplus'``.
+    :type activation: str
+    :param kwargs: Additional arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -149,13 +96,12 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         """
         Create a complete MLP with hidden layers and optional output layer.
 
-        Args:
-            name: Name for the Sequential model.
-            output_units: Number of units in output layer. If None, no output
-                layer is added (will be added later in build()).
-
-        Returns:
-            Sequential model with specified architecture.
+        :param name: Name for the Sequential model.
+        :type name: str
+        :param output_units: Number of units in output layer. None defers to ``build()``.
+        :type output_units: Optional[int]
+        :return: Sequential model with specified architecture.
+        :rtype: keras.Sequential
         """
         mlp_layers = []
 
@@ -177,16 +123,9 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         """
         Build all internal MLP sub-layers with proper output dimensions.
 
-        This method completes the MLP architectures by adding output layers
-        with appropriate dimensions based on the coordinate space, then
-        explicitly builds all sub-layers for robust serialization.
-
-        Args:
-            input_shape: List of two shape tuples for [q, q_dot] inputs.
-
-        Raises:
-            ValueError: If input_shape format is incorrect or coordinate
-                dimensions don't match.
+        :param input_shape: List of two shape tuples for ``[q, q_dot]`` inputs.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :raises ValueError: If input_shape format is incorrect or dimensions don't match.
         """
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
@@ -236,18 +175,10 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         Assembles the Euler-Lagrange equation using the three learned
         approximations without requiring gradient computation.
 
-        Args:
-            inputs: List containing [q, q_dot] where:
-                - q: Generalized coordinates
-                - q_dot: Generalized velocities
-
-        Returns:
-            q_ddot: Computed generalized accelerations
-
-        Note:
-            All matrix operations use batched operations for efficiency.
-            The inverse Hessian and Jacobian outputs are reshaped from
-            flat vectors to matrices before use.
+        :param inputs: List containing ``[q, q_dot]``.
+        :type inputs: List[keras.KerasTensor]
+        :return: Computed generalized accelerations ``q_ddot``.
+        :rtype: keras.KerasTensor
         """
         q, q_dot = inputs
         coord_dim = ops.shape(q)[-1]
@@ -297,11 +228,10 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         """
         Compute output shape for accelerations.
 
-        Args:
-            input_shape: List of input shapes [q_shape, q_dot_shape].
-
-        Returns:
-            Output shape tuple, identical to coordinate input shape.
+        :param input_shape: List of input shapes ``[q_shape, q_dot_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape tuple, identical to coordinate input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         q_shape = input_shape[0]
         return q_shape
@@ -310,9 +240,8 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         """
         Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters needed
-            to recreate this layer instance.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

@@ -140,136 +140,66 @@ from .som_nd_layer import SOMLayer
 @keras.saving.register_keras_serializable()
 class SOM2dLayer(SOMLayer):
     """
-    2D Self-Organizing Map (SOM) layer for competitive learning and topological data organization.
+    2D Self-Organizing Map layer for competitive learning and topological organization.
 
-    This layer is a specialized version of the general N-Dimensional SOMLayer,
-    specifically optimized for creating 2D memory grids. It maps high-dimensional
-    input data onto a 2D discretized grid, preserving topological properties of
-    the input space through competitive learning and neighborhood-based weight updates.
+    Specializes the general N-Dimensional ``SOMLayer`` for 2D grids, mapping
+    high-dimensional input data onto a rectangular ``(H, W)`` neuron grid.
+    For each input ``x``, the Best Matching Unit is found via
+    ``BMU = argmin_{i,j} ||x - w_{i,j}||^2``, then the BMU and its neighbors
+    are updated: ``w_{i,j} <- w_{i,j} + alpha * h_{i,j} * (x - w_{i,j})``
+    where ``h_{i,j} = exp(-d^2/(2*sigma^2))`` for Gaussian neighborhood.
 
-    **Intent**: Provide a convenient 2D interface for self-organizing maps while
-    leveraging all the robust functionality of the general SOMLayer base class,
-    including vectorized operations, multiple neighborhood functions, and proper
-    Keras 3 serialization support.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, input_dim])
-             ↓
-    Find BMU: argmin_ij ||x - w_ij||²
-             ↓
-    Compute: h_ij = neighborhood_function(d_ij, σ)
-             ↓
-    Update: w_ij ← w_ij + α·h_ij·(x - w_ij)
-             ↓
-    Output: BMU_indices(shape=[batch, 2]), quantization_errors(shape=[batch,])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Distance Computation**: d²_ij = ||x - w_ij||²
-    2. **BMU Selection**: BMU = argmin_ij d²_ij
-    3. **Neighborhood**: h_ij = exp(-d²_grid/(2σ²)) for Gaussian
-    4. **Weight Update**: Δw_ij = α·h_ij·(x - w_ij)
+        ┌──────────────────────────────────────────┐
+        │             SOM2dLayer                    │
+        │                                          │
+        │  Input(batch, input_dim)                 │
+        │         │                                │
+        │         ▼                                │
+        │  Distance: ||x - w_{i,j}||^2             │
+        │         │                                │
+        │         ▼                                │
+        │  BMU = argmin_{i,j} (distances)          │
+        │         │                                │
+        │         ▼                                │
+        │  Neighborhood: h = exp(-d^2 / 2*sigma^2) │
+        │         │                                │
+        │         ▼                                │
+        │  Update: w += alpha * h * (x - w)        │
+        │         │                                │
+        │         ▼                                │
+        │  Output: BMU_coords(batch,2),            │
+        │          quant_errors(batch,)             │
+        └──────────────────────────────────────────┘
 
-    The 2D grid enables intuitive visualization and interpretation of the learned
-    topological organization, making it ideal for data exploration and clustering tasks.
-
-    Args:
-        map_size: Tuple[int, int], the shape of the 2D SOM grid (height, width).
-            Must contain exactly 2 positive integers. Controls memory capacity
-            and topological resolution. Larger grids provide finer organization
-            but require more computation and memory.
-        input_dim: int, dimensionality of the input data. Must be positive.
-            Each neuron will have a weight vector of this dimensionality.
-        initial_learning_rate: float, optional, initial learning rate for weight
-            updates. Controls adaptation speed during early training. Should be
-            in range (0, 1]. Defaults to 0.1.
-        decay_function: Callable, optional, learning rate decay function that takes
-            current iteration and returns decay multiplier. If None, uses constant
-            learning rate. Defaults to None.
-        sigma: float, optional, initial neighborhood radius in grid coordinates.
-            Controls the size of the influence region around the BMU. Should be
-            positive, typically 1-5 for small grids. Defaults to 1.0.
-        neighborhood_function: str, optional, type of neighborhood function to use.
-            Either 'gaussian' for smooth decay or 'bubble' for hard cutoff.
-            Defaults to 'gaussian'.
-        weights_initializer: Union[str, keras.initializers.Initializer], optional,
-            initialization method for neuron weights. Can be string name or
-            initializer instance. Defaults to 'random_uniform'.
-        regularizer: keras.regularizers.Regularizer, optional, regularizer function
-            applied to the neuron weights during training. Helps prevent overfitting.
-            Defaults to None.
-        name: str, optional, name of the layer for identification in model summaries
-            and debugging. Defaults to None.
-        **kwargs: Any, additional keyword arguments for the base Layer class.
-
-    Input shape:
-        2D tensor with shape: `(batch_size, input_dim)`.
-        Each sample represents a high-dimensional data point to be mapped.
-
-    Output shape:
-        Tuple of two tensors:
-        - BMU indices: 2D tensor with shape `(batch_size, 2)` containing grid
-          coordinates (row, col) of the best matching unit for each input.
-        - Quantization errors: 1D tensor with shape `(batch_size,)` containing
-          the Euclidean distance between each input and its BMU.
-
-    Attributes:
-        map_size: Tuple[int, int], the 2D grid dimensions (height, width).
-        grid_shape: Tuple[int, int], alias for map_size (inherited from SOMLayer).
-        input_dim: int, dimensionality of input vectors.
-        initial_learning_rate: float, base learning rate for training.
-        decay_function: Callable or None, learning rate decay function.
-        sigma: float, neighborhood radius parameter.
-        neighborhood_function: str, type of neighborhood function ('gaussian'/'bubble').
-        weights: keras.Variable, neuron weight matrix of shape (height*width, input_dim).
-
-    Example:
-        ```python
-        # Create a 10x10 SOM for MNIST digit clustering (784-dimensional)
-        som = SOM2dLayer(
-            map_size=(10, 10),
-            input_dim=784,
-            initial_learning_rate=0.5,
-            sigma=2.0,
-            neighborhood_function='gaussian'
-        )
-
-        # Build model for training
-        inputs = keras.Input(shape=(784,))
-        bmu_indices, quant_errors = som(inputs)
-        model = keras.Model(inputs, [bmu_indices, quant_errors])
-
-        # Training requires custom loop since SOM uses competitive learning
-        for epoch in range(100):
-            for batch in dataset:
-                with tf.GradientTape() as tape:
-                    bmu_coords, errors = model(batch, training=True)
-                    # Custom SOM training logic here
-
-        # Visualize the organized feature map
-        weights_grid = som.get_weights_as_grid()  # Shape: (10, 10, 784)
-
-        # For smaller input dimensions, can visualize weight patterns
-        if input_dim == 2:
-            import matplotlib.pyplot as plt
-            plt.scatter(weights_grid[:,:,0], weights_grid[:,:,1])
-            plt.title("SOM Weight Distribution")
-
-        # Extract BMU positions for clustering analysis
-        bmu_positions, _ = som(test_data)
-        cluster_assignments = bmu_positions[:, 0] * 10 + bmu_positions[:, 1]
-        ```
-
-    Note:
-        This layer inherits all core functionality from SOMLayer including vectorized
-        operations, proper weight management, and Keras serialization support. The
-        2D specialization provides the convenience of `map_size` parameter and
-        `get_weights_as_grid()` method for visualization and backward compatibility.
-
-        Training requires custom loops since SOMs use competitive learning rather
-        than gradient descent. The layer provides the building blocks for SOM
-        training but doesn't implement the training loop itself.
+    :param map_size: Shape of the 2D SOM grid ``(height, width)``. Must contain
+        exactly 2 positive integers.
+    :type map_size: Tuple[int, int]
+    :param input_dim: Dimensionality of the input data. Must be positive.
+    :type input_dim: int
+    :param initial_learning_rate: Initial learning rate for weight updates.
+        Defaults to 0.1.
+    :type initial_learning_rate: float
+    :param decay_function: Learning rate decay function. If None, uses linear decay.
+        Defaults to None.
+    :type decay_function: Optional[Callable]
+    :param sigma: Initial neighborhood radius in grid coordinates. Defaults to 1.0.
+    :type sigma: float
+    :param neighborhood_function: Type of neighborhood function
+        (``'gaussian'`` or ``'bubble'``). Defaults to ``'gaussian'``.
+    :type neighborhood_function: str
+    :param weights_initializer: Initialization method for neuron weights.
+        Defaults to ``'random_uniform'``.
+    :type weights_initializer: Union[str, keras.initializers.Initializer]
+    :param regularizer: Regularizer applied to neuron weights. Defaults to None.
+    :type regularizer: Optional[keras.regularizers.Regularizer]
+    :param name: Name of the layer. Defaults to None.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the base Layer class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -314,63 +244,23 @@ class SOM2dLayer(SOMLayer):
         """
         Get the current neuron weights organized as a 2D grid for visualization.
 
-        This method provides a convenient way to access the weight matrix in its
-        natural 2D grid organization, making it easy to visualize the learned
-        feature organization and topological structure.
+        Alias for ``get_weights_map()`` providing backward compatibility and
+        intuitive naming for 2D SOMs.
 
-        Returns
-        -------
-        keras.KerasTensor
-            The SOM weights reshaped as a grid with shape (height, width, input_dim).
-            Each position (i, j) contains the weight vector for neuron at grid
-            coordinate (i, j). This format is ideal for visualization and analysis
-            of the topological organization learned by the SOM.
-
-        Example
-        -------
-        ```python
-        som = SOM2dLayer(map_size=(8, 8), input_dim=3)
-        # ... after training ...
-
-        weights_grid = som.get_weights_as_grid()  # Shape: (8, 8, 3)
-
-        # Visualize RGB color organization (for 3D input)
-        import matplotlib.pyplot as plt
-        plt.imshow(weights_grid)  # Shows color organization
-        plt.title("SOM Color Organization")
-
-        # Access specific neuron weights
-        center_neuron_weights = weights_grid[4, 4, :]  # Center of 8x8 grid
-        ```
-
-        Note
-        ----
-        This is an alias for `get_weights_map()` provided for backward compatibility
-        and intuitive naming for 2D SOMs. Both methods return identical results.
+        :return: SOM weights reshaped as ``(height, width, input_dim)``.
+        :rtype: keras.KerasTensor
         """
         return self.get_weights_map()
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return layer configuration for serialization and model saving.
+        Return layer configuration for serialization.
 
-        This method ensures proper serialization of the 2D SOM layer by returning
-        all necessary parameters in a format that can be used to reconstruct the
-        layer exactly. It uses `map_size` instead of `grid_shape` for backward
-        compatibility with existing 2D SOM implementations.
+        Uses ``map_size`` instead of ``grid_shape`` for backward compatibility
+        with existing 2D SOM implementations.
 
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary containing all layer configuration parameters needed for
-            reconstruction. Includes serialized initializers and regularizers
-            for complete state preservation.
-
-        Note
-        ----
-        The configuration uses `map_size` rather than `grid_shape` to maintain
-        the 2D-specific interface while ensuring compatibility with the base
-        SOMLayer serialization system.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         # Get the base configuration from parent SOMLayer
         config = super().get_config()
@@ -400,14 +290,10 @@ class SOM2dLayer(SOMLayer):
         """
         Create layer instance from configuration dictionary.
 
-        This class method enables proper deserialization of saved 2D SOM layers,
-        handling the conversion between serialized configurations and layer parameters.
-
-        Args:
-            config: Dictionary containing layer configuration parameters.
-
-        Returns:
-            SOM2dLayer instance reconstructed from the configuration.
+        :param config: Dictionary containing layer configuration parameters.
+        :type config: Dict[str, Any]
+        :return: SOM2dLayer instance reconstructed from the configuration.
+        :rtype: SOM2dLayer
         """
         # Handle initializer deserialization
         if 'weights_initializer' in config:
