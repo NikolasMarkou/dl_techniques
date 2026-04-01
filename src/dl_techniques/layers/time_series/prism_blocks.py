@@ -28,24 +28,31 @@ from dl_techniques.layers.haar_wavelet_decomposition import HaarWaveletDecomposi
 @keras.saving.register_keras_serializable()
 class FrequencyBandStatistics(keras.layers.Layer):
     """
-    Computes summary statistics for frequency bands.
+    Compute summary statistics for frequency bands.
 
     Extracts statistical features from each frequency band including mean,
-    standard deviation, min, max, and temporal derivatives. These statistics
-    serve as input to the importance router.
+    standard deviation, min, max, and temporal derivatives (first-difference
+    mean and std). These statistics serve as input to the importance router.
 
-    **Numerical Stability**:
-    Calculates standard deviation using `sqrt(var + epsilon)` to prevent
-    gradient explosion (division by zero) when processing constant sequences
-    or zero-padded regions.
+    Standard deviation is computed as ``sqrt(var + epsilon)`` to prevent
+    gradient explosion when processing constant sequences or zero-padded
+    regions.
 
-    **Architecture**::
+    **Architecture Overview:**
+
+    .. code-block:: text
 
         Input: frequency band [batch, seq_len, channels]
-               ↓
-        Compute: mean, std, min, max, diff_mean, diff_std
-               ↓
-        Output: statistics [batch, channels, num_stats]
+                        │
+                        ▼
+               ┌────────────────────────────────┐
+               │  Compute per-channel statistics │
+               │  mean, std, min, max            │
+               │  diff_mean, diff_std            │
+               └────────────────┬───────────────┘
+                                │
+                                ▼
+        Output: statistics [batch, channels, 6]
 
     :param epsilon: Small constant for numerical stability.
         Defaults to 1e-6.
@@ -112,7 +119,7 @@ class FrequencyBandStatistics(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape.
+        Compute the output shape of the layer.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -143,21 +150,35 @@ class FrequencyBandRouter(keras.layers.Layer):
 
     Uses a lightweight MLP to compute importance scores for different
     frequency bands based on their statistical properties. Scores are
-    normalized via temperature-scaled softmax.
+    normalized via temperature-scaled softmax:
 
-    **Architecture**::
+        weight_k = softmax(score_k / temperature)
 
-        Input: List of frequency bands [band_1, ..., band_K]
-               ↓
-        For each band: compute statistics
-               ↓
-        LayerNorm(statistics)  <-- Added for stability
-               ↓
-        For each band: MLP(statistics) -> score
-               ↓
-        Softmax(scores / temperature) -> weights
-               ↓
-        Output: weights [batch, channels, num_bands]
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        Input: [band_1, ..., band_K]
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  For each band:              │
+        │    FrequencyBandStatistics   │
+        │           │                  │
+        │           ▼                  │
+        │    LayerNorm(statistics)     │
+        │           │                  │
+        │           ▼                  │
+        │    MLP(stats) ─► score       │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Softmax(scores / temp)      │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        Output: weights [batch, channels, K]
 
     :param hidden_dim: Hidden dimension of the router MLP.
         Defaults to 64.
@@ -222,7 +243,7 @@ class FrequencyBandRouter(keras.layers.Layer):
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """
-        Build the layer.
+        Build the layer and initialize sub-layer weights.
 
         :param input_shape: List of input shapes for each frequency band.
         :type input_shape: List[Tuple[Optional[int], ...]]
@@ -285,7 +306,7 @@ class FrequencyBandRouter(keras.layers.Layer):
             input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape.
+        Compute the output shape of the layer.
 
         :param input_shape: List of input shapes for each frequency band.
         :type input_shape: List[Tuple[Optional[int], ...]]
@@ -319,22 +340,41 @@ class PRISMNode(keras.layers.Layer):
     """
     Single PRISM node combining wavelet decomposition and adaptive weighting.
 
-    Processes a time segment by:
-    1. Decomposing into frequency bands via Haar DWT
-    2. Computing importance weights via the router
-    3. Reconstructing a weighted representation
+    Processes a time segment by decomposing it into frequency bands via Haar
+    DWT, computing importance weights for each band through a learned router,
+    and reconstructing a weighted representation by interpolating all bands
+    to a common length and summing them with the computed weights.
 
-    **Architecture**::
+    **Architecture Overview:**
+
+    .. code-block:: text
 
         Input: time segment [batch, seq_len, channels]
-               ↓
-        HaarWaveletDecomposition -> [approx, detail_1, ..., detail_K]
-               ↓
-        FrequencyBandRouter -> weights [batch, channels, K+1]
-               ↓
-        Weighted sum of bands (interpolated to common length)
-               ↓
-        Output: processed segment [batch, seq_len, channels]
+                        │
+                        ▼
+        ┌───────────────────────────────────┐
+        │  HaarWaveletDecomposition          │
+        │  ─► [approx, detail_1, ..., det_K] │
+        └───────────────┬───────────────────┘
+                        │
+                ┌───────┴───────┐
+                │               │
+                ▼               ▼
+        ┌──────────────┐  ┌──────────────────┐
+        │  Interpolate │  │ FrequencyBand    │
+        │  all bands   │  │ Router ─► weights│
+        │  to seq_len  │  └────────┬─────────┘
+        └──────┬───────┘           │
+               │                   │
+               └───────┬───────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Weighted sum of all bands   │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        Output: processed [batch, seq_len, channels]
 
     :param num_wavelet_levels: Number of Haar DWT decomposition levels.
         Defaults to 3.
@@ -394,7 +434,7 @@ class PRISMNode(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer.
+        Build the layer and initialize sub-layer weights.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -511,7 +551,7 @@ class PRISMNode(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape.
+        Compute the output shape of the layer.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -543,24 +583,39 @@ class PRISMTimeTree(keras.layers.Layer):
     """
     Hierarchical time decomposition with PRISM nodes at each level.
 
-    Builds a binary tree over the time domain by recursively splitting
-    the signal into overlapping segments. Each node processes its segment
-    through wavelet decomposition and adaptive weighting.
+    Builds a binary tree over the time domain by recursively splitting the
+    signal into overlapping segments. Each node processes its segment through
+    wavelet decomposition and adaptive weighting. Segments are stitched back
+    together using linear cross-fade blending in the overlap regions.
 
-    **Architecture**::
+    **Architecture Overview:**
+
+    .. code-block:: text
 
         Input: [batch, T, channels]
-               ↓
-        Level 0: Full sequence -> PRISMNode
-               ↓
-        Level 1: Split into 2 overlapping segments -> 2x PRISMNode
-               ↓
-        Level 2: Split into 4 overlapping segments -> 4x PRISMNode
-               ↓
-        ... (up to tree_depth levels)
-               ↓
-        Stitch segments back with cross-fade
-               ↓
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Level 0: Full sequence          │
+        │    └─► PRISMNode                 │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Level 1: Split ─► 2 segments   │
+        │    ├─► PRISMNode (left half)     │
+        │    └─► PRISMNode (right half)    │
+        │    Stitch with cross-fade        │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Level 2: Split ─► 4 segments   │
+        │    ├─► PRISMNode x4              │
+        │    Stitch with cross-fade        │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
         Output: [batch, T, channels]
 
     :param tree_depth: Depth of the binary time tree. Depth 0 means single
@@ -640,7 +695,7 @@ class PRISMTimeTree(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build all PRISM nodes.
+        Build all PRISM nodes with appropriate segment shapes.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -720,7 +775,7 @@ class PRISMTimeTree(keras.layers.Layer):
             target_len: int
     ) -> keras.KerasTensor:
         """
-        Stitch segments back together using linear cross-fade.
+        Stitch segments back together using linear cross-fade blending.
 
         :param segments: List of processed segment tensors.
         :type segments: List[keras.KerasTensor]
@@ -862,7 +917,7 @@ class PRISMTimeTree(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape.
+        Compute the output shape of the layer.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -897,20 +952,39 @@ class PRISMLayer(keras.layers.Layer):
     Main PRISM layer combining hierarchical time-frequency decomposition.
 
     Provides the complete PRISM processing pipeline including optional
-    projection layers and residual connections.
+    projection layers and residual connections. The input passes through the
+    PRISMTimeTree for hierarchical wavelet processing, followed by dropout,
+    an optional residual connection, and optional output layer normalization.
 
-    **Architecture**::
+    **Architecture Overview:**
+
+    .. code-block:: text
 
         Input: [batch, context_len, channels]
-               ↓
-        (optional) Input projection: Linear -> channels
-               ↓
-        PRISMTimeTree: hierarchical wavelet processing
-               ↓
-        (optional) Residual connection: output + input
-               ↓
-        (optional) Output normalization
-               ↓
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  PRISMTimeTree               │
+        │  (hierarchical wavelet       │
+        │   decomposition + routing)   │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Dropout                     │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Residual: output + input    │ ← (if use_residual=True)
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  LayerNormalization          │ ← (if use_output_norm=True)
+        └──────────────┬───────────────┘
+                       │
+                       ▼
         Output: [batch, context_len, channels]
 
     :param tree_depth: Depth of the binary time tree.
@@ -1000,7 +1074,7 @@ class PRISMLayer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer.
+        Build the layer and initialize sub-layer weights.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -1016,7 +1090,7 @@ class PRISMLayer(keras.layers.Layer):
             mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Apply PRISM processing.
+        Apply PRISM processing to the input sequence.
 
         :param inputs: Input tensor of shape [batch, seq_len, channels].
         :type inputs: keras.KerasTensor
@@ -1048,7 +1122,7 @@ class PRISMLayer(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute output shape.
+        Compute the output shape of the layer.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]

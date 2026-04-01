@@ -1,14 +1,15 @@
 """
 Forecasting Layers based on Valeriy Manokhin's Scientific Framework.
 
-This module implements three novel layers that embed scientific forecasting principles
-directly into neural architectures:
+This module implements three novel layers that embed scientific forecasting
+principles directly into neural architectures:
 
-1. NaiveResidual: Structural enforcement of the Naive Benchmark Principle
-2. ForecastabilityGate: Learnable complexity assessment and switching
-3. ConformalQuantileHead: Built-in support for Conformalized Quantile Regression
+1. **NaiveResidual**: Structural enforcement of the Naive Benchmark Principle
+2. **ForecastabilityGate**: Learnable complexity assessment and switching
+3. **ConformalQuantileHead**: Built-in support for Conformalized Quantile Regression
 
 These layers implement principles from the forecasting science guide:
+
 - Forecastability Assessment (Section 2)
 - Naive Benchmark Principle (Section 8)
 - Conformalized Quantile Regression (Section 5)
@@ -34,39 +35,49 @@ class NaiveResidual(layers.Layer):
     outputting degraded predictions.
 
     Mathematical formulation:
-        output = network_output + naive_forecast
+        ``output = network_output + naive_forecast``
 
     where:
-        naive_forecast = repeat(last_observed_value, forecast_length)
+        ``naive_forecast = repeat(last_observed_value, forecast_length)``
 
-    This ensures that:
-    1. The network optimizes for FVA, not raw MSE
-    2. Gradient descent explicitly learns "what beats naive"
-    3. Model has a guaranteed baseline of competence
+    This ensures that the network optimizes for FVA rather than raw MSE,
+    gradient descent explicitly learns "what beats naive", and the model has
+    a guaranteed baseline of competence.
 
     Reference: Section 8 - The Naive Benchmark Principle
 
-    Args:
-        forecast_length: Integer, number of time steps to forecast.
-        name: String, layer name.
-        **kwargs: Additional keyword arguments passed to the base Layer.
+    **Architecture Overview:**
 
-    Input shape:
-        (batch_size, backcast_length, features)
+    .. code-block:: text
 
-    Output shape:
-        (batch_size, forecast_length, features)
+        Inputs: historical (batch, backcast_len, features)
+                network_output (batch, forecast_len, features)
+                    │                       │
+                    ▼                       │
+        ┌───────────────────────┐           │
+        │  Extract last value   │           │
+        │  inputs[:, -1, :]     │           │
+        └───────────┬───────────┘           │
+                    │                       │
+                    ▼                       │
+        ┌───────────────────────┐           │
+        │  Repeat forecast_len  │           │
+        │  times along axis=1   │           │
+        └───────────┬───────────┘           │
+                    │                       │
+                    ▼                       ▼
+            naive_forecast      +    network_output
+                    │                       │
+                    └───────────┬───────────┘
+                                │
+                                ▼
+                    Output (batch, forecast_len, features)
 
-    Example:
-        >>> # Create layer for 12-step forecast
-        >>> naive_residual = NaiveResidual(forecast_length=12)
-        >>>
-        >>> # Use in a model
-        >>> inputs = keras.Input(shape=(24, 1))
-        >>> x = layers.Dense(64, activation='relu')(layers.Flatten()(inputs))
-        >>> network_output = layers.Dense(12)(x)
-        >>> network_output = ops.reshape(network_output, (-1, 12, 1))
-        >>> final_forecast = naive_residual(inputs, network_output)
+    :param forecast_length: Number of time steps to forecast.
+    :type forecast_length: int
+    :param name: Layer name.
+    :type name: str or None
+    :param kwargs: Additional keyword arguments passed to the base Layer.
     """
 
     def __init__(
@@ -75,6 +86,15 @@ class NaiveResidual(layers.Layer):
             name: Optional[str] = None,
             **kwargs
     ):
+        """
+        Initialize the NaiveResidual layer.
+
+        :param forecast_length: Number of time steps to forecast.
+        :type forecast_length: int
+        :param name: Layer name.
+        :type name: str or None
+        :param kwargs: Additional keyword arguments for the base Layer.
+        """
         super().__init__(name=name, **kwargs)
         self.forecast_length = forecast_length
 
@@ -86,13 +106,14 @@ class NaiveResidual(layers.Layer):
         """
         Combine network prediction with naive baseline.
 
-        Args:
-            inputs: Historical data with shape (batch, backcast_len, features).
-            network_output: Learned residual with shape (batch, forecast_len, features).
-
-        Returns:
-            Combined forecast: network_output + naive_forecast with shape
-            (batch, forecast_len, features).
+        :param inputs: Historical data with shape ``(batch, backcast_len, features)``.
+        :type inputs: keras.KerasTensor
+        :param network_output: Learned residual with shape
+            ``(batch, forecast_len, features)``.
+        :type network_output: keras.KerasTensor
+        :return: Combined forecast ``network_output + naive_forecast`` with shape
+            ``(batch, forecast_len, features)``.
+        :rtype: keras.KerasTensor
         """
         # Extract the last observed value (Random Walk baseline)
         # Shape: (batch, features)
@@ -111,7 +132,12 @@ class NaiveResidual(layers.Layer):
         return network_output + naive_forecast
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialization configuration."""
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "forecast_length": self.forecast_length,
@@ -126,45 +152,68 @@ class ForecastabilityGate(layers.Layer):
     Learnable gate for weighing deep predictions versus naive forecasts.
 
     This layer implements a differentiable switch based on input complexity.
-    It computes a forecastability score α ∈ [0, 1] where:
-    - α ≈ 0: Input is noisy/unforecastable → favor naive baseline
-    - α ≈ 1: Input has clear patterns → trust deep network
+    It computes a forecastability score ``alpha in [0, 1]`` where:
 
-    This prevents "overfitting to noise" common in complex models like Transformers
-    when applied to high-entropy data.
+    - ``alpha ~ 0``: Input is noisy/unforecastable, favor naive baseline
+    - ``alpha ~ 1``: Input has clear patterns, trust deep network
+
+    This prevents "overfitting to noise" common in complex models like
+    Transformers when applied to high-entropy data.
 
     Mathematical formulation:
-        output = α * deep_forecast + (1 - α) * naive_forecast
-        α = ComplexityAnalyzer(inputs)
+        ``output = alpha * deep_forecast + (1 - alpha) * naive_forecast``
+        ``alpha = ComplexityAnalyzer(inputs)``
 
     Reference: Section 2 - Forecastability Assessment
 
-    Args:
-        hidden_units: Integer, number of hidden units in complexity analyzer.
-            Default: 16.
-        activation: String or callable, activation function for hidden layer.
-            Default: 'relu'.
-        kernel_initializer: Initializer for kernel weights. Default: 'glorot_uniform'.
-        kernel_regularizer: Regularizer for kernel weights. Default: None.
-        name: String, layer name.
-        **kwargs: Additional keyword arguments passed to the base Layer.
+    **Architecture Overview:**
 
-    Input shapes:
-        inputs: (batch_size, backcast_length, features)
-        deep_forecast: (batch_size, forecast_length, features)
-        naive_forecast: (batch_size, forecast_length, features)
+    .. code-block:: text
 
-    Output shape:
-        (batch_size, forecast_length, features)
+        Inputs: historical (batch, backcast_len, features)
+                deep_forecast (batch, forecast_len, features)
+                naive_forecast (batch, forecast_len, features)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Flatten                  │
+        │  (batch, backcast*feat)   │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Dense(hidden_units, act) │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Dense(1, sigmoid)        │
+        │  alpha in [0, 1]          │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────────────────────┐
+        │  alpha * deep_forecast                    │
+        │  + (1 - alpha) * naive_forecast           │
+        └─────────────────┬─────────────────────────┘
+                          │
+                          ▼
+                Output (batch, forecast_len, features)
 
-    Example:
-        >>> gate = ForecastabilityGate(hidden_units=32, activation='gelu')
-        >>>
-        >>> # In a model
-        >>> inputs = keras.Input(shape=(24, 1))
-        >>> deep_forecast = ... # from deep network
-        >>> naive_forecast = ... # from NaiveResidual
-        >>> final_forecast = gate(inputs, deep_forecast, naive_forecast)
+    :param hidden_units: Number of hidden units in complexity analyzer.
+        Defaults to 16.
+    :type hidden_units: int
+    :param activation: Activation function for hidden layer.
+        Defaults to ``'relu'``.
+    :type activation: str
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param name: Layer name.
+    :type name: str or None
+    :param kwargs: Additional keyword arguments passed to the base Layer.
     """
 
     def __init__(
@@ -176,6 +225,21 @@ class ForecastabilityGate(layers.Layer):
             name: Optional[str] = None,
             **kwargs
     ):
+        """
+        Initialize the ForecastabilityGate.
+
+        :param hidden_units: Number of hidden units in complexity analyzer.
+        :type hidden_units: int
+        :param activation: Activation function for hidden layer.
+        :type activation: str
+        :param kernel_initializer: Initializer for kernel weights.
+        :type kernel_initializer: str or keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer for kernel weights.
+        :type kernel_regularizer: keras.regularizers.Regularizer or None
+        :param name: Layer name.
+        :type name: str or None
+        :param kwargs: Additional keyword arguments for the base Layer.
+        """
         super().__init__(name=name, **kwargs)
         self.hidden_units = hidden_units
         self.activation = activation
@@ -189,8 +253,9 @@ class ForecastabilityGate(layers.Layer):
         """
         Build the complexity analyzer sub-network.
 
-        Args:
-            input_shape: Shape of inputs tensor, or list of shapes if multiple inputs.
+        :param input_shape: Shape of inputs tensor, or list of shapes if
+            multiple inputs.
+        :type input_shape: tuple or list
         """
         # Handle multiple input shapes (inputs, deep_forecast, naive_forecast)
         if isinstance(input_shape, list):
@@ -198,7 +263,7 @@ class ForecastabilityGate(layers.Layer):
 
         # Tiny sub-network to estimate forecastability
         # Input: flattened time series
-        # Output: scalar α ∈ [0, 1]
+        # Output: scalar alpha in [0, 1]
         self.complexity_analyzer = keras.Sequential([
             layers.Dense(
                 self.hidden_units,
@@ -231,22 +296,28 @@ class ForecastabilityGate(layers.Layer):
         """
         Compute gated combination of deep and naive forecasts.
 
-        Args:
-            inputs: Raw historical data with shape (batch, backcast_len, features).
-            deep_forecast: Output from deep network with shape (batch, forecast_len, features).
-            naive_forecast: Output from naive baseline with shape (batch, forecast_len, features).
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Weighted combination with shape (batch, forecast_len, features).
+        :param inputs: Raw historical data with shape
+            ``(batch, backcast_len, features)``.
+        :type inputs: keras.KerasTensor
+        :param deep_forecast: Output from deep network with shape
+            ``(batch, forecast_len, features)``.
+        :type deep_forecast: keras.KerasTensor
+        :param naive_forecast: Output from naive baseline with shape
+            ``(batch, forecast_len, features)``.
+        :type naive_forecast: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Weighted combination with shape
+            ``(batch, forecast_len, features)``.
+        :rtype: keras.KerasTensor
         """
         # Flatten input for complexity analysis
         # Shape: (batch, backcast_len * features)
         flat_input = ops.reshape(inputs, (ops.shape(inputs)[0], -1))
 
-        # Compute forecastability score α
-        # α → 1.0 if signal is strong (trust deep model)
-        # α → 0.0 if noisy (trust naive baseline)
+        # Compute forecastability score alpha
+        # alpha -> 1.0 if signal is strong (trust deep model)
+        # alpha -> 0.0 if noisy (trust naive baseline)
         # Shape: (batch, 1)
         alpha = self.complexity_analyzer(flat_input, training=training)
 
@@ -255,12 +326,17 @@ class ForecastabilityGate(layers.Layer):
         alpha = ops.expand_dims(alpha, axis=-1)
 
         # Weighted average
-        # If α = 0 (pure noise) → return naive forecast
-        # If α = 1 (clear pattern) → return deep forecast
+        # If alpha = 0 (pure noise) -> return naive forecast
+        # If alpha = 1 (clear pattern) -> return deep forecast
         return (alpha * deep_forecast) + ((1.0 - alpha) * naive_forecast)
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialization configuration."""
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "hidden_units": self.hidden_units,
@@ -277,61 +353,68 @@ class ConformalQuantileHead(layers.Layer):
     """
     Output layer designed for Conformalized Quantile Regression (CQR).
 
-    This layer outputs three quantile predictions per feature:
-    - Lower quantile (typically α/2, e.g., 0.05 for 90% interval)
-    - Median (0.50)
-    - Upper quantile (typically 1-α/2, e.g., 0.95 for 90% interval)
+    This layer outputs three quantile predictions per feature: lower quantile
+    (typically ``alpha/2``, e.g. 0.05 for 90% interval), median (0.50), and
+    upper quantile (typically ``1-alpha/2``, e.g. 0.95 for 90% interval).
 
-    The layer includes:
-    1. Built-in structure for quantile outputs
-    2. Non-trainable calibration score Q for conformal prediction
-    3. Methods for calibration and prediction with valid intervals
-
-    During training, the model learns quantile predictions.
-    After training, use calibrate() with a calibration set to compute Q.
-    During inference, use predict_intervals() to get calibrated predictions.
+    The layer includes built-in structure for quantile outputs, a non-trainable
+    calibration score Q for conformal prediction, and methods for calibration
+    and prediction with valid intervals.
 
     Mathematical formulation:
-        Training: Learn q_low, q_median, q_high
-        Calibration: Q = Quantile(calibration_scores, 1-α)
+        Training: Learn ``q_low``, ``q_median``, ``q_high``
+        Calibration: ``Q = Quantile(calibration_scores, 1-alpha)``
         Inference:
-            final_lower = q_low - Q
-            final_upper = q_high + Q
+            ``final_lower = q_low - Q``
+            ``final_upper = q_high + Q``
 
-    Reference: Section 5 - Conformalized Quantile Regression (CQR)
-              Section 6 - Validity-First Hierarchy
+    Reference: Section 5 - Conformalized Quantile Regression (CQR),
+    Section 6 - Validity-First Hierarchy
 
-    Args:
-        forecast_length: Integer, number of time steps to forecast.
-        output_dim: Integer, number of features to predict.
-        kernel_initializer: Initializer for projection layer weights.
-            Default: 'glorot_uniform'.
-        kernel_regularizer: Regularizer for projection layer weights.
-            Default: None.
-        name: String, layer name.
-        **kwargs: Additional keyword arguments passed to the base Layer.
+    **Architecture Overview:**
 
-    Input shape:
-        (batch_size, input_dim) - typically output of an encoder/flattened features
+    .. code-block:: text
 
-    Output shape:
-        (batch_size, forecast_length, output_dim, 3)
-        where the last dimension contains [lower_quantile, median, upper_quantile]
+        Input: encoded features (batch, input_dim)
+                    │
+                    ▼
+        ┌───────────────────────────────────────┐
+        │  Dense(forecast_len * output_dim * 3) │
+        └───────────────────┬───────────────────┘
+                            │
+                            ▼
+        ┌───────────────────────────────────────┐
+        │  Reshape to                           │
+        │  (batch, forecast_len, output_dim, 3) │
+        └───────────────────┬───────────────────┘
+                            │
+                            ▼
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+          q_low [0]    q_median [1]   q_high [2]
+              │             │             │
+              │      (at inference)       │
+              ▼                           ▼
+        ┌──────────┐               ┌──────────┐
+        │ q_low - Q│               │q_high + Q│
+        └──────────┘               └──────────┘
+              │             │             │
+              ▼             ▼             ▼
+        calibrated     median      calibrated
+          lower                      upper
 
-    Example:
-        >>> # Create head for 12-step, 1-feature forecast
-        >>> head = ConformalQuantileHead(forecast_length=12, output_dim=1)
-        >>>
-        >>> # Training
-        >>> inputs = keras.Input(shape=(128,))  # encoded features
-        >>> quantiles = head(inputs)  # shape: (batch, 12, 1, 3)
-        >>>
-        >>> # After training, calibrate on validation set
-        >>> # calibration_scores = compute_nonconformity_scores(val_data)
-        >>> # head.calibrate(calibration_scores, alpha=0.1)
-        >>>
-        >>> # Inference with calibrated intervals
-        >>> # median, lower, upper = head.predict_intervals(test_inputs)
+    :param forecast_length: Number of time steps to forecast.
+    :type forecast_length: int
+    :param output_dim: Number of features to predict.
+    :type output_dim: int
+    :param kernel_initializer: Initializer for projection layer weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Regularizer for projection layer weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param name: Layer name.
+    :type name: str or None
+    :param kwargs: Additional keyword arguments passed to the base Layer.
     """
 
     def __init__(
@@ -343,6 +426,21 @@ class ConformalQuantileHead(layers.Layer):
             name: Optional[str] = None,
             **kwargs
     ):
+        """
+        Initialize the ConformalQuantileHead.
+
+        :param forecast_length: Number of time steps to forecast.
+        :type forecast_length: int
+        :param output_dim: Number of features to predict.
+        :type output_dim: int
+        :param kernel_initializer: Initializer for projection layer weights.
+        :type kernel_initializer: str or keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer for projection layer weights.
+        :type kernel_regularizer: keras.regularizers.Regularizer or None
+        :param name: Layer name.
+        :type name: str or None
+        :param kwargs: Additional keyword arguments for the base Layer.
+        """
         super().__init__(name=name, **kwargs)
         self.forecast_length = forecast_length
         self.output_dim = output_dim
@@ -360,8 +458,8 @@ class ConformalQuantileHead(layers.Layer):
         """
         Build the projection layer and calibration score.
 
-        Args:
-            input_shape: Shape of input tensor (batch_size, input_dim).
+        :param input_shape: Shape of input tensor ``(batch_size, input_dim)``.
+        :type input_shape: tuple
         """
         # Output 3 quantiles per (time_step, feature)
         total_outputs = self.forecast_length * self.output_dim * 3
@@ -393,13 +491,14 @@ class ConformalQuantileHead(layers.Layer):
         """
         Project inputs to quantile predictions.
 
-        Args:
-            inputs: Encoded features with shape (batch, input_dim).
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Quantile predictions with shape (batch, forecast_len, output_dim, 3).
-            Last dimension: [lower_quantile, median, upper_quantile].
+        :param inputs: Encoded features with shape ``(batch, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Quantile predictions with shape
+            ``(batch, forecast_len, output_dim, 3)`` where the last dimension
+            contains ``[lower_quantile, median, upper_quantile]``.
+        :rtype: keras.KerasTensor
         """
         # Project to all quantile outputs
         # Shape: (batch, forecast_len * output_dim * 3)
@@ -407,7 +506,7 @@ class ConformalQuantileHead(layers.Layer):
 
         # Reshape to separate time, features, and quantiles
         # Shape: (batch, forecast_len, output_dim, 3)
-        # 3 channels: 0=lower(α/2), 1=median(0.5), 2=upper(1-α/2)
+        # 3 channels: 0=lower(alpha/2), 1=median(0.5), 2=upper(1-alpha/2)
         x = ops.reshape(
             x,
             (-1, self.forecast_length, self.output_dim, 3)
@@ -423,31 +522,22 @@ class ConformalQuantileHead(layers.Layer):
         """
         Update the conformal calibration score Q based on calibration data.
 
-        This method should be called after training using a held-out calibration set.
-        The calibration scores are the nonconformity scores computed as:
-            score = max(q_low - y_true, y_true - q_high)
+        This method should be called after training using a held-out calibration
+        set. The calibration scores are the nonconformity scores computed as:
+            ``score = max(q_low - y_true, y_true - q_high)``
 
-        Args:
-            calibration_scores: Array of nonconformity scores from calibration set.
-                Shape: (n_calibration_samples,).
-            alpha: Significance level. Default: 0.1 for 90% coverage.
-                The quantile used is (1-α)(1 + 1/n).
+        The adjusted quantile is ``(1-alpha)(1 + 1/n)`` per Section 7 of the
+        forecasting science guide.
 
-        Example:
-            >>> # After training, compute scores on calibration set
-            >>> scores = []
-            >>> for x_cal, y_cal in calibration_data:
-            ...     quantiles = model.predict(x_cal)  # shape: (batch, T, D, 3)
-            ...     q_low = quantiles[..., 0]
-            ...     q_high = quantiles[..., 2]
-            ...     score = np.maximum(q_low - y_cal, y_cal - q_high)
-            ...     scores.append(score)
-            >>> scores = np.concatenate(scores)
-            >>> head.calibrate(scores, alpha=0.1)
+        :param calibration_scores: Array of nonconformity scores from
+            calibration set with shape ``(n_calibration_samples,)``.
+        :type calibration_scores: numpy.ndarray
+        :param alpha: Significance level. Defaults to 0.1 for 90% coverage.
+        :type alpha: float
         """
         n = len(calibration_scores)
         # Compute adjusted quantile for finite-sample coverage
-        # Formula from Section 7: (1-α)(1 + 1/n)
+        # Formula from Section 7: (1-alpha)(1 + 1/n)
         adjusted_quantile = (1.0 - alpha) * (1.0 + 1.0 / n)
 
         # Clip to [0, 1] to handle edge cases
@@ -466,21 +556,15 @@ class ConformalQuantileHead(layers.Layer):
         """
         Compute calibrated prediction intervals during inference.
 
-        This applies the conformal adjustment to the learned quantiles:
-            calibrated_lower = model_lower - Q
-            calibrated_upper = model_upper + Q
+        Applies the conformal adjustment to the learned quantiles:
+            ``calibrated_lower = model_lower - Q``
+            ``calibrated_upper = model_upper + Q``
 
-        Args:
-            inputs: Encoded features with shape (batch, input_dim).
-
-        Returns:
-            Tuple of (median, lower, upper) predictions, each with shape
-            (batch, forecast_len, output_dim).
-
-        Example:
-            >>> # After calibration
-            >>> median, lower, upper = head.predict_intervals(test_inputs)
-            >>> # Now lower and upper provide valid 90% prediction intervals
+        :param inputs: Encoded features with shape ``(batch, input_dim)``.
+        :type inputs: keras.KerasTensor or numpy.ndarray
+        :return: Tuple of (median, lower, upper) predictions, each with shape
+            ``(batch, forecast_len, output_dim)``.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
         """
         # Get uncalibrated quantile predictions
         # Shape: (batch, forecast_len, output_dim, 3)
@@ -499,7 +583,12 @@ class ConformalQuantileHead(layers.Layer):
         return median_pred, lower_calibrated, upper_calibrated
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialization configuration."""
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "forecast_length": self.forecast_length,
@@ -521,55 +610,30 @@ def create_manokhin_compliant_model(
     """
     Create a model that structurally enforces Manokhin's forecasting principles.
 
-    This factory function creates a complete forecasting model with:
-    1. Deep network for learning patterns (Efficiency)
-    2. Naive baseline integration (Benchmarks)
-    3. Forecastability assessment gate (Noise rejection)
-    4. Uncertainty quantification via quantiles (Validity)
+    This factory function creates a complete forecasting model with a deep
+    network for learning patterns (Efficiency), naive baseline integration
+    (Benchmarks), forecastability assessment gate (Noise rejection), and
+    uncertainty quantification via quantiles (Validity).
 
-    The model has two outputs:
-    - Point forecast: Gated combination of deep + naive predictions
-    - Quantile forecast: For conformalized prediction intervals
+    The model has two outputs: a point forecast (gated combination of deep +
+    naive predictions) and a quantile forecast for conformalized prediction
+    intervals.
 
-    Args:
-        input_shape: Tuple of (backcast_length, features) for input data.
-        forecast_length: Integer, number of time steps to forecast.
-        hidden_units: Integer, number of hidden units in deep network.
-            Default: 128.
-        gate_hidden_units: Integer, number of hidden units in forecastability gate.
-            Default: 16.
-        gate_activation: String, activation function for gate.
-            Default: 'relu'.
-
-    Returns:
-        keras.Model with inputs of shape (batch, backcast_len, features)
-        and outputs [point_forecast, quantiles] where:
-        - point_forecast: (batch, forecast_len, features)
-        - quantiles: (batch, forecast_len, features, 3)
-
-    Example:
-        >>> # Create model for 24-step history, 12-step forecast
-        >>> model = create_manokhin_compliant_model(
-        ...     input_shape=(24, 1),
-        ...     forecast_length=12,
-        ...     hidden_units=128
-        ... )
-        >>>
-        >>> # Compile with appropriate losses
-        >>> model.compile(
-        ...     optimizer='adam',
-        ...     loss=['mse', quantile_loss],  # Custom quantile loss needed
-        ...     loss_weights=[1.0, 0.5]
-        ... )
-        >>>
-        >>> # Train
-        >>> model.fit(x_train, [y_train, y_train_quantiles], ...)
-        >>>
-        >>> # Calibrate quantile head
-        >>> # ... calibration logic here ...
-        >>>
-        >>> # Inference
-        >>> point_pred, quantiles = model.predict(x_test)
+    :param input_shape: Tuple of ``(backcast_length, features)`` for input data.
+    :type input_shape: tuple[int, int]
+    :param forecast_length: Number of time steps to forecast.
+    :type forecast_length: int
+    :param hidden_units: Number of hidden units in deep network.
+        Defaults to 128.
+    :type hidden_units: int
+    :param gate_hidden_units: Number of hidden units in forecastability gate.
+        Defaults to 16.
+    :type gate_hidden_units: int
+    :param gate_activation: Activation function for gate. Defaults to ``'relu'``.
+    :type gate_activation: str
+    :return: Keras Model with inputs of shape ``(batch, backcast_len, features)``
+        and outputs ``[point_forecast, quantiles]``.
+    :rtype: keras.Model
     """
     # Input
     inputs = keras.Input(shape=input_shape, name='input')

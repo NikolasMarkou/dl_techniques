@@ -1,5 +1,5 @@
 """
-xLSTM (Extended Long Short-Term Memory) Implementation.
+xLSTM (Extended Long Short-Term Memory) implementation.
 
 This module provides a production-ready implementation of the xLSTM architecture
 from the paper "xLSTM: Extended Long Short-Term Memory" (arXiv:2405.04517v2).
@@ -32,90 +32,87 @@ from ..norms import create_normalization_layer
 @keras.saving.register_keras_serializable()
 class sLSTMCell(keras.layers.Layer):
     """
-    Scalar LSTM (sLSTM) Cell with exponential gating and normalizer state.
+    Scalar LSTM (sLSTM) cell with exponential gating and normalizer state.
 
-    This cell implements the sLSTM from Section 2.2 of the xLSTM paper, featuring:
-    - Exponential gating for improved memory dynamics
-    - Normalizer state (n_t) to stabilize memory updates
-    - Stabilization technique to prevent numerical overflow
+    This cell implements the sLSTM from Section 2.2 of the xLSTM paper, featuring
+    exponential gating for improved memory dynamics, a normalizer state (n_t) to
+    stabilize memory updates, and a stabilization technique to prevent numerical
+    overflow.
 
-    **Intent**: Provide a recurrent cell with enhanced memory revision capabilities
-    through exponential gating, suitable for sequence modeling tasks.
-
-    **Architecture**:
     The sLSTM maintains three internal states per timestep:
-    1. `cell_state (c_t)`: Primary memory content
-    2. `normalizer_state (n_t)`: Stabilization state
-    3. `hidden_state (h_t)`: Output state, derived as c_t / n_t
+    ``cell_state (c_t)``, ``normalizer_state (n_t)``, and ``hidden_state (h_t)``
+    derived as ``c_t / n_t``.
 
-    **Mathematical Operations** (per timestep t):
-    Gates:
-        - i_t = exp(W_i @ x_t + R_i @ h_{t-1} + b_i)  (Input gate)
-        - f_t = activation(W_f @ x_t + R_f @ h_{t-1} + b_f)  (Forget gate)
-        - o_t = sigmoid(W_o @ x_t + R_o @ h_{t-1} + b_o)  (Output gate)
-        - z_t = tanh(W_z @ x_t + R_z @ h_{t-1} + b_z)  (Cell input)
+    **Gate equations** (per timestep t):
 
-    State Updates:
-        - c_t = f_t * c_{t-1} + i_t * z_t
-        - n_t = f_t * n_{t-1} + i_t
+        i_t = exp(W_i @ x_t + R_i @ h_{t-1} + b_i)
+        f_t = activation(W_f @ x_t + R_f @ h_{t-1} + b_f)
+        o_t = sigmoid(W_o @ x_t + R_o @ h_{t-1} + b_o)
+        z_t = tanh(W_z @ x_t + R_z @ h_{t-1} + b_z)
 
-    Output:
-        - h_t = o_t * (c_t / n_t)
+    **State updates:**
 
-    With stabilization (Equations 15-17 in paper):
-        - m_t = max(m_{t-1} + log(f_t), log(i_t))
-        - i_t_tilde = exp(log(i_t) - m_t)
-        - f_t_tilde = exp(log(f_t) + m_{t-1} - m_t)
+        c_t = f_t * c_{t-1} + i_t * z_t
+        n_t = f_t * n_{t-1} + i_t
+        h_t = o_t * (c_t / n_t)
 
-    Args:
-        units: Integer, dimensionality of the output space. Must be positive.
-        forget_gate_activation: Literal['sigmoid', 'exp'], activation for forget gate.
-            Defaults to 'sigmoid'. Use 'exp' for exponential gating as in the paper.
-        kernel_initializer: Initializer for input weight matrices (W).
-            Defaults to 'glorot_uniform'.
-        recurrent_initializer: Initializer for recurrent weight matrices (R).
-            Defaults to 'orthogonal'.
-        bias_initializer: Initializer for bias vectors. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Layer base class.
+    **Stabilization** (Equations 15-17 in paper):
 
-    Input shape:
-        2D tensor with shape: `(batch_size, input_dim)` for single timestep.
+        m_t = max(m_{t-1} + log(f_t), log(i_t))
+        i_t_tilde = exp(log(i_t) - m_t)
+        f_t_tilde = exp(log(f_t) + m_{t-1} - m_t)
 
-    Output shape:
-        Tuple of three 2D tensors:
-        - h_t: `(batch_size, units)` - Hidden state
-        - c_t: `(batch_size, units)` - Cell state
-        - n_t: `(batch_size, units)` - Normalizer state
-        - m_t: `(batch_size, units)` - Stabilizer state
+    **Architecture Overview:**
 
-    State shape:
-        Tuple of four tensors, each with shape `(batch_size, units)`.
+    .. code-block:: text
 
-    Example:
-        ```python
-        # Create sLSTM cell
-        cell = sLSTMCell(units=128, forget_gate_activation='exp')
+        x_t: (batch, input_dim)    h_{t-1}: (batch, units)
+              │                          │
+              ▼                          ▼
+        ┌──────────┐             ┌──────────────┐
+        │ W @ x_t  │             │ R @ h_{t-1}  │
+        └────┬─────┘             └──────┬───────┘
+             └──────────┬───────────────┘
+                        ▼
+              ┌───────────────────┐
+              │ Split into 4 gates│
+              │  i, f, o, z       │
+              └────────┬──────────┘
+                       ▼
+              ┌───────────────────┐
+              │  Stabilize (m_t)  │
+              │  Exp gating       │
+              └────────┬──────────┘
+                       ▼
+              ┌───────────────────┐
+              │  State Updates    │
+              │  c_t, n_t         │
+              └────────┬──────────┘
+                       ▼
+              ┌───────────────────┐
+              │  h_t = o * c/n    │
+              └────────┬──────────┘
+                       ▼
+              Output: h_t (batch, units)
 
-        # Single timestep forward pass
-        batch_size = 32
-        input_dim = 64
-        x_t = keras.random.normal((batch_size, input_dim))
-
-        # Initialize states
-        state = cell.get_initial_state(batch_size=batch_size)
-
-        # Forward pass
-        output, new_state = cell(x_t, state)
-        h_t, c_t, n_t, m_t = new_state
-
-        # Use with RNN layer for full sequences
-        rnn = keras.layers.RNN(cell, return_sequences=True)
-        inputs = keras.random.normal((batch_size, 10, input_dim))
-        outputs = rnn(inputs)
-        ```
+    :param units: Dimensionality of the output space. Must be positive.
+    :type units: int
+    :param forget_gate_activation: Activation for the forget gate, either
+        ``'sigmoid'`` or ``'exp'`` for exponential gating as in the paper.
+    :type forget_gate_activation: str
+    :param kernel_initializer: Initializer for input weight matrices (W).
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param recurrent_initializer: Initializer for recurrent weight matrices (R).
+    :type recurrent_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias vectors.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer, optional
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :type recurrent_regularizer: keras.regularizers.Regularizer, optional
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer, optional
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -165,7 +162,14 @@ class sLSTMCell(keras.layers.Layer):
         self.output_size = self.units
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the cell's weight matrices."""
+        """
+        Build the cell's weight matrices.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+
+        :raises ValueError: If the last dimension of ``input_shape`` is None.
+        """
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input_shape cannot be None.")
@@ -208,15 +212,14 @@ class sLSTMCell(keras.layers.Layer):
         """
         Forward pass for a single timestep.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim).
-            states: List of state tensors [h_tm1, c_tm1, n_tm1, m_tm1].
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Tuple of (output, new_states):
-                - output: h_t with shape (batch_size, units)
-                - new_states: List [h_t, c_t, n_t, m_t]
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param states: List of state tensors ``[h_tm1, c_tm1, n_tm1, m_tm1]``.
+        :type states: list of keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: bool, optional
+        :return: Tuple of ``(h_t, [h_t, c_t, n_t, m_t])``.
+        :rtype: tuple
         """
         h_tm1, c_tm1, n_tm1, m_tm1 = states
 
@@ -260,11 +263,10 @@ class sLSTMCell(keras.layers.Layer):
         """
         Get initial states for the cell.
 
-        Args:
-            batch_size: Integer, batch size.
-
-        Returns:
-            List of initial state tensors [h_0, c_0, n_0, m_0].
+        :param batch_size: Batch size for the initial state tensors.
+        :type batch_size: int, optional
+        :return: List of initial state tensors ``[h_0, c_0, n_0, m_0]``.
+        :rtype: list of keras.KerasTensor
         """
         return [
             ops.zeros((batch_size, self.units), dtype=self.compute_dtype),
@@ -274,7 +276,12 @@ class sLSTMCell(keras.layers.Layer):
         ]
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the cell."""
+        """
+        Return the configuration of the cell for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -295,58 +302,56 @@ class sLSTMLayer(keras.layers.Layer):
     """
     Scalar LSTM (sLSTM) layer for processing sequences.
 
-    This layer wraps the sLSTMCell in a keras.layers.RNN to process full sequences.
-    It provides a high-level interface for using sLSTM in models.
+    Wraps the ``sLSTMCell`` in a ``keras.layers.RNN`` to process full sequences.
+    Provides a drop-in replacement for standard LSTM layers with enhanced memory
+    dynamics through exponential gating.
 
-    **Intent**: Provide a drop-in replacement for standard LSTM layers with
-    enhanced memory dynamics through exponential gating.
+    **Architecture Overview:**
 
-    Args:
-        units: Integer, dimensionality of the output space.
-        forget_gate_activation: Literal['sigmoid', 'exp'], forget gate activation.
-        return_sequences: Boolean, whether to return the full sequence or just
-            the last output. Defaults to True.
-        return_state: Boolean, whether to return the last state in addition to
-            the output. Defaults to False.
-        go_backwards: Boolean, whether to process the sequence backwards.
-            Defaults to False.
-        stateful: Boolean, whether to maintain states between batches.
-            Defaults to False.
-        unroll: Boolean, whether to unroll the RNN. Defaults to False.
-        kernel_initializer: Initializer for kernel weights.
-        recurrent_initializer: Initializer for recurrent weights.
-        bias_initializer: Initializer for bias weights.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, input_dim)`.
+        Input: (batch, seq_len, input_dim)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │   keras.layers.RNN        │
+        │   ┌───────────────────┐   │
+        │   │   sLSTMCell       │   │
+        │   │  (per timestep)   │   │
+        │   └───────────────────┘   │
+        └───────────┬───────────────┘
+                    ▼
+        Output: (batch, seq_len, units)
+             or (batch, units) if
+             return_sequences=False
 
-    Output shape:
-        - If return_sequences=True: `(batch_size, sequence_length, units)`
-        - If return_sequences=False: `(batch_size, units)`
-        - If return_state=True: tuple of (output, h_state, c_state, n_state, m_state)
-
-    Example:
-        ```python
-        # Create sLSTM layer
-        layer = sLSTMLayer(units=128, return_sequences=True)
-
-        # Process sequence
-        inputs = keras.random.normal((32, 10, 64))
-        outputs = layer(inputs)
-        print(outputs.shape)  # (32, 10, 128)
-
-        # Use in a model
-        model = keras.Sequential([
-            keras.layers.Input(shape=(None, 64)),
-            sLSTMLayer(128, return_sequences=True),
-            sLSTMLayer(64, return_sequences=False),
-            keras.layers.Dense(10, activation='softmax')
-        ])
-        ```
+    :param units: Dimensionality of the output space.
+    :type units: int
+    :param forget_gate_activation: Forget gate activation, ``'sigmoid'`` or ``'exp'``.
+    :type forget_gate_activation: str
+    :param return_sequences: Whether to return the full sequence or just the last output.
+    :type return_sequences: bool
+    :param return_state: Whether to return the last state in addition to the output.
+    :type return_state: bool
+    :param go_backwards: Whether to process the sequence backwards.
+    :type go_backwards: bool
+    :param stateful: Whether to maintain states between batches.
+    :type stateful: bool
+    :param unroll: Whether to unroll the RNN loop.
+    :type unroll: bool
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param recurrent_initializer: Initializer for recurrent weights.
+    :type recurrent_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer, optional
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :type recurrent_regularizer: keras.regularizers.Regularizer, optional
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer, optional
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -405,7 +410,12 @@ class sLSTMLayer(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the RNN layer."""
+        """
+        Build the RNN layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        """
         self.rnn.build(input_shape)
         super().build(input_shape)
 
@@ -417,16 +427,18 @@ class sLSTMLayer(keras.layers.Layer):
         initial_state: Optional[List[keras.KerasTensor]] = None,
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
         """
-        Forward pass through the RNN layer.
+        Forward pass through the sLSTM RNN layer.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, input_dim).
-            mask: Optional mask tensor.
-            training: Boolean, whether in training mode.
-            initial_state: Optional initial state.
-
-        Returns:
-            Output tensor(s) depending on return_sequences and return_state.
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional mask tensor.
+        :type mask: keras.KerasTensor, optional
+        :param training: Whether the layer is in training mode.
+        :type training: bool, optional
+        :param initial_state: Optional initial state tensors.
+        :type initial_state: list of keras.KerasTensor, optional
+        :return: Output tensor(s) depending on ``return_sequences`` and ``return_state``.
+        :rtype: keras.KerasTensor or tuple of keras.KerasTensor
         """
         return self.rnn(
             inputs,
@@ -436,10 +448,23 @@ class sLSTMLayer(keras.layers.Layer):
         )
 
     def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple.
+        :rtype: tuple
+        """
         return self.rnn.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer."""
+        """
+        Return the configuration of the layer for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -468,60 +493,81 @@ class sLSTMLayer(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class mLSTMCell(keras.layers.Layer):
     """
-    Matrix LSTM (mLSTM) Cell with matrix memory and covariance update rule.
+    Matrix LSTM (mLSTM) cell with matrix memory and covariance update rule.
 
     This cell implements the fully parallelizable mLSTM from Section 2.3 of the
-    xLSTM paper. It uses a matrix memory C_t and a covariance-style update rule
-    for enhanced storage capacity.
+    xLSTM paper. It uses a matrix memory ``C_t`` of shape ``(d_key, d_value)``
+    and a covariance-style update rule for enhanced storage capacity compared
+    to traditional LSTMs.
 
-    **Intent**: Provide a parallelizable memory mechanism with matrix-valued
-    memory for improved storage capacity compared to traditional LSTMs.
+    The cell computes query, key, and value projections alongside input, forget,
+    and output gates:
 
-    **Architecture**:
-    The mLSTM uses matrix memory C_t of shape (d_key, d_value) that stores
-    associations between keys and values. The cell computes:
+        C_t = f_t * C_{t-1} + i_t * (v_t (outer) k_t^T)
+        n_t = f_t * n_{t-1} + i_t * k_t
+        h_t = o_t * (C_t @ q_t / (n_t^T @ q_t))
 
-    1. Query (q_t), Key (k_t), Value (v_t) projections
-    2. Input gate (i_t), Forget gate (f_t), Output gate (o_t)
-    3. Matrix memory update: C_t = f_t ⊙ C_{t-1} + i_t ⊙ (v_t ⊗ k_t^T)
-    4. Normalizer update: n_t = f_t ⊙ n_{t-1} + i_t ⊙ k_t
-    5. Hidden state: h_t = o_t ⊙ (C_t @ q_t / (n_t^T @ q_t))
+    **Architecture Overview:**
 
-    Where ⊙ is element-wise multiplication and ⊗ is outer product.
+    .. code-block:: text
 
-    Args:
-        units: Integer, dimensionality of the output space (d_model).
-        num_heads: Integer, number of attention heads. Defaults to 1.
-        key_dim: Optional integer, dimensionality of keys per head.
-            If None, defaults to units // num_heads.
-        value_dim: Optional integer, dimensionality of values per head.
-            If None, defaults to units // num_heads.
-        kernel_initializer: Initializer for input weight matrices.
-        recurrent_initializer: Initializer for recurrent weight matrices.
-        bias_initializer: Initializer for bias vectors.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Layer base class.
+        x_t: (batch, input_dim)    h_{t-1}: (batch, units)
+              │                          │
+              ▼                          ▼
+        ┌──────────┐             ┌──────────────┐
+        │ W @ x_t  │             │ R @ h_{t-1}  │
+        └────┬─────┘             └──────┬───────┘
+             └──────────┬───────────────┘
+                        ▼
+              ┌───────────────────────┐
+              │ Split into projections│
+              │  q, k, v, i, f, o     │
+              └────────┬──────────────┘
+                       ▼
+              ┌───────────────────────┐
+              │ Matrix Memory Update  │
+              │ C_t = f*C + i*(v⊗k^T) │
+              └────────┬──────────────┘
+                       ▼
+              ┌───────────────────────┐
+              │ Normalizer Update     │
+              │ n_t = f*n + i*k       │
+              └────────┬──────────────┘
+                       ▼
+              ┌───────────────────────┐
+              │ Memory Retrieval      │
+              │ o * (C@q / (n^T@q))   │
+              └────────┬──────────────┘
+                       ▼
+              Output: h_t (batch, units)
 
-    Input shape:
-        2D tensor with shape: `(batch_size, input_dim)`.
+    :param units: Dimensionality of the output space (d_model). Must be positive.
+    :type units: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param key_dim: Dimensionality of keys per head. If None, defaults to
+        ``units // num_heads``.
+    :type key_dim: int, optional
+    :param value_dim: Dimensionality of values per head. If None, defaults to
+        ``units // num_heads``.
+    :type value_dim: int, optional
+    :param kernel_initializer: Initializer for input weight matrices.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param recurrent_initializer: Initializer for recurrent weight matrices.
+    :type recurrent_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias vectors.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer, optional
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :type recurrent_regularizer: keras.regularizers.Regularizer, optional
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer, optional
+    :param kwargs: Additional arguments for the Layer base class.
 
-    Output shape:
-        Tuple of (h_t, new_states):
-        - h_t: `(batch_size, units)` - Hidden state
-        - new_states: List of state tensors
-
-    Example:
-        ```python
-        # Create mLSTM cell
-        cell = mLSTMCell(units=256, num_heads=4)
-
-        # Use with RNN for sequences
-        rnn = keras.layers.RNN(cell, return_sequences=True)
-        inputs = keras.random.normal((32, 10, 128))
-        outputs = rnn(inputs)
-        ```
+    :raises ValueError: If ``units`` is not positive.
+    :raises ValueError: If ``num_heads`` is not positive.
+    :raises ValueError: If ``units`` is not divisible by ``num_heads``.
     """
 
     def __init__(
@@ -576,7 +622,14 @@ class mLSTMCell(keras.layers.Layer):
         self.output_size = self.units
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the cell's weight matrices."""
+        """
+        Build the cell's weight matrices.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+
+        :raises ValueError: If the last dimension of ``input_shape`` is None.
+        """
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input_shape cannot be None.")
@@ -626,13 +679,14 @@ class mLSTMCell(keras.layers.Layer):
         """
         Forward pass for a single timestep.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim).
-            states: List of state tensors [h_tm1, C_tm1_flat, n_tm1_flat].
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Tuple of (output, new_states).
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param states: List of state tensors ``[h_tm1, C_tm1_flat, n_tm1_flat]``.
+        :type states: list of keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: bool, optional
+        :return: Tuple of ``(h_t, [h_t, C_t_flat, n_t_flat])``.
+        :rtype: tuple
         """
         h_tm1, C_tm1_flat, n_tm1_flat = states
         batch_size = ops.shape(inputs)[0]
@@ -728,7 +782,14 @@ class mLSTMCell(keras.layers.Layer):
         self,
         batch_size: Optional[int] = None,
     ) -> List[keras.KerasTensor]:
-        """Get initial states for the cell."""
+        """
+        Get initial states for the cell.
+
+        :param batch_size: Batch size for the initial state tensors.
+        :type batch_size: int, optional
+        :return: List of initial state tensors ``[h_0, C_0_flat, n_0_flat]``.
+        :rtype: list of keras.KerasTensor
+        """
         return [
             ops.zeros((batch_size, self.units), dtype=self.compute_dtype),
             ops.zeros((batch_size, self.matrix_memory_size), dtype=self.compute_dtype),
@@ -736,7 +797,12 @@ class mLSTMCell(keras.layers.Layer):
         ]
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the cell."""
+        """
+        Return the configuration of the cell for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -758,32 +824,59 @@ class mLSTMLayer(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) layer for processing sequences.
 
-    This layer wraps the mLSTMCell in a keras.layers.RNN to process full sequences.
+    Wraps the ``mLSTMCell`` in a ``keras.layers.RNN`` to process full sequences,
+    providing a high-level interface for using matrix-valued memory in models.
 
-    Args:
-        units: Integer, dimensionality of the output space.
-        num_heads: Integer, number of attention heads.
-        key_dim: Optional integer, dimensionality of keys per head.
-        value_dim: Optional integer, dimensionality of values per head.
-        return_sequences: Boolean, whether to return the full sequence.
-        return_state: Boolean, whether to return the last state.
-        go_backwards: Boolean, whether to process backwards.
-        stateful: Boolean, whether to maintain states between batches.
-        unroll: Boolean, whether to unroll the RNN.
-        kernel_initializer: Initializer for kernel weights.
-        recurrent_initializer: Initializer for recurrent weights.
-        bias_initializer: Initializer for bias weights.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Layer base class.
+    **Architecture Overview:**
 
-    Example:
-        ```python
-        layer = mLSTMLayer(units=256, num_heads=4, return_sequences=True)
-        inputs = keras.random.normal((32, 10, 128))
-        outputs = layer(inputs)
-        ```
+    .. code-block:: text
+
+        Input: (batch, seq_len, input_dim)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │   keras.layers.RNN        │
+        │   ┌───────────────────┐   │
+        │   │   mLSTMCell       │   │
+        │   │  (per timestep)   │   │
+        │   └───────────────────┘   │
+        └───────────┬───────────────┘
+                    ▼
+        Output: (batch, seq_len, units)
+             or (batch, units) if
+             return_sequences=False
+
+    :param units: Dimensionality of the output space.
+    :type units: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param key_dim: Optional dimensionality of keys per head.
+    :type key_dim: int, optional
+    :param value_dim: Optional dimensionality of values per head.
+    :type value_dim: int, optional
+    :param return_sequences: Whether to return the full sequence.
+    :type return_sequences: bool
+    :param return_state: Whether to return the last state.
+    :type return_state: bool
+    :param go_backwards: Whether to process the sequence backwards.
+    :type go_backwards: bool
+    :param stateful: Whether to maintain states between batches.
+    :type stateful: bool
+    :param unroll: Whether to unroll the RNN loop.
+    :type unroll: bool
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param recurrent_initializer: Initializer for recurrent weights.
+    :type recurrent_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer, optional
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :type recurrent_regularizer: keras.regularizers.Regularizer, optional
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer, optional
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -848,7 +941,12 @@ class mLSTMLayer(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the RNN layer."""
+        """
+        Build the RNN layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        """
         self.rnn.build(input_shape)
         super().build(input_shape)
 
@@ -859,7 +957,20 @@ class mLSTMLayer(keras.layers.Layer):
         training: Optional[bool] = None,
         initial_state: Optional[List[keras.KerasTensor]] = None,
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
-        """Forward pass through the RNN layer."""
+        """
+        Forward pass through the mLSTM RNN layer.
+
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional mask tensor.
+        :type mask: keras.KerasTensor, optional
+        :param training: Whether the layer is in training mode.
+        :type training: bool, optional
+        :param initial_state: Optional initial state tensors.
+        :type initial_state: list of keras.KerasTensor, optional
+        :return: Output tensor(s) depending on ``return_sequences`` and ``return_state``.
+        :rtype: keras.KerasTensor or tuple of keras.KerasTensor
+        """
         return self.rnn(
             inputs,
             mask=mask,
@@ -868,10 +979,23 @@ class mLSTMLayer(keras.layers.Layer):
         )
 
     def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple.
+        :rtype: tuple
+        """
         return self.rnn.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer."""
+        """
+        Return the configuration of the layer for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -905,69 +1029,65 @@ class sLSTMBlock(keras.layers.Layer):
     """
     sLSTM residual block with post-normalization architecture.
 
-    This block implements the architecture from Figure 10 of the xLSTM paper:
-    Input → sLSTM → Normalization → FFN → Residual Add
+    Implements the architecture from Figure 10 of the xLSTM paper: a residual
+    block that applies sLSTM followed by normalization and a configurable
+    feed-forward network, with a skip connection around the entire block.
 
-    **Intent**: Provide a complete residual block for sLSTM with configurable
-    normalization and feed-forward network, suitable for stacking in deep models.
+    **Architecture Overview:**
 
-    **Architecture Flow**:
-    ```
-    Input (residual)
-       ↓
-    sLSTMLayer
-       ↓
-    Normalization
-       ↓
-    Feed-Forward Network (configurable via factory)
-       ↓
-    Add(residual) → Output
-    ```
+    .. code-block:: text
 
-    Args:
-        units: Integer, dimensionality of the layer.
-        ffn_type: String, type of FFN to use. Options: 'mlp', 'swiglu', 'geglu',
-            'glu', 'differential', 'residual', 'swin_mlp'. Defaults to 'swiglu'.
-        ffn_expansion_factor: Integer, expansion factor for FFN intermediate size.
-            Defaults to 2.
-        normalization_type: String, type of normalization. Options: 'layer_norm',
-            'rms_norm', 'batch_norm', 'band_rms', etc. Defaults to 'layer_norm'.
-        normalization_kwargs: Optional dictionary of kwargs for normalization layer.
-        forget_gate_activation: Literal['sigmoid', 'exp'], sLSTM forget gate activation.
-        dropout_rate: Float, dropout rate for FFN. Defaults to 0.0.
-        kernel_initializer: Initializer for kernel weights.
-        recurrent_initializer: Initializer for recurrent weights.
-        bias_initializer: Initializer for bias weights.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Layer base class.
+        Input: (batch, seq_len, units)
+                │
+                ├───────────────────────────┐
+                ▼                           │ (residual)
+        ┌───────────────────────┐           │
+        │      sLSTMLayer       │           │
+        └───────────┬───────────┘           │
+                    ▼                       │
+        ┌───────────────────────┐           │
+        │    Normalization      │           │
+        └───────────┬───────────┘           │
+                    ▼                       │
+        ┌───────────────────────┐           │
+        │   Feed-Forward Net    │           │
+        │   (configurable)      │           │
+        └───────────┬───────────┘           │
+                    ▼                       │
+                  ( + ) ◄───────────────────┘
+                    │
+                    ▼
+        Output: (batch, seq_len, units)
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, units)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, units)`.
-
-    Example:
-        ```python
-        # Standard sLSTM block
-        block = sLSTMBlock(units=256, ffn_type='swiglu')
-
-        # With custom normalization
-        block = sLSTMBlock(
-            units=256,
-            normalization_type='rms_norm',
-            normalization_kwargs={'epsilon': 1e-6}
-        )
-
-        # Stack multiple blocks
-        inputs = keras.Input(shape=(None, 256))
-        x = inputs
-        for i in range(6):
-            x = sLSTMBlock(units=256, name=f'slstm_block_{i}')(x)
-        model = keras.Model(inputs, x)
-        ```
+    :param units: Dimensionality of the layer.
+    :type units: int
+    :param ffn_type: Type of FFN to use (e.g., ``'mlp'``, ``'swiglu'``, ``'geglu'``,
+        ``'glu'``, ``'differential'``, ``'residual'``, ``'swin_mlp'``).
+    :type ffn_type: str
+    :param ffn_expansion_factor: Expansion factor for FFN intermediate size.
+    :type ffn_expansion_factor: int
+    :param normalization_type: Type of normalization (e.g., ``'layer_norm'``,
+        ``'rms_norm'``, ``'batch_norm'``, ``'band_rms'``).
+    :type normalization_type: str
+    :param normalization_kwargs: Optional dictionary of kwargs for the normalization layer.
+    :type normalization_kwargs: dict, optional
+    :param forget_gate_activation: sLSTM forget gate activation, ``'sigmoid'`` or ``'exp'``.
+    :type forget_gate_activation: str
+    :param dropout_rate: Dropout rate for the FFN.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param recurrent_initializer: Initializer for recurrent weights.
+    :type recurrent_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer, optional
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :type recurrent_regularizer: keras.regularizers.Regularizer, optional
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer, optional
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -1033,7 +1153,12 @@ class sLSTMBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build all sub-layers."""
+        """
+        Build all sub-layers.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        """
         # Build sLSTM
         self.slstm.build(input_shape)
 
@@ -1053,7 +1178,18 @@ class sLSTMBlock(keras.layers.Layer):
         training: Optional[bool] = None,
         mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
-        """Forward pass through the block."""
+        """
+        Forward pass through the sLSTM residual block.
+
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, units)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: bool, optional
+        :param mask: Optional mask tensor.
+        :type mask: keras.KerasTensor, optional
+        :return: Output tensor of shape ``(batch_size, seq_len, units)``.
+        :rtype: keras.KerasTensor
+        """
         residual = inputs
 
         # sLSTM
@@ -1069,7 +1205,12 @@ class sLSTMBlock(keras.layers.Layer):
         return x + residual
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer."""
+        """
+        Return the configuration of the layer for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -1094,6 +1235,7 @@ class sLSTMBlock(keras.layers.Layer):
         })
         return config
 
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -1101,67 +1243,75 @@ class mLSTMBlock(keras.layers.Layer):
     """
     mLSTM residual block with pre-up-projection architecture.
 
-    This block implements the architecture from Figure 11 of the xLSTM paper:
-    Input → Up-Project → Conv1D → mLSTM → Norm → Down-Project → Residual
+    Implements the architecture from Figure 11 of the xLSTM paper: a residual
+    block that up-projects the input, applies depthwise causal convolution with
+    swish activation, processes through mLSTM, normalizes, and down-projects
+    back to the original dimension with a skip connection.
 
-    **Intent**: Provide a complete residual block for mLSTM with SSM-style
-    pre-expansion, suitable for parallelizable sequence processing.
+    **Architecture Overview:**
 
-    **Architecture Flow**:
-    ```
-    Input (residual)
-       ↓
-    Up-Projection (Dense: units → units * expansion_factor)
-       ↓
-    Depthwise Conv1D (causal, kernel_size=4)
-       ↓
-    Activation (swish)
-       ↓
-    mLSTMLayer
-       ↓
-    Normalization
-       ↓
-    Down-Projection (Dense: units * expansion_factor → units)
-       ↓
-    Add(residual) → Output
-    ```
+    .. code-block:: text
 
-    Args:
-        units: Integer, dimensionality of the layer.
-        expansion_factor: Integer, expansion factor for internal dimension.
-            Defaults to 2.
-        num_heads: Integer, number of mLSTM heads. Defaults to 1.
-        conv_kernel_size: Integer, kernel size for depthwise conv. Defaults to 4.
-        normalization_type: String, type of normalization. Defaults to 'layer_norm'.
-        normalization_kwargs: Optional dictionary of kwargs for normalization layer.
-        kernel_initializer: Initializer for kernel weights.
-        recurrent_initializer: Initializer for recurrent weights.
-        bias_initializer: Initializer for bias weights.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Layer base class.
+        Input: (batch, seq_len, units)
+                │
+                ├──────────────────────────────────┐
+                ▼                                  │ (residual)
+        ┌───────────────────────────┐              │
+        │  Up-Projection Dense      │              │
+        │  (units → units * exp)    │              │
+        └───────────┬───────────────┘              │
+                    ▼                              │
+        ┌───────────────────────────┐              │
+        │  Depthwise Causal Conv1D  │              │
+        └───────────┬───────────────┘              │
+                    ▼                              │
+        ┌───────────────────────────┐              │
+        │       Swish Activation    │              │
+        └───────────┬───────────────┘              │
+                    ▼                              │
+        ┌───────────────────────────┐              │
+        │       mLSTMLayer          │              │
+        └───────────┬───────────────┘              │
+                    ▼                              │
+        ┌───────────────────────────┐              │
+        │     Normalization         │              │
+        └───────────┬───────────────┘              │
+                    ▼                              │
+        ┌───────────────────────────┐              │
+        │  Down-Projection Dense    │              │
+        │  (units * exp → units)    │              │
+        └───────────┬───────────────┘              │
+                    ▼                              │
+                  ( + ) ◄──────────────────────────┘
+                    │
+                    ▼
+        Output: (batch, seq_len, units)
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, units)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, units)`.
-
-    Example:
-        ```python
-        # Standard mLSTM block
-        block = mLSTMBlock(units=256, expansion_factor=2, num_heads=4)
-
-        # With custom configuration
-        block = mLSTMBlock(
-            units=256,
-            expansion_factor=3,
-            num_heads=8,
-            conv_kernel_size=7,
-            normalization_type='rms_norm'
-        )
-        ```
+    :param units: Dimensionality of the layer.
+    :type units: int
+    :param expansion_factor: Expansion factor for the internal dimension.
+    :type expansion_factor: int
+    :param num_heads: Number of mLSTM attention heads.
+    :type num_heads: int
+    :param conv_kernel_size: Kernel size for the depthwise causal convolution.
+    :type conv_kernel_size: int
+    :param normalization_type: Type of normalization to apply.
+    :type normalization_type: str
+    :param normalization_kwargs: Optional dictionary of kwargs for the normalization layer.
+    :type normalization_kwargs: dict, optional
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param recurrent_initializer: Initializer for recurrent weights.
+    :type recurrent_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer, optional
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :type recurrent_regularizer: keras.regularizers.Regularizer, optional
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer, optional
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -1249,7 +1399,12 @@ class mLSTMBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build all sub-layers."""
+        """
+        Build all sub-layers.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        """
         # Build up projection
         self.up_proj.build(input_shape)
 
@@ -1276,7 +1431,18 @@ class mLSTMBlock(keras.layers.Layer):
         training: Optional[bool] = None,
         mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
-        """Forward pass through the block."""
+        """
+        Forward pass through the mLSTM residual block.
+
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, units)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: bool, optional
+        :param mask: Optional mask tensor.
+        :type mask: keras.KerasTensor, optional
+        :return: Output tensor of shape ``(batch_size, seq_len, units)``.
+        :rtype: keras.KerasTensor
+        """
         residual = inputs
 
         # Up projection
@@ -1301,7 +1467,12 @@ class mLSTMBlock(keras.layers.Layer):
         return x + residual
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer."""
+        """
+        Return the configuration of the layer for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'units': self.units,

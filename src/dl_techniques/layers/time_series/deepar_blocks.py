@@ -27,51 +27,42 @@ class ScaleLayer(keras.layers.Layer):
     likelihood parameters. It is critical for datasets exhibiting power-law
     scale distributions.
 
-    **Intent**: Enable DeepAR to learn effectively from time series spanning
-    multiple orders of magnitude by bringing all series into a common scale
-    during processing, then restoring the original scale for predictions.
+    Scale is computed as:
+        ``nu = mean(conditioning_range) + epsilon``
 
-    **Architecture**:
-    ```
-    Input: (batch, seq_len, features)
-           ↓
-    Scale Computation: ν = mean(conditioning_range) + 1
-           ↓
-    Forward: x_scaled = x / ν
-    Inverse: μ_scaled * ν, σ_scaled * √ν (for Gaussian)
-             μ_scaled * ν, α_scaled / √ν (for NegBin)
-           ↓
-    Output: scaled or descaled values
-    ```
+    Forward scaling divides by ``nu``, while inverse scaling multiplies by
+    ``nu`` (for means) or scales by ``sqrt(nu)`` (for standard deviations in
+    the Gaussian case) or ``1/sqrt(nu)`` (for shape parameters in the Negative
+    Binomial case).
 
-    Args:
-        scale_per_sample: If True, compute scale per sample in batch.
-            If False, use provided scale. Defaults to True.
-        epsilon: Small constant for numerical stability. Defaults to 1.0.
-        **kwargs: Additional arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        3D tensor with shape: `(batch_size, seq_len, features)`.
+    .. code-block:: text
 
-    Output shape:
-        Same as input shape when scaling forward.
+        Input: x (batch, seq_len, features)
+                    │
+                    ▼
+        ┌───────────────────────────────┐
+        │  Scale Computation            │
+        │  nu = mean(x, axis=1) + eps   │
+        └──────────────┬────────────────┘
+                       │
+               ┌───────┴───────┐
+               ▼               ▼
+        ┌────────────┐  ┌─────────────┐
+        │  Forward:  │  │  Inverse:   │
+        │  x / nu    │  │  x * nu     │
+        └─────┬──────┘  └──────┬──────┘
+              │                │
+              ▼                ▼
+        Scaled Output    Descaled Output
 
-    Example:
-        ```python
-        # Scale time series inputs
-        scale_layer = ScaleLayer()
-
-        # During encoding (conditioning range)
-        conditioning_data = keras.random.normal((32, 50, 1))
-        scale = ops.mean(conditioning_data, axis=1, keepdims=True) + 1.0
-        scaled_data = conditioning_data / scale
-
-        # During decoding (apply inverse to likelihood params)
-        mu_scaled = model_output[..., 0:1]
-        sigma_scaled = model_output[..., 1:2]
-        mu = mu_scaled * scale
-        sigma = sigma_scaled * ops.sqrt(scale)
-        ```
+    :param scale_per_sample: If True, compute scale per sample in batch.
+        If False, use provided scale. Defaults to True.
+    :type scale_per_sample: bool
+    :param epsilon: Small constant for numerical stability. Defaults to 1.0.
+    :type epsilon: float
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -80,6 +71,15 @@ class ScaleLayer(keras.layers.Layer):
             epsilon: float = 1.0,
             **kwargs: Any
     ) -> None:
+        """
+        Initialize the ScaleLayer.
+
+        :param scale_per_sample: If True, compute scale per sample.
+        :type scale_per_sample: bool
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
+        :param kwargs: Additional arguments for Layer base class.
+        """
         super().__init__(**kwargs)
         self.scale_per_sample = scale_per_sample
         self.epsilon = epsilon
@@ -93,15 +93,16 @@ class ScaleLayer(keras.layers.Layer):
         """
         Apply scaling or inverse scaling.
 
-        Args:
-            inputs: Input tensor to scale.
-            scale: Pre-computed scale values. If None and scale_per_sample=True,
-                compute from inputs.
-            inverse: If True, apply inverse scaling (multiply). If False,
-                apply forward scaling (divide).
-
-        Returns:
-            Scaled or inverse-scaled tensor.
+        :param inputs: Input tensor to scale.
+        :type inputs: keras.KerasTensor
+        :param scale: Pre-computed scale values. If None and scale_per_sample
+            is True, computes from inputs.
+        :type scale: keras.KerasTensor or None
+        :param inverse: If True, apply inverse scaling (multiply). If False,
+            apply forward scaling (divide).
+        :type inverse: bool
+        :return: Scaled or inverse-scaled tensor.
+        :rtype: keras.KerasTensor
         """
         if scale is None and self.scale_per_sample:
             # Compute scale as mean over sequence dimension plus epsilon
@@ -116,6 +117,12 @@ class ScaleLayer(keras.layers.Layer):
             return inputs / scale
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'scale_per_sample': self.scale_per_sample,
@@ -133,46 +140,38 @@ class GaussianLikelihoodHead(keras.layers.Layer):
     using affine transformations with appropriate activations to ensure valid
     parameter values (positive standard deviation).
 
-    **Intent**: Convert recurrent network outputs into parameters for a
-    Gaussian distribution over the next time step prediction.
+    The mathematical operations are:
+        ``mu(h) = W_mu^T h + b_mu``
+        ``sigma(h) = log(1 + exp(W_sigma^T h + b_sigma))``
 
-    **Architecture**:
-    ```
-    Input: h_t (hidden state)
-           ↓
-    Linear(units) → μ (mean)
-           ↓
-    Linear(units) → Softplus → σ (std > 0)
-           ↓
-    Output: (μ, σ)
-    ```
+    **Architecture Overview:**
 
-    **Mathematical Operation**:
-        μ(h) = W_μ^T h + b_μ
-        σ(h) = log(1 + exp(W_σ^T h + b_σ))
+    .. code-block:: text
 
-    Args:
-        units: Dimensionality of output (typically 1 for univariate time series).
-        **kwargs: Additional arguments for Layer base class.
+        Input: h_t (batch, [seq_len,] hidden_dim)
+                    │
+                    ├─────────────────────┐
+                    ▼                     ▼
+            ┌──────────────┐     ┌──────────────────┐
+            │ Dense(units) │     │  Dense(units)     │
+            │  (linear)    │     │  (linear logits)  │
+            └──────┬───────┘     └────────┬──────────┘
+                   │                      │
+                   ▼                      ▼
+                mu (mean)         ┌──────────────┐
+                                  │  Softplus    │
+                                  │  log(1+exp)  │
+                                  └──────┬───────┘
+                                         │
+                                         ▼
+                                   sigma (std > 0)
+                   │                      │
+                   ▼                      ▼
+            Output: (mu, sigma)
 
-    Input shape:
-        2D/3D tensor with shape: `(batch_size, [seq_len,] hidden_dim)`.
-
-    Output shape:
-        Tuple of two tensors with shape: `(batch_size, [seq_len,] units)`.
-
-    Example:
-        ```python
-        # Create likelihood head
-        likelihood_head = GaussianLikelihoodHead(units=1)
-
-        # Compute parameters from LSTM hidden states
-        hidden_states = keras.random.normal((32, 50, 128))
-        mu, sigma = likelihood_head(hidden_states)
-
-        # Use for probabilistic forecasting
-        # log_likelihood = -0.5 * log(2π) - log(σ) - 0.5 * ((y - μ) / σ)^2
-        ```
+    :param units: Dimensionality of output (typically 1 for univariate time series).
+    :type units: int
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -180,6 +179,13 @@ class GaussianLikelihoodHead(keras.layers.Layer):
             units: int = 1,
             **kwargs: Any
     ) -> None:
+        """
+        Initialize the GaussianLikelihoodHead.
+
+        :param units: Dimensionality of output.
+        :type units: int
+        :param kwargs: Additional arguments for Layer base class.
+        """
         super().__init__(**kwargs)
         self.units = units
 
@@ -194,7 +200,12 @@ class GaussianLikelihoodHead(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer by explicitly building sub-layers."""
+        """
+        Build the layer by explicitly building sub-layers.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple[int or None, ...]
+        """
         self.mu_projection.build(input_shape)
         self.sigma_projection.build(input_shape)
         super().build(input_shape)
@@ -204,13 +215,12 @@ class GaussianLikelihoodHead(keras.layers.Layer):
             inputs: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Compute Gaussian parameters.
+        Compute Gaussian distribution parameters from hidden states.
 
-        Args:
-            inputs: Hidden states from LSTM.
-
-        Returns:
-            Tuple of (mu, sigma) tensors.
+        :param inputs: Hidden states from LSTM.
+        :type inputs: keras.KerasTensor
+        :return: Tuple of (mu, sigma) tensors.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         mu = self.mu_projection(inputs)
 
@@ -224,13 +234,26 @@ class GaussianLikelihoodHead(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Compute output shapes for both mu and sigma."""
+        """
+        Compute output shapes for both mu and sigma.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple[int or None, ...]
+        :return: Tuple of two shapes for mu and sigma.
+        :rtype: tuple[tuple[int or None, ...], tuple[int or None, ...]]
+        """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         output_shape = tuple(output_shape)
         return output_shape, output_shape
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -245,53 +268,44 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
 
     This layer projects LSTM hidden states to Negative Binomial distribution
     parameters, suitable for modeling count data with overdispersion. Both
-    parameters must be positive.
+    parameters must be positive, enforced via softplus activation.
 
-    **Intent**: Convert recurrent network outputs into parameters for a
-    Negative Binomial distribution, enabling accurate modeling of count data
-    with varying dispersion levels.
+    The mathematical operations are:
+        ``mu(h) = log(1 + exp(W_mu^T h + b_mu))``
+        ``alpha(h) = log(1 + exp(W_alpha^T h + b_alpha))``
 
-    **Architecture**:
-    ```
-    Input: h_t (hidden state)
-           ↓
-    Linear(units) → Softplus → μ (mean > 0)
-           ↓
-    Linear(units) → Softplus → α (shape > 0)
-           ↓
-    Output: (μ, α)
-    ```
+    Distribution properties:
+        ``E[z] = mu``
+        ``Var[z] = mu + mu^2 * alpha``
 
-    **Mathematical Operation**:
-        μ(h) = log(1 + exp(W_μ^T h + b_μ))
-        α(h) = log(1 + exp(W_α^T h + b_α))
+    **Architecture Overview:**
 
-    **Distribution Properties**:
-        E[z] = μ
-        Var[z] = μ + μ²α
+    .. code-block:: text
 
-    Args:
-        units: Dimensionality of output (typically 1 for univariate time series).
-        **kwargs: Additional arguments for Layer base class.
+        Input: h_t (batch, [seq_len,] hidden_dim)
+                    │
+                    ├─────────────────────┐
+                    ▼                     ▼
+            ┌──────────────┐     ┌──────────────────┐
+            │ Dense(units) │     │  Dense(units)     │
+            │ (linear)     │     │  (linear logits)  │
+            └──────┬───────┘     └────────┬──────────┘
+                   │                      │
+                   ▼                      ▼
+            ┌──────────────┐     ┌──────────────────┐
+            │  Softplus    │     │  Softplus         │
+            │  log(1+exp)  │     │  log(1+exp)       │
+            └──────┬───────┘     └────────┬──────────┘
+                   │                      │
+                   ▼                      ▼
+              mu (mean > 0)       alpha (shape > 0)
+                   │                      │
+                   ▼                      ▼
+            Output: (mu, alpha)
 
-    Input shape:
-        2D/3D tensor with shape: `(batch_size, [seq_len,] hidden_dim)`.
-
-    Output shape:
-        Tuple of two tensors with shape: `(batch_size, [seq_len,] units)`.
-
-    Example:
-        ```python
-        # Create likelihood head
-        likelihood_head = NegativeBinomialLikelihoodHead(units=1)
-
-        # Compute parameters from LSTM hidden states
-        hidden_states = keras.random.normal((32, 50, 128))
-        mu, alpha = likelihood_head(hidden_states)
-
-        # Use for count data forecasting
-        # NB distribution can model overdispersed count data
-        ```
+    :param units: Dimensionality of output (typically 1 for univariate time series).
+    :type units: int
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -299,6 +313,13 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
             units: int = 1,
             **kwargs: Any
     ) -> None:
+        """
+        Initialize the NegativeBinomialLikelihoodHead.
+
+        :param units: Dimensionality of output.
+        :type units: int
+        :param kwargs: Additional arguments for Layer base class.
+        """
         super().__init__(**kwargs)
         self.units = units
 
@@ -313,7 +334,12 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer by explicitly building sub-layers."""
+        """
+        Build the layer by explicitly building sub-layers.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple[int or None, ...]
+        """
         self.mu_projection.build(input_shape)
         self.alpha_projection.build(input_shape)
         super().build(input_shape)
@@ -323,13 +349,12 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
             inputs: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Compute Negative Binomial parameters.
+        Compute Negative Binomial distribution parameters from hidden states.
 
-        Args:
-            inputs: Hidden states from LSTM.
-
-        Returns:
-            Tuple of (mu, alpha) tensors.
+        :param inputs: Hidden states from LSTM.
+        :type inputs: keras.KerasTensor
+        :return: Tuple of (mu, alpha) tensors.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Softplus activation to ensure both params > 0
         mu_logits = self.mu_projection(inputs)
@@ -344,13 +369,26 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Compute output shapes for both mu and alpha."""
+        """
+        Compute output shapes for both mu and alpha.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple[int or None, ...]
+        :return: Tuple of two shapes for mu and alpha.
+        :rtype: tuple[tuple[int or None, ...], tuple[int or None, ...]]
+        """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         output_shape = tuple(output_shape)
         return output_shape, output_shape
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -365,53 +403,42 @@ class DeepARCell(keras.layers.Layer):
 
     This layer implements the core autoregressive recurrent computation of DeepAR,
     combining the previous observation, covariates, and hidden state to produce
-    the next hidden state. It's designed to work with RNN layers.
+    the next hidden state. It is designed to work with RNN layers.
 
-    **Intent**: Provide the autoregressive computation unit that processes
-    sequences in DeepAR, taking into account both temporal dependencies
-    (via hidden state) and the previous actual/predicted value.
+    The mathematical operation is:
+        ``h_t = h(h_{t-1}, z_{t-1}, x_t, Theta)``
 
-    **Architecture**:
-    ```
-    Inputs: [z_{t-1}, x_t, h_{t-1}]
-           ↓
-    Concatenate: [z_{t-1}, x_t]
-           ↓
-    LSTM Cell: h_t = LSTM([z_{t-1}, x_t], h_{t-1})
-           ↓
-    Output: h_t
-    ```
+    where ``h`` is implemented as an LSTM cell.
 
-    **Mathematical Operation**:
-        h_t = h(h_{t-1}, z_{t-1}, x_t, Θ)
+    **Architecture Overview:**
 
-    Where h is implemented as an LSTM cell.
+    .. code-block:: text
 
-    Args:
-        units: Number of LSTM units (hidden dimension).
-        dropout: Dropout rate for LSTM. Defaults to 0.0.
-        recurrent_dropout: Recurrent dropout rate for LSTM. Defaults to 0.0.
-        **kwargs: Additional arguments for Layer base class.
+        Inputs: [z_{t-1}, x_t]       States: h_{t-1}
+                    │                       │
+                    ▼                       │
+            ┌───────────────┐               │
+            │  Concatenate  │               │
+            │  [z_{t-1}, x_t]               │
+            └───────┬───────┘               │
+                    │                       │
+                    ▼                       ▼
+            ┌───────────────────────────────────┐
+            │           LSTM Cell               │
+            │  h_t = LSTM([z_{t-1}, x_t], h_{t-1})│
+            └───────────────┬───────────────────┘
+                            │
+                            ▼
+                    Output: h_t (batch, units)
+                    States: (h_t, c_t)
 
-    Input shape:
-        2D tensor with shape: `(batch_size, input_dim)` where input_dim
-        includes both the lagged target and covariates.
-
-    Output shape:
-        2D tensor with shape: `(batch_size, units)`.
-
-    Example:
-        ```python
-        # Create cell
-        cell = DeepARCell(units=128, dropout=0.1)
-
-        # Wrap in RNN for sequence processing
-        rnn = keras.layers.RNN(cell, return_sequences=True)
-
-        # Process sequence
-        inputs = keras.random.normal((32, 50, 10))
-        outputs = rnn(inputs)  # Shape: (32, 50, 128)
-        ```
+    :param units: Number of LSTM units (hidden dimension).
+    :type units: int
+    :param dropout: Dropout rate for LSTM. Defaults to 0.0.
+    :type dropout: float
+    :param recurrent_dropout: Recurrent dropout rate for LSTM. Defaults to 0.0.
+    :type recurrent_dropout: float
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -421,6 +448,17 @@ class DeepARCell(keras.layers.Layer):
             recurrent_dropout: float = 0.0,
             **kwargs: Any
     ) -> None:
+        """
+        Initialize the DeepARCell.
+
+        :param units: Number of LSTM units.
+        :type units: int
+        :param dropout: Dropout rate for LSTM.
+        :type dropout: float
+        :param recurrent_dropout: Recurrent dropout rate for LSTM.
+        :type recurrent_dropout: float
+        :param kwargs: Additional arguments for Layer base class.
+        """
         super().__init__(**kwargs)
         self.units = units
         self.dropout = dropout
@@ -436,7 +474,12 @@ class DeepARCell(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the cell by building the LSTM sub-layer."""
+        """
+        Build the cell by building the LSTM sub-layer.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple[int or None, ...]
+        """
         self.lstm_cell.build(input_shape)
         super().build(input_shape)
 
@@ -447,15 +490,16 @@ class DeepARCell(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
         """
-        Process one time step.
+        Process one time step through the LSTM cell.
 
-        Args:
-            inputs: Input tensor at time t, shape (batch_size, input_dim).
-            states: List of state tensors from previous time step.
-            training: Boolean or None, whether in training mode.
-
-        Returns:
-            Tuple of (output, new_states).
+        :param inputs: Input tensor at time t, shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param states: State tensors from previous time step.
+        :type states: tuple[keras.KerasTensor, ...]
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Tuple of (output, new_states).
+        :rtype: tuple[keras.KerasTensor, tuple[keras.KerasTensor, ...]]
         """
         output, new_states = self.lstm_cell(inputs, states, training=training)
         return output, new_states
@@ -464,10 +508,23 @@ class DeepARCell(keras.layers.Layer):
             self,
             batch_size: Optional[int] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Get initial state for the cell."""
+        """
+        Get initial state for the cell.
+
+        :param batch_size: Batch size for the initial state tensors.
+        :type batch_size: int or None
+        :return: Tuple of initial hidden and cell state tensors.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
+        """
         return self.lstm_cell.get_initial_state(batch_size=batch_size)
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'units': self.units,
