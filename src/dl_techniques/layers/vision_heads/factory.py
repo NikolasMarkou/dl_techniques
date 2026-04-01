@@ -28,21 +28,59 @@ from .task_types import TaskType, TaskConfiguration, CommonTaskConfigurations
 @keras.saving.register_keras_serializable()
 class BaseVisionHead(keras.layers.Layer):
     """
-    Base class for all vision_heads task heads.
+    Base class for all vision task heads.
 
-    Provides common functionality and structure for task-specific heads.
+    Provides common functionality and structure for task-specific heads,
+    including optional attention mechanisms, feed-forward networks, normalization,
+    and dropout regularization.
 
-    Args:
-        hidden_dim: int, hidden dimension for intermediate layers
-        normalization_type: str, type of normalization to use
-        activation_type: str, type of activation function
-        dropout_rate: float, dropout rate for regularization
-        use_attention: bool, whether to include attention mechanisms
-        attention_type: str, type of attention to use if enabled
-        use_ffn: bool, whether to include FFN blocks
-        ffn_type: str, type of FFN to use if enabled
-        ffn_expansion_factor: int, expansion factor for FFN
-        **kwargs: Additional arguments for base Layer class
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │   Input Features    │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │   Normalization     │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Attention (opt.)   │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │    FFN (opt.)       │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │   Dropout (opt.)    │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Task-Specific Head │
+        └─────────────────────┘
+
+    :param hidden_dim: Hidden dimension for intermediate layers.
+    :type hidden_dim: int
+    :param normalization_type: Type of normalization to use.
+    :type normalization_type: str
+    :param activation_type: Type of activation function.
+    :type activation_type: str
+    :param dropout_rate: Dropout rate for regularization.
+    :type dropout_rate: float
+    :param use_attention: Whether to include attention mechanisms.
+    :type use_attention: bool
+    :param attention_type: Type of attention to use if enabled.
+    :type attention_type: str
+    :param use_ffn: Whether to include FFN blocks.
+    :type use_ffn: bool
+    :param ffn_type: Type of FFN to use if enabled.
+    :type ffn_type: str
+    :param ffn_expansion_factor: Expansion factor for FFN.
+    :type ffn_expansion_factor: int
+    :param kwargs: Additional arguments for base Layer class.
     """
 
     def __init__(
@@ -160,13 +198,37 @@ class DetectionHead(BaseVisionHead):
     """
     Detection head for object detection tasks.
 
-    Outputs bounding box regression and classification scores.
+    Outputs bounding box regression and classification scores through
+    separate convolutional branches sharing common feature processing.
 
-    Args:
-        num_classes: int, number of object classes
-        num_anchors: int, number of anchor boxes per location
-        bbox_dims: int, dimensions for bounding box (typically 4)
-        **kwargs: Arguments for BaseVisionHead
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │   Input Features    │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Common Processing  │
+        │ (Attention + FFN)   │
+        └────┬────────┬───────┘
+             ▼        ▼
+        ┌────────┐ ┌────────┐
+        │Cls Conv│ │Reg Conv│
+        └───┬────┘ └───┬────┘
+            ▼          ▼
+        ┌────────┐ ┌────────┐
+        │Cls Head│ │Reg Head│
+        └────────┘ └────────┘
+
+    :param num_classes: Number of object classes.
+    :type num_classes: int
+    :param num_anchors: Number of anchor boxes per location.
+    :type num_anchors: int
+    :param bbox_dims: Dimensions for bounding box (typically 4).
+    :type bbox_dims: int
+    :param kwargs: Arguments for BaseVisionHead.
     """
 
     def __init__(
@@ -267,11 +329,42 @@ class SegmentationHead(BaseVisionHead):
     """
     Segmentation head for semantic segmentation tasks.
 
-    Args:
-        num_classes: int, number of segmentation classes
-        upsampling_factor: int, factor for upsampling to match input resolution
-        use_skip_connections: bool, whether to use skip connections
-        **kwargs: Arguments for BaseVisionHead
+    Produces pixel-level class predictions through progressive refinement
+    blocks with optional skip connections and upsampling to match input resolution.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │   Input Features    │
+        │  (multi-scale opt.) │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Common Processing  │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Refinement Blocks  │◄── Skip Connections
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Upsampling Layers  │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Segmentation Head  │
+        │    (softmax)        │
+        └─────────────────────┘
+
+    :param num_classes: Number of segmentation classes.
+    :type num_classes: int
+    :param upsampling_factor: Factor for upsampling to match input resolution.
+    :type upsampling_factor: int
+    :param use_skip_connections: Whether to use skip connections.
+    :type use_skip_connections: bool
+    :param kwargs: Arguments for BaseVisionHead.
     """
 
     def __init__(
@@ -390,12 +483,44 @@ class DepthEstimationHead(BaseVisionHead):
     """
     Depth estimation head for predicting depth maps.
 
-    Args:
-        output_channels: int, number of output channels (1 for single depth)
-        min_depth: float, minimum depth value
-        max_depth: float, maximum depth value
-        use_log_depth: bool, whether to predict log depth
-        **kwargs: Arguments for BaseVisionHead
+    Produces per-pixel depth predictions through progressive refinement and
+    upsampling, with support for both linear and logarithmic depth scaling.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │   Input Features    │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Common Processing  │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Depth Conv Blocks  │
+        │  + Upsampling       │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Depth Head (sig.)  │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Depth Scaling      │
+        │  (log or linear)    │
+        └─────────────────────┘
+
+    :param output_channels: Number of output channels (1 for single depth).
+    :type output_channels: int
+    :param min_depth: Minimum depth value.
+    :type min_depth: float
+    :param max_depth: Maximum depth value.
+    :type max_depth: float
+    :param use_log_depth: Whether to predict log depth.
+    :type use_log_depth: bool
+    :param kwargs: Arguments for BaseVisionHead.
     """
 
     def __init__(
@@ -509,11 +634,41 @@ class ClassificationHead(BaseVisionHead):
     """
     Classification head for image-level classification.
 
-    Args:
-        num_classes: int, number of classes
-        use_global_pooling: bool, whether to use global pooling
-        pooling_type: str, type of pooling ('avg' or 'max')
-        **kwargs: Arguments for BaseVisionHead
+    Aggregates spatial features via global pooling, then applies dense layers
+    and a softmax classifier to produce class probabilities.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │   Input Features    │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Attention (opt.)   │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Global Pooling     │
+        │  (avg or max)       │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │   Dense Blocks      │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Classifier (soft.) │
+        └─────────────────────┘
+
+    :param num_classes: Number of classes.
+    :type num_classes: int
+    :param use_global_pooling: Whether to use global pooling.
+    :type use_global_pooling: bool
+    :param pooling_type: Type of pooling ('avg' or 'max').
+    :type pooling_type: str
+    :param kwargs: Arguments for BaseVisionHead.
     """
 
     def __init__(
@@ -615,11 +770,41 @@ class InstanceSegmentationHead(BaseVisionHead):
     """
     Instance segmentation head combining detection and segmentation.
 
-    Args:
-        num_classes: int, number of object classes
-        num_instances: int, maximum number of instances
-        mask_size: Tuple[int, int], size of instance masks
-        **kwargs: Arguments for BaseVisionHead
+    Produces per-instance bounding boxes, class predictions, and binary masks
+    through parallel detection and mask prediction branches.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │   Input Features    │
+        └─────────┬───────────┘
+                  ▼
+        ┌─────────────────────┐
+        │  Common Processing  │
+        └────┬────────┬───────┘
+             ▼        ▼
+        ┌─────────┐ ┌──────────┐
+        │Detection│ │Mask Conv │
+        │  Head   │ │ Blocks   │
+        └────┬────┘ └────┬─────┘
+             │           ▼
+             │      ┌──────────┐
+             │      │Mask Head │
+             │      └────┬─────┘
+             ▼           ▼
+        ┌─────────────────────┐
+        │  Combined Outputs   │
+        └─────────────────────┘
+
+    :param num_classes: Number of object classes.
+    :type num_classes: int
+    :param num_instances: Maximum number of instances.
+    :type num_instances: int
+    :param mask_size: Size of instance masks.
+    :type mask_size: Tuple[int, int]
+    :param kwargs: Arguments for BaseVisionHead.
     """
 
     def __init__(
@@ -721,11 +906,34 @@ class MultiTaskHead(keras.layers.Layer):
     """
     Multi-task head that combines multiple task-specific heads.
 
-    Args:
-        task_configs: Dict mapping task names to their configurations
-        shared_backbone_dim: int, dimension of shared backbone features
-        use_task_specific_attention: bool, whether each task gets its own attention
-        **kwargs: Additional arguments
+    Routes shared or task-specific inputs to independently configured task heads,
+    enabling joint multi-task learning from a common backbone.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────┐
+        │  Shared / Per-Task  │
+        │   Input Features    │
+        └────┬───┬───┬────────┘
+             ▼   ▼   ▼
+        ┌────┐ ┌──┐ ┌────┐
+        │Det │ │Seg│ │Dep │ ...
+        │Head│ │Hd │ │Head│
+        └──┬─┘ └─┬┘ └──┬─┘
+           ▼     ▼     ▼
+        ┌─────────────────────┐
+        │  Task Output Dict   │
+        └─────────────────────┘
+
+    :param task_configs: Dict mapping task names to their configurations.
+    :type task_configs: Dict[str, Dict[str, Any]]
+    :param shared_backbone_dim: Dimension of shared backbone features.
+    :type shared_backbone_dim: int
+    :param use_task_specific_attention: Whether each task gets its own attention.
+    :type use_task_specific_attention: bool
+    :param kwargs: Additional arguments.
     """
 
     def __init__(
@@ -811,40 +1019,14 @@ def create_vision_head(
         **kwargs: Any
 ) -> BaseVisionHead:
     """
-    Factory function to create vision_heads task heads.
+    Factory function to create vision task heads.
 
-    Args:
-        task_type: TaskType enum or string specifying the task
-        **kwargs: Configuration parameters for the specific head
-
-    Returns:
-        Configured vision_heads head for the specified task
-
-    Example:
-        >>> # Create detection head
-        >>> det_head = create_vision_head(
-        ...     TaskType.DETECTION,
-        ...     num_classes=80,
-        ...     hidden_dim=256,
-        ...     normalization_type='layer_norm',
-        ...     ffn_type='swiglu'
-        ... )
-
-        >>> # Create segmentation head with attention
-        >>> seg_head = create_vision_head(
-        ...     'segmentation',
-        ...     num_classes=21,
-        ...     use_attention=True,
-        ...     attention_type='cbam'
-        ... )
-
-        >>> # Create depth estimation head
-        >>> depth_head = create_vision_head(
-        ...     TaskType.DEPTH_ESTIMATION,
-        ...     min_depth=0.1,
-        ...     max_depth=100.0,
-        ...     use_log_depth=True
-        ... )
+    :param task_type: TaskType enum or string specifying the task.
+    :type task_type: Union[TaskType, str]
+    :param kwargs: Configuration parameters for the specific head.
+    :return: Configured vision head for the specified task.
+    :rtype: BaseVisionHead
+    :raises ValueError: If task_type is not supported.
     """
 
     # Convert string to TaskType if needed
@@ -965,39 +1147,15 @@ def create_multi_task_head(
     """
     Create a multi-task head from task configuration.
 
-    Args:
-        task_configuration: Can be:
-            - TaskConfiguration object
-            - List of TaskType enums
-            - Dict mapping task names to configurations
-        **kwargs: Additional configuration
+    Accepts a TaskConfiguration object, a list of TaskType enums, or a dict
+    mapping task names to configuration dicts.
 
-    Returns:
-        MultiTaskHead instance
-
-    Example:
-        >>> # From TaskConfiguration
-        >>> config = CommonTaskConfigurations.DETECTION_SEGMENTATION_DEPTH
-        >>> multi_head = create_multi_task_head(config)
-
-        >>> # From list of tasks
-        >>> tasks = [TaskType.DETECTION, TaskType.SEGMENTATION]
-        >>> multi_head = create_multi_task_head(tasks, hidden_dim=256)
-
-        >>> # From detailed configuration
-        >>> config = {
-        ...     'detection': {
-        ...         'task_type': TaskType.DETECTION,
-        ...         'num_classes': 80,
-        ...         'num_anchors': 9
-        ...     },
-        ...     'segmentation': {
-        ...         'task_type': TaskType.SEGMENTATION,
-        ...         'num_classes': 21,
-        ...         'upsampling_factor': 4
-        ...     }
-        ... }
-        >>> multi_head = create_multi_task_head(config)
+    :param task_configuration: Task configuration in one of several formats.
+    :type task_configuration: Union[TaskConfiguration, List[TaskType], Dict[str, Dict]]
+    :param kwargs: Additional configuration.
+    :return: Configured multi-task head instance.
+    :rtype: MultiTaskHead
+    :raises ValueError: If task_configuration type is invalid.
     """
 
     if isinstance(task_configuration, TaskConfiguration):
@@ -1036,9 +1194,10 @@ def create_multi_task_head(
 
 class HeadConfiguration:
     """
-    Configuration helper for vision_heads heads.
+    Configuration helper for vision heads.
 
-    Provides default configurations for different tasks and scenarios.
+    Provides default, efficient, and high-performance configurations for
+    different vision tasks and deployment scenarios.
     """
 
     @staticmethod

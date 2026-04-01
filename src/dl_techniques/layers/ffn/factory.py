@@ -293,23 +293,9 @@ def get_ffn_info() -> Dict[str, Dict[str, Any]]:
     """
     Get comprehensive information about all available FFN types.
 
-    Returns:
-        Dict containing information about each FFN type, including:
-        - description: Human-readable description
-        - required_params: List of required parameter names
-        - optional_params: Dict of optional parameters with defaults
-        - use_case: Recommended use case for the FFN type
-
-    Example:
-        ```python
-        info = get_ffn_info()
-
-        # Print available FFN types
-        for ffn_type, details in info.items():
-            print(f"{ffn_type}: {details['description']}")
-            print(f"  Required: {details['required_params']}")
-            print(f"  Use case: {details['use_case']}")
-        ```
+    :return: Dict containing information about each FFN type, including
+        description, required_params, optional_params, and use_case.
+    :rtype: Dict[str, Dict[str, Any]]
     """
     return {ffn_type: info.copy() for ffn_type, info in FFN_REGISTRY.items()}
 
@@ -318,22 +304,10 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
     """
     Validate FFN configuration parameters.
 
-    Args:
-        ffn_type: Type of FFN to validate
-        **kwargs: Parameters to validate
-
-    Raises:
-        ValueError: If ffn_type is invalid or required parameters are missing
-
-    Example:
-        ```python
-        # Validate before creating
-        try:
-            validate_ffn_config('mlp', hidden_dim=512, output_dim=256)
-            print("Configuration is valid")
-        except ValueError as e:
-            print(f"Invalid configuration: {e}")
-        ```
+    :param ffn_type: Type of FFN to validate.
+    :type ffn_type: str
+    :param kwargs: Parameters to validate.
+    :raises ValueError: If ffn_type is invalid or required parameters are missing.
     """
     if ffn_type not in FFN_REGISTRY:
         available_types = sorted(list(FFN_REGISTRY.keys()))
@@ -428,37 +402,16 @@ def create_ffn_layer(
     This function provides a centralized way to create any FFN layer supported by
     dl_techniques, with comprehensive parameter validation and consistent error handling.
 
-    Args:
-        ffn_type: Type of FFN layer to create. See FFNType for all supported types.
-        name: Optional name for the layer.
-        **kwargs: Parameters specific to the FFN type. See individual layer
-            documentation for parameter details.
-
-    Returns:
-        Configured FFN layer instance.
-
-    Raises:
-        ValueError: If ffn_type is invalid or required parameters are missing.
-        TypeError: If parameter types are incorrect.
-
-    Example:
-        ```python
-        # Create standard MLP
-        mlp = create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-
-        # Create SwiGLU with custom parameters
-        swiglu = create_ffn_layer(
-            'swiglu',
-            output_dim=768,
-            ffn_expansion_factor=4,
-            dropout_rate=0.1,
-            name='swiglu_ffn'
-        )
-        ```
-
-    Note:
-        Each FFN type has specific required and optional parameters.
-        Use get_ffn_info() to see parameter requirements for each type.
+    :param ffn_type: Type of FFN layer to create. See ``FFNType`` for all supported types.
+    :type ffn_type: FFNType
+    :param name: Optional name for the layer.
+    :type name: Optional[str]
+    :param kwargs: Parameters specific to the FFN type. See individual layer
+        documentation for parameter details.
+    :return: Configured FFN layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If ffn_type is invalid or required parameters are missing.
+    :raises TypeError: If parameter types are incorrect.
     """
     try:
         # Validate configuration
@@ -533,26 +486,11 @@ def create_ffn_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
     Create FFN layer from configuration dictionary.
 
-    Args:
-        config: Configuration dictionary containing 'type' key and parameters
-
-    Returns:
-        Configured FFN layer instance
-
-    Raises:
-        ValueError: If 'type' key is missing from config
-
-    Example:
-        ```python
-        config = {
-            'type': 'mlp',
-            'hidden_dim': 1024,
-            'output_dim': 512,
-            'dropout_rate': 0.1,
-            'name': 'ffn_block'
-        }
-        ffn = create_ffn_from_config(config)
-        ```
+    :param config: Configuration dictionary containing 'type' key and parameters.
+    :type config: Dict[str, Any]
+    :return: Configured FFN layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If 'type' key is missing from config.
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dictionary, got {type(config)}")

@@ -206,24 +206,43 @@ class VLMTaskConfig:
     """
     Configuration for a specific VLM task.
 
-    Args:
-        name: Unique identifier for the task
-        task_type: Type of VLM task
-        vocab_size: Size of text vocabulary
-        max_text_length: Maximum text sequence length
-        hidden_size: Hidden dimension for task head
-        vision_hidden_size: Vision encoder hidden dimension
-        text_hidden_size: Text encoder hidden dimension
-        fusion_hidden_size: Multi-modal fusion hidden dimension
-        dropout_rate: Dropout rate for regularization
-        num_classes: Number of classes (for classification tasks)
-        use_cross_attention: Whether to use cross-modal attention
-        fusion_type: Type of multi-modal fusion ('concat', 'add', 'multiply', 'attention')
-        pooling_type: Type of pooling for vision features ('avg', 'max', 'cls')
-        use_task_specific_heads: Whether to use task-specific output heads
-        temperature: Temperature for generation tasks
-        beam_size: Beam size for beam search
-        loss_weight: Weight for this task's loss in multi-task training
+    Encapsulates all hyperparameters needed to construct a VLM task head,
+    including vocabulary, dimensionality, fusion, and generation settings.
+
+    :param name: Unique identifier for the task.
+    :type name: str
+    :param task_type: Type of VLM task.
+    :type task_type: VLMTaskType
+    :param vocab_size: Size of text vocabulary.
+    :type vocab_size: int
+    :param max_text_length: Maximum text sequence length.
+    :type max_text_length: int
+    :param hidden_size: Hidden dimension for task head.
+    :type hidden_size: Optional[int]
+    :param vision_hidden_size: Vision encoder hidden dimension.
+    :type vision_hidden_size: Optional[int]
+    :param text_hidden_size: Text encoder hidden dimension.
+    :type text_hidden_size: Optional[int]
+    :param fusion_hidden_size: Multi-modal fusion hidden dimension.
+    :type fusion_hidden_size: Optional[int]
+    :param dropout_rate: Dropout rate for regularization.
+    :type dropout_rate: float
+    :param num_classes: Number of classes (for classification tasks).
+    :type num_classes: Optional[int]
+    :param use_cross_attention: Whether to use cross-modal attention.
+    :type use_cross_attention: bool
+    :param fusion_type: Type of multi-modal fusion.
+    :type fusion_type: Literal["concat", "add", "multiply", "attention"]
+    :param pooling_type: Type of pooling for vision features.
+    :type pooling_type: Literal["avg", "max", "cls"]
+    :param use_task_specific_heads: Whether to use task-specific output heads.
+    :type use_task_specific_heads: bool
+    :param temperature: Temperature for generation tasks.
+    :type temperature: float
+    :param beam_size: Beam size for beam search.
+    :type beam_size: int
+    :param loss_weight: Weight for this task's loss in multi-task training.
+    :type loss_weight: float
     """
 
     name: str
@@ -277,10 +296,23 @@ class VLMTaskConfig:
 class VLMTaskConfiguration:
     """
     Configuration helper for managing task combinations in VLM multi-task models.
+
+    Validates and stores a set of VLM tasks, providing utilities for querying
+    capability requirements such as text generation.
+
+    :param tasks: List of VLMTaskType enum values to enable.
+    :type tasks: List[VLMTaskType]
+    :raises ValueError: If tasks list is empty or contains duplicates.
     """
 
     def __init__(self, tasks: List[VLMTaskType]):
-        """Initialize task configuration."""
+        """
+        Initialize task configuration.
+
+        :param tasks: List of VLMTaskType enum values to enable.
+        :type tasks: List[VLMTaskType]
+        :raises ValueError: If tasks list is empty or contains duplicates.
+        """
         if not tasks:
             raise ValueError("At least one task must be specified")
         if len(tasks) != len(set(tasks)):

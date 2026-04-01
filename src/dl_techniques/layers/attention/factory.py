@@ -18,16 +18,6 @@ Key Features:
     - Support for both dictionary-based and direct configuration
     - Integration with the dl_techniques logging system
     - Complete compatibility with Keras 3 serialization
-
-Example:
-    >>> # Create a standard multi-head attention layer
-    >>> mha = create_attention_layer('multi_head', dim=512, num_heads=8)
-    >>>
-    >>> # Create an efficient mobile MQA layer
-    >>> mobile_attn = create_attention_layer('mobile_mqa', dim=256, use_downsampling=True)
-    >>>
-    >>> # Create Multi-Head Latent Attention
-    >>> mla = create_attention_layer('multi_head_latent', dim=2048, num_heads=16, kv_latent_dim=512)
 """
 
 import keras
@@ -727,30 +717,12 @@ def get_attention_info() -> Dict[str, Dict[str, Any]]:
 
     This function provides complete metadata for each supported attention mechanism,
     including technical descriptions, parameter specifications, use cases, and
-    computational complexity analysis. Essential for understanding which attention
-    mechanism is appropriate for specific architectural requirements.
+    computational complexity analysis.
 
-    Returns:
-        Dict[str, Dict[str, Any]]: Comprehensive attention layer information containing:
-            - description: Technical mechanism description
-            - required_params: List of mandatory instantiation parameters
-            - optional_params: Dict of optional parameters with defaults
-            - use_case: Recommended applications and scenarios
-            - complexity: Computational complexity analysis
-            - paper: Reference to original research
-
-    Example:
-        >>> info = get_attention_info()
-        >>> # Explore available attention mechanisms
-        >>> for attn_type, details in info.items():
-        ...     print(f"{attn_type}: {details['description'][:100]}...")
-        ...     print(f"  Required: {details['required_params']}")
-        ...     print(f"  Complexity: {details['complexity']}")
-        ...     print()
-        >>>
-        >>> # Check specific attention requirements
-        >>> gqa_info = info['group_query']
-        >>> required = gqa_info['required_params']  # ['dim', 'num_heads', 'num_kv_heads']
+    :return: Comprehensive attention layer information containing description,
+        required_params, optional_params, use_case, complexity, and paper
+        for each attention type.
+    :rtype: Dict[str, Dict[str, Any]]
     """
     return {
         attn_type: info.copy() for attn_type, info in ATTENTION_REGISTRY.items()
@@ -761,38 +733,14 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     """
     Validate attention layer configuration parameters against type requirements.
 
-    Performs comprehensive validation of attention layer parameters including:
-    - Attention type existence validation
-    - Required parameter completeness checking
-    - Common parameter value range validation
-    - Type-specific constraint verification
+    Performs comprehensive validation including type existence, required parameter
+    completeness, value range validation, and type-specific constraint verification.
 
-    This function should be called before layer instantiation to catch configuration
-    errors early and provide clear diagnostic messages.
-
-    Args:
-        attention_type (str): The attention layer type to validate against.
-        **kwargs: Parameter dictionary to validate for the specified attention type.
-
-    Raises:
-        ValueError: If attention_type is not supported, required parameters are missing,
-                   or parameter values violate constraints.
-
-    Example:
-        >>> # Validate configuration before creation
-        >>> try:
-        ...     validate_attention_config(
-        ...         'group_query',
-        ...         dim=1024,
-        ...         num_heads=16,
-        ...         num_kv_heads=4
-        ...     )
-        ...     print("Configuration is valid")
-        >>> except ValueError as e:
-        ...     print(f"Validation failed: {e}")
-        >>>
-        >>> # This will raise an error due to missing required parameters
-        >>> validate_attention_config('differential', dim=256)  # Missing num_heads, head_dim
+    :param attention_type: The attention layer type to validate against.
+    :type attention_type: str
+    :param kwargs: Parameter dictionary to validate for the specified attention type.
+    :raises ValueError: If attention_type is not supported, required parameters are missing,
+        or parameter values violate constraints.
     """
     if attention_type not in ATTENTION_REGISTRY:
         available_types = list(ATTENTION_REGISTRY.keys())
@@ -879,68 +827,19 @@ def create_attention_layer(
 
     This is the primary factory function providing a centralized, type-safe way to
     instantiate any attention layer supported by the framework. It includes comprehensive
-    parameter validation, default value handling, and detailed error reporting to
-    facilitate debugging and development.
+    parameter validation, default value handling, and detailed error reporting.
 
-    The factory approach enables:
-    - Easy experimentation with different attention mechanisms
-    - Consistent parameter handling across all attention types
-    - Type safety with IDE autocompletion support
-    - Comprehensive validation and error reporting
-    - Simplified model architecture definition
-
-    Args:
-        attention_type (AttentionType): The type of attention layer to create.
-                                       Must be one of the supported literal types.
-        name (Optional[str], default=None): Optional name for the layer instance.
-                                          If provided, will be passed to the layer constructor.
-        **kwargs: Type-specific parameters for the attention layer. See `get_attention_info()`
-                 for detailed parameter specifications for each attention type.
-
-    Returns:
-        keras.layers.Layer: A fully configured and instantiated attention layer ready
-                           for integration into model architectures.
-
-    Raises:
-        ValueError: If attention_type is invalid, required parameters are missing,
-                   parameter values are out of valid ranges, or layer construction fails.
-        TypeError: If parameter types are incompatible with the target layer class.
-
-    Example:
-        >>> # Standard multi-head attention for transformers
-        >>> mha = create_attention_layer('multi_head', dim=512, num_heads=8, dropout_rate=0.1)
-        >>>
-        >>> # Mobile-optimized attention for edge deployment
-        >>> mobile_attn = create_attention_layer(
-        ...     'mobile_mqa',
-        ...     dim=256,
-        ...     num_heads=8,
-        ...     use_downsampling=True,
-        ...     name='mobile_attention_1'
-        ... )
-        >>>
-        >>> # CBAM for CNN enhancement
-        >>> cbam_block = create_attention_layer(
-        ...     'cbam',
-        ...     channels=128,
-        ...     ratio=16,
-        ...     kernel_size=7
-        ... )
-        >>>
-        >>> # Grouped Query Attention for large language models
-        >>> gqa = create_attention_layer(
-        ...     'group_query',
-        ...     dim=2048,
-        ...     num_heads=32,
-        ...     num_kv_heads=8,
-        ...     max_seq_len=4096
-        ... )
-
-    Note:
-        The factory automatically merges user-provided parameters with defaults
-        from the registry and filters parameters to match the target layer's
-        constructor signature, ensuring compatibility across different attention
-        implementations.
+    :param attention_type: The type of attention layer to create.
+    :type attention_type: AttentionType
+    :param name: Optional name for the layer instance.
+    :type name: Optional[str]
+    :param kwargs: Type-specific parameters for the attention layer. See
+        ``get_attention_info()`` for detailed parameter specifications.
+    :return: A fully configured and instantiated attention layer.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If attention_type is invalid, required parameters are missing,
+        parameter values are out of valid ranges, or layer construction fails.
+    :raises TypeError: If parameter types are incompatible with the target layer class.
     """
     try:
         # Validate configuration before proceeding
@@ -1001,48 +900,16 @@ def create_attention_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     Create an attention layer from a configuration dictionary.
 
     Convenience function for instantiating attention layers from dictionary-based
-    configurations. This is particularly useful for:
-    - Loading model architectures from JSON/YAML files
-    - Hyperparameter optimization pipelines
-    - Dynamic model architecture generation
-    - Configuration-driven model building
+    configurations, useful for loading architectures from JSON/YAML files,
+    hyperparameter optimization, and configuration-driven model building.
 
-    Args:
-        config (Dict[str, Any]): Configuration dictionary containing:
-                                - 'type': The attention layer type (required)
-                                - Additional keys for layer-specific parameters
-
-    Returns:
-        keras.layers.Layer: Instantiated and configured attention layer.
-
-    Raises:
-        ValueError: If config is not a dictionary or missing required 'type' key.
-        TypeError: If config parameter types are invalid.
-
-    Example:
-        >>> # Configuration-based layer creation
-        >>> window_config = {
-        ...     'type': 'window',
-        ...     'dim': 96,
-        ...     'window_size': 7,
-        ...     'num_heads': 3,
-        ...     'name': 'swin_attention_stage2'
-        ... }
-        >>> window_attn = create_attention_from_config(window_config)
-        >>>
-        >>> # Batch creation from multiple configurations
-        >>> attention_configs = [
-        ...     {'type': 'multi_head', 'dim': 512, 'num_heads': 8},
-        ...     {'type': 'group_query', 'dim': 1024, 'num_heads': 16, 'num_kv_heads': 4},
-        ...     {'type': 'cbam', 'channels': 256, 'ratio': 16}
-        ... ]
-        >>> attention_layers = [create_attention_from_config(cfg) for cfg in attention_configs]
-        >>>
-        >>> # Integration with hyperparameter optimization
-        >>> def build_model_with_attention(attn_config):
-        ...     attention = create_attention_from_config(attn_config)
-        ...     # ... build rest of model
-        ...     return model
+    :param config: Configuration dictionary containing a 'type' key specifying the
+        attention layer type and additional keys for layer-specific parameters.
+    :type config: Dict[str, Any]
+    :return: Instantiated and configured attention layer.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If config is not a dictionary or missing required 'type' key.
+    :raises TypeError: If config parameter types are invalid.
     """
     if not isinstance(config, dict):
         raise ValueError(
@@ -1070,25 +937,8 @@ def list_attention_types() -> List[str]:
     """
     Get a list of all supported attention layer types.
 
-    Convenience function returning a simple list of supported attention mechanisms
-    for programmatic access, iteration, and validation purposes.
-
-    Returns:
-        List[str]: Alphabetically sorted list of supported attention layer types.
-
-    Example:
-        >>> # Get all available types
-        >>> attention_types = list_attention_types()
-        >>> print(f"Supported attention mechanisms: {len(attention_types)}")
-        >>> for attn_type in attention_types:
-        ...     print(f"  - {attn_type}")
-        >>>
-        >>> # Validate user input
-        >>> user_choice = "multi_head"
-        >>> if user_choice in list_attention_types():
-        ...     layer = create_attention_layer(user_choice, dim=256)
-        >>> else:
-        ...     print(f"Invalid choice. Available: {list_attention_types()}")
+    :return: Alphabetically sorted list of supported attention layer types.
+    :rtype: List[str]
     """
     return sorted(list(ATTENTION_REGISTRY.keys()))
 
@@ -1100,30 +950,12 @@ def get_attention_requirements(attention_type: str) -> Dict[str, Any]:
     Returns detailed parameter information for a single attention type,
     useful for dynamic UI generation, parameter validation, and documentation.
 
-    Args:
-        attention_type (str): The attention layer type to query.
-
-    Returns:
-        Dict[str, Any]: Parameter requirements containing:
-                       - required_params: List of mandatory parameters
-                       - optional_params: Dict of optional parameters with defaults
-                       - description: Technical description
-                       - use_case: Recommended applications
-
-    Raises:
-        ValueError: If attention_type is not supported.
-
-    Example:
-        >>> # Get requirements for specific attention type
-        >>> reqs = get_attention_requirements('group_query')
-        >>> print(f"Required: {reqs['required_params']}")
-        >>> print(f"Optional defaults: {reqs['optional_params']}")
-        >>>
-        >>> # Dynamic parameter validation
-        >>> def validate_user_params(attn_type, user_params):
-        ...     reqs = get_attention_requirements(attn_type)
-        ...     missing = [p for p in reqs['required_params'] if p not in user_params]
-        ...     return len(missing) == 0, missing
+    :param attention_type: The attention layer type to query.
+    :type attention_type: str
+    :return: Parameter requirements containing required_params, optional_params,
+        description, and use_case.
+    :rtype: Dict[str, Any]
+    :raises ValueError: If attention_type is not supported.
     """
     if attention_type not in ATTENTION_REGISTRY:
         available_types = list(ATTENTION_REGISTRY.keys())

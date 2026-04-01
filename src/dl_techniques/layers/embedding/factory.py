@@ -144,21 +144,9 @@ def get_embedding_info() -> Dict[str, Dict[str, Any]]:
     """
     Get comprehensive information about all available embedding layer types.
 
-    Returns:
-        Dict containing information about each embedding type, including:
-        - description: Human-readable description
-        - required_params: List of required parameter names
-        - optional_params: Dict of optional parameters with defaults
-        - use_case: Recommended use case for the embedding type
-
-    Example:
-        ```python
-        info = get_embedding_info()
-        for embed_type, details in info.items():
-            print(f"{embed_type}: {details['description']}")
-            print(f"  Required: {details['required_params']}")
-            print(f"  Use case: {details['use_case']}")
-        ```
+    :return: Dict containing information about each embedding type, including
+        description, required_params, optional_params, and use_case.
+    :rtype: Dict[str, Dict[str, Any]]
     """
     return {embed_type: info.copy() for embed_type, info in EMBEDDING_REGISTRY.items()}
 
@@ -166,22 +154,11 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
     """
     Validate embedding configuration parameters.
 
-    Args:
-        embedding_type: Type of embedding to validate.
-        **kwargs: Parameters to validate against the embedding type's requirements.
-
-    Raises:
-        ValueError: If embedding_type is invalid, required parameters are missing,
-                    or parameter values are out of their valid range.
-
-    Example:
-        ```python
-        try:
-            validate_embedding_config('rope', head_dim=64, max_seq_len=512)
-            print("Configuration is valid.")
-        except ValueError as e:
-            print(f"Invalid configuration: {e}")
-        ```
+    :param embedding_type: Type of embedding to validate.
+    :type embedding_type: str
+    :param kwargs: Parameters to validate against the embedding type's requirements.
+    :raises ValueError: If embedding_type is invalid, required parameters are missing,
+        or parameter values are out of their valid range.
     """
     if embedding_type not in EMBEDDING_REGISTRY:
         available_types = list(EMBEDDING_REGISTRY.keys())
@@ -277,39 +254,16 @@ def create_embedding_layer(
     This function provides a centralized way to create any embedding layer
     supported by dl_techniques, with comprehensive parameter validation.
 
-    Args:
-        embedding_type: Type of embedding layer to create.
-        name: Optional name for the layer.
-        **kwargs: Parameters specific to the embedding type. See individual layer
-            documentation or use `get_embedding_info()` for details.
-
-    Returns:
-        A configured Keras embedding layer instance.
-
-    Raises:
-        ValueError: If embedding_type is invalid, parameters are missing or invalid.
-        TypeError: If parameter types are incorrect for the layer.
-
-    Example:
-        ```python
-        # Create a 2D patch embedding layer for a ViT
-        patch_embed = create_embedding_layer(
-            'patch_2d',
-            patch_size=16,
-            embed_dim=768,
-            name='vit_patch_embed'
-        )
-
-        # Create a BERT embeddings layer
-        bert_embed = create_embedding_layer(
-            'bert_embeddings',
-            vocab_size=30522,
-            hidden_size=768,
-            max_position_embeddings=512,
-            type_vocab_size=2,
-            name='bert_embeddings'
-        )
-        ```
+    :param embedding_type: Type of embedding layer to create.
+    :type embedding_type: EmbeddingType
+    :param name: Optional name for the layer.
+    :type name: Optional[str]
+    :param kwargs: Parameters specific to the embedding type. See individual layer
+        documentation or use ``get_embedding_info()`` for details.
+    :return: A configured Keras embedding layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If embedding_type is invalid, parameters are missing or invalid.
+    :raises TypeError: If parameter types are incorrect for the layer.
     """
     try:
         # Validate the provided configuration
@@ -372,29 +326,12 @@ def create_embedding_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
     Create an embedding layer from a configuration dictionary.
 
-    Args:
-        config: A dictionary containing a 'type' key specifying the embedding
-                layer and other keys as its parameters.
-
-    Returns:
-        A configured Keras embedding layer instance.
-
-    Raises:
-        ValueError: If 'type' key is missing from config or config is not a dict.
-
-    Example:
-        ```python
-        config = {
-            'type': 'bert_embeddings',
-            'vocab_size': 30522,
-            'hidden_size': 768,
-            'max_position_embeddings': 512,
-            'type_vocab_size': 2,
-            'normalization_type': 'rms_norm',
-            'name': 'bert_embeddings'
-        }
-        bert_embed = create_embedding_from_config(config)
-        ```
+    :param config: A dictionary containing a 'type' key specifying the embedding
+        layer and other keys as its parameters.
+    :type config: Dict[str, Any]
+    :return: A configured Keras embedding layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If 'type' key is missing from config or config is not a dict.
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dictionary, got {type(config)}")

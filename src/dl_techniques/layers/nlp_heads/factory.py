@@ -33,22 +33,35 @@ class BaseNLPHead(keras.layers.Layer):
     Provides common functionality and structure for task-specific heads,
     designed to work with any NLP foundation model's output.
 
-    Args:
-        task_config: NLPTaskConfig object with task configuration
-        input_dim: Dimension of input features from foundation model
-        normalization_type: Type of normalization to use
-        activation_type: Type of activation function
-        use_pooling: Whether to use pooling for sequence-level tasks
-        pooling_type: Type of pooling ('mean', 'max', 'cls', 'attention')
-        use_intermediate: Whether to use intermediate dense layer
-        intermediate_size: Size of intermediate layer if used
-        use_task_attention: Whether to use task-specific attention
-        attention_type: Type of attention mechanism if used
-        use_ffn: Whether to include FFN block
-        ffn_type: Type of FFN to use
-        ffn_expansion_factor: Expansion factor for FFN
-        initializer_range: Standard deviation for weight initialization
-        **kwargs: Additional arguments for base Layer class
+    :param task_config: NLPTaskConfig object with task configuration.
+    :type task_config: NLPTaskConfig
+    :param input_dim: Dimension of input features from foundation model.
+    :type input_dim: int
+    :param normalization_type: Type of normalization to use.
+    :type normalization_type: NormalizationType
+    :param activation_type: Type of activation function.
+    :type activation_type: ActivationType
+    :param use_pooling: Whether to use pooling for sequence-level tasks.
+    :type use_pooling: bool
+    :param pooling_type: Type of pooling ('mean', 'max', 'cls', 'attention').
+    :type pooling_type: Literal['mean', 'max', 'cls', 'attention']
+    :param use_intermediate: Whether to use intermediate dense layer.
+    :type use_intermediate: bool
+    :param intermediate_size: Size of intermediate layer if used.
+    :type intermediate_size: Optional[int]
+    :param use_task_attention: Whether to use task-specific attention.
+    :type use_task_attention: bool
+    :param attention_type: Type of attention mechanism if used.
+    :type attention_type: AttentionType
+    :param use_ffn: Whether to include FFN block.
+    :type use_ffn: bool
+    :param ffn_type: Type of FFN to use.
+    :type ffn_type: FFNType
+    :param ffn_expansion_factor: Expansion factor for FFN.
+    :type ffn_expansion_factor: int
+    :param initializer_range: Standard deviation for weight initialization.
+    :type initializer_range: float
+    :param kwargs: Additional arguments for base Layer class.
     """
 
     def __init__(
@@ -180,12 +193,12 @@ class BaseNLPHead(keras.layers.Layer):
         """
         Pool sequence representations to a single vector.
 
-        Args:
-            sequence: Sequence tensor [batch_size, seq_length, hidden_dim]
-            attention_mask: Optional attention mask [batch_size, seq_length]
-
-        Returns:
-            Pooled representation [batch_size, hidden_dim]
+        :param sequence: Sequence tensor [batch_size, seq_length, hidden_dim].
+        :type sequence: keras.KerasTensor
+        :param attention_mask: Optional attention mask [batch_size, seq_length].
+        :type attention_mask: Optional[keras.KerasTensor]
+        :return: Pooled representation [batch_size, hidden_dim].
+        :rtype: keras.KerasTensor
         """
         if self.pooling_type == 'cls':
             # Use first token (CLS token for BERT-like models)
@@ -398,12 +411,12 @@ class TextClassificationHead(BaseNLPHead):
         """
         Forward pass through classification head.
 
-        Args:
-            inputs: Either sequence tensor or dict with 'hidden_states' and optional 'attention_mask'
-            training: Whether in training mode
-
-        Returns:
-            Dictionary with 'logits' and 'probabilities'
+        :param inputs: Either sequence tensor or dict with 'hidden_states' and optional 'attention_mask'.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Dictionary with 'logits' and 'probabilities'.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
         if isinstance(inputs, dict):
@@ -526,8 +539,8 @@ class TokenClassificationHead(BaseNLPHead):
         """
         Forward pass through token classification head.
 
-        Returns:
-            Dictionary with 'logits' and optional 'predictions'
+        :return: Dictionary with 'logits' and optional 'predictions'.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
         if isinstance(inputs, dict):
@@ -644,8 +657,8 @@ class QuestionAnsweringHead(BaseNLPHead):
         """
         Forward pass through QA head.
 
-        Returns:
-            Dictionary with 'start_logits', 'end_logits', and optionally answer spans
+        :return: Dictionary with 'start_logits', 'end_logits', and optionally answer spans.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
         if isinstance(inputs, dict):
@@ -791,14 +804,13 @@ class TextSimilarityHead(BaseNLPHead):
         """
         Forward pass through similarity head.
 
-        Args:
-            inputs: Can be:
-                - Single sequence tensor
-                - Dict with 'hidden_states'
-                - Tuple of two sequences for pairwise similarity
-
-        Returns:
-            Dictionary with 'embeddings' and/or 'similarity_score'
+        :param inputs: Single sequence tensor, dict with 'hidden_states',
+            or tuple of two sequences for pairwise similarity.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor], Tuple]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Dictionary with 'embeddings' and/or 'similarity_score'.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
         if isinstance(inputs, tuple) and len(inputs) == 2:
@@ -957,8 +969,8 @@ class TextGenerationHead(BaseNLPHead):
         """
         Forward pass through generation head.
 
-        Returns:
-            Dictionary with 'logits' over vocabulary
+        :return: Dictionary with 'logits' over vocabulary.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
         if isinstance(inputs, dict):
@@ -1048,12 +1060,13 @@ class MultipleChoiceHead(BaseNLPHead):
         """
         Forward pass through multiple choice head.
 
-        Args:
-            inputs: Should have shape [batch_size, num_choices, seq_len, hidden_dim]
-                   or be a dict with such 'hidden_states'
-
-        Returns:
-            Dictionary with 'logits' over choices
+        :param inputs: Should have shape [batch_size, num_choices, seq_len, hidden_dim]
+            or be a dict with such 'hidden_states'.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Dictionary with 'logits' over choices.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         if isinstance(inputs, dict):
             hidden_states = inputs['hidden_states']
@@ -1105,11 +1118,13 @@ class MultiTaskNLPHead(keras.layers.Layer):
     """
     Multi-task head that combines multiple task-specific NLP heads.
 
-    Args:
-        task_configs: Dictionary mapping task names to NLPTaskConfig objects
-        shared_input_dim: Dimension of shared features from foundation model
-        use_task_specific_projections: Whether to use task-specific projections
-        **kwargs: Additional arguments
+    :param task_configs: Dictionary mapping task names to NLPTaskConfig objects.
+    :type task_configs: Dict[str, NLPTaskConfig]
+    :param shared_input_dim: Dimension of shared features from foundation model.
+    :type shared_input_dim: int
+    :param use_task_specific_projections: Whether to use task-specific projections.
+    :type use_task_specific_projections: bool
+    :param kwargs: Additional arguments.
     """
 
     def __init__(
@@ -1219,13 +1234,14 @@ class MultiTaskNLPHead(keras.layers.Layer):
         """
         Forward pass through multi-task head.
 
-        Args:
-            inputs: Input features from foundation model
-            task_name: Specific task to run (if None, runs all tasks)
-            training: Whether in training mode
-
-        Returns:
-            Dictionary of task outputs or single task output
+        :param inputs: Input features from foundation model.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param task_name: Specific task to run (if None, runs all tasks).
+        :type task_name: Optional[str]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Dictionary of task outputs or single task output.
+        :rtype: Union[Dict[str, Dict[str, keras.KerasTensor]], Dict[str, keras.KerasTensor]]
         """
         # Handle single task
         if task_name is not None:
@@ -1309,7 +1325,14 @@ class MultiTaskNLPHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 def get_head_class(task_type: NLPTaskType) -> type:
-    """Get the appropriate head class for a task type."""
+    """
+    Get the appropriate head class for a task type.
+
+    :param task_type: The NLP task type to look up.
+    :type task_type: NLPTaskType
+    :return: The head class corresponding to the given task type.
+    :rtype: type
+    """
     head_mapping = {
         # Classification tasks
         NLPTaskType.TEXT_CLASSIFICATION: TextClassificationHead,
@@ -1363,31 +1386,13 @@ def create_nlp_head(
     """
     Factory function to create NLP task heads.
 
-    Args:
-        task_config: NLPTaskConfig object or dict with task configuration
-        input_dim: Dimension of input features from foundation model
-        **kwargs: Additional configuration parameters
-
-    Returns:
-        Configured NLP head for the specified task
-
-    Example:
-        >>> # Create sentiment classification head
-        >>> config = NLPTaskConfig(
-        ...     name="sentiment",
-        ...     task_type=NLPTaskType.SENTIMENT_ANALYSIS,
-        ...     num_classes=3
-        ... )
-        >>> head = create_nlp_head(config, input_dim=768)
-
-        >>> # Create NER head with CRF
-        >>> ner_config = NLPTaskConfig(
-        ...     name="ner",
-        ...     task_type=NLPTaskType.NAMED_ENTITY_RECOGNITION,
-        ...     num_classes=9,
-        ...     use_crf=True
-        ... )
-        >>> ner_head = create_nlp_head(ner_config, input_dim=768)
+    :param task_config: NLPTaskConfig object or dict with task configuration.
+    :type task_config: Union[NLPTaskConfig, Dict[str, Any]]
+    :param input_dim: Dimension of input features from foundation model.
+    :type input_dim: int
+    :param kwargs: Additional configuration parameters.
+    :return: Configured NLP head for the specified task.
+    :rtype: BaseNLPHead
     """
     # Convert dict to NLPTaskConfig if needed
     if isinstance(task_config, dict):
@@ -1412,23 +1417,13 @@ def create_multi_task_nlp_head(
     """
     Create a multi-task NLP head from task configurations.
 
-    Args:
-        task_configs: List or dict of NLPTaskConfig objects
-        input_dim: Dimension of input features from foundation model
-        **kwargs: Additional configuration
-
-    Returns:
-        MultiTaskNLPHead instance
-
-    Example:
-        >>> # Create multi-task head for GLUE-like tasks
-        >>> configs = [
-        ...     NLPTaskConfig("cola", NLPTaskType.TEXT_CLASSIFICATION, num_classes=2),
-        ...     NLPTaskConfig("sst", NLPTaskType.SENTIMENT_ANALYSIS, num_classes=5),
-        ...     NLPTaskConfig("mrpc", NLPTaskType.PARAPHRASE_DETECTION, num_classes=2),
-        ...     NLPTaskConfig("sts", NLPTaskType.TEXT_SIMILARITY),
-        ... ]
-        >>> multi_head = create_multi_task_nlp_head(configs, input_dim=768)
+    :param task_configs: List or dict of NLPTaskConfig objects.
+    :type task_configs: Union[List[NLPTaskConfig], Dict[str, NLPTaskConfig]]
+    :param input_dim: Dimension of input features from foundation model.
+    :type input_dim: int
+    :param kwargs: Additional configuration.
+    :return: MultiTaskNLPHead instance.
+    :rtype: MultiTaskNLPHead
     """
     # Convert list to dict if needed
     if isinstance(task_configs, list):
@@ -1450,7 +1445,14 @@ class NLPHeadConfiguration:
 
     @staticmethod
     def get_default_config(task_type: NLPTaskType) -> Dict[str, Any]:
-        """Get default configuration for a task type."""
+        """
+        Get default configuration for a task type.
+
+        :param task_type: The NLP task type to get defaults for.
+        :type task_type: NLPTaskType
+        :return: Default configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         base_config = {
             'dropout_rate': 0.1,
             'normalization_type': 'layer_norm',

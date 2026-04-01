@@ -141,13 +141,8 @@ class TaskType(Enum):
         """
         Get all available task types.
 
-        Returns:
-            List of all TaskType enum values.
-
-        Example:
-            >>> all_tasks = TaskType.all_tasks()
-            >>> print(len(all_tasks))
-            42
+        :return: List of all TaskType enum values.
+        :rtype: List[TaskType]
         """
         return list(cls)
 
@@ -156,13 +151,8 @@ class TaskType(Enum):
         """
         Get tasks organized by categories.
 
-        Returns:
-            Dictionary mapping category names to lists of tasks.
-
-        Example:
-            >>> categories = TaskType.get_task_categories()
-            >>> core_tasks = categories["Core Detection & Segmentation"]
-            >>> assert TaskType.DETECTION in core_tasks
+        :return: Dictionary mapping category names to lists of tasks.
+        :rtype: Dict[str, List[TaskType]]
         """
         return {
             "Core Detection & Segmentation": [
@@ -233,15 +223,10 @@ class TaskType(Enum):
         """
         Get tasks that are commonly combined with the given task.
 
-        Args:
-            task: The reference task.
-
-        Returns:
-            List of tasks that work well together with the reference task.
-
-        Example:
-            >>> compatible = TaskType.get_compatible_tasks(TaskType.DETECTION)
-            >>> assert TaskType.INSTANCE_SEGMENTATION in compatible
+        :param task: The reference task.
+        :type task: TaskType
+        :return: List of tasks that work well together with the reference task.
+        :rtype: List[TaskType]
         """
         compatibility_map = {
             # Core tasks work well together
@@ -301,16 +286,10 @@ class TaskType(Enum):
         """
         Get the expected output types for a given task.
 
-        Args:
-            task: The task to get output types for.
-
-        Returns:
-            Dictionary mapping output names to their types/shapes.
-
-        Example:
-            >>> outputs = TaskType.get_output_types(TaskType.DETECTION)
-            >>> assert "bboxes" in outputs
-            >>> assert "classes" in outputs
+        :param task: The task to get output types for.
+        :type task: TaskType
+        :return: Dictionary mapping output names to their types/shapes.
+        :rtype: Dict[str, str]
         """
         output_types = {
             cls.DETECTION: {
@@ -387,18 +366,11 @@ class TaskType(Enum):
         """
         Create TaskType from string value.
 
-        Args:
-            task_str: String representation of the task.
-
-        Returns:
-            TaskType enum value.
-
-        Raises:
-            ValueError: If task_str is not a valid task type.
-
-        Example:
-            >>> task = TaskType.from_string("depth_estimation")
-            >>> assert task == TaskType.DEPTH_ESTIMATION
+        :param task_str: String representation of the task.
+        :type task_str: str
+        :return: TaskType enum value.
+        :rtype: TaskType
+        :raises ValueError: If task_str is not a valid task type.
         """
         task_str = task_str.lower().strip()
         for task in cls:
@@ -416,19 +388,11 @@ class TaskType(Enum):
         """
         Create list of TaskTypes from list of strings.
 
-        Args:
-            task_strs: List of string representations of tasks.
-
-        Returns:
-            List of TaskType enum values.
-
-        Raises:
-            ValueError: If any task_str is not a valid task type.
-
-        Example:
-            >>> tasks = TaskType.from_strings(["detection", "depth_estimation"])
-            >>> assert TaskType.DETECTION in tasks
-            >>> assert TaskType.DEPTH_ESTIMATION in tasks
+        :param task_strs: List of string representations of tasks.
+        :type task_strs: List[str]
+        :return: List of TaskType enum values.
+        :rtype: List[TaskType]
+        :raises ValueError: If any task_str is not a valid task type.
         """
         return [cls.from_string(task_str) for task_str in task_strs]
 
@@ -437,16 +401,10 @@ class TaskType(Enum):
         """
         Convert list of TaskTypes to list of strings.
 
-        Args:
-            tasks: List of TaskType enum values.
-
-        Returns:
-            List of string representations.
-
-        Example:
-            >>> tasks = [TaskType.DETECTION, TaskType.SURFACE_NORMALS]
-            >>> strings = TaskType.to_strings(tasks)
-            >>> assert strings == ["detection", "surface_normals"]
+        :param tasks: List of TaskType enum values.
+        :type tasks: List[TaskType]
+        :return: List of string representations.
+        :rtype: List[str]
         """
         return [task.value for task in tasks]
 
@@ -454,12 +412,8 @@ class TaskType(Enum):
         """
         Get the category this task belongs to.
 
-        Returns:
-            Category name as string.
-
-        Example:
-            >>> category = TaskType.DEPTH_ESTIMATION.get_category()
-            >>> assert category == "Geometric Understanding"
+        :return: Category name as string.
+        :rtype: str
         """
         categories = self.get_task_categories()
         for category_name, task_list in categories.items():
@@ -471,15 +425,10 @@ class TaskType(Enum):
         """
         Check if this task is compatible with another task.
 
-        Args:
-            other: Another TaskType to check compatibility with.
-
-        Returns:
-            True if tasks are compatible, False otherwise.
-
-        Example:
-            >>> is_compat = TaskType.DETECTION.is_compatible_with(TaskType.SEGMENTATION)
-            >>> assert is_compat == True
+        :param other: Another TaskType to check compatibility with.
+        :type other: TaskType
+        :return: True if tasks are compatible, False otherwise.
+        :rtype: bool
         """
         compatible_tasks = self.get_compatible_tasks(self)
         return other in compatible_tasks
@@ -499,31 +448,43 @@ class TaskConfiguration:
     """
     Configuration helper for managing task combinations in multi-task models.
 
-    This class provides utilities for validating and managing task configurations,
+    Provides utilities for validating and managing task configurations,
     ensuring that valid combinations are used and providing helpful error messages.
 
-    Args:
-        tasks: List of TaskType enum values to enable.
-        validate_compatibility: Whether to check task compatibility.
+    **Architecture Overview:**
 
-    Example:
-        >>> config = TaskConfiguration([TaskType.DETECTION, TaskType.SEGMENTATION])
-        >>> assert config.has_detection()
-        >>> assert config.has_segmentation()
-        >>> assert not config.has_classification()
+    .. code-block:: text
+
+        ┌──────────────────────────┐
+        │    TaskConfiguration     │
+        │                          │
+        │  ┌────────────────────┐  │
+        │  │  Set[TaskType]     │  │
+        │  │  (enabled tasks)   │  │
+        │  └────────┬───────────┘  │
+        │           ▼              │
+        │  ┌────────────────────┐  │
+        │  │  Compatibility     │  │
+        │  │  Validation        │  │
+        │  └────────────────────┘  │
+        └──────────────────────────┘
+
+    :param tasks: List of TaskType enum values to enable.
+    :type tasks: List[TaskType]
+    :param validate_compatibility: Whether to check task compatibility.
+    :type validate_compatibility: bool
     """
 
     def __init__(self, tasks: List[TaskType], validate_compatibility: bool = True):
         """
         Initialize task configuration.
 
-        Args:
-            tasks: List of TaskType enum values to enable.
-            validate_compatibility: Whether to validate task compatibility.
-
-        Raises:
-            ValueError: If tasks list is empty, contains duplicates, or
-                       contains incompatible tasks (when validation enabled).
+        :param tasks: List of TaskType enum values to enable.
+        :type tasks: List[TaskType]
+        :param validate_compatibility: Whether to validate task compatibility.
+        :type validate_compatibility: bool
+        :raises ValueError: If tasks list is empty, contains duplicates, or
+            contains incompatible tasks (when validation enabled).
         """
         if not tasks:
             raise ValueError("At least one task must be specified")
@@ -622,8 +583,8 @@ class TaskConfiguration:
         """
         Get enabled tasks organized by category.
 
-        Returns:
-            Dictionary mapping category names to lists of enabled tasks.
+        :return: Dictionary mapping category names to lists of enabled tasks.
+        :rtype: Dict[str, List[TaskType]]
         """
         categories = TaskType.get_task_categories()
         result = {}
@@ -639,8 +600,8 @@ class TaskConfiguration:
         """
         Get output specifications for all enabled tasks.
 
-        Returns:
-            Dictionary mapping tasks to their output specifications.
+        :return: Dictionary mapping tasks to their output specifications.
+        :rtype: Dict[TaskType, Dict[str, str]]
         """
         return {task: TaskType.get_output_types(task) for task in self._tasks}
 
@@ -648,8 +609,8 @@ class TaskConfiguration:
         """
         Convert configuration to dictionary for serialization.
 
-        Returns:
-            Dictionary with task names and their enabled status.
+        :return: Dictionary with task names and their enabled status.
+        :rtype: dict
         """
         result = {}
         for task in TaskType.all_tasks():
@@ -661,20 +622,12 @@ class TaskConfiguration:
         """
         Create TaskConfiguration from dictionary.
 
-        Args:
-            config_dict: Dictionary with boolean flags for tasks.
-            validate_compatibility: Whether to validate task compatibility.
-
-        Returns:
-            TaskConfiguration instance.
-
-        Example:
-            >>> config_dict = {
-            ...     "enable_detection": True,
-            ...     "enable_depth_estimation": True,
-            ...     "enable_classification": False
-            ... }
-            >>> config = TaskConfiguration.from_dict(config_dict)
+        :param config_dict: Dictionary with boolean flags for tasks.
+        :type config_dict: dict
+        :param validate_compatibility: Whether to validate task compatibility.
+        :type validate_compatibility: bool
+        :return: TaskConfiguration instance.
+        :rtype: TaskConfiguration
         """
         tasks = []
 
@@ -690,15 +643,12 @@ class TaskConfiguration:
         """
         Create TaskConfiguration from list of task name strings.
 
-        Args:
-            task_strings: List of task names as strings.
-            validate_compatibility: Whether to validate task compatibility.
-
-        Returns:
-            TaskConfiguration instance.
-
-        Example:
-            >>> config = TaskConfiguration.from_strings(["detection", "depth_estimation"])
+        :param task_strings: List of task names as strings.
+        :type task_strings: List[str]
+        :param validate_compatibility: Whether to validate task compatibility.
+        :type validate_compatibility: bool
+        :return: TaskConfiguration instance.
+        :rtype: TaskConfiguration
         """
         tasks = TaskType.from_strings(task_strings)
         return cls(tasks, validate_compatibility=validate_compatibility)
@@ -803,8 +753,8 @@ class CommonTaskConfigurations:
         """
         Get all predefined configurations.
 
-        Returns:
-            List of all predefined TaskConfiguration instances.
+        :return: List of all predefined TaskConfiguration instances.
+        :rtype: List[TaskConfiguration]
         """
         return [
             # Single tasks - Core
@@ -848,8 +798,8 @@ class CommonTaskConfigurations:
         """
         Get configurations organized by complexity level.
 
-        Returns:
-            Dictionary mapping complexity levels to configuration lists.
+        :return: Dictionary mapping complexity levels to configuration lists.
+        :rtype: Dict[str, List[TaskConfiguration]]
         """
         return {
             "Single Task": [
@@ -880,22 +830,15 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
     """
     Parse various task input formats into TaskConfiguration.
 
-    Args:
-        tasks: Can be:
-            - List of TaskType enums
-            - List of strings
-            - TaskConfiguration instance
-            - Single TaskType enum
-            - Single string
-        validate_compatibility: Whether to validate task compatibility.
+    Accepts TaskConfiguration instances, single or lists of TaskType enums,
+    and single or lists of string task names.
 
-    Returns:
-        TaskConfiguration instance.
-
-    Example:
-        >>> config1 = parse_task_list(["detection", "depth_estimation"])
-        >>> config2 = parse_task_list([TaskType.DETECTION, TaskType.DEPTH_ESTIMATION])
-        >>> assert config1 == config2
+    :param tasks: Task specification in any supported format.
+    :param validate_compatibility: Whether to validate task compatibility.
+    :type validate_compatibility: bool
+    :return: TaskConfiguration instance.
+    :rtype: TaskConfiguration
+    :raises ValueError: If the task format is invalid or the task list is empty.
     """
     if isinstance(tasks, TaskConfiguration):
         return tasks
@@ -922,16 +865,12 @@ def get_task_suggestions(base_task: TaskType, max_suggestions: int = 5) -> List[
     """
     Get task suggestions that work well with a base task.
 
-    Args:
-        base_task: The base task to find compatible tasks for.
-        max_suggestions: Maximum number of suggestions to return.
-
-    Returns:
-        List of compatible TaskType suggestions.
-
-    Example:
-        >>> suggestions = get_task_suggestions(TaskType.DETECTION)
-        >>> assert TaskType.SEGMENTATION in suggestions
+    :param base_task: The base task to find compatible tasks for.
+    :type base_task: TaskType
+    :param max_suggestions: Maximum number of suggestions to return.
+    :type max_suggestions: int
+    :return: List of compatible TaskType suggestions.
+    :rtype: List[TaskType]
     """
     compatible_tasks = TaskType.get_compatible_tasks(base_task)
     return compatible_tasks[:max_suggestions]
@@ -941,16 +880,10 @@ def validate_task_combination(tasks: List[TaskType]) -> tuple[bool, Optional[str
     """
     Validate if a combination of tasks is reasonable.
 
-    Args:
-        tasks: List of tasks to validate.
-
-    Returns:
-        Tuple of (is_valid, error_message).
-
-    Example:
-        >>> is_valid, error = validate_task_combination([TaskType.DETECTION, TaskType.SEGMENTATION])
-        >>> assert is_valid == True
-        >>> assert error is None
+    :param tasks: List of tasks to validate.
+    :type tasks: List[TaskType]
+    :return: Tuple of (is_valid, error_message).
+    :rtype: tuple[bool, Optional[str]]
     """
     try:
         TaskConfiguration(tasks, validate_compatibility=True)

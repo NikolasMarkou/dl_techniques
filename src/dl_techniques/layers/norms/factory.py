@@ -51,129 +51,27 @@ def create_normalization_layer(
 
     This factory function provides a unified interface for creating various normalization
     layers, supporting both standard Keras layers and specialized layers from the
-    dl_techniques framework. It allows for easy experimentation with different
-    normalization techniques through a single API.
+    dl_techniques framework.
 
-    Args:
-        normalization_type: Type of normalization layer to create. Supported types:
-            - 'layer_norm': Standard Keras LayerNormalization
-            - 'batch_norm': Standard Keras BatchNormalization
-            - 'rms_norm': Root Mean Square normalization
-            - 'zero_centered_rms_norm': Zero-centered RMS normalization with mean centering
-            - 'zero_centered_band_rms_norm': Combines zero-centering, RMS, and band constraints
-            - 'band_rms': RMS normalization with bounded constraints
-            - 'adaptive_band_rms': Adaptive RMS with log-transformed scaling
-            - 'band_logit_norm': Band-constrained logit normalization
-            - 'global_response_norm': Global response normalization (GRN)
-            - 'logit_norm': LogitNorm for classification tasks
-            - 'max_logit_norm': MaxLogit normalization for OOD detection
-            - 'decoupled_max_logit': Decoupled MaxLogit (DML) normalization
-            - 'dml_plus_focal': DML+ focal model variant
-            - 'dml_plus_center': DML+ center model variant
-            - 'dynamic_tanh': Dynamic Tanh normalization (normalization-free)
-        name: Optional name for the layer. If None, layer will use default naming.
-        epsilon: Small constant for numerical stability. Defaults to 1e-6.
-            Used by normalization layers that support epsilon parameter.
-        **kwargs: Additional keyword arguments specific to each normalization type.
-            These will override default parameters and allow fine-tuning of layer behavior.
-
-            Common kwargs by normalization type:
-
-            layer_norm/batch_norm:
-                - axis: Normalization axis
-                - center: Whether to add learnable bias
-                - scale: Whether to add learnable scale
-
-            rms_norm/zero_centered_rms_norm:
-                - axis: Normalization axis (int or tuple)
-                - use_scale: Whether to use learnable scale parameter
-                - scale_initializer: Initializer for scale parameter
-
-            zero_centered_band_rms_norm:
-                - max_band_width: Maximum band width constraint
-                - axis: Normalization axis
-                - band_initializer: Initializer for band parameter
-
-            band_rms/adaptive_band_rms:
-                - max_band_width: Maximum band width constraint
-                - axis: Normalization axis
-
-            band_logit_norm:
-                - max_band_width: Maximum band width for logit constraint
-                - axis: Normalization axis
-
-            global_response_norm:
-                - eps: Alternative epsilon parameter name for GRN
-
-            logit_norm:
-                - temperature: Temperature parameter for logit scaling
-                - axis: Normalization axis
-
-            max_logit_norm:
-                - axis: Normalization axis
-
-            decoupled_max_logit:
-                - constant: Constant value for decoupling
-                - axis: Normalization axis
-
-            dml_plus_focal/dml_plus_center:
-                - model_type: Automatically set based on normalization_type
-                - axis: Normalization axis
-
-            dynamic_tanh:
-                - axis: Normalization axis
-                - alpha_init_value: Initial alpha value for dynamic scaling
-
-    Returns:
-        Configured normalization layer instance ready for use in neural networks.
-
-    Raises:
-        ValueError: If normalization_type is not supported or if invalid parameters
-            are provided for the specific normalization type.
-        TypeError: If kwargs contain invalid parameter types for the chosen layer.
-
-    Example:
-        ```python
-        # Standard layer normalization
-        layer_norm = create_normalization_layer(
-            'layer_norm',
-            name='encoder_norm',
-            epsilon=1e-5
-        )
-
-        # Zero-centered RMS normalization for enhanced stability
-        zero_centered_rms = create_normalization_layer(
-            'zero_centered_rms_norm',
-            name='zero_centered_norm',
-            axis=-1,
-            use_scale=True,
-            epsilon=1e-5
-        )
-
-        # Zero-centered Band RMS for maximum stability
-        zero_centered_band_rms = create_normalization_layer(
-            'zero_centered_band_rms_norm',
-            name='stable_constrained_norm',
-            max_band_width=0.1,
-            epsilon=1e-6
-        )
-
-        # Global Response Normalization
-        grn = create_normalization_layer(
-            'global_response_norm',
-            name='grn_layer',
-            eps=1e-6
-        )
-        ```
-
-    Note:
-        - The epsilon parameter is automatically mapped to the appropriate parameter
-          name for each layer type (e.g., 'eps' for GRN, 'epsilon' for others)
-        - Some normalization types may ignore certain parameters if they're not applicable
-        - For specialized normalization layers, refer to their individual documentation
-          for detailed parameter descriptions and usage guidelines
-        - Zero-centered RMS and Zero-centered Band RMS are particularly beneficial for
-          large language models and transformer architectures
+    :param normalization_type: Type of normalization layer to create. Supported types
+        include 'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
+        'zero_centered_band_rms_norm', 'band_rms', 'adaptive_band_rms',
+        'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
+        'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', and 'dynamic_tanh'.
+    :type normalization_type: NormalizationType
+    :param name: Optional name for the layer. If None, layer will use default naming.
+    :type name: Optional[str]
+    :param epsilon: Small constant for numerical stability. Defaults to 1e-6.
+        Used by normalization layers that support epsilon parameter.
+    :type epsilon: float
+    :param kwargs: Additional keyword arguments specific to each normalization type.
+        Common kwargs include axis, center, scale, use_scale, max_band_width,
+        temperature, constant, alpha_init_value, and eps (for GRN).
+    :return: Configured normalization layer instance ready for use in neural networks.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If normalization_type is not supported or if invalid parameters
+        are provided for the specific normalization type.
+    :raises TypeError: If kwargs contain invalid parameter types for the chosen layer.
     """
     # Prepare base parameters
     layer_kwargs = kwargs.copy()
@@ -282,17 +180,9 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
     """
     Get information about all supported normalization types and their parameters.
 
-    Returns:
-        Dictionary mapping normalization type names to their parameter information,
+    :return: Dictionary mapping normalization type names to their parameter information,
         including description, supported parameters, and usage notes.
-
-    Example:
-        ```python
-        info = get_normalization_info()
-        print(info['rms_norm']['description'])
-        print(info['zero_centered_rms_norm']['use_case'])
-        print(info['zero_centered_band_rms_norm']['parameters'])
-        ```
+    :rtype: Dict[str, Dict[str, Any]]
     """
     return {
         'layer_norm': {
@@ -382,32 +272,12 @@ def validate_normalization_config(
     """
     Validate normalization configuration parameters.
 
-    Args:
-        normalization_type: Type of normalization to validate.
-        **kwargs: Configuration parameters to validate.
-
-    Returns:
-        True if configuration is valid.
-
-    Raises:
-        ValueError: If configuration is invalid.
-
-    Example:
-        ```python
-        # This will pass
-        validate_normalization_config('rms_norm', axis=-1, use_scale=True)
-
-        # This will also pass - zero-centered band RMS norm
-        validate_normalization_config(
-            'zero_centered_band_rms_norm',
-            axis=-1,
-            max_band_width=0.1,
-            epsilon=1e-5
-        )
-
-        # This will raise ValueError
-        validate_normalization_config('dynamic_tanh', epsilon=1e-6)  # DynamicTanh doesn't use epsilon
-        ```
+    :param normalization_type: Type of normalization to validate.
+    :type normalization_type: NormalizationType
+    :param kwargs: Configuration parameters to validate.
+    :return: True if configuration is valid.
+    :rtype: bool
+    :raises ValueError: If configuration is invalid.
     """
     info = get_normalization_info()
 
@@ -470,50 +340,14 @@ def create_normalization_from_config(config: Dict[str, Any]) -> keras.layers.Lay
     when the configuration is stored as a dictionary, commonly used in configuration
     files or hyperparameter specifications.
 
-    Args:
-        config: Configuration dictionary containing:
-            - 'type': Required. Normalization type (same as normalization_type in create_normalization_layer)
-            - 'name': Optional. Layer name
-            - 'epsilon': Optional. Epsilon for numerical stability (defaults to 1e-6)
-            - Additional parameters specific to the normalization type
-
-    Returns:
-        Configured normalization layer instance.
-
-    Raises:
-        KeyError: If 'type' key is missing from config.
-        ValueError: If normalization type or parameters are invalid.
-
-    Example:
-        ```python
-        # Configuration for zero-centered band RMS normalization
-        config = {
-            'type': 'zero_centered_band_rms_norm',
-            'name': 'llm_norm',
-            'epsilon': 1e-5,
-            'axis': -1,
-            'max_band_width': 0.1,
-        }
-
-        layer = create_normalization_from_config(config)
-
-        # Configuration for band RMS with constraints
-        band_config = {
-            'type': 'band_rms',
-            'name': 'constrained_norm',
-            'max_band_width': 0.1,
-            'epsilon': 1e-6
-        }
-
-        band_layer = create_normalization_from_config(band_config)
-
-        # Configuration from JSON file
-        import json
-        with open('model_config.json', 'r') as f:
-            model_config = json.load(f)
-
-        norm_layer = create_normalization_from_config(model_config['normalization'])
-        ```
+    :param config: Configuration dictionary containing a 'type' key (required),
+        and optionally 'name', 'epsilon', and additional parameters specific to the
+        normalization type.
+    :type config: Dict[str, Any]
+    :return: Configured normalization layer instance.
+    :rtype: keras.layers.Layer
+    :raises KeyError: If 'type' key is missing from config.
+    :raises ValueError: If normalization type or parameters are invalid.
     """
     if 'type' not in config:
         raise KeyError("Configuration dictionary must contain 'type' key")

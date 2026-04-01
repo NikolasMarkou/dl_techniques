@@ -357,21 +357,37 @@ class NLPTaskConfig:
     """
     Configuration for a specific NLP task.
 
-    Args:
-        name: Unique identifier for the task
-        task_type: Type of NLP task
-        num_classes: Number of output classes (for classification tasks)
-        num_labels: Alternative to num_classes for compatibility
-        max_length: Maximum sequence length
-        dropout_rate: Dropout rate for task-specific head
-        hidden_size: Hidden dimension for task head
-        loss_weight: Weight for this task's loss in multi-task training
-        label_smoothing: Label smoothing parameter
-        use_crf: Whether to use CRF for sequence labeling
-        use_attention_pooling: Use attention-based pooling
-        vocabulary_size: Size of vocabulary (for generation tasks)
-        beam_size: Beam size for generation tasks
-        temperature: Temperature for generation sampling
+    Encapsulates all hyperparameters needed to construct an NLP task head,
+    including classification, generation, and regularization settings.
+
+    :param name: Unique identifier for the task.
+    :type name: str
+    :param task_type: Type of NLP task.
+    :type task_type: NLPTaskType
+    :param num_classes: Number of output classes (for classification tasks).
+    :type num_classes: Optional[int]
+    :param num_labels: Alternative to num_classes for compatibility.
+    :type num_labels: Optional[int]
+    :param max_length: Maximum sequence length.
+    :type max_length: int
+    :param dropout_rate: Dropout rate for task-specific head.
+    :type dropout_rate: float
+    :param hidden_size: Hidden dimension for task head.
+    :type hidden_size: Optional[int]
+    :param loss_weight: Weight for this task's loss in multi-task training.
+    :type loss_weight: float
+    :param label_smoothing: Label smoothing parameter.
+    :type label_smoothing: float
+    :param use_crf: Whether to use CRF for sequence labeling.
+    :type use_crf: bool
+    :param use_attention_pooling: Use attention-based pooling.
+    :type use_attention_pooling: bool
+    :param vocabulary_size: Size of vocabulary (for generation tasks).
+    :type vocabulary_size: Optional[int]
+    :param beam_size: Beam size for generation tasks.
+    :type beam_size: int
+    :param temperature: Temperature for generation sampling.
+    :type temperature: float
     """
     name: str
     task_type: NLPTaskType
@@ -425,6 +441,17 @@ class NLPTaskConfig:
 class NLPTaskConfiguration:
     """
     Configuration helper for managing task combinations in NLP multi-task models.
+
+    Validates and stores a set of NLP tasks, providing utilities for querying
+    capability requirements such as token-level processing, sequence pairs,
+    and generation.
+
+    :param tasks: List of NLPTaskType enum values to enable.
+    :type tasks: List[NLPTaskType]
+    :param validate_compatibility: Whether to validate task compatibility.
+    :type validate_compatibility: bool
+    :raises ValueError: If tasks list is empty, contains duplicates, or
+        contains incompatible tasks (when validation enabled).
     """
 
     def __init__(
@@ -432,7 +459,16 @@ class NLPTaskConfiguration:
             tasks: List[NLPTaskType],
             validate_compatibility: bool = True
     ):
-        """Initialize task configuration."""
+        """
+        Initialize task configuration.
+
+        :param tasks: List of NLPTaskType enum values to enable.
+        :type tasks: List[NLPTaskType]
+        :param validate_compatibility: Whether to validate task compatibility.
+        :type validate_compatibility: bool
+        :raises ValueError: If tasks list is empty, contains duplicates, or
+            contains incompatible tasks (when validation enabled).
+        """
         if not tasks:
             raise ValueError("At least one task must be specified")
 

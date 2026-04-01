@@ -35,19 +35,54 @@ class BaseVLMHead(keras.layers.Layer):
     Provides common functionality for multi-modal tasks, delegating complex
     fusion logic to the dedicated MultiModalFusion layer.
 
-    Args:
-        task_config: VLMTaskConfig object with task configuration.
-        vision_dim: Dimension of vision features.
-        text_dim: Dimension of text features.
-        fusion_strategy: The fusion strategy for the MultiModalFusion layer.
-        fusion_config: A dictionary of configuration parameters for the
-                       MultiModalFusion layer.
-        normalization_type: Type of normalization for post-fusion blocks.
-        activation_type: Type of activation function for post-fusion blocks.
-        use_post_fusion_ffn: If True, includes an FFN block after fusion.
-        ffn_type: Type of FFN to use in the post-fusion block.
-        ffn_expansion_factor: Expansion factor for the post-fusion FFN.
-        **kwargs: Additional arguments for the base Layer.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐  ┌──────────────┐
+        │Vision Features│  │Text Features │
+        └──────┬───────┘  └──────┬───────┘
+               └──────┬──────────┘
+                      ▼
+            ┌──────────────────┐
+            │ MultiModalFusion │
+            └────────┬─────────┘
+                     ▼
+            ┌──────────────────┐
+            │ Post-Fusion Norm │
+            └────────┬─────────┘
+                     ▼
+            ┌──────────────────┐
+            │ Post-Fusion FFN  │
+            │    (optional)    │
+            └────────┬─────────┘
+                     ▼
+            ┌──────────────────┐
+            │ Task-Specific    │
+            │    Output Head   │
+            └──────────────────┘
+
+    :param task_config: VLMTaskConfig object with task configuration.
+    :type task_config: VLMTaskConfig
+    :param vision_dim: Dimension of vision features.
+    :type vision_dim: int
+    :param text_dim: Dimension of text features.
+    :type text_dim: int
+    :param fusion_strategy: The fusion strategy for the MultiModalFusion layer.
+    :type fusion_strategy: FusionStrategy
+    :param fusion_config: Configuration parameters for the MultiModalFusion layer.
+    :type fusion_config: Optional[Dict[str, Any]]
+    :param normalization_type: Type of normalization for post-fusion blocks.
+    :type normalization_type: NormalizationType
+    :param activation_type: Type of activation function for post-fusion blocks.
+    :type activation_type: ActivationType
+    :param use_post_fusion_ffn: If True, includes an FFN block after fusion.
+    :type use_post_fusion_ffn: bool
+    :param ffn_type: Type of FFN to use in the post-fusion block.
+    :type ffn_type: FFNType
+    :param ffn_expansion_factor: Expansion factor for the post-fusion FFN.
+    :type ffn_expansion_factor: int
+    :param kwargs: Additional arguments for the base Layer.
     """
 
     def __init__(
@@ -141,21 +176,52 @@ class ImageCaptioningHead(keras.layers.Layer):
     """
     An autoregressive decoder head for generating text conditioned on vision features.
 
-    This head implements a multi-layer Transformer decoder, a standard
-    architecture for sequence-to-sequence tasks, specifically adapted for image
-    captioning. Its purpose is to generate a descriptive text sequence one token
-    at a time, conditioned on a set of static visual features extracted from an
-    image encoder. It uses self-attention to model the text and cross-attention
-    to incorporate visual information at each layer.
+    Implements a multi-layer Transformer decoder adapted for image captioning,
+    generating descriptive text one token at a time conditioned on static visual
+    features. Each layer uses causal self-attention for text modeling and
+    cross-attention to incorporate visual information.
 
-    Args:
-        task_config (VLMTaskConfig): Configuration object for the task.
-        vision_dim (int): Dimension of vision features.
-        text_dim (int): Dimension of text features.
-        num_layers (int): Number of decoder layers. Defaults to 6.
-        num_heads (int): Number of attention heads. Defaults to 12.
-        ffn_type (FFNType): Type of feed-forward network in decoder blocks. Defaults to "swiglu".
-        **kwargs: Additional arguments for the base Layer.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐  ┌──────────────┐
+        │Vision Features│  │Text Embeddings│
+        └──────┬───────┘  └──────┬───────┘
+               │                 ▼
+               │        ┌────────────────┐
+               │        │ Self-Attention  │
+               │        │ (causal mask)   │
+               │        └───────┬────────┘
+               │                ▼
+               └───────►┌────────────────┐
+                        │Cross-Attention  │
+                        └───────┬────────┘
+                                ▼
+                        ┌────────────────┐
+                        │     FFN        │
+                        └───────┬────────┘
+                                ▼
+                          (x num_layers)
+                                ▼
+                        ┌────────────────┐
+                        │ Output Proj.   │
+                        │ (vocab_size)   │
+                        └────────────────┘
+
+    :param task_config: Configuration object for the task.
+    :type task_config: VLMTaskConfig
+    :param vision_dim: Dimension of vision features.
+    :type vision_dim: int
+    :param text_dim: Dimension of text features.
+    :type text_dim: int
+    :param num_layers: Number of decoder layers.
+    :type num_layers: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param ffn_type: Type of feed-forward network in decoder blocks.
+    :type ffn_type: FFNType
+    :param kwargs: Additional arguments for the base Layer.
     """
 
     def __init__(
@@ -280,18 +346,49 @@ class VQAHead(keras.layers.Layer):
     """
     A multimodal fusion and classification head for Visual Question Answering.
 
-    This layer is designed to solve the VQA task by first fusing representations
-    from vision and text modalities into a single, joint vector, and then
-    passing this joint representation through a classifier to predict the final answer.
-    It supports several fusion strategies like mean, max, and attention pooling.
+    Fuses vision and text representations into a joint vector via configurable
+    pooling strategies, then classifies through a multi-layer MLP to predict
+    the final answer from a fixed answer vocabulary.
 
-    Args:
-        task_config (VLMTaskConfig): Configuration object for the task.
-        vision_dim (int): Dimension of vision features.
-        text_dim (int): Dimension of text features.
-        hidden_dims (List[int]): List of hidden layer dimensions for the classifier MLP.
-        pooling_strategy (str): Strategy for pooling features ("mean", "max", "attention").
-        **kwargs: Additional arguments for the base Layer.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐  ┌────────────────┐
+        │Vision Features│  │Question Features│
+        └──────┬───────┘  └──────┬─────────┘
+               └──────┬──────────┘
+                      ▼
+            ┌──────────────────┐
+            │ Pooling Strategy │
+            │(mean/max/attn.)  │
+            └────────┬─────────┘
+                     ▼
+            ┌──────────────────┐
+            │  Concatenation   │
+            └────────┬─────────┘
+                     ▼
+            ┌──────────────────┐
+            │  Hidden Layers   │
+            │  + Dropout       │
+            └────────┬─────────┘
+                     ▼
+            ┌──────────────────┐
+            │  Output Layer    │
+            │  (num_classes)   │
+            └──────────────────┘
+
+    :param task_config: Configuration object for the task.
+    :type task_config: VLMTaskConfig
+    :param vision_dim: Dimension of vision features.
+    :type vision_dim: int
+    :param text_dim: Dimension of text features.
+    :type text_dim: int
+    :param hidden_dims: List of hidden layer dimensions for the classifier MLP.
+    :type hidden_dims: List[int]
+    :param pooling_strategy: Strategy for pooling features ("mean", "max", "attention").
+    :type pooling_strategy: str
+    :param kwargs: Additional arguments for the base Layer.
     """
 
     def __init__(
@@ -400,7 +497,36 @@ class VQAHead(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class VisualGroundingHead(BaseVLMHead):
-    """Head for visual grounding tasks."""
+    """
+    Head for visual grounding tasks.
+
+    Localizes image regions matching a text query by fusing per-region visual
+    features with the pooled text query, scoring each region, and regressing
+    a bounding box from the top-scoring region.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐  ┌──────────────┐
+        │Vision Regions │  │Text Features │
+        │ [B, N, D_vis]│  │              │
+        └──────┬───────┘  └──────┬───────┘
+               │                 ▼
+               │        ┌────────────────┐
+               │        │ Mean Pooling   │
+               │        └───────┬────────┘
+               │                ▼
+               └───────►┌────────────────┐
+                        │ Gated Fusion   │
+                        │ (per region)   │
+                        └───┬────────┬───┘
+                            ▼        ▼
+                    ┌──────────┐ ┌────────┐
+                    │Confidence│ │  BBox  │
+                    │ Scorer   │ │Regress.│
+                    └──────────┘ └────────┘
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         # A strategy that scores per-region interactions is best.
@@ -465,21 +591,51 @@ class ImageTextMatchingHead(BaseVLMHead):
     """
     A projection head for contrastive image-text alignment and fine-grained matching.
 
-    This head performs two functions:
-    1.  **Contrastive Alignment**: Projects vision and text features into a
-        shared, L2-normalized embedding space for CLIP-style contrastive loss,
-        scaled by a learnable temperature.
-    2.  **Fine-grained Matching**: Fuses the features using a dedicated fusion
-        module to produce a single matching score (0 to 1), indicating the
-        semantic correspondence between a specific image-text pair.
+    Performs two functions: (1) projects vision and text features into a shared
+    L2-normalized embedding space for CLIP-style contrastive loss scaled by a
+    learnable temperature, and (2) fuses features to produce a fine-grained
+    matching score indicating semantic correspondence.
 
-    Args:
-        task_config (VLMTaskConfig): Configuration object for the task.
-        vision_dim (int): Dimension of vision features.
-        text_dim (int): Dimension of text features.
-        projection_dim (int): Projection dimension for contrastive learning.
-        temperature (float): Initial temperature for contrastive loss.
-        **kwargs: Additional arguments for the base Layer.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐  ┌──────────────┐
+        │Vision Features│  │Text Features │
+        └──┬───────┬───┘  └──┬───────┬───┘
+           │       │         │       │
+           ▼       │         ▼       │
+        ┌──────┐   │      ┌──────┐   │
+        │V Proj│   │      │T Proj│   │
+        └──┬───┘   │      └──┬───┘   │
+           ▼       │         ▼       │
+        ┌──────┐   │      ┌──────┐   │
+        │L2Norm│   │      │L2Norm│   │
+        └──┬───┘   │      └──┬───┘   │
+           └──┬────┘─────────┘       │
+              ▼                      │
+        ┌───────────┐    ┌───────────┘
+        │Similarity │    │
+        │Matrix/τ   │    ▼
+        └───────────┘  ┌──────────┐
+                       │  Fusion  │
+                       └────┬─────┘
+                            ▼
+                       ┌──────────┐
+                       │Match Scr.│
+                       └──────────┘
+
+    :param task_config: Configuration object for the task.
+    :type task_config: VLMTaskConfig
+    :param vision_dim: Dimension of vision features.
+    :type vision_dim: int
+    :param text_dim: Dimension of text features.
+    :type text_dim: int
+    :param projection_dim: Projection dimension for contrastive learning.
+    :type projection_dim: int
+    :param temperature: Initial temperature for contrastive loss.
+    :type temperature: float
+    :param kwargs: Additional arguments for the base Layer.
     """
 
     def __init__(
@@ -569,7 +725,33 @@ class ImageTextMatchingHead(BaseVLMHead):
 
 @keras.saving.register_keras_serializable()
 class MultiTaskVLMHead(keras.layers.Layer):
-    """Multi-task head combining multiple VLM task-specific heads."""
+    """
+    Multi-task head combining multiple VLM task-specific heads.
+
+    Routes shared vision and text features to independently configured
+    task-specific heads, enabling joint multi-task VLM training.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐  ┌──────────────┐
+        │Vision Features│  │Text Features │
+        └──────┬───────┘  └──────┬───────┘
+               └──────┬──────────┘
+                      ▼
+            ┌──────────────────┐
+            │  Task Router     │
+            └──┬───┬───┬───┬──┘
+               ▼   ▼   ▼   ▼
+            ┌───┐┌───┐┌───┐┌───┐
+            │Cap││VQA││Grd││ITM│...
+            └─┬─┘└─┬─┘└─┬─┘└─┬─┘
+              ▼    ▼    ▼    ▼
+            ┌──────────────────┐
+            │ Task Output Dict │
+            └──────────────────┘
+    """
 
     def __init__(
         self,
@@ -643,7 +825,14 @@ class MultiTaskVLMHead(keras.layers.Layer):
 
 
 def get_head_class(task_type: VLMTaskType) -> type:
-    """Gets the appropriate head class for a VLM task type."""
+    """
+    Get the appropriate head class for a VLM task type.
+
+    :param task_type: The VLM task type to look up.
+    :type task_type: VLMTaskType
+    :return: The head class corresponding to the task type.
+    :rtype: type
+    """
     head_mapping = {
         VLMTaskType.IMAGE_CAPTIONING: ImageCaptioningHead,
         VLMTaskType.DENSE_CAPTIONING: BaseVLMHead,  # Placeholder
@@ -661,13 +850,12 @@ def create_vlm_head(
     """
     Factory function to create VLM task heads.
 
-    Args:
-        task_config: VLMTaskConfig object or dict with task configuration.
-        **kwargs: Additional configuration parameters for the head, including
-                  `vision_dim`, `text_dim`, `fusion_strategy`, etc.
-
-    Returns:
-        A configured VLM head for the specified task.
+    :param task_config: VLMTaskConfig object or dict with task configuration.
+    :type task_config: Union[VLMTaskConfig, Dict[str, Any]]
+    :param kwargs: Additional configuration parameters for the head, including
+        ``vision_dim``, ``text_dim``, ``fusion_strategy``, etc.
+    :return: A configured VLM head for the specified task.
+    :rtype: Union[BaseVLMHead, keras.layers.Layer]
     """
     if isinstance(task_config, dict):
         task_config = VLMTaskConfig(**task_config)
@@ -681,16 +869,15 @@ def create_multi_task_vlm_head(
     **kwargs: Any,
 ) -> MultiTaskVLMHead:
     """
-    Creates a multi-task VLM head from task configurations.
+    Create a multi-task VLM head from task configurations.
 
-    Args:
-        task_configs: List or dict of VLMTaskConfig objects.
-        **kwargs: Shared configuration for all heads, such as `vision_dim`,
-                  `text_dim`, `fusion_strategy`. Can also include
-                  `task_specific_kwargs` to override settings for specific tasks.
-
-    Returns:
-        MultiTaskVLMHead instance.
+    :param task_configs: List or dict of VLMTaskConfig objects.
+    :type task_configs: Union[List[VLMTaskConfig], Dict[str, VLMTaskConfig]]
+    :param kwargs: Shared configuration for all heads, such as ``vision_dim``,
+        ``text_dim``, ``fusion_strategy``. Can also include
+        ``task_specific_kwargs`` to override settings for specific tasks.
+    :return: Configured multi-task VLM head instance.
+    :rtype: MultiTaskVLMHead
     """
     if isinstance(task_configs, list):
         task_configs = {config.name: config for config in task_configs}

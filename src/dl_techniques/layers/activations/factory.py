@@ -316,12 +316,9 @@ def get_activation_info() -> Dict[str, Dict[str, Any]]:
     """
     Get comprehensive information about all available activation layer types.
 
-    Returns:
-        Dict containing information about each activation type, including:
-        - description: Human-readable description
-        - required_params: List of required parameter names
-        - optional_params: Dict of optional parameters with defaults
-        - use_case: Recommended use case for the activation type
+    :return: Dict containing information about each activation type, including
+        description, required_params, optional_params, and use_case.
+    :rtype: Dict[str, Dict[str, Any]]
     """
     return {
         act_type: info.copy() for act_type, info in ACTIVATION_REGISTRY.items()
@@ -332,13 +329,11 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
     """
     Validate activation layer configuration parameters.
 
-    Args:
-        activation_type: Type of activation to validate.
-        **kwargs: Parameters to validate.
-
-    Raises:
-        ValueError: If activation_type is invalid or parameters have invalid values.
-        TypeError: If parameter types are incorrect.
+    :param activation_type: Type of activation to validate.
+    :type activation_type: str
+    :param kwargs: Parameters to validate.
+    :raises ValueError: If activation_type is invalid or parameters have invalid values.
+    :raises TypeError: If parameter types are incorrect.
     """
     if activation_type not in ACTIVATION_REGISTRY:
         available_types = sorted(list(ACTIVATION_REGISTRY.keys()))
@@ -466,36 +461,15 @@ def create_activation_layer(
     This function provides a centralized way to create any activation layer
     supported by dl_techniques, with comprehensive parameter validation.
 
-    Args:
-        activation_type: Type of activation layer to create.
-        name: Optional name for the layer.
-        **kwargs: Parameters specific to the activation type.
-
-    Returns:
-        A configured activation layer instance.
-
-    Raises:
-        ValueError: If activation_type is invalid or parameters are incorrect.
-        TypeError: If parameter types are incorrect.
-
-    Example:
-        ```python
-        # Create a standard GELU
-        gelu = create_activation_layer('gelu')
-
-        # Create Monotonicity Layer
-        mono = create_activation_layer(
-            'monotonicity',
-            method='exponential',
-            clip_inputs=True
-        )
-
-        # Create Hierarchical Routing
-        routing = create_activation_layer(
-            'hierarchical_routing',
-            output_dim=10000
-        )
-        ```
+    :param activation_type: Type of activation layer to create.
+    :type activation_type: ActivationType
+    :param name: Optional name for the layer.
+    :type name: Optional[str]
+    :param kwargs: Parameters specific to the activation type.
+    :return: A configured activation layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If activation_type is invalid or parameters are incorrect.
+    :raises TypeError: If parameter types are incorrect.
     """
     try:
         # Validate configuration first
@@ -564,14 +538,11 @@ def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
     Create an activation layer from a configuration dictionary.
 
-    Args:
-        config: Configuration dictionary containing a 'type' key and parameters.
-
-    Returns:
-        A configured activation layer instance.
-
-    Raises:
-        ValueError: If 'type' key is missing or config is invalid.
+    :param config: Configuration dictionary containing a 'type' key and parameters.
+    :type config: Dict[str, Any]
+    :return: A configured activation layer instance.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If 'type' key is missing or config is invalid.
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dictionary, got {type(config)}")
