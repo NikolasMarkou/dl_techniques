@@ -20,57 +20,44 @@ class ExpertConfig:
     dl_techniques FFN factory system, eliminating parameter duplication and
     ensuring consistency with the broader framework.
 
-    Args:
-        ffn_config: Dictionary containing FFN configuration that will be passed
-            directly to the FFN factory's create_ffn_from_config() function.
-            This should include 'type' and any FFN-specific parameters.
-            Example: {"type": "swiglu", "output_dim": 768, "ffn_expansion_factor": 4}
+    **Architecture Overview:**
 
-        use_bias: Whether to include bias terms in any additional linear layers
-            (not part of the FFN itself). Defaults to True.
-        kernel_initializer: Weight initialization strategy for any additional layers.
-        bias_initializer: Bias initialization strategy for any additional layers.
-        kernel_regularizer: Regularization applied to weights in additional layers.
-        bias_regularizer: Regularization applied to biases in additional layers.
+    .. code-block:: text
 
-    Example:
-        ```python
-        # SwiGLU FFN expert configuration
-        config = ExpertConfig(
-            ffn_config={
-                "type": "swiglu",
-                "output_dim": 768,
-                "ffn_expansion_factor": 4,
-                "dropout_rate": 0.1
-            }
-        )
+        ┌─────────────────────┐
+        │    ExpertConfig      │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │  ffn_config (dict)  │──▶ FFN Factory
+        │  ├─ type            │    (create_ffn_from_config)
+        │  ├─ output_dim      │
+        │  └─ ...params       │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │  Additional Layers  │
+        │  (use_bias, init,   │
+        │   regularizers)     │
+        └─────────────────────┘
 
-        # Standard MLP expert configuration
-        config = ExpertConfig(
-            ffn_config={
-                "type": "mlp",
-                "hidden_dim": 2048,
-                "output_dim": 768,
-                "activation": "gelu",
-                "dropout_rate": 0.1
-            }
-        )
-
-        # GeGLU expert with custom initialization
-        config = ExpertConfig(
-            ffn_config={
-                "type": "geglu",
-                "hidden_dim": 3072,
-                "output_dim": 768
-            },
-            kernel_initializer="he_normal"
-        )
-        ```
-
-    Note:
-        All FFN-specific validation and parameter handling is delegated to the
-        FFN factory system, ensuring consistency across the framework and
-        eliminating code duplication.
+    :param ffn_config: Dictionary containing FFN configuration that will be passed
+        directly to the FFN factory's create_ffn_from_config() function.
+        This should include 'type' and any FFN-specific parameters.
+    :type ffn_config: Dict[str, Any]
+    :param use_bias: Whether to include bias terms in any additional linear layers
+        (not part of the FFN itself).
+    :type use_bias: bool
+    :param kernel_initializer: Weight initialization strategy for any additional layers.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Bias initialization strategy for any additional layers.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularization applied to weights in additional layers.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Regularization applied to biases in additional layers.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     """
     ffn_config: Dict[str, Any] = field(default_factory=dict)
 
@@ -103,46 +90,52 @@ class GatingConfig:
     This dataclass defines the routing mechanism for MoE models, supporting
     various gating strategies and load balancing techniques.
 
-    Args:
-        gating_type: Type of gating mechanism ('linear', 'cosine', 'softmoe').
-        top_k: Number of experts to select per token.
-        capacity_factor: Multiplier for expert capacity calculation.
-        add_noise: Whether to add noise to gating logits for exploration.
-        noise_std: Standard deviation of gating noise.
-        temperature: Temperature parameter for gating softmax.
+    **Architecture Overview:**
 
-        # Linear gating parameters
-        use_bias: Whether to use bias in linear gating.
+    .. code-block:: text
 
-        # Cosine gating parameters
-        embedding_dim: Dimension of expert embeddings for cosine gating.
-        learnable_temperature: Whether temperature is learnable in cosine gating.
+        ┌─────────────────────┐
+        │   Input Tokens      │
+        └──────────┬──────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │   Gating Network    │
+        │   (linear │ cosine  │
+        │    │ softmoe)       │
+        └──────────┬──────────┘
+                   │
+            ┌──────┴──────┐
+            ▼             ▼
+        ┌────────┐  ┌────────┐
+        │ top-k  │  │ aux    │
+        │ routes │  │ losses │
+        └────────┘  └────────┘
 
-        # SoftMoE parameters
-        num_slots: Number of input slots per expert in SoftMoE.
-
-        # Load balancing parameters
-        aux_loss_weight: Weight for auxiliary load balancing loss.
-        z_loss_weight: Weight for router z-loss (entropy regularization).
-
-    Example:
-        ```python
-        # Linear gating with load balancing
-        linear_config = GatingConfig(
-            gating_type='linear',
-            top_k=2,
-            capacity_factor=1.25,
-            aux_loss_weight=0.01
-        )
-
-        # Cosine similarity gating
-        cosine_config = GatingConfig(
-            gating_type='cosine',
-            top_k=1,
-            embedding_dim=256,
-            temperature=0.1
-        )
-        ```
+    :param gating_type: Type of gating mechanism ('linear', 'cosine', 'softmoe').
+    :type gating_type: Literal['linear', 'cosine', 'softmoe']
+    :param top_k: Number of experts to select per token.
+    :type top_k: int
+    :param capacity_factor: Multiplier for expert capacity calculation.
+    :type capacity_factor: float
+    :param add_noise: Whether to add noise to gating logits for exploration.
+    :type add_noise: bool
+    :param noise_std: Standard deviation of gating noise.
+    :type noise_std: float
+    :param temperature: Temperature parameter for gating softmax.
+    :type temperature: float
+    :param use_bias: Whether to use bias in linear gating.
+    :type use_bias: bool
+    :param embedding_dim: Dimension of expert embeddings for cosine gating.
+    :type embedding_dim: int
+    :param learnable_temperature: Whether temperature is learnable in cosine gating.
+    :type learnable_temperature: bool
+    :param num_slots: Number of input slots per expert in SoftMoE.
+    :type num_slots: int
+    :param aux_loss_weight: Weight for auxiliary load balancing loss.
+    :type aux_loss_weight: float
+    :param z_loss_weight: Weight for router z-loss (entropy regularization).
+    :type z_loss_weight: float
     """
     gating_type: Literal['linear', 'cosine', 'softmoe'] = 'linear'
     top_k: int = 1
@@ -175,51 +168,42 @@ class MoEConfig:
     This dataclass combines expert and gating configurations with MoE-specific
     parameters to define complete MoE architectures using FFN experts exclusively.
 
-    Args:
-        num_experts: Total number of FFN expert networks.
-        expert_config: Configuration for FFN expert networks.
-        gating_config: Configuration for the gating network.
+    **Architecture Overview:**
 
-        # System-level parameters
-        jitter_noise: Standard deviation for expert capacity jittering.
-        drop_tokens: Whether to drop tokens when expert capacity is exceeded.
-        use_residual_connection: Whether to add residual connection for dropped tokens.
+    .. code-block:: text
 
-        # Training parameters
-        train_capacity_factor: Capacity factor during training.
-        eval_capacity_factor: Capacity factor during evaluation.
+        ┌─────────────────────────────────┐
+        │           MoEConfig             │
+        │                                 │
+        │  ┌───────────┐ ┌────────────┐   │
+        │  │ExpertConfig│ │GatingConfig│   │
+        │  └─────┬─────┘ └─────┬──────┘   │
+        │        │              │          │
+        │        ▼              ▼          │
+        │  ┌───────────────────────────┐  │
+        │  │    MoE Layer Assembly     │  │
+        │  │  (N experts + router)     │  │
+        │  └───────────────────────────┘  │
+        └─────────────────────────────────┘
 
-        # Advanced features
-        routing_dtype: Data type for routing computations.
-
-    Example:
-        ```python
-        # Standard FFN MoE with SwiGLU experts
-        moe_config = MoEConfig(
-            num_experts=8,
-            expert_config=ExpertConfig(
-                ffn_config={
-                    "type": "swiglu",
-                    "output_dim": 768,
-                    "ffn_expansion_factor": 4
-                }
-            ),
-            gating_config=GatingConfig(gating_type='linear', top_k=2)
-        )
-
-        # MoE with standard MLP experts
-        moe_config = MoEConfig(
-            num_experts=16,
-            expert_config=ExpertConfig(
-                ffn_config={
-                    "type": "mlp",
-                    "hidden_dim": 2048,
-                    "output_dim": 768,
-                    "activation": "gelu"
-                }
-            )
-        )
-        ```
+    :param num_experts: Total number of FFN expert networks.
+    :type num_experts: int
+    :param expert_config: Configuration for FFN expert networks.
+    :type expert_config: ExpertConfig
+    :param gating_config: Configuration for the gating network.
+    :type gating_config: GatingConfig
+    :param jitter_noise: Standard deviation for expert capacity jittering.
+    :type jitter_noise: float
+    :param drop_tokens: Whether to drop tokens when expert capacity is exceeded.
+    :type drop_tokens: bool
+    :param use_residual_connection: Whether to add residual connection for dropped tokens.
+    :type use_residual_connection: bool
+    :param train_capacity_factor: Capacity factor during training.
+    :type train_capacity_factor: Optional[float]
+    :param eval_capacity_factor: Capacity factor during evaluation.
+    :type eval_capacity_factor: Optional[float]
+    :param routing_dtype: Data type for routing computations.
+    :type routing_dtype: str
     """
     num_experts: int = 8
     expert_config: ExpertConfig = field(default_factory=ExpertConfig)

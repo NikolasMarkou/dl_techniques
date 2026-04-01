@@ -58,38 +58,72 @@ class MultiModalFusion(keras.layers.Layer):
     This layer enables flexible fusion between multiple modalities using various
     strategies including cross-attention, concatenation, gating, and tensor fusion.
 
-    Args:
-        dim: Feature dimension for the fused representation.
-        fusion_strategy: Strategy for combining modalities.
-        num_fusion_layers: Number of fusion blocks (only for iterative strategies).
-        attention_config: Configuration dict for attention layers.
-        ffn_type: Type of feed-forward network to use.
-        ffn_config: Configuration dict for FFN layers.
-        norm_type: Type of normalization to apply.
-        norm_config: Configuration dict for normalization layers.
-        num_tensor_projections: Number of projections for tensor fusion.
-        dropout_rate: Dropout probability for regularization.
-        use_residual: Whether to use residual connections.
-        activation: Activation function for projections.
-        kernel_initializer: Initializer for weight matrices.
-        bias_initializer: Initializer for bias vectors.
-        kernel_regularizer: Regularizer for weight matrices.
-        bias_regularizer: Regularizer for bias vectors.
+    **Architecture Overview:**
 
-    Raises:
-        ValueError: If configuration parameters are invalid.
+    .. code-block:: text
 
-    Example:
-        >>> # Create a cross-attention fusion layer
-        >>> fusion = MultiModalFusion(
-        ...     dim=768,
-        ...     fusion_strategy='cross_attention',
-        ...     num_fusion_layers=2
-        ... )
-        >>> # Apply to vision and text features
-        >>> vision_features = keras.random.normal((2, 196, 768))
-        >>> text_features = keras.random.normal((2, 50, 768))
-        >>> fused = fusion([vision_features, text_features])
+        ┌───────────┐   ┌───────────┐        ┌───────────┐
+        │ Modality 1 │   │ Modality 2 │  ...  │ Modality N │
+        └─────┬─────┘   └─────┬─────┘        └─────┬─────┘
+              │               │                     │
+              └───────┬───────┴─────────┬───────────┘
+                      │                 │
+                      ▼                 ▼
+              ┌──────────────┐  ┌──────────────┐
+              │  Projection  │  │   Alignment  │
+              └──────┬───────┘  └──────┬───────┘
+                     │                 │
+                     ▼                 ▼
+              ┌─────────────────────────────┐
+              │     Fusion Strategy          │
+              │  (cross_attention │ gated │  │
+              │   concat │ bilinear │ ...)   │
+              └────────────┬────────────────┘
+                           │
+                           ▼
+                   ┌──────────────┐
+                   │ Norm + FFN   │
+                   └──────┬───────┘
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │ Fused Output  │
+                  └───────────────┘
+
+    :param dim: Feature dimension for the fused representation.
+    :type dim: int
+    :param fusion_strategy: Strategy for combining modalities.
+    :type fusion_strategy: FusionStrategy
+    :param num_fusion_layers: Number of fusion blocks (only for iterative strategies).
+    :type num_fusion_layers: int
+    :param attention_config: Configuration dict for attention layers.
+    :type attention_config: Optional[Dict[str, Any]]
+    :param ffn_type: Type of feed-forward network to use.
+    :type ffn_type: FFNType
+    :param ffn_config: Configuration dict for FFN layers.
+    :type ffn_config: Optional[Dict[str, Any]]
+    :param norm_type: Type of normalization to apply.
+    :type norm_type: NormalizationType
+    :param norm_config: Configuration dict for normalization layers.
+    :type norm_config: Optional[Dict[str, Any]]
+    :param num_tensor_projections: Number of projections for tensor fusion.
+    :type num_tensor_projections: int
+    :param dropout_rate: Dropout probability for regularization.
+    :type dropout_rate: float
+    :param use_residual: Whether to use residual connections.
+    :type use_residual: bool
+    :param activation: Activation function for projections.
+    :type activation: Union[str, Callable]
+    :param kernel_initializer: Initializer for weight matrices.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for weight matrices.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Regularizer for bias vectors.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+
+    :raises ValueError: If configuration parameters are invalid.
     """
 
     def __init__(
@@ -154,15 +188,18 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> None:
         """Validate initialization parameters.
 
-        Args:
-            dim: Feature dimension.
-            fusion_strategy: Fusion strategy name.
-            num_fusion_layers: Number of fusion layers.
-            num_tensor_projections: Number of tensor projections.
-            dropout_rate: Dropout rate.
+        :param dim: Feature dimension.
+        :type dim: int
+        :param fusion_strategy: Fusion strategy name.
+        :type fusion_strategy: str
+        :param num_fusion_layers: Number of fusion layers.
+        :type num_fusion_layers: int
+        :param num_tensor_projections: Number of tensor projections.
+        :type num_tensor_projections: int
+        :param dropout_rate: Dropout rate.
+        :type dropout_rate: float
 
-        Raises:
-            ValueError: If any parameter is invalid.
+        :raises ValueError: If any parameter is invalid.
         """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -190,9 +227,8 @@ class MultiModalFusion(keras.layers.Layer):
     def _init_layer_containers(self) -> None:
         """Initialize containers for sublayers.
 
-        Note:
-            We use lists to store sublayers instead of creating them here.
-            Sublayers are created in build() when we know the input shapes.
+        Uses lists to store sublayers instead of creating them here.
+        Sublayers are created in build() when input shapes are known.
         """
         self.fusion_layers = []      # Main fusion layers
         self.projection_layers = []  # Dense projection layers
@@ -205,14 +241,13 @@ class MultiModalFusion(keras.layers.Layer):
         """Create and build all sublayers based on input shapes.
 
         This method is called automatically the first time the layer is called.
-        We create all sublayers here because we need to know the input shapes.
+        All sublayers are created here because input shapes are required.
 
-        Args:
-            input_shape: List of shapes for each modality input.
-                        Each shape should be (batch_size, sequence_length, dim).
+        :param input_shape: List of shapes for each modality input.
+            Each shape should be (batch_size, sequence_length, dim).
+        :type input_shape: Union[Tuple, List[Tuple]]
 
-        Raises:
-            ValueError: If input shapes are invalid.
+        :raises ValueError: If input shapes are invalid.
         """
         if self.built:
             return
@@ -245,11 +280,10 @@ class MultiModalFusion(keras.layers.Layer):
     def _validate_input_shapes(self, input_shape: Union[Tuple, List]) -> None:
         """Validate that input shapes are compatible.
 
-        Args:
-            input_shape: List of input shapes.
+        :param input_shape: List of input shapes.
+        :type input_shape: Union[Tuple, List]
 
-        Raises:
-            ValueError: If shapes are invalid or incompatible.
+        :raises ValueError: If shapes are invalid or incompatible.
         """
         if not isinstance(input_shape, (list, tuple)):
             raise ValueError("Expected list or tuple of input shapes")
@@ -279,8 +313,8 @@ class MultiModalFusion(keras.layers.Layer):
         Creates multiple fusion blocks, each containing cross-attention
         between all modality pairs, normalization, and FFN layers.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
@@ -336,8 +370,8 @@ class MultiModalFusion(keras.layers.Layer):
     def _build_concatenation(self, input_shape: List[Tuple]) -> None:
         """Build layers for concatenation fusion strategy.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
@@ -376,8 +410,8 @@ class MultiModalFusion(keras.layers.Layer):
     def _build_elementwise(self, input_shape: List[Tuple]) -> None:
         """Build layers for element-wise fusion strategies (add/multiply).
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
@@ -423,8 +457,8 @@ class MultiModalFusion(keras.layers.Layer):
 
         Creates gates that learn to weight each modality's contribution.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
@@ -472,8 +506,8 @@ class MultiModalFusion(keras.layers.Layer):
 
         Uses self-attention to pool features before fusion.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
@@ -511,11 +545,10 @@ class MultiModalFusion(keras.layers.Layer):
 
         Computes outer product between modalities.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
 
-        Raises:
-            ValueError: If not exactly 2 modalities provided.
+        :raises ValueError: If not exactly 2 modalities provided.
         """
         num_modalities = len(input_shape)
         if num_modalities != 2:
@@ -555,8 +588,8 @@ class MultiModalFusion(keras.layers.Layer):
 
         Creates multiple projections to model higher-order interactions.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
@@ -600,19 +633,19 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
         """Apply the fusion strategy to combine multiple modalities.
 
-        Args:
-            inputs: List or tuple of tensors, one for each modality.
-                   Each tensor shape: (batch_size, sequence_length, dim)
-            training: Boolean flag for training mode (affects dropout).
+        :param inputs: List or tuple of tensors, one for each modality.
+            Each tensor shape: (batch_size, sequence_length, dim).
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Boolean flag for training mode (affects dropout).
+        :type training: Optional[bool]
 
-        Returns:
-            Fused representation(s). Shape depends on fusion strategy:
-            - cross_attention: Tuple of tensors, one per modality
-            - attention_pooling: (batch_size, dim)
-            - Others: (batch_size, sequence_length, dim)
+        :return: Fused representation(s). Shape depends on fusion strategy:
+            cross_attention returns a tuple of tensors (one per modality),
+            attention_pooling returns (batch_size, dim),
+            others return (batch_size, sequence_length, dim).
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]
 
-        Raises:
-            ValueError: If inputs are invalid.
+        :raises ValueError: If inputs are invalid.
         """
         # Validate inputs
         if not isinstance(inputs, (list, tuple)):
@@ -648,12 +681,13 @@ class MultiModalFusion(keras.layers.Layer):
         Each modality attends to all others, results are averaged,
         then passed through normalization and FFN.
 
-        Args:
-            inputs: List of modality tensors.
-            training: Training mode flag.
+        :param inputs: List of modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Tuple of refined features for each modality.
+        :return: Refined features for each modality.
+        :rtype: Tuple[keras.KerasTensor, ...]
         """
         outputs = list(inputs)
         num_modalities = len(inputs)
@@ -718,12 +752,13 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply concatenation fusion.
 
-        Args:
-            inputs: List of modality tensors.
-            training: Training mode flag.
+        :param inputs: List of modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Fused tensor after concatenation and projection.
+        :return: Fused tensor after concatenation and projection.
+        :rtype: keras.KerasTensor
         """
         # Concatenate along feature dimension
         concatenated = keras.ops.concatenate(inputs, axis=-1)
@@ -746,12 +781,13 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply element-wise fusion (addition or multiplication).
 
-        Args:
-            inputs: List of modality tensors.
-            training: Training mode flag.
+        :param inputs: List of modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Fused tensor after element-wise operation.
+        :return: Fused tensor after element-wise operation.
+        :rtype: keras.KerasTensor
         """
         # Apply alignment projections if available
         if self.projection_layers:
@@ -790,12 +826,13 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply gated fusion with learned importance weights.
 
-        Args:
-            inputs: List of modality tensors.
-            training: Training mode flag.
+        :param inputs: List of modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Fused tensor after gating and projection.
+        :return: Fused tensor after gating and projection.
+        :rtype: keras.KerasTensor
         """
         # Apply learned gates to each modality
         gated_features = []
@@ -826,12 +863,13 @@ class MultiModalFusion(keras.layers.Layer):
 
         Uses self-attention to create pooled representations.
 
-        Args:
-            inputs: List of modality tensors.
-            training: Training mode flag.
+        :param inputs: List of modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Fused tensor after attention pooling.
+        :return: Fused tensor after attention pooling.
+        :rtype: keras.KerasTensor
         """
         pooled_features = []
 
@@ -865,12 +903,13 @@ class MultiModalFusion(keras.layers.Layer):
 
         Computes outer product between two modalities.
 
-        Args:
-            inputs: List of exactly 2 modality tensors.
-            training: Training mode flag.
+        :param inputs: List of exactly 2 modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Fused tensor after bilinear pooling.
+        :return: Fused tensor after bilinear pooling.
+        :rtype: keras.KerasTensor
         """
         x1, x2 = inputs
 
@@ -907,12 +946,13 @@ class MultiModalFusion(keras.layers.Layer):
 
         Models higher-order interactions through tensor decomposition.
 
-        Args:
-            inputs: List of modality tensors.
-            training: Training mode flag.
+        :param inputs: List of modality tensors.
+        :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
 
-        Returns:
-            Fused tensor after tensor fusion.
+        :return: Fused tensor after tensor fusion.
+        :rtype: keras.KerasTensor
         """
         # Concatenate all modalities
         concatenated = keras.ops.concatenate(inputs, axis=-1)
@@ -941,11 +981,11 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> Union[Tuple[int, ...], List[Tuple[int, ...]]]:
         """Compute the output shape for given input shapes.
 
-        Args:
-            input_shape: List of input shapes for each modality.
+        :param input_shape: List of input shapes for each modality.
+        :type input_shape: Union[Tuple, List[Tuple]]
 
-        Returns:
-            Output shape(s) depending on fusion strategy.
+        :return: Output shape(s) depending on fusion strategy.
+        :rtype: Union[Tuple[int, ...], List[Tuple[int, ...]]]
         """
         if self.fusion_strategy == 'cross_attention':
             # Returns same shape for each modality
@@ -960,8 +1000,8 @@ class MultiModalFusion(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -988,11 +1028,11 @@ class MultiModalFusion(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> 'MultiModalFusion':
         """Create layer from configuration.
 
-        Args:
-            config: Configuration dictionary.
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
 
-        Returns:
-            New MultiModalFusion instance.
+        :return: New MultiModalFusion instance.
+        :rtype: MultiModalFusion
         """
         # Deserialize activation, initializers, and regularizers
         config['activation'] = keras.activations.deserialize(config['activation'])
