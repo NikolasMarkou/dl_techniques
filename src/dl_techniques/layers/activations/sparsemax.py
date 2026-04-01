@@ -17,27 +17,25 @@ dynamic shape inference issues.
 1.  **Flattening vs. N-D Broadcasting**:
     *   *Attempt*: Operating directly on N-D tensors (e.g., [Batch, Seq, Heads, K]).
     *   *Failure*: XLA often fails to infer broadcast shapes dynamically when
-        mixing Rank-1 support vectors with Rank-N inputs inside `where` or
+        mixing Rank-1 support vectors with Rank-N inputs inside ``where`` or
         boolean masking ops.
-    *   *Decision*: We flatten all inputs to 2D `(N, K)` before processing.
+    *   *Decision*: We flatten all inputs to 2D ``(N, K)`` before processing.
         This reduces the problem to a canonical Rank-2 vs Rank-1 operation,
         which compilers can optimize reliably without shape ambiguity.
 
-2.  **Masking vs. Gathering (`take_along_axis`)**:
-    *   *Attempt*: Using `ops.take_along_axis` to select the cumulative sum
-        value at the threshold index `k(z)`.
-    *   *Failure*: `take_along_axis` with dynamic indices (indices determined
-        by data values during the forward pass) forces the compiler to generate
-        dynamic slice operations. If the compiler cannot prove the bounds are
-        valid at compile-time, it often throws `BroadcastArgs` or `Invalid Argument`
-        errors.
-    *   *Decision*: We use `one_hot` encoding + multiplication (`sum(vals * mask)`).
+2.  **Masking vs. Gathering (take_along_axis)**:
+    *   *Attempt*: Using ``ops.take_along_axis`` to select the cumulative sum
+        value at the threshold index ``k(z)``.
+    *   *Failure*: ``take_along_axis`` with dynamic indices forces the compiler
+        to generate dynamic slice operations. If the compiler cannot prove the
+        bounds are valid at compile-time, it often throws errors.
+    *   *Decision*: We use ``one_hot`` encoding + multiplication (``sum(vals * mask)``).
         While computationally slightly heavier (O(K) vs O(1) fetch), it relies
-        purely on matrix arithmetic (Multiplication/Add), which is shape-static
-        and universally supported by all hardware accelerators.
+        purely on matrix arithmetic, which is shape-static and universally
+        supported by all hardware accelerators.
 
 3.  **Explicit Reshaping**:
-    *   *Decision*: We explicitly reshape support vectors to `(1, K)` rather
+    *   *Decision*: We explicitly reshape support vectors to ``(1, K)`` rather
         than relying on implicit NumPy-style broadcasting. This removes any
         ambiguity in the computation graph regarding which dimension is being
         broadcasted.
@@ -56,21 +54,61 @@ from typing import Optional, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class Sparsemax(keras.layers.Layer):
-    """
-    Sparsemax activation function layer for sparse probability distributions.
+    """Sparsemax activation function layer for sparse probability distributions.
 
-    **Intent**: Provide a differentiable sparse alternative to softmax that produces
-    probability distributions with many exact zeros.
+    Sparsemax projects logits onto the probability simplex using an L2
+    projection, producing distributions with many exact zeros. Unlike softmax,
+    which always assigns non-zero probabilities to all classes, Sparsemax
+    encourages sparsity. This XLA-safe implementation employs a
+    "Flatten-Mask-Restore" strategy to avoid dynamic tensor slicing and
+    ambiguous broadcasting.
 
-    **XLA-Safe Implementation**:
-    This class employs a "Flatten-Mask-Restore" strategy to avoid dynamic
-    tensor slicing and ambiguous broadcasting, making it robust for
-    `@tf.function` and `jit_compile=True` environments.
+    **Architecture Overview:**
 
-    Args:
-        axis: Integer, axis along which to compute sparsemax normalization.
-            Typically -1. Defaults to -1.
-        **kwargs: Additional keyword arguments passed to the Layer base class.
+    .. code-block:: text
+
+        Input: logits (batch, ..., K)
+                │
+                ▼
+        ┌───────────────────────────┐
+        │  Permute axis to last dim │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Flatten to 2D: (N, K)   │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Sort descending          │
+        │  Cumulative sum           │
+        │  Find support set k(z)   │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Compute threshold tau    │
+        │  tau = (cumsum - 1) / k   │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Project: max(z - tau, 0) │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │  Restore original shape   │
+        └───────────┬───────────────┘
+                    │
+                    ▼
+        Output: (batch, ..., K) sparse probabilities
+
+    :param axis: Axis along which to compute sparsemax normalization.
+        Typically -1. Defaults to -1.
+    :type axis: int
+    :param kwargs: Additional keyword arguments passed to the Layer base class.
     """
 
     def __init__(
@@ -78,6 +116,13 @@ class Sparsemax(keras.layers.Layer):
             axis: int = -1,
             **kwargs: Any
     ) -> None:
+        """Initialize the Sparsemax layer.
+
+        :param axis: Axis along which to compute sparsemax normalization.
+        :type axis: int
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :raises ValueError: If axis is not an integer.
+        """
         super().__init__(**kwargs)
         if not isinstance(axis, int):
             raise ValueError(f"axis must be an integer, got {type(axis).__name__}")
@@ -88,15 +133,14 @@ class Sparsemax(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply sparsemax activation to input logits.
+        """Apply sparsemax activation to input logits.
 
-        Args:
-            inputs: Input tensor of logits, arbitrary shape.
-            training: Unused.
-
-        Returns:
-            Sparse probability distribution with same shape as inputs.
+        :param inputs: Input tensor of logits, arbitrary shape.
+        :type inputs: keras.KerasTensor
+        :param training: Unused.
+        :type training: Optional[bool]
+        :return: Sparse probability distribution with same shape as inputs.
+        :rtype: keras.KerasTensor
         """
         # Store original shape for restoration
         input_shape = inputs.shape
@@ -211,10 +255,10 @@ class Sparsemax(keras.layers.Layer):
         # =====================================================================
 
         # Calculate Tau (Threshold)
-        # τ = (sum(z_support) - 1) / |support|
+        # tau = (sum(z_support) - 1) / |support|
         tau = (z_cumsum_at_k - 1.0) / k_z
 
-        # Projection: P = max(0, z - τ)
+        # Projection: P = max(0, z - tau)
         # This naturally sets elements outside the support to exactly zero.
         output_2d = ops.maximum(inputs_2d - tau, 0.0)
 
@@ -239,23 +283,20 @@ class Sparsemax(keras.layers.Layer):
             self,
             input_shape: tuple
     ) -> tuple:
-        """
-        Compute output shape (same as input shape).
+        """Compute output shape (same as input shape).
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple (identical to input).
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple, identical to input.
+        :rtype: tuple
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

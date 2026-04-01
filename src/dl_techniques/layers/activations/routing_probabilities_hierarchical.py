@@ -2,86 +2,37 @@
 Trainable hierarchical routing tree for large-scale classification.
 
 This module provides a learnable alternative to the standard Dense -> Softmax
-architecture. Unlike RoutingProbabilitiesLayer which uses fixed deterministic
+architecture. Unlike ``RoutingProbabilitiesLayer`` which uses fixed deterministic
 projections, this layer learns the optimal routing decisions via backpropagation.
 
-Complete Architecture Flow::
+The concept is identical to the deterministic routing layer, but the
+decisions are learned:
 
-    INPUT: Features [batch, D]
-      │
-      │  Learnable Projection Phase
-      ├──────────────────────────────────────────────────┐
-      │  Weights W: [D, log₂(padded_N)]                  │
-      │  Bias b:    [log₂(padded_N)]                     │
-      │                                                  │
-      │  logits = <input, W> + b                         │
-      │  p_k = σ(logits)           (sigmoid)             │
-      └──────────────────────────────────────────────────┘
-      │
-      ↓  [p₀, p₁, ..., p_{d-1}]  where d = log₂(padded_N)
-      │
-      │  Hierarchical Routing Phase
-      ├──────────────────────────────────────────────────┐
-      │  Initialize: root_prob = 1.0                     │
-      │                                                  │
-      │  For level k = 0 to d-1:                         │
-      │    For each node at level k:                     │
-      │      left_child_prob  = node_prob × (1 - p_k)    │
-      │      right_child_prob = node_prob × p_k          │
-      │                                                  │
-      │  Result: 2^d leaf probabilities                  │
-      └──────────────────────────────────────────────────┘
-      │
-      ↓  [leaf₀, leaf₁, ..., leaf_{2^d-1}]  (sum = 1.0)
-      │
-      │  Slicing & Renormalization Phase
-      ├──────────────────────────────────────────────────┐
-      │  If N != 2^d (not power of 2):                   │
-      │    selected = [leaf₀, ..., leaf_{N-1}]           │
-      │    normalized = selected / sum(selected)         │
-      │  Else:                                           │
-      │    normalized = leaves (already sum to 1.0)      │
-      └──────────────────────────────────────────────────┘
-      │
-      ↓
-    OUTPUT: Class Probabilities [batch, N]  (sum = 1.0)
+1. **Padding**: The output dimension ``N`` is padded to the next power of
+   two (``padded_dim``). Depth ``d = log2(padded_dim)``.
 
-Binary Tree Structure::
+2. **Learnable Projections**: A trainable Dense projection maps the
+   input features to ``d`` logits.
 
-    The concept is identical to the deterministic routing layer, but the
-    decisions are learned.
+3. **Probabilistic Decisions**: Sigmoid activation converts logits to
+   branching probabilities.
 
-    1. **Padding**: The output dimension N is padded to the next power of
-       two (`padded_dim`). Depth d = log₂(padded_dim).
+4. **Hierarchical Routing**: Probability mass flows from the root to
+   leaves based on these decisions.
 
-    2. **Learnable Projections**: A trainable Dense projection maps the
-       input features to d logits.
+Unlike the deterministic version which uses cosine similarity, this layer
+uses a standard affine transformation for decision making:
+``z = xW + b``
 
-    3. **Probabilistic Decisions**: Sigmoid activation converts logits to
-       branching probabilities.
+where ``x`` is the input vector ``[1, D]``, ``W`` is the learnable weight matrix
+``[D, d]``, and ``b`` is the learnable bias vector ``[d]``.
 
-    4. **Hierarchical Routing**: Probability mass flows from the root to
-       leaves based on these decisions.
+The probability of taking the 'right' branch at depth ``k`` is:
+``P(right_k) = sigma(z_k)``
 
-Foundational Mathematics
-------------------------
-Unlike the deterministic version which uses Cosine Similarity, this layer
-uses a standard Affine Transformation for decision making.
-
-    z = xW + b
-
-    Where:
-    - x is the input vector [1, D]
-    - W is the learnable weight matrix [D, d]
-    - b is the learnable bias vector [d]
-
-    The probability of taking the 'right' branch at depth k is:
-    P(right_k) = σ(z_k)
-
-References
-----------
-- Morin, F., & Bengio, Y. (2005). "Hierarchical Probabilistic Neural
-  Network Language Model". AISTATS.
+References:
+    - Morin, F., & Bengio, Y. (2005). "Hierarchical Probabilistic Neural
+      Network Language Model". AISTATS.
 """
 
 import math
@@ -107,52 +58,76 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
     This layer acts as a drop-in replacement for a standard Dense+Softmax
     output head. It reduces the computational complexity of the output
     projection from O(N) to O(log N) by learning a sequence of binary
-    decisions.
+    decisions. The routing weights are learned via backpropagation, unlike
+    the deterministic ``RoutingProbabilitiesLayer``.
 
-    **Architecture Overview**::
+    **Architecture Overview:**
 
-        Input Features [batch, ..., D]
-               ↓
-        ┌──────────────────────────────────────┐
-        │  Trainable Dense Projection          │  (Learnable Weights)
-        │  d = log₂(padded_dim) outputs        │
-        └──────────────────────────────────────┘
-               ↓
-        Decision Logits [batch, d] → Sigmoid → Decision Probs [batch, d]
-               ↓
-        ┌──────────────────────────────────────┐
-        │    Hierarchical Probability Tree     │
-        │  (binary splits at each level k)     │
-        └──────────────────────────────────────┘
-               ↓
-        Leaf Probabilities [batch, padded_dim] → Slice & Renormalize
-               ↓
-        Output Probabilities [batch, ..., output_dim]  (sums to 1.0)
+    .. code-block:: text
 
-    **Processing Pipeline**:
-
-    1. **Output Dimension Logic**: Calculates `padded_dim` (next power of 2)
-       to ensure a complete binary tree.
-
-    2. **Learnable Decision Making**: Projects inputs using a trainable kernel
-       `W` of shape `(input_dim, log2(padded_dim))` and bias `b`.
-
-    3. **Probabilistic Routing**: Traverses the binary tree, splitting
-       probability mass at each level.
-
-    4. **Slicing & Renormalization**: Selects probabilities for original
-       classes and renormalizes.
+        ┌─────────────────────────────────────────┐
+        │    Input Features [batch, ..., D]       │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Trainable Dense Projection             │
+        │  W: [D, log2(padded_dim)]               │
+        │  b: [log2(padded_dim)]                  │
+        │  logits = x @ W + b                     │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Sigmoid Activation                     │
+        │  p_k = sigma(logit_k) -> Decision Probs│
+        │  [batch, d]                             │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Hierarchical Probability Tree          │
+        │                                         │
+        │            Root (p=1.0)                  │
+        │           ┌───┴───┐                     │
+        │       (1-p0)    (p0)                    │
+        │       ┌──┴──┐  ┌──┴──┐                  │
+        │      ...   ... ...   ...                │
+        │       │     │   │     │                  │
+        │      L0    L1  L2    L3  ...            │
+        │                                         │
+        │  Binary splits at each level k          │
+        │  left = parent * (1 - p_k)              │
+        │  right = parent * p_k                   │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Slice & Renormalize                    │
+        │  Keep first output_dim leaves           │
+        │  Renormalize to sum = 1.0               │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Output Probabilities                   │
+        │  [batch, ..., output_dim] (sum = 1.0)   │
+        └─────────────────────────────────────────┘
 
     :param output_dim: Dimensionality of the output space (number of classes).
     :type output_dim: int
-    :param axis: Axis along which the routing is applied. Defaults to -1.
+    :param axis: Axis along which the routing is applied.
     :type axis: int
     :param epsilon: Small float added to prevent numerical issues.
     :type epsilon: float
     :param kernel_initializer: Initializer for the weight matrix.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the bias vector.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer function for the weight matrix.
-    :param use_bias: Whether to use a bias vector. Defaults to True.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_bias: Whether to use a bias vector.
+    :type use_bias: bool
     :param kwargs: Additional arguments for the Layer base class.
     """
 
@@ -169,6 +144,23 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
     ) -> None:
         """
         Initialize the HierarchicalRoutingLayer.
+
+        :param output_dim: Number of output classes. Must be greater than 1.
+        :type output_dim: int
+        :param axis: Axis along which the routing is applied.
+        :type axis: int
+        :param epsilon: Small float for numerical stability.
+        :type epsilon: float
+        :param kernel_initializer: Initializer for the weight matrix.
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param bias_initializer: Initializer for the bias vector.
+        :type bias_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Regularizer for the weight matrix.
+        :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param use_bias: Whether to use a bias vector.
+        :type use_bias: bool
+        :param kwargs: Additional layer arguments.
+        :type kwargs: Any
         """
         super().__init__(**kwargs)
 
@@ -205,6 +197,7 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
         Build the layer by creating trainable weights and tree structure.
 
         :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Normalize axis to handle negative indices
         input_rank = len(input_shape)
@@ -265,26 +258,18 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Define the forward pass logic of the layer.
+        Apply learnable hierarchical routing to produce class probabilities.
 
-        **Processing Steps**::
-
-            0. Axis manipulation & reshape to 2D
-               ↓
-            1. Compute learnable decision probabilities (MatMul)
-               ↓
-            2. Initialize root probability (1.0 for all samples)
-               ↓
-            3. Iteratively split probabilities through binary tree
-               ↓
-            4. Slice to output_dim and renormalize
-               ↓
-            5. Reshape back to original structure
-               ↓
-            6. Transpose to restore original axis order
+        Projects inputs through a trainable kernel, converts to decision
+        probabilities via sigmoid, then routes probability mass through
+        a binary tree.
 
         :param inputs: Input tensor of arbitrary rank.
+        :type inputs: keras.KerasTensor
         :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output probability tensor with output_dim at the specified axis.
+        :rtype: keras.KerasTensor
         """
         # Step 0: Handle axis manipulation for arbitrary rank tensors
         # Move the target axis to the last position and flatten others
@@ -332,11 +317,6 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
 
         # Step 3: Iteratively build the tree by splitting probabilities
         # At each level, split each existing leaf into two children
-        #
-        # Visual representation:
-        #               Root              Level 0          Level 1
-        #              [1.0]      →      [L  R]    →    [LL LR RL RR]
-        #
         for i in range(self.num_decisions):
             # Get routing probability for current decision level
             # Shape: (batch_size, 1)
@@ -412,6 +392,11 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """
         Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with output_dim at the specified axis.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
 
@@ -429,6 +414,9 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """
         Return the configuration of the layer for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

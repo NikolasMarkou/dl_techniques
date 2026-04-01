@@ -12,12 +12,12 @@ Architectural Overview:
     The core principle is to transform the output of a standard softmax
     based on each class's "confidence" relative to a uniform distribution.
     The process involves:
-    1.  A standard softmax is applied to the input logits to obtain `p`.
-    2.  A confidence threshold is established as `τ = 1/N`.
-    3.  A smooth, differentiable step function `S` is applied to the
-        confidence difference `d = p - τ`.
-    4.  **Gating Operation**: The mask `S(d)` is applied *multiplicatively*
-        to the original probabilities `p`. This prevents "Rank Collapse" by
+    1.  A standard softmax is applied to the input logits to obtain ``p``.
+    2.  A confidence threshold is established as ``tau = 1/N``.
+    3.  A smooth, differentiable step function ``S`` is applied to the
+        confidence difference ``d = p - tau``.
+    4.  **Gating Operation**: The mask ``S(d)`` is applied *multiplicatively*
+        to the original probabilities ``p``. This prevents "Rank Collapse" by
         preserving the relative magnitude of the confident classes.
     5.  The resulting values are renormalized to sum to one.
 
@@ -27,10 +27,10 @@ Architectural Overview:
     uniform scenarios, making explicit fallback logic unnecessary.
 
 Mathematical Foundation:
-    1. Standard Softmax: p = softmax(x)
-    2. Confidence Gate:  g = 0.5 * (tanh(slope * (p - 1/N)) + 1)
-    3. Gated Probs:      p_gated = p * g
-    4. Renormalization:  p_sparse = p_gated / sum(p_gated)
+    1. Standard Softmax: ``p = softmax(x)``
+    2. Confidence Gate:  ``g = 0.5 * (tanh(slope * (p - 1/N)) + 1)``
+    3. Gated Probs:      ``p_gated = p * g``
+    4. Renormalization:  ``p_sparse = p_gated / sum(p_gated)``
 
 References:
     -   **Sparse Softmax Variants:** Similar to Sparsemax.
@@ -61,25 +61,63 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 class ThreshMax(keras.layers.Layer):
     """ThreshMax activation layer with learnable sparsity.
 
-    A drop-in replacement for Softmax that produces sparse probability distributions
-    while preserving the relative rank of confident classes. Supports an optional
+    A drop-in replacement for Softmax that produces sparse probability
+    distributions while preserving the relative rank of confident classes.
+    The computation is: ``softmax(x) -> gate via differentiable step ->
+    multiplicative masking -> renormalization``. Supports an optional
     trainable slope parameter to learn the optimal sparsity threshold.
 
-    Mathematical formulation:
-        1. y_soft = softmax(x)
-        2. gate = differentiable_step(y_soft - 1/N, slope)
-        3. y_gated = y_soft * gate
-        4. y_final = y_gated / sum(y_gated)
+    **Architecture Overview:**
 
-    Args:
-        axis: Integer, axis along which to apply normalization. Defaults to -1.
-        slope: Float, initial steepness of the step function. Defaults to 10.0.
-        epsilon: Float, numerical stability constant. Defaults to 1e-12.
-        trainable_slope: Boolean, if True, the slope is learned. Defaults to False.
-        slope_initializer: Initializer for slope (if trainable).
-        slope_regularizer: Regularizer for slope. Defaults to negative L2 to
-            encourage sharpening over time.
-        slope_constraint: Constraint for slope. Defaults to [1, 50.0].
+    .. code-block:: text
+
+        Input: logits (batch, ..., N)
+                │
+                ▼
+        ┌───────────────────────────┐
+        │  Softmax: p = softmax(x)  │
+        └───────────┬───────────────┘
+                    │
+                    ├───────────────────────────┐
+                    │                           │
+                    ▼                           ▼
+        ┌───────────────────┐   ┌───────────────────────────┐
+        │  Identity: p      │   │  Confidence diff:         │
+        │                   │   │  d = p - 1/N              │
+        │                   │   │  gate = step(d, slope)    │
+        └───────┬───────────┘   └──────────────┬────────────┘
+                │                              │
+                └──────────┬───────────────────┘
+                           │
+                           ▼
+                ┌──────────────────────┐
+                │  p_gated = p * gate  │
+                └──────────┬───────────┘
+                           │
+                           ▼
+                ┌──────────────────────────────┐
+                │  Renormalize: p_gated / sum  │
+                └──────────────┬───────────────┘
+                               │
+                               ▼
+        Output: (batch, ..., N) sparse probabilities
+
+    :param axis: Axis along which to apply normalization. Defaults to -1.
+    :type axis: int
+    :param slope: Initial steepness of the step function. Defaults to 10.0.
+    :type slope: float
+    :param epsilon: Numerical stability constant. Defaults to 1e-12.
+    :type epsilon: float
+    :param trainable_slope: If True, the slope is learned. Defaults to False.
+    :type trainable_slope: bool
+    :param slope_initializer: Initializer for slope (if trainable).
+    :type slope_initializer: Union[str, initializers.Initializer]
+    :param slope_regularizer: Regularizer for slope. Defaults to negative L2 to
+        encourage sharpening over time.
+    :type slope_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param slope_constraint: Constraint for slope. Defaults to [1, 50.0].
+    :type slope_constraint: Optional[Union[str, constraints.Constraint]]
+    :param kwargs: Additional keyword arguments passed to the Layer base class.
     """
 
     def __init__(
@@ -93,6 +131,25 @@ class ThreshMax(keras.layers.Layer):
             slope_constraint: Optional[Union[str, constraints.Constraint]] = ValueRangeConstraint(1.0, 50.0),
             **kwargs: Any
     ) -> None:
+        """Initialize the ThreshMax layer.
+
+        :param axis: Axis along which to apply normalization. Defaults to -1.
+        :type axis: int
+        :param slope: Initial steepness of the step function. Defaults to 10.0.
+        :type slope: float
+        :param epsilon: Numerical stability constant. Defaults to 1e-12.
+        :type epsilon: float
+        :param trainable_slope: If True, the slope is learned. Defaults to False.
+        :type trainable_slope: bool
+        :param slope_initializer: Initializer for slope (if trainable).
+        :type slope_initializer: Union[str, initializers.Initializer]
+        :param slope_regularizer: Regularizer for slope.
+        :type slope_regularizer: Optional[Union[str, regularizers.Regularizer]]
+        :param slope_constraint: Constraint for slope.
+        :type slope_constraint: Optional[Union[str, constraints.Constraint]]
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :raises ValueError: If epsilon or slope is not positive.
+        """
         super().__init__(**kwargs)
 
         if epsilon <= 0:
@@ -116,9 +173,9 @@ class ThreshMax(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the layer weights if trainable_slope is True.
-        
-        Args:
-            input_shape: Shape of the input tensor.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         init = self.slope_initializer
         # Use slope_initial_value if using default "ones" initializer
@@ -148,17 +205,18 @@ class ThreshMax(keras.layers.Layer):
             slope: Union[float, keras.KerasTensor] = 1.0,
             shift: Union[float, keras.KerasTensor] = 0.0
     ) -> keras.KerasTensor:
-        """Approximates a Heaviside step function using a scaled and shifted tanh.
+        """Approximate a Heaviside step function using scaled and shifted tanh.
 
-        The formula is: f(x) = (tanh(slope * (x - shift)) + 1) / 2
+        Computes ``f(x) = (tanh(slope * (x - shift)) + 1) / 2``.
 
-        Args:
-            x: Input tensor.
-            slope: Controls steepness. Higher = sharper step.
-            shift: Center point where output is 0.5.
-
-        Returns:
-            Tensor with values smoothly transitioning from 0 to 1.
+        :param x: Input tensor.
+        :type x: keras.KerasTensor
+        :param slope: Controls steepness. Higher values produce a sharper step.
+        :type slope: Union[float, keras.KerasTensor]
+        :param shift: Center point where output is 0.5.
+        :type shift: Union[float, keras.KerasTensor]
+        :return: Tensor with values smoothly transitioning from 0 to 1.
+        :rtype: keras.KerasTensor
         """
         # Cast scalar inputs to tensor if x is a tensor for consistent broadcasting
         if isinstance(slope, (int, float)):
@@ -173,19 +231,15 @@ class ThreshMax(keras.layers.Layer):
             self,
             x: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Internal computation for ThreshMax activation.
+        """Compute the ThreshMax activation on input logits.
 
-        Optimized logic:
-        1. Computes Softmax.
-        2. Calculates soft gate based on deviation from uniform distribution.
-        3. Applies multiplicative gating (Rank Preservation).
-        4. Renormalizes.
+        Applies softmax, gates via differentiable step based on deviation
+        from uniform distribution, then renormalizes.
 
-        Args:
-            x: Input logits.
-
-        Returns:
-            Sparse probability distribution summing to 1.
+        :param x: Input logits.
+        :type x: keras.KerasTensor
+        :return: Sparse probability distribution summing to 1.
+        :rtype: keras.KerasTensor
         """
         # Step 1: Compute standard softmax
         y_soft = keras.activations.softmax(x, axis=self.axis)
@@ -215,13 +269,13 @@ class ThreshMax(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Apply ThreshMax activation to inputs.
-        
-        Args:
-            inputs: Input tensor containing logits.
-            training: Boolean indicating training mode (unused).
-            
-        Returns:
-            Output tensor with sparse probability distributions.
+
+        :param inputs: Input tensor containing logits.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode (unused).
+        :type training: Optional[bool]
+        :return: Output tensor with sparse probability distributions.
+        :rtype: keras.KerasTensor
         """
         return self._compute_threshmax(inputs)
 
@@ -230,20 +284,19 @@ class ThreshMax(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
-        
-        Args:
-            input_shape: Shape of the input tensor.
-            
-        Returns:
-            Shape of the output tensor (same as input).
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape of the output tensor (same as input).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
-        
-        Returns:
-            Dictionary containing layer configuration.
+        """Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -258,10 +311,10 @@ class ThreshMax(keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        """Get string representation of the layer.
-        
-        Returns:
-            String representation.
+        """Return string representation of the layer.
+
+        :return: String representation including the layer name and key parameters.
+        :rtype: str
         """
         mode = "learnable" if self.trainable_slope else "fixed"
         return (f"ThreshMax(axis={self.axis}, slope={self.slope_initial_value}, "
@@ -281,14 +334,16 @@ def thresh_max(
 ) -> keras.KerasTensor:
     """Functional interface for ThreshMax activation.
 
-    Args:
-        x: Input tensor containing logits.
-        axis: The axis along which the softmax normalization is applied.
-        slope: Controls the steepness of the differentiable step function.
-        epsilon: Small value for numerical stability.
-
-    Returns:
-        Output tensor with sparse probability distributions.
+    :param x: Input tensor containing logits.
+    :type x: keras.KerasTensor
+    :param axis: The axis along which the softmax normalization is applied.
+    :type axis: int
+    :param slope: Controls the steepness of the differentiable step function.
+    :type slope: Union[float, keras.KerasTensor]
+    :param epsilon: Small value for numerical stability.
+    :type epsilon: float
+    :return: Output tensor with sparse probability distributions.
+    :rtype: keras.KerasTensor
     """
     if epsilon <= 0:
         raise ValueError(f"epsilon must be positive, got {epsilon}")

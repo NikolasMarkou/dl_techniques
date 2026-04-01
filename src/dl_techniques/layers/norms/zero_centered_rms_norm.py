@@ -9,21 +9,21 @@ problem in standard RMSNorm while maintaining computational advantages.
 Mathematical Formulation:
     Given an input tensor x with shape (..., d), Zero-Centered RMS normalization computes:
 
-    μ = mean(x) over specified axes
-    x_centered = x - μ
-    RMS(x_centered) = sqrt(mean(x_centered²) + ε)
-    output = (x_centered / RMS(x_centered)) * γ
+    mu = mean(x) over specified axes
+    x_centered = x - mu
+    RMS(x_centered) = sqrt(mean(x_centered^2) + epsilon)
+    output = (x_centered / RMS(x_centered)) * gamma
 
     Where:
-    - μ is the mean computed over specified axes (centering step)
-    - mean(x_centered²) is computed over the same specified axes
-    - ε is a small epsilon for numerical stability
-    - γ is an optional learnable scaling parameter
+    - mu is the mean computed over specified axes (centering step)
+    - mean(x_centered^2) is computed over the same specified axes
+    - epsilon is a small epsilon for numerical stability
+    - gamma is an optional learnable scaling parameter
 
 Key Differences from Standard Normalization:
-    - LayerNorm: (x - μ) / σ * γ + β (centers, scales, and shifts)
-    - RMSNorm: x / RMS(x) * γ (only scales, no centering)
-    - Zero-Centered RMSNorm: (x - μ) / RMS(x - μ) * γ (centers and scales, no shift)
+    - LayerNorm: (x - mu) / sigma * gamma + beta (centers, scales, and shifts)
+    - RMSNorm: x / RMS(x) * gamma (only scales, no centering)
+    - Zero-Centered RMSNorm: (x - mu) / RMS(x - mu) * gamma (centers and scales, no shift)
 
 This makes Zero-Centered RMSNorm conceptually similar to LayerNorm without the bias term,
 but framed as an enhancement to RMSNorm that prevents mean drift.
@@ -63,176 +63,78 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
     the computational efficiency of RMSNorm with the stabilizing zero-mean property of
     LayerNorm, preventing mean drift and abnormal weight growth.
 
-    **Intent**: Provide enhanced normalization that prevents abnormal growth of layer
-    normalization weights while maintaining computational efficiency, particularly
-    beneficial for transformer architectures and large language models.
+    The normalization is computed as:
 
-    **Architecture**:
-    ```
-    Input(shape=[..., features])
-           ↓
-    Compute: μ = mean(x)
-           ↓
-    Center: x_centered = x - μ
-           ↓
-    Compute: rms = sqrt(mean(x_centered²) + ε)
-           ↓
-    Normalize: x_norm = x_centered / rms
-           ↓
-    Scale: output = x_norm * γ (if use_scale=True)
-           ↓
-    Output(shape=[..., features])
-    ```
+    1. Centering: mu = E[x], x_centered = x - mu
+    2. RMS Computation: rms = sqrt(E[x_centered^2] + epsilon)
+    3. Normalization: x_hat = x_centered / rms
+    4. Scaling: y = gamma * x_hat (if use_scale=True)
 
-    **Mathematical Operations**:
-    1. **Centering**: μ = E[x], x_centered = x - μ
-    2. **RMS Computation**: rms = √(E[x_centered²] + ε)
-    3. **Normalization**: x̂ = x_centered / rms
-    4. **Scaling**: y = γ ⊙ x̂ (if use_scale=True)
+    Where mu is computed per feature across normalization axes, gamma (scale) is a
+    learnable parameter if use_scale=True, and epsilon is a small constant for
+    numerical stability.
 
-    Where:
-    - μ is computed per feature across normalization axes
-    - γ (scale) is a learnable parameter if use_scale=True
-    - ε is a small constant for numerical stability
-    - ⊙ denotes element-wise multiplication
+    This layer is particularly beneficial for transformer architectures and large
+    language models, preventing abnormal growth of layer normalization weights while
+    maintaining computational efficiency. Conceptually similar to LayerNorm without
+    bias, but framed as enhanced RMSNorm.
 
-    Args:
-        axis: Axis or axes along which to compute mean and RMS statistics.
-            The default (-1) computes statistics over the last dimension. For multi-axis
-            normalization, pass a tuple (e.g., (-2, -1) for normalizing over last two
-            dimensions). Defaults to -1.
-        epsilon: Small constant added to denominator for numerical stability.
-            Should be positive and typically in range [1e-8, 1e-5]. Defaults to 1e-6.
-        use_scale: Boolean, whether to use a learnable scaling parameter after
-            normalization. When True, adds a trainable parameter that can help the model
-            learn appropriate scaling. Defaults to True.
-        scale_initializer: Initializer for the scale parameter when ``use_scale=True``.
-            Common choices include "ones" (default), "zeros", or custom initializers.
-            Defaults to "ones".
-        **kwargs: Additional keyword arguments passed to the parent Layer class.
+    **Architecture Overview:**
 
-    Input shape:
-        N-D tensor with shape: ``(batch_size, ..., features)``
+    .. code-block:: text
 
-        The layer can handle any dimensionality, with normalization applied along
-        the specified axis/axes.
+        Input: x (batch, ..., features)
+                │
+                ▼
+        ┌───────────────────────────────┐
+        │  μ = mean(x) along axis       │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  x_centered = x - μ           │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  RMS = √(mean(x_centered²)+ε)│
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  normalized = x_centered / RMS│
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  output = normalized × γ      │
+        │  (if use_scale=True)          │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        Output: (batch, ..., features)
 
-    Output shape:
-        Same shape as input: ``(batch_size, ..., features)``
+    :param axis: Axis or axes along which to compute mean and RMS statistics.
+        The default (-1) computes statistics over the last dimension. For multi-axis
+        normalization, pass a tuple (e.g., (-2, -1) for normalizing over last two
+        dimensions).
+    :type axis: Union[int, Tuple[int, ...]]
+    :param epsilon: Small constant added to denominator for numerical stability.
+        Should be positive and typically in range [1e-8, 1e-5].
+    :type epsilon: float
+    :param use_scale: Whether to use a learnable scaling parameter after
+        normalization. When True, adds a trainable parameter that can help the model
+        learn appropriate scaling.
+    :type use_scale: bool
+    :param scale_initializer: Initializer for the scale parameter when
+        ``use_scale=True``. Common choices include "ones" (default), "zeros",
+        or custom initializers.
+    :type scale_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional keyword arguments passed to the parent Layer class.
 
-    Attributes:
-        scale: Learnable scale parameter if use_scale=True, else None. Created in build().
-
-    Raises:
-        ValueError: If epsilon is not positive.
-        ValueError: If attempting to normalize along dynamic axes during build.
-        TypeError: If axis is not int or tuple of ints.
-
-    Example:
-        Basic usage with default parameters:
-
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
-
-            # Simple case - normalize last dimension
-            inputs = keras.Input(shape=(512,))
-            normalized = ZeroCenteredRMSNorm()(inputs)
-            model = keras.Model(inputs, normalized)
-
-        Custom configuration for transformer layers:
-
-        .. code-block:: python
-
-            # Pre-normalization transformer block with enhanced stability
-            def stable_transformer_block(inputs, hidden_size=768):
-                # Zero-centered RMSNorm before attention
-                norm_inputs = ZeroCenteredRMSNorm(
-                    axis=-1,
-                    epsilon=1e-5,
-                    use_scale=True,
-                    scale_initializer='ones'
-                )(inputs)
-
-                # Multi-head attention
-                attention_out = keras.layers.MultiHeadAttention(
-                    num_heads=12,
-                    key_dim=64
-                )(norm_inputs, norm_inputs)
-
-                # Residual connection
-                x = inputs + attention_out
-
-                # Zero-centered RMSNorm before FFN
-                norm_x = ZeroCenteredRMSNorm()(x)
-
-                # Feed-forward network
-                ffn_out = keras.layers.Dense(3072, activation='relu')(norm_x)
-                ffn_out = keras.layers.Dense(hidden_size)(ffn_out)
-
-                # Residual connection
-                return x + ffn_out
-
-        Large language model integration (Qwen3-Next style):
-
-        .. code-block:: python
-
-            class QwenBlock(keras.layers.Layer):
-                def __init__(self, hidden_size=4096, **kwargs):
-                    super().__init__(**kwargs)
-                    # Use Zero-Centered RMSNorm for stability
-                    self.attention_norm = ZeroCenteredRMSNorm(epsilon=1e-5)
-                    self.ffn_norm = ZeroCenteredRMSNorm(epsilon=1e-5)
-                    self.attention = keras.layers.MultiHeadAttention(...)
-                    self.feed_forward = keras.layers.Dense(...)
-
-                def call(self, inputs):
-                    # Pre-normalization with zero-centering
-                    norm_inputs = self.attention_norm(inputs)
-                    attn_out = self.attention(norm_inputs, norm_inputs)
-                    x = inputs + attn_out
-
-                    norm_x = self.ffn_norm(x)
-                    ffn_out = self.feed_forward(norm_x)
-                    return x + ffn_out
-
-        Multi-axis normalization:
-
-        .. code-block:: python
-
-            # Normalize over spatial dimensions for images
-            inputs = keras.Input(shape=(32, 32, 256))  # (H, W, C)
-
-            # Normalize over height and width, keep channels separate
-            spatial_norm = ZeroCenteredRMSNorm(axis=(1, 2))(inputs)
-
-            # Normalize over all feature dimensions
-            full_norm = ZeroCenteredRMSNorm(axis=(-3, -2, -1))(inputs)
-
-        Mixed precision training optimization:
-
-        .. code-block:: python
-
-            # Zero-Centered RMSNorm with mixed precision
-            keras.mixed_precision.set_global_policy('mixed_float16')
-
-            inputs = keras.Input(shape=(1024,), dtype='float16')
-            normalized = ZeroCenteredRMSNorm(
-                epsilon=1e-5,  # Slightly larger epsilon for fp16 stability
-                use_scale=True
-            )(inputs)
-
-            model = keras.Model(inputs, normalized)
-
-    Note:
-        - Prevents abnormal growth of layer normalization weights compared to standard RMSNorm
-        - Maintains zero-mean property across layers for enhanced training stability
-        - Particularly effective in transformer architectures and large language models
-        - The implementation automatically handles mixed precision training with appropriate casting
-        - Scale parameter shape is automatically inferred from normalization axes
-        - This implementation follows modern Keras 3 patterns for robust serialization
-        - Conceptually similar to LayerNorm without bias, but framed as enhanced RMSNorm
+    :raises ValueError: If epsilon is not positive.
+    :raises ValueError: If attempting to normalize along dynamic axes during build.
+    :raises TypeError: If axis is not int or tuple of ints.
     """
 
     def __init__(
@@ -263,13 +165,12 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         """
         Validate initialization parameters.
 
-        Args:
-            axis: Normalization axis/axes to validate.
-            epsilon: Epsilon value to validate.
-
-        Raises:
-            ValueError: If epsilon is not positive.
-            TypeError: If axis is not int or tuple of ints.
+        :param axis: Normalization axis/axes to validate.
+        :type axis: Union[int, Tuple[int, ...]]
+        :param epsilon: Epsilon value to validate.
+        :type epsilon: float
+        :raises ValueError: If epsilon is not positive.
+        :raises TypeError: If axis is not int or tuple of ints.
         """
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
@@ -288,13 +189,11 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         This is called automatically when the layer first processes input.
         Following modern Keras 3 Pattern 1: Simple Layer (No Sub-layers).
 
-        Args:
-            input_shape: Shape tuple indicating input tensor shape.
-                First dimension (batch size) may be None.
-
-        Raises:
-            ValueError: If attempting to create scale parameter with dynamic shape
-                along normalization axes.
+        :param input_shape: Shape tuple indicating input tensor shape.
+            First dimension (batch size) may be None.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If attempting to create scale parameter with dynamic
+            shape along normalization axes.
         """
         if self.use_scale:
             # Determine the shape for the scale parameter
@@ -339,19 +238,15 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         """
         Apply Zero-Centered RMS normalization to inputs.
 
-        Args:
-            inputs: Input tensor of any shape. Normalization is applied along
-                the axes specified during initialization.
-            training: Boolean indicating whether the layer should behave in training mode.
-                Not used in Zero-Centered RMSNorm but kept for consistency with other
-                normalization layers.
-
-        Returns:
-            Zero-centered RMS normalized tensor with the same shape as inputs.
-
-        Note:
-            The computation is performed in float32 for numerical stability in mixed
-            precision training, then cast back to the original input dtype.
+        :param inputs: Input tensor of any shape. Normalization is applied along
+            the axes specified during initialization.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating whether the layer should behave in
+            training mode. Not used in Zero-Centered RMSNorm but kept for
+            consistency with other normalization layers.
+        :type training: Optional[bool]
+        :return: Zero-centered RMS normalized tensor with the same shape as inputs.
+        :rtype: keras.KerasTensor
         """
         # Store original dtype for casting back
         original_dtype = inputs.dtype
@@ -392,11 +287,10 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple (same as input shape for normalization layers).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input shape for normalization layers).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
@@ -407,8 +301,8 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         Following modern Keras 3 patterns, this method returns ALL constructor
         arguments needed to recreate this layer instance.
 
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

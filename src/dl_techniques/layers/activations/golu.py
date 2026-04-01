@@ -66,78 +66,45 @@ from typing import Any, Dict
 
 @keras.saving.register_keras_serializable()
 class GoLU(keras.layers.Layer):
-    """
-    Gompertz Linear Unit (GoLU) activation function layer.
+    """Gompertz Linear Unit (GoLU) activation function layer.
 
     GoLU is an element-wise, self-gated activation function that leverages the
-    Gompertz function to gate the input tensor. This implementation provides a
-    Keras-native, serializable layer compatible with all Keras 3 backends
-    (TensorFlow, PyTorch, JAX).
+    Gompertz function to gate the input tensor. The function is defined as
+    ``GoLU(x) = x * alpha * exp(-beta * exp(-gamma * x))``, where the default
+    values of ``alpha=1.0``, ``beta=1.0``, ``gamma=1.0`` correspond to the
+    standard Gumbel distribution CDF as the gate.
 
-    **Intent**: To provide a robust and production-ready Keras implementation of
-    the GoLU activation, following modern API design and serialization patterns.
+    **Architecture Overview:**
 
-    **Architecture**:
-    The layer applies a non-linear transformation to the input tensor without
-    changing its shape.
-    ```
-    Input(shape=[...])
-           ↓
-    GoLU Activation: x * Gompertz(x)
-           ↓
-    Output(shape=[...])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operation**:
-        `GoLU(x) = x * Gompertz(x)`
-    where:
-        `Gompertz(x) = alpha * exp(-beta * exp(-gamma * x))`
+        Input: x (batch, ..., features)
+                │
+                ├──────────────────┐
+                │                  │
+                ▼                  ▼
+        ┌──────────────┐   ┌──────────────────────────────┐
+        │   Identity   │   │ Gompertz(x) =                │
+        │      x       │   │  alpha * exp(-beta*exp(-γ*x)) │
+        └──────┬───────┘   └──────────────┬───────────────┘
+               │                          │
+               └────────┬─────────────────┘
+                        │
+                        ▼
+                ┌───────────────┐
+                │   x * G(x)   │
+                └───────┬───────┘
+                        │
+                        ▼
+        Output: (batch, ..., features)
 
-    The parameters `alpha`, `beta`, and `gamma` control the shape of the Gompertz
-    gate, allowing for fine-tuned activation behavior. The default values of 1.0
-    for all parameters correspond to the standard Gumbel distribution CDF as the gate.
-
-    Args:
-        alpha (float, optional): Controls the upper asymptote or scale of the gate.
-            Defaults to 1.0.
-        beta (float, optional): Controls the gate displacement along the input-axis.
-            Defaults to 1.0.
-        gamma (float, optional): Controls the growth rate of the gate.
-            Defaults to 1.0.
-        **kwargs: Additional arguments for the `Layer` base class (e.g., `name`).
-
-    Input shape:
-        Arbitrary. The layer is applied element-wise and does not depend on
-        the input shape.
-
-    Output shape:
-        Same shape as the input.
-
-    Example:
-        ```python
-        # Use GoLU as a standalone activation layer in a model
-        model = keras.Sequential([
-            keras.layers.Input(shape=(784,)),
-            keras.layers.Dense(128),
-            GoLU(),
-            keras.layers.Dense(10, activation='softmax')
-        ])
-        model.summary()
-
-        # Use GoLU with custom parameters for specialized behavior
-        custom_golu_layer = GoLU(alpha=0.8, beta=1.2, gamma=0.9)
-
-        # GoLU can also be used as a string identifier after registration
-        # This is useful when defining models from configurations.
-        # keras.saving.get_custom_objects()['GoLU'] = GoLU
-        # layer = keras.layers.Dense(64, activation='GoLU')
-        ```
-
-    Note:
-        The original research suggests keeping `alpha`, `beta`, and `gamma` as positive
-        values to maintain the characteristic S-shape of the Gompertz gate.
-        This layer does not contain trainable weights; its parameters are treated as
-        fixed hyperparameters set during initialization.
+    :param alpha: Controls the upper asymptote or scale of the gate.
+    :type alpha: float
+    :param beta: Controls the gate displacement along the input-axis.
+    :type beta: float
+    :param gamma: Controls the growth rate of the gate.
+    :type gamma: float
+    :param kwargs: Additional arguments for the ``Layer`` base class (e.g., ``name``).
     """
 
     def __init__(
@@ -147,7 +114,16 @@ class GoLU(keras.layers.Layer):
         gamma: float = 1.0,
         **kwargs: Any
     ) -> None:
-        """Initializes the GoLU layer and stores its configuration."""
+        """Initialize the GoLU layer and store its configuration.
+
+        :param alpha: Upper asymptote or scale of the Gompertz gate.
+        :type alpha: float
+        :param beta: Displacement of the gate along the input axis.
+        :type beta: float
+        :param gamma: Growth rate of the gate.
+        :type gamma: float
+        :param kwargs: Additional arguments for the ``Layer`` base class.
+        """
         super().__init__(**kwargs)
 
         # Store all configuration parameters. This is crucial for serialization.
@@ -156,11 +132,12 @@ class GoLU(keras.layers.Layer):
         self.gamma = gamma
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Forward pass computation for the GoLU activation.
+        """Apply the GoLU activation: ``x * alpha * exp(-beta * exp(-gamma * x))``.
 
-        Applies the function: x * alpha * exp(-beta * exp(-gamma * x)).
-        This operation is backend-agnostic thanks to `keras.ops`.
+        :param inputs: Input tensor of any shape.
+        :type inputs: keras.KerasTensor
+        :return: Activated tensor with the same shape as inputs.
+        :rtype: keras.KerasTensor
         """
         # Gompertz(x) = alpha * exp(-beta * exp(-gamma * x))
         gompertz_gate = self.alpha * ops.exp(
@@ -170,15 +147,20 @@ class GoLU(keras.layers.Layer):
         return inputs * gompertz_gate
 
     def compute_output_shape(self, input_shape: tuple) -> tuple:
-        """Returns the output shape, which is identical to the input shape."""
+        """Return the output shape, which is identical to the input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple, identical to input_shape.
+        :rtype: tuple
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the configuration of the layer for serialization.
+        """Return the configuration of the layer for serialization.
 
-        This method ensures that all initialization parameters are saved,
-        allowing the layer to be perfectly reconstructed from its config.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

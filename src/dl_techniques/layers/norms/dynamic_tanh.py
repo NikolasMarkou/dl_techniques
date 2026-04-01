@@ -26,70 +26,70 @@ from keras import ops, constraints, initializers, regularizers
 
 @keras.saving.register_keras_serializable()
 class DynamicTanh(keras.layers.Layer):
-    """Dynamic Tanh (DyT) layer as described in "Transformers without Normalization".
+    """Dynamic Tanh (DyT) normalization layer.
 
-    Applies learnable scaled hyperbolic tangent followed by affine transformation:
-    output = weight * tanh(alpha * input) + bias
+    A drop-in replacement for LayerNormalization in Transformers, applying a
+    learnable scaled hyperbolic tangent followed by an affine transformation:
+    ``output = weight * tanh(alpha * input) + bias``, where ``alpha`` is a
+    learnable scalar. This provides normalization-like benefits without batch
+    statistics computation, as described in "Transformers without Normalization"
+    (Zhu et al., CVPR 2025).
 
-    This serves as a drop-in replacement for LayerNormalization in Transformers,
-    providing normalization-like benefits without batch statistics computation.
+    **Architecture Overview:**
 
-    Args:
-        axis: Integer or list of integers specifying normalization axes.
-            Typically -1 (features axis). Defaults to -1.
-        alpha_init_value: Float, initial value for learnable alpha parameter.
-            Paper suggests:
-            - Attention normalization: 0.6-0.8
-            - FFN normalization: 0.1-0.2
-            - Final decoder normalization: 0.1-0.2
-            Defaults to 0.5.
-        kernel_initializer: Initializer for weight parameters. Defaults to 'ones'.
-        bias_initializer: Initializer for bias parameters. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for weight parameters.
-        bias_regularizer: Optional regularizer for bias parameters.
-        kernel_constraint: Optional constraint for weight parameters.
-        bias_constraint: Optional constraint for bias parameters.
-        **kwargs: Additional keyword arguments for Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        Arbitrary tensor shape.
+        ┌──────────────────────────────┐
+        │       Input (x)              │
+        │       shape: (B, ..., D)     │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Scale by alpha:             │
+        │  scaled = α × x             │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Hyperbolic tangent:         │
+        │  tanh(scaled)                │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Affine transform:           │
+        │  weight × tanh(...) + bias   │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │       Output                 │
+        │       shape: (B, ..., D)     │
+        └──────────────────────────────┘
 
-    Output shape:
-        Same as input shape.
+    :param axis: Integer or list of integers specifying normalization axes.
+        Typically -1 (features axis). Defaults to -1.
+    :type axis: Union[int, List[int]]
+    :param alpha_init_value: Initial value for learnable alpha parameter.
+        Paper suggests 0.6-0.8 for attention normalization, 0.1-0.2 for FFN
+        and final decoder normalization. Defaults to 0.5.
+    :type alpha_init_value: float
+    :param kernel_initializer: Initializer for weight parameters. Defaults to ``'ones'``.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for bias parameters. Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for weight parameters.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias parameters.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kernel_constraint: Optional constraint for weight parameters.
+    :type kernel_constraint: Optional[constraints.Constraint]
+    :param bias_constraint: Optional constraint for bias parameters.
+    :type bias_constraint: Optional[constraints.Constraint]
 
-    Example:
-        ```python
-        # Basic usage as LayerNorm replacement
-        layer = DynamicTanh(alpha_init_value=0.7)
-
-        # For attention normalization (higher alpha)
-        attn_norm = DynamicTanh(
-            alpha_init_value=0.8,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # For FFN normalization (lower alpha)
-        ffn_norm = DynamicTanh(alpha_init_value=0.15)
-
-        # Multi-axis normalization
-        layer = DynamicTanh(axis=[1, 2])
-
-        # In transformer block
-        def transformer_block(x):
-            # Attention normalization
-            x_norm = DynamicTanh(alpha_init_value=0.7)(x)
-            attn_out = MultiHeadAttention(...)(x_norm, x_norm)
-            x = Add()([x, attn_out])
-
-            # FFN normalization
-            x_norm = DynamicTanh(alpha_init_value=0.15)(x)
-            ffn_out = Dense(...)(x_norm)
-            return Add()([x, ffn_out])
-        ```
-
-    Raises:
-        ValueError: If alpha_init_value is not a number.
-        ValueError: If axis is out of bounds for input tensor.
+    :raises ValueError: If alpha_init_value is not a number.
+    :raises ValueError: If axis is out of bounds for input tensor.
     """
 
     def __init__(
@@ -133,8 +133,11 @@ class DynamicTanh(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the layer's learnable parameters.
 
-        Creates alpha (scalar), weight, and bias parameters based on input shape
-        and configured normalization axes.
+        Creates alpha (scalar), weight, and bias parameters based on input
+        shape and configured normalization axes.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         ndims = len(input_shape)
 
@@ -193,14 +196,16 @@ class DynamicTanh(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward computation: weight * tanh(alpha * inputs) + bias.
+        """Apply dynamic tanh transformation: weight * tanh(alpha * inputs) + bias.
 
-        Args:
-            inputs: Input tensor.
-            training: Training mode flag (unused but kept for interface consistency).
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag (unused but kept for interface
+            consistency).
+        :type training: Optional[bool]
 
-        Returns:
-            Transformed tensor with same shape as input.
+        :return: Transformed tensor with same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Step 1: Scale inputs by learnable alpha
         scaled_inputs = self.alpha * inputs
@@ -233,11 +238,22 @@ class DynamicTanh(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape (same as input shape)."""
+        """Compute output shape (same as input shape).
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: Output shape (identical to input shape).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'axis': self.axis,

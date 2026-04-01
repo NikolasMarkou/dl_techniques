@@ -40,85 +40,47 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class MaxLogitNorm(keras.layers.Layer):
-    """
-    Basic MaxLogit normalization layer for out-of-distribution detection.
+    """Basic MaxLogit normalization layer for out-of-distribution detection.
 
-    Applies L2 normalization to logits for better OOD detection by separating
-    the magnitude and direction components of logits. This helps distinguish
-    between in-distribution and out-of-distribution samples.
+    Applies L2 normalization to logits to separate magnitude and direction
+    components, improving OOD detection. The layer computes:
+    ``output = inputs / ||inputs||_2``, where the L2 norm is taken along
+    the specified axis with epsilon for numerical stability.
 
-    The layer computes:
+    **Architecture Overview:**
 
-    .. math::
-        \\text{output} = \\frac{\\text{inputs}}{||\\text{inputs}||_2}
+    .. code-block:: text
 
-    Args:
-        axis: Axis along which to normalize. Typically -1 for the class dimension.
-            Defaults to -1.
-        epsilon: Small constant for numerical stability. Must be positive.
-            Defaults to 1e-7.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌─────────────────────────┐
+        │    Input Logits (x)     │
+        │   shape: (B, C)         │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │  L2 Norm along axis     │
+        │  norm = √(Σ(x²) + ε)   │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │  Normalize: x / norm    │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │  Normalized Logits      │
+        │  shape: (B, C)          │
+        └─────────────────────────┘
 
-    Input shape:
-        Arbitrary. The most common use case is a 2D input with shape
-        ``(batch_size, features)``.
+    :param axis: Axis along which to normalize. Typically -1 for the class
+        dimension. Defaults to -1.
+    :type axis: int
+    :param epsilon: Small constant for numerical stability. Must be positive.
+        Defaults to 1e-7.
+    :type epsilon: float
 
-    Output shape:
-        Same as input shape.
-
-    Raises:
-        ValueError: If epsilon is not positive.
-
-    Example:
-        Basic usage for OOD detection:
-
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.max_logit_norm import MaxLogitNorm
-
-            # Standard classification model with MaxLogit normalization
-            inputs = keras.Input(shape=(784,))
-            x = keras.layers.Dense(256, activation='relu')(inputs)
-            logits = keras.layers.Dense(10)(x)  # Raw logits
-
-            # Apply MaxLogit normalization for OOD detection
-            normalized_logits = MaxLogitNorm(axis=-1)(logits)
-            outputs = keras.layers.Softmax()(normalized_logits)
-
-            model = keras.Model(inputs, outputs)
-
-        Integration with uncertainty estimation:
-
-        .. code-block:: python
-
-            def create_ood_detector(num_classes):
-                inputs = keras.Input(shape=(input_dim,))
-
-                # Feature extraction
-                features = keras.layers.Dense(512, activation='relu')(inputs)
-                logits = keras.layers.Dense(num_classes)(features)
-
-                # MaxLogit normalization for OOD detection
-                normalized_logits = MaxLogitNorm()(logits)
-                probabilities = keras.layers.Softmax()(normalized_logits)
-
-                # The max probability can be used as confidence score
-                return keras.Model(inputs, [probabilities, normalized_logits])
-
-        Custom epsilon for numerical stability:
-
-        .. code-block:: python
-
-            # For mixed precision training, might need larger epsilon
-            max_logit = MaxLogitNorm(axis=-1, epsilon=1e-6)
-            normalized = max_logit(logits)
-
-    Note:
-        - This layer performs only computation on inputs without creating any weights
-        - Useful for improving out-of-distribution detection performance
-        - Can be combined with temperature scaling for calibration
-        - Works well with mixed precision training
+    :raises ValueError: If epsilon is not positive.
     """
 
     def __init__(
@@ -127,16 +89,16 @@ class MaxLogitNorm(keras.layers.Layer):
         epsilon: float = 1e-7,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the MaxLogitNorm layer.
+        """Initialize the MaxLogitNorm layer.
 
-        Args:
-            axis: Axis along which to normalize.
-            epsilon: Small constant for numerical stability. Must be positive.
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param axis: Axis along which to normalize.
+        :type axis: int
+        :param epsilon: Small constant for numerical stability. Must be positive.
+        :type epsilon: float
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :type kwargs: Any
 
-        Raises:
-            ValueError: If epsilon is not positive.
+        :raises ValueError: If epsilon is not positive.
         """
         super().__init__(**kwargs)
 
@@ -150,14 +112,12 @@ class MaxLogitNorm(keras.layers.Layer):
         logger.debug(f"Initialized MaxLogitNorm with axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(self, epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        Args:
-            epsilon: Small constant for numerical stability.
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
 
-        Raises:
-            ValueError: If epsilon is not positive.
+        :raises ValueError: If epsilon is not positive.
         """
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
@@ -167,16 +127,16 @@ class MaxLogitNorm(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply MaxLogit normalization.
+        """Apply MaxLogit normalization.
 
-        Args:
-            inputs: Input logits tensor.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer.
+        :param inputs: Input logits tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating whether the layer should behave in
+            training mode or inference mode. Not used in this layer.
+        :type training: Optional[bool]
 
-        Returns:
-            Tensor with L2 normalized logits along the specified axis.
+        :return: Tensor with L2 normalized logits along the specified axis.
+        :rtype: keras.KerasTensor
         """
         # Cast inputs to computation dtype for numerical stability
         inputs = ops.cast(inputs, self.compute_dtype)
@@ -191,26 +151,21 @@ class MaxLogitNorm(keras.layers.Layer):
         return inputs / norm
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Output shape tuple (same as input shape).
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -222,95 +177,64 @@ class MaxLogitNorm(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class DecoupledMaxLogit(keras.layers.Layer):
-    """
-    Decoupled MaxLogit (DML) normalization layer.
+    """Decoupled MaxLogit (DML) normalization layer.
 
-    Separates MaxLogit into cosine similarity and L2 norm components with learnable
-    weighting between them. This allows better understanding of which component
-    contributes to out-of-distribution detection.
+    Separates MaxLogit into cosine similarity and L2 norm components with
+    learnable weighting. The decomposition computes:
+    ``normalized = inputs / ||inputs||_2``,
+    ``max_cosine = max(normalized)``,
+    ``max_norm = max(||inputs||_2)``,
+    ``output = constant × max_cosine + max_norm``.
+    This allows analysis of which component drives OOD detection.
 
-    The layer computes:
-    - normalized = inputs / ||inputs||_2
-    - max_cosine = max(normalized)
-    - max_norm = max(||inputs||_2)
-    - output = constant × max_cosine + max_norm
+    **Architecture Overview:**
 
-    Args:
-        constant: Weight between cosine and L2 components. Must be positive.
-            Defaults to 1.0.
-        axis: Axis along which to normalize. Defaults to -1.
-        epsilon: Small constant for numerical stability. Must be positive.
-            Defaults to 1e-7.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        Arbitrary. The most common use case is a 2D input with shape
-        ``(batch_size, features)``.
+        ┌──────────────────────────────┐
+        │      Input Logits (x)        │
+        │      shape: (B, C)           │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │   L2 Norm: √(Σ(x²) + ε)    │
+        └──────┬───────────────┬───────┘
+               │               │
+               ▼               ▼
+        ┌──────────────┐ ┌─────────────┐
+        │ Normalize:   │ │ Max Norm:   │
+        │ x / norm     │ │ max(norm)   │
+        └──────┬───────┘ └──────┬──────┘
+               │                │
+               ▼                │
+        ┌──────────────┐        │
+        │ Max Cosine:  │        │
+        │ max(x/norm)  │        │
+        └──────┬───────┘        │
+               │                │
+               ▼                ▼
+        ┌──────────────────────────────┐
+        │  Combine:                    │
+        │  c × max_cosine + max_norm   │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Output: (combined,          │
+        │    max_cosine, max_norm)     │
+        └──────────────────────────────┘
 
-    Output shape:
-        If axis=-1 and input shape is (batch_size, features), all output shapes are:
-        ``(batch_size,)`` for each of the three returned tensors.
+    :param constant: Weight between cosine and L2 components. Must be positive.
+        Defaults to 1.0.
+    :type constant: float
+    :param axis: Axis along which to normalize. Defaults to -1.
+    :type axis: int
+    :param epsilon: Small constant for numerical stability. Must be positive.
+        Defaults to 1e-7.
+    :type epsilon: float
 
-    Returns:
-        Tuple of three tensors:
-        - Combined score (constant × max_cosine + max_norm)
-        - MaxCosine component
-        - MaxNorm component
-
-    Raises:
-        ValueError: If constant or epsilon is not positive.
-
-    Example:
-        Basic usage for decoupled OOD detection:
-
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.max_logit_norm import DecoupledMaxLogit
-
-            # Create model with decoupled MaxLogit
-            inputs = keras.Input(shape=(784,))
-            x = keras.layers.Dense(256, activation='relu')(inputs)
-            logits = keras.layers.Dense(10)(x)
-
-            # Get separate cosine and norm components
-            combined, max_cos, max_norm = DecoupledMaxLogit(constant=1.0)(logits)
-
-            # Use different components for different purposes
-            model = keras.Model(inputs, [combined, max_cos, max_norm])
-
-        Analysis of OOD detection components:
-
-        .. code-block:: python
-
-            def analyze_ood_components():
-                # Test with different weighting
-                dml_layer = DecoupledMaxLogit(constant=0.5, axis=-1)
-
-                # Separate analysis of cosine vs norm contribution
-                combined, cosine, norm = dml_layer(test_logits)
-
-                # cosine: measures similarity to training distribution
-                # norm: measures confidence/magnitude
-                # combined: balanced score for OOD detection
-
-                return combined, cosine, norm
-
-        Custom weighting for specific datasets:
-
-        .. code-block:: python
-
-            # For datasets where cosine similarity is more important
-            dml_cosine_heavy = DecoupledMaxLogit(constant=2.0)
-
-            # For datasets where norm is more informative
-            dml_norm_heavy = DecoupledMaxLogit(constant=0.5)
-
-    Note:
-        - Returns three separate components for detailed analysis
-        - Constant parameter controls the balance between cosine and norm
-        - Useful for understanding which component drives OOD detection
-        - Can be used to train specialized models for each component
+    :raises ValueError: If constant or epsilon is not positive.
     """
 
     def __init__(
@@ -320,17 +244,18 @@ class DecoupledMaxLogit(keras.layers.Layer):
         epsilon: float = 1e-7,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the DecoupledMaxLogit layer.
+        """Initialize the DecoupledMaxLogit layer.
 
-        Args:
-            constant: Weight between cosine and L2 components. Must be positive.
-            axis: Axis along which to normalize.
-            epsilon: Small constant for numerical stability. Must be positive.
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param constant: Weight between cosine and L2 components. Must be positive.
+        :type constant: float
+        :param axis: Axis along which to normalize.
+        :type axis: int
+        :param epsilon: Small constant for numerical stability. Must be positive.
+        :type epsilon: float
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :type kwargs: Any
 
-        Raises:
-            ValueError: If constant or epsilon is not positive.
+        :raises ValueError: If constant or epsilon is not positive.
         """
         super().__init__(**kwargs)
 
@@ -345,15 +270,14 @@ class DecoupledMaxLogit(keras.layers.Layer):
         logger.debug(f"Initialized DecoupledMaxLogit with constant={constant}, axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(self, constant: float, epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        Args:
-            constant: Weight between cosine and L2 components.
-            epsilon: Small constant for numerical stability.
+        :param constant: Weight between cosine and L2 components.
+        :type constant: float
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
 
-        Raises:
-            ValueError: If constant or epsilon is not positive.
+        :raises ValueError: If constant or epsilon is not positive.
         """
         if constant <= 0:
             raise ValueError(f"constant must be positive, got {constant}")
@@ -365,19 +289,16 @@ class DecoupledMaxLogit(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """
-        Apply decoupled MaxLogit normalization.
+        """Apply decoupled MaxLogit normalization.
 
-        Args:
-            inputs: Input logits tensor.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer.
+        :param inputs: Input logits tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating whether the layer should behave in
+            training mode or inference mode. Not used in this layer.
+        :type training: Optional[bool]
 
-        Returns:
-            Tuple of three tensors:
-            - Combined score (constant × max_cosine + max_norm)
-            - MaxCosine component
-            - MaxNorm component
+        :return: Tuple of (combined score, MaxCosine component, MaxNorm component).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
         """
         inputs = ops.cast(inputs, self.compute_dtype)
 
@@ -402,14 +323,13 @@ class DecoupledMaxLogit(keras.layers.Layer):
         return output, max_cosine, max_norm
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Tuple of output shapes for (combined, max_cosine, max_norm).
+        :return: Tuple of output shapes for (combined, max_cosine, max_norm).
+        :rtype: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
         """
         # Convert to list for manipulation
         input_shape_list = list(input_shape)
@@ -425,14 +345,10 @@ class DecoupledMaxLogit(keras.layers.Layer):
         return (output_shape, output_shape, output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -445,96 +361,52 @@ class DecoupledMaxLogit(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class DMLPlus(keras.layers.Layer):
-    """
-    DML+ implementation for separate focal and center models.
+    """DML+ layer for separate focal and center OOD detection models.
 
-    This layer is designed to be used in separate models optimized for different
-    components of the decoupled MaxLogit. The focal model is optimized for MaxCosine
-    while the center model is optimized for MaxNorm.
+    Designed for specialized models optimized for different components of
+    decoupled MaxLogit. The focal model computes ``MaxCosine = max(x / ||x||_2)``
+    for similarity-based OOD detection, while the center model computes
+    ``MaxNorm = max(||x||_2)`` for magnitude-based detection. Combining both
+    in an ensemble yields improved OOD detection performance.
 
-    Args:
-        model_type: Type of model, either "focal" or "center".
-            - "focal": Returns MaxCosine component for similarity-based OOD detection
-            - "center": Returns MaxNorm component for magnitude-based OOD detection
-        axis: Axis along which to normalize. Defaults to -1.
-        epsilon: Small constant for numerical stability. Must be positive.
-            Defaults to 1e-7.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        Arbitrary. The most common use case is a 2D input with shape
-        ``(batch_size, features)``.
+    .. code-block:: text
 
-    Output shape:
-        - For focal model: Reduced by one dimension along the specified axis.
-        - For center model: Tuple of (reduced_shape, input_shape) for
-          (max_norm, norm_factor).
+        ┌──────────────────────────────┐
+        │      Input Logits (x)        │
+        │      shape: (B, C)           │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │   L2 Norm: √(Σ(x²) + ε)    │
+        └──────┬───────────────┬───────┘
+               │               │
+               ▼               ▼
+        ┌──────────────┐ ┌─────────────┐
+        │ Normalize:   │ │  L2 Norm    │
+        │ x / norm     │ │  (keepdims) │
+        └──────┬───────┘ └──────┬──────┘
+               │                │
+               ▼                ▼
+        ┌──────────────┐ ┌─────────────┐
+        │ [focal]      │ │ [center]    │
+        │ max(x/norm)  │ │ max(norm),  │
+        │ → MaxCosine  │ │ norm_factor │
+        └──────────────┘ └─────────────┘
 
-    Returns:
-        - For focal model: MaxCosine score tensor.
-        - For center model: Tuple of (MaxNorm score, normalization factor).
+    :param model_type: Type of model, either ``"focal"`` (returns MaxCosine) or
+        ``"center"`` (returns MaxNorm and norm factor).
+    :type model_type: Literal["focal", "center"]
+    :param axis: Axis along which to normalize. Defaults to -1.
+    :type axis: int
+    :param epsilon: Small constant for numerical stability. Must be positive.
+        Defaults to 1e-7.
+    :type epsilon: float
 
-    Raises:
-        ValueError: If model_type is not "focal" or "center".
-        ValueError: If epsilon is not positive.
-
-    Example:
-        Separate models for focal and center components:
-
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.max_logit_norm import DMLPlus
-
-            # Create separate models for different components
-            def create_focal_model():
-                inputs = keras.Input(shape=(784,))
-                x = keras.layers.Dense(256, activation='relu')(inputs)
-                logits = keras.layers.Dense(10)(x)
-
-                # Focal model optimized for cosine similarity
-                max_cosine = DMLPlus(model_type="focal")(logits)
-                return keras.Model(inputs, max_cosine)
-
-            def create_center_model():
-                inputs = keras.Input(shape=(784,))
-                x = keras.layers.Dense(256, activation='relu')(inputs)
-                logits = keras.layers.Dense(10)(x)
-
-                # Center model optimized for norm magnitude
-                max_norm, norm_factor = DMLPlus(model_type="center")(logits)
-                return keras.Model(inputs, [max_norm, norm_factor])
-
-        Training specialized models:
-
-        .. code-block:: python
-
-            # Train focal model on cosine-based objectives
-            focal_model = create_focal_model()
-            focal_model.compile(optimizer='adam', loss='mse')
-
-            # Train center model on norm-based objectives
-            center_model = create_center_model()
-            center_model.compile(optimizer='adam', loss=['mse', 'mae'])
-
-        Ensemble inference:
-
-        .. code-block:: python
-
-            def ensemble_ood_detection(inputs):
-                # Get components from specialized models
-                max_cosine = focal_model(inputs)
-                max_norm, _ = center_model(inputs)
-
-                # Combine for final OOD score
-                combined_score = 0.7 * max_cosine + 0.3 * max_norm
-                return combined_score
-
-    Note:
-        - Designed for training separate specialized models
-        - Focal model focuses on directional similarity
-        - Center model focuses on magnitude information
-        - Can be combined in ensemble for improved OOD detection
+    :raises ValueError: If model_type is not ``"focal"`` or ``"center"``.
+    :raises ValueError: If epsilon is not positive.
     """
 
     def __init__(
@@ -544,17 +416,18 @@ class DMLPlus(keras.layers.Layer):
         epsilon: float = 1e-7,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the DMLPlus layer.
+        """Initialize the DMLPlus layer.
 
-        Args:
-            model_type: Type of model ("focal" or "center").
-            axis: Axis along which to normalize.
-            epsilon: Small constant for numerical stability. Must be positive.
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param model_type: Type of model (``"focal"`` or ``"center"``).
+        :type model_type: Literal["focal", "center"]
+        :param axis: Axis along which to normalize.
+        :type axis: int
+        :param epsilon: Small constant for numerical stability. Must be positive.
+        :type epsilon: float
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :type kwargs: Any
 
-        Raises:
-            ValueError: If model_type is invalid or epsilon is not positive.
+        :raises ValueError: If model_type is invalid or epsilon is not positive.
         """
         super().__init__(**kwargs)
 
@@ -569,15 +442,14 @@ class DMLPlus(keras.layers.Layer):
         logger.debug(f"Initialized DMLPlus with model_type={model_type}, axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(self, model_type: str, epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        Args:
-            model_type: Type of model ("focal" or "center").
-            epsilon: Small constant for numerical stability.
+        :param model_type: Type of model (``"focal"`` or ``"center"``).
+        :type model_type: str
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
 
-        Raises:
-            ValueError: If model_type is invalid or epsilon is not positive.
+        :raises ValueError: If model_type is invalid or epsilon is not positive.
         """
         if model_type not in ["focal", "center"]:
             raise ValueError(f"model_type must be 'focal' or 'center', got {model_type}")
@@ -589,17 +461,17 @@ class DMLPlus(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """
-        Apply DML+ normalization based on model type.
+        """Apply DML+ normalization based on model type.
 
-        Args:
-            inputs: Input logits tensor.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer.
+        :param inputs: Input logits tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating whether the layer should behave in
+            training mode or inference mode. Not used in this layer.
+        :type training: Optional[bool]
 
-        Returns:
-            For focal model: MaxCosine score tensor.
-            For center model: Tuple of (MaxNorm score, normalization factor).
+        :return: For focal model: MaxCosine score tensor. For center model:
+            tuple of (MaxNorm score, normalization factor).
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         inputs = ops.cast(inputs, self.compute_dtype)
 
@@ -621,14 +493,13 @@ class DMLPlus(keras.layers.Layer):
             return max_norm, norm
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Output shape(s) depending on model type.
+        :return: Output shape(s) depending on model type.
+        :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]
         """
         # Convert to list for manipulation
         input_shape_list = list(input_shape)
@@ -647,14 +518,10 @@ class DMLPlus(keras.layers.Layer):
             return (reduced_shape, input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

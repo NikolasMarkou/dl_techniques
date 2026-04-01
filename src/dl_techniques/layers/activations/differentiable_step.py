@@ -5,39 +5,37 @@ This layer addresses a fundamental limitation of the Heaviside step function,
 whose discontinuous nature and zero-everywhere derivative (except at the
 origin) make it incompatible with gradient-based optimization methods. It
 provides a smooth, fully differentiable surrogate by employing a transformed
-hyperbolic tangent (`tanh`) function. The key innovation is that the two
-defining characteristics of the step—its location and its steepness—are
+hyperbolic tangent (``tanh``) function. The key innovation is that the two
+defining characteristics of the step -- its location and its steepness -- are
 promoted to trainable parameters, allowing a network to learn optimal soft
 gating or thresholding behaviors.
 
-Architectural and Mathematical Underpinnings:
-
 The layer's operation is defined by a single mathematical transformation:
 
-`f(x) = 0.5 * (tanh(slope * (x - shift)) + 1)`
+``f(x) = 0.5 * (tanh(slope * (x - shift)) + 1)``
 
 Each component of this equation has a distinct conceptual role:
 
-1.  **Hyperbolic Tangent (`tanh`)**: This function serves as the core
+1.  **Hyperbolic Tangent (tanh)**: This function serves as the core
     differentiable switch. It naturally maps any real-valued input to the
-    range `[-1, 1]`, exhibiting a steep, sigmoidal ("S"-shaped) transition
+    range [-1, 1], exhibiting a steep, sigmoidal ("S"-shaped) transition
     centered around zero.
 
-2.  **Learnable `shift` Parameter**: This parameter controls the horizontal
-    position of the transition. By learning an optimal `shift`, the network
+2.  **Learnable shift Parameter**: This parameter controls the horizontal
+    position of the transition. By learning an optimal ``shift``, the network
     determines the threshold or activation point at which the soft step
     occurs, effectively deciding "where" the gate should be placed.
 
-3.  **Learnable `slope` Parameter**: This parameter controls the steepness of
-    the transition. A larger `slope` value will cause the `tanh` function to
+3.  **Learnable slope Parameter**: This parameter controls the steepness of
+    the transition. A larger ``slope`` value will cause the tanh function to
     more closely approximate a true, hard step function, leading to a more
-    binary decision. Conversely, a smaller `slope` results in a gentler,
+    binary decision. Conversely, a smaller ``slope`` results in a gentler,
     softer transition. This allows the network to learn the "hardness" of
     the decision boundary required for the task.
 
-4.  **Output Scaling (`0.5 * (... + 1)`)**: This is a simple linear
-    transformation that rescales the `tanh` output from its native `[-1, 1]`
-    range to the `[0, 1]` range. This makes the output directly interpretable
+4.  **Output Scaling (0.5 * (... + 1))**: This is a simple linear
+    transformation that rescales the tanh output from its native [-1, 1]
+    range to the [0, 1] range. This makes the output directly interpretable
     as a probabilistic gate or a soft mask.
 
 This functional form is a generalization of the gating mechanisms that are
@@ -68,82 +66,69 @@ class DifferentiableStep(keras.layers.Layer):
     A learnable, differentiable step function, configurable for scalar or per-axis operation.
 
     This layer implements a soft, fully differentiable step function using a scaled
-    and shifted hyperbolic tangent (tanh). The steepness (`slope`) and center point
-    (`shift`) of the step are trainable parameters. It can operate in two modes:
-    1.  **Scalar Mode (`axis=None`)**: A single `slope` and `shift` are learned and
+    and shifted hyperbolic tangent (tanh). The steepness (``slope``) and center point
+    (``shift``) of the step are trainable parameters. It can operate in two modes:
+
+    1.  **Scalar Mode** (``axis=None``): A single ``slope`` and ``shift`` are learned and
         applied to the entire input tensor.
-    2.  **Per-Axis Mode (`axis` is an int)**: A vector of `slope` and `shift` values
+    2.  **Per-Axis Mode** (``axis`` is an int): A vector of ``slope`` and ``shift`` values
         is learned, one for each element along the specified axis, enabling
         per-feature or per-channel thresholding.
 
-    **Intent**: Provide a flexible, learnable gating or soft thresholding mechanism.
-    Useful for tasks requiring learned binary decisions, feature selection, or
-    conditional computation where gradients must flow and different thresholds may be
-    needed for different features.
+    The mathematical operation is:
+    ``output = 0.5 * (tanh(slope * (inputs - shift)) + 1)``
 
-    **Architecture**:
-    The layer has no sub-layers and directly applies a mathematical transformation.
-    ```
-    Input(shape=[...])
-           ↓
-    f(x) = 0.5 * (tanh(slope * (x - shift)) + 1)
-           ↓
-    Output(shape=[...])
-    ```
+    where ``slope`` and ``shift`` are either scalars or vectors that broadcast to the
+    input shape.
 
-    **Mathematical Operation**:
-        `output = 0.5 * (tanh(slope * (inputs - shift)) + 1)`
+    **Architecture Overview:**
 
-    Where `slope` and `shift` are either scalars or vectors that broadcast to the input shape.
+    .. code-block:: text
 
-    Args:
-        axis: The axis over which to apply per-feature stepping. If `None`, a single
-            scalar `slope` and `shift` are used for the entire input. If an integer,
-            a separate `slope` and `shift` are learned for each index along this axis.
-            Defaults to -1 (typically the feature/channel axis).
-        slope_initializer: Initializer for the `slope` parameter(s). Can be a string
-            name ('ones', 'zeros') or an Initializer instance. Defaults to 'ones'.
-        shift_initializer: Initializer for the `shift` parameter(s). Can be a string
-            name or an Initializer instance. Defaults to 'zeros'.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
+        ┌─────────────────────────────────────┐
+        │         Input x [...]               │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │  Shift: x_shifted = x - shift       │
+        │  (learned threshold position)       │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │  Scale: z = slope * x_shifted       │
+        │  (learned steepness control)        │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │  Activation: tanh(z) -> [-1, 1]     │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │  Rescale: (tanh(z) + 1) / 2         │
+        │  Maps [-1, 1] -> [0, 1]             │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │     Output [0, 1] range [...]       │
+        └─────────────────────────────────────┘
 
-    Input shape:
-        N-D tensor of any shape. If `axis` is specified, the input must have a
-        defined dimension for that axis.
-
-    Output shape:
-        N-D tensor with the same shape as the input.
-
-    Attributes:
-        slope: Trainable weight(s) controlling the steepness of the step. Shape is
-            `()` if `axis` is `None`, otherwise it's broadcastable to the input shape
-            along the specified `axis`.
-        shift: Trainable weight(s) controlling the center point of the step. Shape
-            is determined by the `axis` parameter, same as `slope`.
-
-    Example:
-        ```python
-        # Per-feature gating (default axis=-1)
-        # Learns a different threshold for each of the 64 features.
-        inputs = keras.Input(shape=(64,))
-        gated_features = DifferentiableStep(axis=-1)(inputs)
-        model = keras.Model(inputs, gated_features)
-
-        # Scalar gating
-        # Learns one threshold for the entire input tensor.
-        image_input = keras.Input(shape=(28, 28, 1))
-        # Use a single gate for all pixels
-        scalar_gate_layer = DifferentiableStep(axis=None)
-        attention_mask = scalar_gate_layer(image_input)
-
-        # Initialize with a steeper slope for per-channel gating
-        image_input_rgb = keras.Input(shape=(28, 28, 3))
-        channel_gate = DifferentiableStep(
-            axis=-1, # One gate per channel (R, G, B)
-            slope_initializer=keras.initializers.Constant(10.0),
-            shift_initializer=keras.initializers.Constant(0.5)
-        )(image_input_rgb)
-        ```
+    :param axis: The axis over which to apply per-feature stepping. If ``None``, a
+        single scalar ``slope`` and ``shift`` are used for the entire input. If an
+        integer, a separate ``slope`` and ``shift`` are learned for each index along
+        this axis.
+    :type axis: Optional[int]
+    :param slope_initializer: Initializer for the ``slope`` parameter(s). Can be a
+        string name ('ones', 'zeros') or an Initializer instance.
+    :type slope_initializer: Union[str, keras.initializers.Initializer]
+    :param shift_initializer: Initializer for the ``shift`` parameter(s). Can be a
+        string name or an Initializer instance.
+    :type shift_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional arguments for Layer base class (name, trainable, etc.).
     """
 
     def __init__(
@@ -174,7 +159,10 @@ class DifferentiableStep(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Create the layer's trainable weights based on the `axis` configuration.
+        Create the layer's trainable weights based on the ``axis`` configuration.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if self.axis is None:
             # Scalar mode: weights have no shape
@@ -231,8 +219,14 @@ class DifferentiableStep(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass computation applying the soft step function.
-        Broadcasting handles both scalar and per-axis cases automatically.
+        Apply the soft step function to inputs.
+
+        :param inputs: Input tensor of any shape.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Tensor in [0, 1] range with same shape as inputs.
+        :rtype: keras.KerasTensor
         """
         scaled_shifted_x = self.slope * (inputs - self.shift)
         return (keras.ops.tanh(scaled_shifted_x) + 1.0) / 2.0
@@ -240,14 +234,20 @@ class DifferentiableStep(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
         Compute the output shape of the layer.
-        Since this is an element-wise operation, the output shape is
-        identical to the input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, identical to input_shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return the layer's configuration for serialization.
+
+        :return: Configuration dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

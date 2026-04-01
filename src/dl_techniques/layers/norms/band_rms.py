@@ -61,91 +61,73 @@ class BandRMS(keras.layers.Layer):
     Root Mean Square Normalization layer with bounded RMS constraints.
 
     This layer implements root mean square normalization that guarantees the output
-    RMS value will be between [1-α, 1], where α is the max_band_width parameter.
+    RMS value will be between [1-alpha, 1], where alpha is the max_band_width parameter.
     Unlike L2 normalization which constrains the actual vector length, this approach
     constrains the Root Mean Square value, making it dimension-independent.
 
     The normalization is computed in two steps:
-    1. RMS normalization: sets RMS=1, L2_norm≈sqrt(D) (dimension-independent scaling)
-    2. Learnable scaling within the [1-α, 1] band using a single global parameter
+
+    1. RMS normalization: sets RMS=1, L2_norm ~ sqrt(D) (dimension-independent scaling)
+    2. Learnable scaling within the [1-alpha, 1] band using a single global parameter
 
     The layer creates a "thick shell" in the RMS space rather than geometric space,
     allowing features to exist within a bounded range while maintaining dimension-
     independent behavior across different layer widths.
 
-    Args:
-        max_band_width: Maximum allowed deviation from unit normalization (0 < α < 1).
-            Controls the thickness of the spherical shell. Defaults to 0.1.
-        axis: Axis or axes along which to compute RMS statistics. The default (-1)
-            computes RMS over the last dimension. Can be int or tuple of ints.
-            Defaults to -1.
-        epsilon: Small constant added to denominator for numerical stability.
-            Should be positive. Defaults to 1e-7.
-        band_initializer: Initializer for the single band parameter. Defaults to "zeros".
-        band_regularizer: Optional regularizer for the band parameter. If None,
-            defaults to L2(1e-5) regularizer. Defaults to None.
-        **kwargs: Additional keyword arguments passed to the parent Layer class.
+    **Architecture Overview:**
 
-    Input shape:
-        Arbitrary. Use the keyword argument `input_shape` (tuple of integers, does not
-        include the samples axis) when using this layer as the first layer in a model.
+    .. code-block:: text
 
-    Output shape:
-        Same shape as input.
+        Input: x (batch, ..., features)
+                │
+                ▼
+        ┌───────────────────────────────┐
+        │  Compute mean(x²) along axis  │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  RMS = max(√(mean(x²)+ε), ε) │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  normalized = x / RMS         │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  σ = sigmoid(5 × band_param)  │
+        │  scale = (1-α) + α × σ       │
+        │  scale ∈ [1-α, 1]            │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        ┌───────────────────────────────┐
+        │  output = normalized × scale  │
+        └────────────┬──────────────────┘
+                     │
+                     ▼
+        Output: (batch, ..., features)
 
-    Raises:
-        ValueError: If max_band_width is not between 0 and 1.
-        ValueError: If epsilon is not positive.
+    :param max_band_width: Maximum allowed deviation from unit normalization
+        (0 < alpha < 1). Controls the thickness of the spherical shell.
+    :type max_band_width: float
+    :param axis: Axis or axes along which to compute RMS statistics. The default
+        (-1) computes RMS over the last dimension. Can be int or tuple of ints.
+    :type axis: Union[int, Tuple[int, ...]]
+    :param epsilon: Small constant added to denominator for numerical stability.
+        Should be positive.
+    :type epsilon: float
+    :param band_initializer: Initializer for the single band parameter.
+    :type band_initializer: Union[str, keras.initializers.Initializer]
+    :param band_regularizer: Optional regularizer for the band parameter. If None,
+        defaults to L2(1e-5) regularizer.
+    :type band_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments passed to the parent Layer class.
 
-    Example:
-        Basic usage:
-
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.band_rms import BandRMS
-
-            # Apply BandRMS normalization to the output of a dense layer
-            inputs = keras.Input(shape=(128,))
-            x = keras.layers.Dense(64)(inputs)
-            x = BandRMS(max_band_width=0.2)(x)
-            model = keras.Model(inputs, x)
-
-        CNN application:
-
-        .. code-block:: python
-
-            # Apply to a specific axis in a CNN
-            inputs = keras.Input(shape=(32, 32, 3))
-            conv = keras.layers.Conv2D(32, 3)(inputs)
-            norm = BandRMS(axis=3, max_band_width=0.1)(conv)
-
-        Custom configuration:
-
-        .. code-block:: python
-
-            # With custom regularization and initialization
-            norm_layer = BandRMS(
-                max_band_width=0.3,
-                band_initializer='random_uniform',
-                band_regularizer=keras.regularizers.L2(1e-4)
-            )
-            outputs = norm_layer(inputs)
-
-        Multi-axis normalization:
-
-        .. code-block:: python
-
-            # Normalize over multiple axes
-            inputs = keras.Input(shape=(16, 16, 64))
-            norm = BandRMS(
-                axis=(1, 2),  # Normalize over spatial dimensions
-                max_band_width=0.15
-            )(inputs)
-
-    Note:
-        This implementation follows modern Keras 3 patterns for robust serialization
-        and is designed to work seamlessly with mixed precision training.
+    :raises ValueError: If max_band_width is not between 0 and 1.
+    :raises ValueError: If epsilon is not positive.
     """
 
     def __init__(
@@ -160,17 +142,20 @@ class BandRMS(keras.layers.Layer):
         """
         Initialize the BandRMS layer.
 
-        Args:
-            max_band_width: Maximum allowed deviation from unit normalization (0 < α < 1).
-                Controls the thickness of the spherical shell.
-            axis: Axis or axes along which to compute RMS statistics.
-            epsilon: Small constant added to denominator for numerical stability.
-            band_initializer: Initializer for the single band parameter.
-            band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
-            **kwargs: Additional layer arguments.
-
-        Raises:
-            ValueError: If max_band_width is not between 0 and 1 or if epsilon is not positive.
+        :param max_band_width: Maximum allowed deviation from unit normalization
+            (0 < alpha < 1). Controls the thickness of the spherical shell.
+        :type max_band_width: float
+        :param axis: Axis or axes along which to compute RMS statistics.
+        :type axis: Union[int, Tuple[int, ...]]
+        :param epsilon: Small constant added to denominator for numerical stability.
+        :type epsilon: float
+        :param band_initializer: Initializer for the single band parameter.
+        :type band_initializer: Union[str, keras.initializers.Initializer]
+        :param band_regularizer: Regularizer for the band parameter. Default is L2(1e-5).
+        :type band_regularizer: Optional[keras.regularizers.Regularizer]
+        :param kwargs: Additional layer arguments.
+        :raises ValueError: If max_band_width is not between 0 and 1 or if epsilon
+            is not positive.
         """
         super().__init__(**kwargs)
 
@@ -195,12 +180,11 @@ class BandRMS(keras.layers.Layer):
         """
         Validate initialization parameters.
 
-        Args:
-            max_band_width: Maximum allowed deviation from unit norm.
-            epsilon: Small constant for numerical stability.
-
-        Raises:
-            ValueError: If parameters are invalid.
+        :param max_band_width: Maximum allowed deviation from unit norm.
+        :type max_band_width: float
+        :param epsilon: Small constant for numerical stability.
+        :type epsilon: float
+        :raises ValueError: If parameters are invalid.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -216,9 +200,9 @@ class BandRMS(keras.layers.Layer):
         This is called automatically when the layer first processes input.
         Following modern Keras 3 Pattern 1: Simple Layer (No Sub-layers).
 
-        Args:
-            input_shape: Shape tuple indicating input tensor shape.
-                First dimension (batch size) may be None.
+        :param input_shape: Shape tuple indicating input tensor shape.
+            First dimension (batch size) may be None.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Create a single scalar band parameter using add_weight()
         self.band_param = self.add_weight(
@@ -242,13 +226,13 @@ class BandRMS(keras.layers.Layer):
         """
         Apply constrained RMS normalization.
 
-        Args:
-            inputs: Input tensor.
-            training: Boolean indicating whether in training mode.
-
-        Returns:
-            Normalized tensor with RMS value in [1-max_band_width, 1] and
-            L2 norm approximately in [(1-max_band_width)×sqrt(D), sqrt(D)].
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating whether in training mode.
+        :type training: Optional[bool]
+        :return: Normalized tensor with RMS value in [1-max_band_width, 1] and
+            L2 norm approximately in [(1-max_band_width)*sqrt(D), sqrt(D)].
+        :rtype: keras.KerasTensor
         """
         # Cast to float32 for numerical stability in mixed precision training
         inputs_fp32 = ops.cast(inputs, "float32")
@@ -294,11 +278,10 @@ class BandRMS(keras.layers.Layer):
         """
         Compute the shape of output tensor.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Shape of output tensor (same as input).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape of output tensor (same as input).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
@@ -309,8 +292,8 @@ class BandRMS(keras.layers.Layer):
         Following modern Keras 3 patterns, this method returns ALL constructor
         arguments needed to recreate this layer instance.
 
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

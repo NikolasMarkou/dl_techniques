@@ -8,120 +8,55 @@ initial probability mass through a fixed binary decision tree. This approach
 is computationally efficient and introduces a structured, hierarchical bias
 without adding any trainable parameters to the model.
 
-Complete Architecture Flow::
+The routing process works as follows:
 
-    INPUT: Features [batch, D]
-      │
-      │  Deterministic Projection Phase
-      ├──────────────────────────────────────────────────┐
-      │  For each decision k = 0 to log₂(N)-1:           │
-      │    w_k = cosine_basis_pattern(k)                 │
-      │    logit_k = <input, w_k>     (dot product)      │
-      │    p_k = σ(logit_k)           (sigmoid)          │
-      └──────────────────────────────────────────────────┘
-      │
-      ↓  [p₀, p₁, ..., p_{d-1}]  where d = log₂(padded_N)
-      │
-      │  Hierarchical Routing Phase
-      ├──────────────────────────────────────────────────┐
-      │  Initialize: root_prob = 1.0                     │
-      │                                                  │
-      │  For level k = 0 to d-1:                         │
-      │    For each node at level k:                     │
-      │      left_child_prob  = node_prob × (1 - p_k)    │
-      │      right_child_prob = node_prob × p_k          │
-      │                                                  │
-      │  Result: 2^d leaf probabilities                  │
-      └──────────────────────────────────────────────────┘
-      │
-      ↓  [leaf₀, leaf₁, ..., leaf_{2^d-1}]  (sum = 1.0)
-      │
-      │  Slicing & Renormalization Phase
-      ├──────────────────────────────────────────────────┐
-      │  If N != 2^d (not power of 2):                   │
-      │    selected = [leaf₀, ..., leaf_{N-1}]           │
-      │    normalized = selected / sum(selected)         │
-      │  Else:                                           │
-      │    normalized = leaves (already sum to 1.0)      │
-      └──────────────────────────────────────────────────┘
-      │
-      ↓
-    OUTPUT: Class Probabilities [batch, N]  (sum = 1.0)
+1. **Padding**: The number of classes ``output_dim`` is padded to the
+   next highest power of two, ``padded_dim``, to ensure a complete
+   binary tree structure can be formed. The number of routing
+   decisions (tree depth) is ``d = log2(padded_dim)``.
 
-Binary Tree Structure::
+2. **Deterministic Projections**: For each of the ``d`` decisions, a
+   fixed, non-trainable weight vector is pre-computed. The input
+   feature vector is projected onto each of these ``d`` vectors to
+   produce ``d`` scalar logits.
 
-    The core concept is to model the choice among N classes as a sequence
-    of d = log₂(N) binary (left/right) decisions. This is represented
-    conceptually as a complete binary tree of depth d with N leaf nodes,
-    where each leaf corresponds to a class.
+3. **Probabilistic Decisions**: Each logit is passed through a sigmoid
+   activation function to yield ``d`` probabilities. Each probability
+   ``p_k`` represents the likelihood of taking the "right" branch at
+   level ``k`` of the tree.
 
-    The routing process works as follows:
+4. **Hierarchical Routing**: The layer simulates the flow of
+   probability mass, starting with 1.0 at the root. At each level ``k``,
+   the probability mass at every node is split between its left and
+   right children according to ``1 - p_k`` and ``p_k``, respectively.
 
-    1. **Padding**: The number of classes `output_dim` is padded to the
-       next highest power of two, `padded_dim`, to ensure a complete
-       binary tree structure can be formed. The number of routing
-       decisions (tree depth) is d = log₂(padded_dim).
-
-    2. **Deterministic Projections**: For each of the d decisions, a
-       fixed, non-trainable weight vector is pre-computed. The input
-       feature vector is projected onto each of these d vectors to
-       produce d scalar logits.
-
-    3. **Probabilistic Decisions**: Each logit is passed through a sigmoid
-       activation function to yield d probabilities. Each probability
-       p_k represents the likelihood of taking the "right" branch at
-       level k of the tree.
-
-    4. **Hierarchical Routing**: The layer simulates the flow of
-       probability mass, starting with 1.0 at the root. At each level k,
-       the probability mass at every node is split between its left and
-       right children according to 1 - p_k and p_k, respectively.
-
-    5. **Renormalization**: After d splits, the accumulated mass at each
-       of the padded_dim leaves forms a valid probability distribution.
-       This distribution is then truncated to the original output_dim and
-       renormalized to sum to 1.0.
-
-Foundational Mathematics
-------------------------
+5. **Renormalization**: After ``d`` splits, the accumulated mass at each
+   of the ``padded_dim`` leaves forms a valid probability distribution.
+   This distribution is then truncated to the original ``output_dim`` and
+   renormalized to sum to 1.0.
 
 The mechanism relies on two key mathematical ideas: deterministic feature
 extraction using basis functions and hierarchical probability decomposition.
 
-1. **Deterministic Weight Patterns**: The weight vectors used for the
-   projections are not learned but are generated from a cosine basis,
-   similar to a Fourier series. The weight for the i-th input feature
-   in the k-th decision vector is given by::
+The weight vectors used for the projections are generated from a cosine basis:
+``w_{k,i} = cos(2*pi * (k+1) * i / D)``
 
-       w_{k,i} = cos(2π × (k+1) × i / D)
+where ``D`` is the input feature dimension. The decision logit is the dot product:
+``z_k = <x, w_k> = Sigma_i x_i * w_{k,i}``
 
-   where D is the input feature dimension. This creates a set of
-   structurally diverse, near-orthogonal vectors that are sensitive to
-   different patterns (or "frequencies") in the input features without
-   requiring any training. The decision logit is the dot product::
+The probability of reaching a specific leaf (class) is the product of the
+probabilities of the choices along its unique path from the root:
+``P(leaf) = product_{k=0}^{d-1} P(b_k)``
 
-       z_k = <x, w_k> = Σᵢ xᵢ × w_{k,i}
+where branch probabilities are determined by:
+``P(right_k) = sigma(z_k) = 1 / (1 + e^{-z_k})``
+``P(left_k)  = 1 - sigma(z_k)``
 
-2. **Probabilistic Tree Traversal**: The probability of reaching a
-   specific leaf (class) is the product of the probabilities of the
-   choices made along its unique path from the root. If a path is
-   defined by a sequence of choices (b_0, b_1, ..., b_{d-1}), where
-   b_k ∈ {left, right}, the leaf probability is::
-
-       P(leaf) = ∏_{k=0}^{d-1} P(b_k)
-
-   The branch probabilities at level k are determined by the sigmoid
-   of the corresponding logit::
-
-       P(right_k) = σ(z_k) = 1 / (1 + e^{-z_k})
-       P(left_k)  = 1 - σ(z_k)
-
-References
-----------
-- Zhang, Z., et al. (2024). "Softmax-free Large-scale Language Modeling".
-  arXiv preprint arXiv:2402.01258.
-- Morin, F., & Bengio, Y. (2005). "Hierarchical Probabilistic Neural
-  Network Language Model". AISTATS.
+References:
+    - Zhang, Z., et al. (2024). "Softmax-free Large-scale Language Modeling".
+      arXiv preprint arXiv:2402.01258.
+    - Morin, F., & Bengio, Y. (2005). "Hierarchical Probabilistic Neural
+      Network Language Model". AISTATS.
 """
 
 import math
@@ -147,66 +82,61 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     This layer provides a deterministic, parameter-free alternative to softmax
     by building a probabilistic routing tree. It computes routing decisions
     directly from input features using deterministic patterns (Fourier-like
-    cosine basis functions).
+    cosine basis functions), then routes probability mass through a binary
+    tree to produce class probabilities.
 
-    **Architecture Overview**::
+    **Architecture Overview:**
 
-        Input Features [batch, ..., D]
-               ↓
-        ┌──────────────────────────────────────┐
-        │  Deterministic Weight Projections    │  (cosine basis patterns)
-        │  d = log₂(padded_dim) projections    │
-        └──────────────────────────────────────┘
-               ↓
-        Decision Logits [batch, d] → Sigmoid → Decision Probs [batch, d]
-               ↓
-        ┌──────────────────────────────────────┐
-        │    Hierarchical Probability Tree     │
-        │  (binary splits at each level k)     │
-        └──────────────────────────────────────┘
-               ↓
-        Leaf Probabilities [batch, padded_dim] → Slice & Renormalize
-               ↓
-        Output Probabilities [batch, ..., output_dim]  (sums to 1.0)
+    .. code-block:: text
 
-    **Routing Tree Structure** (Example: output_dim=5 → padded_dim=8, depth=3)::
-
-                                  Root (p=1.0)
-                                /              \\
-                          p₀_left            p₀_right
-                          /    \\              /      \\
-                    p₁_left  p₁_right   p₁_left   p₁_right
-                     / \\      / \\         / \\        / \\
-                   L₀ L₁    L₂ L₃       L₄ L₅      L₆ L₇
-                   ↓  ↓     ↓  ↓        ↓  ↓       ↓  ↓
-                  C₀ C₁    C₂ C₃       C₄ [pad]  [pad][pad]
-
-        Where:
-          - pₖ = decision probability at level k (from sigmoid(logit_k))
-          - Lᵢ = leaf i with accumulated probability (product of path decisions)
-          - Cᵢ = class i (first 5 leaves map to classes, rest are padding)
-          - [pad] = padded virtual classes (discarded and renormalized)
-
-    **Processing Pipeline**:
-
-    1. **Output Dimension Inference**: If output_dim is None, it is inferred
-       from the input shape along the specified axis during build().
-
-    2. **Padding**: Given output_dim = N, calculate padded_dim, the smallest
-       power of two such that padded_dim >= N.
-
-    3. **Deterministic Decision Making**: For each of k = log₂(padded_dim)
-       routing decisions, compute a scalar from the inputs using precomputed
-       deterministic weight patterns (based on cosine basis functions) and
-       apply sigmoid activation.
-
-    4. **Probabilistic Routing**: Traverse a binary tree, splitting
-       probability mass at each of the k levels to produce a distribution
-       over padded_dim virtual classes.
-
-    5. **Slicing & Renormalization**: Select the probabilities for the
-       original N classes and renormalize to ensure a valid probability
-       distribution.
+        ┌─────────────────────────────────────────┐
+        │    Input Features [batch, ..., D]       │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Deterministic Weight Projections       │
+        │  w_{k,i} = cos(2pi*(k+1)*i / D)        │
+        │  d = log2(padded_dim) projections       │
+        │  z_k = <x, w_k>  (dot product)         │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Sigmoid Activation                     │
+        │  p_k = sigma(z_k) -> Decision Probs    │
+        │  [batch, d]                             │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Hierarchical Probability Tree          │
+        │                                         │
+        │            Root (p=1.0)                  │
+        │           ┌───┴───┐                     │
+        │       (1-p0)    (p0)                    │
+        │       ┌──┴──┐  ┌──┴──┐                  │
+        │      ...   ... ...   ...                │
+        │       │     │   │     │                  │
+        │      L0    L1  L2    L3  ...            │
+        │                                         │
+        │  Binary splits at each level k          │
+        │  left = parent * (1 - p_k)              │
+        │  right = parent * p_k                   │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Slice & Renormalize                    │
+        │  Keep first output_dim leaves           │
+        │  Renormalize to sum = 1.0               │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Output Probabilities                   │
+        │  [batch, ..., output_dim] (sum = 1.0)   │
+        └─────────────────────────────────────────┘
 
     :param output_dim: Dimensionality of the output space. If None, will be
         inferred from the dimension at the specified axis of the input shape
@@ -217,25 +147,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         negative to index from the end.
     :type axis: int
     :param epsilon: Small float added to prevent numerical issues during
-        probability clipping and renormalization. Defaults to 1e-7.
+        probability clipping and renormalization.
     :type epsilon: float
     :param kwargs: Additional arguments for the Layer base class (e.g., name).
     :type kwargs: Any
-
-    Examples::
-
-        >>> # As a drop-in replacement for softmax on the last axis
-        >>> inputs = keras.layers.Input(shape=(128,))
-        >>> logits = keras.layers.Dense(10)(inputs)
-        >>> probs = RoutingProbabilitiesLayer(output_dim=10)(logits)
-        >>>
-        >>> # With axis parameter for arbitrary shapes
-        >>> inputs = keras.layers.Input(shape=(32, 64, 10))
-        >>> # Apply routing along axis 1
-        >>> probs = RoutingProbabilitiesLayer(axis=1)(inputs)  # (32, 64, 10)
-        >>>
-        >>> # Infer output_dim from input
-        >>> probs = RoutingProbabilitiesLayer()(logits)
     """
 
     def __init__(
@@ -287,23 +202,13 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         determines the number of routing decisions (tree depth), and generates
         deterministic weight patterns using cosine basis functions.
 
-        **Weight Pattern Generation** (cosine basis)::
+        Weight pattern generation (cosine basis):
+        For each decision ``k`` (row) and feature ``i`` (column):
+        ``w[k,i] = cos(2*pi * (k+1) * i / D)``
 
-            For each decision k (row) and feature i (column):
-              w[k,i] = cos(2π × (k+1) × i / D)
-
-            Example (D=8, num_decisions=3):
-                   Feature Index (i) →
-             k    0    1    2    3    4    5    6    7
-              ┌──────────────────────────────────────────┐
-             0│ [+1.0 +0.7  0.0 -0.7 -1.0 -0.7  0.0 +0.7]│  ← Low freq
-             1│ [+1.0  0.0 -1.0  0.0 +1.0  0.0 -1.0  0.0]│  ← Mid freq
-             2│ [+1.0 -0.7  0.0 +0.7 -1.0 +0.7  0.0 -0.7]│  ← High freq
-              └──────────────────────────────────────────┘
-
-            These patterns are near-orthogonal and capture different
-            "frequencies" in the input features, enabling diverse routing
-            decisions without training.
+        These patterns are near-orthogonal and capture different
+        "frequencies" in the input features, enabling diverse routing
+        decisions without training.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -399,27 +304,11 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Define the forward pass logic of the layer.
+        Apply hierarchical routing to transform inputs into class probabilities.
 
-        Applies hierarchical routing to transform inputs into class
-        probabilities through deterministic projections and binary tree
-        traversal.
-
-        **Processing Steps**::
-
-            0. Axis manipulation & reshape to 2D
-               ↓
-            1. Compute decision probabilities via cosine projections
-               ↓
-            2. Initialize root probability (1.0 for all samples)
-               ↓
-            3. Iteratively split probabilities through binary tree
-               ↓
-            4. Slice to output_dim and renormalize
-               ↓
-            5. Reshape back to original structure
-               ↓
-            6. Transpose to restore original axis order
+        Applies deterministic projections using cosine basis weight patterns,
+        then routes probability mass through a binary tree via iterative
+        splitting and interleaving.
 
         :param inputs: Input tensor of arbitrary rank. The routing is applied
             along the specified axis. All other dimensions are treated as
@@ -436,29 +325,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         """
         # Step 0: Handle axis manipulation for arbitrary rank tensors
         # Move the target axis to the last position for easier computation
-        #
-        # Axis Normalization & Reshaping
-        # Example: axis=1, input shape (B, C, H, W)
-        # =========================================
-        # Original input:
-        #   Shape: (B, C, H, W)  where we route along axis=1 (C dimension)
-        #          ↓  ↓  ↓  ↓
-        #   axis:  0  1  2  3
-        #
-        # Step 1: Transpose to move axis 1 to last position
-        #   Permutation: [0, 2, 3, 1]  (swap axis 1 with axis 3)
-        #   New shape: (B, H, W, C)
-        #
-        # Step 2: Reshape to 2D for efficient computation
-        #   batch_size = B × H × W  (product of all dims except last)
-        #   New shape: (B×H×W, C) = (batch_size, input_dim)
-        #
-        #   This flattening allows treating all non-routing dimensions
-        #   as a single batch dimension for vectorized operations.
-        #
-        # After processing, reverse these operations to restore original
-        # structure.
-        #
         input_rank = len(inputs.shape)
 
         # Create permutation to move target axis to last position
@@ -479,32 +345,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         inputs_2d = ops.reshape(inputs_transposed, (-1, input_dim))
 
         # Step 1: Compute deterministic routing decisions from inputs
-        # For each decision, compute weighted sum of inputs using
-        # precomputed patterns
-        #
-        # Decision Computation (Matrix Multiplication)
-        # ============================================
-        # inputs_2d:        [batch_size × input_dim]      e.g., [B × D]
-        # decision_weights: [num_decisions × input_dim]   e.g., [d × D]
-        #                          ↓ matmul
-        # decision_logits:  [batch_size × num_decisions]  e.g., [B × d]
-        #
-        # Visual representation (batch_size=3, input_dim=4, num_decisions=2):
-        #
-        #   inputs_2d:          decision_weights^T:       decision_logits:
-        #   ┌──────────┐        ┌────────┐              ┌───────┐
-        #   │x₀₀...x₀₃ │        │w₀₀ w₁₀ │              │z₀₀ z₀₁│
-        #   │x₁₀...x₁₃ │    ×   │w₀₁ w₁₁ │      =       │z₁₀ z₁₁│
-        #   │x₂₀...x₂₃ │        │w₀₂ w₁₂ │              │z₂₀ z₂₁│
-        #   └──────────┘        │w₀₃ w₁₃ │              └───────┘
-        #                       └────────┘
-        #   Each xᵢⱼ is an     Each column wₖ     Each zᵢₖ = <xᵢ, wₖ>
-        #   input feature      is a decision       is a routing logit
-        #                      weight pattern
-        #
-        # Then apply sigmoid to convert logits to probabilities [0, 1]:
-        #   p_k = σ(z_k) = 1 / (1 + e^{-z_k})
-        #
         # Shape: inputs_2d = (batch_size, input_dim)
         # Shape: decision_weights = (num_decisions, input_dim)
         # Result shape: (batch_size, num_decisions)
@@ -525,49 +365,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
         # Step 2: Initialize root probability using ones_like for XLA safety
         # Start with probability mass of 1.0 for each batch item
-        #
-        # Root Initialization
-        # ===================
-        #   Each sample in the batch starts at the root of the tree
-        #   with full probability mass (1.0). This mass will be
-        #   distributed across leaves through successive binary splits.
-        #
-        #   Initial state (batch_size=3):
-        #   ┌─────┐
-        #   │ 1.0 │  ← Sample 0
-        #   │ 1.0 │  ← Sample 1
-        #   │ 1.0 │  ← Sample 2
-        #   └─────┘
-        #   Shape: (batch_size, 1)
-        #
-        # Create a slice of the input with shape (batch_size, 1)
+        # Shape: (batch_size, 1)
         ones_template = inputs_2d[:, 0:1]
-        # Create a tensor of ones with the same dynamic shape
         padded_probs = ops.ones_like(ones_template)
 
         # Step 3: Iteratively build the tree by splitting probabilities
         # At each level, split each existing leaf into two children
-        #
-        # Probability Splitting Process (Example: 3 levels)
-        # ==================================================
-        # Level 0 (i=0): 1 node → 2 nodes
-        #     [1.0]  →  [L, R]  where L = 1.0×(1-p₀), R = 1.0×p₀
-        #
-        # Level 1 (i=1): 2 nodes → 4 nodes
-        #     [L, R]  →  [LL, LR, RL, RR]
-        #     where: LL = L×(1-p₁), LR = L×p₁, RL = R×(1-p₁), RR = R×p₁
-        #
-        # Level 2 (i=2): 4 nodes → 8 nodes (interleaved pattern)
-        #     [LL, LR, RL, RR]  →  [LLL, LLR, LRL, LRR, RLL, RLR, RRL, RRR]
-        #
-        # Visual representation:
-        #               Root              Level 0          Level 1
-        #              [1.0]      →      [L  R]    →    [LL LR RL RR]
-        #     Shape: (batch, 1)      (batch, 2)      (batch, 4)
-        #
-        # Interleaving maintains breadth-first tree structure where index i
-        # corresponds to the leaf reached by binary path representation of i.
-        #
         for i in range(self.num_decisions):
             # Get routing probability for current decision level
             # Shape: (batch_size, 1)
@@ -598,21 +401,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
         # Step 4: Handle non-power-of-2 output dimensions
         # If output_dim != padded_dim, we need to slice and renormalize
-        #
-        # Example (output_dim=5, padded_dim=8)
-        # =====================================
-        # Before slicing (padded_probs):
-        #   [C₀  C₁  C₂  C₃  C₄  pad₀  pad₁  pad₂]  ← sum = 1.0
-        #   [0.2 0.15 0.1 0.15 0.2  0.08  0.07  0.05]
-        #
-        # After slicing (keep first 5):
-        #   [C₀  C₁  C₂  C₃  C₄]  ← sum = 0.8 (< 1.0)
-        #   [0.2 0.15 0.1 0.15 0.2]
-        #
-        # After renormalization (divide by sum):
-        #   [C₀   C₁    C₂    C₃    C₄  ]  ← sum = 1.0 ✓
-        #   [0.25 0.1875 0.125 0.1875 0.25]
-        #
         if self.output_dim == self.padded_output_dim:
             # Output dimension is already a power of 2, no adjustment needed
             final_probs = padded_probs
@@ -629,23 +417,8 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # Step 5: Reshape back to original shape (with axis still at last
         # position)
         # Reverse the 2D flattening from Step 0
-        #
-        # Reshape Process (continuing example from Step 0)
-        # ================================================
-        # Current state:
-        #   Shape: (B×H×W, output_dim) = (batch_size, output_dim)
-        #
-        # Target:
-        #   Shape: (B, H, W, output_dim)  ← routing axis still at end
-        #
-        # We must reconstruct the shape tensor using tensor operations
-        # to remain graph-safe (avoiding list(tensor) or tuple issues).
-        #
 
         # Get the symbolic shape tensor of the transposed input.
-        # Note: ops.shape() might return a tuple (e.g. in some backends or
-        # eagerly) or a tensor. To safely use it with ops.concatenate,
-        # we explicitly convert it to a tensor of type int32.
         input_transposed_shape = ops.shape(inputs_transposed)
         input_transposed_shape_tensor = ops.convert_to_tensor(
             input_transposed_shape, dtype="int32"
@@ -671,16 +444,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
         # Step 6: Transpose back to original axis order if needed
         # Reverse the transpose from Step 0 to restore original axis layout
-        #
-        # Transpose Back (if axis != -1)
-        # ==============================
-        # Current: (B, H, W, output_dim)  ← routing axis at end
-        #          ↓ apply inverse permutation
-        # Target:  (B, output_dim, H, W)  ← routing axis back at position 1
-        #
-        # This restores the original axis order with output_dim at the
-        # user-specified axis location.
-        #
         if self._normalized_axis != input_rank - 1:
             outputs = ops.transpose(outputs_transposed, perm)
         else:

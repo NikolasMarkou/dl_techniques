@@ -10,46 +10,44 @@ classes (an out-of-distribution scenario). This layer counteracts this
 effect by dynamically sharpening the output distribution based on its
 uncertainty.
 
-Architectural Overview:
-    The core principle is to adjust the softmax temperature `T` only when
-    necessary. A low temperature (`T < 1.0`) sharpens a distribution,
-    concentrating probability on the highest-scoring logits, while `T=1.0`
-    recovers the standard softmax.
+The core principle is to adjust the softmax temperature ``T`` only when
+necessary. A low temperature (``T < 1.0``) sharpens a distribution,
+concentrating probability on the highest-scoring logits, while ``T=1.0``
+recovers the standard softmax.
 
-    This layer uses Shannon entropy as a quantitative measure of the
-    output distribution's uncertainty. A high entropy value indicates a
-    flat, uncertain distribution that needs sharpening. The operational
-    flow is as follows:
-    1.  An initial probability distribution `p` is calculated using a
-        standard softmax (`T=1.0`).
-    2.  The Shannon entropy `H(p)` of this initial distribution is computed.
-    3.  If `H(p)` exceeds a specified `entropy_threshold`, the distribution
-        is considered too diffuse. An adaptive temperature `T < 1.0` is
-        then calculated.
-    4.  If `H(p)` is below the threshold, the distribution is already
-        sharp, and the temperature is set to `T=1.0` to preserve it.
-    5.  The final, potentially sharpened, distribution is computed using
-        the selected temperature: `softmax(logits / T)`.
+This layer uses Shannon entropy as a quantitative measure of the
+output distribution's uncertainty. A high entropy value indicates a
+flat, uncertain distribution that needs sharpening. The operational
+flow is as follows:
 
-Mathematical Foundation:
-    The standard softmax function is defined as:
-        p_i = exp(z_i) / Σ_j exp(z_j)
+1.  An initial probability distribution ``p`` is calculated using a
+    standard softmax (``T=1.0``).
+2.  The Shannon entropy ``H(p)`` of this initial distribution is computed.
+3.  If ``H(p)`` exceeds a specified ``entropy_threshold``, the distribution
+    is considered too diffuse. An adaptive temperature ``T < 1.0`` is
+    then calculated.
+4.  If ``H(p)`` is below the threshold, the distribution is already
+    sharp, and the temperature is set to ``T=1.0`` to preserve it.
+5.  The final, potentially sharpened, distribution is computed using
+    the selected temperature: ``softmax(logits / T)``.
 
-    This is a special case of the temperatured softmax where T=1:
-        p_i(T) = exp(z_i / T) / Σ_j exp(z_j / T)
+The standard softmax function is defined as:
+``p_i = exp(z_i) / Sigma_j exp(z_j)``
 
-    The uncertainty of a distribution `p` is measured by its Shannon
-    entropy:
-        H(p) = -Σ_i p_i * log(p_i)
+This is a special case of the temperatured softmax where T=1:
+``p_i(T) = exp(z_i / T) / Sigma_j exp(z_j / T)``
 
-    This layer implements an adaptive temperature function `T = f(H)` which
-    maps the entropy `H` to an appropriate temperature `T`. The function is
-    designed such that higher entropy (more uncertainty) maps to a lower
-    temperature (more sharpening). This implementation uses a polynomial
-    to approximate this mapping, `T = polynomial(H)`, which is then clipped
-    and scaled to lie within a pre-defined `[min_temp, max_temp]` range.
-    This provides a continuous and differentiable mechanism for adapting
-    the model's confidence to the characteristics of each input.
+The uncertainty of a distribution ``p`` is measured by its Shannon entropy:
+``H(p) = -Sigma_i p_i * log(p_i)``
+
+This layer implements an adaptive temperature function ``T = f(H)`` which
+maps the entropy ``H`` to an appropriate temperature ``T``. The function is
+designed such that higher entropy (more uncertainty) maps to a lower
+temperature (more sharpening). This implementation uses a polynomial
+to approximate this mapping, ``T = polynomial(H)``, which is then clipped
+and scaled to lie within a pre-defined ``[min_temp, max_temp]`` range.
+This provides a continuous and differentiable mechanism for adapting
+the model's confidence to the characteristics of each input.
 
 References:
     - I. Drozdov et al., "Softmax is not enough (for sharp
@@ -85,63 +83,74 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
     efficiency and preserving sharp distributions.
 
     Mathematical formulation:
-        1. p_initial = softmax(logits)
-        2. H = -Σ p_i * log(p_i + ε)  # Shannon entropy
-        3. T = polynomial(H) if H > threshold else 1.0
-        4. p_output = softmax(logits / T)
+        1. ``p_initial = softmax(logits)``
+        2. ``H = -Sigma p_i * log(p_i + epsilon)``  (Shannon entropy)
+        3. ``T = polynomial(H)`` if ``H > threshold`` else ``1.0``
+        4. ``p_output = softmax(logits / T)``
 
-    Args:
-        min_temp: Float, minimum temperature value. Must be positive.
-            Controls the sharpest possible output distribution. Defaults to 0.1.
-        max_temp: Float, maximum temperature value. Must be positive and >= min_temp.
-            Controls the smoothest possible output distribution. Defaults to 1.0.
-        entropy_threshold: Float, entropy threshold for applying adaptation.
-            Only applies temperature scaling when input entropy exceeds this value.
-            Must be non-negative. Defaults to 0.5.
-        eps: Float, small epsilon for numerical stability. If None, uses a small
-            default value for safe logarithm computation. Defaults to None.
-        polynomial_coeffs: Optional[List[float]], coefficients for polynomial
-            temperature function ordered from highest to lowest degree.
-            If None, uses empirically derived default coefficients.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        N-D tensor with shape (..., num_classes).
-        The last dimension represents class logits.
+    .. code-block:: text
 
-    Output shape:
-        Same shape as input. Values are probabilities that sum to 1.0 along last axis.
+        ┌─────────────────────────────────────┐
+        │       Input Logits [..., C]         │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │     Standard Softmax (T=1.0)        │
+        │     p_initial = softmax(logits)     │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │     Shannon Entropy Computation     │
+        │     H = -Sigma p_i * log(p_i + e)  │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │     Adaptive Temperature Calc       │
+        │  ┌───────────────────────────────┐  │
+        │  │ H > threshold?                │  │
+        │  │  Yes: T = polynomial(H)       │  │
+        │  │  No:  T = 1.0                 │  │
+        │  └───────────────────────────────┘  │
+        │     T = clip(T, min_temp, max_temp) │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │     Final Softmax                   │
+        │     output = softmax(logits / T)    │
+        └──────────────┬──────────────────────┘
+                       │
+                       ▼
+        ┌─────────────────────────────────────┐
+        │   Output Probabilities [..., C]     │
+        └─────────────────────────────────────┘
 
-    Example:
-        ```python
-        # Basic usage
-        layer = AdaptiveTemperatureSoftmax()
-        logits = keras.random.normal((batch_size, num_classes))
-        probabilities = layer(logits)
+    :param min_temp: Minimum temperature value. Must be positive.
+        Controls the sharpest possible output distribution.
+    :type min_temp: float
+    :param max_temp: Maximum temperature value. Must be positive and >= min_temp.
+        Controls the smoothest possible output distribution.
+    :type max_temp: float
+    :param entropy_threshold: Entropy threshold for applying adaptation.
+        Only applies temperature scaling when input entropy exceeds this value.
+        Must be non-negative.
+    :type entropy_threshold: float
+    :param eps: Small epsilon for numerical stability. If None, uses a small
+        default value for safe logarithm computation.
+    :type eps: Optional[float]
+    :param polynomial_coeffs: Coefficients for polynomial temperature function
+        ordered from highest to lowest degree. If None, uses empirically derived
+        default coefficients.
+    :type polynomial_coeffs: Optional[List[float]]
+    :param kwargs: Additional keyword arguments for Layer base class.
 
-        # Custom configuration
-        layer = AdaptiveTemperatureSoftmax(
-            min_temp=0.05,
-            max_temp=2.0,
-            entropy_threshold=0.3
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(features,))
-        logits = keras.layers.Dense(num_classes)(inputs)
-        probabilities = AdaptiveTemperatureSoftmax()(logits)
-        model = keras.Model(inputs, probabilities)
-        ```
-
-    Raises:
-        ValueError: If min_temp <= 0, max_temp <= 0, min_temp > max_temp,
-                   or entropy_threshold < 0.
-
-    Note:
-        This layer is stateless and does not contain trainable parameters.
-        Temperature adaptation is computed dynamically based on input entropy.
-        For efficiency, adaptation is only applied when needed (entropy > threshold).
+    :raises ValueError: If min_temp <= 0, max_temp <= 0, min_temp > max_temp,
+        or entropy_threshold < 0.
     """
 
     def __init__(
@@ -182,10 +191,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer - validates input shape.
+        Build the layer by validating input shape.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate that we have at least 2 dimensions (batch + classes)
         if len(input_shape) < 2:
@@ -206,12 +215,12 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         """
         Evaluate polynomial using Horner's method for numerical stability.
 
-        Args:
-            coeffs: Polynomial coefficients from highest to lowest degree.
-            x: Input tensor values.
-
-        Returns:
-            Polynomial evaluated at x.
+        :param coeffs: Polynomial coefficients from highest to lowest degree.
+        :type coeffs: List[float]
+        :param x: Input tensor values.
+        :type x: keras.KerasTensor
+        :return: Polynomial evaluated at x.
+        :rtype: keras.KerasTensor
         """
         if not coeffs:
             return ops.zeros_like(x)
@@ -228,13 +237,12 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
 
     def _compute_entropy(self, probabilities: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Compute Shannon entropy: H = -Σ p_i * log(p_i + ε).
+        Compute Shannon entropy: ``H = -Sigma p_i * log(p_i + epsilon)``.
 
-        Args:
-            probabilities: Probability tensor with shape (..., num_classes).
-
-        Returns:
-            Entropy tensor with shape (..., 1) (keepdims=True).
+        :param probabilities: Probability tensor with shape (..., num_classes).
+        :type probabilities: keras.KerasTensor
+        :return: Entropy tensor with shape (..., 1) (keepdims=True).
+        :rtype: keras.KerasTensor
         """
         # Clamp probabilities to avoid log(0)
         safe_probs = ops.clip(probabilities, self.eps, 1.0 - self.eps)
@@ -252,11 +260,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         Temperature adaptation is only applied when entropy exceeds threshold.
         The polynomial maps entropy values to temperature range [min_temp, max_temp].
 
-        Args:
-            entropy: Entropy tensor with shape (..., 1).
-
-        Returns:
-            Temperature tensor with same shape as entropy.
+        :param entropy: Entropy tensor with shape (..., 1).
+        :type entropy: keras.KerasTensor
+        :return: Temperature tensor with same shape as entropy.
+        :rtype: keras.KerasTensor
         """
         # Determine which samples need adaptation
         needs_adaptation = entropy > self.entropy_threshold
@@ -290,12 +297,12 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         """
         Apply adaptive temperature softmax to input logits.
 
-        Args:
-            inputs: Input logits tensor with shape (..., num_classes).
-            training: Boolean indicating training mode. Not used in this layer.
-
-        Returns:
-            Output probabilities tensor with same shape as input.
+        :param inputs: Input logits tensor with shape (..., num_classes).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode. Not used in this layer.
+        :type training: Optional[bool]
+        :return: Output probabilities tensor with same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Step 1: Compute initial probability distribution
         initial_probs = ops.nn.softmax(inputs, axis=-1)
@@ -320,11 +327,10 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         """
         Compute output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple (same as input shape).
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
@@ -332,8 +338,8 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all initialization parameters.
+        :return: Dictionary containing all initialization parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

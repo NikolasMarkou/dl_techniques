@@ -20,20 +20,20 @@ below one.
 
 Mathematical Foundation:
     The squashing function is defined as:
-        v_squashed = (||v||² / (1 + ||v||²)) * (v / ||v||)
+        ``v_squashed = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)``
 
     This formula can be understood as the product of two components:
-    1.  **Directional Unit Vector (`v / ||v||`):** This term isolates the
-        orientation of the input vector `v`, ensuring that the direction of
+    1.  **Directional Unit Vector (v / ||v||):** This term isolates the
+        orientation of the input vector ``v``, ensuring that the direction of
         the output is identical to the input. This preserves the learned
         instantiation parameters.
-    2.  **Scalar Scaling Factor (`||v||² / (1 + ||v||²)`):** This term
+    2.  **Scalar Scaling Factor (||v||^2 / (1 + ||v||^2)):** This term
         non-linearly scales the magnitude. It is a monotonic function of
-        the squared norm `||v||²`.
-        -   As the input vector's norm approaches zero (`||v|| -> 0`), the
+        the squared norm ``||v||^2``.
+        -   As the input vector's norm approaches zero (``||v|| -> 0``), the
             scaling factor also approaches zero, effectively nullifying
             low-confidence capsules.
-        -   As the input vector's norm becomes very large (`||v|| -> ∞`),
+        -   As the input vector's norm becomes very large (``||v|| -> inf``),
             the scaling factor asymptotically approaches one, ensuring the
             output length is always bounded.
 
@@ -61,78 +61,62 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class SquashLayer(keras.layers.Layer):
-    """Applies squashing non-linearity to vectors (capsules).
+    """Squashing non-linearity for Capsule Network vectors.
 
-    The squashing function is a key component in Capsule Networks that ensures
-    capsule outputs have meaningful magnitudes while preserving their directional
-    information. This function provides the following properties:
+    Applies the squashing function
+    ``squash(v) = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)`` along a specified
+    axis, normalizing capsule vector lengths to the range [0, 1) while
+    preserving their directional information. Short vectors are shrunk toward
+    zero and long vectors are shrunk to just below one.
 
-    1. Short vectors get shrunk to almost zero length
-    2. Long vectors get shrunk to a length slightly below 1  
-    3. Vector orientation is preserved throughout the transformation
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        squash(v) = (||v||² / (1 + ||v||²)) * (v / ||v||)
+    .. code-block:: text
 
-    Where ||v|| represents the L2 norm of vector v, and the operation is applied
-    along the specified axis. The resulting vectors have norms in the range [0, 1).
+        Input: v (batch, num_capsules, dim)
+                │
+                ├──────────────────────────────┐
+                │                              │
+                ▼                              ▼
+        ┌───────────────────┐   ┌──────────────────────────┐
+        │  Squared L2 Norm  │   │   Unit Vector:           │
+        │  ||v||^2 along    │   │   v / (||v|| + epsilon)  │
+        │  specified axis   │   │                          │
+        └───────┬───────────┘   └─────────────┬────────────┘
+                │                             │
+                ▼                             │
+        ┌───────────────────┐                 │
+        │  Scale Factor:    │                 │
+        │  ||v||^2          │                 │
+        │  ───────────      │                 │
+        │  1 + ||v||^2      │                 │
+        └───────┬───────────┘                 │
+                │                             │
+                └──────────┬──────────────────┘
+                           │
+                           ▼
+                ┌──────────────────┐
+                │ scale * unit_vec │
+                └────────┬─────────┘
+                         │
+                         ▼
+        Output: (batch, num_capsules, dim)
+                norms in [0, 1)
 
-    Args:
-        axis: Integer, axis along which to compute the vector norm for squashing.
-            Defaults to -1 (last axis). This determines which dimension represents
-            the vector components to be squashed.
-        epsilon: Float, small constant for numerical stability to prevent division
-            by zero. If None, uses keras.backend.epsilon() which is typically 1e-7.
-            Defaults to None.
-        **kwargs: Additional keyword arguments passed to the Layer base class,
-            such as `name`, `dtype`, `trainable`, etc.
-
-    Input shape:
-        Arbitrary tensor of rank >= 1. The squashing operation is applied along
-        the specified axis, treating slices along that axis as vectors.
-
-    Output shape:
-        Same as input shape. No dimensional transformation occurs.
-
-    Attributes:
-        axis: The axis along which vector norms are computed.
-        epsilon: The small constant used for numerical stability.
-
-    Example:
-        ```python
-        # Basic usage for capsule vectors
-        layer = SquashLayer()
-        inputs = keras.Input(shape=(10, 16))  # 10 capsules, each 16-dimensional
-        outputs = layer(inputs)  # Same shape, but vectors are squashed
-
-        # Custom axis for different tensor layouts
-        layer = SquashLayer(axis=1)
-        inputs = keras.Input(shape=(32, 10, 16))  # Batch of capsule matrices
-        outputs = layer(inputs)  # Squashing applied along axis 1
-
-        # In a Capsule Network
-        inputs = keras.Input(shape=(1152, 8))  # Primary capsules
-        x = keras.layers.Dense(160)(inputs)  # Transform to digit capsules
-        x = keras.layers.Reshape((10, 16))(x)  # 10 digit capsules, 16D each
-        outputs = SquashLayer()(x)  # Apply squashing to capsule vectors
-
-        # Custom epsilon for numerical stability
-        layer = SquashLayer(epsilon=1e-8)
-        ```
+    :param axis: Axis along which to compute the vector norm for squashing.
+        Defaults to -1 (last axis).
+    :type axis: int
+    :param epsilon: Small constant for numerical stability to prevent division
+        by zero. If None, uses ``keras.backend.epsilon()`` (typically 1e-7).
+    :type epsilon: Optional[float]
+    :param kwargs: Additional keyword arguments passed to the Layer base class,
+        such as ``name``, ``dtype``, ``trainable``, etc.
 
     References:
         - Sabour, S., Frosst, N., & Hinton, G. E. (2017). Dynamic routing between
           capsules. In Advances in neural information processing systems.
         - Hinton, G. E., Krizhevsky, A., & Wang, S. D. (2011). Transforming
           auto-encoders. In International conference on artificial neural networks.
-
-    Note:
-        - The squashing function is non-linear and differentiable
-        - Output vector norms are bounded in the range [0, 1)
-        - This layer has no trainable parameters
-        - Commonly used as the final activation in capsule layers
-        - The epsilon parameter is crucial for numerical stability when vectors
-          have very small norms
     """
 
     def __init__(
@@ -143,11 +127,12 @@ class SquashLayer(keras.layers.Layer):
     ) -> None:
         """Initialize the Squash layer.
 
-        Args:
-            axis: Axis along which to compute vector norms for squashing.
-            epsilon: Small constant for numerical stability. If None, uses
-                keras.backend.epsilon().
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param axis: Axis along which to compute vector norms for squashing.
+        :type axis: int
+        :param epsilon: Small constant for numerical stability. If None, uses
+            ``keras.backend.epsilon()``.
+        :type epsilon: Optional[float]
+        :param kwargs: Additional keyword arguments for the Layer base class.
         """
         super().__init__(**kwargs)
 
@@ -164,18 +149,17 @@ class SquashLayer(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply squashing non-linearity to input vectors.
 
-        Applies the squashing function: squash(v) = (||v||² / (1 + ||v||²)) * (v / ||v||)
+        Computes ``squash(v) = (||v||^2 / (1 + ||v||^2)) * (v / ||v||)``.
 
-        Args:
-            inputs: Input tensor to be squashed. Vectors are identified along
-                the specified axis.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer but
-                kept for API consistency.
-
-        Returns:
-            Tensor with same shape as inputs, containing squashed vectors with
+        :param inputs: Input tensor to be squashed. Vectors are identified along
+            the specified axis.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training or inference mode. Not used
+            in this layer but kept for API consistency.
+        :type training: Optional[bool]
+        :return: Tensor with same shape as inputs, containing squashed vectors with
             norms bounded in [0, 1).
+        :rtype: keras.KerasTensor
         """
         # Compute squared L2 norm along specified axis
         # Shape: input_shape with axis dimension reduced to 1
@@ -189,7 +173,7 @@ class SquashLayer(keras.layers.Layer):
         # Add epsilon for numerical stability
         safe_norm = ops.sqrt(squared_norm + self.epsilon)
 
-        # Compute scale factor: ||v||² / (1 + ||v||²)
+        # Compute scale factor: ||v||^2 / (1 + ||v||^2)
         # This ensures output norm is in [0, 1)
         scale = squared_norm / (1.0 + squared_norm)
 
@@ -197,7 +181,7 @@ class SquashLayer(keras.layers.Layer):
         unit_vector = inputs / safe_norm
 
         # Apply squashing: scale * unit_vector
-        # Final result: (||v||² / (1 + ||v||²)) * (v / ||v||)
+        # Final result: (||v||^2 / (1 + ||v||^2)) * (v / ||v||)
         return scale * unit_vector
 
     def compute_output_shape(
@@ -206,26 +190,19 @@ class SquashLayer(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
-        For the squash layer, output shape is identical to input shape since
-        no dimensional transformation occurs - only the vector magnitudes change.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple, identical to input_shape.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, identical to input_shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns all parameters passed to __init__ so the layer can be
-        properly reconstructed during model loading.
-
-        Returns:
-            Dictionary containing the layer configuration, including
+        :return: Dictionary containing the layer configuration including
             axis and epsilon parameters along with parent class configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -237,8 +214,8 @@ class SquashLayer(keras.layers.Layer):
     def __repr__(self) -> str:
         """Return string representation of the layer.
 
-        Returns:
-            String representation including the layer name and key parameters.
+        :return: String representation including the layer name and key parameters.
+        :rtype: str
         """
         return f"SquashLayer(axis={self.axis}, epsilon={self.epsilon}, name='{self.name}')"
 

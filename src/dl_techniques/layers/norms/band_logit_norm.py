@@ -24,27 +24,66 @@ from typing import Any, Dict, Optional
 
 @keras.saving.register_keras_serializable()
 class BandLogitNorm(keras.layers.Layer):
-    """
-    Band-constrained logit normalization layer.
+    """Band-constrained logit normalization layer.
 
-    This layer applies RMS normalization to input tensors and constrains the resulting
-    L2 norm to lie within a specified band around 1.0. The scaling factor is learned
-    through a LayerNormalization applied to the original L2 norms.
+    Applies RMS normalization to input tensors and constrains the resulting L2
+    norm to lie within a specified band around 1.0. First normalizes to unit L2
+    norm, then applies a LayerNormalization-based learned scaling factor bounded
+    via ``tanh`` to the range ``[1 - max_band_width, 1]``. This provides
+    controlled normalization strength while preserving directional information.
 
-    :param max_band_width: Maximum allowed deviation from unit norm (0 < max_band_width < 1)
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────┐
+        │       Input (x)              │
+        │       shape: (..., D)        │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  L2 Norm: √(max(Σ(x²), ε)) │
+        └──────┬───────────────┬───────┘
+               │               │
+               ▼               ▼
+        ┌──────────────┐ ┌─────────────┐
+        │ Unit Norm:   │ │ LayerNorm   │
+        │ x / ||x||_2 │ │ on ||x||_2  │
+        └──────┬───────┘ └──────┬──────┘
+               │                │
+               │                ▼
+               │         ┌─────────────┐
+               │         │ tanh(4·LN)  │
+               │         └──────┬──────┘
+               │                │
+               │                ▼
+               │         ┌─────────────┐
+               │         │ Scale to    │
+               │         │ [1-bw, 1]   │
+               │         └──────┬──────┘
+               │                │
+               ▼                ▼
+        ┌──────────────────────────────┐
+        │  Multiply: x_norm × scale   │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │  Output: band-constrained   │
+        │  shape: (..., D)            │
+        └──────────────────────────────┘
+
+    :param max_band_width: Maximum allowed deviation from unit norm
+        (must satisfy ``0 < max_band_width < 1``). Defaults to 0.01.
     :type max_band_width: float
-    :param axis: Axis along which to compute the L2 norm, defaults to -1
+    :param axis: Axis along which to compute the L2 norm. Defaults to -1.
     :type axis: int
-    :param epsilon: Small constant for numerical stability, defaults to 1e-7
+    :param epsilon: Small constant for numerical stability. Must be positive.
+        Defaults to 1e-7.
     :type epsilon: float
-    :param kwargs: Additional keyword arguments passed to the base Layer
-    :type kwargs: Any
 
-    :raises ValueError: If max_band_width is not in (0, 1) or epsilon is not positive
-
-    Example:
-        >>> layer = BandLogitNorm(max_band_width=0.1)
-        >>> output = layer(input_tensor)  # L2 norm will be in [0.9, 1.0]
+    :raises ValueError: If max_band_width is not in (0, 1) or epsilon is not positive.
     """
 
     def __init__(
@@ -54,17 +93,18 @@ class BandLogitNorm(keras.layers.Layer):
             epsilon: float = 1e-7,
             **kwargs: Any
     ):
-        """
-        Initialize the BandLogitNorm layer.
+        """Initialize the BandLogitNorm layer.
 
-        :param max_band_width: Maximum allowed deviation from unit norm
+        :param max_band_width: Maximum allowed deviation from unit norm.
         :type max_band_width: float
-        :param axis: Axis along which to compute the L2 norm
+        :param axis: Axis along which to compute the L2 norm.
         :type axis: int
-        :param epsilon: Small constant for numerical stability
+        :param epsilon: Small constant for numerical stability.
         :type epsilon: float
-        :param kwargs: Additional keyword arguments
+        :param kwargs: Additional keyword arguments.
         :type kwargs: Any
+
+        :raises ValueError: If max_band_width is not in (0, 1) or epsilon is not positive.
         """
         super().__init__(**kwargs)
 
@@ -80,14 +120,14 @@ class BandLogitNorm(keras.layers.Layer):
         self.norm = None
 
     def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        :param max_band_width: Maximum allowed deviation from unit norm
+        :param max_band_width: Maximum allowed deviation from unit norm.
         :type max_band_width: float
-        :param epsilon: Small constant for numerical stability
+        :param epsilon: Small constant for numerical stability.
         :type epsilon: float
-        :raises ValueError: If parameters are invalid
+
+        :raises ValueError: If parameters are invalid.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -97,11 +137,10 @@ class BandLogitNorm(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     def build(self, input_shape) -> None:
-        """
-        Build the layer by initializing the LayerNormalization sublayer.
+        """Build the layer by initializing the LayerNormalization sublayer.
 
-        :param input_shape: Shape of the input tensor
-        :type input_shape: tuple or tf.TensorShape
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple
         """
         super().build(input_shape)
 
@@ -124,14 +163,14 @@ class BandLogitNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply constrained RMS normalization.
+        """Apply constrained RMS normalization.
 
-        :param inputs: Input tensor to normalize
+        :param inputs: Input tensor to normalize.
         :type inputs: keras.KerasTensor
-        :param training: Whether the layer is in training mode
+        :param training: Whether the layer is in training mode.
         :type training: Optional[bool]
-        :returns: Normalized tensor with L2 norm in [1-max_band_width, 1]
+
+        :return: Normalized tensor with L2 norm in [1-max_band_width, 1].
         :rtype: keras.KerasTensor
         """
         x = inputs
@@ -165,21 +204,20 @@ class BandLogitNorm(keras.layers.Layer):
         return x_normalized * scale
 
     def compute_output_shape(self, input_shape) -> tuple:
-        """
-        Compute the shape of the output tensor.
+        """Compute the shape of the output tensor.
 
-        :param input_shape: Shape of the input tensor
-        :type input_shape: tuple or tf.TensorShape
-        :returns: Shape of the output tensor (same as input)
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple
+
+        :return: Shape of the output tensor (same as input).
         :rtype: tuple
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        :returns: Dictionary containing the layer configuration
+        :return: Dictionary containing the layer configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -192,12 +230,12 @@ class BandLogitNorm(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'BandLogitNorm':
-        """
-        Create a layer instance from its configuration.
+        """Create a layer instance from its configuration.
 
-        :param config: Layer configuration dictionary
+        :param config: Layer configuration dictionary.
         :type config: Dict[str, Any]
-        :returns: New layer instance
+
+        :return: New layer instance.
         :rtype: BandLogitNorm
         """
         return cls(**config)

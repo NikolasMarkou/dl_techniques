@@ -46,109 +46,87 @@ class AdaptiveBandRMS(keras.layers.Layer):
     from logarithmically transformed RMS statistics. The log transformation stabilizes
     variance and creates more symmetric distributions for adaptive scaling computation.
 
-    **Intent**: Provide input-adaptive normalization that creates "thick spherical shells"
-    in RMS space, where shell thickness adapts based on input magnitude characteristics
-    with improved numerical stability through log-transformed statistics.
-
-    **Architecture**:
-    ```
-    Input(shape=[..., features])
-           ↓
-    RMS Statistics: rms = sqrt(mean(x²) + ε)
-           ↓
-    RMS Normalization: x_norm = x / rms
-           ↓
-    Log Transform: log_rms = log(aggregate(rms))
-           ↓
-    Dense Projection: band_params = Dense(log_rms)
-           ↓
-    Sigmoid Scaling: scale = (1-α) + α*σ(band_params)
-           ↓
-    Adaptive Scaling: output = x_norm * scale
-           ↓
-    Output(shape=[..., features])
-    ```
-
-    **Mathematical Operations**:
-    1. **RMS computation**: rms = √(E[x²] + ε)
-    2. **Normalization**: x̂ = x / rms
-    3. **Log transform**: log_rms = log(rms_aggregate)
-    4. **Adaptive scaling**: y = x̂ * scale(log_rms)
-
-    Where scale(·) ∈ [1-α, 1] is computed via dense projection and sigmoid activation.
+    The intent is to provide input-adaptive normalization that creates "thick spherical
+    shells" in RMS space, where shell thickness adapts based on input magnitude
+    characteristics with improved numerical stability through log-transformed statistics.
 
     This robust version supports arbitrary tensor shapes (2D, 3D, 4D, etc.) with
     flexible axis configurations, making it suitable for dense layers, sequence models,
     convolutions, and any tensor processing scenarios.
 
-    Args:
-        max_band_width: Float between 0 and 1, maximum allowed deviation from unit
-            normalization. Controls the thickness of the adaptive spherical shell.
-            Smaller values create tighter constraints. Defaults to 0.1.
-        axis: Integer or tuple of integers specifying axes along which to compute
-            RMS statistics. Similar to keras.layers.LayerNormalization:
-            - For 2D (batch, features): axis=-1 (feature-wise)
-            - For 3D (batch, seq, features): axis=-1 or axis=1
-            - For 4D (batch, H, W, channels): axis=-1 or axis=(1,2)
-            Defaults to -1.
-        epsilon: Float, small positive constant added to denominator for numerical
-            stability. Should be small but not too small to avoid underflow.
-            Defaults to 1e-7.
-        band_initializer: Initializer for the dense layer computing scaling parameters.
-            String name or Initializer instance. Defaults to 'zeros' for stable
-            initialization near unit scaling.
-        band_regularizer: Optional regularizer for the dense layer weights.
-            Can help prevent overfitting of adaptive scaling. Defaults to None.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
+    **Mathematical Operations:**
 
-    Input shape:
-        Arbitrary N-D tensor with shape: `(batch_size, ...)`.
-        The normalization axes must have defined dimensions (not None).
+    1. **RMS computation**: rms = sqrt(E[x^2] + epsilon)
+    2. **Normalization**: x_hat = x / rms
+    3. **Log transform**: log_rms = log(rms_aggregate)
+    4. **Adaptive scaling**: y = x_hat * scale(log_rms)
 
-    Output shape:
-        Same shape as input: `(batch_size, ...)`.
-        Values are RMS-normalized with adaptive scaling applied.
+    Where scale(.) is in [1-alpha, 1] computed via dense projection and sigmoid activation.
 
-    Attributes:
-        dense_layer: Dense layer for computing scaling parameters from log-RMS stats.
-        Created during build() since output size depends on input shape and axes.
+    **Architecture Overview:**
 
-    Example:
-        ```python
-        # Dense layer usage (2D tensors)
-        inputs = keras.Input(shape=(128,))
-        x = keras.layers.Dense(64)(inputs)
-        x = AdaptiveBandRMS(max_band_width=0.2)(x)
+    .. code-block:: text
 
-        # Sequence model usage (3D tensors)
-        inputs = keras.Input(shape=(100, 256))  # seq_len=100, features=256
-        x = AdaptiveBandRMS(axis=-1)(inputs)    # Feature-wise normalization
-        x = AdaptiveBandRMS(axis=1)(inputs)     # Sequence-wise normalization
+        Input: x (batch, ..., features)
+                │
+                ▼
+        ┌───────────────────────────────────┐
+        │  RMS = max(√(mean(x²)+ε), ε)     │
+        └──────────┬────────────────────────┘
+                   │
+                   ├──────────────────────┐
+                   ▼                      ▼
+        ┌──────────────────┐   ┌─────────────────────┐
+        │ x_norm = x / RMS │   │ Aggregate RMS stats  │
+        └────────┬─────────┘   │ to [batch, 1]        │
+                 │             └──────────┬────────────┘
+                 │                        ▼
+                 │             ┌─────────────────────┐
+                 │             │ log_rms = log(stats) │
+                 │             └──────────┬────────────┘
+                 │                        ▼
+                 │             ┌─────────────────────┐
+                 │             │ Dense → band_logits  │
+                 │             └──────────┬────────────┘
+                 │                        ▼
+                 │             ┌─────────────────────┐
+                 │             │ σ = sigmoid(5×logits)│
+                 │             │ scale = (1-α)+α×σ   │
+                 │             │ scale ∈ [1-α, 1]    │
+                 │             └──────────┬────────────┘
+                 │                        │
+                 ▼                        ▼
+        ┌───────────────────────────────────┐
+        │  output = x_norm × scale          │
+        └──────────────┬────────────────────┘
+                       │
+                       ▼
+        Output: (batch, ..., features)
 
-        # CNN usage (4D tensors)
-        inputs = keras.Input(shape=(32, 32, 64))  # H=32, W=32, channels=64
-        x = AdaptiveBandRMS(axis=-1)(inputs)      # Channel-wise normalization
-        x = AdaptiveBandRMS(axis=(1, 2))(inputs) # Spatial normalization
+    :param max_band_width: Maximum allowed deviation from unit normalization
+        (0 < alpha < 1). Controls the thickness of the adaptive spherical shell.
+        Smaller values create tighter constraints.
+    :type max_band_width: float
+    :param axis: Axes along which to compute RMS statistics. Similar to
+        keras.layers.LayerNormalization: for 2D (batch, features) use axis=-1;
+        for 3D (batch, seq, features) use axis=-1 or axis=1; for 4D
+        (batch, H, W, channels) use axis=-1 or axis=(1,2).
+    :type axis: Union[int, Tuple[int, ...]]
+    :param epsilon: Small positive constant added to denominator for numerical
+        stability.
+    :type epsilon: float
+    :param band_initializer: Initializer for the dense layer computing scaling
+        parameters. Defaults to 'zeros' for stable initialization near unit scaling.
+    :type band_initializer: Union[str, keras.initializers.Initializer]
+    :param band_regularizer: Optional regularizer for the dense layer weights.
+        Can help prevent overfitting of adaptive scaling.
+    :type band_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for Layer base class (name, trainable, etc.).
 
-        # Custom configuration with regularization
-        norm_layer = AdaptiveBandRMS(
-            max_band_width=0.3,
-            axis=(1, 2),
-            band_regularizer=keras.regularizers.L2(1e-4)
-        )
-        outputs = norm_layer(inputs)
-        ```
-
-    Raises:
-        ValueError: If max_band_width is not between 0 and 1.
-        ValueError: If epsilon is not positive.
-        ValueError: If axis configuration includes batch dimension (axis 0).
-        ValueError: If axis is out of bounds for input tensor rank.
-
-    Note:
-        This layer uses dynamic sub-layer creation in build() rather than __init__()
-        because the dense layer's output size depends on the input shape and
-        normalization axes. This is necessary for proper parameter shape computation.
+    :raises ValueError: If max_band_width is not between 0 and 1.
+    :raises ValueError: If epsilon is not positive.
+    :raises ValueError: If axis configuration includes batch dimension (axis 0).
+    :raises ValueError: If axis is out of bounds for input tensor rank.
     """
 
     def __init__(
@@ -189,12 +167,11 @@ class AdaptiveBandRMS(keras.layers.Layer):
         """
         Validate initialization parameters.
 
-        Args:
-            max_band_width: Maximum deviation from unit normalization.
-            epsilon: Numerical stability constant.
-
-        Raises:
-            ValueError: If parameters are invalid.
+        :param max_band_width: Maximum deviation from unit normalization.
+        :type max_band_width: float
+        :param epsilon: Numerical stability constant.
+        :type epsilon: float
+        :raises ValueError: If parameters are invalid.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -213,16 +190,13 @@ class AdaptiveBandRMS(keras.layers.Layer):
         Determines what dimensions should have independent scaling parameters,
         similar to how LayerNormalization computes parameter shapes.
 
-        Args:
-            input_shape: Shape of input tensor including batch dimension.
-
-        Returns:
-            Tuple of (param_shape, scaling_axes) where:
-            - param_shape: Shape for scaling parameters (without batch dim)
-            - scaling_axes: List of axes that will be scaled independently
-
-        Raises:
-            ValueError: If axis configuration is invalid.
+        :param input_shape: Shape of input tensor including batch dimension.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Tuple of (param_shape, scaling_axes) where param_shape is the
+            shape for scaling parameters (without batch dim) and scaling_axes is
+            the list of axes that will be scaled independently.
+        :rtype: Tuple[Tuple[int, ...], List[int]]
+        :raises ValueError: If axis configuration is invalid.
         """
         input_rank = len(input_shape)
 
@@ -279,10 +253,13 @@ class AdaptiveBandRMS(keras.layers.Layer):
         """
         Build the layer and create sub-layers with proper parameter sizing.
 
-        Note: This layer uses dynamic sub-layer creation because the dense layer's
+        This layer uses dynamic sub-layer creation because the dense layer's
         output size depends on input shape and normalization axes. This deviates
         from the standard Keras pattern where sub-layers are created in __init__(),
         but is necessary for proper parameter shape computation.
+
+        :param input_shape: Shape tuple indicating input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Compute parameter configuration
         self._param_shape, self._scaling_axes = self._compute_param_shape_and_axes(
@@ -328,11 +305,10 @@ class AdaptiveBandRMS(keras.layers.Layer):
         per batch element. This is computed by averaging all RMS values
         across non-batch dimensions.
 
-        Args:
-            rms_tensor: RMS tensor with keepdims=True, same rank as input.
-
-        Returns:
-            Aggregated RMS statistics with shape [batch, 1].
+        :param rms_tensor: RMS tensor with keepdims=True, same rank as input.
+        :type rms_tensor: keras.KerasTensor
+        :return: Aggregated RMS statistics with shape [batch, 1].
+        :rtype: keras.KerasTensor
         """
         # Aggregate over all non-batch dimensions
         aggregation_axes = list(range(1, len(rms_tensor.shape)))
@@ -354,12 +330,12 @@ class AdaptiveBandRMS(keras.layers.Layer):
         """
         Reshape scaling factors from dense layer for proper broadcasting.
 
-        Args:
-            scaling_factors: Output from dense layer, shape [batch, num_params].
-            input_shape: Original input tensor shape.
-
-        Returns:
-            Reshaped scaling factors ready for element-wise multiplication.
+        :param scaling_factors: Output from dense layer, shape [batch, num_params].
+        :type scaling_factors: keras.KerasTensor
+        :param input_shape: Original input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Reshaped scaling factors ready for element-wise multiplication.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(scaling_factors)[0]
         target_shape = [batch_size] + list(self._param_shape)
@@ -373,12 +349,12 @@ class AdaptiveBandRMS(keras.layers.Layer):
         """
         Apply adaptive RMS normalization with log-transformed statistics.
 
-        Args:
-            inputs: Input tensor of arbitrary shape.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Normalized tensor with adaptive RMS-based scaling.
+        :param inputs: Input tensor of arbitrary shape.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Normalized tensor with adaptive RMS-based scaling.
+        :rtype: keras.KerasTensor
         """
         # Cast to float32 for numerical stability in mixed precision
         inputs_fp32 = ops.cast(inputs, "float32")
@@ -424,14 +400,23 @@ class AdaptiveBandRMS(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape (same as input)."""
+        """
+        Compute output shape (same as input).
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return configuration for serialization.
 
-        Returns all constructor parameters needed for layer reconstruction.
+        :return: Dictionary containing all constructor parameters needed for
+            layer reconstruction.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

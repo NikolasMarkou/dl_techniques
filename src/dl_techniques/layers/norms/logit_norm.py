@@ -43,127 +43,63 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class LogitNorm(keras.layers.Layer):
-    """
-    LogitNorm layer for classification tasks.
+    """LogitNorm layer for classification tasks.
 
-    This layer implements logit normalization by applying L2 normalization with a learned
-    temperature parameter. This helps stabilize training and can improve model calibration
-    by reducing overconfidence in predictions.
+    Applies L2 normalization with a temperature parameter to logits, stabilizing
+    training and improving model calibration by reducing overconfidence. The
+    normalization is computed as:
+    ``norm = sqrt(sum(logits²) + ε)``, ``output = logits / (norm × τ)``,
+    where τ is the temperature controlling distribution sharpness.
 
-    The normalization is computed as:
+    **Architecture Overview:**
 
-    .. math::
-        \\text{norm} = \\sqrt{\\text{sum}(\\text{logits}^2) + \\varepsilon}
+    .. code-block:: text
 
-    .. math::
-        \\text{output} = \\frac{\\text{logits}}{\\text{norm} \\times \\text{temperature}}
+        ┌─────────────────────────┐
+        │    Input Logits (x)     │
+        │   shape: (..., C)       │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │   Square: x²            │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │  Sum along axis + ε     │
+        │  norm² = Σ(x²) + ε     │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │  sqrt(norm²) → L2 norm  │
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │  Divide: x / (norm × τ)│
+        └───────────┬─────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────┐
+        │   Normalized Logits     │
+        │   shape: (..., C)       │
+        └─────────────────────────┘
 
-    Args:
-        temperature: Temperature scaling parameter. Higher values produce more spread-out
-            logits, while lower values make the distribution sharper. Must be positive.
-            Defaults to 0.04 (optimal for CIFAR-10 from original paper).
-        axis: Axis along which to perform normalization. Typically -1 for the class
-            dimension. Defaults to -1.
-        epsilon: Small constant for numerical stability. Must be positive.
-            Defaults to 1e-7.
-        **kwargs: Additional keyword arguments passed to the parent Layer class.
+    :param temperature: Temperature scaling parameter. Higher values produce more
+        spread-out logits, while lower values make the distribution sharper. Must
+        be positive. Defaults to 0.04 (optimal for CIFAR-10 from original paper).
+    :type temperature: float
+    :param axis: Axis along which to perform normalization. Typically -1 for the
+        class dimension. Defaults to -1.
+    :type axis: int
+    :param epsilon: Small constant for numerical stability. Must be positive.
+        Defaults to 1e-7.
+    :type epsilon: float
 
-    Input shape:
-        N-D tensor with shape: ``(..., num_classes)``
-
-        The layer can handle any dimensionality, with normalization applied along
-        the specified axis.
-
-    Output shape:
-        Same shape as input: ``(..., num_classes)``
-
-    Raises:
-        ValueError: If temperature is not positive.
-        ValueError: If epsilon is not positive.
-
-    Example:
-        Basic usage in classification model:
-
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.logit_norm import LogitNorm
-
-            # Standard classification model with LogitNorm
-            inputs = keras.Input(shape=(784,))
-            x = keras.layers.Dense(256, activation='relu')(inputs)
-            x = keras.layers.Dense(128, activation='relu')(x)
-            logits = keras.layers.Dense(10)(x)  # Raw logits
-
-            # Apply LogitNorm before softmax
-            normalized_logits = LogitNorm(temperature=0.04)(logits)
-            outputs = keras.layers.Softmax()(normalized_logits)
-
-            model = keras.Model(inputs, outputs)
-
-        Custom temperature for different datasets:
-
-        .. code-block:: python
-
-            # For ImageNet (larger dataset, may need different temperature)
-            logit_norm = LogitNorm(temperature=0.1)
-
-            # For small datasets (may need smaller temperature)
-            logit_norm = LogitNorm(temperature=0.01)
-
-        Integration with mixed precision:
-
-        .. code-block:: python
-
-            # LogitNorm works well with mixed precision training
-            keras.mixed_precision.set_global_policy('mixed_float16')
-
-            inputs = keras.Input(shape=(224, 224, 3), dtype='float16')
-            # ... feature extraction layers ...
-            logits = keras.layers.Dense(1000)(features)
-
-            # LogitNorm helps with numerical stability in fp16
-            normalized = LogitNorm(temperature=0.05, epsilon=1e-6)(logits)
-            outputs = keras.layers.Softmax(dtype='float32')(normalized)
-
-        Calibration-aware training:
-
-        .. code-block:: python
-
-            def create_calibrated_classifier(num_classes, temperature=0.04):
-                inputs = keras.Input(shape=(input_dim,))
-
-                # Feature extraction
-                features = keras.layers.Dense(512, activation='relu')(inputs)
-                features = keras.layers.Dropout(0.5)(features)
-                features = keras.layers.Dense(256, activation='relu')(features)
-
-                # Raw logits
-                logits = keras.layers.Dense(num_classes)(features)
-
-                # LogitNorm for calibration
-                normalized_logits = LogitNorm(temperature=temperature)(logits)
-                probabilities = keras.layers.Softmax()(normalized_logits)
-
-                return keras.Model(inputs, probabilities)
-
-        Multi-axis normalization:
-
-        .. code-block:: python
-
-            # For multi-label classification (normalize each label separately)
-            inputs = keras.Input(shape=(sequence_length, feature_dim))
-            # ... processing layers ...
-            logits = keras.layers.Dense(num_labels)(processed)
-
-            # Normalize along the feature dimension
-            normalized = LogitNorm(axis=-1, temperature=0.1)(logits)
-
-    Note:
-        - This layer performs only computation on inputs without creating any weights
-        - Temperature parameter is fixed at initialization (not learnable by default)
-        - For learnable temperature, consider using a separate Dense layer with sigmoid activation
-        - Works well with mixed precision training due to numerical stability improvements
+    :raises ValueError: If temperature is not positive.
+    :raises ValueError: If epsilon is not positive.
     """
 
     def __init__(
@@ -173,19 +109,20 @@ class LogitNorm(keras.layers.Layer):
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the LogitNorm layer.
+        """Initialize the LogitNorm layer.
 
-        Args:
-            temperature: Temperature scaling parameter. Higher values produce more
-                spread-out logits. Must be positive.
-            axis: Axis along which to perform normalization.
-            epsilon: Small constant for numerical stability. Must be positive.
-            **kwargs: Additional keyword arguments for the Layer parent class.
+        :param temperature: Temperature scaling parameter. Higher values produce more
+            spread-out logits. Must be positive.
+        :type temperature: float
+        :param axis: Axis along which to perform normalization.
+        :type axis: int
+        :param epsilon: Small constant for numerical stability. Must be positive.
+        :type epsilon: float
+        :param kwargs: Additional keyword arguments for the Layer parent class.
+        :type kwargs: Any
 
-        Raises:
-            ValueError: If temperature is not positive.
-            ValueError: If epsilon is not positive.
+        :raises ValueError: If temperature is not positive.
+        :raises ValueError: If epsilon is not positive.
         """
         super().__init__(**kwargs)
 
@@ -200,15 +137,14 @@ class LogitNorm(keras.layers.Layer):
         logger.debug(f"Initialized LogitNorm with temperature={temperature}, axis={axis}, epsilon={epsilon}")
 
     def _validate_inputs(self, temperature: float, epsilon: float) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        Args:
-            temperature: Temperature parameter to validate.
-            epsilon: Epsilon parameter to validate.
+        :param temperature: Temperature parameter to validate.
+        :type temperature: float
+        :param epsilon: Epsilon parameter to validate.
+        :type epsilon: float
 
-        Raises:
-            ValueError: If parameters are invalid.
+        :raises ValueError: If parameters are invalid.
         """
         if temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
@@ -220,21 +156,19 @@ class LogitNorm(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply logit normalization to inputs.
+        """Apply logit normalization to inputs.
 
-        This method implements L2 normalization with temperature scaling:
-        1. Compute L2 norm along specified axis
-        2. Normalize inputs by the L2 norm
-        3. Scale by temperature parameter
+        Computes L2 normalization along the specified axis and scales by
+        the temperature parameter.
 
-        Args:
-            inputs: Input logits tensor of any shape.
-            training: Boolean indicating whether in training mode (unused, kept for
-                API compatibility).
+        :param inputs: Input logits tensor of any shape.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating whether in training mode (unused,
+            kept for API compatibility).
+        :type training: Optional[bool]
 
-        Returns:
-            Normalized logits tensor with the same shape as inputs.
+        :return: Normalized logits tensor with the same shape as inputs.
+        :rtype: keras.KerasTensor
         """
         # Compute L2 norm along specified axis with numerical stability
         # Use maximum to prevent sqrt of values smaller than epsilon
@@ -246,26 +180,21 @@ class LogitNorm(keras.layers.Layer):
         return inputs / (norm * self.temperature)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Output shape tuple (same as input shape for normalization layers).
+        :return: Output shape tuple (same as input shape for normalization layers).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Following modern Keras 3 patterns, this method returns ALL constructor
-        arguments needed to recreate this layer instance.
-
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

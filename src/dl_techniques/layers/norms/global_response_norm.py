@@ -55,83 +55,78 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class GlobalResponseNormalization(keras.layers.Layer):
-    """
-    Global Response Normalization (GRN) layer supporting 2D, 3D, and 4D inputs.
+    """Global Response Normalization (GRN) layer for 2D, 3D, and 4D inputs.
 
-    This layer implements the GRN operation from the ConvNeXt V2 paper, generalized
-    to handle 2D, 3D, and 4D tensors. It enhances inter-channel feature competition by
-    normalizing features and applying learnable scale and bias parameters with a
-    residual connection.
+    Implements the GRN operation from ConvNeXt V2, enhancing inter-channel feature
+    competition. For each channel, computes the L2 norm across spatial/sequence
+    dimensions, normalizes by the mean norm across channels, then applies learnable
+    gamma and beta with a residual connection:
+    ``Y = X + γ * (X ⊙ (norm_c / (mean(norm) + ε))) + β``.
+    Generalizes to 2D (MLP), 3D (sequence), and 4D (image) inputs.
 
-    The operation flow is:
-    1. Compute L2 norm across spatial/sequence dimensions for each channel. For 2D data,
-       this simplifies to the absolute value.
-    2. Normalize by the mean of the L2 norm across channels.
-    3. Apply learnable scaling (gamma) and bias (beta).
-    4. Add the result to the input (residual connection).
+    **Architecture Overview:**
 
-    Args:
-        eps: Small constant for numerical stability. Must be positive. Defaults to 1e-6.
-        gamma_initializer: Initializer for gamma (scale) weights. Defaults to 'ones'.
-        beta_initializer: Initializer for beta (bias) weights. Defaults to 'zeros'.
-        gamma_regularizer: Optional regularizer for gamma weights. Defaults to None.
-        beta_regularizer: Optional regularizer for beta weights. Defaults to None.
-        activity_regularizer: Optional regularizer for the layer output. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer parent class.
+    .. code-block:: text
 
-    Input shape:
-        - 2D tensor: ``(batch_size, features)``
-        - 3D tensor: ``(batch_size, sequence_length, features)``
-        - 4D tensor: ``(batch_size, height, width, channels)``
+        ┌──────────────────────────────────┐
+        │         Input (X)                │
+        │  shape: (B, [spatial...], C)     │
+        └──────────────┬───────────────────┘
+                       │
+                       ├──────────────────────┐
+                       │                      │
+                       ▼                      │
+        ┌──────────────────────────────┐      │
+        │  L2 Norm per channel over    │      │
+        │  spatial dims: norm_c        │      │
+        └──────────────┬───────────────┘      │
+                       │                      │
+                       ▼                      │
+        ┌──────────────────────────────┐      │
+        │  Mean norm across channels:  │      │
+        │  μ = mean(norm_c)            │      │
+        └──────────────┬───────────────┘      │
+                       │                      │
+                       ▼                      │
+        ┌──────────────────────────────┐      │
+        │  Normalize: norm_c / (μ + ε) │      │
+        └──────────────┬───────────────┘      │
+                       │                      │
+                       ▼                      │
+        ┌──────────────────────────────┐      │
+        │  γ × (X ⊙ norm') + β        │      │
+        └──────────────┬───────────────┘      │
+                       │                      │
+                       ▼                      ▼
+        ┌──────────────────────────────────────┐
+        │  Residual: X + transformed           │
+        └──────────────┬───────────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │         Output (Y)               │
+        │  shape: (B, [spatial...], C)     │
+        └──────────────────────────────────┘
 
-    Output shape:
-        Same shape as input.
+    :param eps: Small constant for numerical stability. Must be positive.
+        Defaults to 1e-6.
+    :type eps: float
+    :param gamma_initializer: Initializer for gamma (scale) weights.
+        Defaults to ``'ones'``.
+    :type gamma_initializer: Union[str, keras.initializers.Initializer]
+    :param beta_initializer: Initializer for beta (bias) weights.
+        Defaults to ``'zeros'``.
+    :type beta_initializer: Union[str, keras.initializers.Initializer]
+    :param gamma_regularizer: Optional regularizer for gamma weights.
+    :type gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param beta_regularizer: Optional regularizer for beta weights.
+    :type beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param activity_regularizer: Optional regularizer for the layer output.
+    :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
 
-    Raises:
-        ValueError: If eps <= 0.
-        ValueError: If input rank is not 2, 3, or 4.
-        ValueError: If the feature/channel dimension is not defined.
-
-    Example:
-        `GlobalResponseNormalization` can be used with various data formats.
-
-        **4D Data (e.g., in a CNN)**
-        .. code-block:: python
-
-            import keras
-            from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
-
-            inputs_4d = keras.Input(shape=(32, 32, 64))
-            normalized_4d = GlobalResponseNormalization()(inputs_4d)
-            model_4d = keras.Model(inputs_4d, normalized_4d)
-            print(model_4d.output_shape)
-            # Output: (None, 32, 32, 64)
-
-        **3D Data (e.g., in a Transformer)**
-        .. code-block:: python
-
-            inputs_3d = keras.Input(shape=(50, 128))  # (batch, seq_len, features)
-            normalized_3d = GlobalResponseNormalization()(inputs_3d)
-            model_3d = keras.Model(inputs_3d, normalized_3d)
-            print(model_3d.output_shape)
-            # Output: (None, 50, 128)
-
-        **2D Data (e.g., in an MLP)**
-        .. code-block:: python
-
-            inputs_2d = keras.Input(shape=(256,))  # (batch, features)
-            normalized_2d = GlobalResponseNormalization()(inputs_2d)
-            model_2d = keras.Model(inputs_2d, normalized_2d)
-            print(model_2d.output_shape)
-            # Output: (None, 256)
-
-    Note:
-        - This implementation follows modern Keras 3 patterns for robust serialization.
-        - Designed for inputs where the last dimension is the channel/feature dimension.
-        - Maintains residual connections for stable gradient flow.
-
-    References:
-        ConvNeXt V2 paper: https://arxiv.org/abs/2301.00808
+    :raises ValueError: If eps <= 0.
+    :raises ValueError: If input rank is not 2, 3, or 4.
+    :raises ValueError: If the feature/channel dimension is not defined.
     """
 
     def __init__(
@@ -144,20 +139,22 @@ class GlobalResponseNormalization(keras.layers.Layer):
         activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the GlobalResponseNormalization layer.
+        """Initialize the GlobalResponseNormalization layer.
 
-        Args:
-            eps: Small constant for numerical stability. Must be positive.
-            gamma_initializer: Initializer for gamma (scale) weights.
-            beta_initializer: Initializer for beta (bias) weights.
-            gamma_regularizer: Regularizer for gamma weights.
-            beta_regularizer: Regularizer for beta weights.
-            activity_regularizer: Regularizer for the layer output.
-            **kwargs: Additional keyword arguments for the Layer parent class.
+        :param eps: Small constant for numerical stability. Must be positive.
+        :type eps: float
+        :param gamma_initializer: Initializer for gamma (scale) weights.
+        :type gamma_initializer: Union[str, keras.initializers.Initializer]
+        :param beta_initializer: Initializer for beta (bias) weights.
+        :type beta_initializer: Union[str, keras.initializers.Initializer]
+        :param gamma_regularizer: Regularizer for gamma weights.
+        :type gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param beta_regularizer: Regularizer for beta weights.
+        :type beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param activity_regularizer: Regularizer for the layer output.
+        :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
 
-        Raises:
-            ValueError: If eps <= 0.
+        :raises ValueError: If eps <= 0.
         """
         super().__init__(**kwargs)
 
@@ -177,15 +174,13 @@ class GlobalResponseNormalization(keras.layers.Layer):
         logger.debug(f"Initialized GlobalResponseNormalization with eps={eps}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's weights, adapted for 2D, 3D, or 4D inputs.
+        """Create the layer's weights, adapted for 2D, 3D, or 4D inputs.
 
-        Args:
-            input_shape: Tuple of integers defining the input shape.
+        :param input_shape: Tuple of integers defining the input shape.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Raises:
-            ValueError: If input rank is not 2, 3, or 4, or if the channel
-                        dimension is not defined.
+        :raises ValueError: If input rank is not 2, 3, or 4, or if the
+            channel dimension is not defined.
         """
         rank = len(input_shape)
         if rank not in [2, 3, 4]:
@@ -226,17 +221,17 @@ class GlobalResponseNormalization(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply global response normalization to the input tensor.
+        """Apply global response normalization to the input tensor.
 
-        This method implements the core GRN algorithm for 2D, 3D, or 4D inputs.
+        Implements the core GRN algorithm for 2D, 3D, or 4D inputs.
 
-        Args:
-            inputs: Input tensor of shape (batch, ..., channels).
-            training: Whether in training mode (unused, for API compatibility).
+        :param inputs: Input tensor of shape ``(batch, ..., channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode (unused, for API compatibility).
+        :type training: Optional[bool]
 
-        Returns:
-            Normalized tensor of the same shape as input.
+        :return: Normalized tensor of the same shape as input.
+        :rtype: keras.KerasTensor
         """
         rank = ops.ndim(inputs)
 
@@ -262,23 +257,21 @@ class GlobalResponseNormalization(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Output shape tuple (same as input shape).
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
