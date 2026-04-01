@@ -55,50 +55,39 @@ from ..utils.logger import logger
 @keras.saving.register_keras_serializable()
 class StochasticDepth(keras.layers.Layer):
     """
-    Implements Stochastic Depth for deep networks.
+    Stochastic Depth regularization for deep networks.
 
-    This layer implements batch-wise dropping of residual paths as described in the
-    Stochastic Depth paper. Unlike sample-wise dropping methods (like DropPath in timm),
-    this implementation drops the same paths for all samples in a batch.
+    This layer implements batch-wise dropping of residual paths. During
+    training, the entire path is dropped (zeroed) with probability
+    ``drop_path_rate``, and surviving paths are scaled by
+    ``1 / (1 - drop_path_rate)`` to maintain expected activation magnitude.
+    During inference the layer acts as an identity function.
 
-    The layer acts as an identity function during inference and randomly drops entire
-    paths during training with the specified probability.
+    **Architecture Overview:**
 
-    Args:
-        drop_path_rate: Float between 0 and 1, probability of dropping the residual path.
-            Must be in the range [0, 1). Defaults to 0.5.
-        **kwargs: Additional keyword arguments passed to the parent Layer class.
+    .. code-block:: text
 
-    Input shape:
-        Arbitrary tensor with at least 2 dimensions (batch_size, ...).
+        ┌─────────────────────────────────┐
+        │  Input [B, ...]                 │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Training:                      │
+        │    mask ~ Bernoulli(keep_prob)  │
+        │    output = input * mask / p    │
+        │  Inference:                     │
+        │    output = input (identity)    │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Output [B, ...]                │
+        └─────────────────────────────────┘
 
-    Output shape:
-        Same shape as input.
-
-    Raises:
-        TypeError: If drop_path_rate is not a number.
-        ValueError: If drop_path_rate is not in the range [0, 1).
-
-    References:
-        - Deep Networks with Stochastic Depth (https://arxiv.org/abs/1603.09382)
-        - timm library implementation (https://github.com/rwightman/pytorch-image-models)
-
-    Example:
-        ```python
-        # Basic usage in a residual block
-        inputs = keras.Input(shape=(32, 32, 64))
-        x = keras.layers.Conv2D(64, 3, padding='same')(inputs)
-        x = StochasticDepth(drop_path_rate=0.2)(x)
-        x = keras.layers.Add()([inputs, x])  # Residual connection
-
-        # Higher drop rates for deeper layers
-        stoch_depth = StochasticDepth(drop_path_rate=0.3)
-        x = stoch_depth(x, training=True)  # Explicit training mode
-        ```
-
-    Note:
-        This implementation uses dynamic noise shape calculation to handle inputs
-        of varying dimensions without requiring build-time shape information.
+    :param drop_path_rate: Probability of dropping the residual path.
+        Must be in ``[0, 1)``. Defaults to 0.5.
+    :type drop_path_rate: float
+    :param kwargs: Additional keyword arguments for the parent Layer class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -109,14 +98,11 @@ class StochasticDepth(keras.layers.Layer):
         """
         Initialize the StochasticDepth layer.
 
-        Args:
-            drop_path_rate: Probability of dropping the residual path.
-                Must be in the range [0, 1).
-            **kwargs: Additional keyword arguments passed to the parent Layer class.
-
-        Raises:
-            TypeError: If drop_path_rate is not a number.
-            ValueError: If drop_path_rate is not in [0, 1).
+        :param drop_path_rate: Probability of dropping the residual path.
+            Must be in ``[0, 1)``.
+        :type drop_path_rate: float
+        :param kwargs: Additional keyword arguments for the parent Layer class.
+        :type kwargs: Any
         """
         super().__init__(**kwargs)
 
@@ -143,18 +129,12 @@ class StochasticDepth(keras.layers.Layer):
         """
         Forward pass of the layer.
 
-        During training, randomly drops the entire path with probability drop_path_rate.
-        During inference, acts as identity function.
-
-        Args:
-            inputs: Input tensor with shape (batch_size, ...).
-            training: Boolean indicating whether in training mode. If None,
-                uses the current training phase from the backend.
-
-        Returns:
-            Output tensor with same shape as input. During training, the tensor
-            may be zeroed out with probability drop_path_rate. During inference,
-            the tensor is returned unchanged.
+        :param inputs: Input tensor with shape ``(batch_size, ...)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Output tensor with same shape as input.
+        :rtype: keras.KerasTensor
         """
         # During inference, act as identity
         if training is False:
@@ -197,11 +177,10 @@ class StochasticDepth(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Tuple representing output shape (same as input shape).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple (same as input shape).
+        :rtype: tuple
         """
         return tuple(input_shape)
 
@@ -209,8 +188,8 @@ class StochasticDepth(keras.layers.Layer):
         """
         Return the config dictionary for layer serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

@@ -61,16 +61,48 @@ from typing import Dict, Tuple, Any
 
 @keras.saving.register_keras_serializable()
 class StrongAugmentation(keras.layers.Layer):
-    """Strong augmentation layer for unlabeled data.
+    """
+    Strong augmentation layer for consistency-based regularization.
 
-    Implements color jittering and CutMix augmentations using Keras operations
-    for backend compatibility.
+    Applies sequential color jittering (brightness and contrast adjustment) and
+    CutMix augmentation during training. During inference the input is passed
+    through unchanged. Color jittering modifies pixel values via random scaling
+    factors, while CutMix pastes a random rectangular patch from a shuffled
+    batch image onto the original: ``x_new = M * x_perm + (1-M) * x``.
 
-    Args:
-        cutmix_prob: Float, probability of applying CutMix augmentation.
-        cutmix_ratio_range: Tuple of floats, range for CutMix cut ratio.
-        color_jitter_strength: Float, strength of color jittering.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────┐
+        │  Input [B, H, W, C]             │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Color Jitter                    │
+        │  brightness: I * alpha           │
+        │  contrast: (I-mu)*beta + mu      │
+        │  clip to [0, 1]                  │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  CutMix (with prob cutmix_prob) │
+        │  paste random patch from         │
+        │  shuffled batch                  │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [B, H, W, C]            │
+        └──────────────────────────────────┘
+
+    :param cutmix_prob: Probability of applying CutMix augmentation.
+    :type cutmix_prob: float
+    :param cutmix_ratio_range: Range for CutMix cut ratio ``(min, max)``.
+    :type cutmix_ratio_range: tuple[float, float]
+    :param color_jitter_strength: Strength of color jittering.
+    :type color_jitter_strength: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -86,14 +118,15 @@ class StrongAugmentation(keras.layers.Layer):
         self.color_jitter_strength = color_jitter_strength
 
     def call(self, inputs: keras.KerasTensor, training: bool = None) -> keras.KerasTensor:
-        """Apply strong augmentations to input images.
+        """
+        Apply strong augmentations to input images.
 
-        Args:
-            inputs: Input images tensor with shape (batch_size, height, width, channels).
-            training: Boolean indicating whether in training mode.
-
-        Returns:
-            Augmented images tensor with same shape as input.
+        :param inputs: Input images tensor with shape ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Augmented images tensor with same shape as input.
+        :rtype: keras.KerasTensor
         """
         if not training:
             return inputs
@@ -107,13 +140,13 @@ class StrongAugmentation(keras.layers.Layer):
         return x
 
     def _apply_color_jitter(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply color jittering augmentation.
+        """
+        Apply color jittering augmentation.
 
-        Args:
-            x: Input images tensor.
-
-        Returns:
-            Color-jittered images tensor.
+        :param x: Input images tensor.
+        :type x: keras.KerasTensor
+        :return: Color-jittered images tensor.
+        :rtype: keras.KerasTensor
         """
         # Brightness adjustment
         brightness_factor = ops.random.uniform(
@@ -138,13 +171,13 @@ class StrongAugmentation(keras.layers.Layer):
         return x
 
     def _apply_cutmix(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply CutMix augmentation.
+        """
+        Apply CutMix augmentation.
 
-        Args:
-            x: Input images tensor.
-
-        Returns:
-            CutMix-augmented images tensor.
+        :param x: Input images tensor.
+        :type x: keras.KerasTensor
+        :return: CutMix-augmented images tensor.
+        :rtype: keras.KerasTensor
         """
         # Apply CutMix with probability
         should_apply = ops.random.uniform(shape=()) < self.cutmix_prob

@@ -50,46 +50,37 @@ from ..utils.logger import logger
 @keras.saving.register_keras_serializable()
 class StochasticGradient(keras.layers.Layer):
     """
-    Implements Stochastic Gradient dropping for deep networks.
+    Stochastic Gradient dropping regularization for deep networks.
 
-    This layer stochastically stops the gradient flow during backpropagation based on
-    the `drop_path_rate`. The forward pass is always an identity function.
+    This layer stochastically stops gradient flow during backpropagation with
+    probability ``drop_path_rate``. The forward pass is always an identity
+    function -- unlike Stochastic Depth, only the backward pass is affected.
+    During inference the layer has no effect.
 
-    Args:
-        drop_path_rate: Float between 0 and 1, the probability of stopping the
-            gradient. Must be in the range [0, 1). Defaults to 0.5.
-        **kwargs: Additional keyword arguments passed to the parent Layer class.
+    **Architecture Overview:**
 
-    Input shape:
-        Arbitrary tensor.
+    .. code-block:: text
 
-    Output shape:
-        Same shape as input.
+        ┌─────────────────────────────────┐
+        │  Input [any shape]              │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Forward: identity (always)     │
+        │  Backward (training):           │
+        │    p < keep_prob → pass grads   │
+        │    p ≥ keep_prob → stop_gradient│
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Output [same shape as input]   │
+        └─────────────────────────────────┘
 
-    Raises:
-        TypeError: If drop_path_rate is not a number.
-        ValueError: If drop_path_rate is not in the range [0, 1).
-
-    Example:
-        ```python
-        # Basic usage in a sequential model
-        inputs = keras.Input(shape=(784,))
-        x = keras.layers.Dense(128, activation='relu')(inputs)
-        x = StochasticGradient(drop_path_rate=0.2)(x) # Stochastically drop gradient
-        x = keras.layers.Dense(10, activation='softmax')(x)
-        model = keras.Model(inputs, x)
-
-        # In a residual connection
-        res_inputs = keras.Input(shape=(32, 32, 64))
-        res_x = keras.layers.Conv2D(64, 3, padding='same')(res_inputs)
-        # Gradient from this path may be dropped
-        res_x = StochasticGradient(drop_path_rate=0.3)(res_x)
-        res_output = keras.layers.Add()([res_inputs, res_x])
-        ```
-
-    Note:
-        This layer's effect is only present during training (`training=True`). During
-        inference, it has no impact.
+    :param drop_path_rate: Probability of stopping the gradient. Must be in
+        ``[0, 1)``. Defaults to 0.5.
+    :type drop_path_rate: float
+    :param kwargs: Additional keyword arguments for the parent Layer class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -100,14 +91,10 @@ class StochasticGradient(keras.layers.Layer):
         """
         Initialize the StochasticGradient layer.
 
-        Args:
-            drop_path_rate: Probability of dropping the gradient.
-                Must be in the range [0, 1).
-            **kwargs: Additional keyword arguments passed to the parent Layer class.
-
-        Raises:
-            TypeError: If drop_path_rate is not a number.
-            ValueError: If drop_path_rate is not in [0, 1).
+        :param drop_path_rate: Probability of dropping the gradient. Must be in ``[0, 1)``.
+        :type drop_path_rate: float
+        :param kwargs: Additional keyword arguments for the parent Layer class.
+        :type kwargs: Any
         """
         super().__init__(**kwargs)
 
@@ -134,15 +121,12 @@ class StochasticGradient(keras.layers.Layer):
         """
         Forward pass of the layer.
 
-        Stops the gradient based on `drop_path_rate` during training.
-
-        Args:
-            inputs: Input tensor.
-            training: Boolean indicating whether in training mode.
-
-        Returns:
-            The output tensor, which is the same as the input tensor. The gradient
-            may be stopped during training.
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Output tensor (same as input; gradient may be stopped during training).
+        :rtype: keras.KerasTensor
         """
         if training is False or self.drop_path_rate == 0.0:
             return inputs
@@ -167,11 +151,10 @@ class StochasticGradient(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Tuple representing output shape (same as input shape).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple (same as input shape).
+        :rtype: tuple
         """
         return tuple(input_shape)
 
@@ -179,8 +162,8 @@ class StochasticGradient(keras.layers.Layer):
         """
         Return the config dictionary for layer serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

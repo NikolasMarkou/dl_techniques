@@ -58,113 +58,80 @@ from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 @keras.saving.register_keras_serializable()
 class ConvNextV2Block(keras.layers.Layer):
-    """
-    Implementation of ConvNextV2 block with modern best practices.
+    """ConvNeXt V2 block with Global Response Normalization.
 
-    This layer implements the ConvNextV2 block architecture from "ConvNeXt V2:
-    Co-designing and Scaling ConvNets with Masked Autoencoders" (Woo et al., 2023).
-    The main improvement over V1 is the addition of Global Response Normalization (GRN)
-    which enhances inter-channel feature competition and improves representation learning.
+    Implements the block from "ConvNeXt V2: Co-designing and Scaling ConvNets
+    with Masked Autoencoders" (Woo et al., 2023). Extends V1 by inserting a
+    Global Response Normalization (GRN) layer after GELU activation, which
+    computes per-channel L2 norms across spatial dimensions and applies
+    learnable scaling to enhance inter-channel feature competition. The
+    computation is ``DepthwiseConv -> LayerNorm -> Conv1x1(4x) -> GELU ->
+    GRN -> Dropout -> Conv1x1(reduce) -> gamma * x``.
 
-    Key architectural features:
-    - Depthwise convolution for spatial feature extraction
-    - LayerNormalization following the proper normalization strategy
-    - Inverted bottleneck MLP with 4x expansion factor
-    - Global Response Normalization (GRN) - the key innovation in V2
-    - Optional learnable scaling (gamma) for feature calibration
-    - Configurable dropout strategies for regularization
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        x = DepthwiseConv(input)
-        x = LayerNorm(x)
-        x = Conv1x1_expand(x)  # 4x expansion
-        x = GELU(x)
-        x = GRN(x)  # Global Response Normalization - V2 innovation
-        x = Dropout(x)
-        x = Conv1x1_reduce(x)  # back to original channels
-        output = gamma * x
+    .. code-block:: text
 
-    Global Response Normalization (GRN):
-        The GRN layer computes:
-        1. L2 norm across spatial dimensions for each channel
-        2. Normalizes by the mean of the L2 norm
-        3. Applies learnable scaling (gamma) and bias (beta)
-        4. Enhances inter-channel feature competition
+        ┌───────────────────────────────────┐
+        │  Input (B, H, W, C)               │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  DepthwiseConv2D (KxK, same)      │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  LayerNormalization               │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Conv2D 1x1 (expand: F*4)         │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  GELU Activation                  │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Global Response Normalization    │  ← V2 innovation
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Dropout / SpatialDropout         │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Conv2D 1x1 (reduce: F)           │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  gamma * x  (learnable scale)     │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Output (B, H, W, F)              │
+        └───────────────────────────────────┘
 
-    Args:
-        kernel_size: Integer or tuple of integers, size of the depthwise convolution kernel.
-            For square kernels, can be a single integer. Must be positive.
-        filters: Integer, number of output filters/channels. Must be positive.
-        activation: String or callable, activation function to use in the MLP.
-            Supports standard Keras activation names. Defaults to 'gelu'.
-        kernel_regularizer: Optional regularizer for convolution kernels.
-            Applied to all convolutional layers in the block.
-        use_bias: Boolean, whether to include bias terms in convolutions.
-            Defaults to True.
-        dropout_rate: Optional float between 0 and 1, standard dropout rate
-            applied after GRN. If None or 0, no dropout is applied.
-        spatial_dropout_rate: Optional float between 0 and 1, spatial dropout rate
-            for structured regularization. If None or 0, no spatial dropout is applied.
-        use_gamma: Boolean, whether to use learnable scaling (gamma multiplier).
-            When True, applies channel-wise learnable scaling. Defaults to True.
-        use_softorthonormal_regularizer: Boolean, whether to apply soft orthonormal
-            regularization to convolutional kernels. Defaults to False.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, filters)`
-
-    Attributes:
-        conv_1: DepthwiseConv2D layer for spatial feature extraction.
-        norm: LayerNormalization layer for feature normalization.
-        conv_2: First pointwise Conv2D layer (expansion).
-        activation_layer: Activation layer (GELU by default).
-        grn: GlobalResponseNormalization layer - key V2 innovation.
-        dropout: Dropout layer for regularization.
-        spatial_dropout: SpatialDropout2D layer for structured regularization.
-        conv_3: Second pointwise Conv2D layer (reduction).
-        gamma: LearnableMultiplier for channel-wise scaling (if use_gamma=True).
-
-    Example:
-        ```python
-        # Basic usage
-        block = ConvNextV2Block(kernel_size=7, filters=64)
-
-        # Advanced configuration
-        block = ConvNextV2Block(
-            kernel_size=7,
-            filters=128,
-            activation='gelu',
-            kernel_regularizer=keras.regularizers.L2(0.01),
-            dropout_rate=0.1,
-            spatial_dropout_rate=0.05,
-            use_gamma=True,
-            use_softorthonormal_regularizer=False
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = ConvNextV2Block(kernel_size=7, filters=64)(inputs)
-        outputs = keras.layers.Dense(1000)(keras.layers.GlobalAveragePooling2D()(x))
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders,
-          Woo et al., 2023
-        - https://arxiv.org/abs/2301.00808
-
-    Raises:
-        ValueError: If kernel_size or filters is not positive.
-        ValueError: If dropout rates are not between 0 and 1.
-
-    Note:
-        The key difference from ConvNextV1 is the Global Response Normalization (GRN)
-        layer, which enhances feature competition and improves representation learning.
-        This implementation follows the exact specifications from the original paper.
+    :param kernel_size: Size of the depthwise convolution kernel. Must be positive.
+    :type kernel_size: Union[int, Tuple[int, int]]
+    :param filters: Number of output filters/channels. Must be positive.
+    :type filters: int
+    :param activation: Activation function name. Defaults to ``'gelu'``.
+    :type activation: Union[str, keras.layers.Activation]
+    :param kernel_regularizer: Optional regularizer for convolution kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_bias: Whether to include bias terms. Defaults to ``True``.
+    :type use_bias: bool
+    :param dropout_rate: Standard dropout rate. Defaults to 0.0.
+    :type dropout_rate: Optional[float]
+    :param spatial_dropout_rate: Spatial dropout rate. Defaults to 0.0.
+    :type spatial_dropout_rate: Optional[float]
+    :param use_gamma: Whether to use learnable gamma scaling. Defaults to ``True``.
+    :type use_gamma: bool
+    :param use_softorthonormal_regularizer: Whether to apply soft orthonormal
+        regularization. Defaults to ``False``.
+    :type use_softorthonormal_regularizer: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     # Important constants - following ConvNeXt V2 paper specifications
@@ -345,8 +312,7 @@ class ConvNextV2Block(keras.layers.Layer):
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         This ensures all weight variables exist before weight restoration.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+            :param input_shape: Shape tuple of the input tensor.
         """
         # Build sub-layers in computational order for proper shape propagation
 
@@ -399,12 +365,10 @@ class ConvNextV2Block(keras.layers.Layer):
         """
         Forward pass of the ConvNextV2 block.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether in training mode.
+            :param inputs: Input tensor of shape (batch_size, height, width, channels).
+            :param training: Boolean indicating whether in training mode.
 
-        Returns:
-            Output tensor of shape (batch_size, height, width, filters).
+            :return: Output tensor of shape (batch_size, height, width, filters).
         """
         # 1. Depthwise convolution
         x = self.conv_1(inputs, training=training)
@@ -437,15 +401,11 @@ class ConvNextV2Block(keras.layers.Layer):
         """
         Compute the output shape of the ConvNextV2 block.
 
-        Args:
-            input_shape: Shape tuple representing input shape
+            :param input_shape: Shape tuple representing input shape
                 (batch_size, height, width, channels).
 
-        Returns:
-            Output shape tuple (batch_size, height, width, filters).
+            :return: Output shape tuple (batch_size, height, width, filters).
 
-        Raises:
-            ValueError: If input shape doesn't have 4 dimensions.
         """
         if isinstance(input_shape, list):
             return [self.compute_output_shape(shape) for shape in input_shape]
@@ -466,8 +426,7 @@ class ConvNextV2Block(keras.layers.Layer):
 
         Returns ALL constructor parameters for proper serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
         """
         config = super().get_config()
         config.update({
@@ -488,11 +447,9 @@ class ConvNextV2Block(keras.layers.Layer):
         """
         Create layer from configuration dictionary.
 
-        Args:
-            config: Configuration dictionary.
+            :param config: Configuration dictionary.
 
-        Returns:
-            ConvNextV2Block instance.
+            :return: ConvNextV2Block instance.
         """
         # Make a copy to avoid modifying the original config
         config_copy = config.copy()

@@ -81,26 +81,16 @@ class ComplexLayer(keras.layers.Layer):
     and i is the imaginary unit. Operations are performed using split real/imaginary
     arithmetic to maintain numerical stability and computational efficiency.
 
-    Args:
-        epsilon: Float, small value added for numerical stability in division operations.
+        :param epsilon: Float, small value added for numerical stability in division operations.
             Prevents catastrophic cancellation and division by zero. Defaults to 1e-7.
-        kernel_regularizer: Optional regularizer instance for kernel weights.
+        :param kernel_regularizer: Optional regularizer instance for kernel weights.
             Applied to both real and imaginary parts of complex weights.
             Defaults to None (no regularization).
-        kernel_initializer: Optional initializer for kernel weights. When None,
+        :param kernel_initializer: Optional initializer for kernel weights. When None,
             uses GlorotUniform initialization. For complex layers, this affects
             the base scaling before applying complex-specific initialization.
             Defaults to None.
-        **kwargs: Additional keyword arguments passed to Layer base class.
-
-    Attributes:
-        epsilon: Numerical stability constant.
-        kernel_regularizer: Kernel weight regularizer.
-        kernel_initializer: Kernel weight initializer.
-
-    Note:
-        This is an abstract base class. Use specific implementations like
-        ComplexConv2D or ComplexDense for actual neural network construction.
+            **kwargs: Additional keyword arguments passed to Layer base class.
     """
 
     def __init__(
@@ -134,12 +124,10 @@ class ComplexLayer(keras.layers.Layer):
         them into complex numbers. The scaling follows Xavier/Glorot initialization
         principles adapted for the complex domain.
 
-        Args:
-            shape: Tuple of integers specifying the shape of weight tensor.
-            dtype: TensorFlow data type for complex weights. Defaults to tf.complex64.
+            :param shape: Tuple of integers specifying the shape of weight tensor.
+            :param dtype: TensorFlow data type for complex weights. Defaults to tf.complex64.
 
-        Returns:
-            Complex-valued weight tensor with proper initialization.
+            :return: Complex-valued weight tensor with proper initialization.
         """
         fan_in = int(np.prod(shape[:-1]))
         fan_out = int(shape[-1])
@@ -161,8 +149,7 @@ class ComplexLayer(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters needed for
+            :return: Dictionary containing all constructor parameters needed for
             reconstruction during model loading.
         """
         config = super().get_config()
@@ -190,8 +177,10 @@ class ComplexConv2D(ComplexLayer):
     radar, sonar, and certain computer vision_heads tasks where complex representations
     are natural.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Input(shape=[batch, height, width, channels_complex])
            ↓
     Split: real_part, imag_part
@@ -209,40 +198,16 @@ class ComplexConv2D(ComplexLayer):
     For complex input I = I_r + iI_i and complex kernel K = K_r + iK_i:
     Output = (I_r + iI_i) * (K_r + iK_i) = (I_r*K_r - I_i*K_i) + i(I_r*K_i + I_i*K_r)
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
+        :param filters: Integer, number of output filters. Must be positive.
             Each filter produces one complex-valued output channel.
-        kernel_size: Integer or tuple of 2 integers, specifying height and width
+        :param kernel_size: Integer or tuple of 2 integers, specifying height and width
             of the 2D convolution window. If integer, same value for both dimensions.
-        strides: Integer or tuple of 2 integers, specifying stride of convolution.
+        :param strides: Integer or tuple of 2 integers, specifying stride of convolution.
             If integer, same stride for both dimensions. Defaults to 1.
-        padding: String, either 'SAME' or 'VALID' (case-insensitive).
+        :param padding: String, either 'SAME' or 'VALID' (case-insensitive).
             'SAME' pads input to preserve spatial dimensions with stride=1.
             'VALID' performs convolution without padding. Defaults to 'SAME'.
-        **kwargs: Additional keyword arguments for ComplexLayer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        Input should be complex-valued (tf.complex64 or tf.complex128).
-
-    Output shape:
-        4D tensor with shape: `(batch_size, new_height, new_width, filters)`.
-        Output dimensions depend on padding and stride configuration.
-
-    Attributes:
-        filters: Number of output filters.
-        kernel_size: Size of convolution kernel.
-        strides: Stride configuration.
-        padding: Padding mode.
-        kernel: Complex-valued convolution kernel weights.
-        bias: Complex-valued bias terms.
-
-    Example:
-        ```python
-        # Basic complex convolution
-        conv = ComplexConv2D(filters=64, kernel_size=3)
-        inputs = keras.random.uniform((32, 28, 28, 1), dtype=tf.complex64)
-        outputs = conv(inputs)  # Shape: (32, 28, 28, 64)
+            **kwargs: Additional keyword arguments for ComplexLayer base class.
 
         # Strided convolution with regularization
         conv = ComplexConv2D(
@@ -254,10 +219,6 @@ class ComplexConv2D(ComplexLayer):
         )
         ```
 
-    Note:
-        This implementation uses split arithmetic to maintain numerical stability
-        and compatibility with automatic differentiation. Input tensors should
-        be complex-valued (tf.complex64 or tf.complex128).
     """
 
     def __init__(
@@ -291,8 +252,7 @@ class ComplexConv2D(ComplexLayer):
         """
         Create the layer's weights.
 
-        Args:
-            input_shape: Shape of the input tensor.
+            :param input_shape: Shape of the input tensor.
         """
         if len(input_shape) != 4:
             raise ValueError(f"ComplexConv2D requires 4D input, got {len(input_shape)}D")
@@ -330,12 +290,10 @@ class ComplexConv2D(ComplexLayer):
         """
         Apply complex convolution to input tensor.
 
-        Args:
-            inputs: Complex-valued input tensor.
-            training: Boolean indicating whether in training mode.
+            :param inputs: Complex-valued input tensor.
+            :param training: Boolean indicating whether in training mode.
 
-        Returns:
-            Complex-valued output tensor after convolution.
+            :return: Complex-valued output tensor after convolution.
         """
         # Split real and imaginary parts
         inputs_real = tf.math.real(inputs)
@@ -371,11 +329,9 @@ class ComplexConv2D(ComplexLayer):
         """
         Compute the output shape of the convolution.
 
-        Args:
-            input_shape: Input tensor shape.
+            :param input_shape: Input tensor shape.
 
-        Returns:
-            Output tensor shape.
+            :return: Output tensor shape.
         """
         batch_size = input_shape[0]
 
@@ -398,8 +354,7 @@ class ComplexConv2D(ComplexLayer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary containing all constructor parameters.
+            :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -427,8 +382,10 @@ class ComplexDense(ComplexLayer):
     applications, complex embeddings, or as building blocks in complex
     neural architectures.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Input(shape=[..., input_dim_complex])
            ↓
     Split: real_part, imag_part
@@ -446,30 +403,9 @@ class ComplexDense(ComplexLayer):
     For complex input I = I_r + iI_i and complex weights W = W_r + iW_i:
     Output = (I_r + iI_i) @ (W_r + iW_i) = (I_r@W_r - I_i@W_i) + i(I_r@W_i + I_i@W_r)
 
-    Args:
-        units: Integer, number of output units. Must be positive.
+        :param units: Integer, number of output units. Must be positive.
             Determines the dimensionality of the output space.
-        **kwargs: Additional keyword arguments for ComplexLayer base class.
-
-    Input shape:
-        N-D tensor with shape: `(..., input_dim)`.
-        Input should be complex-valued (tf.complex64 or tf.complex128).
-
-    Output shape:
-        N-D tensor with shape: `(..., units)`.
-        Same rank as input with last dimension changed to `units`.
-
-    Attributes:
-        units: Number of output units.
-        kernel: Complex-valued weight matrix.
-        bias: Complex-valued bias vector.
-
-    Example:
-        ```python
-        # Basic complex dense layer
-        dense = ComplexDense(units=128)
-        inputs = keras.random.uniform((32, 256), dtype=tf.complex64)
-        outputs = dense(inputs)  # Shape: (32, 128)
+            **kwargs: Additional keyword arguments for ComplexLayer base class.
 
         # With regularization and custom initialization
         dense = ComplexDense(
@@ -486,10 +422,6 @@ class ComplexDense(ComplexLayer):
         model = keras.Model(inputs, outputs)
         ```
 
-    Note:
-        This layer performs efficient complex matrix multiplication using
-        split arithmetic to maintain numerical stability. Input tensors
-        should be complex-valued for proper operation.
     """
 
     def __init__(
@@ -513,8 +445,7 @@ class ComplexDense(ComplexLayer):
         """
         Create the layer's weights.
 
-        Args:
-            input_shape: Shape of the input tensor.
+            :param input_shape: Shape of the input tensor.
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -547,12 +478,10 @@ class ComplexDense(ComplexLayer):
         """
         Apply complex dense transformation.
 
-        Args:
-            inputs: Complex-valued input tensor.
-            training: Boolean indicating whether in training mode.
+            :param inputs: Complex-valued input tensor.
+            :param training: Boolean indicating whether in training mode.
 
-        Returns:
-            Complex-valued output tensor after transformation.
+            :return: Complex-valued output tensor after transformation.
         """
         # Split computations for numerical stability
         real_output = keras.ops.matmul(
@@ -576,11 +505,9 @@ class ComplexDense(ComplexLayer):
         """
         Compute the output shape of the dense layer.
 
-        Args:
-            input_shape: Input tensor shape.
+            :param input_shape: Input tensor shape.
 
-        Returns:
-            Output tensor shape.
+            :return: Output tensor shape.
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
@@ -590,8 +517,7 @@ class ComplexDense(ComplexLayer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary containing all constructor parameters.
+            :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -619,8 +545,10 @@ class ComplexReLU(keras.layers.Layer):
     For complex input z = x + iy:
     output = ReLU(x) + i·ReLU(y) = max(0, x) + i·max(0, y)
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Input(shape=[..., complex_features])
            ↓
     Split: real_part = Re(z), imag_part = Im(z)
@@ -633,22 +561,7 @@ class ComplexReLU(keras.layers.Layer):
     Output(shape=[..., complex_features])
     ```
 
-    Args:
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        Arbitrary. Complex-valued tensor of any shape.
-
-    Output shape:
-        Same as input shape. Complex-valued tensor with ReLU applied component-wise.
-
-    Example:
-        ```python
-        # Basic complex ReLU activation
-        activation = ComplexReLU()
-        complex_input = tf.complex([[-1.0, 2.0]], [[3.0, -4.0]])
-        output = activation(complex_input)
-        # Output: complex([[0.0, 2.0]], [[3.0, 0.0]])
+            **kwargs: Additional keyword arguments for Layer base class.
 
         # In a complex neural network
         inputs = keras.Input(shape=(128,), dtype=tf.complex64)
@@ -658,10 +571,6 @@ class ComplexReLU(keras.layers.Layer):
         model = keras.Model(inputs, outputs)
         ```
 
-    Note:
-        This activation maintains complex structure while introducing sparsity
-        through rectification. Alternative complex activations like complex
-        sigmoid or tanh could be implemented following similar patterns.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -675,12 +584,10 @@ class ComplexReLU(keras.layers.Layer):
         """
         Apply complex ReLU activation.
 
-        Args:
-            inputs: Complex-valued input tensor.
-            training: Boolean indicating whether in training mode.
+            :param inputs: Complex-valued input tensor.
+            :param training: Boolean indicating whether in training mode.
 
-        Returns:
-            Complex-valued output tensor with ReLU applied to both components.
+            :return: Complex-valued output tensor with ReLU applied to both components.
         """
         return tf.complex(
             keras.ops.relu(tf.math.real(inputs)),
@@ -691,11 +598,9 @@ class ComplexReLU(keras.layers.Layer):
         """
         Compute the output shape (same as input for activation).
 
-        Args:
-            input_shape: Input tensor shape.
+            :param input_shape: Input tensor shape.
 
-        Returns:
-            Output tensor shape (identical to input).
+            :return: Output tensor shape (identical to input).
         """
         return input_shape
 
@@ -703,8 +608,7 @@ class ComplexReLU(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary.
+            :return: Configuration dictionary.
         """
         return super().get_config()
 
@@ -729,8 +633,10 @@ class ComplexAveragePooling2D(keras.layers.Layer):
     imaginary parts:
     output = AvgPool(x) + i·AvgPool(y)
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Input(shape=[batch, height, width, channels_complex])
            ↓
     Split: real_part = Re(z), imag_part = Im(z)
@@ -744,31 +650,15 @@ class ComplexAveragePooling2D(keras.layers.Layer):
     Output(shape=[batch, new_height, new_width, channels_complex])
     ```
 
-    Args:
-        pool_size: Integer or tuple of 2 integers, specifying the dimensions
+        :param pool_size: Integer or tuple of 2 integers, specifying the dimensions
             of the pooling window. If an integer, the same value is used for
             both height and width. Defaults to (2, 2).
-        strides: Integer or tuple of 2 integers, specifying the stride of the
+        :param strides: Integer or tuple of 2 integers, specifying the stride of the
             pooling operation. If None, it defaults to `pool_size`. Defaults to None.
-        padding: String, either 'SAME' or 'VALID' (case-insensitive).
+        :param padding: String, either 'SAME' or 'VALID' (case-insensitive).
             'SAME' pads the input to preserve spatial dimensions as much as
             possible. 'VALID' performs pooling without padding. Defaults to 'VALID'.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        Input should be complex-valued (tf.complex64 or tf.complex128).
-
-    Output shape:
-        4D tensor with shape: `(batch_size, new_height, new_width, channels)`.
-        Output dimensions depend on `pool_size`, `strides`, and `padding`.
-
-    Example:
-        ```python
-        # Downsample complex feature maps
-        pool = ComplexAveragePooling2D(pool_size=(2, 2), strides=(2, 2))
-        inputs = keras.random.uniform((32, 28, 28, 64), dtype=tf.complex64)
-        outputs = pool(inputs) # Shape: (32, 14, 14, 64)
+            **kwargs: Additional keyword arguments for Layer base class.
 
         # As part of a complex CNN
         inputs = keras.Input(shape=(128, 128, 3), dtype=tf.complex64)
@@ -782,9 +672,6 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         model = keras.Model(inputs, x)
         ```
 
-    Note:
-        This layer has no trainable weights. It performs a fixed downsampling
-        operation on the real and imaginary parts of the input.
     """
 
     def __init__(
@@ -813,12 +700,10 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         """
         Apply complex average pooling.
 
-        Args:
-            inputs: Complex-valued input tensor.
-            training: Boolean indicating whether in training mode (unused).
+            :param inputs: Complex-valued input tensor.
+            :param training: Boolean indicating whether in training mode (unused).
 
-        Returns:
-            Complex-valued output tensor after pooling.
+            :return: Complex-valued output tensor after pooling.
         """
         # Split into real and imaginary components
         inputs_real = tf.math.real(inputs)
@@ -849,11 +734,9 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         """
         Compute the output shape of the pooling layer.
 
-        Args:
-            input_shape: Input tensor shape.
+            :param input_shape: Input tensor shape.
 
-        Returns:
-            Output tensor shape.
+            :return: Output tensor shape.
         """
         if len(input_shape) != 4:
             raise ValueError(f"ComplexAveragePooling2D requires 4D input, got {len(input_shape)}D")
@@ -877,8 +760,7 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary containing all constructor parameters.
+            :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -909,8 +791,10 @@ class ComplexDropout(keras.layers.Layer):
     2. During training, the output is `(x + iy) * m / (1 - rate)`.
     3. During inference, the output is unchanged: `x + iy`.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Input(shape=[..., complex_features])
            ↓
     (During Training Only)
@@ -922,22 +806,8 @@ class ComplexDropout(keras.layers.Layer):
     Output(shape=[..., complex_features])
     ```
 
-    Args:
-        rate: Float between 0 and 1. Fraction of the input units to drop.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        Arbitrary. Complex-valued tensor of any shape.
-
-    Output shape:
-        Same as input shape.
-
-    Example:
-        ```python
-        # Apply dropout to complex activations
-        dropout = ComplexDropout(rate=0.5)
-        inputs = keras.random.uniform((32, 128), dtype=tf.complex64)
-        outputs = dropout(inputs, training=True) # `training` flag is crucial
+        :param rate: Float between 0 and 1. Fraction of the input units to drop.
+            **kwargs: Additional keyword arguments for Layer base class.
 
         # In a complex model
         inputs = keras.Input(shape=(256,), dtype=tf.complex64)
@@ -948,11 +818,6 @@ class ComplexDropout(keras.layers.Layer):
         model = keras.Model(inputs, outputs)
         ```
 
-    Note:
-        This layer is only active during training (`training=True`). During
-        inference, it returns the input tensor unmodified. The multiplication
-        of a complex tensor by the real-valued mask correctly scales both
-        the real and imaginary parts.
     """
 
     def __init__(self, rate: float, **kwargs: Any) -> None:
@@ -975,12 +840,10 @@ class ComplexDropout(keras.layers.Layer):
         """
         Apply complex dropout.
 
-        Args:
-            inputs: Complex-valued input tensor.
-            training: Boolean indicating whether in training mode.
+            :param inputs: Complex-valued input tensor.
+            :param training: Boolean indicating whether in training mode.
 
-        Returns:
-            Complex-valued output tensor after dropout.
+            :return: Complex-valued output tensor after dropout.
         """
         # Generate a real-valued mask by applying dropout to a tensor of ones.
         # The internal Dropout layer handles the `training` flag and scaling.
@@ -997,11 +860,9 @@ class ComplexDropout(keras.layers.Layer):
         """
         Compute the output shape (same as input for dropout).
 
-        Args:
-            input_shape: Input tensor shape.
+            :param input_shape: Input tensor shape.
 
-        Returns:
-            Output tensor shape (identical to input).
+            :return: Output tensor shape (identical to input).
         """
         return input_shape
 
@@ -1009,8 +870,7 @@ class ComplexDropout(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary.
+            :return: Configuration dictionary.
         """
         config = super().get_config()
         config.update({
@@ -1038,8 +898,10 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
     output = GlobalAvgPool(x) + i·GlobalAvgPool(y)
     where GlobalAvgPool computes the mean over the spatial (height, width) axes.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Input(shape=[batch, height, width, channels_complex])
            ↓
     Split: real_part = Re(z), imag_part = Im(z)
@@ -1054,36 +916,11 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
     Output(shape=[batch, 1, 1, channels_complex])
     ```
 
-    Args:
-        keepdims: Boolean, whether to keep the spatial dimensions or not.
+        :param keepdims: Boolean, whether to keep the spatial dimensions or not.
             If `False` (default), the output has shape `(batch, channels)`.
             If `True`, the output has shape `(batch, 1, 1, channels)`.
-        **kwargs: Additional keyword arguments for Layer base class.
+            **kwargs: Additional keyword arguments for Layer base class.
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        Input should be complex-valued (tf.complex64 or tf.complex128).
-
-    Output shape:
-        - If `keepdims=False`: 2D tensor with shape `(batch_size, channels)`.
-        - If `keepdims=True`: 4D tensor with shape `(batch_size, 1, 1, channels)`.
-
-    Example:
-        ```python
-        # Transition from conv to dense in a complex CNN
-        inputs = keras.Input(shape=(32, 32, 3), dtype=tf.complex64)
-        x = ComplexConv2D(64, 3)(inputs)
-        x = ComplexReLU()(x)
-        x = ComplexAveragePooling2D()(x)
-        # Flatten spatial dimensions to a vector of complex features
-        x = ComplexGlobalAveragePooling2D()(x) # Shape: (batch, 64)
-        outputs = ComplexDense(10)(x) # Classifier head
-        model = keras.Model(inputs, outputs)
-        ```
-
-    Note:
-        This layer has no trainable weights and is a fundamental building block
-        for complex-valued classification models.
     """
     def __init__(self, keepdims: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -1097,12 +934,10 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         """
         Apply complex global average pooling.
 
-        Args:
-            inputs: Complex-valued input tensor.
-            training: Boolean indicating whether in training mode (unused).
+            :param inputs: Complex-valued input tensor.
+            :param training: Boolean indicating whether in training mode (unused).
 
-        Returns:
-            Complex-valued output tensor after pooling.
+            :return: Complex-valued output tensor after pooling.
         """
         # Split into real and imaginary components
         inputs_real = tf.math.real(inputs)
@@ -1120,11 +955,9 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         """
         Compute the output shape of the global pooling layer.
 
-        Args:
-            input_shape: Input tensor shape.
+            :param input_shape: Input tensor shape.
 
-        Returns:
-            Output tensor shape.
+            :return: Output tensor shape.
         """
         if len(input_shape) != 4:
             raise ValueError(f"ComplexGlobalAveragePooling2D requires 4D input, got {len(input_shape)}D")
@@ -1138,8 +971,7 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary containing all constructor parameters.
+            :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({

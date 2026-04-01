@@ -48,94 +48,66 @@ from keras import ops, layers, initializers, regularizers
 
 @keras.saving.register_keras_serializable()
 class PatchMerging(keras.layers.Layer):
-    """
-    Patch merging layer for hierarchical downsampling in Swin Transformer architectures.
+    """Patch merging layer for hierarchical downsampling in Swin Transformers.
 
-    This layer performs spatial downsampling by merging 2x2 patches while doubling the
-    feature dimension. It implements the standard patch merging operation from the
-    Swin Transformer paper, combining adjacent patches and projecting them through
-    a linear transformation for efficient multi-scale feature learning.
+    This layer performs spatial downsampling by extracting non-overlapping
+    2x2 patches, concatenating them along the channel axis to produce
+    ``4*C`` channels, normalising the result, and projecting down to
+    ``2*C`` channels via a learned linear transformation. The operation
+    halves each spatial dimension while doubling the feature depth,
+    analogous to strided pooling in CNNs but fully learnable. For odd
+    spatial dimensions the layer automatically pads before extraction.
 
-    **Intent**: Provide efficient spatial downsampling between Swin Transformer stages
-    while maintaining feature information through dimension expansion. This enables
-    hierarchical feature learning with progressively larger receptive fields.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C])
-           ↓
-    Extract 2x2 Patches: [x0, x1, x2, x3] from adjacent locations
-           ↓
-    Concatenate: (batch, H/2, W/2, 4*C)
-           ↓
-    LayerNormalization(4*C features)
-           ↓
-    Linear Projection: Dense(2*C)
-           ↓
-    Output(shape=[batch, H/2, W/2, 2*C])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operation**:
-    1. **Patch Extraction**: Extract 2x2 neighborhoods from input feature map
-    2. **Concatenation**: Combine patches along channel dimension (4C channels)
-    3. **Normalization**: Apply layer normalization for training stability
-    4. **Projection**: Linear transformation to reduce from 4C to 2C channels
+        ┌───────────────────────────────────┐
+        │  Input [batch, H, W, C]           │
+        └────────────────┬──────────────────┘
+                         │
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Extract 2x2 patches:             │
+        │  x0 (top-left), x1 (bottom-left) │
+        │  x2 (top-right), x3 (bottom-right)│
+        └────────────────┬──────────────────┘
+                         │
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Concatenate along channels       │
+        │  [batch, H/2, W/2, 4*C]          │
+        └────────────────┬──────────────────┘
+                         │
+                         ▼
+        ┌───────────────────────────────────┐
+        │  LayerNormalization               │
+        └────────────────┬──────────────────┘
+                         │
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Dense(2*C) linear projection     │
+        └────────────────┬──────────────────┘
+                         │
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Output [batch, H/2, W/2, 2*C]   │
+        └───────────────────────────────────┘
 
-    This creates a 2x spatial downsampling with 2x feature dimension increase.
-
-    Args:
-        dim: Integer, input dimension (number of channels). Must be positive.
-            This represents the channel dimension of the input feature map.
-        use_bias: Boolean, whether to use bias in the linear projection.
-            When False, helps reduce parameters. Defaults to False.
-        kernel_initializer: String or Initializer, initializer for projection kernel.
-            Controls weight initialization strategy. Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer, bias initializer if use_bias=True.
-            Only used when use_bias=True. Defaults to "zeros".
-        kernel_regularizer: Optional Regularizer, regularization for projection weights.
-            Helps prevent overfitting in the linear projection. Defaults to None.
-        bias_regularizer: Optional Regularizer, regularization for bias if use_bias=True.
-            Only applied when use_bias=True. Defaults to None.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        4D tensor: `(batch_size, height, width, dim)`
-        Height and width should ideally be even for optimal patch merging,
-        but odd dimensions are handled through padding.
-
-    Output shape:
-        4D tensor: `(batch_size, height//2, width//2, dim*2)`
-        Spatial dimensions are halved, feature dimension is doubled.
-
-    Attributes:
-        norm: LayerNormalization layer for feature normalization after concatenation.
-        reduction: Dense layer for projecting from 4*dim to 2*dim channels.
-
-    Example:
-        ```python
-        # Standard patch merging for 96-channel input
-        merge = PatchMerging(dim=96)
-        inputs = keras.Input(shape=(56, 56, 96))
-        outputs = merge(inputs)  # Shape: (batch, 28, 28, 192)
-
-        # Patch merging without bias for parameter efficiency
-        merge = PatchMerging(dim=192, use_bias=False)
-
-        # With regularization for large models
-        merge = PatchMerging(
-            dim=384,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-        ```
-
-    Raises:
-        ValueError: If dim is not positive.
-
-    Note:
-        For odd spatial dimensions, the layer automatically applies padding to
-        ensure proper 2x2 patch extraction. This maintains compatibility with
-        various input sizes while preserving the hierarchical structure.
-    """
+    :param dim: Number of input channels. Must be positive.
+    :type dim: int
+    :param use_bias: Whether to include bias in the linear projection.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the projection kernel.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for the projection bias.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for projection weights.
+    :type kernel_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer for the projection bias.
+    :type bias_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -182,16 +154,14 @@ class PatchMerging(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of patch merging operation.
+        """Forward pass of the patch merging operation.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, dim).
-            training: Boolean indicating training mode for normalization and dropout.
-
-        Returns:
-            Output tensor of shape (batch_size, height//2, width//2, dim*2).
-        """
+        :param inputs: Input tensor of shape ``(batch, H, W, dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Merged tensor of shape ``(batch, H//2, W//2, 2*dim)``.
+        :rtype: keras.KerasTensor"""
         B, H, W, C = ops.shape(inputs)[0], ops.shape(inputs)[1], ops.shape(inputs)[2], ops.shape(inputs)[3]
 
         # Handle odd dimensions by padding
@@ -220,7 +190,12 @@ class PatchMerging(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape for shape inference."""
+        """Compute output shape for shape inference.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         batch_size, height, width, channels = input_shape
         output_height = None if height is None else (height + 1) // 2
         output_width = None if width is None else (width + 1) // 2
@@ -228,7 +203,10 @@ class PatchMerging(keras.layers.Layer):
         return (batch_size, output_height, output_width, output_channels)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             "dim": self.dim,

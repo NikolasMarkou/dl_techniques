@@ -1,24 +1,11 @@
 """
-Downsampling Module for Neural Networks.
+Downsampling module for neural networks.
 
-This module provides various downsampling strategies for convolutional neural networks
-implemented in Keras/TensorFlow. It supports multiple downsampling methods including
-convolution-based, pooling-based, and hybrid approaches.
-
-Key Features:
-    - Multiple downsampling strategies (Conv2D, MaxPool, strided operations)
-    - Support for batch normalization and layer normalization
-    - Orthonormal initialization options
-    - Configurable convolution parameters
-
-Note:
-    All convolution operations use 'same' padding by default to maintain
-    spatial dimensions consistency except for explicit strided operations.
-
-Example:
-    >>> input_layer = keras.layers.Input(shape=(64, 64, 3))
-    >>> conv_params = {"filters": 64, "activation": "relu"}
-    >>> downsampled = downsample(input_layer, "conv2d_2x2", conv_params)
+This module provides various downsampling strategies for convolutional neural
+networks implemented in Keras/TensorFlow. It supports multiple downsampling
+methods including convolution-based, pooling-based, and hybrid approaches.
+All convolution operations use 'same' padding by default to maintain spatial
+dimensions consistency except for explicit strided operations.
 """
 
 import copy
@@ -58,36 +45,43 @@ def downsample(
         ln_params: Optional[Dict[str, Union[float, bool]]] = None
 ) -> Layer:
     """
-    Applies downsampling operation to the input layer based on specified strategy.
+    Apply downsampling operation to the input layer based on specified strategy.
 
-    This function supports various downsampling methods including convolution-based
-    downsampling, max pooling, and strided operations. It can also apply batch
-    normalization and layer normalization after downsampling.
+    Supports various downsampling methods including convolution-based
+    downsampling (2x2, 3x3), max pooling, strided operations, and hybrid
+    approaches with orthonormal initialization.
 
-    Args:
-        input_layer: Input Keras layer to be downsampled
-        downsample_type: Type of downsampling operation to apply
-        conv_params: Dictionary containing convolution parameters such as:
-            - filters: Number of output filters
-            - activation: Activation function to use
-            - kernel_initializer: Weight initialization method
-            - kernel_regularizer: Weight regularization method
-        bn_params: Batch normalization parameters (optional)
-        ln_params: Layer normalization parameters (optional)
+    **Architecture Overview:**
 
-    Returns:
-        Downsampled Keras layer
+    .. code-block:: text
 
-    Raises:
-        ValueError: If downsample_type is None, empty, or unsupported
+        ┌───────────────────────────────────────────┐
+        │  Input [batch, H, W, C]                   │
+        └──────────────────┬────────────────────────┘
+                           ▼
+        ┌──────────┬───────┴────────┬───────────────┐
+        │ conv2d   │ maxpool        │ strides       │
+        │ (2x2/3x3)│ ──▶ opt 1x1  │ ──▶ opt 1x1  │
+        └────┬─────┴───────┬───────┴───────┬───────┘
+             ▼             ▼               ▼
+        ┌───────────────────────────────────────────┐
+        │  Output [batch, H/2, W/2, C']             │
+        └───────────────────────────────────────────┘
 
-    Example:
-        >>> conv_params = {
-        ...     "filters": 64,
-        ...     "activation": "relu",
-        ...     "kernel_initializer": "he_normal"
-        ... }
-        >>> x = downsample(input_layer, "conv2d_2x2", conv_params)
+    :param input_layer: Input Keras layer to be downsampled.
+    :type input_layer: Layer
+    :param downsample_type: Type of downsampling operation to apply.
+    :type downsample_type: DownsampleType
+    :param conv_params: Dictionary containing convolution parameters such as
+        filters, activation, kernel_initializer, kernel_regularizer.
+    :type conv_params: Optional[Dict[str, Union[int, str, float]]]
+    :param bn_params: Batch normalization parameters.
+    :type bn_params: Optional[Dict[str, Union[float, bool]]]
+    :param ln_params: Layer normalization parameters.
+    :type ln_params: Optional[Dict[str, Union[float, bool]]]
+    :return: Downsampled Keras layer.
+    :rtype: Layer
+    :raises ValueError: If downsample_type is None, empty, or unsupported.
     """
     if not downsample_type:
         raise ValueError("downsample_type cannot be None or empty")

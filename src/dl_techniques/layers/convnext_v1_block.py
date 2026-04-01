@@ -52,101 +52,74 @@ from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersph
 
 @keras.saving.register_keras_serializable()
 class ConvNextV1Block(keras.layers.Layer):
-    """
-    Implementation of ConvNext block with modern best practices.
+    """ConvNeXt V1 block with depthwise convolution and inverted bottleneck MLP.
 
-    This layer implements the ConvNext block architecture from "A ConvNet for the 2020s"
-    (Liu et al., 2022). The block uses depthwise convolutions with large kernels followed
-    by an inverted bottleneck design with LayerNormalization.
+    Implements the block from "A ConvNet for the 2020s" (Liu et al., 2022).
+    The computation is ``x = DepthwiseConv -> LayerNorm -> Conv1x1(4x expand)
+    -> GELU -> Dropout -> Conv1x1(reduce) -> gamma * x``, using large-kernel
+    depthwise convolutions and an inverted bottleneck design with a 4x
+    expansion factor in the pointwise MLP.
 
-    Key architectural features:
-    - Depthwise convolution for spatial feature extraction
-    - LayerNormalization following the normalization strategy
-    - Inverted bottleneck MLP with 4x expansion factor
-    - Optional learnable scaling (gamma) for feature calibration
-    - Configurable dropout strategies for regularization
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        x = DepthwiseConv(input)
-        x = LayerNorm(x)
-        x = Conv1x1_expand(x)  # 4x expansion
-        x = GELU(x)
-        x = Dropout(x)
-        x = Conv1x1_reduce(x)  # back to original channels
-        output = gamma * x
+    .. code-block:: text
 
-    Args:
-        kernel_size: Integer or tuple of integers, size of the depthwise convolution kernel.
-            For square kernels, can be a single integer. Must be positive.
-        filters: Integer, number of output filters/channels. Must be positive.
-        activation: String or callable, activation function to use in the MLP.
-            Supports standard Keras activation names. Defaults to 'gelu'.
-        kernel_regularizer: Optional regularizer for convolution kernels.
-            Applied to all convolutional layers in the block.
-        use_bias: Boolean, whether to include bias terms in convolutions.
-            Defaults to True.
-        dropout_rate: Optional float between 0 and 1, standard dropout rate
-            applied after activation. If None or 0, no dropout is applied.
-        spatial_dropout_rate: Optional float between 0 and 1, spatial dropout rate
-            for structured regularization. If None or 0, no spatial dropout is applied.
-        use_gamma: Boolean, whether to use learnable scaling (gamma multiplier).
-            When True, applies channel-wise learnable scaling. Defaults to True.
-        use_softorthonormal_regularizer: Boolean, whether to apply soft orthonormal
-            regularization to convolutional kernels. Defaults to False.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌───────────────────────────────────┐
+        │  Input (B, H, W, C)               │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  DepthwiseConv2D (KxK, same)      │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  LayerNormalization               │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Conv2D 1x1 (expand: F*4)         │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  GELU Activation                  │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Dropout / SpatialDropout         │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Conv2D 1x1 (reduce: F)           │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  gamma * x  (learnable scale)     │
+        └────────────────┬──────────────────┘
+                         ▼
+        ┌───────────────────────────────────┐
+        │  Output (B, H, W, F)              │
+        └───────────────────────────────────┘
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, filters)`
-
-    Attributes:
-        conv_1: DepthwiseConv2D layer for spatial feature extraction.
-        norm: LayerNormalization layer for feature normalization.
-        conv_2: First pointwise Conv2D layer (expansion).
-        activation_layer: Activation layer (GELU by default).
-        dropout: Dropout layer for regularization.
-        spatial_dropout: SpatialDropout2D layer for structured regularization.
-        conv_3: Second pointwise Conv2D layer (reduction).
-        gamma: LearnableMultiplier for channel-wise scaling (if use_gamma=True).
-
-    Example:
-        ```python
-        # Basic usage
-        block = ConvNextV1Block(kernel_size=7, filters=64)
-
-        # Advanced configuration
-        block = ConvNextV1Block(
-            kernel_size=7,
-            filters=128,
-            activation='gelu',
-            kernel_regularizer=keras.regularizers.L2(0.01),
-            dropout_rate=0.1,
-            spatial_dropout_rate=0.05,
-            use_gamma=True,
-            use_softorthonormal_regularizer=False
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = ConvNextV1Block(kernel_size=7, filters=64)(inputs)
-        outputs = keras.layers.Dense(1000)(keras.layers.GlobalAveragePooling2D()(x))
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - A ConvNet for the 2020s, Liu et al., 2022
-        - https://arxiv.org/abs/2201.03545
-
-    Raises:
-        ValueError: If kernel_size or filters is not positive.
-        ValueError: If dropout rates are not between 0 and 1.
-
-    Note:
-        This implementation follows the exact specifications from the original paper,
-        including the 4x expansion factor, TruncatedNormal initialization, and
-        LayerNormalization placement.
+    :param kernel_size: Size of the depthwise convolution kernel. Must be positive.
+    :type kernel_size: Union[int, Tuple[int, int]]
+    :param filters: Number of output filters/channels. Must be positive.
+    :type filters: int
+    :param activation: Activation function name. Defaults to ``'gelu'``.
+    :type activation: Union[str, keras.layers.Activation]
+    :param kernel_regularizer: Optional regularizer for convolution kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_bias: Whether to include bias terms. Defaults to ``True``.
+    :type use_bias: bool
+    :param dropout_rate: Standard dropout rate. Defaults to 0.0.
+    :type dropout_rate: Optional[float]
+    :param spatial_dropout_rate: Spatial dropout rate. Defaults to 0.0.
+    :type spatial_dropout_rate: Optional[float]
+    :param use_gamma: Whether to use learnable gamma scaling. Defaults to ``True``.
+    :type use_gamma: bool
+    :param use_softorthonormal_regularizer: Whether to apply soft orthonormal
+        regularization. Defaults to ``False``.
+    :type use_softorthonormal_regularizer: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     # Important constants - following ConvNeXt paper specifications
@@ -322,8 +295,7 @@ class ConvNextV1Block(keras.layers.Layer):
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         This ensures all weight variables exist before weight restoration.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+            :param input_shape: Shape tuple of the input tensor.
         """
         # Build sub-layers in computational order for proper shape propagation
 
@@ -373,12 +345,10 @@ class ConvNextV1Block(keras.layers.Layer):
         """
         Forward pass of the ConvNext block.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether in training mode.
+            :param inputs: Input tensor of shape (batch_size, height, width, channels).
+            :param training: Boolean indicating whether in training mode.
 
-        Returns:
-            Output tensor of shape (batch_size, height, width, filters).
+            :return: Output tensor of shape (batch_size, height, width, filters).
         """
         # 1. Depthwise convolution
         x = self.conv_1(inputs, training=training)
@@ -408,15 +378,11 @@ class ConvNextV1Block(keras.layers.Layer):
         """
         Compute the output shape of the ConvNext block.
 
-        Args:
-            input_shape: Shape tuple representing input shape
+            :param input_shape: Shape tuple representing input shape
                 (batch_size, height, width, channels).
 
-        Returns:
-            Output shape tuple (batch_size, height, width, filters).
+            :return: Output shape tuple (batch_size, height, width, filters).
 
-        Raises:
-            ValueError: If input shape doesn't have 4 dimensions.
         """
         if isinstance(input_shape, list):
             return [self.compute_output_shape(shape) for shape in input_shape]
@@ -437,8 +403,7 @@ class ConvNextV1Block(keras.layers.Layer):
 
         Returns ALL constructor parameters for proper serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
         """
         config = super().get_config()
         config.update({
@@ -459,11 +424,9 @@ class ConvNextV1Block(keras.layers.Layer):
         """
         Create layer from configuration dictionary.
 
-        Args:
-            config: Configuration dictionary.
+            :param config: Configuration dictionary.
 
-        Returns:
-            ConvNextV1Block instance.
+            :return: ConvNextV1Block instance.
         """
         # Make a copy to avoid modifying the original config
         config_copy = config.copy()

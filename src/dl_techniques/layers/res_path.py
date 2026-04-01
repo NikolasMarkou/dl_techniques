@@ -84,50 +84,55 @@ from .squeeze_excitation import SqueezeExcitation
 
 @keras.saving.register_keras_serializable()
 class ResPath(keras.layers.Layer):
-    """Residual Path layer for improving skip connections in U-Net architectures.
+    """Residual path for bridging the semantic gap in U-Net skip connections.
 
-    This layer applies a series of residual blocks to features from the encoder
-    before they are passed to the decoder via skip connections. This process
-    helps bridge the "semantic gap" by refining the encoder features.
+    This layer refines encoder features before they reach the decoder by
+    passing them through ``num_blocks`` sequential residual blocks. Each
+    block applies a ``3x3`` convolution, batch normalisation,
+    Squeeze-and-Excitation channel recalibration, and a LeakyReLU
+    activation with an identity shortcut:
+    ``y = F(x) + x`` where ``F`` is the conv-BN-SE-act pipeline.
+    Stacking these blocks progressively enriches the semantic content of
+    low-level encoder features while preserving spatial resolution,
+    effectively narrowing the representation gap before concatenation
+    with decoder features.
 
-    Each residual block consists of a 3x3 convolution, batch normalization,
-    a Squeeze-and-Excitation block, an activation, and a residual connection.
+    **Architecture Overview:**
 
-    Args:
-        channels (int): The number of channels for the input and output features.
-            This value is kept constant throughout the ResPath. Must be positive.
-        num_blocks (int): The number of residual blocks to apply. Must be positive.
-        kernel_initializer (Union[str, keras.initializers.Initializer], optional):
-            Initializer for the convolution kernel weights. Defaults to 'glorot_uniform'.
-        kernel_regularizer (Optional[keras.regularizers.Regularizer], optional):
-            Regularizer function applied to the kernel weights. Defaults to None.
-        **kwargs: Additional arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        A 4D tensor with shape `(batch_size, height, width, channels)`.
+        ┌──────────────────────────────────┐
+        │  Input [B, H, W, C]             │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼  (repeat num_blocks times)
+        ┌──────────────────────────────────┐
+        │  Conv2D 3x3 (same, no bias)     │
+        │  BatchNorm → SE → LeakyReLU     │
+        │  + residual shortcut            │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Final SE → LeakyReLU → BN      │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [B, H, W, C]            │
+        └──────────────────────────────────┘
 
-    Output shape:
-        A 4D tensor with the same shape as the input: `(batch_size, height, width, channels)`.
-
-    Attributes:
-        conv_blocks (List[keras.layers.Conv2D]): List of convolution layers for each residual block.
-        bn_blocks (List[keras.layers.BatchNormalization]): List of batch normalization layers.
-        se_blocks (List[SqueezeExcitation]): List of Squeeze-and-Excitation layers.
-        final_se (SqueezeExcitation): The final Squeeze-and-Excitation block.
-        final_bn (keras.layers.BatchNormalization): The final batch normalization layer.
-
-    Example:
-        ```python
-        # For a deep-level skip connection with 32 channels and 4 blocks
-        input_features = keras.Input(shape=(64, 64, 32))
-        respath_layer = ResPath(channels=32, num_blocks=4)
-        refined_features = respath_layer(input_features)
-        # refined_features.shape will be (None, 64, 64, 32)
-        ```
-
-    Raises:
-        ValueError: If `channels` or `num_blocks` are not positive integers.
-    """
+    :param channels: Number of channels (kept constant throughout).
+        Must be positive.
+    :type channels: int
+    :param num_blocks: Number of residual blocks. Must be positive.
+    :type num_blocks: int
+    :param kernel_initializer: Initializer for convolution kernels.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -186,11 +191,10 @@ class ResPath(keras.layers.Layer):
         self.final_bn = keras.layers.BatchNormalization(name='final_bn')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the residual blocks and all sub-layers.
+        """Build all residual sub-layers.
 
-        This method explicitly builds each sub-layer created in `__init__`,
-        which is critical for robust serialization and weight restoration.
-        """
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         # Since all internal layers maintain the same shape, we can use
         # the initial input_shape to build all of them.
         for conv, bn, se in zip(self.conv_blocks, self.bn_blocks, self.se_blocks):
@@ -209,7 +213,14 @@ class ResPath(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the series of residual blocks."""
+        """Forward pass through the series of residual blocks.
+
+        :param inputs: Input tensor ``(batch, H, W, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Refined tensor with same shape as input.
+        :rtype: keras.KerasTensor"""
         x = inputs
 
         # Apply residual blocks sequentially
@@ -229,11 +240,19 @@ class ResPath(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape (same as input).
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         return input_shape  # Shape remains unchanged throughout the path
 
     def get_config(self) -> dict:
-        """Returns the layer configuration for serialization."""
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: dict"""
         config = super().get_config()
         config.update({
             'channels': self.channels,

@@ -60,93 +60,65 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class AntennalLobeLayer(keras.layers.Layer):
-    """
-    Antennal Lobe layer implementing competitive inhibition for contrast enhancement.
+    """Antennal Lobe layer implementing competitive inhibition for contrast enhancement.
 
-    This layer enhances contrast by having each neuron excite itself while inhibiting
-    all other neurons through global inhibition. This creates a "winner-take-more"
-    dynamic that sharpens the input signal and suppresses noise, mimicking the
-    competitive dynamics observed in the insect antennal lobe.
+    This layer enhances contrast through a "winner-take-more" dynamic that
+    sharpens the input signal and suppresses noise, mimicking competitive
+    dynamics in the insect antennal lobe. The operation computes
+    ``h = W * x + b`` (excitation), ``mu = mean(h)`` (global inhibition),
+    then ``y = activation(h - alpha * mu)`` (competitive response), where
+    ``alpha`` controls inhibition strength.
 
-    **Intent**: Model the first stage of olfactory processing in moths, where
-    receptor signals are sharpened through competitive inhibition, creating a
-    cleaner and more robust representation for downstream processing.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input Features (shape=[batch, features])
-           ↓
-    Linear Transform: h = W·x + b
-           ↓
-    Compute Global Mean: μ = mean(h)
-           ↓
-    Lateral Inhibition: h_inhibited = h - α·μ
-           ↓
-    Activation: output = activation(h_inhibited)
-           ↓
-    Output (shape=[batch, units])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Excitation**: h = W·x + b (learnable linear transformation)
-    2. **Global Inhibition**: μ = (1/N)·∑h_i (mean activity across neurons)
-    3. **Competitive Response**: y = activation(h - α·μ)
+        ┌──────────────────────────────┐
+        │  Input [batch, features]     │
+        └─────────────┬────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────┐
+        │  Linear: h = W·x + b        │
+        └─────────────┬────────────────┘
+                      │
+              ┌───────┴───────┐
+              │               │
+              ▼               ▼
+        ┌───────────┐  ┌───────────┐
+        │     h     │  │ mu=mean(h)│
+        └─────┬─────┘  └─────┬─────┘
+              │               │
+              ▼               ▼
+        ┌──────────────────────────────┐
+        │  h_inhibited = h - alpha*mu  │
+        └─────────────┬────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────┐
+        │  Activation(h_inhibited)     │
+        └─────────────┬────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────┐
+        │  Output [batch, units]       │
+        └──────────────────────────────┘
 
-    Where α controls inhibition strength (higher values = stronger competition).
-
-    Parameters
-    ----------
-    units : int
-        Number of output units (typically same as input dimension).
-    inhibition_strength : float, default=0.5
-        Strength of lateral inhibition (α). Higher values create stronger
-        competitive dynamics. Range: [0, 1], where 0 = no inhibition,
-        1 = maximum competition.
-    activation : str, default='relu'
-        Activation function to apply after inhibition. Common choices:
-        'relu', 'gelu', 'swish'.
-    kernel_initializer : str or keras.initializers.Initializer, default='glorot_uniform'
-        Initializer for the excitatory weight matrix.
-    kernel_regularizer : Optional[keras.regularizers.Regularizer], default=None
-        Regularizer function applied to excitatory weights.
-    use_bias : bool, default=True
-        Whether to include bias terms in the transformation.
-    **kwargs
-        Additional keyword arguments for the base Layer class.
-
-    Input shape
-        (batch_size, input_dim): 2D tensor of feature vectors.
-
-    Output shape
-        (batch_size, units): 2D tensor after competitive inhibition.
-
-    Attributes
-    ----------
-    excitatory_weights : keras.Variable
-        Weight matrix for excitatory connections, shape (input_dim, units).
-    bias : keras.Variable, optional
-        Bias vector, shape (units,), present if use_bias=True.
-
-    Example
-    -------
-    >>> # Create AL layer for 85-dimensional input
-    >>> al_layer = AntennalLobeLayer(
-    ...     units=85,
-    ...     inhibition_strength=0.5,
-    ...     activation='relu'
-    ... )
-    >>> x = keras.ops.ones((32, 85))  # Batch of 32 samples
-    >>> output = al_layer(x)
-    >>> print(output.shape)  # (32, 85)
-
-    Notes
-    -----
-    The competitive inhibition mechanism serves two purposes:
-    1. **Contrast Enhancement**: Strong features become relatively stronger
-    2. **Noise Suppression**: Weak, noisy features are suppressed below threshold
-
-    This is analogous to contrast enhancement in image processing, but applied
-    to abstract feature spaces.
+    :param units: Number of output units.
+    :type units: int
+    :param inhibition_strength: Strength of lateral inhibition (alpha).
+        Range [0, 1]. Defaults to 0.5.
+    :type inhibition_strength: float
+    :param activation: Activation function after inhibition. Defaults to ``'relu'``.
+    :type activation: str
+    :param kernel_initializer: Initializer for excitatory weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for excitatory weights. Defaults to None.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_bias: Whether to include bias terms. Defaults to True.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -168,15 +140,10 @@ class AntennalLobeLayer(keras.layers.Layer):
         self.use_bias = use_bias
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create layer weights for excitatory connections.
+        """Create layer weights for excitatory connections.
 
-        This is called automatically when the layer first processes input.
-
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -206,20 +173,14 @@ class AntennalLobeLayer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply competitive inhibition to inputs.
+        """Apply competitive inhibition to inputs.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Whether the layer is in training mode (unused, for API compatibility).
-
-        Returns
-        -------
-        keras.KerasTensor
-            Output tensor of shape (batch_size, units) after competitive inhibition.
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, present for API compatibility.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, units)``.
+        :rtype: keras.KerasTensor
         """
         # Excitatory response: linear transformation
         excitation = keras.ops.matmul(inputs, self.excitatory_weights)
@@ -240,31 +201,22 @@ class AntennalLobeLayer(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape for this layer.
+        """Compute output shape for this layer.
 
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
-
-        Returns
-        -------
-        tuple
-            Output shape (batch_size, units).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns
-        -------
-        dict
-            Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -282,124 +234,70 @@ class AntennalLobeLayer(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class MushroomBodyLayer(keras.layers.Layer):
-    """
-    Mushroom Body layer implementing high-dimensional sparse random projection.
+    """Mushroom Body layer implementing high-dimensional sparse random projection.
 
-    This layer projects inputs into a much higher-dimensional space using sparse,
-    random connections (mimicking AL→MB connections in insects), then enforces
-    sparse firing through top-k winner-take-all selection. This creates a
-    combinatorial code that is both robust to noise and highly discriminative,
-    similar to the sparse coding observed in insect mushroom bodies.
+    This layer projects inputs into a much higher-dimensional space using
+    sparse, random connections, then enforces sparse firing through top-k
+    winner-take-all selection. The sparse projection
+    ``h = W_sparse * x + b`` (with ~10% non-zero weights) expands the
+    feature space, and ``output = TopK(activation(h), k)`` where
+    ``k = floor(sparsity * units)`` creates a combinatorial code that is
+    both robust to noise and highly discriminative, providing massive
+    representational capacity (e.g., ``C(4000, 400) ~ 10^459`` patterns).
 
-    **Intent**: Implement the critical expansion and sparsification stage of the
-    moth olfactory network, where low-dimensional odor representations are
-    transformed into high-dimensional, sparse codes that enable rapid learning
-    with minimal examples.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input from AL (shape=[batch, input_dim])
-           ↓
-    Sparse Random Projection: h = W_sparse·x + b
-           │ (connection_sparsity = 10% non-zero)
-           │ (expansion: input_dim → units, typically 20-50x)
-           ↓
-    Activation: h_active = activation(h)
-           ↓
-    Top-K Selection (WTA): select k = sparsity·units largest values
-           ↓
-    Sparse Output: only k neurons fire, rest = 0
-           ↓
-    Output to Readout (shape=[batch, units], ~90% zeros)
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Sparse Projection**: h = W_sparse·x + b
-       - W_sparse has only 10% non-zero entries (fixed random pattern)
-       - Dimensionality expansion: units >> input_dim
+        ┌──────────────────────────────────┐
+        │  Input from AL [batch, input_dim]│
+        └─────────────┬────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────────┐
+        │  Sparse Random Projection        │
+        │  h = W_sparse·x + b             │
+        │  (~10% non-zero connections)     │
+        │  (input_dim → units, 20-50x)    │
+        └─────────────┬────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────────┐
+        │  Activation(h)                   │
+        └─────────────┬────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────────┐
+        │  Top-K Winner-Take-All           │
+        │  keep k = sparsity * units       │
+        │  (rest set to 0)                 │
+        └─────────────┬────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────────┐
+        │  Sparse Output [batch, units]    │
+        │  (~90% zeros)                    │
+        └──────────────────────────────────┘
 
-    2. **Sparse Coding**: output = TopK(activation(h), k)
-       - k = ⌊sparsity × units⌋ (typically 5-15% of neurons)
-       - Creates combinatorial representation: C(units, k) possible patterns
-
-    3. **Information Capacity**: With 4000 neurons and 10% sparsity:
-       - C(4000, 400) ≈ 10^459 possible unique patterns
-       - Far exceeds typical classification needs
-
-    Parameters
-    ----------
-    units : int
-        Number of output units (typically 20-50x input dimension).
-        Example: For 85 AL neurons, use 2000-4000 MB neurons.
-    sparsity : float, default=0.1
-        Fraction of neurons that fire for any input (k/units).
-        Range: (0, 1), typical values: 0.05-0.15.
-    connection_sparsity : float, default=0.1
-        Sparsity of the random projection matrix (fraction of non-zero weights).
-        Range: (0, 1), typical value: 0.1.
-    activation : str, default='relu'
-        Activation function before top-k selection.
-    kernel_initializer : str or keras.initializers.Initializer, default='glorot_uniform'
-        Initializer for the non-zero projection weights.
-    trainable_projection : bool, default=False
-        Whether projection matrix is trainable. In biological systems, these
-        connections are random and fixed.
-    use_bias : bool, default=True
-        Whether to include bias terms.
-    **kwargs
-        Additional keyword arguments for the base Layer class.
-
-    Input shape
-        (batch_size, input_dim): 2D tensor from Antennal Lobe.
-
-    Output shape
-        (batch_size, units): Sparse 2D tensor with only k active neurons per sample.
-
-    Attributes
-    ----------
-    projection_weights : keras.Variable
-        Sparse random projection matrix, shape (input_dim, units).
-    projection_mask : np.ndarray
-        Binary mask defining which connections exist (fixed at initialization).
-    k : int
-        Number of neurons kept active per sample (k = ⌊sparsity × units⌋).
-    bias : keras.Variable, optional
-        Bias vector, shape (units,), present if use_bias=True.
-
-    Example
-    -------
-    >>> # Create MB layer with 50x expansion and 10% sparsity
-    >>> mb_layer = MushroomBodyLayer(
-    ...     units=4000,  # 50x expansion from 80 AL neurons
-    ...     sparsity=0.1,  # 400 active neurons per input
-    ...     connection_sparsity=0.1  # Sparse random connections
-    ... )
-    >>> x = keras.ops.ones((32, 80))  # Batch from AL
-    >>> output = mb_layer(x)
-    >>> print(output.shape)  # (32, 4000)
-    >>> # Count non-zeros per sample
-    >>> active = keras.ops.sum(keras.ops.cast(output > 0, 'int32'), axis=1)
-    >>> print(active)  # Each sample has ~400 active neurons
-
-    Notes
-    -----
-    **Why High-Dimensional Sparse Coding Works**:
-
-    1. **Separation**: High dimensions untangle complex, non-linearly separable
-       patterns (similar to kernel trick in SVMs).
-
-    2. **Sparsity**: Enforces selectivity - each active neuron becomes a
-       specialized detector for specific feature combinations.
-
-    3. **Combinatorial Power**: With n units and k active, there are C(n,k)
-       possible patterns, providing massive representational capacity.
-
-    4. **Noise Robustness**: Sparse codes are resistant to corruption since
-       pattern identity depends on which neurons fire, not exact values.
-
-    The combination is particularly powerful for few-shot learning because
-    each example gets a unique, discriminative representation that standard
-    ML methods can easily separate.
+    :param units: Number of output units (typically 20-50x input dimension).
+    :type units: int
+    :param sparsity: Fraction of neurons that fire per input. Range (0, 1).
+        Defaults to 0.1.
+    :type sparsity: float
+    :param connection_sparsity: Sparsity of random projection matrix.
+        Range (0, 1). Defaults to 0.1.
+    :type connection_sparsity: float
+    :param activation: Activation function before top-k. Defaults to ``'relu'``.
+    :type activation: str
+    :param kernel_initializer: Initializer for non-zero projection weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param trainable_projection: Whether projection matrix is trainable.
+        Defaults to False.
+    :type trainable_projection: bool
+    :param use_bias: Whether to include bias terms. Defaults to True.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -424,15 +322,10 @@ class MushroomBodyLayer(keras.layers.Layer):
         self.k = int(units * sparsity)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create sparse random projection matrix.
+        """Create sparse random projection matrix.
 
-        This is called automatically when the layer first processes input.
-
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -472,21 +365,14 @@ class MushroomBodyLayer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply sparse high-dimensional projection with winner-take-all.
+        """Apply sparse high-dimensional projection with winner-take-all.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Whether the layer is in training mode (unused, for API compatibility).
-
-        Returns
-        -------
-        keras.KerasTensor
-            Sparse output tensor of shape (batch_size, units) with only top-k
-            neurons active per sample.
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, present for API compatibility.
+        :type training: Optional[bool]
+        :return: Sparse output tensor of shape ``(batch_size, units)``.
+        :rtype: keras.KerasTensor
         """
         # Apply sparse random projection
         output = keras.ops.matmul(inputs, self.projection_weights)
@@ -527,31 +413,22 @@ class MushroomBodyLayer(keras.layers.Layer):
         return sparse_output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape for this layer.
+        """Compute output shape for this layer.
 
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
-
-        Returns
-        -------
-        tuple
-            Output shape (batch_size, units).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns
-        -------
-        dict
-            Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -569,127 +446,51 @@ class MushroomBodyLayer(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class HebbianReadoutLayer(keras.layers.Layer):
-    """
-    Hebbian readout layer implementing local correlation-based learning.
+    """Hebbian readout layer implementing local correlation-based learning.
 
-    This layer uses Hebbian plasticity ("neurons that fire together, wire together")
-    rather than backpropagation for weight updates. Connections strengthen when
-    pre-synaptic (MB) and post-synaptic (class label) neurons are simultaneously
-    active, implementing a biologically plausible local learning rule.
+    This layer uses Hebbian plasticity ("neurons that fire together, wire
+    together") rather than backpropagation for weight updates. The forward
+    pass computes ``logits = W * x + b`` (standard linear transformation).
+    During training, weights are updated via the Hebbian rule:
+    ``dW = alpha * (x^T * y) / batch_size``, where ``x`` are sparse MB
+    activations and ``y`` are one-hot target labels. Sparsity in the MB
+    codes is critical -- it ensures selective associations between specific
+    neuron patterns and their corresponding classes.
 
-    **Intent**: Provide an alternative to global error minimization (backpropagation)
-    by using a simple, local correlation-based learning rule. This demonstrates that
-    effective learning doesn't require error signals to propagate backward through
-    the network.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    MB Input (shape=[batch, mb_units])
-           ↓
-    Linear Transform: logits = W·x + b
-           │ W updated via Hebbian rule, not backprop
-           ↓
-    Class Logits (shape=[batch, num_classes])
+    .. code-block:: text
 
-    Hebbian Update (during training):
-    ΔW = α · (x^T · y) / batch_size
+        ┌──────────────────────────────────┐
+        │  MB Input [batch, mb_units]      │
+        └─────────────┬────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────────┐
+        │  Linear: logits = W·x + b       │
+        │  (W updated via Hebbian rule)    │
+        └─────────────┬────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────────┐
+        │  Class Logits [batch, units]     │
+        └──────────────────────────────────┘
 
-    Where:
-    - x: MB activations (pre-synaptic)
-    - y: Target labels one-hot (post-synaptic)
-    - α: Learning rate
-    ```
+        Hebbian Update (training):
+        dW = alpha * (x^T · y) / N
 
-    **Mathematical Operations**:
-    1. **Forward Pass**: logits = W·x + b (standard linear transformation)
-
-    2. **Hebbian Update**:
-       - Compute correlation: C = (1/N)·∑(x_i ⊗ y_i) over batch
-       - Update weights: W_new = W_old + α·C
-       - Where x_i ⊗ y_i is the outer product
-
-    3. **Biological Interpretation**:
-       - High MB activity + High target → Strengthen connection
-       - High MB activity + Low target → No change (asymmetric rule)
-       - Low MB activity → No change (requires pre-synaptic activity)
-
-    Parameters
-    ----------
-    units : int
-        Number of output units (number of classes).
-    learning_rate : float, default=0.01
-        Hebbian learning rate (α in ΔW = α·x^T·y).
-        Typical range: [0.001, 0.1].
-    kernel_initializer : str or keras.initializers.Initializer, default='glorot_uniform'
-        Initializer for the readout weight matrix.
-    kernel_regularizer : Optional[keras.regularizers.Regularizer], default=None
-        Regularizer for the readout weights (applied during Hebbian updates).
-    use_bias : bool, default=True
-        Whether to include bias terms.
-    **kwargs
-        Additional keyword arguments for the base Layer class.
-
-    Input shape
-        (batch_size, input_dim): 2D tensor from Mushroom Body (sparse MB codes).
-
-    Output shape
-        (batch_size, units): Class logits before softmax.
-
-    Attributes
-    ----------
-    readout_weights : keras.Variable
-        Weight matrix for readout connections, shape (input_dim, units).
-        Updated via Hebbian rule, not backpropagation.
-    bias : keras.Variable, optional
-        Bias vector, shape (units,), present if use_bias=True.
-        Can be trained via backprop or manually updated.
-
-    Example
-    -------
-    >>> # Create Hebbian readout for 10-class classification
-    >>> readout = HebbianReadoutLayer(
-    ...     units=10,
-    ...     learning_rate=0.01
-    ... )
-    >>>
-    >>> # Forward pass
-    >>> mb_codes = keras.ops.ones((32, 4000))  # Batch of MB codes
-    >>> logits = readout(mb_codes)
-    >>> print(logits.shape)  # (32, 10)
-    >>>
-    >>> # Hebbian training (in training loop)
-    >>> y_true = keras.ops.one_hot(labels, num_classes=10)
-    >>> readout.hebbian_update(mb_codes, y_true)
-
-    Notes
-    -----
-    **Advantages of Hebbian Learning**:
-
-    1. **Local Computation**: Weight updates only require local information
-       (pre- and post-synaptic activity), not global error signals.
-
-    2. **Biological Plausibility**: This rule is observed in real neural systems
-       and may explain aspects of biological learning.
-
-    3. **Complementary to Backprop**: Hebbian learning excels at associative
-       learning and discovers different patterns than gradient descent.
-
-    **Why It Works with Sparse MB Codes**:
-
-    - Sparsity is CRITICAL: With dense codes, Hebbian learning strengthens
-      all connections indiscriminately, learning nothing discriminative.
-
-    - With sparse codes: Only the specific handful of MB neurons active for
-      each class strengthen their connections to that class's output.
-
-    - This creates selective associations: MB pattern A → Class 1,
-      MB pattern B → Class 2, with minimal interference.
-
-    **Custom Training Required**:
-
-    This layer cannot be trained with standard `model.fit()`. Use the
-    `train_hebbian()` method of the MothNet model, or implement a custom
-    training loop that calls `hebbian_update()`.
+    :param units: Number of output units (number of classes).
+    :type units: int
+    :param learning_rate: Hebbian learning rate (alpha). Defaults to 0.01.
+    :type learning_rate: float
+    :param kernel_initializer: Initializer for readout weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for readout weights. Defaults to None.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_bias: Whether to include bias terms. Defaults to True.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -709,15 +510,10 @@ class HebbianReadoutLayer(keras.layers.Layer):
         self.use_bias = use_bias
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create readout weights.
+        """Create readout weights.
 
-        This is called automatically when the layer first processes input.
-
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -746,20 +542,14 @@ class HebbianReadoutLayer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Compute readout activations (forward pass).
+        """Compute readout activations (forward pass).
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim) from Mushroom Body.
-        training : bool, optional
-            Whether the layer is in training mode (unused, for API compatibility).
-
-        Returns
-        -------
-        keras.KerasTensor
-            Class logits of shape (batch_size, units).
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, present for API compatibility.
+        :type training: Optional[bool]
+        :return: Class logits of shape ``(batch_size, units)``.
+        :rtype: keras.KerasTensor
         """
         output = keras.ops.matmul(inputs, self.readout_weights)
 
@@ -773,26 +563,14 @@ class HebbianReadoutLayer(keras.layers.Layer):
         pre_synaptic: keras.KerasTensor,
         post_synaptic: keras.KerasTensor
     ) -> None:
-        """
-        Apply Hebbian weight update rule: ΔW = α · (x^T · y) / batch_size.
+        """Apply Hebbian weight update rule: ``dW = alpha * (x^T * y) / batch_size``.
 
-        This method should be called during training to update weights based on
-        correlations between MB activations and target labels.
-
-        Parameters
-        ----------
-        pre_synaptic : keras.KerasTensor
-            Pre-synaptic activations (MB layer output) of shape (batch_size, input_dim).
-            These are the sparse MB codes.
-        post_synaptic : keras.KerasTensor
-            Post-synaptic activations (target labels, one-hot encoded) of shape
-            (batch_size, units). Represents desired output neuron activity.
-
-        Notes
-        -----
-        The update is averaged over the batch to make learning rate independent
-        of batch size. The outer product x^T·y computes correlation between
-        each MB neuron and each class.
+        :param pre_synaptic: Pre-synaptic activations (MB output) of shape
+            ``(batch_size, input_dim)``.
+        :type pre_synaptic: keras.KerasTensor
+        :param post_synaptic: Post-synaptic activations (one-hot targets) of shape
+            ``(batch_size, units)``.
+        :type post_synaptic: keras.KerasTensor
         """
         # Compute batch-averaged outer product: (1/N) · x^T · y
         batch_size = keras.ops.shape(pre_synaptic)[0]
@@ -806,31 +584,22 @@ class HebbianReadoutLayer(keras.layers.Layer):
         self.readout_weights.assign(new_weights)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape for this layer.
+        """Compute output shape for this layer.
 
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
-
-        Returns
-        -------
-        tuple
-            Output shape (batch_size, units).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns
-        -------
-        dict
-            Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

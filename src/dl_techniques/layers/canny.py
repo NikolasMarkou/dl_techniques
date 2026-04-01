@@ -7,98 +7,68 @@ from typing import Optional, Tuple, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class Canny(keras.layers.Layer):
-    """Keras implementation of the Canny edge detection algorithm.
+    """Multi-stage Canny edge detection layer for single-channel images.
 
-    This layer performs Canny edge detection, a multi-stage algorithm used to
-    detect a wide range of edges in images. The process includes Gaussian
-    smoothing, gradient calculation, non-maximum suppression, double
-    thresholding, and edge tracking by hysteresis.
+    Applies the classical Canny algorithm as a differentiable Keras layer:
+    Gaussian smoothing ``I_smooth = I * G(sigma)``, Sobel gradient computation
+    ``G = sqrt(Gx^2 + Gy^2)``, non-maximum suppression along the gradient
+    direction, double thresholding into strong/weak edges, and iterative
+    hysteresis tracking to connect weak edges adjacent to strong ones.
+    All convolution kernels are stored as non-trainable weights.
 
-    **Intent**: Provide a robust, serializable, and modern Keras 3 implementation
-    of the Canny algorithm that can be integrated into neural network models or
-    used as a standalone image processing layer.
+    **Architecture Overview:**
 
-    **Architecture & Stages**:
-    ```
-    Input Image [B, H, W, 1]
-           ↓
-    1. Noise Reduction (Gaussian Filter)
-           ↓
-    2. Gradient Calculation (Sobel Operator)
-           ↓ (Magnitude & Angle)
-    3. Non-Maximum Suppression
-           ↓
-    4. Double Thresholding (Strong & Weak Edges)
-           ↓
-    5. Hysteresis Edge Tracking
-           ↓
-    Output Edge Map [B, H, W, 1]
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Smoothing**: `I_smooth = I * G(σ)` where `G` is a Gaussian kernel.
-    2. **Gradients**: `Gx = I_smooth * S_x`, `Gy = I_smooth * S_y`.
-       Magnitude `G = sqrt(Gx² + Gy²)`, Angle `θ = atan2(Gy, Gx)`.
-    3. **Suppression**: Discard pixels that are not local maxima in the
-       direction of the gradient.
-    4. **Thresholding**: Classify edges as strong (`> threshold_max`),
-       weak (`> threshold_min`), or non-edges.
-    5. **Hysteresis**: Connect weak edges to strong edges iteratively.
+        ┌──────────────────────────────┐
+        │  Input (B, H, W, 1)          │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  1. Gaussian Smoothing       │
+        │     I_smooth = I * G(sigma)  │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  2. Sobel Gradient           │
+        │     Gx, Gy ──► Mag, Angle   │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  3. Non-Maximum Suppression  │
+        │     angle-specific dilation  │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  4. Double Thresholding      │
+        │     strong / weak / discard  │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  5. Hysteresis Tracking      │
+        │     dilate strong ──► weak   │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Output Edge Map (B,H,W,1)   │
+        └──────────────────────────────┘
 
-    Args:
-        sigma (float): Standard deviation for the Gaussian kernel. A larger
-            sigma corresponds to more blurring and detection of larger-scale
-            edges. Must be >= 0.8. Defaults to 0.8.
-        threshold_min (int): The lower threshold for the double thresholding
-            stage. Pixels with gradient magnitude below this are discarded.
-            Defaults to 50.
-        threshold_max (int): The upper threshold for the double thresholding
-            stage. Pixels above this are considered strong edges.
-            Defaults to 80.
-        tracking_connection (int): The connectivity size (kernel size) for the final
-            hysteresis edge tracking stage. Determines the neighborhood for
-            connecting weak edges to strong ones. Defaults to 5.
-        tracking_iterations (int): The maximum number of iterations for the
-            hysteresis tracking. Prevents infinite loops in edge connection.
-            Defaults to 3.
-        **kwargs: Additional arguments for the `keras.layers.Layer` base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, 1)`.
-        The input image should be a single-channel (grayscale) tensor.
-
-    Output shape:
-        4D tensor with the same shape as the input:
-        `(batch_size, height, width, 1)`.
-        The output is a binary edge map where `1.0` represents an edge and
-        `0.0` represents the background.
-
-    Attributes:
-        gaussian_kernel (keras.Variable): Non-trainable weight for Gaussian smoothing.
-        sobel_kernel (keras.Variable): Non-trainable weight for Sobel gradient calculation.
-        angle_kernel (keras.Variable): Non-trainable weights for non-maximum suppression.
-        dilation_kernel (keras.Variable): Non-trainable weight for hysteresis tracking.
-
-    Example:
-        ```python
-        # Create a Canny edge detection layer
-        canny_layer = Canny(sigma=1.0, threshold_min=40, threshold_max=90)
-
-        # Apply to an input image
-        # Note: Input tensor should be float type
-        input_image = keras.random.uniform(shape=(1, 256, 256, 1)) * 255.0
-        edge_map = canny_layer(input_image)
-
-        # Use within a Keras model
-        inputs = keras.Input(shape=(256, 256, 1))
-        outputs = Canny()(inputs)
-        model = keras.Model(inputs, outputs)
-        model.summary()
-        ```
-
-    Raises:
-        ValueError: If `sigma` is less than 0.8 or if `threshold_min` is
-            not less than `threshold_max`.
+    :param sigma: Standard deviation for the Gaussian kernel. Must be >= 0.8.
+        Defaults to 0.8.
+    :type sigma: float
+    :param threshold_min: Lower threshold for double thresholding.
+        Defaults to 50.
+    :type threshold_min: int
+    :param threshold_max: Upper threshold for double thresholding.
+        Defaults to 80.
+    :type threshold_max: int
+    :param tracking_connection: Connectivity kernel size for hysteresis
+        edge tracking. Defaults to 5.
+    :type tracking_connection: int
+    :param tracking_iterations: Maximum number of hysteresis iterations.
+        Defaults to 3.
+    :type tracking_iterations: int
+    :param kwargs: Additional arguments for the ``keras.layers.Layer`` base class.
     """
 
     def __init__(
@@ -142,7 +112,11 @@ class Canny(keras.layers.Layer):
         self.dilation_kernel = None
 
     def _build_gaussian_kernel(self) -> np.ndarray:
-        """Creates a 2D Gaussian kernel for image smoothing."""
+        """Create a 2D Gaussian kernel for image smoothing.
+
+        :return: Gaussian kernel array of shape ``(K, K, 1, 1)``.
+        :rtype: np.ndarray
+        """
         kernel_size = int(((((self.sigma - 0.8) / 0.3) + 1) * 2) + 1)
         kernel_size += 1 if (kernel_size % 2) == 0 else 0
 
@@ -156,7 +130,11 @@ class Canny(keras.layers.Layer):
         return kernel.reshape((kernel_size, kernel_size, 1, 1))
 
     def _build_sobel_kernel(self) -> np.ndarray:
-        """Creates Sobel kernels for Gx and Gy gradient computation."""
+        """Create Sobel kernels for Gx and Gy gradient computation.
+
+        :return: Stacked Sobel kernels of shape ``(3, 3, 1, 2)``.
+        :rtype: np.ndarray
+        """
         # Gx kernel: detects vertical edges
         gx_kernel = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
         # Gy kernel: detects horizontal edges
@@ -165,7 +143,11 @@ class Canny(keras.layers.Layer):
         return np.stack([gx_kernel, gy_kernel], axis=-1).reshape((3, 3, 1, 2))
 
     def _build_angle_kernels(self) -> np.ndarray:
-        """Creates kernels for angle-specific non-maximum suppression."""
+        """Create kernels for angle-specific non-maximum suppression.
+
+        :return: Concatenated angle kernels of shape ``(3, 3, 4)``.
+        :rtype: np.ndarray
+        """
         inf = np.inf
         # Kernels for 0°, 45°, 90°, 135° detection
         k0 = np.array([[[-inf], [-inf], [-inf]], [[0.0], [0.0], [0.0]], [[-inf], [-inf], [-inf]]])
@@ -177,7 +159,11 @@ class Canny(keras.layers.Layer):
         return np.concatenate([k0, k45, k90, k135], axis=-1).astype(np.float32)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the layer's non-trainable weights (kernels)."""
+        """Create the layer's non-trainable weights (kernels).
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         # 1. Gaussian Kernel
         gaussian_val = self._build_gaussian_kernel()
         self.gaussian_kernel = self.add_weight(
@@ -211,7 +197,13 @@ class Canny(keras.layers.Layer):
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Perform Canny edge detection on the input image tensor."""
+        """Perform Canny edge detection on the input image tensor.
+
+        :param inputs: Grayscale image tensor of shape ``(B, H, W, 1)``.
+        :type inputs: keras.KerasTensor
+        :return: Binary edge map of same shape as input.
+        :rtype: keras.KerasTensor
+        """
         original_dtype = inputs.dtype
 
         # Stage 1: Noise reduction
@@ -246,7 +238,15 @@ class Canny(keras.layers.Layer):
     def _compute_angle_responses(
             self, theta: keras.KerasTensor, grad_mag: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Compute angle-specific edge responses for suppression."""
+        """Compute angle-specific edge responses for suppression.
+
+        :param theta: Gradient angle tensor.
+        :type theta: keras.KerasTensor
+        :param grad_mag: Gradient magnitude tensor.
+        :type grad_mag: keras.KerasTensor
+        :return: Angle-weighted edge response tensor.
+        :rtype: keras.KerasTensor
+        """
         angle_masks = []
         low, high = self.angle_ranges[0]
         mask = keras.ops.logical_or(
@@ -270,7 +270,17 @@ class Canny(keras.layers.Layer):
     def _apply_double_threshold(
             self, max_pool_angle: tf.Tensor, angle_responses: tf.Tensor, grad_mag: tf.Tensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Apply double thresholding to find strong and weak edges."""
+        """Apply double thresholding to find strong and weak edges.
+
+        :param max_pool_angle: Max-pooled angle response tensor.
+        :type max_pool_angle: tf.Tensor
+        :param angle_responses: Angle response tensor.
+        :type angle_responses: tf.Tensor
+        :param grad_mag: Gradient magnitude tensor.
+        :type grad_mag: tf.Tensor
+        :return: Tuple of ``(strong_edges, weak_edges)`` binary masks.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        """
         suppressed = keras.ops.where(
             keras.ops.equal(max_pool_angle, angle_responses), grad_mag, 0.0
         )
@@ -293,7 +303,15 @@ class Canny(keras.layers.Layer):
     def _track_edges(
             self, strong_edges: tf.Tensor, weak_edges: tf.Tensor
     ) -> keras.KerasTensor:
-        """Track edges using hysteresis with a tf.while_loop."""
+        """Track edges using hysteresis with a tf.while_loop.
+
+        :param strong_edges: Binary mask of strong edges.
+        :type strong_edges: tf.Tensor
+        :param weak_edges: Binary mask of weak edges.
+        :type weak_edges: tf.Tensor
+        :return: Final binary edge map.
+        :rtype: keras.KerasTensor
+        """
 
         def loop_cond(current, has_changed):
             return has_changed
@@ -316,7 +334,11 @@ class Canny(keras.layers.Layer):
         return final_edges
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer for serialization."""
+        """Return the configuration of the layer for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "sigma": self.sigma,
@@ -330,7 +352,13 @@ class Canny(keras.layers.Layer):
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """The output shape is the same as the input shape."""
+        """Compute the output shape (same as input).
+
+        :param input_shape: Input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output tensor shape (identical to input).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
 # ---------------------------------------------------------------------

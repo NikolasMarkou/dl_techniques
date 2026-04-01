@@ -62,59 +62,58 @@ class ShearletTransform(keras.layers.Layer):
     This layer implements a cone-adapted discrete shearlet transform with improved frame
     properties and frequency coverage. The shearlet transform provides optimal sparse
     representation of images with edges and directional features by combining multi-scale
-    analysis with directional selectivity.
+    analysis with directional selectivity through parabolic scaling and Meyer window
+    functions in the frequency domain.
 
-    **Intent**: Provide a differentiable shearlet transform that can be integrated into
-    neural networks for enhanced feature extraction, particularly effective for images
-    containing edges, textures, and directional patterns.
+    The transform operates by computing the 2D FFT of the input, multiplying with a
+    pre-computed bank of shearlet filters (each tuned to a specific scale and
+    orientation), and applying the inverse FFT to obtain spatial-domain coefficients.
+    The filter bank is pre-shifted (``ifftshift``) during build to match standard FFT
+    layout, eliminating expensive runtime shift operations.
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓
-    2D FFT (Keras Ops) → Frequency Domain
-           ↓
-    Apply Shearlet Filters (scales × directions filters)
-    (Complex Multiplication in Frequency Domain)
-           ↓
-    2D IFFT (Keras Ops) → Spatial Domain Coefficients
-           ↓
-    Output(shape=[batch, height, width, num_filters])
-    ```
+    **Architecture Overview:**
 
-    **Optimization**:
-    This implementation pre-shifts the filter bank during the build phase to match
-    the standard FFT output layout (DC component at corners). This optimization
-    removes the need for computationally expensive `fftshift` and `ifftshift`
-    operations during the forward pass (call), significantly improving throughput.
+    .. code-block:: text
 
-    Args:
-        scales: Integer, number of scales in the transform. Controls the multi-resolution
-            analysis depth. Higher values provide finer scale analysis. Must be positive.
-            Defaults to 4.
-        directions: Integer, number of directions per scale. Controls angular resolution.
-            Higher values provide better directional selectivity but increase computation.
-            Must be positive and preferably even. Defaults to 8.
-        alpha: Float, anisotropy parameter controlling the relationship between scale
-            and direction sampling. Value of 0.5 provides parabolic scaling which is
-            optimal for edge detection. Must be in (0, 1]. Defaults to 0.5.
-        high_freq: Boolean, whether to include high frequency components in the transform.
-            When True, captures fine details and noise. When False, focuses on low-mid
-            frequencies. Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌─────────────────────────────────────────┐
+        │  Input [B, H, W, C]                     │
+        └──────────────┬──────────────────────────┘
+                       ▼
+        ┌─────────────────────────────────────────┐
+        │  Permute to [B, C, H, W]               │
+        │  2D FFT (real → complex)                │
+        └──────────────┬──────────────────────────┘
+                       ▼
+        ┌─────────────────────────────────────────┐
+        │  Complex Multiply with Filter Bank      │
+        │  [1+S*(D+1) filters, H, W]             │
+        │  → [B, C, NumFilters, H, W]            │
+        └──────────────┬──────────────────────────┘
+                       ▼
+        ┌─────────────────────────────────────────┐
+        │  Inverse FFT via conj(FFT(conj(·)))/N  │
+        │  Take real part → coefficients          │
+        └──────────────┬──────────────────────────┘
+                       ▼
+        ┌─────────────────────────────────────────┐
+        │  Reshape to [B, H, W, C * NumFilters]  │
+        └─────────────────────────────────────────┘
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        All input images should have the same spatial dimensions within a batch.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, num_filters)`.
-        Where num_filters = (1 (low-pass) + scales * directions) * channels.
-        Spatial dimensions are preserved.
-
-    Attributes:
-        filter_bank_real: Tensor, real part of shearlet filters (set during build).
-        filter_bank_imag: Tensor, imaginary part of shearlet filters (set during build).
+    :param scales: Number of scales in the transform. Controls multi-resolution
+        analysis depth. Must be positive. Defaults to 4.
+    :type scales: int
+    :param directions: Number of directions per scale. Controls angular resolution.
+        Must be positive and preferably even. Defaults to 8.
+    :type directions: int
+    :param alpha: Anisotropy parameter controlling scale-direction sampling
+        relationship. Value of 0.5 provides parabolic scaling optimal for edge
+        detection. Must be in (0, 1]. Defaults to 0.5.
+    :type alpha: float
+    :param high_freq: Whether to include high frequency components. When True,
+        captures fine details and noise. Defaults to True.
+    :type high_freq: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -154,13 +153,13 @@ class ShearletTransform(keras.layers.Layer):
         """
         Build the layer and create shearlet filter bank.
 
-        This method generates the frequency grid and all shearlet filters using
-        NumPy for precise construction, then converts them to Keras tensors.
-        Filters are pre-shifted (ifftshift) to align with standard FFT output,
-        avoiding runtime shifts.
+        Generates the frequency grid and all shearlet filters using NumPy for
+        precise construction, then converts them to Keras tensors. Filters are
+        pre-shifted (ifftshift) to align with standard FFT output, avoiding
+        runtime shifts.
 
-        Args:
-            input_shape: Input tensor shape (batch_size, height, width, channels)
+        :param input_shape: Input tensor shape (batch_size, height, width, channels).
+        :type input_shape: tuple
         """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
@@ -209,8 +208,8 @@ class ShearletTransform(keras.layers.Layer):
         """
         Generate shearlet filters using NumPy.
 
-        Returns:
-            List of complex-valued filter arrays (centered frequency domain).
+        :return: List of complex-valued filter arrays (centered frequency domain).
+        :rtype: list[numpy.ndarray]
         """
         # Create normalized frequency grid [-0.5, 0.5]
         fx = np.linspace(-0.5, 0.5, width)
@@ -327,12 +326,12 @@ class ShearletTransform(keras.layers.Layer):
         """
         Apply shearlet transform to input images using Keras Ops.
 
-        Args:
-            inputs: Input tensor [batch_size, height, width, channels]
-            training: Unused.
-
-        Returns:
-            Shearlet coefficients [batch_size, height, width, num_filters * channels]
+        :param inputs: Input tensor of shape ``[batch_size, height, width, channels]``.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, kept for interface consistency.
+        :type training: bool or None
+        :return: Shearlet coefficients of shape ``[batch_size, height, width, num_filters * channels]``.
+        :rtype: keras.KerasTensor
         """
         inputs = ops.cast(inputs, "float32")
 
@@ -409,7 +408,7 @@ class ShearletTransform(keras.layers.Layer):
         return ops.reshape(coeffs, final_shape)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
+        """Compute the output shape of the layer."""
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 

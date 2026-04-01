@@ -67,53 +67,48 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 @keras.saving.register_keras_serializable(package="custom_layers")
 class SelectiveGradientMask(keras.layers.Layer):
-    """
-    Layer that selectively stops gradients based on a binary mask.
+    """Selectively stop gradients based on a binary mask.
 
-    This layer allows fine-grained control over gradient flow by selectively stopping
-    gradients at specified positions based on a binary mask. During the forward pass,
-    the signal remains unchanged, while during backpropagation, gradients are blocked
-    where mask equals 1.
+    During the forward pass this layer acts as an identity on the signal
+    tensor. During backpropagation the dual-path computation
+    ``output = stop_gradient(signal) * mask + signal * (1 - mask)``
+    blocks gradients where ``mask == 1`` and passes them where
+    ``mask == 0``. The effective backward Jacobian is
+    ``dy/dx = 1 - mask``, providing fine-grained element-wise gradient
+    control. At inference time the signal is returned unchanged for
+    efficiency.
 
-    The layer implements a dual-path mechanism:
-    - Stopped gradient path: For masked regions (mask = 1)
-    - Normal gradient path: For unmasked regions (mask = 0)
+    **Architecture Overview:**
 
-    Computation: `stop_gradient(signal) * mask + signal * (1 - mask)`
+    .. code-block:: text
 
-    Args:
-        name: Optional name for the layer.
-        dtype: Optional datatype for layer computations.
-        **kwargs: Additional keyword arguments passed to parent class.
+        ┌──────────────┐    ┌──────────────┐
+        │  Signal      │    │  Mask        │
+        │  [B, ...]    │    │  [B, ...]    │
+        └──────┬───────┘    └──────┬───────┘
+               │                   │
+               │        ┌─────────┴──────────┐
+               │        │                    │
+               ▼        ▼                    ▼
+        ┌────────────────────┐  ┌────────────────────┐
+        │ stop_gradient(sig) │  │ signal * (1-mask)  │
+        │ * mask             │  │ (gradient flows)   │
+        └────────┬───────────┘  └────────┬───────────┘
+                 │                       │
+                 └───────────┬───────────┘
+                             ▼
+        ┌──────────────────────────────────┐
+        │  Add → Output [B, ...]          │
+        │  (forward = signal, backward    │
+        │   grad *= (1 - mask))           │
+        └──────────────────────────────────┘
 
-    Call arguments:
-        inputs: List of two tensors [signal, mask] with identical shapes.
-            - signal: Input tensor to process (any shape)
-            - mask: Binary mask tensor (same shape as signal) with values 0 or 1,
-                   where 1 indicates gradient should be stopped
-        training: Boolean indicating training phase.
-
-    Input shape:
-        List of two tensors with identical shapes:
-        - signal: (batch_size, ...)
-        - mask: (batch_size, ...)
-
-    Output shape:
-        Same as signal input shape: (batch_size, ...)
-
-    Examples:
-        >>> # Basic usage
-        >>> signal = keras.Input(shape=(28, 28, 1))
-        >>> mask = keras.Input(shape=(28, 28, 1))
-        >>> masked_output = SelectiveGradientMask()([signal, mask])
-        >>> model = keras.Model(inputs=[signal, mask], outputs=masked_output)
-
-        >>> # Dynamic mask generation
-        >>> features = keras.Input(shape=(64,))
-        >>> dense = keras.layers.Dense(64, activation='sigmoid')(features)
-        >>> mask = keras.ops.cast(keras.ops.greater(dense, 0.5), "float32")
-        >>> output = SelectiveGradientMask()([dense, mask])
-    """
+    :param name: Optional layer name.
+    :type name: Optional[str]
+    :param dtype: Optional datatype for computations.
+    :type dtype: Optional[str]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
         self,
@@ -121,7 +116,7 @@ class SelectiveGradientMask(keras.layers.Layer):
         dtype: Optional[str] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the SelectiveGradientMask layer."""
+        """Initialise the SelectiveGradientMask layer."""
         super().__init__(name=name, dtype=dtype, **kwargs)
         self.supports_masking = True
 
@@ -129,15 +124,10 @@ class SelectiveGradientMask(keras.layers.Layer):
         self,
         input_shape: Union[List[Tuple[Optional[int], ...]], Tuple[Tuple[Optional[int], ...], ...]]
     ) -> None:
-        """
-        Build the layer by validating input shapes.
+        """Build the layer by validating input shapes.
 
-        Args:
-            input_shape: List or tuple containing shapes of [signal, mask] tensors.
-
-        Raises:
-            ValueError: If not exactly 2 inputs or if shapes don't match.
-        """
+        :param input_shape: List of two shape tuples ``[signal, mask]``.
+        :type input_shape: Union[List, Tuple]"""
         # Validate we have exactly 2 inputs
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
@@ -167,25 +157,14 @@ class SelectiveGradientMask(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply selective gradient masking.
+        """Apply selective gradient masking.
 
-        During training, creates two parallel paths:
-        - A gradient-stopped path where mask == 1
-        - A normal gradient flow path where mask == 0
-
-        During inference, the signal passes through unchanged.
-
-        Args:
-            inputs: List or tuple containing [signal, mask] tensors.
-            training: Boolean indicating training phase.
-
-        Returns:
-            Output tensor with selective gradient masking applied.
-
-        Raises:
-            ValueError: If inputs is not a list/tuple of exactly 2 tensors.
-        """
+        :param inputs: List of ``[signal, mask]`` tensors.
+        :type inputs: Union[List, Tuple]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor (signal with masked gradients).
+        :rtype: keras.KerasTensor"""
         # Validate inputs structure
         if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
             raise ValueError(
@@ -224,18 +203,12 @@ class SelectiveGradientMask(keras.layers.Layer):
         self,
         input_shape: Union[List[Tuple[Optional[int], ...]], Tuple[Tuple[Optional[int], ...], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape.
+        """Compute the output shape (same as signal shape).
 
-        Args:
-            input_shape: List of input shapes [signal_shape, mask_shape].
-
-        Returns:
-            Output shape (same as signal shape).
-
-        Raises:
-            ValueError: If input_shape is invalid.
-        """
+        :param input_shape: List of ``[signal_shape, mask_shape]``.
+        :type input_shape: Union[List, Tuple]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
                 f"Expected list of 2 input shapes [signal_shape, mask_shape], "
@@ -253,27 +226,22 @@ class SelectiveGradientMask(keras.layers.Layer):
         return signal_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing layer configuration.
-        """
+        :return: Dictionary containing layer configuration.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         # This layer has no additional parameters to serialize
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SelectiveGradientMask":
-        """
-        Create layer from configuration dictionary.
+        """Create layer from a configuration dictionary.
 
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            Reconstructed SelectiveGradientMask layer instance.
-        """
+        :param config: Configuration from ``get_config()``.
+        :type config: Dict[str, Any]
+        :return: Reconstructed layer instance.
+        :rtype: SelectiveGradientMask"""
         return cls(**config)
 
 # ---------------------------------------------------------------------

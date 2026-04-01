@@ -1,46 +1,15 @@
 """
 2D Gaussian blur using a depthwise convolution.
 
-This layer implements a Gaussian filter, a fundamental low-pass filter used
-for smoothing images and reducing high-frequency noise. The filtering is
-achieved by convolving the input image with a kernel whose weights are derived
-from a 2D Gaussian distribution. This operation is a cornerstone of many
-computer vision_heads algorithms, often serving as a preprocessing step to enhance
-feature stability.
-
-Architectural and Mathematical Foundations:
-The core of this layer is the 2D Gaussian function, which is used to generate
-the convolution kernel. The function is defined as:
-
-    G(x, y) = (1 / (2 * pi * sigma^2)) * exp(-(x^2 + y^2) / (2 * sigma^2))
-
-The parameter `sigma` (standard deviation) controls the "spread" of the bell-
-shaped curve. A larger `sigma` results in a wider curve, leading to a kernel
-that averages pixels over a larger neighborhood, producing a more pronounced
-blur. Conversely, a smaller `sigma` yields a sharper kernel with less blur.
-
-To create the discrete convolution kernel, this continuous function is sampled
-at integer coordinates `(x, y)` over a grid defined by `kernel_size`. The
-resulting values are then normalized to sum to 1, ensuring that the overall
-brightness of the image is preserved after filtering.
-
-The filtering operation is implemented as a **depthwise convolution**. This is a
-critical architectural choice. In image processing, blurring is typically
-performed independently on each color channel (e.g., R, G, B). A depthwise
-convolution naturally enforces this by applying a separate filter to each input
-channel. In this implementation, the *same* Gaussian kernel is replicated for
-each channel, ensuring that all channels are blurred consistently. This approach
-prevents unnatural color mixing ("bleeding") between channels and is both
-conceptually sound and computationally efficient.
+Implements a Gaussian filter for smoothing images and reducing high-frequency
+noise. The filtering is achieved by convolving the input with a kernel derived
+from the 2D Gaussian function G(x,y) = (1/(2*pi*sigma^2)) * exp(-(x^2+y^2) /
+(2*sigma^2)). The kernel is applied via depthwise convolution so each channel
+is filtered independently with the same kernel, preventing color bleeding.
 
 References:
-    - Gonzalez, R. C., & Woods, R. E. "Digital Image Processing". This text
-      provides a comprehensive background on Gaussian filtering and its
-      mathematical properties in the context of image processing.
-
-    - Canny, J. "A Computational Approach to Edge Detection". This seminal
-      paper demonstrates the use of Gaussian smoothing as a critical first
-      step to reduce noise before computing image gradients for edge detection.
+    - Gonzalez, R. C., & Woods, R. E. "Digital Image Processing".
+    - Canny, J. "A Computational Approach to Edge Detection".
       https://doi.org/10.1109/TPAMI.1986.4767851
 """
 
@@ -59,44 +28,47 @@ from ..utils.tensors import depthwise_gaussian_kernel
 
 @keras.saving.register_keras_serializable()
 class GaussianFilter(keras.layers.Layer):
-    """Applies Gaussian blur filter to input images.
+    """
+    Apply Gaussian blur filter to input images via depthwise convolution.
 
-    This layer creates a depthwise convolution with Gaussian kernel to perform
-    filtering on images. Each channel is processed independently using the same
-    Gaussian filter.
+    Creates a depthwise convolution with Gaussian kernel weights derived from
+    G(x,y) = (1/(2*pi*sigma^2)) * exp(-(x^2+y^2)/(2*sigma^2)), where sigma
+    controls the blur spread. Each channel is processed independently using the
+    same normalized kernel to preserve brightness and prevent channel mixing.
 
-    Args:
-        kernel_size: Tuple of two integers specifying the height and width of the
-            2D Gaussian kernel.
-        strides: Tuple/list of 2 integers specifying the strides of the convolution
-            along height and width.
-        sigma: Standard deviation of the Gaussian distribution. If a single value,
-            the same sigma is used for both dimensions. If a tuple, (sigma_height,
-            sigma_width) are used. If -1 or None, sigma is calculated based on
-            kernel size.
-        padding: String, either "valid" or "same" (case-insensitive).
-        data_format: String, either "channels_last" or "channels_first".
-        trainable: Boolean, if True allow the weights to change, otherwise static
-        **kwargs: Additional keyword arguments passed to the Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape:
-        - If data_format="channels_last": (batch_size, height, width, channels)
-        - If data_format="channels_first": (batch_size, channels, height, width)
+    .. code-block:: text
 
-    Output shape:
-        4D tensor with shape:
-        - If data_format="channels_last":
-            (batch_size, new_height, new_width, channels)
-        - If data_format="channels_first":
-            (batch_size, channels, new_height, new_width)
+        ┌──────────────────────────────────────────┐
+        │  Input [batch, H, W, C]                  │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Depthwise Conv2D with Gaussian kernel   │
+        │  (same kernel replicated per channel)    │
+        │  kernel_size, strides, padding           │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Output [batch, H', W', C]               │
+        └──────────────────────────────────────────┘
 
-    Example:
-        >>> x = np.random.rand(4, 32, 32, 3)  # Input images
-        >>> layer = GaussianFilter(kernel_size=(5, 5), sigma=1.5)
-        >>> y = layer(x)
-        >>> print(y.shape)
-        (4, 32, 32, 3)
+    :param kernel_size: Height and width of the 2D Gaussian kernel.
+    :type kernel_size: Tuple[int, int]
+    :param strides: Strides of the convolution along height and width.
+    :type strides: Union[Tuple[int, int], List[int]]
+    :param sigma: Standard deviation of the Gaussian distribution. If a single
+        value, same sigma for both dimensions. If a tuple, (sigma_h, sigma_w).
+        If -1 or None, sigma is calculated from kernel size.
+    :type sigma: Union[float, Tuple[float, float]]
+    :param padding: Either "valid" or "same" (case-insensitive).
+    :type padding: str
+    :param data_format: Either "channels_last" or "channels_first".
+    :type data_format: Optional[str]
+    :param trainable: If True allow the weights to change, otherwise static.
+    :type trainable: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -152,7 +124,11 @@ class GaussianFilter(keras.layers.Layer):
         )
 
     def build(self, input_shape):
-        """Build the Gaussian kernel weights based on input shape."""
+        """Build the Gaussian kernel weights based on input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if self.built:
             return
 
@@ -191,14 +167,12 @@ class GaussianFilter(keras.layers.Layer):
     def call(self, inputs, training=None):
         """Apply the Gaussian filter to the input tensor.
 
-        Args:
-            inputs: Input tensor of shape:
-                - If data_format="channels_last": (batch_size, height, width, channels)
-                - If data_format="channels_first": (batch_size, channels, height, width)
-            training: Boolean indicating whether in training mode (unused).
-
-        Returns:
-            Filtered tensor with the same shape as the input tensor.
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode (unused).
+        :type training: Optional[bool]
+        :return: Filtered tensor with the same shape as the input.
+        :rtype: keras.KerasTensor
         """
         # Apply depthwise convolution
         outputs = ops.nn.depthwise_conv(
@@ -214,8 +188,8 @@ class GaussianFilter(keras.layers.Layer):
     def get_config(self):
         """Return the configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

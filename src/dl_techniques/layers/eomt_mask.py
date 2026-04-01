@@ -3,59 +3,20 @@ Generate instance segmentation predictions from transformer query tokens.
 
 This layer implements the prediction heads for a query-based segmentation
 architecture, translating learned object queries into class labels and spatial
-masks. It is designed as the final component in models like the Encoder-only
-Mask Transformer (EoMT), bridging the gap between the transformer's abstract
-feature representations and the concrete, pixel-level segmentation task.
+masks. Each query represents a hypothesis for a single object instance, and
+the module decouples classification ("what") and localization ("where") into
+two parallel prediction heads operating on the same query tokens.
 
-The core design philosophy is to decouple the tasks of classification ("what")
-and localization ("where") into two parallel prediction heads, both operating
-on the same set of input query tokens. Each query represents a hypothesis for
-a single object instance in the image.
-
-Architectural and Mathematical Foundations:
-The module takes two inputs: a set of N query tokens and a dense, pixel-level
-feature map from an image encoder (e.g., a Vision Transformer).
-
-1.  **Classification Head**: Each of the N query tokens, which is a vector
-    `q` in R^D, is passed through a simple linear layer. This produces a
-    logit vector for C classes, directly predicting the object category for
-    that query.
-        `class_logits = Linear(q)`
-
-2.  **Mask Head**: This head generates the spatial mask and is the more
-    intricate component. The process involves two steps:
-    a.  First, each query token `q` is transformed by a multi-layer
-        perceptron (MLP) into a specialized "mask embedding" `m` in R^D'.
-        This MLP allows the model to learn a representation of the query
-        that is optimized for the spatial localization task.
-    b.  Second, the final mask is produced by computing the similarity between
-        this single mask embedding `m` and the feature vector of *every*
-        pixel in the encoder's output feature map. This similarity is
-        calculated via a dot product. For a pixel feature map `P` of shape
-        (H, W, D'), the mask logit at position (i, j) is:
-        `mask_logit[i, j] = m @ P[i, j]^T`
-
-The intuition behind this operation is that the mask embedding `m` acts as a
-learned "template" or "filter" for a specific object instance. The dot
-product effectively "slides" this template across the entire image feature map,
-producing a high activation at spatial locations whose features are similar
-to the object's learned representation. This yields a per-query segmentation
-mask of shape (H, W), localizing the object instance in the image.
-
-This query-based, dual-head approach is foundational to many modern object
-detection and segmentation models, enabling end-to-end training without the
-need for hand-crafted components like anchor boxes or non-maximum suppression.
+The classification head uses a linear layer (with optional MLP) on query tokens
+to produce class logits: class_logits = Linear(q). The mask head transforms
+queries through an MLP into mask embeddings, then computes dot-product similarity
+with every pixel in the encoder's feature map: mask_logit[i,j] = m @ P[i,j]^T,
+producing per-query segmentation masks.
 
 References:
     - Carion et al. "End-to-End Object Detection with Transformers" (DETR).
-      The pioneering work that introduced the object query and prediction head
-      architecture for object detection.
       https://arxiv.org/abs/2005.12872
-
-    - Li et al. "Your ViT is Secretly a Segmentation Model". This work
-      adapts and applies query-based mechanisms specifically for segmentation
-      tasks with Vision Transformer backbones, providing the direct context
-      for this module.
+    - Li et al. "Your ViT is Secretly a Segmentation Model".
       https://arxiv.org/abs/2312.02113
 """
 
@@ -77,146 +38,100 @@ class EomtMask(keras.layers.Layer):
     """
     Configurable mask prediction module for Encoder-only Mask Transformer (EoMT).
 
-    This module processes query tokens and pixel-level features to generate both
-    class predictions and spatial mask predictions for instance segmentation,
-    with extensive configurability for architecture variations.
+    Processes query tokens and pixel-level features to generate both class
+    predictions and spatial mask predictions for instance segmentation. The class
+    head produces logits via cls_logits = ClassHead(norm(query_tokens)), while the
+    mask head generates embeddings via mask_emb = MaskMLP(norm(query_tokens)) and
+    computes mask logits as mask_logits = mask_emb @ pixel_features^T, optionally
+    scaled by a temperature parameter.
 
-    **Intent**: Provide highly configurable prediction heads that convert learned
-    query representations into segmentation outputs, supporting various architectural
-    choices and regularization strategies.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Query Tokens [batch, num_queries, embed_dim]
-           ↓
-    ┌─────────────────┬─────────────────┐
-    │   Class Head    │   Mask Head     │
-    │                 │                 │
-    │ Norm (optional) │ Norm (optional) │
-    │       ↓         │       ↓         │
-    │ MLP (optional)  │  MLP Network    │
-    │       ↓         │       ↓         │
-    │ Dense(classes)  │ Mask Embeddings │
-    │       ↓         │       ↓         │
-    │ Class Logits    │    Dot Product  │
-    └─────────────────┴─────────────────┘
-                              ↓
-         Pixel Features [batch, H, W, embed_dim]
-                              ↓
-                   Mask Logits [batch, queries, H, W]
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Class Prediction**: cls_logits = ClassHead(norm(query_tokens))
-    2. **Mask Embedding**: mask_emb = MaskMLP(norm(query_tokens))
-    3. **Mask Prediction**: mask_logits = mask_emb @ pixel_features^T
-    4. **Optional temperature scaling**: mask_logits = mask_logits / temperature
+        ┌────────────────────────────────────────────────────┐
+        │  Query Tokens [batch, num_queries, embed_dim]      │
+        └───────────────────┬────────────────────────────────┘
+                            ▼
+              ┌─────────────┴─────────────┐
+              ▼                           ▼
+        ┌───────────────┐         ┌───────────────┐
+        │  Class Head   │         │  Mask Head    │
+        │  ┌─────────┐  │         │  ┌─────────┐  │
+        │  │Norm(opt)│  │         │  │Norm(opt)│  │
+        │  └────┬────┘  │         │  └────┬────┘  │
+        │       ▼       │         │       ▼       │
+        │  ┌─────────┐  │         │  ┌─────────┐  │
+        │  │MLP(opt) │  │         │  │MLP Net  │  │
+        │  └────┬────┘  │         │  └────┬────┘  │
+        │       ▼       │         │       ▼       │
+        │  ┌─────────┐  │         │  ┌─────────┐  │
+        │  │Dense(C) │  │         │  │Mask Proj│  │
+        │  └────┬────┘  │         │  └────┬────┘  │
+        └───────┼───────┘         └───────┼───────┘
+                ▼                         ▼
+        Class Logits          Mask Embeddings
+        [B, Q, classes]       [B, Q, mask_dim]
+                                      │
+                                      ▼
+                              ┌───────────────┐
+                              │  Dot Product   │◀── Pixel Features
+                              │  m @ P^T       │    [B, H, W, D]
+                              └───────┬───────┘
+                                      ▼
+                              Mask Logits
+                              [B, Q, H, W]
 
-    Args:
-        num_classes: Integer, number of classes to predict. Must be positive.
-        hidden_dims: List of integers, hidden dimensions for mask MLP layers.
-            If None, defaults to [256, 256]. Empty list means direct projection.
-        mask_dim: Integer, final dimension of mask embeddings. Should typically
-            match pixel feature dimension. Defaults to 256.
-        class_mlp_dims: Optional list of integers, hidden dimensions for class MLP.
-            If provided, adds MLP layers before final classification.
-        use_class_norm: Boolean, whether to normalize query tokens before class head.
-            Defaults to False.
-        use_mask_norm: Boolean, whether to normalize query tokens before mask head.
-            Defaults to False.
-        normalization_type: String, type of normalization from factory.
-            Options: 'layer_norm', 'rms_norm', 'band_rms', etc. Defaults to 'layer_norm'.
-        normalization_args: Optional dict of arguments for normalization layers.
-        mlp_activation: String or callable, activation for MLP hidden layers.
-            Defaults to 'relu'.
-        mlp_dropout_rate: Float between 0 and 1, dropout rate for MLP layers.
-            Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in dense layers.
-            Defaults to True.
-        mask_temperature: Float, temperature scaling for mask logits.
-            Higher values produce softer masks. Defaults to 1.0.
-        learnable_temperature: Boolean, whether mask temperature is learnable.
-            Defaults to False.
-        class_activation: Optional string or callable, activation for class logits.
-            Common choices: None (logits), 'softmax', 'sigmoid'. Defaults to None.
-        mask_activation: Optional string or callable, activation for mask logits.
-            Common choices: None (logits), 'sigmoid'. Defaults to None.
-        kernel_initializer: Initializer for dense layer kernels.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for dense layer biases.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        kernel_constraint: Optional constraint for kernel weights.
-        bias_constraint: Optional constraint for bias weights.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        Tuple of two tensors:
-        - query_tokens: `(batch_size, num_queries, embed_dim)`
-        - pixel_features: `(batch_size, height, width, pixel_dim)`
-
-    Output shape:
-        Tuple of two tensors:
-        - class_predictions: `(batch_size, num_queries, num_classes)`
-        - mask_predictions: `(batch_size, num_queries, height, width)`
-
-    Attributes:
-        class_norm: Optional normalization layer for class head.
-        mask_norm: Optional normalization layer for mask head.
-        class_mlp: Optional MLP for class prediction.
-        class_head: Final dense layer for class prediction.
-        mask_mlp: MLP network for mask embedding generation.
-        mask_projection: Final projection for mask embeddings.
-        temperature: Temperature parameter for mask scaling.
-
-    Example:
-        ```python
-        # Basic usage
-        module = EomtMask(num_classes=80)
-
-        # With normalization and deeper MLPs
-        module = EomtMask(
-            num_classes=80,
-            hidden_dims=[512, 512, 256],
-            mask_dim=384,
-            use_class_norm=True,
-            use_mask_norm=True,
-            normalization_type='rms_norm',
-            mlp_dropout_rate=0.1
-        )
-
-        # With class MLP and temperature scaling
-        module = EomtMask(
-            num_classes=21,
-            class_mlp_dims=[256],
-            hidden_dims=[512, 256],
-            mask_temperature=0.5,
-            learnable_temperature=True,
-            mlp_activation='gelu'
-        )
-
-        # Minimal configuration (direct projections)
-        module = EomtMask(
-            num_classes=10,
-            hidden_dims=[],  # No hidden layers, direct projection
-            mask_dim=768,
-            use_bias=False
-        )
-
-        # With regularization and constraints
-        module = EomtMask(
-            num_classes=80,
-            hidden_dims=[256, 256],
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            kernel_constraint=keras.constraints.UnitNorm(axis=0)
-        )
-        ```
-
-    Note:
-        The mask_dim should typically match the dimension of pixel_features for
-        optimal dot product computation. Temperature scaling can help with
-        mask sharpness and training stability.
+    :param num_classes: Number of classes to predict. Must be positive.
+    :type num_classes: int
+    :param hidden_dims: Hidden dimensions for mask MLP layers. If None, defaults
+        to [256, 256]. Empty list means direct projection.
+    :type hidden_dims: Optional[List[int]]
+    :param mask_dim: Final dimension of mask embeddings. Should typically match
+        pixel feature dimension. Defaults to 256.
+    :type mask_dim: int
+    :param class_mlp_dims: Optional hidden dimensions for class MLP.
+    :type class_mlp_dims: Optional[List[int]]
+    :param use_class_norm: Whether to normalize query tokens before class head.
+        Defaults to False.
+    :type use_class_norm: bool
+    :param use_mask_norm: Whether to normalize query tokens before mask head.
+        Defaults to False.
+    :type use_mask_norm: bool
+    :param normalization_type: Type of normalization from factory. Defaults to
+        'layer_norm'.
+    :type normalization_type: str
+    :param normalization_args: Optional arguments for normalization layers.
+    :type normalization_args: Optional[Dict[str, Any]]
+    :param mlp_activation: Activation for MLP hidden layers. Defaults to 'relu'.
+    :type mlp_activation: Union[str, keras.layers.Activation]
+    :param mlp_dropout_rate: Dropout rate for MLP layers. Defaults to 0.0.
+    :type mlp_dropout_rate: float
+    :param use_bias: Whether to use bias in dense layers. Defaults to True.
+    :type use_bias: bool
+    :param mask_temperature: Temperature scaling for mask logits. Defaults to 1.0.
+    :type mask_temperature: float
+    :param learnable_temperature: Whether mask temperature is learnable.
+        Defaults to False.
+    :type learnable_temperature: bool
+    :param class_activation: Optional activation for class logits. Defaults to None.
+    :type class_activation: Optional[Union[str, keras.layers.Activation]]
+    :param mask_activation: Optional activation for mask logits. Defaults to None.
+    :type mask_activation: Optional[Union[str, keras.layers.Activation]]
+    :param kernel_initializer: Initializer for dense layer kernels. Defaults to
+        'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for dense layer biases. Defaults to 'zeros'.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kernel_constraint: Optional constraint for kernel weights.
+    :type kernel_constraint: Optional[constraints.Constraint]
+    :param bias_constraint: Optional constraint for bias weights.
+    :type bias_constraint: Optional[constraints.Constraint]
+    :param kwargs: Additional keyword arguments for Layer base class.
     """
 
     def __init__(
@@ -355,7 +270,15 @@ class EomtMask(keras.layers.Layer):
             dims: List[int],
             name_prefix: str
     ) -> Optional[keras.Sequential]:
-        """Build an MLP with specified dimensions."""
+        """Build an MLP with specified dimensions.
+
+        :param dims: List of hidden dimensions.
+        :type dims: List[int]
+        :param name_prefix: Name prefix for layers.
+        :type name_prefix: str
+        :return: Sequential MLP or None if dims is empty.
+        :rtype: Optional[keras.Sequential]
+        """
         if not dims:
             return None
 
@@ -387,7 +310,11 @@ class EomtMask(keras.layers.Layer):
         return keras.Sequential(layers_list, name=name_prefix)
 
     def build(self, input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]) -> None:
-        """Build the layer and all its sub-layers."""
+        """Build the layer and all its sub-layers.
+
+        :param input_shape: Tuple of (query_shape, pixel_shape).
+        :type input_shape: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
+        """
         query_shape, pixel_shape = input_shape
 
         # Build normalization layers if present
@@ -425,12 +352,13 @@ class EomtMask(keras.layers.Layer):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Forward pass through the mask module.
 
-        Args:
-            inputs: Either tuple of (query_tokens, pixel_features) or dict with these keys
-            training: Boolean indicating training mode
-
-        Returns:
-            Tuple of (class_predictions, mask_predictions)
+        :param inputs: Either tuple of (query_tokens, pixel_features) or dict
+            with those keys.
+        :type inputs: Union[Tuple[keras.KerasTensor, keras.KerasTensor], Dict[str, keras.KerasTensor]]
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (class_predictions, mask_predictions).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Handle both tuple and dict inputs
         if isinstance(inputs, dict):
@@ -499,7 +427,13 @@ class EomtMask(keras.layers.Layer):
             input_shape: Union[Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]],
             Dict[str, Tuple[Optional[int], ...]]]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Compute output shapes."""
+        """Compute output shapes.
+
+        :param input_shape: Input shapes as tuple or dict.
+        :type input_shape: Union[Tuple, Dict]
+        :return: Tuple of (class_shape, mask_shape).
+        :rtype: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
+        """
         if isinstance(input_shape, dict):
             query_shape = input_shape['query_tokens']
             pixel_shape = input_shape['pixel_features']
@@ -516,7 +450,11 @@ class EomtMask(keras.layers.Layer):
         return class_shape, mask_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,

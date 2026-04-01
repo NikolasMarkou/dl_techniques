@@ -7,68 +7,65 @@ from typing import Optional, Tuple, Dict, Any
 @keras.saving.register_keras_serializable()
 class FFTLayer(keras.layers.Layer):
     """
-    Applies 2D Fast Fourier Transform and outputs concatenated real/imag parts.
+    Apply 2D Fast Fourier Transform and output concatenated real/imaginary parts.
 
-    This layer transforms real-valued spatial domain features into the frequency
-    domain. To interface with standard real-valued Keras layers (like Conv2D),
-    it outputs a single real-valued tensor where the real and imaginary components
-    of the FFT are concatenated along the channel axis.
+    Transforms real-valued spatial domain features into the frequency domain via
+    2D FFT, producing a single real-valued tensor where the real and imaginary
+    components are concatenated along the channel axis. The output has shape
+    [batch, H, W, 2*C] with float32 dtype. This is a core component of the
+    Fourier-based token mixer in PW-FNet.
 
-    **Intent**: To provide a modular, serializable Keras layer for frequency domain
-    analysis that is compatible with standard convolutional pipelines. This is a
-    core component of the Fourier-based token mixer in PW-FNet.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C])
-           ↓
-    Transpose: [batch, C, H, W]
-           ↓
-    Create (real, imag) tuple where imag is zeros
-           ↓
-    FFT2D along spatial dims → (fft_real, fft_imag)
-           ↓
-    Transpose both back: [batch, H, W, C]
-           ↓
-    Concatenate: [fft_real, fft_imag] along channels
-           ↓
-    Output(float32, shape=[batch, H, W, 2*C])
-    ```
+    .. code-block:: text
 
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, channels)`.
+        ┌───────────────────────────────────────┐
+        │  Input [batch, H, W, C]               │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  Transpose: [batch, C, H, W]          │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  Create (real, zeros) complex tuple    │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  FFT2D along spatial dims              │
+        │  ──▶ (fft_real, fft_imag)             │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  Transpose both: [batch, H, W, C]     │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  Concatenate [real, imag] along ch.    │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  Output [batch, H, W, 2*C] (float32)  │
+        └───────────────────────────────────────┘
 
-    **Output shape**:
-        4D tensor: `(batch_size, height, width, 2 * channels)` with `float32`
-        dtype, representing concatenated real and imaginary parts.
-
-    **Example**:
-        >>> fft_layer = FFTLayer()
-        >>> spatial_features = ops.random.normal((2, 32, 32, 64))
-        >>> freq_features = fft_layer(spatial_features)
-        >>> print(freq_features.shape, freq_features.dtype)
-        (2, 32, 32, 128) float32
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """
-        Initialize the FFT layer.
+        """Initialize the FFT layer.
 
-        Args:
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param kwargs: Additional keyword arguments for the Layer base class.
         """
         super().__init__(**kwargs)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply 2D FFT to input tensor.
+        """Apply 2D FFT to input tensor.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
-
-        Returns:
-            Real tensor of shape (batch, height, width, 2*channels)
+        :param inputs: Input tensor of shape (batch, height, width, channels).
+        :type inputs: keras.KerasTensor
+        :return: Real tensor of shape (batch, height, width, 2*channels)
             representing concatenated real and imaginary frequency components.
+        :rtype: keras.KerasTensor
         """
         # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
         x_permuted = keras.ops.transpose(inputs, [0, 3, 1, 2])
@@ -94,14 +91,12 @@ class FFTLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (channels are doubled).
+        """Compute output shape (channels are doubled).
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         batch, height, width, channels = input_shape
         if channels is not None:
@@ -111,11 +106,10 @@ class FFTLayer(keras.layers.Layer):
         return batch, height, width, output_channels
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         return config
@@ -125,66 +119,62 @@ class FFTLayer(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class IFFTLayer(keras.layers.Layer):
     """
-    Applies 2D Inverse FFT to concatenated real/imag parts.
+    Apply 2D Inverse FFT to concatenated real/imaginary parts.
 
-    This layer transforms frequency domain features (represented as a real tensor
-    with concatenated real and imaginary parts) back into the spatial domain.
-    It performs the inverse operation of `FFTLayer`.
+    Transforms frequency domain features (represented as a real tensor with
+    concatenated real and imaginary parts) back into the spatial domain. It
+    performs the inverse operation of ``FFTLayer``, taking input of shape
+    [batch, H, W, 2*C] and producing output of shape [batch, H, W, C].
 
-    **Intent**: To reconstruct spatial features from the frequency domain after
-    processing, completing the Fourier-based token mixer block in PW-FNet.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(float32, shape=[batch, H, W, 2*C])
-           ↓
-    Split into (real, imag) parts along channels
-           ↓
-    Transpose both: [batch, C, H, W]
-           ↓
-    IFFT2D on (real, imag) tuple → (ifft_real, ifft_imag)
-           ↓
-    Take ifft_real and transpose back: [batch, H, W, C]
-           ↓
-    Output(float32, shape=[batch, H, W, C])
-    ```
+    .. code-block:: text
 
-    **Input shape**:
-        4D tensor: `(batch_size, height, width, 2 * channels)` with `float32`
-        dtype. Channel dimension must be even.
+        ┌─────────────────────────────────────────┐
+        │  Input [batch, H, W, 2*C] (float32)     │
+        └──────────────────┬──────────────────────┘
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Split into (real, imag) along channels  │
+        └──────────────────┬──────────────────────┘
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Transpose both: [batch, C, H, W]        │
+        └──────────────────┬──────────────────────┘
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  IFFT2D on (real, imag) tuple            │
+        │  ──▶ (ifft_real, ifft_imag)             │
+        └──────────────────┬──────────────────────┘
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Take ifft_real, transpose back          │
+        │  [batch, H, W, C]                        │
+        └──────────────────┬──────────────────────┘
+                           ▼
+        ┌─────────────────────────────────────────┐
+        │  Output [batch, H, W, C] (float32)       │
+        └─────────────────────────────────────────┘
 
-    **Output shape**:
-        4D tensor: `(batch_size, height, width, channels)` with `float32` dtype.
-
-    **Example**:
-        >>> # Create layers
-        >>> fft_layer = FFTLayer()
-        >>> ifft_layer = IFFTLayer()
-        >>> # Round-trip transformation
-        >>> spatial_features = ops.random.normal((2, 32, 32, 64))
-        >>> freq_features = fft_layer(spatial_features) # shape (2,32,32,128)
-        >>> reconstructed = ifft_layer(freq_features)   # shape (2,32,32,64)
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """
-        Initialize the IFFT layer.
+        """Initialize the IFFT layer.
 
-        Args:
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param kwargs: Additional keyword arguments for the Layer base class.
         """
         super().__init__(**kwargs)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Apply 2D IFFT to input tensor and extract real part.
+        """Apply 2D IFFT to input tensor and extract real part.
 
-        Args:
-            inputs: Real tensor with concatenated real/imag parts, shape
-                    (batch, height, width, 2*channels).
-
-        Returns:
-            Real tensor of shape (batch, height, width, channels) in spatial domain.
+        :param inputs: Real tensor with concatenated real/imag parts, shape
+            (batch, height, width, 2*channels).
+        :type inputs: keras.KerasTensor
+        :return: Real tensor of shape (batch, height, width, channels) in
+            spatial domain.
+        :rtype: keras.KerasTensor
         """
         # Input is a concatenation of real and imaginary parts
         real_part, imag_part = keras.ops.split(inputs, 2, axis=-1)
@@ -205,14 +195,12 @@ class IFFTLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape (channels are halved).
+        """Compute output shape (channels are halved).
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         batch, height, width, channels = input_shape
         if channels is not None:
@@ -226,11 +214,10 @@ class IFFTLayer(keras.layers.Layer):
         return batch, height, width, output_channels
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         return config

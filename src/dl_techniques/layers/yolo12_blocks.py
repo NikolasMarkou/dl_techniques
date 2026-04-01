@@ -53,55 +53,50 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class ConvBlock(keras.layers.Layer):
-    """Standard Convolution Block with BatchNorm and SiLU activation.
+    """
+    Standard YOLOv12 convolution block: Conv2D, BatchNorm, SiLU.
 
-    This block implements the standard pattern used throughout YOLOv12:
-    Conv2D -> BatchNormalization -> SiLU Activation
+    This block implements the base convolutional pattern used throughout YOLOv12,
+    combining a 2D convolution with batch normalization and optional SiLU activation.
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
-        kernel_size: Integer, size of the convolution kernel. Must be positive.
-            Defaults to 3.
-        strides: Integer, stride of the convolution. Must be positive.
-            Defaults to 1.
-        padding: String, padding mode ('same' or 'valid'). Defaults to 'same'.
-        groups: Integer, number of groups for grouped convolution. Must be positive.
-            Defaults to 1.
-        activation: Boolean, whether to apply SiLU activation. Defaults to True.
-        use_bias: Boolean, whether to use bias in convolution. Defaults to False.
-        kernel_initializer: String or Initializer, weight initializer.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional Regularizer, weight regularizer. Defaults to None.
-        **kwargs: Additional keyword arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
+    .. code-block:: text
 
-    Output shape:
-        4D tensor with shape: (batch_size, new_height, new_width, filters)
-        where new_height and new_width depend on strides and padding.
+        ┌─────────────────────────────────┐
+        │  Input [B, H, W, C]            │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Conv2D(filters, kernel, stride)│
+        │  BatchNormalization             │
+        │  Optional SiLU Activation       │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Output [B, H', W', filters]   │
+        └─────────────────────────────────┘
 
-    Raises:
-        ValueError: If filters, kernel_size, strides, or groups are not positive.
-        ValueError: If padding is not 'same' or 'valid'.
-
-    Example:
-        ```python
-        # Basic convolution block
-        conv = ConvBlock(filters=64)
-
-        # Custom configuration
-        conv = ConvBlock(
-            filters=128,
-            kernel_size=3,
-            strides=2,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = ConvBlock(filters=32)(inputs)
-        ```
+    :param filters: Number of output filters. Must be positive.
+    :type filters: int
+    :param kernel_size: Size of the convolution kernel. Defaults to 3.
+    :type kernel_size: int
+    :param strides: Stride of the convolution. Defaults to 1.
+    :type strides: int
+    :param padding: Padding mode (``'same'`` or ``'valid'``). Defaults to ``'same'``.
+    :type padding: str
+    :param groups: Number of groups for grouped convolution. Defaults to 1.
+    :type groups: int
+    :param activation: Whether to apply SiLU activation. Defaults to True.
+    :type activation: bool
+    :param use_bias: Whether to use bias in convolution. Defaults to False.
+    :type use_bias: bool
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional weight regularizer.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -168,8 +163,8 @@ class ConvBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all its sub-layers.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+            :param input_shape: Shape tuple of the input tensor.
+            :type input_shape: tuple
         """
         # Build sub-layers in computational order for robust serialization
         self.conv.build(input_shape)
@@ -191,12 +186,13 @@ class ConvBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the convolution block.
 
-        Args:
-            inputs: Input tensor.
-            training: Boolean, whether the layer should behave in training mode.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether the layer should behave in training mode.
+            :type training: bool or None
 
-        Returns:
-            Output tensor after convolution, batch normalization, and optional activation.
+            :return: Output tensor after convolution, batch normalization, and optional activation.
+            :rtype: keras.KerasTensor
         """
         x = self.conv(inputs)
         x = self.bn(x, training=training)
@@ -207,19 +203,19 @@ class ConvBlock(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape tuple of input.
+            :param input_shape: Shape tuple of input.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple.
+            :return: Output shape tuple.
+            :rtype: tuple
         """
         return self.conv.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -241,49 +237,49 @@ class ConvBlock(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class AreaAttention(keras.layers.Layer):
-    """Area Attention mechanism for YOLOv12.
+    """
+    Area Attention mechanism for YOLOv12.
 
-    This implements the area-attention mechanism that allows the model
-    to focus on different spatial regions with varying granularities.
+    This layer implements multi-head self-attention over 2D feature maps that can
+    operate globally (``area=1``) or on localized spatial regions, enabling both
+    local and global context modeling. Includes positional encoding via depthwise
+    convolution and an output projection.
 
-    The attention can operate globally (area=1) or on localized areas,
-    enabling both local and global context modeling.
+    **Architecture Overview:**
 
-    Args:
-        dim: Integer, number of feature dimensions. Must be positive and
-            divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive.
-            Defaults to 8.
-        area: Integer, area size for attention grouping (1 for global attention).
-            Must be positive. Defaults to 1.
-        kernel_initializer: String or Initializer, weight initializer.
-            Defaults to 'he_normal'.
-        **kwargs: Additional keyword arguments for Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
+        ┌───────────────────────────────────┐
+        │  Input [B, H, W, C]              │
+        └──────────────┬────────────────────┘
+                       ▼
+        ┌───────────────────────────────────┐
+        │  QK = ConvBlock 1x1 → [B,H,W,2D]│
+        │  V  = ConvBlock 1x1 → [B,H,W,D] │
+        │  PE = DW ConvBlock 5x5 on V      │
+        └──────────────┬────────────────────┘
+                       ▼
+        ┌───────────────────────────────────┐
+        │  Reshape to [B, areas, seq, D]   │
+        │  Multi-head scaled dot-product   │
+        │  attention within each area      │
+        └──────────────┬────────────────────┘
+                       ▼
+        ┌───────────────────────────────────┐
+        │  Add PE + projection ConvBlock   │
+        │  Output [B, H, W, dim]           │
+        └───────────────────────────────────┘
 
-    Output shape:
-        4D tensor with shape: (batch_size, height, width, dim)
-
-    Raises:
-        ValueError: If dim is not positive.
-        ValueError: If num_heads is not positive.
-        ValueError: If dim is not divisible by num_heads.
-        ValueError: If area is not positive.
-
-    Example:
-        ```python
-        # Global attention
-        attn = AreaAttention(dim=256, num_heads=8, area=1)
-
-        # Local area attention
-        attn = AreaAttention(dim=256, num_heads=8, area=4)
-
-        # In a model
-        inputs = keras.Input(shape=(32, 32, 256))
-        outputs = AreaAttention(dim=256)(inputs)
-        ```
+    :param dim: Number of feature dimensions. Must be divisible by ``num_heads``.
+    :type dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param area: Area size for attention grouping (1 for global). Defaults to 1.
+    :type area: int
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -355,8 +351,8 @@ class AreaAttention(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the attention components and all sub-layers.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: tuple
         """
         # Build sub-layers in computational order for robust serialization
         self.qk_conv.build(input_shape)
@@ -378,12 +374,13 @@ class AreaAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through area attention.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean, whether in training mode.
+            :param inputs: Input tensor of shape (batch_size, height, width, channels).
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Output tensor with attention applied.
+            :return: Output tensor with attention applied.
+            :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(inputs)[0]
         height = ops.shape(inputs)[1]
@@ -439,13 +436,15 @@ class AreaAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Compute scaled dot-product attention.
 
-        Args:
-            q: Query tensor.
-            k: Key tensor.
-            v: Value tensor.
+            :param q: Query tensor.
+            :type q: keras.KerasTensor
+            :param k: Key tensor.
+            :type k: keras.KerasTensor
+            :param v: Value tensor.
+            :type v: keras.KerasTensor
 
-        Returns:
-            Attention output tensor.
+            :return: Attention output tensor.
+            :rtype: keras.KerasTensor
         """
         # Reshape for multi-head attention
         batch_size = ops.shape(q)[0]
@@ -478,11 +477,11 @@ class AreaAttention(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape tuple of input.
+            :param input_shape: Shape tuple of input.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple.
+            :return: Output shape tuple.
+            :rtype: tuple
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.dim
@@ -491,8 +490,8 @@ class AreaAttention(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -509,49 +508,48 @@ class AreaAttention(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class AttentionBlock(keras.layers.Layer):
-    """Attention Block with Area Attention and MLP.
+    """
+    Transformer-style block with Area Attention and MLP for YOLOv12.
 
-    This block combines area attention with a feed-forward network
-    using residual connections, following the transformer architecture pattern.
+    Combines area attention with a two-layer feed-forward network (1x1
+    convolutions), both wrapped in residual connections. This allows the
+    model to refine features through attention and non-linear transformation.
 
-    Args:
-        dim: Integer, number of feature dimensions. Must be positive.
-        num_heads: Integer, number of attention heads. Must be positive.
-            Defaults to 8.
-        mlp_ratio: Float, expansion ratio for MLP hidden dimension. Must be positive.
-            Defaults to 1.2.
-        area: Integer, area size for attention grouping. Must be positive.
-            Defaults to 1.
-        kernel_initializer: String or Initializer, weight initializer.
-            Defaults to 'he_normal'.
-        **kwargs: Additional keyword arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
+    .. code-block:: text
 
-    Output shape:
-        4D tensor with shape: (batch_size, height, width, dim)
+        ┌────────────────────────────────┐
+        │  Input [B, H, W, C]           │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  AreaAttention + Residual      │
+        │  x = input + attn(input)       │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  MLP (Conv1x1 expand + shrink) │
+        │  + Residual                    │
+        │  x = x + mlp2(mlp1(x))        │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  Output [B, H, W, dim]        │
+        └────────────────────────────────┘
 
-    Raises:
-        ValueError: If dim, num_heads, mlp_ratio, or area are not positive.
-
-    Example:
-        ```python
-        # Basic attention block
-        attn_block = AttentionBlock(dim=256)
-
-        # Custom configuration
-        attn_block = AttentionBlock(
-            dim=512,
-            num_heads=16,
-            mlp_ratio=2.0,
-            area=4
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(32, 32, 256))
-        outputs = AttentionBlock(dim=256)(inputs)
-        ```
+    :param dim: Number of feature dimensions. Must be positive.
+    :type dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param mlp_ratio: Expansion ratio for MLP hidden dimension. Defaults to 1.2.
+    :type mlp_ratio: float
+    :param area: Area size for attention grouping. Defaults to 1.
+    :type area: int
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -612,8 +610,8 @@ class AttentionBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the attention block components and all sub-layers.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: tuple
         """
         # Build sub-layers in computational order for robust serialization
         self.attn.build(input_shape)
@@ -633,12 +631,13 @@ class AttentionBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through attention block.
 
-        Args:
-            inputs: Input tensor.
-            training: Boolean, whether in training mode.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Output tensor after attention and MLP with residual connections.
+            :return: Output tensor after attention and MLP with residual connections.
+            :rtype: keras.KerasTensor
         """
         # Attention with residual connection
         attn_out = self.attn(inputs, training=training)
@@ -654,11 +653,11 @@ class AttentionBlock(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape tuple of input.
+            :param input_shape: Shape tuple of input.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple.
+            :return: Output shape tuple.
+            :rtype: tuple
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.dim
@@ -667,8 +666,8 @@ class AttentionBlock(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -686,44 +685,42 @@ class AttentionBlock(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class Bottleneck(keras.layers.Layer):
-    """Standard Bottleneck block with optional residual connection.
+    """
+    Standard bottleneck block with optional residual connection for YOLOv12.
 
-    A bottleneck block consists of two 3x3 convolutions with an optional
-    shortcut connection. This is a fundamental building block for deep
-    residual networks.
+    Two sequential 3x3 ConvBlock layers with an optional shortcut connection
+    that adds the input to the output when channels match.
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
-        shortcut: Boolean, whether to use residual connection. Defaults to True.
-        kernel_initializer: String or Initializer, weight initializer.
-            Defaults to 'he_normal'.
-        **kwargs: Additional keyword arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
+    .. code-block:: text
 
-    Output shape:
-        4D tensor with shape: (batch_size, height, width, filters)
+        ┌──────────────────────────────┐
+        │  Input [B, H, W, C]         │
+        └──────┬───────────────┬───────┘
+               ▼               │ (shortcut if C=filters)
+        ┌──────────────┐       │
+        │  ConvBlock3x3│       │
+        ├──────────────┤       │
+        │  ConvBlock3x3│       │
+        └──────┬───────┘       │
+               ▼               ▼
+        ┌──────────────────────────────┐
+        │  Add (if shortcut=True)      │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Output [B, H, W, filters]  │
+        └──────────────────────────────┘
 
-    Raises:
-        ValueError: If filters is not positive.
-
-    Note:
-        The shortcut connection is only applied when shortcut=True and the
-        input channels match the output filters.
-
-    Example:
-        ```python
-        # Basic bottleneck
-        bottleneck = Bottleneck(filters=64)
-
-        # Without residual connection
-        bottleneck = Bottleneck(filters=64, shortcut=False)
-
-        # In a model
-        inputs = keras.Input(shape=(32, 32, 64))
-        outputs = Bottleneck(filters=64)(inputs)
-        ```
+    :param filters: Number of output filters. Must be positive.
+    :type filters: int
+    :param shortcut: Whether to use residual connection. Defaults to True.
+    :type shortcut: bool
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -763,8 +760,8 @@ class Bottleneck(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the bottleneck components and all sub-layers.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: tuple
         """
         # Build sub-layers in computational order for robust serialization
         self.cv1.build(input_shape)
@@ -783,12 +780,13 @@ class Bottleneck(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through bottleneck.
 
-        Args:
-            inputs: Input tensor.
-            training: Boolean, whether in training mode.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Output tensor with optional residual connection.
+            :return: Output tensor with optional residual connection.
+            :rtype: keras.KerasTensor
         """
         x = self.cv1(inputs, training=training)
         x = self.cv2(x, training=training)
@@ -801,11 +799,11 @@ class Bottleneck(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape tuple of input.
+            :param input_shape: Shape tuple of input.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple.
+            :return: Output shape tuple.
+            :rtype: tuple
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.filters
@@ -814,8 +812,8 @@ class Bottleneck(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -831,45 +829,47 @@ class Bottleneck(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class C3k2Block(keras.layers.Layer):
-    """CSP-like block with 2 convolutions and Bottleneck layers.
+    """
+    CSP-like block with dual paths and Bottleneck layers for YOLOv12.
 
-    This block implements a Cross-Stage Partial (CSP) connection pattern
-    that splits the input into two paths. One path is processed through
-    a series of bottleneck layers, while the other remains unchanged.
-    The paths are then concatenated and processed through a final convolution.
+    Splits the input into two paths via 1x1 convolutions. One path is
+    processed through ``n`` Bottleneck layers, while the other remains
+    unchanged. Both paths are concatenated and fused through a final 1x1
+    convolution.
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
-        n: Integer, number of bottleneck layers. Must be non-negative.
-            Defaults to 1.
-        shortcut: Boolean, whether to use shortcuts in bottlenecks.
-            Defaults to True.
-        kernel_initializer: String or Initializer, weight initializer.
-            Defaults to 'he_normal'.
-        **kwargs: Additional keyword arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
+    .. code-block:: text
 
-    Output shape:
-        4D tensor with shape: (batch_size, height, width, filters)
+        ┌──────────────────────────────────┐
+        │  Input [B, H, W, C]             │
+        └──────┬───────────────┬───────────┘
+               ▼               ▼
+        ┌────────────┐  ┌────────────┐
+        │  cv1 (1x1) │  │  cv2 (1x1) │
+        ├────────────┤  └──────┬─────┘
+        │  Bottleneck│         │
+        │  x n       │         │
+        └──────┬─────┘         │
+               ▼               ▼
+        ┌──────────────────────────────────┐
+        │  Concatenate along channels      │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  cv3 (1x1) → Output [B,H,W,F]  │
+        └──────────────────────────────────┘
 
-    Raises:
-        ValueError: If filters is not positive.
-        ValueError: If n is negative.
-
-    Example:
-        ```python
-        # Basic C3k2 block
-        c3k2 = C3k2Block(filters=128)
-
-        # Multiple bottlenecks without shortcuts
-        c3k2 = C3k2Block(filters=256, n=3, shortcut=False)
-
-        # In a model
-        inputs = keras.Input(shape=(32, 32, 128))
-        outputs = C3k2Block(filters=256)(inputs)
-        ```
+    :param filters: Number of output filters. Must be positive.
+    :type filters: int
+    :param n: Number of bottleneck layers. Must be non-negative. Defaults to 1.
+    :type n: int
+    :param shortcut: Whether to use shortcuts in bottlenecks. Defaults to True.
+    :type shortcut: bool
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -931,8 +931,8 @@ class C3k2Block(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the C3k2 block components and all sub-layers.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: tuple
         """
         # Build sub-layers in computational order for robust serialization
         self.cv1.build(input_shape)
@@ -963,12 +963,13 @@ class C3k2Block(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through C3k2 block.
 
-        Args:
-            inputs: Input tensor.
-            training: Boolean, whether in training mode.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Output tensor after CSP processing.
+            :return: Output tensor after CSP processing.
+            :rtype: keras.KerasTensor
         """
         y1 = self.cv1(inputs, training=training)
         y2 = self.cv2(inputs, training=training)
@@ -984,11 +985,11 @@ class C3k2Block(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape tuple of input.
+            :param input_shape: Shape tuple of input.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple.
+            :return: Output shape tuple.
+            :rtype: tuple
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.filters
@@ -997,8 +998,8 @@ class C3k2Block(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -1015,47 +1016,47 @@ class C3k2Block(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class A2C2fBlock(keras.layers.Layer):
-    """Attention-enhanced R-ELAN block with progressive feature extraction.
+    """
+    Attention-enhanced ELAN block with progressive feature extraction for YOLOv12.
 
-    This block processes input through a series of attention block pairs,
-    progressively concatenating the output of each stage. This creates a
-    rich feature hierarchy inspired by ELAN (Efficient Layer Aggregation Network)
-    principles, allowing the network to learn complex representations by
-    combining features from different levels of abstraction.
+    Processes input through a 1x1 convolution, then through ``n`` pairs of
+    AttentionBlocks, progressively concatenating outputs from each stage to
+    build a rich feature hierarchy. A final 1x1 convolution fuses all features.
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
-        n: Integer, number of attention block pairs. Must be non-negative.
-            Defaults to 1.
-        area: Integer, area size for attention mechanism. Must be positive.
-            Defaults to 1.
-        kernel_initializer: String or Initializer, weight initializer.
-            Defaults to 'he_normal'.
-        **kwargs: Additional keyword arguments for Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
+    .. code-block:: text
 
-    Output shape:
-        4D tensor with shape: (batch_size, height, width, filters)
+        ┌──────────────────────────────────┐
+        │  Input [B, H, W, C]             │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  cv1 (1x1) → y0 [B,H,W,F/2]   │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  AttentionBlock pair 1 → y1     │
+        │  AttentionBlock pair 2 → y2     │
+        │  ...                             │
+        │  AttentionBlock pair n → yn     │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Concat [y0, y1, ..., yn]       │
+        │  cv2 (1x1) → Output [B,H,W,F]  │
+        └──────────────────────────────────┘
 
-    Raises:
-        ValueError: If filters is not positive.
-        ValueError: If n is negative.
-        ValueError: If area is not positive.
-
-    Example:
-        ```python
-        # Basic A2C2f block
-        a2c2f = A2C2fBlock(filters=256)
-
-        # Multiple attention pairs with local attention
-        a2c2f = A2C2fBlock(filters=512, n=2, area=4)
-
-        # In a model
-        inputs = keras.Input(shape=(32, 32, 256))
-        outputs = A2C2fBlock(filters=512)(inputs)
-        ```
+    :param filters: Number of output filters. Must be positive.
+    :type filters: int
+    :param n: Number of attention block pairs. Must be non-negative. Defaults to 1.
+    :type n: int
+    :param area: Area size for attention mechanism. Defaults to 1.
+    :type area: int
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -1124,8 +1125,8 @@ class A2C2fBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the A2C2f block components and all sub-layers.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: tuple
         """
         # Build sub-layers in computational order for robust serialization
         self.cv1.build(input_shape)
@@ -1161,12 +1162,13 @@ class A2C2fBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through A2C2f block.
 
-        Args:
-            inputs: Input tensor.
-            training: Boolean, whether in training mode.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Output tensor after progressive feature extraction and fusion.
+            :return: Output tensor after progressive feature extraction and fusion.
+            :rtype: keras.KerasTensor
         """
         y = self.cv1(inputs, training=training)
 
@@ -1186,11 +1188,11 @@ class A2C2fBlock(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
-        Args:
-            input_shape: Shape tuple of input.
+            :param input_shape: Shape tuple of input.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple.
+            :return: Output shape tuple.
+            :rtype: tuple
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.filters
@@ -1199,8 +1201,8 @@ class A2C2fBlock(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+            :return: Dictionary containing the layer configuration.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({

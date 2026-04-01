@@ -66,59 +66,48 @@ from .squeeze_excitation import SqueezeExcitation
 
 @keras.saving.register_keras_serializable()
 class YOLOv12DetectionHead(keras.layers.Layer):
-    """YOLOv12 Detection Head with separate classification and regression branches.
+    """
+    YOLOv12 detection head with separate classification and regression branches.
 
-    This head processes multi-scale feature maps from the backbone/neck to produce
-    object detection predictions including bounding boxes and class probabilities.
-    Uses depthwise separable convolutions for efficiency.
+    Processes multi-scale feature maps (P3, P4, P5) to produce per-anchor
+    bounding box regression and class probability predictions. Uses depthwise
+    separable convolutions in the classification branch for efficiency.
 
-    Following modern Keras 3 patterns: creates sub-layers in __init__() and builds
-    them explicitly in build() for robust serialization.
+    **Architecture Overview:**
 
-    Args:
-        num_classes: Integer, number of object classes to detect. Must be positive. Defaults to 80.
-        reg_max: Integer, maximum value for DFL (Distribution Focal Loss) regression.
-            Must be positive. Defaults to 16.
-        bbox_channels: Optional list of integers specifying bbox branch channels for each scale.
-            If None, automatically calculated as max(16, reg_max * 4). Length must be 3.
-        cls_channels: Optional list of integers specifying classification branch channels
-            for each scale. If None, automatically calculated. Length must be 3.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional Regularizer, regularizer for kernel weights. Defaults to None.
-        **kwargs: Additional keyword arguments for Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        List of 3 tensors with shapes:
-        - [(batch_size, height/8, width/8, channels_p3),
-           (batch_size, height/16, width/16, channels_p4),
-           (batch_size, height/32, width/32, channels_p5)]
+        ┌───────────────────────────────────────┐
+        │  Inputs: [P3, P4, P5]                │
+        └──────┬────────┬────────┬──────────────┘
+               ▼        ▼        ▼
+        ┌────────┐ ┌────────┐ ┌────────┐
+        │Scale 0 │ │Scale 1 │ │Scale 2 │
+        │ ┌────┐ │ │ ┌────┐ │ │ ┌────┐ │
+        │ │bbox│ │ │ │bbox│ │ │ │bbox│ │
+        │ │cls │ │ │ │cls │ │ │ │cls │ │
+        │ └─┬──┘ │ │ └─┬──┘ │ │ └─┬──┘ │
+        └───┼────┘ └───┼────┘ └───┼────┘
+            ▼          ▼          ▼
+        ┌───────────────────────────────────────┐
+        │  Concatenate along anchor dimension   │
+        │  → [B, total_anchors, 4R + num_cls]  │
+        └───────────────────────────────────────┘
 
-    Output shape:
-        Tensor with shape (batch_size, total_anchors, 4*reg_max + num_classes)
-        where total_anchors is the sum of anchors from all three scales.
-
-    Raises:
-        ValueError: If num_classes or reg_max is not positive.
-        ValueError: If bbox_channels or cls_channels length is not 3.
-
-    Example:
-        ```python
-        # Basic usage with automatic channel calculation
-        head = YOLOv12DetectionHead(num_classes=80)
-
-        # Advanced usage with custom channels
-        head = YOLOv12DetectionHead(
-            num_classes=80,
-            reg_max=16,
-            bbox_channels=[32, 64, 96],
-            cls_channels=[64, 96, 128],
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        features = [p3_features, p4_features, p5_features]
-        detections = head(features)
-        ```
+    :param num_classes: Number of object classes. Defaults to 80.
+    :type num_classes: int
+    :param reg_max: Maximum value for DFL regression. Defaults to 16.
+    :type reg_max: int
+    :param bbox_channels: Bbox branch channels per scale (length 3). Auto-calculated if None.
+    :type bbox_channels: list[int] or None
+    :param cls_channels: Classification branch channels per scale (length 3). Auto-calculated if None.
+    :type cls_channels: list[int] or None
+    :param kernel_initializer: Initializer for kernel weights. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -179,12 +168,9 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 
         Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
-        Args:
-            input_shape: List of shape tuples for each input feature map.
-                Expected: 3 shapes for [P3, P4, P5] features.
+            :param input_shape: List of shape tuples for each input feature map. Expected: 3 shapes for [P3, P4, P5] features.
+            :type input_shape: tuple
 
-        Raises:
-            ValueError: If input_shape is not a list of 3 shapes.
         """
         # Validate input structure
         if not isinstance(input_shape, list):
@@ -294,17 +280,14 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through detection head.
 
-        Args:
-            inputs: List of 3 feature maps from backbone/neck.
-                Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
-            training: Boolean, whether the layer should behave in training mode.
+            :param inputs: List of 3 feature maps from backbone/neck. Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether the layer should behave in training mode.
+            :type training: bool or None
 
-        Returns:
-            Concatenated detection predictions for all scales.
-            Shape: (batch_size, total_anchors, 4*reg_max + num_classes)
+            :return: Concatenated detection predictions for all scales. Shape: (batch_size, total_anchors, 4*reg_max + num_classes)
+            :rtype: tuple
 
-        Raises:
-            ValueError: If inputs is not a list of exactly 3 tensors.
         """
         if not isinstance(inputs, list) or len(inputs) != 3:
             raise ValueError("YOLOv12DetectionHead expects exactly 3 input feature maps")
@@ -336,11 +319,11 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
         """Compute output shape of the layer.
 
-        Args:
-            input_shape: List of input shape tuples.
+            :param input_shape: List of input shape tuples.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple (batch_size, total_anchors, 4*reg_max + num_classes).
+            :return: Output shape tuple (batch_size, total_anchors, 4*reg_max + num_classes).
+            :rtype: tuple
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             return (None, None, 4 * self.reg_max + self.num_classes)
@@ -359,8 +342,8 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing ALL layer configuration parameters.
+            :return: Dictionary containing ALL layer configuration parameters.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -379,64 +362,54 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class YOLOv12SegmentationHead(keras.layers.Layer):
-    """Segmentation head for YOLOv12 multitask learning.
+    """
+    Segmentation head for YOLOv12 multitask learning.
 
-    Uses progressive upsampling with skip connections from backbone features
-    to generate pixel-level segmentation masks. Designed for dense prediction
-    tasks like crack segmentation.
+    Progressive upsampling decoder with skip connections from backbone features
+    (P3, P4, P5) to generate pixel-level segmentation masks. Includes optional
+    Squeeze-and-Excitation attention at skip connection fusion points and
+    bilinear resize to exact target resolution.
 
-    Following modern Keras 3 patterns: creates sub-layers in __init__() and builds
-    them explicitly in build() for robust serialization.
+    **Architecture Overview:**
 
-    Args:
-        num_classes: Integer, number of segmentation classes. Must be positive.
-            Use 1 for binary segmentation. Defaults to 1.
-        intermediate_filters: List of integers, filter sizes for each upsampling stage.
-            Must have at least 2 elements. Defaults to [128, 64, 32, 16].
-        target_size: Optional tuple of integers (height, width), target output size.
-            If None, auto-computed from P3 features as (H/8 * 8, W/8 * 8). Defaults to None.
-        use_attention: Boolean, whether to use attention mechanisms for feature fusion.
-            Defaults to True.
-        dropout_rate: Float, dropout rate for regularization. Must be between 0 and 1.
-            Defaults to 0.1.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional Regularizer, regularizer for kernel weights.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        List of 3 tensors with shapes:
-        - [(batch_size, height/8, width/8, channels_p3),
-           (batch_size, height/16, width/16, channels_p4),
-           (batch_size, height/32, width/32, channels_p5)]
+        ┌──────────────────────────────────────┐
+        │  Inputs: [P3, P4, P5]               │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  P5 → UpConv0 (2x) → fuse with P4  │
+        │       (skip conv + opt. SE attn)     │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  → UpConv1 (2x) → fuse with P3     │
+        │       (skip conv + opt. SE attn)     │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  → UpConv2..N (2x each)             │
+        │  → Resize to target_size             │
+        │  → Dropout → Conv1x1(num_classes)   │
+        └──────────────────────────────────────┘
 
-    Output shape:
-        Tensor with shape (batch_size, target_height, target_width, num_classes)
-
-    Raises:
-        ValueError: If num_classes is not positive.
-        ValueError: If intermediate_filters has fewer than 2 elements.
-        ValueError: If dropout_rate is not between 0 and 1.
-        ValueError: If target_size is provided but not a tuple of 2 positive integers.
-
-    Example:
-        ```python
-        # Basic usage
-        head = YOLOv12SegmentationHead(num_classes=1)
-
-        # Advanced usage
-        head = YOLOv12SegmentationHead(
-            num_classes=2,
-            intermediate_filters=[256, 128, 64, 32],
-            target_size=(512, 512),
-            use_attention=True,
-            dropout_rate=0.2
-        )
-
-        features = [p3_features, p4_features, p5_features]
-        segmentation = head(features)
-        ```
+    :param num_classes: Number of segmentation classes. Defaults to 1.
+    :type num_classes: int
+    :param intermediate_filters: Filter sizes per upsampling stage. Defaults to ``[128, 64, 32, 16]``.
+    :type intermediate_filters: list[int]
+    :param target_size: Target output size ``(height, width)``. Auto-computed if None.
+    :type target_size: tuple[int, int] or None
+    :param use_attention: Whether to use SE attention at skip connections. Defaults to True.
+    :type use_attention: bool
+    :param dropout_rate: Dropout rate. Defaults to 0.1.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for kernel weights. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -516,12 +489,9 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
-        Args:
-            input_shape: List of shape tuples for input feature maps.
-                Expected: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :param input_shape: List of shape tuples for input feature maps. Expected: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :type input_shape: tuple
 
-        Raises:
-            ValueError: If input_shape is not a list of 3 shapes.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             raise ValueError("YOLOv12SegmentationHead expects 3 input feature maps")
@@ -710,16 +680,14 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through segmentation head.
 
-        Args:
-            inputs: List of feature maps [P3, P4, P5] from backbone.
-                Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
-            training: Boolean, whether in training mode.
+            :param inputs: List of feature maps [P3, P4, P5] from backbone. Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Segmentation mask tensor with shape (batch_size, target_height, target_width, num_classes).
+            :return: Segmentation mask tensor with shape (batch_size, target_height, target_width, num_classes).
+            :rtype: keras.KerasTensor
 
-        Raises:
-            ValueError: If inputs is not a list of exactly 3 tensors.
         """
         if not isinstance(inputs, list) or len(inputs) != 3:
             raise ValueError("YOLOv12SegmentationHead expects exactly 3 input feature maps")
@@ -778,11 +746,11 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
         """Compute output shape of the layer.
 
-        Args:
-            input_shape: List of input shape tuples.
+            :param input_shape: List of input shape tuples.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple (batch_size, target_height, target_width, num_classes).
+            :return: Output shape tuple (batch_size, target_height, target_width, num_classes).
+            :rtype: tuple
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             return (None, None, None, self.num_classes)
@@ -804,8 +772,8 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing ALL layer configuration parameters.
+            :return: Dictionary containing ALL layer configuration parameters.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -825,62 +793,55 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class YOLOv12ClassificationHead(keras.layers.Layer):
-    """Classification head for YOLOv12 multitask learning.
+    """
+    Classification head for YOLOv12 multitask learning.
 
-    Uses multiscale global pooling with attention mechanism for
-    patch-level classification tasks like crack presence detection.
+    Applies multi-scale global pooling (avg and/or max) to each of the three
+    backbone feature maps, concatenates all pooled features, applies optional
+    attention weighting, and passes through a dense classifier.
 
-    Following modern Keras 3 patterns: creates sub-layers in __init__() and builds
-    them explicitly in build() for robust serialization.
+    **Architecture Overview:**
 
-    Args:
-        num_classes: Integer, number of classification classes. Must be positive.
-            Use 1 for binary classification. Defaults to 1.
-        hidden_dims: List of integers, hidden layer dimensions for the classifier.
-            Must have at least 1 element. Defaults to [512, 256].
-        pooling_types: List of strings, types of global pooling to use.
-            Valid values: 'avg', 'max'. Must have at least 1 element. Defaults to ['avg', 'max'].
-        use_attention: Boolean, whether to use attention pooling. Defaults to True.
-        dropout_rate: Float, dropout rate for regularization. Must be between 0 and 1.
-            Defaults to 0.3.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional Regularizer, regularizer for kernel weights.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        List of 3 tensors with shapes:
-        - [(batch_size, height/8, width/8, channels_p3),
-           (batch_size, height/16, width/16, channels_p4),
-           (batch_size, height/32, width/32, channels_p5)]
+        ┌───────────────────────────────────────┐
+        │  Inputs: [P3, P4, P5]                │
+        └──────┬────────┬────────┬──────────────┘
+               ▼        ▼        ▼
+        ┌──────────────────────────────────────┐
+        │  GlobalPool (avg/max) each scale     │
+        │  → Concatenate all pooled features   │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Optional Attention Weighting        │
+        │  Dense(D/4, relu) → Dense(D, sig)   │
+        │  x = x * attention_weights           │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Dense(hidden[0]) → Dropout          │
+        │  Dense(hidden[1]) → Dropout          │
+        │  ...                                 │
+        │  Dense(num_classes) → logits         │
+        └──────────────────────────────────────┘
 
-    Output shape:
-        Tensor with shape (batch_size, num_classes)
-
-    Raises:
-        ValueError: If num_classes is not positive.
-        ValueError: If hidden_dims is empty.
-        ValueError: If pooling_types is empty or contains invalid values.
-        ValueError: If dropout_rate is not between 0 and 1.
-
-    Example:
-        ```python
-        # Basic usage
-        head = YOLOv12ClassificationHead(num_classes=2)
-
-        # Advanced usage
-        head = YOLOv12ClassificationHead(
-            num_classes=3,
-            hidden_dims=[1024, 512, 256],
-            pooling_types=['avg', 'max'],
-            use_attention=True,
-            dropout_rate=0.4
-        )
-
-        features = [p3_features, p4_features, p5_features]
-        classification = head(features)
-        ```
+    :param num_classes: Number of classification classes. Defaults to 1.
+    :type num_classes: int
+    :param hidden_dims: Hidden layer dimensions. Defaults to ``[512, 256]``.
+    :type hidden_dims: list[int]
+    :param pooling_types: Types of global pooling (``'avg'``, ``'max'``). Defaults to ``['avg', 'max']``.
+    :type pooling_types: list[str]
+    :param use_attention: Whether to use attention pooling. Defaults to True.
+    :type use_attention: bool
+    :param dropout_rate: Dropout rate. Defaults to 0.3.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for kernel weights. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -970,12 +931,9 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
 
         Following modern Keras 3 pattern: explicitly build all sub-layers for robust serialization.
 
-        Args:
-            input_shape: List of shape tuples for input feature maps.
-                Expected: 3 shapes for [P3, P4, P5] features.
+            :param input_shape: List of shape tuples for input feature maps. Expected: 3 shapes for [P3, P4, P5] features.
+            :type input_shape: tuple
 
-        Raises:
-            ValueError: If input_shape is not a list of 3 shapes.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             raise ValueError("YOLOv12ClassificationHead expects 3 input feature maps")
@@ -1062,16 +1020,14 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through classification head.
 
-        Args:
-            inputs: List of feature maps [P3, P4, P5] from backbone.
-                Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
-            training: Boolean, whether in training mode.
+            :param inputs: List of feature maps [P3, P4, P5] from backbone. Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :type inputs: keras.KerasTensor
+            :param training: Boolean, whether in training mode.
+            :type training: bool or None
 
-        Returns:
-            Classification logits with shape (batch_size, num_classes).
+            :return: Classification logits with shape (batch_size, num_classes).
+            :rtype: tuple
 
-        Raises:
-            ValueError: If inputs is not a list of exactly 3 tensors.
         """
         if not isinstance(inputs, list) or len(inputs) != 3:
             raise ValueError("YOLOv12ClassificationHead expects exactly 3 input feature maps")
@@ -1107,11 +1063,11 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
         """Compute output shape of the layer.
 
-        Args:
-            input_shape: List of input shape tuples.
+            :param input_shape: List of input shape tuples.
+            :type input_shape: tuple
 
-        Returns:
-            Output shape tuple (batch_size, num_classes).
+            :return: Output shape tuple (batch_size, num_classes).
+            :rtype: tuple
         """
         if not isinstance(input_shape, list) or len(input_shape) != 3:
             return (None, self.num_classes)
@@ -1122,8 +1078,8 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing ALL layer configuration parameters.
+            :return: Dictionary containing ALL layer configuration parameters.
+            :rtype: dict
         """
         config = super().get_config()
         config.update({

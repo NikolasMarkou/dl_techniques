@@ -57,99 +57,44 @@ class SpatialLayer(keras.layers.Layer):
     """
     Spatial coordinate grid generator for injecting positional information into models.
 
-    This layer creates normalized coordinate grids (x, y) that provide explicit spatial
-    information to neural networks. It generates standardized coordinate features that
-    can be concatenated with existing feature maps to enhance spatial reasoning capabilities
-    in computer vision_heads tasks.
+    This non-trainable layer creates normalized coordinate grids ``(x, y)`` that
+    provide explicit spatial information to neural networks. A low-resolution
+    prototype grid is built once during ``build()``, then dynamically resized and
+    tiled during ``call()`` to match the input spatial dimensions and batch size.
+    Each coordinate channel is standardized to zero mean and unit variance
+    (``z = (x - mu) / sigma``) so that coordinate features have a similar
+    statistical distribution to typical learned activations.
 
-    **Intent**: Enable explicit spatial awareness in neural networks by providing
-    normalized coordinate information for each spatial location, improving performance
-    in tasks requiring precise spatial reasoning such as object detection, segmentation,
-    and generative modeling.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓
-    Internal Grid(resolution) → Standardize → Resize(height, width)
-           ↓
-    Batch Expansion → Output(shape=[batch, height, width, 2])
-    ```
+    .. code-block:: text
 
-    **Grid Processing Steps**:
-    1. **Base Grid Creation**: Generate normalized coordinate meshgrid at specified resolution
-    2. **Standardization**: Normalize coordinates to zero mean and unit variance
-    3. **Dynamic Resizing**: Resize grid to match input spatial dimensions
-    4. **Batch Tiling**: Expand to match input batch size
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, C]                  │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Prototype Grid [1, res_h, res_w, 2] │
+        │  (built once, normalized x/y coords) │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Resize to [1, H, W, 2]             │
+        │  (nearest / bilinear interpolation)  │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Tile to [B, H, W, 2]               │
+        └──────────────────────────────────────┘
 
-    **Mathematical Operations**:
-    - **Grid Generation**: x, y ∈ [-0.5, 0.5] over specified resolution
-    - **Standardization**: coord_norm = (coord - μ) / (σ + ε)
-    - **Bilinear/Nearest Interpolation**: Resize to target spatial dimensions
-
-    The output provides explicit (x, y) coordinates for each spatial location,
-    enabling the network to directly access positional information.
-
-    Args:
-        resolution: Tuple of integers (height, width) specifying the initial grid resolution.
-            Controls the base resolution before dynamic resizing. Both values must be positive.
-            Higher resolutions provide finer initial coordinate granularity. Defaults to (4, 4).
-        resize_method: Interpolation method for dynamic resizing to match input dimensions.
-            Available options:
-            - 'nearest': Nearest neighbor interpolation (faster, less smooth)
-            - 'bilinear': Bilinear interpolation (slower, smoother gradients)
-            Defaults to 'nearest'.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-        The height and width dimensions determine the output coordinate grid size.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, 2)`.
-        The last dimension contains normalized (x, y) coordinates for each spatial location.
-
-    Attributes:
-        xy_grid: Internal coordinate grid tensor created during build phase.
-            Shape: (1, resolution[0], resolution[1], 2)
-
-    Example:
-        ```python
-        # Basic usage with default resolution
-        spatial_layer = SpatialLayer()
-        inputs = keras.Input(shape=(64, 64, 3))
-        coords = spatial_layer(inputs)  # Shape: (batch, 64, 64, 2)
-
-        # High-resolution base grid with bilinear resizing
-        spatial_layer = SpatialLayer(
-            resolution=(16, 16),
-            resize_method='bilinear'
-        )
-
-        # Concatenate with original features
-        inputs = keras.Input(shape=(32, 32, 128))
-        coords = SpatialLayer()(inputs)
-        combined = keras.layers.Concatenate(axis=-1)([inputs, coords])
-        # combined.shape: (batch, 32, 32, 130)
-
-        # In a complete model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
-        coords = SpatialLayer(resolution=(8, 8))(x)
-        features_with_coords = keras.layers.Concatenate()([x, coords])
-        outputs = keras.layers.Conv2D(32, 1)(features_with_coords)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    Note:
-        The layer is non-trainable by design as it provides deterministic coordinate
-        information. The coordinate grid is standardized to match the scale of typical
-        neural network activations, promoting training stability when concatenated with
-        learned features.
-
-    References:
-        - CoordConv: An intriguing failing of convolutional neural networks and the CoordConv solution
-        - Used in various generative models and spatial attention mechanisms
+    :param resolution: Tuple of integers ``(height, width)`` specifying the initial
+        grid resolution. Both values must be positive. Defaults to ``(4, 4)``.
+    :type resolution: tuple[int, int]
+    :param resize_method: Interpolation method for dynamic resizing. One of
+        ``'nearest'`` or ``'bilinear'``. Defaults to ``'nearest'``.
+    :type resize_method: str
+    :param kwargs: Additional keyword arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -181,16 +126,10 @@ class SpatialLayer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Creates the normalized coordinate grid during layer building.
+        Create the normalized coordinate grid during layer building.
 
-        This method generates the base coordinate grid at the specified resolution,
-        applies standardization, and prepares it for dynamic resizing during forward passes.
-
-        Args:
-            input_shape: Shape tuple of the input tensor. Must be 4D.
-
-        Raises:
-            ValueError: If input_shape is not 4D.
+        :param input_shape: Shape tuple of the input tensor. Must be 4D.
+        :type input_shape: tuple
         """
         if len(input_shape) != 4:
             raise ValueError(f"SpatialLayer expects 4D input, got shape {input_shape}")
@@ -234,16 +173,16 @@ class SpatialLayer(keras.layers.Layer):
         **kwargs: Any
     ) -> keras.KerasTensor:
         """
-        Forward pass that dynamically resizes coordinate grid to match input dimensions.
+        Dynamically resize coordinate grid to match input dimensions.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, height, width, channels).
-            training: Boolean indicating training mode (unused, kept for interface consistency).
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            Coordinate grid tensor with shape (batch_size, height, width, 2).
-            Each location contains the (x, y) coordinates for that spatial position.
+        :param inputs: Input tensor with shape ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, kept for interface consistency.
+        :type training: bool or None
+        :param kwargs: Additional keyword arguments.
+        :type kwargs: Any
+        :return: Coordinate grid tensor with shape ``(batch_size, height, width, 2)``.
+        :rtype: keras.KerasTensor
         """
         # Get input spatial dimensions
         input_shape = ops.shape(inputs)
@@ -272,13 +211,12 @@ class SpatialLayer(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Computes the output shape of the layer.
+        Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple: (batch_size, height, width, 2)
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: tuple
+        :return: Output shape tuple ``(batch_size, height, width, 2)``.
+        :rtype: tuple
         """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {input_shape}")
@@ -288,10 +226,10 @@ class SpatialLayer(keras.layers.Layer):
 
     def get_config(self) -> dict:
         """
-        Returns the configuration dictionary for serialization.
+        Return the configuration dictionary for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters needed for reconstruction.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

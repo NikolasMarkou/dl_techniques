@@ -72,74 +72,64 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 @keras.saving.register_keras_serializable()
 class TverskyProjectionLayer(layers.Layer):
-    """A projection layer based on a differentiable Tversky similarity model.
+    """
+    Projection layer based on a differentiable Tversky similarity model.
 
-    This layer replaces the standard geometric similarity (dot-product) of a
-    fully-connected layer with a learnable, differentiable version of Tversky's
-    contrast model of similarity. It computes the similarity between an input
-    vector and a set of learned `prototypes` based on their common and
-    distinctive features, as defined by a learned `feature_bank`.
+    This layer replaces the standard dot-product of a Dense layer with a
+    learnable, differentiable version of Tversky's contrast model. It computes
+    similarity between an input vector and a set of learned prototypes based on
+    their common and distinctive features via a learned feature bank. The
+    similarity formula is ``S(a, b) = theta * f(A ∩ B) - alpha * f(A - B) - beta * f(B - A)``,
+    where feature presence is determined by positive dot products with the
+    feature bank vectors and all parameters are learned end-to-end.
 
-    **Intent**: To provide a more psychologically plausible and interpretable
-    alternative to `keras.layers.Dense`, enabling models to learn non-linear
-    decision boundaries (like XOR) in a single layer and offering improved
-    performance and parameter efficiency in certain tasks as shown in the source paper.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           ↓
-    Compute Similarity: S(Input, Prototype_i) for i in [0, units-1]
-           ↓
-    Output(shape=[..., units])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operation**:
-    The similarity `S` between an input `a` and a prototype `b` is:
-        `S(a, b) = θ * f(A ∩ B) - α * f(A - B) - β * f(B - A)`
+        ┌────────────────────────────────────────┐
+        │  Input [..., input_dim]                │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Compute feature presence scores       │
+        │  input_dots = Input @ feature_bank^T  │
+        │  proto_dots = prototypes @ feat_bank^T │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Set operations:                       │
+        │  f(A∩B), f(A-B), f(B-A)              │
+        │  via masks + aggregation               │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Tversky contrast:                     │
+        │  S = θ*f(A∩B) - α*f(A-B) - β*f(B-A) │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Output [..., units]                   │
+        └────────────────────────────────────────┘
 
-    Where:
-    - `A` and `B` are the sets of features for `a` and `b`.
-    - A feature `f_k` is in set `A` if `dot(a, f_k) > 0`.
-    - `f(...)` measures the salience of features in a set.
-    - `θ`, `α`, `β` are learnable scalar weights.
-    - The measures `f(A ∩ B)`, `f(A - B)`, `f(B - A)` are made differentiable.
-
-    Args:
-        units: Integer, dimensionality of the output space. This is the number of
-            learned prototypes. Must be positive.
-        num_features: Integer, the size of the learnable feature universe `Ω`.
-            This is a key hyperparameter controlling the layer's capacity.
-        intersection_reduction: The aggregation method for common features `f(A ∩ B)`.
-            One of `'product'`, `'min'`, `'mean'`. Defaults to `'product'`.
-        difference_reduction: The method for calculating distinctive features `f(A - B)`.
-            One of `'ignorematch'`, `'subtractmatch'`. Defaults to `'subtractmatch'`.
-        prototype_initializer: Initializer for the prototype vectors.
-        feature_initializer: Initializer for the feature bank vectors.
-        contrast_initializer: Initializer for the Tversky contrast parameters (θ, α, β).
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., units)`.
-
-    Attributes:
-        prototypes: Learnable weight matrix of shape `(units, input_dim)`.
-        feature_bank: Learnable weight matrix of shape `(num_features, input_dim)`.
-        theta: Learnable scalar weight for common features.
-        alpha: Learnable scalar weight for input's distinctive features.
-        beta: Learnable scalar weight for prototype's distinctive features.
-
-    References:
-        - Doumbouya, M. K. B., Jurafsky, D., & Manning, C. D. (2025).
-          Tversky Neural Networks: Psychologically Plausible Deep Learning
-          with Differentiable Tversky Similarity. arXiv:2506.11035.
-
-    Raises:
-        ValueError: If `units` or `num_features` are not positive.
-        NotImplementedError: If an unsupported reduction method is provided.
+    :param units: Dimensionality of the output space (number of prototypes). Must be positive.
+    :type units: int
+    :param num_features: Size of the learnable feature universe. Must be positive.
+    :type num_features: int
+    :param intersection_reduction: Aggregation for common features. One of
+        ``'product'``, ``'min'``, ``'mean'``. Defaults to ``'product'``.
+    :type intersection_reduction: str
+    :param difference_reduction: Method for distinctive features. One of
+        ``'ignorematch'``, ``'subtractmatch'``. Defaults to ``'subtractmatch'``.
+    :type difference_reduction: str
+    :param prototype_initializer: Initializer for prototype vectors.
+    :type prototype_initializer: str or keras.initializers.Initializer
+    :param feature_initializer: Initializer for feature bank vectors.
+    :type feature_initializer: str or keras.initializers.Initializer
+    :param contrast_initializer: Initializer for Tversky contrast parameters.
+    :type contrast_initializer: str or keras.initializers.Initializer
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(

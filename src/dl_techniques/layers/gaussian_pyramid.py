@@ -1,44 +1,16 @@
-"""Construct a multi-scale Gaussian pyramid representation of an image.
+"""
+Construct a multi-scale Gaussian pyramid representation of an image.
 
-This layer implements the classic Gaussian pyramid, a foundational technique
-in computer vision_heads for analyzing images at multiple scales. The pyramid is a
-sequence of images, where each subsequent level is a low-pass filtered and
-downsampled version of its predecessor. This hierarchical structure enables
-algorithms to efficiently find features and objects at various sizes.
-
-Architectural and Mathematical Foundations:
-The construction of a Gaussian pyramid is an iterative process involving two
-key steps at each level: smoothing and subsampling.
-
-1.  **Smoothing (Convolution with a Gaussian Kernel)**: Before downsampling,
-    the image is convolved with a Gaussian filter. This is a critical
-    low-pass filtering operation that removes high-frequency components. The
-    2D Gaussian function is defined as:
-        `G(x, y) = (1 / (2 * pi * sigma^2)) * exp(-(x^2 + y^2) / (2 * sigma^2))`
-    This filter is chosen because it is separable, circularly symmetric, and
-    its Fourier transform is also a Gaussian, providing a smooth frequency
-    cutoff.
-
-2.  **Subsampling (Downsampling)**: After blurring, the image resolution is
-    reduced, typically by a factor of 2 in each dimension.
-
-The theoretical motivation for the initial smoothing step is rooted in the
-Nyquist-Shannon sampling theorem. Directly subsampling an image can lead to
-aliasing artifacts (e.g., moiré patterns), where high-frequency signals in
-the original image are misinterpreted as low-frequency signals in the
-downsampled version. The Gaussian blur acts as an anti-aliasing filter by
-ensuring that the signal's bandwidth is sufficiently limited before sampling,
-thus preserving the integrity of the representation at coarser scales.
-
-The resulting pyramid contains versions of the image at different levels of
-resolution and blur, forming a compact and effective basis for scale-invariant
-feature detection, image registration, and texture analysis.
+Implements the classic Gaussian pyramid by iteratively applying Gaussian blur
+(anti-aliasing low-pass filter) followed by downsampling. Each level is a
+smoothed, lower-resolution version of its predecessor. The Gaussian function
+G(x,y) = (1/(2*pi*sigma^2)) * exp(-(x^2+y^2)/(2*sigma^2)) prevents aliasing
+artifacts per the Nyquist-Shannon sampling theorem by limiting signal
+bandwidth before subsampling.
 
 References:
     - Burt, P. J. and Adelson, E. H. "The Laplacian Pyramid as a Compact
-      Image Code". This is the seminal paper that introduced both the Gaussian
-      and Laplacian pyramid concepts.
-      https://doi.org/10.1109/T-C.1983.225452
+      Image Code". https://doi.org/10.1109/T-C.1983.225452
 """
 
 import keras
@@ -57,77 +29,64 @@ from .gaussian_filter import GaussianFilter
 
 @keras.saving.register_keras_serializable()
 class GaussianPyramid(keras.layers.Layer):
-    """Gaussian Pyramid layer for multi-scale image representation.
+    """
+    Gaussian Pyramid layer for multi-scale image representation.
 
-    This layer creates a Gaussian pyramid by repeatedly applying Gaussian blur
-    and downsampling to create multiple scales of the input image. Each level
-    is a downsampled version of the previous level, creating a multi-scale
-    representation suitable for various computer vision_heads tasks.
+    Creates a Gaussian pyramid by repeatedly applying Gaussian blur and
+    downsampling to produce multiple scales of the input image. Each level
+    is a low-pass filtered and spatially reduced version of the previous
+    level, forming a hierarchical representation for scale-invariant feature
+    detection, image registration, and texture analysis.
 
-    Args:
-        levels: Integer, number of pyramid levels to generate. Must be >= 1.
-            The first level is the original (possibly blurred) image.
-        kernel_size: Tuple of two integers specifying the height and width of the
-            2D Gaussian kernel used for blurring before downsampling.
-        sigma: Standard deviation of the Gaussian distribution. If a single value,
-            the same sigma is used for both dimensions. If a tuple, (sigma_height,
-            sigma_width) are used. If -1 or None, sigma is calculated based on
-            kernel size.
-        scale_factor: Integer, downsampling factor between levels. Default is 2.
-        padding: String, either "valid" or "same" (case-insensitive).
-        data_format: String, either "channels_last" or "channels_first".
-        trainable: Boolean, if True allow the Gaussian filter weights to change,
-            otherwise they remain static.
-        **kwargs: Additional keyword arguments passed to the Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        4D tensor with shape:
-        - If data_format="channels_last": (batch_size, height, width, channels)
-        - If data_format="channels_first": (batch_size, channels, height, width)
+    .. code-block:: text
 
-    Output shape:
-        List of 4D tensors, each with progressively smaller spatial dimensions:
-        - If data_format="channels_last":
-            [(batch_size, height, width, channels),
-             (batch_size, height//2, width//2, channels),
-             (batch_size, height//4, width//4, channels), ...]
-        - If data_format="channels_first":
-            [(batch_size, channels, height, width),
-             (batch_size, channels, height//2, width//2),
-             (batch_size, channels, height//4, width//4), ...]
+        ┌──────────────────────────────────────────┐
+        │  Input [batch, H, W, C]                  │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Level 0: GaussianFilter ──▶ output[0]   │
+        │           [batch, H, W, C]               │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  AvgPool (downsample by scale_factor)    │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Level 1: GaussianFilter ──▶ output[1]   │
+        │           [batch, H/2, W/2, C]           │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  AvgPool (downsample by scale_factor)    │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Level 2: GaussianFilter ──▶ output[2]   │
+        │           [batch, H/4, W/4, C]           │
+        └──────────────────────────────────────────┘
 
-    Returns:
-        List of tensors representing the Gaussian pyramid levels.
-
-    Raises:
-        ValueError: If levels < 1, kernel_size is not length 2, scale_factor < 1,
-            or invalid padding/data_format values.
-
-    Example:
-        ```python
-        # Basic usage
-        layer = GaussianPyramid(levels=3, kernel_size=(5, 5), sigma=1.0)
-
-        # Advanced configuration
-        layer = GaussianPyramid(
-            levels=4,
-            kernel_size=(7, 7),
-            sigma=(1.5, 1.5),
-            scale_factor=2,
-            padding="same"
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(64, 64, 3))
-        pyramid = GaussianPyramid(levels=3)(inputs)
-        # pyramid is a list of 3 tensors with shapes:
-        # [(None, 64, 64, 3), (None, 32, 32, 3), (None, 16, 16, 3)]
-        ```
-
-    Note:
-        This implementation follows modern Keras 3 patterns where all sub-layers
-        are created in __init__ and explicitly built in build() for robust
-        serialization support.
+    :param levels: Number of pyramid levels to generate. Must be >= 1.
+        Defaults to 3.
+    :type levels: int
+    :param kernel_size: Height and width of the 2D Gaussian kernel.
+    :type kernel_size: Tuple[int, int]
+    :param sigma: Standard deviation of the Gaussian. If a single value, same
+        for both dimensions. If tuple, (sigma_h, sigma_w). If -1 or None,
+        calculated from kernel size.
+    :type sigma: Union[float, Tuple[float, float]]
+    :param scale_factor: Downsampling factor between levels. Defaults to 2.
+    :type scale_factor: int
+    :param padding: Either "valid" or "same" (case-insensitive).
+    :type padding: str
+    :param data_format: Either "channels_last" or "channels_first".
+    :type data_format: Optional[str]
+    :param trainable: If True allow the Gaussian filter weights to change.
+    :type trainable: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -205,11 +164,8 @@ class GaussianPyramid(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build all Gaussian filters with appropriate input shapes.
 
-        This method explicitly builds each sub-layer with the correct input shape
-        for robust serialization support.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build sub-layers in computational order with correct shapes
         current_shape = input_shape
@@ -228,11 +184,10 @@ class GaussianPyramid(keras.layers.Layer):
     def _compute_downsampled_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the shape after downsampling.
 
-        Args:
-            input_shape: Shape tuple before downsampling.
-
-        Returns:
-            Shape tuple after downsampling.
+        :param input_shape: Shape tuple before downsampling.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape tuple after downsampling.
+        :rtype: Tuple[Optional[int], ...]
         """
         input_shape_list = list(input_shape)
 
@@ -254,11 +209,10 @@ class GaussianPyramid(keras.layers.Layer):
     def _downsample(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Downsample the input tensor by the scale factor.
 
-        Args:
-            inputs: Input tensor to downsample.
-
-        Returns:
-            Downsampled tensor.
+        :param inputs: Input tensor to downsample.
+        :type inputs: keras.KerasTensor
+        :return: Downsampled tensor.
+        :rtype: keras.KerasTensor
         """
         if self.scale_factor == 1:
             return inputs
@@ -279,14 +233,12 @@ class GaussianPyramid(keras.layers.Layer):
     ) -> List[keras.KerasTensor]:
         """Apply Gaussian pyramid decomposition.
 
-        Args:
-            inputs: Input tensor of shape:
-                - If data_format="channels_last": (batch_size, height, width, channels)
-                - If data_format="channels_first": (batch_size, channels, height, width)
-            training: Boolean indicating whether in training mode.
-
-        Returns:
-            List of tensors representing the Gaussian pyramid levels.
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: List of tensors representing the Gaussian pyramid levels.
+        :rtype: List[keras.KerasTensor]
         """
         results = []
         x = inputs
@@ -305,11 +257,10 @@ class GaussianPyramid(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> List[Tuple[Optional[int], ...]]:
         """Compute the output shapes for all pyramid levels.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            List of shape tuples for each pyramid level.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: List of shape tuples for each pyramid level.
+        :rtype: List[Tuple[Optional[int], ...]]
         """
         output_shapes = []
         current_shape = input_shape
@@ -324,10 +275,8 @@ class GaussianPyramid(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration for serialization.
 
-        Returns ALL __init__ parameters for complete serialization support.
-
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -356,42 +305,27 @@ def gaussian_pyramid(
 ) -> List[keras.KerasTensor]:
     """Functional interface for Gaussian pyramid decomposition.
 
-    This is a convenience function that creates a Gaussian pyramid of the input.
-
-    Args:
-        inputs: Input tensor of shape:
-            - If data_format="channels_last": (batch_size, height, width, channels)
-            - If data_format="channels_first": (batch_size, channels, height, width)
-        levels: Integer, number of pyramid levels to generate. Must be >= 1.
-        kernel_size: Tuple of two integers specifying the height and width of the
-            2D Gaussian kernel. Defaults to (5, 5).
-        sigma: Standard deviation of the Gaussian distribution. If a single value,
-            the same sigma is used for both dimensions. If a tuple, (sigma_height,
-            sigma_width) are used. If -1, sigma is calculated based on kernel size.
-        scale_factor: Integer, downsampling factor between levels. Default is 2.
-        padding: String, either "valid" or "same" (case-insensitive). Defaults to "same".
-        data_format: String, either "channels_last" or "channels_first". If None,
-            uses the default format from Keras configuration.
-        name: Optional name for the operation.
-
-    Returns:
-        List of tensors representing the Gaussian pyramid levels.
-
-    Example:
-        ```python
-        import numpy as np
-
-        # Create sample input
-        x = keras.random.normal(shape=(4, 32, 32, 3))
-
-        # Generate 3-level pyramid
-        pyramid = gaussian_pyramid(x, levels=3, kernel_size=(5, 5), sigma=1.0)
-
-        print(f"Number of levels: {len(pyramid)}")
-        print(f"Shapes: {[p.shape for p in pyramid]}")
-        # Output: Number of levels: 3
-        # Output: Shapes: [(4, 32, 32, 3), (4, 16, 16, 3), (4, 8, 8, 3)]
-        ```
+    :param inputs: Input tensor.
+    :type inputs: keras.KerasTensor
+    :param levels: Number of pyramid levels. Must be >= 1. Defaults to 3.
+    :type levels: int
+    :param kernel_size: Height and width of the Gaussian kernel. Defaults to
+        (5, 5).
+    :type kernel_size: Tuple[int, int]
+    :param sigma: Standard deviation of the Gaussian. If -1, calculated from
+        kernel size.
+    :type sigma: Union[float, Tuple[float, float]]
+    :param scale_factor: Downsampling factor between levels. Defaults to 2.
+    :type scale_factor: int
+    :param padding: Either "valid" or "same". Defaults to "same".
+    :type padding: str
+    :param data_format: Either "channels_last" or "channels_first". If None,
+        uses Keras default.
+    :type data_format: Optional[str]
+    :param name: Optional name for the operation.
+    :type name: Optional[str]
+    :return: List of tensors representing the Gaussian pyramid levels.
+    :rtype: List[keras.KerasTensor]
     """
     layer = GaussianPyramid(
         levels=levels,

@@ -1,62 +1,23 @@
 """
-Depthwise separable convolution block, a core of MobileNet.
-
-Architecture and Core Concepts:
+Depthwise separable convolution block, a core building block of MobileNet.
 
 A standard convolution operation performs spatial filtering and channel
 mixing in a single, monolithic step. A depthwise separable convolution
-decomposes this into two sequential steps:
-
-1.  **Depthwise Convolution (Spatial Filtering):** In the first step, a
-    single spatial filter (e.g., 3x3) is applied independently to *each*
-    input channel. This step learns spatial patterns and features, such as
-    edges or textures, within each channel individually. It does not combine
-    or mix information across different channels.
-
-2.  **Pointwise Convolution (Channel Mixing):** The second step uses a 1x1
-    convolution to project the features from the depthwise step onto a new
-    channel space. This operation is purely a linear combination of the
-    channels at each spatial location. Its function is to mix the
-    spatially-filtered information from the previous step to generate new,
-    rich features.
-
-By separating these two functions, the model can learn representations far
-more efficiently. The intuition is that spatial correlations and
-cross-channel correlations are sufficiently independent that they do not need
-to be learned simultaneously in a large, multidimensional kernel.
-
-Mathematical Foundation:
+decomposes this into two sequential steps: depthwise convolution (spatial
+filtering per channel) followed by pointwise convolution (channel mixing
+via 1x1 convolution).
 
 The efficiency gain comes from the dramatic reduction in parameters. For a
-standard 3x3 convolution with `C_in` input channels and `C_out` output
-channels, the number of parameters is `3 * 3 * C_in * C_out`.
-
-In contrast, a depthwise separable convolution has:
--   `K * K * C_in` parameters for the depthwise step.
--   `1 * 1 * C_in * C_out` parameters for the pointwise step.
-
-The ratio of reduction is approximately `(K*K + C_out) / (K*K * C_out)`, which
-for a reasonable number of output channels, results in an ~8-9x reduction in
-both parameters and computational cost, with only a small, often negligible,
-loss in accuracy.
+standard 3x3 convolution with C_in input channels and C_out output channels,
+the number of parameters is 3 * 3 * C_in * C_out. In contrast, a depthwise
+separable convolution has K * K * C_in + C_in * C_out parameters, resulting
+in an approximately 8-9x reduction for typical configurations.
 
 References:
-
-While the concept of separable convolutions has existed for some time, its
-application as a core component of modern, efficient deep neural networks
-was popularized by the following seminal works:
-
--   Howard, A. G., et al. (2017). "MobileNets: Efficient Convolutional
-    Neural Networks for Mobile Vision Applications." This paper introduced
-    the MobileNetV1 architecture, which demonstrated the remarkable
-    effectiveness of depthwise separable convolutions for creating small,
-    fast, and accurate models for mobile devices.
--   Chollet, F. (2017). "Xception: Deep Learning with Depthwise Separable
-    Convolutions." This work further explored the idea, proposing that a
-    stack of depthwise separable convolution blocks could outperform even
-    large-scale architectures like Inception V3 by making more efficient
-    use of model parameters.
-
+    - Howard, A. G., et al. (2017). "MobileNets: Efficient Convolutional
+      Neural Networks for Mobile Vision Applications."
+    - Chollet, F. (2017). "Xception: Deep Learning with Depthwise Separable
+      Convolutions."
 """
 
 import keras
@@ -77,120 +38,67 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
     """
     Configurable depthwise separable convolution block.
 
-    This block implements the core building block of MobileNetV1, which decomposes
-    standard convolution into two separate layers for computational efficiency:
-    depthwise convolution (spatial filtering) followed by pointwise convolution
-    (channel mixing). This drastically reduces the number of parameters and
-    computational cost compared to standard convolutions.
+    This block implements the core building block of MobileNetV1, decomposing
+    standard convolution into depthwise convolution (spatial filtering per channel)
+    followed by pointwise convolution (1x1 channel mixing). This reduces parameters
+    by approximately 8-9x compared to standard convolution while maintaining
+    comparable accuracy. The total parameter count is
+    channels * (K * K + filters) versus channels * filters * K * K for standard
+    convolution.
 
-    **Intent**: Provide an efficient convolutional building block for mobile and
-    edge device deployment, reducing parameters by ~8-9x compared to standard
-    convolution while maintaining comparable accuracy. Now with configurable
-    activation and normalization layers for maximum flexibility.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓
-    DepthwiseConv2D(K×K, stride) - Spatial filtering per channel
-           ↓
-    Normalization → Activation
-           ↓
-    Conv2D(1×1) - Pointwise/channel mixing
-           ↓
-    Normalization → Activation
-           ↓
-    Output(shape=[batch, new_height, new_width, filters])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Depthwise**: Each input channel convolved with its own K×K kernel
-       - Parameters: channels × K × K
-    2. **Pointwise**: 1×1 convolution to mix channels
-       - Parameters: channels × filters
+        ┌───────────────────────────────────────────────┐
+        │  Input [batch, height, width, channels]       │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  DepthwiseConv2D (K x K, stride)              │
+        │  Spatial filtering per channel independently  │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Normalization ──▶ Activation                 │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Conv2D (1 x 1) ── Pointwise / channel mixing│
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Normalization ──▶ Activation                 │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Output [batch, new_height, new_width, filters]│
+        └───────────────────────────────────────────────┘
 
-    Total parameters: channels × (K × K + filters) vs standard: channels × filters × K × K
-
-    Args:
-        filters: Integer, number of output filters (channels). Must be positive.
-            This determines the output channel dimension.
-        depthwise_kernel_size: Integer or tuple, kernel size for the depthwise convolution.
-            Controls the spatial filtering window size. Defaults to 3 (3x3 convolution).
-        stride: Integer, stride for the depthwise convolution. Controls spatial
-            downsampling. Common values: 1 (no downsampling) or 2 (2x downsampling).
-            Defaults to 1.
-        block_id: Integer, unique identifier for the block used in layer naming.
-            Helps identify layers in large models. Defaults to 0.
-        kernel_initializer: String name or Initializer instance for weight initialization.
-            Applies to both depthwise and pointwise convolution kernels.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional Regularizer instance for weight regularization.
-            Applies to both depthwise and pointwise convolution kernels.
-            Defaults to None.
-        normalization_type: String specifying the normalization layer type.
-            Supported types: 'batch_norm', 'layer_norm', 'rms_norm', 'zero_centered_rms_norm',
-            'band_rms', 'global_response_norm', etc. Defaults to 'batch_norm'.
-        activation_type: String specifying the activation function type.
-            Supported types: 'relu', 'gelu', 'mish', 'hard_swish', 'silu', etc.
-            Defaults to 'relu'.
-        normalization_kwargs: Optional dictionary of arguments to pass to the
-            normalization layer factory. Defaults to {}.
-        activation_kwargs: Optional dictionary of arguments to pass to the
-            activation layer factory. Defaults to {}.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, new_height, new_width, filters)`
-        Where new_height = height // stride, new_width = width // stride
-        (with padding adjustments)
-
-    Attributes:
-        depthwise_conv: DepthwiseConv2D layer for spatial filtering.
-        depthwise_norm: Normalization layer after depthwise convolution.
-        depthwise_activation: Activation layer after depthwise normalization.
-        pointwise_conv: Conv2D layer for channel mixing.
-        pointwise_norm: Normalization layer after pointwise convolution.
-        pointwise_activation: Activation layer after pointwise normalization.
-
-    Example:
-        ```python
-        # Basic depthwise separable block (backwards compatible)
-        block = DepthwiseSeparableBlock(filters=64, stride=1, block_id=1)
-        inputs = keras.Input(shape=(224, 224, 32))
-        outputs = block(inputs)  # Shape: (batch, 224, 224, 64)
-
-        # Configurable block with modern components
-        modern_block = DepthwiseSeparableBlock(
-            filters=128,
-            depthwise_kernel_size=5,  # 5x5 depthwise filters
-            stride=2,  # Spatial downsampling
-            normalization_type='layer_norm',
-            activation_type='gelu',
-            block_id=2
-        )
-
-        # With custom layer parameters
-        advanced_block = DepthwiseSeparableBlock(
-            filters=256,
-            normalization_type='rms_norm',
-            activation_type='mish',
-            normalization_kwargs={'epsilon': 1e-5, 'use_scale': True},
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            block_id=3
-        )
-        ```
-
-    Note:
-        This implementation follows the CRITICAL pattern from the Modern Keras 3 guide:
-        sub-layers are created in __init__() but explicitly built in build() method
-        for robust serialization. Without explicit building, model loading will fail.
-
-        The block is backwards compatible - existing code using the old interface
-        will continue to work exactly as before, while new code can take advantage
-        of the configurable normalization and activation layers.
+    :param filters: Number of output filters (channels). Must be positive.
+    :type filters: int
+    :param depthwise_kernel_size: Kernel size for the depthwise convolution.
+        Defaults to 3.
+    :type depthwise_kernel_size: Union[int, Tuple[int, int]]
+    :param stride: Stride for the depthwise convolution. Defaults to 1.
+    :type stride: int
+    :param block_id: Unique identifier for the block used in layer naming.
+        Defaults to 0.
+    :type block_id: int
+    :param kernel_initializer: Initializer for weight initialization. Defaults to
+        'he_normal'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for weight regularization.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Type of normalization layer. Defaults to 'batch_norm'.
+    :type normalization_type: str
+    :param activation_type: Type of activation function. Defaults to 'relu'.
+    :type activation_type: str
+    :param normalization_kwargs: Optional arguments for the normalization layer factory.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param activation_kwargs: Optional arguments for the activation layer factory.
+    :type activation_kwargs: Optional[Dict[str, Any]]
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -282,16 +190,13 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all its sub-layers.
 
-        CRITICAL: This method explicitly builds each sub-layer to ensure proper
-        weight creation before serialization. Without this, model loading will fail
-        with "Layer was never built" errors.
+        Explicitly builds each sub-layer to ensure proper weight creation
+        before serialization.
 
-        Args:
-            input_shape: Shape tuple (including batch dimension).
-                Expected shape: (batch_size, height, width, channels)
+        :param input_shape: Shape tuple (including batch dimension).
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -338,16 +243,14 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the depthwise separable block.
+        """Forward pass through the depthwise separable block.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
-            training: Boolean or None. If True, layers like BatchNorm use
-                training mode. If None, uses keras.backend.learning_phase().
-
-        Returns:
-            Output tensor of shape (batch, new_height, new_width, filters).
+        :param inputs: Input tensor of shape (batch, height, width, channels).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean or None indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (batch, new_height, new_width, filters).
+        :rtype: keras.KerasTensor
         """
         # Depthwise convolution pathway
         x = self.depthwise_conv(inputs, training=training)
@@ -362,14 +265,12 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple (including batch dimension).
-
-        Returns:
-            Output shape tuple (batch_size, new_height, new_width, filters).
+        :param input_shape: Shape tuple (including batch dimension).
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (batch_size, new_height, new_width, filters).
+        :rtype: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 4:
             raise ValueError(
@@ -393,12 +294,10 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         return (batch_size, new_height, new_width, self.filters)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters needed
-            to recreate this layer.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

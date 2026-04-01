@@ -92,119 +92,68 @@ from .mobile_one_block import MobileOneBlock
 
 @keras.saving.register_keras_serializable()
 class RepMixerBlock(keras.layers.Layer):
-    """
-    RepMixer block for efficient feature mixing in vision_heads models.
+    """RepMixer block for efficient spatial and channel feature mixing.
 
-    This layer implements the RepMixer architecture that efficiently combines
-    token mixing (spatial interaction) and channel mixing (feature transformation)
-    operations. It uses depthwise convolutions for token mixing and pointwise
-    convolutions for channel mixing, with residual connections and normalization.
+    This residual block decouples spatial token mixing from channel mixing,
+    replacing the quadratic self-attention mechanism with linear-cost
+    depthwise convolutions. Token mixing uses a ``3x3`` depthwise
+    convolution followed by a ``1x1`` depthwise convolution with batch
+    normalisation, while channel mixing employs an inverted-bottleneck MLP
+    implemented with ``1x1`` pointwise convolutions. Each sub-block is
+    preceded by normalisation and connected through a residual shortcut:
+    ``Y = X + TokenMixer(Norm(X))``,
+    ``Z = Y + ChannelMixer(Norm(Y))``.
 
-    **Intent**: Provide an efficient alternative to self-attention for vision_heads tasks
-    that maintains strong representational capacity while reducing computational cost,
-    especially suitable for mobile and edge deployment scenarios.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., H, W, C])
-           ↓
-    LayerNorm → RepMixer Token Mixing
-           ↓ (residual)
-    LayerNorm → RepMixer Channel Mixing
-           ↓ (residual)
-    Output(shape=[..., H, W, C])
-    ```
+    .. code-block:: text
 
-    **Token Mixing (Spatial)**:
-    ```
-    x → DWConv(3x3) → BN → GELU → DWConv(1x1) → BN → x
-    ```
+        ┌──────────────────────────────────┐
+        │  Input [B, H, W, C]             │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Norm1 → Token Mixer            │
+        │  DWConv3x3 → BN → Act →        │
+        │  DWConv1x1 → BN                 │
+        └──────────────┬───────────────────┘
+                       │ + residual
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Norm2 → Channel Mixer          │
+        │  Conv1x1(expand) → Act →        │
+        │  Conv1x1(project)               │
+        └──────────────┬───────────────────┘
+                       │ + residual
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [B, H, W, C]            │
+        └──────────────────────────────────┘
 
-    **Channel Mixing (Feature)**:
-    ```
-    x → Conv1x1(expand) → GELU → Conv1x1(project) → x
-    ```
-
-    **Mathematical Operations**:
-    - **Token Mixing**: Captures spatial relationships using depthwise convolutions
-    - **Channel Mixing**: Captures feature relationships using pointwise convolutions
-    - **Residual Connections**: Enable gradient flow and feature reuse
-
-    Args:
-        dim: Integer, input and output feature dimension. Must be positive.
-        kernel_size: Integer, kernel size for depthwise convolutions in token mixing.
-            Must be positive and odd. Defaults to 3.
-        expansion_ratio: Float, expansion ratio for channel mixing MLP.
-            Must be positive. Defaults to 4.0.
-        dropout_rate: Float, dropout rate applied in both mixers.
-            Must be between 0 and 1. Defaults to 0.0.
-        activation: String or callable, activation function to use.
-            Defaults to 'gelu'.
-        use_layer_norm: Boolean, whether to use LayerNormalization.
-            If False, uses BatchNormalization. Defaults to True.
-        kernel_initializer: String or initializer, initializer for conv kernels.
-            Defaults to 'he_normal'.
-        bias_initializer: String or initializer, initializer for bias terms.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for conv kernels.
-        bias_regularizer: Optional regularizer for bias terms.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with same shape as input: `(batch_size, height, width, channels)`
-
-    Attributes:
-        token_mixer: Sequential block for spatial token mixing.
-        channel_mixer: Sequential block for channel mixing.
-        norm1: First normalization layer.
-        norm2: Second normalization layer.
-        dropout: Dropout layer for regularization.
-
-    Example:
-        ```python
-        # Basic RepMixer block
-        mixer = RepMixerBlock(dim=256)
-        inputs = keras.Input(shape=(56, 56, 256))
-        outputs = mixer(inputs)  # Shape: (None, 56, 56, 256)
-
-        # With custom parameters
-        mixer = RepMixerBlock(
-            dim=512,
-            kernel_size=5,
-            expansion_ratio=6.0,
-            dropout_rate=0.1,
-            activation='swish'
-        )
-
-        # With batch normalization instead of layer norm
-        mixer = RepMixerBlock(
-            dim=128,
-            use_layer_norm=False,
-            dropout_rate=0.05
-        )
-
-        # In a sequential model
-        model = keras.Sequential([
-            layers.Conv2D(64, 7, strides=2, padding='same'),
-            RepMixerBlock(dim=64),
-            RepMixerBlock(dim=64),
-            layers.GlobalAveragePooling2D(),
-            layers.Dense(1000, activation='softmax')
-        ])
-        ```
-
-    Note:
-        This implementation is optimized for efficiency while maintaining the core
-        RepMixer functionality. The token mixing uses depthwise convolutions which
-        are hardware-friendly and achieve good spatial modeling capabilities.
-
-    References:
-        RepMixer: Representation Mixing for Efficient Vision Transformers
-        FastViT: A Fast Hybrid Vision Transformer using Structural Reparameterization
-    """
+    :param dim: Input and output feature dimension. Must be positive.
+    :type dim: int
+    :param kernel_size: Kernel size for depthwise convolutions. Must be
+        positive and odd.
+    :type kernel_size: int
+    :param expansion_ratio: Channel expansion ratio for channel mixer.
+    :type expansion_ratio: float
+    :param dropout_rate: Dropout rate for both mixers.
+    :type dropout_rate: float
+    :param activation: Activation function name or callable.
+    :type activation: Union[str, callable]
+    :param use_layer_norm: If ``True`` use LayerNorm, else BatchNorm.
+    :type use_layer_norm: bool
+    :param kernel_initializer: Initializer for convolution kernels.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for bias terms.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernels.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for biases.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -325,7 +274,10 @@ class RepMixerBlock(keras.layers.Layer):
             self.channel_dropout_final = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all sub-layers."""
+        """Build the layer and all sub-layers.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input, got {len(input_shape)}D")
 
@@ -357,7 +309,14 @@ class RepMixerBlock(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through RepMixer block."""
+        """Forward pass through the RepMixer block.
+
+        :param inputs: Input tensor ``(batch, H, W, C)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor with same shape as input.
+        :rtype: keras.KerasTensor"""
         # Token mixing with residual connection
         x_norm1 = self.norm1(inputs, training=training)
         token_mixed = self.token_mixer(x_norm1, training=training)
@@ -382,11 +341,19 @@ class RepMixerBlock(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Output shape is identical to input shape."""
+        """Compute output shape (identical to input).
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'dim': self.dim,
@@ -406,87 +373,59 @@ class RepMixerBlock(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class ConvolutionalStem(keras.layers.Layer):
-    """
-    Convolutional stem for FastVLM using MobileOne blocks.
+    """Convolutional stem for FastVLM using MobileOne blocks.
 
-    This layer creates the initial feature extraction stage of a vision_heads model
-    using a sequence of MobileOne blocks with progressively reduced spatial
-    dimensions and increased feature depth. It's designed to efficiently
-    capture low-level visual features before passing to the main architecture.
+    This layer forms the initial feature extraction stage by applying three
+    successive MobileOne blocks that progressively downsample the spatial
+    dimensions by a factor of 4 while mapping to a consistent channel
+    depth. The first two blocks use ``3x3`` kernels with stride 2 for
+    spatial reduction; the third uses a ``1x1`` kernel at stride 1 for
+    channel refinement. All blocks support structural reparameterisation
+    for efficient inference.
 
-    **Intent**: Provide an efficient and effective initial processing stage
-    that converts raw images to meaningful feature representations while
-    maintaining computational efficiency through structural reparameterization.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[H, W, 3])
-           ↓
-    MobileOneBlock(out_channels, k=3, s=2) → [H/2, W/2, out_channels]
-           ↓
-    MobileOneBlock(out_channels, k=3, s=2, dw) → [H/4, W/4, out_channels]
-           ↓
-    MobileOneBlock(out_channels, k=1, s=1) → [H/4, W/4, out_channels]
-           ↓
-    Output(shape=[H/4, W/4, out_channels])
-    ```
+    .. code-block:: text
 
-    **Design Principles**:
-    - Progressive spatial downsampling (4x reduction)
-    - Consistent channel dimension throughout
-    - Mix of different kernel sizes (3x3, 1x1)
-    - Efficient depthwise operations where appropriate
+        ┌──────────────────────────────────┐
+        │  Input [H, W, 3]                │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  MobileOneBlock(k=3, s=2)       │
+        │  → [H/2, W/2, out_channels]     │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  MobileOneBlock(k=3, s=2, dw)   │
+        │  → [H/4, W/4, out_channels]     │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  MobileOneBlock(k=1, s=1)       │
+        │  → [H/4, W/4, out_channels]     │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [H/4, W/4, out_channels]│
+        └──────────────────────────────────┘
 
-    Args:
-        out_channels: Integer, number of output channels for all blocks.
-            Must be positive. This determines the feature dimension.
-        use_se: Boolean, whether to use Squeeze-and-Excitation in blocks.
-            Defaults to False for efficiency.
-        activation: String or callable, activation function for all blocks.
-            Defaults to 'gelu'.
-        kernel_initializer: String or initializer, initializer for conv kernels.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional regularizer for conv kernels.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, 3)`
-        Typically expects RGB images.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height/4, width/4, out_channels)`
-
-    Attributes:
-        blocks: List of MobileOne blocks comprising the stem.
-
-    Example:
-        ```python
-        # Basic usage for 224x224 input
-        stem = ConvolutionalStem(out_channels=64)
-        inputs = keras.Input(shape=(224, 224, 3))
-        features = stem(inputs)  # Shape: (None, 56, 56, 64)
-
-        # With Squeeze-and-Excitation
-        stem = ConvolutionalStem(out_channels=96, use_se=True)
-
-        # Custom activation
-        stem = ConvolutionalStem(
-            out_channels=128,
-            activation='swish',
-            kernel_initializer='glorot_uniform'
-        )
-
-        # In a complete model
-        inputs = keras.Input(shape=(224, 224, 3))
-        features = ConvolutionalStem(64)(inputs)
-        # ... rest of model architecture
-        ```
-
-    Note:
-        The 4x spatial downsampling is designed to balance between capturing
-        fine-grained details and computational efficiency. The stem can be
-        reparameterized for inference by calling reparameterize() on each block.
-    """
+    :param out_channels: Number of output channels for all blocks.
+    :type out_channels: int
+    :param use_se: Whether to use Squeeze-and-Excitation.
+    :type use_se: bool
+    :param activation: Activation function for all blocks.
+    :type activation: Union[str, callable]
+    :param kernel_initializer: Initializer for convolution kernels.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernels.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -545,7 +484,10 @@ class ConvolutionalStem(keras.layers.Layer):
         ]
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build all stem blocks."""
+        """Build all stem blocks.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         current_shape = input_shape
 
         for block in self.blocks:
@@ -559,14 +501,24 @@ class ConvolutionalStem(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through stem blocks."""
+        """Forward pass through the stem blocks.
+
+        :param inputs: Input image tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Feature tensor after 4x spatial downsampling.
+        :rtype: keras.KerasTensor"""
         x = inputs
         for block in self.blocks:
             x = block(x, training=training)
         return x
 
     def reparameterize(self) -> None:
-        """Reparameterize all blocks in the stem for efficient inference."""
+        """Reparameterize all blocks in the stem for efficient inference.
+
+        Fuses multi-branch training topology into single-branch for
+        deployment."""
         logger.info(f"Reparameterizing ConvolutionalStem with {len(self.blocks)} blocks")
         for i, block in enumerate(self.blocks):
             try:
@@ -585,14 +537,22 @@ class ConvolutionalStem(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape through all blocks."""
+        """Compute output shape through all blocks.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         current_shape = input_shape
         for block in self.blocks:
             current_shape = block.compute_output_shape(current_shape)
         return current_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'out_channels': self.out_channels,

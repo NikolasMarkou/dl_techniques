@@ -54,103 +54,72 @@ from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 @keras.saving.register_keras_serializable()
 class KANLinear(keras.layers.Layer):
-    """
-    Kolmogorov-Arnold Network (KAN) linear layer with learnable activation functions.
+    """Kolmogorov-Arnold Network (KAN) linear layer with learnable activation functions.
 
-    This layer replaces the standard Dense layer's operation `activation(x @ W + b)`
-    with a more expressive structure where each connection from an input feature to an
-    output feature has its own learnable activation function `phi_ij`. Unlike traditional
-    layers with fixed, predefined activations, KAN layers learn optimal activation
-    functions for each input-output connection in a data-driven manner through
-    parameterized B-splines combined with base activation functions.
+    This layer replaces the standard Dense layer's operation ``activation(x @ W + b)``
+    with a more expressive structure where each connection ``(i, j)`` has its own
+    learnable activation function ``phi_ij``. Each ``phi_ij`` is a weighted sum of
+    a fixed base activation and a learnable B-spline:
+    ``phi_ij(x) = w_base_ij * b(x) + w_spline_ij * sum_k(c_ijk * B_k(x))``.
+    The output is aggregated as ``y_j = sum_i phi_ij(x_i)``. B-spline basis
+    functions ``B_k(x)`` are computed via Cox-de Boor recursion on a configurable
+    knot grid.
 
-    **Intent**: Provide a Keras-native, serializable implementation of a KAN layer
-    that offers greater expressivity than traditional Dense layers by learning
-    connection-specific activation functions. This enables more parameter-efficient
-    architectures that can capture complex input-output relationships with fewer
-    layers and neurons.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_features])
-              ↓
-    For each (i, j) pair:
-         ↓
-    Base Path: b(x_i) * w_base_ij
-         ↓
-    Spline Path: spline_ij(x_i) * w_spline_ij
-         ↓
-    Combine: phi_ij(x_i) = base + spline
-         ↓
-    Sum over i: y_j = Σ_i phi_ij(x_i)
-         ↓
-    Output(shape=[..., features])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Per-Connection Activation**: phi_ij(x) = w_base_ij * b(x) + w_spline_ij * spline_ij(x)
-       - b(x) is a fixed base activation (e.g., SiLU/Swish)
-       - spline_ij(x) is a learnable B-spline: Σ_k c_ijk * B_k(x)
-       - w_base_ij and w_spline_ij are learnable scalar weights
-    2. **Output Aggregation**: y_j = Σ_i phi_ij(x_i)
-    3. **B-spline Basis**: B_k(x) computed via Cox-de Boor recursion on grid
+        ┌───────────────────────────────────┐
+        │  Input [..., input_features]      │
+        └───────────────┬───────────────────┘
+                        │
+            ┌───────────┴───────────┐
+            │                       │
+            ▼                       ▼
+        ┌───────────┐      ┌──────────────────┐
+        │ Base Path │      │  Spline Path     │
+        │ b(x_i) *  │      │  B-spline(x_i) * │
+        │ w_base_ij │      │  w_spline_ij     │
+        └─────┬─────┘      └────────┬─────────┘
+              │                     │
+              └──────────┬──────────┘
+                         │
+                         ▼
+        ┌───────────────────────────────────┐
+        │  phi_ij = base + spline           │
+        │  y_j = sum_i phi_ij(x_i)         │
+        └───────────────┬───────────────────┘
+                        │
+                        ▼
+        ┌───────────────────────────────────┐
+        │     Output [..., features]        │
+        └───────────────────────────────────┘
 
-    Where:
-    - x_i is the i-th input feature
-    - y_j is the j-th output feature
-    - B_k(x) are B-spline basis functions of specified order
-    - c_ijk are learned spline coefficients
-
-    **Usage Recommendations**:
-    - **Grid Updates**: Call `update_grid_from_samples(x)` periodically during
-      training with representative data to adapt the B-spline grid to the actual
-      input distribution for optimal expressivity.
-    - **Network Depth**: KANs are more parameter-efficient than MLPs. Start with
-      narrower and shallower architectures.
-    - **Residual Connections**: For deep KANs, use standard residual connections:
-      `y = x + KANLinear(features)(x)` to facilitate gradient flow.
-
-    References:
-        1. Liu, Z., Wang, Y., et al. (2024). "KAN: Kolmogorov-Arnold Networks."
-           arXiv preprint arXiv:2404.19756.
-
-    Args:
-        features: Integer, number of output features. Must be positive.
-            This determines the width of the layer's output.
-        grid_size: Integer, number of intervals in the B-spline grid. Must be positive.
-            Controls the resolution of learnable activation functions. Larger values
-            enable more complex activation shapes but increase parameters.
-            Defaults to 5.
-        spline_order: Integer, order (degree) of the B-spline basis functions.
-            Must be non-negative. Higher orders produce smoother activations.
-            Common values: 1 (linear), 2 (quadratic), 3 (cubic). Defaults to 3.
-        grid_range: Tuple of two floats, (min, max) range for the initial B-spline grid.
-            Should approximately cover the expected range of input activations.
-            Can be updated later via `update_grid_from_samples()`.
-            Defaults to (-2.0, 2.0).
-        activation: String name or callable for the base activation function b(x).
-            Applied uniformly to all connections. Common choices: 'swish', 'silu',
-            'relu', 'gelu'. Defaults to 'swish'.
-        base_trainable: Boolean, whether the base activation scaling weights
-            (base_scaler) are trainable. When True, the layer can learn to emphasize
-            or de-emphasize the base activation path per connection. Defaults to True.
-        spline_trainable: Boolean, whether the spline activation scaling weights
-            (spline_scaler) are trainable. When True, the layer can learn to emphasize
-            or de-emphasize the spline path per connection. Defaults to True.
-        kernel_initializer: Initializer for the spline coefficient weights. Can be
-            string name ('glorot_uniform', 'he_normal') or Initializer instance.
-            Defaults to 'glorot_uniform'.
-        epsilon: Small float added for numerical stability in division operations
-            during B-spline basis computation. Defaults to 1e-7.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_features)`.
-        The layer accepts any number of leading batch dimensions.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., features)`.
-        Only the final dimension changes from input_features to features.
+    :param features: Number of output features. Must be positive.
+    :type features: int
+    :param grid_size: Number of intervals in the B-spline grid. Controls the
+        resolution of learnable activation functions. Defaults to 5.
+    :type grid_size: int
+    :param spline_order: Order (degree) of B-spline basis functions. Higher orders
+        produce smoother activations (1=linear, 2=quadratic, 3=cubic). Defaults to 3.
+    :type spline_order: int
+    :param grid_range: ``(min, max)`` range for the initial B-spline grid.
+        Can be updated via ``update_grid_from_samples()``. Defaults to ``(-2.0, 2.0)``.
+    :type grid_range: Tuple[float, float]
+    :param activation: Base activation function ``b(x)``. Defaults to ``'swish'``.
+    :type activation: Union[str, Callable]
+    :param base_trainable: Whether base activation scaling weights are trainable.
+        Defaults to True.
+    :type base_trainable: bool
+    :param spline_trainable: Whether spline scaling weights are trainable.
+        Defaults to True.
+    :type spline_trainable: bool
+    :param kernel_initializer: Initializer for spline coefficient weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param epsilon: Small float for numerical stability. Defaults to 1e-7.
+    :type epsilon: float
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -198,11 +167,10 @@ class KANLinear(keras.layers.Layer):
         self.base_scaler: Optional[keras.Variable] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create layer weights and B-spline grid based on input shape.
+        """Create layer weights and B-spline grid based on input shape.
 
-        Args:
-            input_shape: Shape tuple of the input tensor. Must be at least 2D.
+        :param input_shape: Shape tuple of the input tensor. Must be at least 2D.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
@@ -260,18 +228,14 @@ class KANLinear(keras.layers.Layer):
         super().build(input_shape)
 
     def _compute_grid_values(self, start: float, stop: float) -> keras.KerasTensor:
-        """
-        Compute the extended B-spline knot sequence values.
+        """Compute the extended B-spline knot sequence values.
 
-        Generates a uniform grid between [start, stop] and extends it on both
-        ends to satisfy B-spline boundary conditions.
-
-        Args:
-            start: Range minimum.
-            stop: Range maximum.
-
-        Returns:
-            Tensor containing the complete knot sequence.
+        :param start: Range minimum.
+        :type start: float
+        :param stop: Range maximum.
+        :type stop: float
+        :return: Tensor containing the complete knot sequence.
+        :rtype: keras.KerasTensor
         """
         # Create uniform grid points within the specified range
         # Shape: (grid_size + 1,)
@@ -298,19 +262,23 @@ class KANLinear(keras.layers.Layer):
         )
 
     def _set_grid_from_range(self, start: float, stop: float) -> None:
-        """Helper to calculate and assign grid values to the state variable."""
+        """Calculate and assign grid values to the state variable.
+
+        :param start: Range minimum.
+        :type start: float
+        :param stop: Range maximum.
+        :type stop: float
+        """
         grid_values = self._compute_grid_values(start, stop)
         self.grid.assign(grid_values)
 
     def _compute_bspline_basis(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Compute B-spline basis functions using Cox-de Boor recursion formula.
+        """Compute B-spline basis functions using Cox-de Boor recursion formula.
 
-        Args:
-            x: Input tensor, shape (..., input_features).
-
-        Returns:
-            Basis function values, shape (..., input_features, num_basis_fns).
+        :param x: Input tensor of shape ``(..., input_features)``.
+        :type x: keras.KerasTensor
+        :return: Basis function values of shape ``(..., input_features, num_basis_fns)``.
+        :rtype: keras.KerasTensor
         """
         # Add dimension for broadcasting with grid: (..., input_features, 1)
         x = keras.ops.expand_dims(x, axis=-1)
@@ -357,15 +325,14 @@ class KANLinear(keras.layers.Layer):
     def call(
             self, inputs: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass: compute output using learned activation functions.
+        """Forward pass using learned activation functions.
 
-        Args:
-            inputs: Input tensor, shape (batch_size, ..., input_features).
-            training: Unused.
-
-        Returns:
-            Output tensor, shape (batch_size, ..., features).
+        :param inputs: Input tensor of shape ``(batch_size, ..., input_features)``.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, present for API consistency.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, ..., features)``.
+        :rtype: keras.KerasTensor
         """
         # Path 1: Base Activation
         # Shape: (..., input_features)
@@ -402,17 +369,11 @@ class KANLinear(keras.layers.Layer):
         return output
 
     def update_grid_from_samples(self, x: Union[keras.KerasTensor, Any]) -> None:
-        """
-        Update B-spline grid based on input data statistics.
+        """Update B-spline grid based on input data statistics.
 
-        This method updates the `grid` weight to cover the range of the input data `x`.
-        It maintains a uniform grid distribution but adapts the min/max boundaries.
-
-        Args:
-            x: Input data tensor, shape (batch_size, input_features).
-
-        Raises:
-            ValueError: If input is not 2D.
+        :param x: Input data tensor of shape ``(batch_size, input_features)``.
+        :type x: Union[keras.KerasTensor, Any]
+        :raises ValueError: If input is not 2D.
         """
         # Ensure input is a tensor
         x = keras.ops.convert_to_tensor(x, dtype=self.dtype)
@@ -451,13 +412,23 @@ class KANLinear(keras.layers.Layer):
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape from input shape."""
+        """Compute output shape from input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         output_shape = list(input_shape)
         output_shape[-1] = self.features
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration dictionary for serialization."""
+        """Return configuration dictionary for serialization.
+
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "features": self.features,

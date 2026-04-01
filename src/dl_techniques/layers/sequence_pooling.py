@@ -106,49 +106,54 @@ AggregationMethod = Literal['concat', 'add', 'multiply', 'weighted_sum']
 
 @keras.saving.register_keras_serializable()
 class AttentionPooling(keras.layers.Layer):
-    """
-    Attention-based pooling that learns to weight sequence elements.
+    """Attention-based pooling that learns to weight sequence elements.
 
-    This computes attention weights for each sequence element and returns
-    a weighted sum of the sequence. The attention mechanism learns what
-    parts of the sequence are most important for the downstream task.
+    Each token is transformed through a ``tanh`` dense layer and scored
+    against a learnable context vector, producing per-token importance
+    weights via softmax. The output is the weighted sum of the original
+    input tokens, optionally using multiple attention heads whose outputs
+    are averaged.
 
-    **Intent**: Provide learnable attention-based pooling that dynamically
-    weights sequence elements based on their importance, enabling the model
-    to focus on relevant parts of the input sequence.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(batch, seq_len, embed_dim)
-           ↓
-    Dense(hidden_dim * num_heads, activation='tanh')
-           ↓
-    Reshape(batch, seq_len, num_heads, hidden_dim)
-           ↓
-    Attention Score = einsum with context_vector
-           ↓
-    Softmax(with masking if provided)
-           ↓
-    Weighted Sum = einsum with input
-           ↓
-    Output(batch, embed_dim)
-    ```
+    .. code-block:: text
 
-    Args:
-        hidden_dim: Hidden dimension for attention computation.
-        num_heads: Number of attention heads for multi-head variant.
-        dropout_rate: Dropout rate for attention weights.
-        use_bias: Whether to use bias in attention layers.
-        temperature: Temperature for attention softmax.
-        kernel_initializer: Initializer for kernel weights.
-        kernel_regularizer: Regularizer for kernel weights.
+        ┌──────────────────────────────────┐
+        │  Input [B, seq_len, embed_dim]   │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Dense(hidden*heads, tanh)       │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Reshape → [B, S, heads, hidden] │
+        │  Score = einsum(context_vector)  │
+        │  Softmax → attention weights     │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Weighted sum over sequence      │
+        │  → Output [B, embed_dim]         │
+        └──────────────────────────────────┘
 
-    Input shape:
-        3D tensor with shape `(batch_size, sequence_length, embedding_dim)`
-
-    Output shape:
-        2D tensor with shape `(batch_size, embedding_dim)`
-    """
+    :param hidden_dim: Hidden dimension for attention computation.
+    :type hidden_dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param dropout_rate: Dropout rate for attention weights.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in attention layers.
+    :type use_bias: bool
+    :param temperature: Temperature for attention softmax.
+    :type temperature: float
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]"""
 
     def __init__(
         self,
@@ -161,7 +166,7 @@ class AttentionPooling(keras.layers.Layer):
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize attention pooling layer."""
+        """Initialise the attention pooling layer."""
         super().__init__(**kwargs)
 
         # Store all configuration
@@ -189,7 +194,10 @@ class AttentionPooling(keras.layers.Layer):
             self.dropout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build attention layers based on input shape."""
+        """Build attention layers based on input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         super().build(input_shape)
 
         embed_dim = input_shape[-1]
@@ -218,7 +226,16 @@ class AttentionPooling(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply attention-based pooling."""
+        """Apply attention-based pooling.
+
+        :param inputs: Input sequence ``(batch, seq_len, embed_dim)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional boolean mask ``(batch, seq_len)``.
+        :type mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Pooled output ``(batch, embed_dim)``.
+        :rtype: keras.KerasTensor"""
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
 
@@ -260,11 +277,19 @@ class AttentionPooling(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
+        """Compute output shape.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         return (input_shape[0], input_shape[-1])
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'hidden_dim': self.hidden_dim,
@@ -281,45 +306,45 @@ class AttentionPooling(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class WeightedPooling(keras.layers.Layer):
-    """
-    Learnable weighted pooling with position-specific weights.
+    """Learnable position-weighted pooling for sequences.
 
-    This learns a weight for each position in the sequence and computes
-    a weighted sum. Useful when certain positions consistently contain
-    more important information.
+    A scalar learnable weight is assigned to each position up to
+    ``max_seq_len``. At inference the weights for the current sequence
+    length are softmax-normalised and used to compute a weighted sum,
+    producing a fixed-size vector. Unlike attention pooling these weights
+    are content-independent: they capture positional importance patterns
+    rather than input-dependent relevance.
 
-    **Intent**: Enable position-aware pooling where the model learns which
-    sequence positions are most informative, providing a simpler alternative
-    to attention mechanisms for position-dependent importance.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(batch, seq_len, embed_dim)
-           ↓
-    Get position_weights[:seq_len]
-           ↓
-    Apply temperature & mask
-           ↓
-    Softmax normalization
-           ↓
-    Weighted sum with input
-           ↓
-    Output(batch, embed_dim)
-    ```
+    .. code-block:: text
 
-    Args:
-        max_seq_len: Maximum sequence length for weight initialization.
-        dropout_rate: Dropout rate for weights.
-        temperature: Temperature for weight softmax.
-        initializer: Weight initializer.
-        regularizer: Weight regularizer.
+        ┌──────────────────────────────────┐
+        │  Input [B, seq_len, embed_dim]   │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  position_weights[:seq_len]      │
+        │  / temperature → softmax         │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Weighted sum over sequence      │
+        │  → Output [B, embed_dim]         │
+        └──────────────────────────────────┘
 
-    Input shape:
-        3D tensor with shape `(batch_size, sequence_length, embedding_dim)`
-
-    Output shape:
-        2D tensor with shape `(batch_size, embedding_dim)`
-    """
+    :param max_seq_len: Maximum sequence length for weight allocation.
+    :type max_seq_len: int
+    :param dropout_rate: Dropout rate applied to normalised weights.
+    :type dropout_rate: float
+    :param temperature: Temperature for weight softmax.
+    :type temperature: float
+    :param initializer: Initializer for position weights.
+    :type initializer: Union[str, initializers.Initializer]
+    :param regularizer: Optional regularizer for weights.
+    :type regularizer: Optional[regularizers.Regularizer]"""
 
     def __init__(
         self,
@@ -330,7 +355,7 @@ class WeightedPooling(keras.layers.Layer):
         regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize weighted pooling layer."""
+        """Initialise the weighted pooling layer."""
         super().__init__(**kwargs)
 
         # Store all configuration
@@ -347,7 +372,10 @@ class WeightedPooling(keras.layers.Layer):
             self.dropout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build position weights."""
+        """Build learnable position weights.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         super().build(input_shape)
 
         # Create learnable position weights
@@ -371,7 +399,16 @@ class WeightedPooling(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply weighted pooling."""
+        """Apply position-weighted pooling.
+
+        :param inputs: Input sequence ``(batch, seq_len, embed_dim)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional boolean mask ``(batch, seq_len)``.
+        :type mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Pooled output ``(batch, embed_dim)``.
+        :rtype: keras.KerasTensor"""
         seq_len = ops.shape(inputs)[1]
 
         # Get weights for current sequence length
@@ -396,11 +433,19 @@ class WeightedPooling(keras.layers.Layer):
         return weighted_sum
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
+        """Compute output shape.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         return (input_shape[0], input_shape[-1])
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'max_seq_len': self.max_seq_len,
@@ -418,81 +463,73 @@ class WeightedPooling(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class SequencePooling(keras.layers.Layer):
-    """
-    Highly configurable pooling layer for sequence data.
+    """Configurable pooling layer supporting multiple strategies for sequences.
 
-    This layer provides a unified interface for various pooling strategies
-    commonly used in sequence models like transformers. It supports both
-    simple statistical pooling and advanced learnable methods.
+    This layer provides a unified interface for positional, statistical,
+    learnable, and top-k pooling strategies. One or more strategies can
+    be applied simultaneously and their results aggregated via
+    concatenation, addition, multiplication, or learned weighted sum.
+    Supported strategies include ``cls``, ``first``, ``last``, ``middle``
+    (positional); ``mean``, ``max``, ``min``, ``sum`` (statistical);
+    ``mean_max``, ``mean_std``, ``mean_max_min`` (combined);
+    ``attention``, ``multi_head_attention``, ``weighted`` (learnable);
+    ``top_k_mean``, ``top_k_max`` (top-k); and ``none``, ``flatten``
+    (special).
 
-    **Intent**: Provide a flexible, unified pooling interface that can adapt
-    to different sequence modeling tasks, from simple averaging to complex
-    attention-based mechanisms, enabling easy experimentation with pooling strategies.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(batch, seq_len, hidden_dim)
-           ↓
-    Apply Strategy 1 → Output 1
-    Apply Strategy 2 → Output 2  (if multiple strategies)
-    Apply Strategy N → Output N
-           ↓
-    Aggregation (concat/add/multiply/weighted_sum)
-           ↓
-    Output(batch, output_dim)
-    ```
+    .. code-block:: text
 
-    **Pooling Strategies**:
-    - **Positional**: 'cls', 'first', 'last', 'middle'
-    - **Statistical**: 'mean', 'max', 'min', 'sum'
-    - **Combined**: 'mean_max', 'mean_std', 'mean_max_min'
-    - **Learnable**: 'attention', 'multi_head_attention', 'weighted'
-    - **Top-k**: 'top_k_mean', 'top_k_max'
-    - **Special**: 'none', 'flatten'
+        ┌──────────────────────────────────┐
+        │  Input [B, seq_len, hidden_dim]  │
+        └──────────────┬───────────────────┘
+                       │
+            ┌──────────┼──────────┐
+            ▼          ▼          ▼
+        ┌────────┐ ┌────────┐ ┌────────┐
+        │Strat 1 │ │Strat 2 │ │Strat N │
+        └───┬────┘ └───┬────┘ └───┬────┘
+            │          │          │
+            └──────────┼──────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Aggregation                     │
+        │  (concat/add/multiply/weighted)  │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [B, output_dim]          │
+        └──────────────────────────────────┘
 
-    Args:
-        strategy: PoolingStrategy or list of strategies to use.
-        exclude_positions: List of positions to exclude from pooling (0-indexed).
-        aggregation_method: How to combine multiple strategies.
-        attention_hidden_dim: Hidden dimension for attention pooling.
-        attention_num_heads: Number of heads for multi-head attention pooling.
-        attention_dropout: Dropout rate for attention mechanisms.
-        weighted_max_seq_len: Maximum sequence length for weighted pooling.
-        top_k: Number of top elements for top-k pooling.
-        temperature: Temperature for softmax in attention/weighted pooling.
-        use_bias: Whether to use bias in learnable components.
-        kernel_initializer: Initializer for kernels.
-        bias_initializer: Initializer for biases.
-        kernel_regularizer: Regularizer for kernels.
-        bias_regularizer: Regularizer for biases.
-
-    Input Shape:
-        3D tensor with shape `(batch_size, sequence_length, hidden_dim)`
-
-    Output Shape:
-        - For single strategies: `(batch_size, hidden_dim)` or variants
-        - For 'none': `(batch_size, sequence_length, hidden_dim)`
-        - For 'flatten': `(batch_size, sequence_length * hidden_dim)`
-
-    Example:
-        ```python
-        # Simple mean pooling
-        pooling = SequencePooling(strategy='mean')
-
-        # Attention-based pooling
-        pooling = SequencePooling(
-            strategy='attention',
-            attention_hidden_dim=256,
-            attention_dropout=0.1
-        )
-
-        # Combination of strategies
-        pooling = SequencePooling(
-            strategy=['mean', 'max', 'attention'],
-            aggregation_method='concat'
-        )
-        ```
-    """
+    :param strategy: Pooling strategy name or list of strategy names.
+    :type strategy: Union[PoolingStrategy, List[PoolingStrategy]]
+    :param exclude_positions: Positions to exclude from pooling.
+    :type exclude_positions: Optional[List[int]]
+    :param aggregation_method: How to combine multiple strategy outputs.
+    :type aggregation_method: AggregationMethod
+    :param attention_hidden_dim: Hidden dimension for attention pooling.
+    :type attention_hidden_dim: int
+    :param attention_num_heads: Number of heads for multi-head attention.
+    :type attention_num_heads: int
+    :param attention_dropout: Dropout rate for attention mechanisms.
+    :type attention_dropout: float
+    :param weighted_max_seq_len: Maximum sequence length for weighted
+        pooling.
+    :type weighted_max_seq_len: int
+    :param top_k: Number of top elements for top-k pooling.
+    :type top_k: int
+    :param temperature: Temperature for softmax in learnable strategies.
+    :type temperature: float
+    :param use_bias: Whether to use bias in learnable components.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernels.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for biases.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernels.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for biases.
+    :type bias_regularizer: Optional[regularizers.Regularizer]"""
 
     def __init__(
         self,
@@ -512,7 +549,7 @@ class SequencePooling(keras.layers.Layer):
         bias_regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize sequence pooling layer."""
+        """Initialise the sequence pooling layer."""
         super().__init__(**kwargs)
 
         # Store ALL configuration (critical for get_config)
@@ -558,7 +595,10 @@ class SequencePooling(keras.layers.Layer):
                 )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all sub-layers."""
+        """Build the layer and all learnable sub-layers.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         super().build(input_shape)
 
         # CRITICAL: Explicitly build all learnable components
@@ -580,7 +620,14 @@ class SequencePooling(keras.layers.Layer):
         inputs: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None
     ) -> Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]:
-        """Apply mask and position exclusions."""
+        """Apply mask and position exclusions.
+
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional boolean mask.
+        :type mask: Optional[keras.KerasTensor]
+        :return: Tuple of (masked inputs, updated mask).
+        :rtype: Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]"""
         if self.exclude_positions:
             seq_len = ops.shape(inputs)[1]
             if mask is None:
@@ -602,7 +649,18 @@ class SequencePooling(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply a single pooling strategy."""
+        """Apply a single pooling strategy.
+
+        :param strategy: Name of the pooling strategy.
+        :type strategy: str
+        :param inputs: Input sequence tensor.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional boolean mask.
+        :type mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Pooled tensor.
+        :rtype: keras.KerasTensor"""
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
 
@@ -760,17 +818,16 @@ class SequencePooling(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply pooling strategy to inputs.
+        """Apply the configured pooling strategies.
 
-        Args:
-            inputs: Input tensor of shape (batch, seq_len, hidden_dim)
-            mask: Optional boolean mask of shape (batch, seq_len)
-            training: Whether in training mode.
-
-        Returns:
-            Pooled features based on configured strategy.
-        """
+        :param inputs: Input tensor ``(batch, seq_len, hidden_dim)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional boolean mask ``(batch, seq_len)``.
+        :type mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Pooled features tensor.
+        :rtype: keras.KerasTensor"""
         # Apply each strategy
         outputs = []
         for strat in self.strategy:
@@ -813,7 +870,12 @@ class SequencePooling(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape based on pooling strategy."""
+        """Compute output shape based on pooling strategy.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         batch_size = input_shape[0]
         hidden_dim = input_shape[-1]
 
@@ -848,7 +910,10 @@ class SequencePooling(keras.layers.Layer):
             return (batch_size, hidden_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'strategy': self.strategy,

@@ -90,78 +90,64 @@ from .squeeze_excitation import SqueezeExcitation
 
 @keras.saving.register_keras_serializable()
 class MLFCLayer(keras.layers.Layer):
-    """
-    Multi Level Feature Compilation (MLFC) Layer.
+    """Multi Level Feature Compilation (MLFC) Layer.
 
-    This layer implements multi-level feature fusion by:
-    1. Resizing feature maps from different encoder levels to common dimensions
-    2. Concatenating them along the channel dimension
-    3. Processing through pointwise convolutions
-    4. Applying residual connections and squeeze-excitation
+    This layer implements multi-level feature fusion from the ACC-UNet
+    architecture by resizing feature maps from 4 encoder levels to common
+    dimensions, concatenating them along the channel axis, processing through
+    1x1 convolutions, and applying residual connections with squeeze-excitation
+    recalibration. For each level ``i`` at iteration ``t``:
+    ``F_concat = Concat([Resize(F_j, size_i) for j in 1..4])``,
+    ``F_compiled = Conv1x1(F_concat)``,
+    ``F_merged = Conv1x1(Concat([F_compiled, F_i])) + F_i``.
 
-    The layer processes features from 4 different encoder levels simultaneously,
-    enriching each level with information from other levels through cross-level
-    feature compilation.
+    **Architecture Overview:**
 
-    Args:
-        channels_list: List of channel counts for each of the 4 levels [c1, c2, c3, c4].
-            Must contain exactly 4 positive integers.
-        num_iterations: Integer, number of compilation iterations to apply. Must be positive.
-            More iterations strengthen feature mixing but increase computation.
-            Defaults to 1.
-        kernel_initializer: String or Initializer instance for convolution kernels.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer instance for bias vectors.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional Regularizer instance for convolution kernels.
-            Defaults to None.
-        bias_regularizer: Optional Regularizer instance for bias vectors.
-            Defaults to None.
-        **kwargs: Additional arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        List of 4 tensors with shapes:
-        - Level 1: (batch_size, h1, w1, c1) - highest resolution
-        - Level 2: (batch_size, h2, w2, c2) - h2=h1/2, w2=w1/2
-        - Level 3: (batch_size, h3, w3, c3) - h3=h1/4, w3=w1/4
-        - Level 4: (batch_size, h4, w4, c4) - h4=h1/8, w4=w1/8
+        ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
+        │ Level 1 │  │ Level 2 │  │ Level 3 │  │ Level 4 │
+        │ [H,W,c1]│  │[H/2,c2] │  │[H/4,c3] │  │[H/8,c4] │
+        └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘
+             │            │            │            │
+             ▼            ▼            ▼            ▼
+        ┌──────────────────────────────────────────────────┐
+        │  For each level i (repeat num_iterations times): │
+        │    1. Resize all 4 levels to level i dimensions  │
+        │    2. Concatenate → Conv1x1 → BN → Activation   │
+        │    3. Concat with original → Conv1x1 → + residual│
+        └──────────────────────────────────────────────────┘
+             │            │            │            │
+             ▼            ▼            ▼            ▼
+        ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
+        │   SE    │  │   SE    │  │   SE    │  │   SE    │
+        └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘
+             │            │            │            │
+             ▼            ▼            ▼            ▼
+        ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
+        │ Output 1│  │ Output 2│  │ Output 3│  │ Output 4│
+        └─────────┘  └─────────┘  └─────────┘  └─────────┘
 
-    Output shape:
-        List of 4 tensors with same shapes as input but enriched features.
+    :param channels_list: Channel counts for each of the 4 levels ``[c1, c2, c3, c4]``.
+        Must contain exactly 4 positive integers.
+    :type channels_list: List[int]
+    :param num_iterations: Number of compilation iterations. Must be positive.
+        Defaults to 1.
+    :type num_iterations: int
+    :param kernel_initializer: Initializer for convolution kernels.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for convolution kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias vectors.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for the Layer base class.
 
-    Raises:
-        ValueError: If channels_list doesn't have exactly 4 elements.
-        ValueError: If any channel count is not positive.
-        ValueError: If num_iterations is not positive.
-        ValueError: If inputs don't contain exactly 4 tensors.
-
-    Example:
-        ```python
-        # For standard U-Net with base filters=32
-        mlfc = MLFCLayer(
-            channels_list=[32, 64, 128, 256],
-            num_iterations=1
-        )
-
-        # Multiple iterations for stronger feature mixing
-        mlfc = MLFCLayer(
-            channels_list=[32, 64, 128, 256],
-            num_iterations=3,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Usage in model
-        x1, x2, x3, x4 = encoder_features  # From different levels
-        x1, x2, x3, x4 = mlfc([x1, x2, x3, x4])
-        ```
-
-    Note:
-        This layer expects exactly 4 input feature maps from different
-        encoder levels with 2x downsampling between adjacent levels.
-        The spatial dimensions are handled automatically through resizing.
-
-        Following modern Keras 3 patterns, all sub-layers are created in __init__()
-        and built appropriately for robust serialization.
+    :raises ValueError: If channels_list doesn't have exactly 4 elements.
+    :raises ValueError: If any channel count is not positive.
+    :raises ValueError: If num_iterations is not positive.
     """
 
     def __init__(
@@ -261,17 +247,11 @@ class MLFCLayer(keras.layers.Layer):
         self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all its sub-layers.
 
-        Following modern Keras 3 pattern, this method builds the sub-layers
-        for robust serialization. All sub-layers were already created in __init__.
-
-        Args:
-            input_shape: List of 4 input shapes for the 4 encoder levels.
-
-        Raises:
-            ValueError: If input_shape is not a list of 4 shapes.
+        :param input_shape: List of 4 input shapes for the 4 encoder levels.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :raises ValueError: If input_shape is not a list of 4 shapes.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 4:
             raise ValueError(
@@ -322,21 +302,15 @@ class MLFCLayer(keras.layers.Layer):
         inputs: List[keras.KerasTensor],
         training: Optional[bool] = None
     ) -> List[keras.KerasTensor]:
-        """
-        Forward pass computation.
+        """Forward pass performing iterative cross-level feature compilation.
 
-        Performs multi-level feature compilation through iterative cross-level fusion,
-        adaptive resizing, and residual enhancement.
-
-        Args:
-            inputs: List of 4 input tensors from different encoder levels.
-            training: Boolean indicating training mode for batch normalization and dropout.
-
-        Returns:
-            List of 4 output tensors with same shapes as input but enriched features.
-
-        Raises:
-            ValueError: If inputs doesn't contain exactly 4 tensors.
+        :param inputs: List of 4 input tensors from different encoder levels.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: List of 4 output tensors with enriched features.
+        :rtype: List[keras.KerasTensor]
+        :raises ValueError: If inputs doesn't contain exactly 4 tensors.
         """
         if len(inputs) != 4:
             raise ValueError(f"Expected 4 input tensors, got {len(inputs)}")
@@ -406,27 +380,20 @@ class MLFCLayer(keras.layers.Layer):
         self,
         input_shape: List[Tuple[Optional[int], ...]]
     ) -> List[Tuple[Optional[int], ...]]:
-        """
-        Compute output shapes.
+        """Compute output shapes.
 
-        Args:
-            input_shape: List of input shapes for the 4 encoder levels.
-
-        Returns:
-            List of output shapes, identical to input shapes since only
-            channel-wise operations are performed.
+        :param input_shape: List of input shapes for the 4 encoder levels.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: List of output shapes (identical to input shapes).
+        :rtype: List[Tuple[Optional[int], ...]]
         """
         return input_shape  # Shapes remain unchanged
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Following modern Keras 3 pattern, this includes ALL parameters
-        passed to __init__() to ensure complete reconstruction.
-
-        Returns:
-            Dictionary containing the complete layer configuration.
+        :return: Dictionary containing the complete layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

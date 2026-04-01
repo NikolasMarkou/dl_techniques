@@ -98,98 +98,91 @@ Axis = Union[int, List[int]]
 
 @keras.saving.register_keras_serializable()
 class KMeansLayer(keras.layers.Layer):
-    """
-    A differentiable K-means layer with momentum and centroid repulsion.
+    """Differentiable K-means layer with momentum and centroid repulsion.
 
-    This layer implements a differentiable version of K-means clustering using soft
-    assignments, momentum, and repulsive forces between centroids to prevent collapse.
-    The layer performs clustering on specified axes and can output either soft assignments
-    or mixture representations based on the learned centroids.
+    This layer implements a differentiable version of K-means clustering using
+    soft assignments via temperature-controlled softmax, momentum-based centroid
+    updates, and repulsive forces between centroids to prevent collapse. The
+    soft assignment probability of input ``x_i`` to centroid ``c_j`` is
+    ``a_ij = softmax(-||x_i - c_j||^2 / tau)_j``. Centroids are updated as
+    ``c_new = c + alpha * (momentum_update + repulsion_forces)``.
 
-    Mathematical formulation:
-        assignments = softmax(-||x - c||² / τ)
-        centroids_new = centroids + α * (momentum_update + repulsion_forces)
+    **Architecture Overview:**
 
-    Where:
-    - x are input features
-    - c are cluster centroids
-    - τ is temperature parameter
-    - α is centroid learning rate
+    .. code-block:: text
 
-    Args:
-        n_clusters: Integer, number of clusters (K in K-means). Must be positive.
-        temperature: Float, softmax temperature for assignments. Controls softness of
-            cluster assignments. Lower values create harder assignments. Must be positive.
-            Defaults to 0.1.
-        momentum: Float, momentum coefficient for centroid updates. Must be in [0, 1).
-            Higher values provide smoother updates. Defaults to 0.9.
-        centroid_lr: Float, learning rate for centroid updates. Must be in (0, 1].
-            Controls speed of centroid adaptation. Defaults to 0.1.
-        repulsion_strength: Float, strength of repulsive force between centroids.
-            Prevents centroid collapse. Must be non-negative. Defaults to 0.1.
-        min_distance: Float, minimum desired distance between centroids. Must be positive.
-            Used in repulsion force calculation. Defaults to 1.0.
-        output_mode: String, output type. Either 'assignments' for cluster probabilities
-            or 'mixture' for reconstructed inputs using centroids. Defaults to 'assignments'.
-        cluster_axis: Integer or list of integers, axis or axes to perform clustering on.
-            Negative values are supported. Defaults to -1.
-        centroid_initializer: String or initializer instance, initializer for centroids.
-            Supports 'orthonormal' for orthogonal initialization when possible.
-            Defaults to 'orthonormal'.
-        centroid_regularizer: Optional regularizer for centroids. Defaults to None.
-        random_seed: Optional integer, random seed for initialization. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌─────────────────────────────────────┐
+        │   Input (arbitrary shape)           │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Reshape for clustering             │
+        │  (flatten cluster_axis dims)        │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Compute ||x - c||^2 distances     │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Soft assignments:                  │
+        │  softmax(-distances / tau)          │
+        └────────┬───────────────┬────────────┘
+                 │               │
+        (training only)         │
+                 ▼               │
+        ┌────────────────┐      │
+        │ Update centroids│     │
+        │ + momentum      │     │
+        │ + repulsion     │     │
+        └────────────────┘      │
+                                ▼
+        ┌─────────────────────────────────────┐
+        │  Output: assignments or mixture     │
+        └─────────────────────────────────────┘
 
-    Input shape:
-        N-D tensor with arbitrary shape. The dimensions specified by cluster_axis
-        will be used for clustering.
+    :param n_clusters: Number of clusters (K). Must be positive.
+    :type n_clusters: int
+    :param temperature: Softmax temperature for assignments. Lower values create
+        harder assignments. Must be positive. Defaults to 0.1.
+    :type temperature: float
+    :param momentum: Momentum coefficient for centroid updates. Must be in [0, 1).
+        Defaults to 0.9.
+    :type momentum: float
+    :param centroid_lr: Learning rate for centroid updates. Must be in (0, 1].
+        Defaults to 0.1.
+    :type centroid_lr: float
+    :param repulsion_strength: Strength of repulsive force between centroids.
+        Must be non-negative. Defaults to 0.1.
+    :type repulsion_strength: float
+    :param min_distance: Minimum desired distance between centroids. Must be positive.
+        Defaults to 1.0.
+    :type min_distance: float
+    :param output_mode: Output type: ``'assignments'`` for cluster probabilities or
+        ``'mixture'`` for reconstructed inputs using centroids. Defaults to ``'assignments'``.
+    :type output_mode: str
+    :param cluster_axis: Axis or axes to perform clustering on. Negative values
+        are supported. Defaults to -1.
+    :type cluster_axis: Union[int, List[int]]
+    :param centroid_initializer: Initializer for centroids. Supports ``'orthonormal'``.
+        Defaults to ``'orthonormal'``.
+    :type centroid_initializer: Union[str, keras.initializers.Initializer]
+    :param centroid_regularizer: Optional regularizer for centroids. Defaults to None.
+    :type centroid_regularizer: Optional[keras.regularizers.Regularizer]
+    :param random_seed: Random seed for initialization. Defaults to None.
+    :type random_seed: Optional[int]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Output shape:
-        - For 'assignments' mode: Same as input shape except cluster_axis dimensions
-          are replaced with n_clusters
-        - For 'mixture' mode: Same as input shape
-
-    Attributes:
-        centroids: Weight tensor of shape (n_clusters, feature_dims) containing
-            the learned cluster centers.
-        centroid_momentum: Non-trainable weight tensor of shape (n_clusters, feature_dims)
-            storing momentum for centroid updates.
-
-    Example:
-        ```python
-        # Basic feature clustering
-        layer = KMeansLayer(n_clusters=10, temperature=0.1)
-        inputs = keras.Input(shape=(128,))
-        assignments = layer(inputs)  # Shape: (batch_size, 10)
-
-        # Mixture reconstruction
-        layer = KMeansLayer(n_clusters=5, output_mode='mixture')
-        reconstructed = layer(inputs)  # Shape: (batch_size, 128)
-
-        # Multi-dimensional clustering
-        layer = KMeansLayer(
-            n_clusters=16,
-            cluster_axis=[1, 2],  # Cluster spatial dimensions
-            temperature=0.05
-        )
-        image_features = keras.Input(shape=(32, 32, 256))
-        spatial_clusters = layer(image_features)  # Shape: (batch_size, 16, 256)
-        ```
-
-    Raises:
-        ValueError: If n_clusters is not positive.
-        ValueError: If temperature is not positive.
-        ValueError: If momentum is not in [0, 1).
-        ValueError: If centroid_lr is not in (0, 1].
-        ValueError: If repulsion_strength is negative.
-        ValueError: If min_distance is not positive.
-        ValueError: If output_mode is not 'assignments' or 'mixture'.
-        ValueError: If cluster_axis contains invalid indices.
-
-    Note:
-        The layer uses soft assignments during training and inference. Centroid updates
-        only occur during training mode. The repulsion mechanism helps prevent mode
-        collapse by maintaining separation between centroids.
+    :raises ValueError: If n_clusters is not positive.
+    :raises ValueError: If temperature is not positive.
+    :raises ValueError: If momentum is not in [0, 1).
+    :raises ValueError: If centroid_lr is not in (0, 1].
+    :raises ValueError: If repulsion_strength is negative.
+    :raises ValueError: If min_distance is not positive.
+    :raises ValueError: If output_mode is not ``'assignments'`` or ``'mixture'``.
     """
 
     def __init__(
@@ -248,17 +241,21 @@ class KMeansLayer(keras.layers.Layer):
     ) -> None:
         """Validate initialization arguments.
 
-        Args:
-            n_clusters: Number of clusters
-            temperature: Softmax temperature
-            momentum: Momentum coefficient
-            centroid_lr: Centroid learning rate
-            repulsion_strength: Repulsion force strength
-            min_distance: Minimum distance between centroids
-            output_mode: Output mode string
-
-        Raises:
-            ValueError: If any argument is invalid
+        :param n_clusters: Number of clusters.
+        :type n_clusters: int
+        :param temperature: Softmax temperature.
+        :type temperature: float
+        :param momentum: Momentum coefficient.
+        :type momentum: float
+        :param centroid_lr: Centroid learning rate.
+        :type centroid_lr: float
+        :param repulsion_strength: Repulsion force strength.
+        :type repulsion_strength: float
+        :param min_distance: Minimum distance between centroids.
+        :type min_distance: float
+        :param output_mode: Output mode string.
+        :type output_mode: str
+        :raises ValueError: If any argument is invalid.
         """
         if not isinstance(n_clusters, int) or n_clusters < 1:
             raise ValueError(f"n_clusters must be a positive integer, got {n_clusters}")
@@ -278,17 +275,11 @@ class KMeansLayer(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer weights.
+        """Build the layer weights.
 
-        Creates the centroid weights and momentum buffer based on input shape.
-        This method is called automatically when the layer first processes input.
-
-        Args:
-            input_shape: Shape of input tensor as tuple
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible with cluster_axis
+        :param input_shape: Shape of input tensor as tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is invalid or incompatible with cluster_axis.
         """
         # Store input information
         self.input_rank = len(input_shape)
@@ -319,8 +310,7 @@ class KMeansLayer(keras.layers.Layer):
     def _setup_cluster_axes(self) -> None:
         """Setup and validate cluster axes.
 
-        Raises:
-            ValueError: If cluster axes are invalid
+        :raises ValueError: If cluster axes are invalid.
         """
         # Convert negative axes to positive
         self.cluster_axis = [
@@ -340,14 +330,11 @@ class KMeansLayer(keras.layers.Layer):
     def _compute_feature_dims(self, input_shape: Tuple[Optional[int], ...]) -> int:
         """Compute total feature dimensions.
 
-        Args:
-            input_shape: Input tensor shape
-
-        Returns:
-            Product of dimensions along cluster axes
-
-        Raises:
-            ValueError: If input shape is invalid
+        :param input_shape: Input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Product of dimensions along cluster axes.
+        :rtype: int
+        :raises ValueError: If input shape is invalid.
         """
         try:
             return int(np.prod([input_shape[axis] for axis in self.cluster_axis]))
@@ -359,8 +346,8 @@ class KMeansLayer(keras.layers.Layer):
     def _compute_non_feature_dims(self) -> List[int]:
         """Compute non-feature dimensions.
 
-        Returns:
-            List of axes not used for clustering
+        :return: List of axes not used for clustering.
+        :rtype: List[int]
         """
         return [i for i in range(self.input_rank) if i not in self.cluster_axis]
 
@@ -401,11 +388,10 @@ class KMeansLayer(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute shape of layer output.
 
-        Args:
-            input_shape: Shape of input tensor
-
-        Returns:
-            Output tensor shape
+        :param input_shape: Shape of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output tensor shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         if self.output_mode == 'assignments':
             output_shape = list(input_shape)
@@ -428,11 +414,10 @@ class KMeansLayer(keras.layers.Layer):
     def _reshape_for_clustering(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Reshape input tensor for clustering operations.
 
-        Args:
-            inputs: Input tensor
-
-        Returns:
-            Reshaped tensor with shape (batch * non_feature_dims, feature_dims)
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :return: Reshaped tensor with shape ``(batch * non_feature_dims, feature_dims)``.
+        :rtype: keras.KerasTensor
         """
         # Optimize for common case of single axis at end
         if len(self.cluster_axis) == 1 and self.cluster_axis[0] == self.input_rank - 1:
@@ -446,11 +431,10 @@ class KMeansLayer(keras.layers.Layer):
     def _compute_distances(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Compute squared Euclidean distances to centroids.
 
-        Args:
-            inputs: Input tensor of shape (batch, features)
-
-        Returns:
-            Distances tensor of shape (batch, n_clusters)
+        :param inputs: Input tensor of shape ``(batch, features)``.
+        :type inputs: keras.KerasTensor
+        :return: Distances tensor of shape ``(batch, n_clusters)``.
+        :rtype: keras.KerasTensor
         """
         # Use broadcasting for memory efficiency
         expanded_inputs = keras.ops.expand_dims(inputs, axis=1)  # (batch, 1, features)
@@ -467,11 +451,10 @@ class KMeansLayer(keras.layers.Layer):
     def _soft_assignments(self, distances: keras.KerasTensor) -> keras.KerasTensor:
         """Compute soft cluster assignments using temperature-scaled softmax.
 
-        Args:
-            distances: Distance tensor of shape (batch, n_clusters)
-
-        Returns:
-            Assignment probabilities of shape (batch, n_clusters)
+        :param distances: Distance tensor of shape ``(batch, n_clusters)``.
+        :type distances: keras.KerasTensor
+        :return: Assignment probabilities of shape ``(batch, n_clusters)``.
+        :rtype: keras.KerasTensor
         """
         # Scale distances by temperature
         scaled_distances = -distances / self.temperature
@@ -482,8 +465,8 @@ class KMeansLayer(keras.layers.Layer):
     def _compute_repulsion_forces(self) -> keras.KerasTensor:
         """Compute repulsive forces between centroids to prevent collapse.
 
-        Returns:
-            Tensor of shape (n_clusters, feature_dims) containing repulsion vectors
+        :return: Tensor of shape ``(n_clusters, feature_dims)`` containing repulsion vectors.
+        :rtype: keras.KerasTensor
         """
         # Compute pairwise differences between centroids
         # Shape: (n_clusters, n_clusters, feature_dims)
@@ -529,9 +512,10 @@ class KMeansLayer(keras.layers.Layer):
     ) -> None:
         """Update centroids using soft assignments with momentum and repulsion.
 
-        Args:
-            inputs: Input tensor of shape (batch, features)
-            assignments: Soft assignment probabilities of shape (batch, n_clusters)
+        :param inputs: Input tensor of shape ``(batch, features)``.
+        :type inputs: keras.KerasTensor
+        :param assignments: Soft assignment probabilities of shape ``(batch, n_clusters)``.
+        :type assignments: keras.KerasTensor
         """
         # Compute weighted sum of points
         # Shape: (n_clusters, features)
@@ -566,11 +550,10 @@ class KMeansLayer(keras.layers.Layer):
     def _reshape_output(self, output: keras.KerasTensor) -> keras.KerasTensor:
         """Reshape clustering output to match desired output shape.
 
-        Args:
-            output: Output tensor from clustering
-
-        Returns:
-            Reshaped output tensor
+        :param output: Output tensor from clustering.
+        :type output: keras.KerasTensor
+        :return: Reshaped output tensor.
+        :rtype: keras.KerasTensor
         """
         if self.output_mode == 'assignments':
             output_shape = list(self.original_shape)
@@ -598,22 +581,15 @@ class KMeansLayer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the layer.
+        """Forward pass performing differentiable K-means clustering.
 
-        Performs differentiable K-means clustering on the input tensor. During training,
-        centroids are updated using soft assignments with momentum and repulsion forces.
-
-        Args:
-            inputs: Input tensor with arbitrary shape. Clustering is performed along
-                the dimensions specified by cluster_axis.
-            training: Boolean indicating training mode. If None, uses Keras' global
-                training mode. Centroid updates only occur during training.
-
-        Returns:
-            Output tensor based on output_mode:
-            - 'assignments': Soft cluster assignments with cluster dimension
-            - 'mixture': Reconstructed tensor using weighted centroids
+        :param inputs: Input tensor with arbitrary shape.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode. Centroid updates
+            only occur during training.
+        :type training: Optional[bool]
+        :return: Output tensor based on output_mode.
+        :rtype: keras.KerasTensor
         """
         # Cast inputs to layer dtype for numerical stability
         inputs = keras.ops.cast(inputs, self.dtype)
@@ -642,9 +618,8 @@ class KMeansLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration. Includes all parameters
-            passed to __init__ in serializable form.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -667,21 +642,18 @@ class KMeansLayer(keras.layers.Layer):
     def cluster_centers(self) -> Optional[keras.KerasTensor]:
         """Get current cluster centers.
 
-        Returns:
-            Tensor of shape (n_clusters, feature_dims) containing cluster centroids,
-            or None if layer hasn't been built yet
+        :return: Tensor of shape ``(n_clusters, feature_dims)`` or None if not built.
+        :rtype: Optional[keras.KerasTensor]
         """
         return self.centroids
 
     def reset_centroids(self, new_centroids: Optional[keras.KerasTensor] = None) -> None:
         """Reset centroids to new values or reinitialize.
 
-        Args:
-            new_centroids: Optional tensor of shape (n_clusters, feature_dims).
-                If None, centroids are reinitialized using random values.
-
-        Raises:
-            ValueError: If new_centroids has wrong shape or layer isn't built
+        :param new_centroids: Optional tensor of shape ``(n_clusters, feature_dims)``.
+            If None, centroids are reinitialized using random values.
+        :type new_centroids: Optional[keras.KerasTensor]
+        :raises ValueError: If new_centroids has wrong shape or layer is not built.
         """
         if not self.built:
             raise ValueError("Layer must be built before resetting centroids")

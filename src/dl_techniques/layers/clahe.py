@@ -60,94 +60,61 @@ from typing import Dict, Any, Optional, Union, Tuple
 
 @keras.saving.register_keras_serializable()
 class CLAHE(keras.layers.Layer):
-    """Contrast Limited Adaptive Histogram Equalization (CLAHE) layer.
+    """Trainable Contrast Limited Adaptive Histogram Equalization layer.
 
-    This layer enhances local contrast in single-channel images. It divides the
-    image into small, non-overlapping tiles and applies histogram equalization
-    to each tile. To prevent noise amplification, the contrast is limited by
-    clipping the histogram at a predefined value before computing the
-    cumulative distribution function (CDF).
+    Enhances local contrast in single-channel images by dividing the image into
+    non-overlapping tiles and applying histogram equalization per tile. The
+    histogram is clipped at ``clip_limit * mean(hist)`` before computing the CDF
+    to prevent noise amplification. A learnable sigmoid-gated modulation
+    ``cdf_mapped = cdf_norm * sigmoid(mapping_kernel)`` allows end-to-end
+    fine-tuning of the enhancement for a downstream task.
 
-    **Intent**: Provide a production-ready and serializable Keras layer for
-    image preprocessing and enhancement, particularly useful for medical imaging,
-    satellite imagery, and other domains where local contrast is critical.
+    **Architecture Overview:**
 
-    **Architecture & Stages**:
-    ```
-    Input Image [H, W, 1]
-           ↓
-    1. Divide into non-overlapping tiles of `tile_size` x `tile_size`.
-           ↓
-    2. For each tile:
-       a. Compute histogram with `n_bins`.
-       b. Clip histogram based on `clip_limit`.
-       c. Redistribute clipped values across all bins.
-       d. Compute Cumulative Distribution Function (CDF).
-       e. Normalize CDF to [0, 255].
-       f. Apply a learnable sigmoid-gated mapping.
-       g. Map tile pixel values using the final CDF.
-           ↓
-    3. Stitch processed tiles back together.
-           ↓
-    Output Enhanced Image [H, W, 1]
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    For each tile:
-    1.  **Histogram Clipping**: `clip_val = clip_limit * mean(hist)`
-        `hist_clipped = min(hist, clip_val)`
-    2.  **Redistribution**: `excess = sum(hist - hist_clipped)`
-        `hist_final = hist_clipped + excess / n_bins`
-    3.  **CDF Mapping**: `cdf = cumsum(hist_final)`
-        `cdf_norm = (cdf - min(cdf)) * 255 / (max(cdf) - min(cdf))`
-    4.  **Trainable Modulation**: `cdf_mapped = cdf_norm * sigmoid(mapping_kernel)`
-    5.  **Output**: `output_pixel = cdf_mapped[input_pixel]`
+        ┌──────────────────────────────────┐
+        │  Input Image (H, W, 1)           │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Divide into tiles (tile_size^2) │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Per-tile processing:            │
+        │  histogram ──► clip ──► redist   │
+        │  ──► CDF ──► normalize           │
+        │  ──► sigmoid(kernel) modulate    │
+        │  ──► remap pixel intensities     │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Stitch tiles back together      │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Output Enhanced Image (H,W,1)   │
+        └──────────────────────────────────┘
 
-    Args:
-        clip_limit (float): The contrast limit for histogram clipping. Higher
-            values result in more contrast. Must be positive. Defaults to 4.0.
-        n_bins (int): The number of bins to use for the histogram.
-            Must be positive. Defaults to 256.
-        tile_size (int): The size of the square tiles for local histogram
-            equalization. Must be positive. Defaults to 16.
-        kernel_initializer (Union[str, keras.initializers.Initializer]):
-            Initializer for the `mapping_kernel` weights. Defaults to "glorot_uniform".
-        kernel_regularizer (Optional[keras.regularizers.Regularizer]):
-            Regularizer function applied to the `mapping_kernel`. Defaults to None.
-        kernel_constraint (Optional[keras.constraints.Constraint]):
-            Constraint function applied to the `mapping_kernel`. Defaults to None.
-        **kwargs: Additional arguments for the `keras.layers.Layer` base class.
-
-    Input shape:
-        3D tensor with shape: `(height, width, 1)`.
-        Input values are expected to be in the range [0, 255].
-
-    Output shape:
-        3D tensor with the same shape as the input.
-        Output values will be in the range [0, 255].
-
-    Attributes:
-        mapping_kernel (keras.Variable): Trainable weight vector of shape
-            `(n_bins,)` used to modulate the final CDF mapping, allowing the
-            enhancement effect to be fine-tuned during model training.
-
-    Example:
-        ```python
-        # Standalone usage
-        clahe_layer = CLAHE(clip_limit=3.0, tile_size=8)
-        # Create a sample grayscale image tensor
-        image = tf.random.uniform(shape=(256, 256, 1), maxval=256, dtype=tf.int32)
-        image = tf.cast(image, tf.float32)
-        enhanced_image = clahe_layer(image)
-
-        # In a Keras model
-        inputs = keras.Input(shape=(128, 128, 1))
-        x = CLAHE(clip_limit=2.0, name='clahe_enhancement')(inputs)
-        # ... subsequent layers ...
-        outputs = keras.layers.Conv2D(3, 3, padding='same')(x)
-        model = keras.Model(inputs, outputs)
-        model.summary()
-        ```
+    :param clip_limit: Contrast limit for histogram clipping. Must be positive.
+        Defaults to 4.0.
+    :type clip_limit: float
+    :param n_bins: Number of histogram bins. Must be > 1. Defaults to 256.
+    :type n_bins: int
+    :param tile_size: Size of square tiles for local equalization. Must be
+        positive. Defaults to 16.
+    :type tile_size: int
+    :param kernel_initializer: Initializer for the ``mapping_kernel`` weights.
+        Defaults to ``"glorot_uniform"``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for the ``mapping_kernel``.
+        Defaults to ``None``.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_constraint: Constraint for the ``mapping_kernel``.
+        Defaults to ``None``.
+    :type kernel_constraint: Optional[keras.constraints.Constraint]
+    :param kwargs: Additional arguments for the ``keras.layers.Layer`` base class.
     """
 
     def __init__(
@@ -182,7 +149,11 @@ class CLAHE(keras.layers.Layer):
         self.mapping_kernel = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the layer's trainable weights."""
+        """Create the layer's trainable weights.
+
+        :param input_shape: Shape tuple ``(height, width, 1)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if len(input_shape) != 3 or input_shape[-1] != 1:
             raise ValueError(
                 "Expected input shape (height, width, 1), but "
@@ -201,7 +172,13 @@ class CLAHE(keras.layers.Layer):
         super().build(input_shape)
 
     def _process_tile(self, tile: tf.Tensor) -> tf.Tensor:
-        """Process a single image tile using CLAHE logic."""
+        """Process a single image tile using CLAHE logic.
+
+        :param tile: 2D tile tensor.
+        :type tile: tf.Tensor
+        :return: Enhanced tile tensor.
+        :rtype: tf.Tensor
+        """
         # Note: tf.histogram_fixed_width is used as there is no Keras Ops equivalent.
         hist = tf.histogram_fixed_width(
             tile, value_range=[0.0, 255.0], nbins=self.n_bins
@@ -233,9 +210,13 @@ class CLAHE(keras.layers.Layer):
     def call(self, inputs: tf.Tensor) -> tf.Tensor:
         """Apply CLAHE to the input tensor.
 
-        Note: This implementation uses a tf.function-decorated loop for tiling,
-        which is specific to the TensorFlow backend's AutoGraph feature. This
-        is necessary to handle dynamic input shapes in graph mode.
+        Uses a ``tf.function``-decorated loop for tiling, which is specific to
+        the TensorFlow backend's AutoGraph feature for dynamic input shapes.
+
+        :param inputs: Input image tensor of shape ``(H, W, 1)``.
+        :type inputs: tf.Tensor
+        :return: Enhanced image tensor of same shape.
+        :rtype: tf.Tensor
         """
         x = keras.ops.cast(inputs, self.compute_dtype)
         shape = keras.ops.shape(x)
@@ -268,7 +249,11 @@ class CLAHE(keras.layers.Layer):
         return keras.ops.reshape(result, (height, width, 1))
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer for serialization."""
+        """Return the configuration of the layer for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "clip_limit": self.clip_limit,
@@ -283,7 +268,13 @@ class CLAHE(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """The output shape is the same as the input shape."""
+        """Compute the output shape (same as input).
+
+        :param input_shape: Input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output tensor shape (identical to input).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
 # ---------------------------------------------------------------------

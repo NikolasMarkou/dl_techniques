@@ -74,134 +74,77 @@ from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersph
 
 @keras.saving.register_keras_serializable()
 class OrthoBlock(keras.layers.Layer):
-    """
-    Structured feature learning block with orthogonal regularization and constrained scaling.
+    """Structured feature learning block with orthogonal regularization and gating.
 
-    This composite layer implements a four-stage pipeline designed to learn decorrelated,
-    well-scaled, and interpretable feature representations. It combines orthogonally
-    regularized linear projection, RMS normalization, learnable feature gating, and
-    configurable activation to create a structured alternative to standard Dense layers.
+    This composite layer implements a four-stage pipeline that learns
+    decorrelated, well-scaled, and interpretable feature representations by
+    combining an orthogonally-regularised linear projection, RMS
+    normalisation, a learnable gating mechanism, and an optional activation.
+    The projection weight matrix ``W`` is softly constrained towards
+    orthonormality via
+    ``Loss_ortho = lambda * ||W^T W - I||^2_F``,
+    promoting decorrelated features and stable gradient flow. A per-unit
+    learnable scale vector ``s in [0, 1]^units`` acts as a differentiable
+    feature gate, enabling automatic feature selection during training.
 
-    **Intent**: Provide a mathematically-motivated building block that encourages
-    feature decorrelation, training stability, and model interpretability through
-    constrained feature scaling that acts as learnable feature gates.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           ↓
-    Dense(units) + OrthonormalRegularizer
-           ↓
-    ZeroCenteredRMSNorm(stabilize activations)
-           ↓
-    Activation(user-specified)
-           ↓
-    ConstrainedScale([0,1] learnable gates)
-           ↓
-    Output(shape=[..., units])
-    ```
+    .. code-block:: text
 
-    **Computational Flow**:
+        ┌─────────────────────────────────────┐
+        │  Input [..., input_dim]             │
+        └─────────────────┬───────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  Dense(units) + Orthonormal Reg.    │
+        │  z = xW + b                         │
+        └─────────────────┬───────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  ZeroCenteredRMSNorm                │
+        │  (stabilise activation magnitudes)  │
+        └─────────────────┬───────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  Constrained Scale s in [0,1]       │
+        │  (learnable feature gates)          │
+        └─────────────────┬───────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  Activation (optional)              │
+        └─────────────────┬───────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  Output [..., units]                │
+        └─────────────────────────────────────┘
 
-    1. **Orthogonally Regularized Dense Projection**:
-       - Linear transformation: z = xW + b where W has orthonormal regularization
-       - Math: Regularizer adds penalty ∝ ||W^T W - I||² encouraging orthogonal columns
-       - Purpose: Promotes feature decorrelation and improves gradient flow stability
-
-    2. **RMS Normalization**:
-       - Root Mean Square normalization to constrain activation magnitudes
-       - Purpose: Prevents feature explosion/vanishing, stabilizes training dynamics
-
-    3. **Constrained Learnable Scaling**:
-       - Element-wise multiplication by learnable vector s ∈ [0,1]^units
-       - Purpose: Acts as learnable feature gates - model learns feature importance
-
-    4. **Final Activation**:
-       - Standard non-linear activation function applied to scaled features
-
-    **Key Benefits**:
-    - Feature decorrelation through orthonormal weight regularization
-    - Training stability via RMS normalization and orthogonal transformations
-    - Interpretability through constrained scaling vectors (feature importance)
-    - Automatic feature selection when scale factors approach zero
-
-    Args:
-        units: Integer, dimensionality of the output space (number of neurons).
-            Must be positive. This determines both the output size and the number
-            of feature gates in the scaling layer.
-        activation: Optional activation function. Can be string name ('relu', 'gelu'),
-            callable, or None for linear activation. Applied after all other operations.
-            Defaults to None.
-        use_bias: Boolean, whether the dense layer uses a bias vector.
-            When True, adds learnable bias term after linear transformation.
-            Defaults to True.
-        ortho_reg_factor: Float, strength of orthonormal regularization applied
-            to dense layer weights. Higher values enforce stronger orthogonality
-            but may slow convergence. Must be non-negative. Defaults to 0.01.
-        kernel_initializer: Initializer for the dense layer weight matrix.
-            String name or Initializer instance. Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for the bias vector. Only used when
-            use_bias=True. Defaults to 'zeros'.
-        bias_regularizer: Optional regularizer for the bias vector.
-            Defaults to None.
-        scale_initial_value: Float, initial value for constrained scale parameters.
-            Must be between 0.0 and 1.0. Higher values start with more "open" gates.
-            Defaults to 0.5 for balanced initialization.
-        **kwargs: Additional keyword arguments for Layer base class (name, dtype, etc.).
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-        Most common: 2D tensor with shape `(batch_size, input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., units)`.
-        Same rank as input, but last dimension becomes `units`.
-
-    Attributes:
-        dense: Dense layer with orthonormal regularization for feature projection.
-        norm: ZeroCenteredRMSNorm layer for activation stabilization.
-        constrained_scale: LearnableMultiplier with [0,1] constraints for feature gating.
-        ortho_reg: SoftOrthonormalConstraintRegularizer for weight matrix regularization.
-
-    Example:
-        ```python
-        # Basic usage - decorrelated features with ReLU activation
-        inputs = keras.Input(shape=(128,))
-        outputs = OrthoBlock(units=64, activation='relu')(inputs)
-        model = keras.Model(inputs, outputs)
-
-        # Custom regularization for stronger orthogonality
-        ortho_layer = OrthoBlock(
-            units=32,
-            activation='gelu',
-            ortho_reg_factor=0.02,        # Stronger orthogonal regularization
-            scale_initial_value=0.3,      # Start with more closed gates
-        )
-
-        # In a deep network for feature decorrelation
-        inputs = keras.Input(shape=(784,))
-        x = keras.layers.Dense(512, activation='relu')(inputs)
-        x = OrthoBlock(units=256, activation='gelu')(x)  # Decorrelated features
-        x = keras.layers.Dense(128, activation='relu')(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-        model = keras.Model(inputs, outputs)
-
-        # Access learned feature importance after training
-        scale_weights = ortho_layer.constrained_scale.get_weights()[0]
-        print(f"Feature importance scores: {scale_weights}")  # Values in [0,1]
-        ```
-
-    Raises:
-        ValueError: If units is not a positive integer.
-        ValueError: If ortho_reg_factor is negative.
-        ValueError: If scale_initial_value is not between 0.0 and 1.0.
-
-    Note:
-        The constrained scaling vector provides interpretability - values close to 0
-        indicate features the model considers less important, while values close to 1
-        indicate important features. This can be inspected post-training for model
-        analysis and feature selection insights.
-    """
+    :param units: Dimensionality of the output space. Must be a positive
+        integer.
+    :type units: int
+    :param activation: Activation function applied after all other
+        operations. String name, callable, or ``None`` for linear.
+    :type activation: Optional[Union[str, Callable]]
+    :param use_bias: Whether the dense layer includes a bias vector.
+    :type use_bias: bool
+    :param ortho_reg_factor: Strength of orthonormal regularisation on
+        the dense layer weights. Must be non-negative.
+    :type ortho_reg_factor: float
+    :param kernel_initializer: Initializer for the dense weight matrix.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for the bias vector.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Optional regularizer for the bias vector.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param scale_initial_value: Initial value for scale parameters,
+        must be in ``[0.0, 1.0]``.
+    :type scale_initial_value: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
         self,
@@ -273,15 +216,10 @@ class OrthoBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization
-        following the modern Keras 3 pattern.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         # Validate input shape
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined for OrthoBlock")
@@ -303,21 +241,14 @@ class OrthoBlock(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward computation through the orthogonal block pipeline.
+        """Forward computation through the orthogonal block pipeline.
 
-        Applies the four-stage computation: orthogonally regularized dense projection,
-        RMS normalization, constrained scaling, and final activation.
-
-        Args:
-            inputs: Input tensor with shape (..., input_dim).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor after applying the full orthogonal block computation
-            with shape (..., units).
-        """
+        :param inputs: Input tensor with shape ``(..., input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor with shape ``(..., units)``.
+        :rtype: keras.KerasTensor"""
         # Stage 1: Dense projection with orthonormal regularization
         z = self.dense(inputs, training=training)
 
@@ -336,15 +267,12 @@ class OrthoBlock(keras.layers.Layer):
         return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple where the last dimension is replaced with units.
-        """
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape with last dimension replaced by ``units``.
+        :rtype: Tuple[Optional[int], ...]"""
         # Convert to list for manipulation
         output_shape = list(input_shape)
 
@@ -354,14 +282,10 @@ class OrthoBlock(keras.layers.Layer):
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the layer's configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns ALL constructor parameters needed for layer reconstruction.
-
-        Returns:
-            Dictionary containing complete layer configuration.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             "units": self.units,

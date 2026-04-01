@@ -71,65 +71,48 @@ from typing import List, Tuple, Optional, Any
 
 @keras.saving.register_keras_serializable()
 class ConditionalOutputLayer(keras.layers.Layer):
-    """
-    A custom layer for conditional output selection based on ground truth values.
+    """Batch-wise conditional tensor selector for semi-supervised training.
 
-    This layer implements a batch-wise selection mechanism where for each item in the batch:
-    - If the ground truth tensor item contains all zeros, output the inference tensor item
-    - Otherwise, output the ground truth tensor item
+    For each sample in the batch, inspects ``ground_truth``: if every element
+    is zero the corresponding ``inference`` sample is routed to output;
+    otherwise the ``ground_truth`` sample is used. This implements
+    ``output_i = where(all(gt_i == 0), inference_i, gt_i)``, enabling
+    loss masking where labeled samples contribute zero loss via
+    ``L(gt, gt) = 0`` while unlabeled samples train through the inference path.
 
-    The layer maintains the same shape and dtype as the input tensors and provides
-    a clean abstraction for conditional training scenarios.
+    **Architecture Overview:**
 
-    Key Features:
-        - Batch-wise conditional selection based on zero detection
-        - Shape and dtype preservation
-        - Efficient broadcasting for multi-dimensional tensors
-        - Full serialization support
+    .. code-block:: text
 
-    Args:
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌────────────────────┐  ┌────────────────────┐
+        │  ground_truth      │  │  inference          │
+        │  (B, ...)          │  │  (B, ...)           │
+        └─────────┬──────────┘  └─────────┬───────────┘
+                  │                        │
+                  ▼                        │
+        ┌──────────────────┐               │
+        │  all(gt == 0) ?  │               │
+        │  per-sample      │               │
+        └────┬────────┬────┘               │
+             │ True   │ False              │
+             ▼        ▼                    ▼
+        ┌─────────┐ ┌──────────┐   ┌──────────┐
+        │ select  │ │ select   │   │          │
+        │ infer   │ │ gt       │   │          │
+        └────┬────┘ └────┬─────┘   └──────────┘
+             └─────┬─────┘
+                   ▼
+        ┌──────────────────┐
+        │  Output (B, ...) │
+        └──────────────────┘
 
-    Input shape:
-        List of two tensors with identical shapes:
-        - ground_truth: Tensor with shape (batch_size, ...)
-        - inference: Tensor with shape (batch_size, ...)
-
-    Output shape:
-        Tensor with same shape as input tensors: (batch_size, ...)
-
-    Example:
-        ```python
-        # Create layer
-        layer = ConditionalOutputLayer()
-
-        # Example tensors
-        ground_truth = keras.ops.array([[0., 0.], [1., 2.]])  # First batch item all zeros
-        inference = keras.ops.array([[3., 4.], [5., 6.]])
-
-        # Apply conditional selection
-        output = layer([ground_truth, inference])
-        # Result: [[3., 4.], [1., 2.]]  # First item from inference, second from ground_truth
-
-        # In a model
-        gt_input = keras.Input(shape=(10,), name='ground_truth')
-        inf_input = keras.Input(shape=(10,), name='inference')
-        output = ConditionalOutputLayer()([gt_input, inf_input])
-        model = keras.Model(inputs=[gt_input, inf_input], outputs=output)
-        ```
-
-    Note:
-        Both input tensors must have identical shapes and compatible dtypes.
-        The layer efficiently handles multi-dimensional tensors by reducing
-        across all non-batch dimensions for zero detection.
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """
-        Initialize the BatchConditionalOutputLayer.
+        """Initialize the ConditionalOutputLayer.
 
-        Args:
-            **kwargs: Additional keyword arguments for the Layer base class.
+        :param kwargs: Additional keyword arguments for the Layer base class.
         """
         super().__init__(**kwargs)
         self.supports_masking = True
@@ -146,16 +129,12 @@ class ConditionalOutputLayer(keras.layers.Layer):
         from either ground_truth or inference based on whether ground_truth contains
         all zeros.
 
-        Args:
-            inputs: List containing [ground_truth, inference] tensors with identical shapes.
-            training: Boolean indicating training mode (unused but included for consistency).
+            :param inputs: List containing [ground_truth, inference] tensors with identical shapes.
+            :param training: Boolean indicating training mode (unused but included for consistency).
 
-        Returns:
-            keras.KerasTensor: Output tensor with values selected from either ground truth
+            :return: keras.KerasTensor: Output tensor with values selected from either ground truth
                              or inference based on ground truth zero detection.
 
-        Raises:
-            ValueError: If inputs list doesn't contain exactly 2 tensors or if shapes don't match.
         """
         if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
             raise ValueError(
@@ -199,14 +178,10 @@ class ConditionalOutputLayer(keras.layers.Layer):
         """
         Compute the layer's output shape.
 
-        Args:
-            input_shape: List of input shapes for [ground_truth, inference].
+            :param input_shape: List of input shapes for [ground_truth, inference].
 
-        Returns:
-            Tuple representing the output shape (same as input shapes).
+            :return: Tuple representing the output shape (same as input shapes).
 
-        Raises:
-            ValueError: If input_shape doesn't contain exactly 2 shapes or shapes don't match.
         """
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
@@ -228,8 +203,7 @@ class ConditionalOutputLayer(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            dict: Layer configuration dictionary containing all necessary
+            :return: dict: Layer configuration dictionary containing all necessary
                  parameters for reconstruction.
         """
         config = super().get_config()

@@ -80,132 +80,94 @@ from dl_techniques.layers.activations import create_activation_layer, Activation
 @keras.saving.register_keras_serializable()
 class UniversalInvertedBottleneck(keras.layers.Layer):
     """
-    Universal Inverted Bottleneck (UIB) - A highly configurable building block for efficient CNNs.
+    Universal Inverted Bottleneck (UIB) for efficient CNNs.
 
-    This layer unifies and extends various efficient building blocks including Inverted Bottleneck (IB),
-    ConvNeXt, Feed-Forward Network (FFN), and Extra Depthwise (ExtraDW) variants. It provides extensive
-    configurability for activation functions, normalization methods, dropout, and architectural options
-    while maintaining backward compatibility.
+    A highly configurable building block that unifies Inverted Bottleneck (IB),
+    ConvNeXt, Feed-Forward Network (FFN), and Extra Depthwise (ExtraDW) variants
+    through boolean flags and parameter selection. The block follows an
+    expand-process-project pattern with optional depthwise convolutions, SE
+    attention, and residual connections.
 
-    **Intent**: Provide a single, unified building block that can replicate or extend multiple successful
-    CNN architectures through configuration, enabling easy architectural experimentation and neural
-    architecture search within a consistent framework.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C_in])
-           ↓
-    Expand: Conv2D(1x1) → Norm → Activation
-           ↓
-    Process: DepthwiseConv2D(optional) → Norm → Activation → Dropout(optional)
-           ↓
-    Process: DepthwiseConv2D(optional) → Norm → Activation → Dropout(optional)
-           ↓
-    SE Block(optional): Squeeze-and-Excitation
-           ↓
-    Project: Conv2D(1x1) → Norm
-           ↓
-    Residual: Add input if stride=1 and C_in=C_out
-           ↓
-    Output(shape=[batch, H//stride, W//stride, filters])
-    ```
+    .. code-block:: text
 
-    **Architectural Variants**:
-    - **Inverted Bottleneck (MobileNetV2)**: `use_dw1=True, use_dw2=False`
-    - **ConvNeXt Block**: `use_dw1=True, use_dw2=False, kernel_size=7, activation_type='gelu'`
-    - **FFN Block**: `use_dw1=False, use_dw2=False` (pure 1x1 convolutions)
-    - **Extra Depthwise**: `use_dw1=True, use_dw2=True`
+        ┌──────────────────────────────────────────┐
+        │  Input [B, H, W, C_in]                   │
+        └──────┬───────────────────────────┬───────┘
+               ▼                           │ (residual)
+        ┌──────────────────────┐           │
+        │  Expand: Conv1x1     │           │
+        │  → Norm → Act        │           │
+        ├──────────────────────┤           │
+        │  Opt. DW Conv (dw1)  │           │
+        │  → Norm → Act → Drop │           │
+        ├──────────────────────┤           │
+        │  Opt. DW Conv (dw2)  │           │
+        │  → Norm → Act → Drop │           │
+        ├──────────────────────┤           │
+        │  Opt. SE Block       │           │
+        ├──────────────────────┤           │
+        │  Project: Conv1x1    │           │
+        │  → Norm              │           │
+        └──────┬───────────────┘           │
+               ▼                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Add (if stride=1 and C_in=filters)      │
+        └──────────────┬───────────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────────┐
+        │  Output [B, H/s, W/s, filters]           │
+        └──────────────────────────────────────────┘
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
-            Determines the final channel dimension of the block output.
-        expansion_factor: Integer, expansion factor for the hidden dimension.
-            The intermediate channel count becomes `input_filters * expansion_factor`.
-            This is ignored if `expanded_channels` is provided. Defaults to 4.
-        expanded_channels: Optional Integer, the exact number of channels for the
-            expansion layer. If provided, overrides `expansion_factor`. Defaults to None.
-        stride: Integer, stride for the first depthwise convolution.
-            Used for spatial downsampling. Must be positive. Defaults to 1.
-        kernel_size: Integer, kernel size for depthwise convolutions.
-            Must be positive and odd for symmetric padding. Defaults to 3.
-        use_dw1: Boolean, whether to use the first depthwise convolution.
-            When False, skips the first depthwise processing stage. Defaults to True.
-        use_dw2: Boolean, whether to use the second depthwise convolution.
-            When False, skips the second depthwise processing stage. Defaults to False.
-        activation_type: String, type of activation function to use.
-            Supports all activations from dl_techniques activation factory.
-            Defaults to 'relu' for backward compatibility.
-        activation_args: Optional dictionary of activation-specific arguments.
-            Passed to the activation factory for customization. Defaults to None.
-        normalization_type: NormalizationType, type of normalization to use.
-            Supports all normalizations from dl_techniques normalization factory.
-            Defaults to 'batch_norm' for backward compatibility.
-        normalization_args: Optional dictionary of normalization-specific arguments.
-            Passed to the normalization factory for customization. Defaults to None.
-        dropout_rate: Float, dropout rate applied after depthwise convolutions.
-            Must be between 0.0 and 1.0. When 0.0, no dropout is applied.
-            Defaults to 0.0.
-        use_squeeze_excitation: Boolean, whether to add SE block before projection.
-            Adds channel attention mechanism for improved feature selection.
-            Defaults to False.
-        se_ratio: Float, reduction ratio for SE block.
-            Controls the bottleneck size in SE block. Only used when use_squeeze_excitation=True.
-            Must be positive. Defaults to 0.25.
-        se_activation: String, activation function for SE block.
-            Used for the first activation in SE block. Defaults to 'relu'.
-        use_bias: Boolean, whether to use bias in convolution layers.
-            Defaults to False for efficiency and since normalization follows.
-        padding: String, padding type for convolutions.
-            Must be 'same', 'valid', or 'causal'. Defaults to 'same'.
-        block_type: String identifier for the block type.
-            Used for configuration tracking and logging. Does not affect behavior.
-            Defaults to 'UIB'.
-        kernel_initializer: String or initializer, initializer for convolution kernels.
-            Defaults to 'he_normal'.
-        depthwise_initializer: String or initializer, initializer for depthwise kernels.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional regularizer for convolution kernels.
-            Applied to all Conv2D layers. Defaults to None.
-        depthwise_regularizer: Optional regularizer for depthwise kernels.
-            Applied to all DepthwiseConv2D layers. Defaults to None.
-        **kwargs: Additional arguments for the Layer base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, new_height, new_width, filters)`.
-        `new_height` and `new_width` are reduced by `stride` if stride > 1.
-
-    Raises:
-        ValueError: If any parameter is invalid (e.g., non-positive filters, invalid dropout rate).
-        ValueError: If activation_type or normalization_type is not supported.
-
-    Example:
-        ```python
-        # Standard MobileNetV2 Inverted Bottleneck
-        ib_block = UniversalInvertedBottleneck(
-            filters=64,
-            expansion_factor=6,
-            stride=2,
-            kernel_size=3,
-            use_dw1=True,
-            use_dw2=False
-        )
-
-        # MobileNetV3-style block with exact expanded channels and SE
-        mnv3_block = UniversalInvertedBottleneck(
-            filters=80,
-            expanded_channels=200,  # Explicitly set, overrides expansion_factor
-            use_squeeze_excitation=True,
-            se_ratio=0.25
-        )
-        ```
-
-    Note:
-        This implementation maintains backward compatibility with the original UIB layer.
-        All new parameters have defaults that preserve the original behavior.
-        The layer automatically handles residual connections when appropriate.
+    :param filters: Number of output filters. Must be positive.
+    :type filters: int
+    :param expansion_factor: Expansion factor for hidden dimension. Ignored if
+        ``expanded_channels`` is provided. Defaults to 4.
+    :type expansion_factor: int
+    :param expanded_channels: Exact number of expansion channels (overrides
+        ``expansion_factor``). Defaults to None.
+    :type expanded_channels: int or None
+    :param stride: Stride for the first depthwise convolution. Defaults to 1.
+    :type stride: int
+    :param kernel_size: Kernel size for depthwise convolutions. Defaults to 3.
+    :type kernel_size: int
+    :param use_dw1: Whether to use the first depthwise convolution. Defaults to True.
+    :type use_dw1: bool
+    :param use_dw2: Whether to use the second depthwise convolution. Defaults to False.
+    :type use_dw2: bool
+    :param activation_type: Activation function type. Defaults to ``'relu'``.
+    :type activation_type: str
+    :param activation_args: Additional activation arguments.
+    :type activation_args: dict or None
+    :param normalization_type: Normalization type. Defaults to ``'batch_norm'``.
+    :type normalization_type: str
+    :param normalization_args: Additional normalization arguments.
+    :type normalization_args: dict or None
+    :param dropout_rate: Dropout rate after depthwise convolutions. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_squeeze_excitation: Whether to add SE block. Defaults to False.
+    :type use_squeeze_excitation: bool
+    :param se_ratio: Reduction ratio for SE block. Defaults to 0.25.
+    :type se_ratio: float
+    :param se_activation: Activation for SE block. Defaults to ``'relu'``.
+    :type se_activation: str
+    :param use_bias: Whether to use bias in convolutions. Defaults to False.
+    :type use_bias: bool
+    :param padding: Padding type. Defaults to ``'same'``.
+    :type padding: str
+    :param block_type: String identifier for the block type. Defaults to ``'UIB'``.
+    :type block_type: str
+    :param kernel_initializer: Initializer for convolution kernels. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param depthwise_initializer: Initializer for depthwise kernels. Defaults to ``'he_normal'``.
+    :type depthwise_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for convolution kernels.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param depthwise_regularizer: Optional regularizer for depthwise kernels.
+    :type depthwise_regularizer: keras.regularizers.Regularizer or None
+    :param kwargs: Additional arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(

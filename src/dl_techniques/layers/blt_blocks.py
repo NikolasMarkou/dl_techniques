@@ -241,29 +241,20 @@ class ByteTokenizer(keras.layers.Layer):
     information without vocabulary limitations, enabling robust processing of
     any UTF-8 text input.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Text String → UTF-8 Encoding → Byte Values + Offset → Special Tokens
     "Hello" → [72, 101, 108, 108, 111] → [76, 105, 112, 112, 115] → [1, 76, ..., 2]
     ```
 
-    Args:
-        vocab_size: Size of the vocabulary including special tokens.
-        byte_offset: Offset added to raw byte values for special tokens.
-        **kwargs: Additional layer arguments.
+        :param vocab_size: Size of the vocabulary including special tokens.
+        :param byte_offset: Offset added to raw byte values for special tokens.
+            **kwargs: Additional layer arguments.
 
-    Input shape:
-        Variable - this layer processes text strings.
 
-    Output shape:
-        Variable - returns list of integers representing byte tokens.
 
-    Example:
-        ```python
-        tokenizer = ByteTokenizer(vocab_size=260, byte_offset=4)
-        tokens = tokenizer.text_to_bytes("Hello, world!")
-        text = tokenizer.tokens_to_text(tokens)
-        ```
     """
 
     def __init__(
@@ -286,13 +277,11 @@ class ByteTokenizer(keras.layers.Layer):
         """
         Convert text string to byte token sequence.
 
-        Args:
-            text: Input text string.
-            add_bos: Whether to add begin-of-sequence token.
-            add_eos: Whether to add end-of-sequence token.
+            :param text: Input text string.
+            :param add_bos: Whether to add begin-of-sequence token.
+            :param add_eos: Whether to add end-of-sequence token.
 
-        Returns:
-            List of byte token IDs.
+            :return: List of byte token IDs.
         """
         # Convert to UTF-8 bytes
         byte_sequence = text.encode('utf-8', errors='ignore')
@@ -312,11 +301,9 @@ class ByteTokenizer(keras.layers.Layer):
         """
         Convert byte token sequence back to text.
 
-        Args:
-            tokens: List of byte token IDs.
+            :param tokens: List of byte token IDs.
 
-        Returns:
-            Decoded text string.
+            :return: Decoded text string.
         """
         # Filter out special tokens and convert back to bytes
         byte_values = []
@@ -342,11 +329,9 @@ class ByteTokenizer(keras.layers.Layer):
         Output shape depends on the text length, so the sequence
         dimension is dynamic (None).
 
-        Args:
-            input_shape: Input shape tuple (ignored for this utility layer).
+            :param input_shape: Input shape tuple (ignored for this utility layer).
 
-        Returns:
-            Output shape tuple: (batch_size, None) for variable-length byte sequences.
+            :return: Output shape tuple: (batch_size, None) for variable-length byte sequences.
         """
         if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 1:
             return (input_shape[0], None)
@@ -376,8 +361,10 @@ class EntropyModel(keras.layers.Layer):
     boundary detection, enabling adaptive compute allocation based on
     information content.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Byte Tokens → Embedding → Positional → Transformer Layers → LayerNorm → Dense → Logits
     [B,S] → [B,S,H] → [B,S,H] → [B,S,H] → [B,S,H] → [B,S,V] → Shannon Entropy
     ```
@@ -388,27 +375,16 @@ class EntropyModel(keras.layers.Layer):
     3. **Causal Self-Attention**: Att(Q,K,V) with lower triangular mask
     4. **Entropy Calculation**: H(x) = -Σ p(x) log p(x)
 
-    Args:
-        vocab_size: Size of byte vocabulary.
-        hidden_dim: Hidden dimension of the transformer.
-        num_layers: Number of transformer layers.
-        num_heads: Number of attention heads.
-        max_seq_len: Maximum sequence length.
-        dropout_rate: Dropout rate.
-        **kwargs: Additional layer arguments.
+        :param vocab_size: Size of byte vocabulary.
+        :param hidden_dim: Hidden dimension of the transformer.
+        :param num_layers: Number of transformer layers.
+        :param num_heads: Number of attention heads.
+        :param max_seq_len: Maximum sequence length.
+        :param dropout_rate: Dropout rate.
+            **kwargs: Additional layer arguments.
 
-    Input shape:
-        Tensor with shape (batch_size, seq_len).
 
-    Output shape:
-        Tensor with shape (batch_size, seq_len, vocab_size).
 
-    Example:
-        ```python
-        entropy_model = EntropyModel(vocab_size=260, hidden_dim=256)
-        logits = entropy_model(byte_tokens)
-        entropy = entropy_model.compute_entropy(logits)
-        ```
     """
 
     def __init__(
@@ -492,12 +468,10 @@ class EntropyModel(keras.layers.Layer):
         """
         Forward pass of the entropy model.
 
-        Args:
-            inputs: Input token tensor of shape (batch_size, seq_len).
-            training: Whether in training mode.
+            :param inputs: Input token tensor of shape (batch_size, seq_len).
+            :param training: Whether in training mode.
 
-        Returns:
-            Logits tensor of shape (batch_size, seq_len, vocab_size).
+            :return: Logits tensor of shape (batch_size, seq_len, vocab_size).
         """
         # Token embedding
         x = self.embedding(inputs)
@@ -519,11 +493,9 @@ class EntropyModel(keras.layers.Layer):
         """
         Compute Shannon entropy from logits.
 
-        Args:
-            logits: Logits tensor of shape (batch_size, seq_len, vocab_size).
+            :param logits: Logits tensor of shape (batch_size, seq_len, vocab_size).
 
-        Returns:
-            Entropy tensor of shape (batch_size, seq_len).
+            :return: Entropy tensor of shape (batch_size, seq_len).
         """
         # Apply softmax to get probabilities
         probs = keras.activations.softmax(logits, axis=-1)
@@ -569,8 +541,10 @@ class DynamicPatcher(keras.layers.Layer):
     content, allowing more compute for complex regions while grouping
     predictable content efficiently.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Entropy Values → Threshold Detection → Boundary Creation → Patch Lengths
     [B,S] → Compare > θ → Boundary Mask → [B,max_patches]
     ```
@@ -581,23 +555,12 @@ class DynamicPatcher(keras.layers.Layer):
     3. **Length Constraints**: Min/max patch sizes for stability
     4. **Dynamic Allocation**: Variable patches per sequence
 
-    Args:
-        entropy_threshold: Threshold for creating patch boundaries.
-        max_patches: Maximum number of patches to create.
-        **kwargs: Additional layer arguments.
+        :param entropy_threshold: Threshold for creating patch boundaries.
+        :param max_patches: Maximum number of patches to create.
+            **kwargs: Additional layer arguments.
 
-    Input shape:
-        Entropy tensor with shape (batch_size, seq_len).
 
-    Output shape:
-        Patch lengths tensor with shape (batch_size, max_patches).
 
-    Example:
-        ```python
-        patcher = DynamicPatcher(entropy_threshold=1.5, max_patches=512)
-        patch_lengths = patcher(entropy_values)
-        patch_ids = patcher.compute_patch_ids(patch_lengths)
-        ```
     """
 
     def __init__(
@@ -621,12 +584,10 @@ class DynamicPatcher(keras.layers.Layer):
         This is a simplified implementation that creates roughly equal patches.
         A full implementation would use more sophisticated boundary detection.
 
-        Args:
-            entropy: Entropy tensor of shape (batch_size, seq_len).
-            training: Whether in training mode.
+            :param entropy: Entropy tensor of shape (batch_size, seq_len).
+            :param training: Whether in training mode.
 
-        Returns:
-            Patch lengths tensor of shape (batch_size, max_patches).
+            :return: Patch lengths tensor of shape (batch_size, max_patches).
         """
         batch_size = ops.shape(entropy)[0]
         seq_len = ops.shape(entropy)[1]
@@ -661,11 +622,9 @@ class DynamicPatcher(keras.layers.Layer):
         """
         Convert patch lengths to patch IDs for each position.
 
-        Args:
-            patch_lengths: Patch lengths tensor of shape (batch_size, max_patches).
+            :param patch_lengths: Patch lengths tensor of shape (batch_size, max_patches).
 
-        Returns:
-            Patch IDs tensor of shape (batch_size, seq_len).
+            :return: Patch IDs tensor of shape (batch_size, seq_len).
         """
         batch_size = ops.shape(patch_lengths)[0]
         max_patches = ops.shape(patch_lengths)[1]
@@ -732,28 +691,13 @@ class PatchPooling(keras.layers.Layer):
     2. **Mean Pooling**: mean(h_bytes) per patch
     3. **Attention Pooling**: Learnable queries attend to patch bytes
 
-    Args:
-        pooling_method: Method for pooling ('max', 'mean', 'attention').
-        output_dim: Output dimension for patch representations.
-        num_queries: Number of query vectors for attention pooling.
-        **kwargs: Additional layer arguments.
+        :param pooling_method: Method for pooling ('max', 'mean', 'attention').
+        :param output_dim: Output dimension for patch representations.
+        :param num_queries: Number of query vectors for attention pooling.
+            **kwargs: Additional layer arguments.
 
-    Input shape:
-        byte_hiddens: (batch_size, seq_len, hidden_dim)
-        patch_ids: (batch_size, seq_len)
 
-    Output shape:
-        Tensor with shape (batch_size, num_patches, output_dim).
 
-    Example:
-        ```python
-        pooling = PatchPooling(
-            pooling_method='attention',
-            output_dim=768,
-            num_queries=4
-        )
-        patch_reps = pooling(byte_hiddens, patch_ids)
-        ```
     """
 
     def __init__(
@@ -818,13 +762,11 @@ class PatchPooling(keras.layers.Layer):
         """
         Pool byte representations into patch representations.
 
-        Args:
-            byte_hiddens: Byte hidden states of shape (batch_size, seq_len, hidden_dim).
-            patch_ids: Patch IDs of shape (batch_size, seq_len).
-            training: Whether in training mode.
+            :param byte_hiddens: Byte hidden states of shape (batch_size, seq_len, hidden_dim).
+            :param patch_ids: Patch IDs of shape (batch_size, seq_len).
+            :param training: Whether in training mode.
 
-        Returns:
-            Patch representations of shape (batch_size, num_patches, output_dim).
+            :return: Patch representations of shape (batch_size, num_patches, output_dim).
         """
         batch_size = ops.shape(byte_hiddens)[0]
         seq_len = ops.shape(byte_hiddens)[1]
@@ -989,8 +931,10 @@ class LocalEncoder(keras.layers.Layer):
     short-range dependencies, then aggregate into patch representations for
     hierarchical global processing.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Byte Tokens → Embedding → Positional → Local Transformers → Patch Pooling
     [B,S] → [B,S,D_l] → [B,S,D_l] → [B,S,D_l] → [B,P,D_g]
     ```
@@ -1001,18 +945,17 @@ class LocalEncoder(keras.layers.Layer):
     3. **Local Attention**: Causal self-attention within patches
     4. **Cross-Attention Pooling**: Aggregate bytes to patch representations
 
-    Args:
-        vocab_size: Size of byte vocabulary (typically 256 + special tokens).
-        local_dim: Hidden dimension for local encoder.
-        num_local_layers: Number of transformer layers in local encoder.
-        num_heads_local: Number of attention heads for local transformer.
-        max_sequence_length: Maximum sequence length in bytes.
-        max_patches: Maximum number of patches per sequence.
-        dropout_rate: Dropout rate for all layers.
-        patch_pooling_method: Method for patch pooling ('max', 'mean', 'attention').
-        global_dim: Hidden dimension for global transformer (output dimension).
-        cross_attention_queries: Number of queries for patch representation.
-        **kwargs: Additional layer arguments.
+        :param vocab_size: Size of byte vocabulary (typically 256 + special tokens).
+        :param local_dim: Hidden dimension for local encoder.
+        :param num_local_layers: Number of transformer layers in local encoder.
+        :param num_heads_local: Number of attention heads for local transformer.
+        :param max_sequence_length: Maximum sequence length in bytes.
+        :param max_patches: Maximum number of patches per sequence.
+        :param dropout_rate: Dropout rate for all layers.
+        :param patch_pooling_method: Method for patch pooling ('max', 'mean', 'attention').
+        :param global_dim: Hidden dimension for global transformer (output dimension).
+        :param cross_attention_queries: Number of queries for patch representation.
+            **kwargs: Additional layer arguments.
     """
 
     def __init__(
@@ -1112,13 +1055,11 @@ class LocalEncoder(keras.layers.Layer):
         """
         Forward pass of local encoder.
 
-        Args:
-            byte_tokens: Byte token tensor of shape (batch_size, seq_len).
-            patch_ids: Patch ID tensor of shape (batch_size, seq_len).
-            training: Whether in training mode.
+            :param byte_tokens: Byte token tensor of shape (batch_size, seq_len).
+            :param patch_ids: Patch ID tensor of shape (batch_size, seq_len).
+            :param training: Whether in training mode.
 
-        Returns:
-            Patch representations of shape (batch_size, num_patches, global_dim).
+            :return: Patch representations of shape (batch_size, num_patches, global_dim).
         """
         # Embed byte tokens
         x = self.byte_embedding(byte_tokens)
@@ -1174,8 +1115,10 @@ class GlobalTransformer(keras.layers.Layer):
     causal self-attention, enabling global context understanding while
     maintaining computational efficiency through reduced sequence length.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Patch Representations → Positional → Global Transformers → Contextualized Patches
     [B,P,D_g] → [B,P,D_g] → [B,P,D_g] → [B,P,D_g]
     ```
@@ -1186,13 +1129,12 @@ class GlobalTransformer(keras.layers.Layer):
     3. **Deep Processing**: Multiple layers for complex dependency modeling
     4. **Context Integration**: Rich patch representations with global awareness
 
-    Args:
-        global_dim: Hidden dimension for global transformer.
-        num_global_layers: Number of transformer layers in global processor.
-        num_heads_global: Number of attention heads for global transformer.
-        max_patches: Maximum number of patches per sequence.
-        dropout_rate: Dropout rate for all layers.
-        **kwargs: Additional layer arguments.
+        :param global_dim: Hidden dimension for global transformer.
+        :param num_global_layers: Number of transformer layers in global processor.
+        :param num_heads_global: Number of attention heads for global transformer.
+        :param max_patches: Maximum number of patches per sequence.
+        :param dropout_rate: Dropout rate for all layers.
+            **kwargs: Additional layer arguments.
     """
 
     def __init__(
@@ -1257,12 +1199,10 @@ class GlobalTransformer(keras.layers.Layer):
         """
         Forward pass of global transformer.
 
-        Args:
-            patch_representations: Patch representations of shape (batch_size, num_patches, global_dim).
-            training: Whether in training mode.
+            :param patch_representations: Patch representations of shape (batch_size, num_patches, global_dim).
+            :param training: Whether in training mode.
 
-        Returns:
-            Contextual patch representations of shape (batch_size, num_patches, global_dim).
+            :return: Contextual patch representations of shape (batch_size, num_patches, global_dim).
         """
         # Add patch positional embeddings
         x = self.patch_positional_embedding(patch_representations, training=training)
@@ -1306,8 +1246,10 @@ class LocalDecoder(keras.layers.Layer):
     modeling with global patch context, enabling both local coherence
     and global consistency in generation.
 
-    **Architecture**:
-    ```
+    **Architecture Overview:**
+
+    .. code-block:: text
+
     Byte Tokens + Global Context → Self-Attention → Cross-Attention → Output Logits
     [B,S] + [B,P,D_g] → [B,S,D_l] → [B,S,D_l] → [B,S,V]
     ```
@@ -1323,15 +1265,14 @@ class LocalDecoder(keras.layers.Layer):
     - Masked to ensure bytes only see relevant patch context
     - Combines local patterns with global understanding
 
-    Args:
-        vocab_size: Size of byte vocabulary (typically 256 + special tokens).
-        local_dim: Hidden dimension for local decoder.
-        global_dim: Hidden dimension for global transformer.
-        num_local_layers: Number of transformer layers in local decoder.
-        num_heads_local: Number of attention heads for local transformers.
-        max_sequence_length: Maximum sequence length in bytes.
-        dropout_rate: Dropout rate for all layers.
-        **kwargs: Additional layer arguments.
+        :param vocab_size: Size of byte vocabulary (typically 256 + special tokens).
+        :param local_dim: Hidden dimension for local decoder.
+        :param global_dim: Hidden dimension for global transformer.
+        :param num_local_layers: Number of transformer layers in local decoder.
+        :param num_heads_local: Number of attention heads for local transformers.
+        :param max_sequence_length: Maximum sequence length in bytes.
+        :param dropout_rate: Dropout rate for all layers.
+            **kwargs: Additional layer arguments.
     """
 
     def __init__(
@@ -1464,14 +1405,12 @@ class LocalDecoder(keras.layers.Layer):
         """
         Forward pass of local decoder.
 
-        Args:
-            byte_tokens: Byte token tensor of shape (batch_size, seq_len).
-            global_context: Global patch representations of shape (batch_size, num_patches, global_dim).
-            patch_ids: Patch ID tensor of shape (batch_size, seq_len).
-            training: Whether in training mode.
+            :param byte_tokens: Byte token tensor of shape (batch_size, seq_len).
+            :param global_context: Global patch representations of shape (batch_size, num_patches, global_dim).
+            :param patch_ids: Patch ID tensor of shape (batch_size, seq_len).
+            :param training: Whether in training mode.
 
-        Returns:
-            Logits tensor of shape (batch_size, seq_len, vocab_size).
+            :return: Logits tensor of shape (batch_size, seq_len, vocab_size).
         """
         # Embed byte tokens
         x = self.byte_embedding(byte_tokens)

@@ -73,8 +73,8 @@ def activation_wrapper(activation: Union[Layer, str] = "linear") -> keras.layers
     configuration of advanced activation functions with specific parameters for
     improved training dynamics.
 
-    Args:
-        activation (Union[Layer, str]): Activation specification. Can be either:
+        :param activation: Activation specification. Can be either:
+        :type activation: Union[Layer, str]
             - A string identifying the activation function
             - A pre-configured Keras Layer instance
             Default is "linear" (no activation)
@@ -91,8 +91,7 @@ def activation_wrapper(activation: Union[Layer, str] = "linear") -> keras.layers
             * Shared parameters across spatial dimensions
         - Any valid Keras activation name (e.g., "relu", "tanh", etc.)
 
-    Returns:
-        keras.layers.Layer: Configured activation layer ready for use in a model
+        :return: keras.layers.Layer: Configured activation layer ready for use in a model
 
     Examples:
         >>> # Using string identifier
@@ -269,9 +268,10 @@ def conv2d_wrapper(
     3. Activation
     4. Dropout (standard and/or spatial)
 
-    Args:
-        input_layer (keras.layers.Layer): Input tensor or layer
-        conv_params (Dict[str, Any]): Convolution parameters dictionary including:
+        :param input_layer: Input tensor or layer
+        :type input_layer: keras.layers.Layer
+        :param conv_params: Convolution parameters dictionary including:
+        :type conv_params: Dict[str, Any]
             - filters: Number of output filters
             - kernel_size: Size of convolution kernel
             - strides: Convolution stride
@@ -279,22 +279,24 @@ def conv2d_wrapper(
             - kernel_initializer: Weight initialization method
             - kernel_regularizer: Weight regularization method
             - Other valid Conv2D parameters
-        bn_params (Optional[Dict[str, Any]]): Batch normalization parameters.
+        :param bn_params: Batch normalization parameters.
+        :type bn_params: Optional[Dict[str, Any]]
             If None, batch normalization is not applied. Default: None
-        ln_params (Optional[Dict[str, Any]]): Layer normalization parameters.
+        :param ln_params: Layer normalization parameters.
+        :type ln_params: Optional[Dict[str, Any]]
             If None, layer normalization is not applied. Default: None
-        dropout_params (Optional[Dict[str, Any]]): Standard dropout parameters.
+        :param dropout_params: Standard dropout parameters.
+        :type dropout_params: Optional[Dict[str, Any]]
             If None, dropout is not applied. Default: None
-        dropout_2d_params (Optional[Dict[str, Any]]): Spatial dropout parameters.
+        :param dropout_2d_params: Spatial dropout parameters.
+        :type dropout_2d_params: Optional[Dict[str, Any]]
             If None, spatial dropout is not applied. Default: None
-        conv_type (Union[ConvType, str]): Type of convolution to use.
+        :param conv_type: Type of convolution to use.
+        :type conv_type: Union[ConvType, str]
             Can be either a ConvType enum or a string. Default: ConvType.CONV2D
 
-    Returns:
-        keras.layers.Layer: The constructed layer stack
+        :return: keras.layers.Layer: The constructed layer stack
 
-    Raises:
-        ValueError: If input_layer is None
         ValueError: If conv_params is None
         ValueError: If conv_type is invalid
 

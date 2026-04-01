@@ -54,24 +54,20 @@ from typing import Dict, Any, Optional, Union, Tuple
 
 
 class MultiplierType(Enum):
-    """Enumeration for multiplier types."""
+    """Enumeration for multiplier types (GLOBAL or CHANNEL)."""
 
     GLOBAL = 0
     CHANNEL = 1
 
     @staticmethod
     def from_string(type_str: Union[str, "MultiplierType"]) -> "MultiplierType":
-        """
-        Convert string to MultiplierType enum.
+        """Convert string to MultiplierType enum.
 
-        Args:
-            type_str: String representation of multiplier type or MultiplierType instance.
-
-        Returns:
-            MultiplierType enum value.
-
-        Raises:
-            ValueError: If type_str is invalid.
+        :param type_str: String representation or MultiplierType instance.
+        :type type_str: Union[str, MultiplierType]
+        :return: MultiplierType enum value.
+        :rtype: MultiplierType
+        :raises ValueError: If type_str is invalid.
         """
         if type_str is None:
             raise ValueError("type_str must not be null")
@@ -91,11 +87,10 @@ class MultiplierType(Enum):
             raise ValueError(f"Invalid multiplier type: {type_str}")
 
     def to_string(self) -> str:
-        """
-        Convert enum to string representation.
+        """Convert enum to string representation.
 
-        Returns:
-            String representation of the enum.
+        :return: String representation of the enum.
+        :rtype: str
         """
         return self.name
 
@@ -105,95 +100,49 @@ class MultiplierType(Enum):
 
 @keras.saving.register_keras_serializable()
 class LearnableMultiplier(keras.layers.Layer):
-    """
-    Layer implementing learnable element-wise multipliers for adaptive feature scaling.
+    """Learnable element-wise multiplier for adaptive feature scaling.
 
-    This layer introduces trainable scaling parameters that can be applied either
-    globally across the entire input tensor or per-channel. It provides a simple
-    but effective mechanism for learning feature importance and can act as a
-    differentiable gating mechanism.
+    This layer introduces trainable scaling parameters applied either globally
+    (single scalar) or per-channel. In global mode,
+    ``output = gamma * input`` where gamma is scalar. In channel mode,
+    ``output = gamma * input`` where gamma has shape ``(channels,)`` and
+    multiplication is element-wise. The layer defaults to identity
+    initialization (``ones``) and non-negative constraint for stable training.
 
-    The layer implements two operational modes:
-    - **Global**: Single scalar multiplier applied uniformly across all features
-    - **Channel**: Individual multipliers for each channel, enabling channel-wise
-      feature re-weighting
+    **Architecture Overview:**
 
-    Key architectural benefits:
-    - **Identity initialization**: Starts as identity transform for stable training
-    - **Non-negative constraint**: Optional constraint to ensure positive scaling
-    - **Minimal overhead**: Lightweight operation with negligible computational cost
-    - **Flexible integration**: Can be inserted anywhere in the network architecture
+    .. code-block:: text
 
-    Mathematical formulation:
-        - Global mode: ``output = gamma * input`` where gamma is scalar
-        - Channel mode: ``output = gamma ⊙ input`` where ⊙ is element-wise product
-          and gamma has shape ``(channels,)``
+        ┌──────────────────────────────┐
+        │     Input (any shape)        │
+        └─────────────┬────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────┐
+        │  gamma * input               │
+        │  (GLOBAL: scalar gamma)      │
+        │  (CHANNEL: per-channel gamma)│
+        └─────────────┬────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────────┐
+        │    Output (same shape)       │
+        └──────────────────────────────┘
 
-    Args:
-        multiplier_type: Union[MultiplierType, str], type of multiplier operation.
-            Either 'GLOBAL' for uniform scaling or 'CHANNEL' for per-channel scaling.
-            Accepts MultiplierType enum or string. Defaults to 'CHANNEL'.
-        initializer: Union[str, keras.initializers.Initializer], initializer for
-            the multiplier weights. Should typically be 'ones' to start as identity.
-            Defaults to 'ones'.
-        regularizer: Optional[Union[str, keras.regularizers.Regularizer]], optional
-            regularizer applied to the multiplier weights. Use for preventing
-            overfitting or enforcing sparsity. Defaults to None.
-        constraint: Optional[Union[str, keras.constraints.Constraint]], optional
-            constraint applied to the multiplier weights. Common choices include
-            'non_neg' to ensure positive values or 'unit_norm' for normalization.
-            Defaults to 'non_neg'.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param multiplier_type: Type of multiplier operation: ``'GLOBAL'`` or
+        ``'CHANNEL'``. Defaults to ``'CHANNEL'``.
+    :type multiplier_type: Union[MultiplierType, str]
+    :param initializer: Initializer for multiplier weights. Defaults to ``'ones'``.
+    :type initializer: Union[str, keras.initializers.Initializer]
+    :param regularizer: Optional regularizer for multiplier weights. Defaults to None.
+    :type regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param constraint: Optional constraint for multiplier weights.
+        Defaults to ``'non_neg'``.
+    :type constraint: Optional[Union[str, keras.constraints.Constraint]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Input shape:
-        Arbitrary tensor shape. For CHANNEL mode, input must have at least 2 dimensions
-        with the last dimension representing channels.
-
-    Output shape:
-        Same shape as input tensor.
-
-    Attributes:
-        gamma: The trainable multiplier weights. Shape depends on multiplier_type:
-            - Global: shape ``(1,)``
-            - Channel: shape ``(input_channels,)``
-        multiplier_type: The type of multiplier operation being performed.
-
-    Example:
-        ```python
-        # Global multiplier for residual gating
-        inputs = keras.Input(shape=(32, 32, 64))
-        residual = keras.layers.Conv2D(64, 3, padding='same')(inputs)
-        gated_residual = LearnableMultiplier(
-            multiplier_type='GLOBAL',
-            initializer='zeros'  # Start with no residual
-        )(residual)
-        outputs = keras.layers.Add()([inputs, gated_residual])
-
-        # Per-channel feature re-weighting
-        inputs = keras.Input(shape=(224, 224, 3))
-        features = keras.layers.Conv2D(256, 3)(inputs)
-        reweighted = LearnableMultiplier(
-            multiplier_type='CHANNEL',
-            regularizer=keras.regularizers.L1(1e-4)
-        )(features)
-
-        # Custom constraint for bounded scaling
-        bounded_multiplier = LearnableMultiplier(
-            multiplier_type='CHANNEL',
-            constraint=keras.constraints.clip(0.1, 2.0)
-        )
-        ```
-
-    Raises:
-        ValueError: If multiplier_type is invalid or input dimensions are
-            incompatible with CHANNEL mode.
-        TypeError: If initializer, regularizer, or constraint types are invalid.
-
-    Note:
-        This layer is particularly useful in attention mechanisms, gating networks,
-        and architectural search where adaptive feature scaling is beneficial.
-        The non-negative constraint is recommended for interpretability but can
-        be removed if negative scaling is desired.
+    :raises ValueError: If multiplier_type is invalid or input dimensions are
+        incompatible with CHANNEL mode.
     """
 
     def __init__(
@@ -204,7 +153,6 @@ class LearnableMultiplier(keras.layers.Layer):
         constraint: Optional[Union[str, keras.constraints.Constraint]] = "non_neg",
         **kwargs: Any
     ) -> None:
-        """Initialize the LearnableMultiplier layer."""
         super().__init__(**kwargs)
 
         # Validate and store configuration parameters
@@ -217,14 +165,11 @@ class LearnableMultiplier(keras.layers.Layer):
         self.gamma = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's trainable multiplier weights.
+        """Create the layer's trainable multiplier weights.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input shape is incompatible with multiplier type.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is incompatible with multiplier type.
         """
         # Determine weight shape based on multiplier type
         if self.multiplier_type == MultiplierType.GLOBAL:
@@ -262,41 +207,34 @@ class LearnableMultiplier(keras.layers.Layer):
         training: Optional[bool] = None,
         **kwargs: Any
     ) -> keras.KerasTensor:
-        """
-        Apply the learnable multipliers to inputs.
+        """Apply the learnable multipliers to inputs.
 
-        Args:
-            inputs: Input tensor to be scaled.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer but
-                included for API consistency.
-            **kwargs: Additional call arguments.
-
-        Returns:
-            Output tensor with multipliers applied element-wise. Same shape as input.
+        :param inputs: Input tensor to be scaled.
+        :type inputs: keras.KerasTensor
+        :param training: Unused, present for API consistency.
+        :type training: Optional[bool]
+        :param kwargs: Additional call arguments.
+        :return: Scaled tensor with same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Element-wise multiplication using Keras ops for backend compatibility
         return ops.multiply(inputs, self.gamma)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple (identical to input shape).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (identical to input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters needed
-            for reconstruction during model loading.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

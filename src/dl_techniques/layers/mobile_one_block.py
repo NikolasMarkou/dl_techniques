@@ -64,101 +64,76 @@ from .squeeze_excitation import SqueezeExcitation
 
 @keras.saving.register_keras_serializable()
 class MobileOneBlock(keras.layers.Layer):
-    """
-    MobileOne building block with structural reparameterization.
+    """MobileOne building block with structural reparameterization.
 
-    This layer implements the multi-branched architecture of MobileOne, which
-    can be fused into a single, efficient convolutional layer at inference time.
-    The design follows the structural reparameterization technique where multiple
-    branches during training are mathematically equivalent to a single branch
-    during inference.
+    This layer implements the multi-branched MobileOne architecture which can
+    be fused into a single, efficient convolutional layer at inference time.
+    During training, multiple parallel Conv-BN branches plus an optional 1x1
+    scale branch and identity skip connection are summed:
+    ``output = activation(sum(branch_i(x)) + SE(x))``. At inference time,
+    all branches are fused into a single convolution by exploiting the linear
+    properties of convolution and batch normalization:
+    ``W' = (gamma / sqrt(var + eps)) * W``, ``b' = beta - gamma * mu / sqrt(var + eps)``.
 
-    **Intent**: Provide an efficient convolutional building block that maintains
-    high performance during training through multiple branches while achieving
-    optimal inference speed through branch fusion.
+    **Architecture Overview:**
 
-    **Architecture (Inference after reparameterization)**:
-    ```
-    Input → Single Conv2D → Activation → Output
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    - **Training**: output = activation(Σ(branch_i(x)) + SE(x))
-    - **Inference**: output = activation(SE(fused_conv(x)))
+        ┌──────────────────────────────────────┐
+        │       Input [B, H, W, C_in]          │
+        └───┬────────┬────────┬────────┬───────┘
+            │        │        │        │
+            ▼        ▼        ▼        ▼
+        ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
+        │Conv  │ │Conv  │ │1x1   │ │Skip  │
+        │Branch│ │Branch│ │Scale │ │(BN)  │
+        │ k×k  │ │ k×k  │ │Branch│ │      │
+        │+ BN  │ │+ BN  │ │+ BN  │ │      │
+        └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
+           │        │        │        │
+           └────────┴────┬───┴────────┘
+                         │
+                         ▼
+        ┌──────────────────────────────────────┐
+        │  Sum → Activation                    │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Squeeze-and-Excitation (optional)   │
+        └───────────────┬──────────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────────┐
+        │     Output [B, H', W', out_channels] │
+        └──────────────────────────────────────┘
 
-    Args:
-        out_channels: Integer, number of output channels. Must be positive.
-        kernel_size: Integer, size of the main convolution kernel. Must be positive.
-        stride: Integer, stride of the convolution. Must be positive. Defaults to 1.
-        padding: String, padding mode for convolutions. Either 'same' or 'valid'.
-            Defaults to 'same'.
-        use_se: Boolean, whether to include Squeeze-and-Excitation block.
-            Defaults to False.
-        num_conv_branches: Integer, number of Conv-BN branches. Must be positive.
-            Defaults to 1.
-        activation: String or callable, activation function to use.
-            Defaults to 'gelu'.
-        kernel_initializer: String or initializer, initializer for conv kernels.
-            Defaults to 'he_normal'.
-        bias_initializer: String or initializer, initializer for bias terms.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for conv kernels.
-        bias_regularizer: Optional regularizer for bias terms.
-        **kwargs: Additional keyword arguments for Layer base class.
+    :param out_channels: Number of output channels. Must be positive.
+    :type out_channels: int
+    :param kernel_size: Size of the main convolution kernel. Must be positive.
+    :type kernel_size: int
+    :param stride: Stride of the convolution. Must be positive. Defaults to 1.
+    :type stride: int
+    :param padding: Padding mode: ``'same'`` or ``'valid'``. Defaults to ``'same'``.
+    :type padding: str
+    :param use_se: Whether to include Squeeze-and-Excitation. Defaults to False.
+    :type use_se: bool
+    :param num_conv_branches: Number of Conv-BN branches. Must be positive. Defaults to 1.
+    :type num_conv_branches: int
+    :param activation: Activation function to use. Defaults to ``'gelu'``.
+    :type activation: Union[str, callable]
+    :param kernel_initializer: Initializer for conv kernels. Defaults to ``'he_normal'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias terms. Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for conv kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias terms.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for Layer base class.
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, new_height, new_width, out_channels)`
-        where new_height and new_width depend on stride and padding.
-
-    Attributes:
-        conv_branches: List of Conv-BN sequential blocks.
-        scale_branch: Optional 1x1 Conv-BN branch.
-        skip_branch: Optional skip connection with BatchNormalization.
-        se_block: Optional Squeeze-and-Excitation block.
-        inference_mode: Boolean indicating whether layer is in inference mode.
-
-    Methods:
-        reparameterize(): Fuse training branches into single convolution for inference.
-        reset_reparameterization(): Switch back to training mode with multiple branches.
-
-    Example:
-        ```python
-        # Basic usage
-        block = MobileOneBlock(out_channels=64, kernel_size=3, stride=1)
-        inputs = keras.Input(shape=(224, 224, 32))
-        outputs = block(inputs)  # Shape: (None, 224, 224, 64)
-
-        # With Squeeze-and-Excitation
-        block = MobileOneBlock(
-            out_channels=128,
-            kernel_size=3,
-            stride=2,
-            use_se=True
-        )
-
-        # Multiple conv branches
-        block = MobileOneBlock(
-            out_channels=256,
-            kernel_size=3,
-            num_conv_branches=3,
-            activation='relu'
-        )
-
-        # Reparameterize for inference
-        block.reparameterize()  # Fuse branches
-        inference_output = block(inputs)  # Uses single conv layer
-
-        # Reset to training mode
-        block.reset_reparameterization()
-        training_output = block(inputs)  # Uses multiple branches
-        ```
-
-    References:
-        MobileOne: An Improved One millisecond Mobile Backbone
-        https://arxiv.org/abs/2206.04040
+    :raises ValueError: If out_channels, kernel_size, stride, or num_conv_branches
+        are not positive, or padding is invalid.
     """
 
     def __init__(
@@ -258,7 +233,11 @@ class MobileOneBlock(keras.layers.Layer):
             self.se_block = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create weights and build sub-layers."""
+        """Create weights and build sub-layers.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         input_channels = input_shape[-1]
         if input_channels is None:
             raise ValueError("Input channels dimension must be defined")
@@ -289,7 +268,15 @@ class MobileOneBlock(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the block."""
+        """Forward pass through the block.
+
+        :param inputs: Input tensor of shape ``(batch, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor.
+        :rtype: keras.KerasTensor
+        """
         x = None
 
         # Conv branches
@@ -318,7 +305,13 @@ class MobileOneBlock(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
+        """Compute output shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if self.conv_branches:
             return self.conv_branches[0].compute_output_shape(input_shape)
 
@@ -335,7 +328,11 @@ class MobileOneBlock(keras.layers.Layer):
         return (input_shape[0], height, width, self.out_channels)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Get layer configuration for serialization.
+
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'out_channels': self.out_channels,

@@ -80,46 +80,48 @@ from typing import Tuple, Any, Dict, List, Optional
 
 @keras.saving.register_keras_serializable()
 class AnchorGenerator(keras.layers.Layer):
-    """Anchor generator layer for YOLOv12 object detection.
+    """Anchor generator layer for multi-scale object detection.
 
-    This layer generates and stores anchor points and strides for different feature map
-    levels. Anchor points represent grid cell centers in feature maps at various scales.
-    The anchor grid is computed once during build() and stored as non-trainable weights.
+    Pre-computes and stores anchor point coordinates and stride values for
+    multiple feature map levels. For each stride, a 2D grid of center
+    coordinates is generated via ``x = (j + 0.5) * stride``,
+    ``y = (i + 0.5) * stride``, concatenated across all scales, and stored as
+    non-trainable weights. The ``call`` method tiles these static anchors to
+    match the input batch size, providing zero-cost spatial scaffolding for
+    detection heads.
 
-    Args:
-        input_image_shape: Tuple of integers (height, width) representing input image
-            dimensions used to calculate grid sizes. Must contain positive integers.
-        strides_config: List of integers specifying stride values for different
-            feature map levels. Each stride must be positive. Defaults to [8, 16, 32].
-        **kwargs: Additional keyword arguments passed to Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        Any tensor with shape `(batch_size, ...)` - content is ignored, only batch
-        size is used for output tiling.
+    .. code-block:: text
 
-    Output shape:
-        Tuple of two tensors:
-        - anchors: `(batch_size, total_anchor_points, 2)` - (x, y) coordinates
-        - strides: `(batch_size, total_anchor_points, 1)` - corresponding strides
+        ┌─────────────────────────────┐
+        │       Input (any tensor)    │
+        └──────────────┬──────────────┘
+                       │ batch_size
+                       ▼
+        ┌─────────────────────────────┐
+        │  Stored Anchors & Strides   │
+        │  (non-trainable weights)    │
+        │                             │
+        │  stride=8  ──► 80x80 grid   │
+        │  stride=16 ──► 40x40 grid   │
+        │  stride=32 ──► 20x20 grid   │
+        │        concat all grids     │
+        └──────────────┬──────────────┘
+                       │ tile to batch
+                       ▼
+        ┌─────────────────────────────┐
+        │  anchors (B, N, 2)          │
+        │  strides (B, N, 1)          │
+        └─────────────────────────────┘
 
-    Example:
-        ```python
-        # Basic usage for 640x640 images
-        anchor_gen = AnchorGenerator(input_image_shape=(640, 640))
-        dummy_input = keras.random.normal([2, 100, 4])  # batch_size=2
-        anchors, strides = anchor_gen(dummy_input)
-        print(f"Anchors shape: {anchors.shape}")  # (2, 8400, 2)
-
-        # Custom configuration
-        custom_gen = AnchorGenerator(
-            input_image_shape=(416, 416),
-            strides_config=[8, 16, 32, 64]
-        )
-        ```
-
-    Raises:
-        ValueError: If input_image_shape contains non-positive values.
-        ValueError: If strides_config contains non-positive values.
+    :param input_image_shape: Tuple of two positive integers ``(height, width)``
+        representing the input image dimensions used to calculate grid sizes.
+    :type input_image_shape: Tuple[int, int]
+    :param strides_config: List of positive integers specifying stride values
+        for different feature map levels. Defaults to ``[8, 16, 32]``.
+    :type strides_config: Optional[List[int]]
+    :param kwargs: Additional keyword arguments passed to the Layer base class.
     """
 
     def __init__(
@@ -155,8 +157,8 @@ class AnchorGenerator(keras.layers.Layer):
     def _make_anchors(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Generate anchor points and strides for all feature map levels.
 
-        Returns:
-            Tuple containing concatenated anchor coordinates and stride values.
+        :return: Tuple containing concatenated anchor coordinates and stride values.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         height, width = self.input_image_shape
         anchor_points: List[keras.KerasTensor] = []
@@ -189,6 +191,9 @@ class AnchorGenerator(keras.layers.Layer):
 
         Computes anchor points once and stores as non-trainable weights for
         efficient graph-safe access during training and inference.
+
+        :param input_shape: Shape tuple indicating the input shape.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Generate anchors and strides
         anchors, strides = self._make_anchors()
@@ -217,14 +222,14 @@ class AnchorGenerator(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Forward pass returning batch-tiled anchors and strides.
+        """Return batch-tiled anchors and strides.
 
-        Args:
-            inputs: Input tensor used only for batch size extraction.
-            training: Training mode flag, unused but kept for interface consistency.
-
-        Returns:
-            Tuple of (anchors, strides) tensors tiled to match batch size.
+        :param inputs: Input tensor used only for batch size extraction.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag (unused).
+        :type training: Optional[bool]
+        :return: Tuple of ``(anchors, strides)`` tensors tiled to match batch size.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         batch_size = ops.shape(inputs)[0]
 
@@ -244,7 +249,13 @@ class AnchorGenerator(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], int, int], Tuple[Optional[int], int, int]]:
-        """Compute output shapes for anchors and strides tensors."""
+        """Compute output shapes for anchors and strides tensors.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Tuple of shapes for anchors and strides.
+        :rtype: Tuple[Tuple[Optional[int], int, int], Tuple[Optional[int], int, int]]
+        """
         batch_size = input_shape[0]
         total_anchors = self.total_anchor_points
 
@@ -255,7 +266,11 @@ class AnchorGenerator(keras.layers.Layer):
 
     @property
     def total_anchor_points(self) -> int:
-        """Calculate total number of anchor points across all stride levels."""
+        """Calculate total number of anchor points across all stride levels.
+
+        :return: Total anchor count.
+        :rtype: int
+        """
         total = 0
         height, width = self.input_image_shape
 
@@ -266,7 +281,11 @@ class AnchorGenerator(keras.layers.Layer):
         return total
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'input_image_shape': self.input_image_shape,

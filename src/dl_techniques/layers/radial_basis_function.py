@@ -52,45 +52,73 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class RBFLayer(keras.layers.Layer):
-    """
-    Radial Basis Function layer with stable center repulsion mechanism.
+    """Radial Basis Function layer with adaptive center repulsion.
 
-    This layer implements RBF units with an improved repulsive force mechanism
-    between centers to ensure better coverage of the input space. It utilizes
-    broadcasting for distance calculations to support inputs of arbitrary rank
-    (e.g., (batch, dim) or (batch, time, dim)) numerically stably.
+    Each of the ``units`` RBF neurons computes a Gaussian activation
+    ``phi_i(x) = exp(-gamma_i * ||x - c_i||^2)`` measuring the proximity
+    of the input ``x`` to a learnable center ``c_i``. The width parameter
+    ``gamma_i`` is stored in raw (pre-softplus) form to guarantee
+    positivity. During training an auxiliary repulsive penalty
+    ``V_rep = alpha * D * max(0, d_min*(1+mu) - ||c_i - c_j||)^2``
+    discourages centre collapse, ensuring broad coverage of the input
+    space. Broadcasting-based distance computation supports inputs of
+    arbitrary rank (2-D, 3-D, etc.).
 
-    Attributes:
-        units (int): Number of RBF units.
-        gamma_init (float): Initial value for width parameter (1/2σ²).
-        repulsion_strength (float): Strength of the repulsion penalty.
-        min_center_distance (float): Minimum desired distance between centers.
-        safety_margin (float): Margin added to minimum distance for repulsion.
-        centers (keras.Variable): Weight matrix of center positions.
-        gamma_raw (keras.Variable): Raw width parameters (pre-softplus).
+    **Architecture Overview:**
 
-    Args:
-        units: Integer, number of RBF units in the layer. Must be positive.
-        gamma_init: Float, initial value for the width parameter.
-            Defaults to 1.0.
-        repulsion_strength: Float, strength of center repulsion.
-            Defaults to 0.1.
-        min_center_distance: Float, minimum distance threshold for centers.
-            Defaults to 1.0.
-        center_initializer: Initializer for RBF centers.
-            Defaults to 'uniform'.
-        center_constraint: Constraint for center positions.
-            Defaults to None.
-        trainable_gamma: Boolean, whether width parameters are trainable.
-            Defaults to True.
-        safety_margin: Float, margin for repulsion calculation.
-            Defaults to 0.2.
-        kernel_regularizer: Regularizer for center weights.
-            Defaults to None.
-        gamma_regularizer: Regularizer for width parameters.
-            Defaults to None.
-        **kwargs: Standard Layer keyword arguments.
-    """
+    .. code-block:: text
+
+        ┌──────────────────────────────────┐
+        │  Input [..., dim]                │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Expand dims → [..., 1, dim]     │
+        │  Broadcast against centers       │
+        │  [units, dim]                    │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Squared Euclidean distance      │
+        │  ||x - c_i||^2  → [..., units]  │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Gaussian activation             │
+        │  exp(-gamma_i * dist^2)          │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [..., units]             │
+        └──────────────────────────────────┘
+        (+ center repulsion loss during training)
+
+    :param units: Number of RBF units. Must be positive.
+    :type units: int
+    :param gamma_init: Initial value for the width parameter.
+    :type gamma_init: float
+    :param repulsion_strength: Strength of the center repulsion penalty.
+    :type repulsion_strength: float
+    :param min_center_distance: Minimum desired distance between centres.
+    :type min_center_distance: float
+    :param center_initializer: Initializer for RBF center positions.
+    :type center_initializer: Union[str, keras.initializers.Initializer]
+    :param center_constraint: Optional constraint for center positions.
+    :type center_constraint: Optional[keras.constraints.Constraint]
+    :param trainable_gamma: Whether the width parameters are trainable.
+    :type trainable_gamma: bool
+    :param safety_margin: Margin added to minimum distance threshold.
+    :type safety_margin: float
+    :param kernel_regularizer: Optional regularizer for center weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param gamma_regularizer: Optional regularizer for width parameters.
+    :type gamma_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
         self,
@@ -137,12 +165,10 @@ class RBFLayer(keras.layers.Layer):
         self._feature_dim: int = 0
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create layer weights.
+        """Create layer weights (centers and raw gamma values).
 
-        Args:
-            input_shape: Shape of the input tensor.
-        """
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         if len(input_shape) < 2:
             raise ValueError(
                 f"Input shape must have at least 2 dimensions, got {len(input_shape)}"
@@ -184,24 +210,17 @@ class RBFLayer(keras.layers.Layer):
 
     @property
     def gamma(self) -> keras.KerasTensor:
-        """
-        Effective positive gamma values via softplus transformation.
+        """Effective positive gamma values via softplus transformation.
 
-        Returns:
-            A tensor containing the strictly positive width parameters.
-        """
+        :return: Strictly positive width parameters.
+        :rtype: keras.KerasTensor"""
         return keras.activations.softplus(self.gamma_raw)
 
     def _compute_repulsion_loss(self) -> keras.KerasTensor:
-        """
-        Compute the center repulsion loss.
+        """Compute the pairwise center repulsion regularisation loss.
 
-        Calculates pairwise distances between centers and applies a penalty
-        if they are closer than `min_center_distance * (1 + safety_margin)`.
-
-        Returns:
-            A scalar tensor representing the regularization loss.
-        """
+        :return: Scalar regularisation loss tensor.
+        :rtype: keras.KerasTensor"""
         # centers shape: (units, feature_dim)
         # Expand for broadcasting:
         # c1: (units, 1, feature_dim)
@@ -245,16 +264,14 @@ class RBFLayer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: bool = False
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the RBF Layer.
+        """Forward pass computing Gaussian RBF activations.
 
-        Args:
-            inputs: Input tensor of shape `(batch_size, ... , dim)`.
-            training: Boolean indicating whether the layer is in training mode.
-
-        Returns:
-            Output tensor of shape `(batch_size, ..., units)`.
-        """
+        :param inputs: Input tensor of shape ``(batch, ..., dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: bool
+        :return: RBF activations of shape ``(batch, ..., units)``.
+        :rtype: keras.KerasTensor"""
         # Inputs shape: (batch, ..., dim)
         # Centers shape: (units, dim)
 
@@ -288,26 +305,21 @@ class RBFLayer(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple (tuple of integers) or list of shape tuples.
-
-        Returns:
-            Output shape tuple.
-        """
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the config of the layer.
+        """Return layer configuration for serialization.
 
-        Returns:
-            A Python dictionary containing the configuration of the layer.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -327,12 +339,18 @@ class RBFLayer(keras.layers.Layer):
     # Convenience properties for inspection
     @property
     def center_positions(self) -> Optional[keras.KerasTensor]:
-        """Get current positions of RBF centers."""
+        """Get current positions of RBF centers.
+
+        :return: Center weight tensor or ``None`` if not built.
+        :rtype: Optional[keras.KerasTensor]"""
         return self.centers
 
     @property
     def width_values(self) -> Optional[keras.KerasTensor]:
-        """Get current effective width (gamma) values."""
+        """Get current effective width (gamma) values.
+
+        :return: Effective gamma tensor or ``None`` if not built.
+        :rtype: Optional[keras.KerasTensor]"""
         return self.gamma if self.built else None
 
 # ---------------------------------------------------------------------

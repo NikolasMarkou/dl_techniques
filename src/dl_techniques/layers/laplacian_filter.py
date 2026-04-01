@@ -53,65 +53,58 @@ from .gaussian_filter import GaussianFilter
 
 @keras.saving.register_keras_serializable()
 class LaplacianFilter(keras.layers.Layer):
-    """Laplacian filter layer that detects edges by approximating the second derivative.
+    """Laplacian filter layer using Difference of Gaussians for edge detection.
 
-    This filter highlights areas of rapid intensity change in an image and is
-    commonly used for edge detection. It works by applying a Gaussian blur
-    and then computing the difference between the blurred image and the original image.
+    This filter highlights areas of rapid intensity change in an image by
+    applying a Gaussian blur and computing the difference between the blurred
+    and original image: ``laplacian = scale_factor * (blurred - input)``. This
+    Difference of Gaussians (DoG) approach is a common and efficient
+    approximation of the Laplacian of Gaussian operator. The filter is
+    non-trainable with parameters determined by mathematical formulas.
 
-    The implementation uses a difference of Gaussians (DoG) approach, which
-    is a common approximation of the Laplacian of Gaussian.
+    **Architecture Overview:**
 
-    Args:
-        kernel_size: Tuple of two integers specifying the height and width of the 2D kernel.
-            Must be positive odd integers for symmetric filtering.
-        strides: Tuple of two integers specifying the strides of the convolution.
-            Defaults to (1, 1). Note: Strides are ignored and forced to (1, 1) for this
-            layer to preserve shape for the subtraction operation.
-        sigma: Standard deviation for the Gaussian kernel. If float, same sigma is used for
-            both dimensions. If tuple, (sigma_height, sigma_width) are used.
-            If None or <= 0, calculated automatically from kernel_size.
-        scale_factor: Float, scaling factor for the Laplacian response. Controls the
-            strength of edge detection. Defaults to 1.0.
-        kernel_initializer: Initializer for the kernel weights. Used for compatibility
-            but not actively used since this is a fixed filter.
-        kernel_regularizer: Optional regularizer for the kernel weights.
-        **kwargs: Additional keyword arguments passed to the parent class constructor.
+    .. code-block:: text
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        ┌───────────────────────────────┐
+        │  Input [B, H, W, C]          │
+        └───────┬───────────────┬───────┘
+                │               │
+                ▼               │
+        ┌───────────────┐      │
+        │ GaussianFilter│      │
+        │ (kernel, sigma)│     │
+        └───────┬───────┘      │
+                │               │
+                ▼               ▼
+        ┌───────────────────────────────┐
+        │  scale * (blurred - input)    │
+        └───────────────┬───────────────┘
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │  Output [B, H, W, C]         │
+        └───────────────────────────────┘
 
-    Output shape:
-        4D tensor with same shape as input: `(batch_size, height, width, channels)`
+    :param kernel_size: Height and width of the 2D kernel. Must be positive
+        odd integers. Defaults to ``(5, 5)``.
+    :type kernel_size: Tuple[int, int]
+    :param strides: Strides of the convolution. Forced to ``(1, 1)`` to
+        preserve shape for the subtraction. Defaults to ``(1, 1)``.
+    :type strides: Union[Tuple[int, int], List[int]]
+    :param sigma: Standard deviation for the Gaussian kernel. If float, same
+        for both dimensions. If tuple, ``(sigma_h, sigma_w)``. If None or <= 0,
+        calculated from kernel_size.
+    :type sigma: Optional[Union[float, Tuple[float, float]]]
+    :param scale_factor: Scaling factor for the Laplacian response. Defaults to 1.0.
+    :type scale_factor: float
+    :param kernel_initializer: Initializer for compatibility (not actively used).
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the parent class.
 
-    Returns:
-        Tensor with highlighted edges, same shape as input tensor.
-
-    Raises:
-        ValueError: If kernel_size is not length 2, or if sigma is invalid.
-
-    Example:
-        ```python
-        # Basic edge detection
-        layer = LaplacianFilter(kernel_size=(5, 5), sigma=1.0)
-
-        # Fine-tuned parameters
-        layer = LaplacianFilter(
-            kernel_size=(7, 7),
-            sigma=(1.5, 1.5),
-            scale_factor=2.0
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        edges = LaplacianFilter(kernel_size=(5, 5))(inputs)
-        # edges will have shape (None, 224, 224, 3) with highlighted edges
-        ```
-
-    Note:
-        This implementation follows modern Keras 3 patterns where sub-layers
-        are created in __init__ and explicitly built in build() for robust
-        serialization support.
+    :raises ValueError: If kernel_size is not length 2 or sigma is invalid.
     """
 
     def __init__(
@@ -124,7 +117,6 @@ class LaplacianFilter(keras.layers.Layer):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the LaplacianFilter layer."""
         super().__init__(**kwargs)
 
         # Validate kernel_size
@@ -162,8 +154,8 @@ class LaplacianFilter(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and explicitly build the Gaussian filter.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build the sub-layer with the input shape
         if not self.gaussian_filter.built:
@@ -180,13 +172,13 @@ class LaplacianFilter(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply the Laplacian filter to the input tensor.
 
-        Args:
-            inputs: Input tensor of shape [batch_size, height, width, channels].
-            training: Boolean indicating whether the layer is in training mode.
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            Tensor with highlighted edges, same shape as input tensor.
+        :param inputs: Input tensor of shape ``[batch_size, height, width, channels]``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :param kwargs: Additional keyword arguments.
+        :return: Tensor with highlighted edges, same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Apply Gaussian blur
         blurred = self.gaussian_filter(inputs, training=training)
@@ -204,21 +196,18 @@ class LaplacianFilter(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple (same as input for this layer).
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Return the config dictionary for the layer.
 
-        Returns ALL __init__ parameters for complete serialization support.
-
-        Returns:
-            Dictionary containing configuration parameters.
+        :return: Dictionary containing configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -237,60 +226,60 @@ class LaplacianFilter(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class AdvancedLaplacianFilter(keras.layers.Layer):
-    """Advanced Laplacian filter with multiple implementation options.
+    """Advanced Laplacian filter with multiple implementation methods.
 
-    This layer offers different methods to compute the Laplacian:
-    - 'dog': Difference of Gaussians (subtracting the original from a blurred image)
-    - 'log': Laplacian of Gaussian (applying a LoG kernel directly)
-    - 'kernel': Using a discrete Laplacian kernel
+    This layer offers three methods to compute the Laplacian operator for edge
+    detection: ``'dog'`` (Difference of Gaussians), ``'log'`` (Laplacian of
+    Gaussian kernel convolution), and ``'kernel'`` (discrete Laplacian kernel).
+    Each method trades off between computational efficiency and filter accuracy.
+    All filters are non-trainable with fixed mathematical kernels.
 
-    Each method has different characteristics and performance implications.
+    **Architecture Overview:**
 
-    Args:
-        method: String, the method to use. Must be one of 'dog', 'log', or 'kernel'.
-        kernel_size: Tuple of two integers specifying the height and width of the 2D kernel.
-        strides: Tuple of two integers specifying the strides of the convolution.
-        sigma: Standard deviation for the Gaussian kernel. If float, same value for both
-            dimensions. If tuple, (sigma_height, sigma_width) are used.
-        scale_factor: Float, scaling factor for the Laplacian response.
-        kernel_initializer: Initializer for the kernel weights (compatibility parameter).
-        kernel_regularizer: Optional regularizer for the kernel weights.
-        **kwargs: Additional keyword arguments passed to the parent class constructor.
+    .. code-block:: text
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        ┌───────────────────────────────────┐
+        │    Input [B, H, W, C]             │
+        └───────────────┬───────────────────┘
+                        │
+            ┌───────────┼───────────┐
+            │           │           │
+            ▼           ▼           ▼
+        ┌────────┐ ┌────────┐ ┌────────┐
+        │  DoG   │ │  LoG   │ │Discrete│
+        │ method │ │ method │ │ kernel │
+        └───┬────┘ └───┬────┘ └───┬────┘
+            │           │           │
+            └───────────┼───────────┘
+                        │
+                        ▼
+        ┌───────────────────────────────────┐
+        │  scale_factor * result            │
+        └───────────────┬───────────────────┘
+                        │
+                        ▼
+        ┌───────────────────────────────────┐
+        │  Output [B, H', W', C]            │
+        └───────────────────────────────────┘
 
-    Output shape:
-        4D tensor whose shape depends on the method and strides. For 'dog' method,
-        output shape is the same as input shape. For 'log' and 'kernel' methods,
-        the spatial dimensions are downsampled according to strides.
+    :param method: Method to use: ``'dog'``, ``'log'``, or ``'kernel'``.
+        Defaults to ``'dog'``.
+    :type method: Literal['dog', 'log', 'kernel']
+    :param kernel_size: Height and width of the 2D kernel. Defaults to ``(5, 5)``.
+    :type kernel_size: Tuple[int, int]
+    :param strides: Strides of the convolution. Defaults to ``(1, 1)``.
+    :type strides: Union[Tuple[int, int], List[int]]
+    :param sigma: Standard deviation for the Gaussian kernel. Defaults to 1.0.
+    :type sigma: Union[float, Tuple[float, float]]
+    :param scale_factor: Scaling factor for the Laplacian response. Defaults to 1.0.
+    :type scale_factor: float
+    :param kernel_initializer: Initializer for compatibility (not actively used).
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the parent class.
 
-    Returns:
-        Tensor with highlighted edges.
-
-    Raises:
-        ValueError: If method is not supported, or if parameters are invalid.
-
-    Example:
-        ```python
-        # Difference of Gaussians (fastest)
-        dog_layer = AdvancedLaplacianFilter(method='dog', kernel_size=(5, 5))
-
-        # Laplacian of Gaussian (most accurate)
-        log_layer = AdvancedLaplacianFilter(method='log', kernel_size=(7, 7), sigma=1.5)
-
-        # Discrete kernel (traditional)
-        kernel_layer = AdvancedLaplacianFilter(method='kernel', kernel_size=(3, 3))
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        edges = AdvancedLaplacianFilter(method='log', kernel_size=(5, 5))(inputs)
-        ```
-
-    Note:
-        The 'dog' method creates a GaussianFilter sub-layer in __init__ for proper
-        serialization. The 'log' and 'kernel' methods create fixed kernels during
-        build() since they depend on the number of input channels.
+    :raises ValueError: If method is not supported or parameters are invalid.
     """
 
     def __init__(
@@ -304,7 +293,6 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize the AdvancedLaplacianFilter layer."""
         super().__init__(**kwargs)
 
         # Validate method
@@ -346,11 +334,10 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     def _create_laplacian_kernel(self, channels: int) -> keras.KerasTensor:
         """Create a discrete Laplacian kernel.
 
-        Args:
-            channels: Number of input channels.
-
-        Returns:
-            Laplacian kernel tensor.
+        :param channels: Number of input channels.
+        :type channels: int
+        :return: Laplacian kernel tensor.
+        :rtype: keras.KerasTensor
         """
         # Simple discrete Laplacian kernel
         if self.kernel_size == (3, 3):
@@ -374,8 +361,8 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     def _create_log_kernel(self) -> np.ndarray:
         """Create a Laplacian of Gaussian (LoG) kernel.
 
-        Returns:
-            LoG kernel as numpy array.
+        :return: LoG kernel as numpy array.
+        :rtype: np.ndarray
         """
         sigma_x, sigma_y = self.sigma
         height, width = self.kernel_size
@@ -400,8 +387,8 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and initialize components based on the selected method.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         channels = input_shape[-1]
         if channels is None:
@@ -432,13 +419,13 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply the Laplacian filter to the input tensor.
 
-        Args:
-            inputs: Input tensor of shape [batch_size, height, width, channels].
-            training: Boolean indicating whether the layer is in training mode.
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            Tensor with highlighted edges, same shape as input tensor.
+        :param inputs: Input tensor of shape ``[batch_size, height, width, channels]``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :param kwargs: Additional keyword arguments.
+        :return: Tensor with highlighted edges.
+        :rtype: keras.KerasTensor
         """
         if self.method == 'dog':
             # Difference of Gaussians approach
@@ -458,11 +445,10 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         if self.method == 'dog':
             return input_shape
@@ -475,10 +461,8 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the config dictionary for the layer.
 
-        Returns ALL __init__ parameters for complete serialization support.
-
-        Returns:
-            Dictionary containing configuration parameters.
+        :return: Dictionary containing configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

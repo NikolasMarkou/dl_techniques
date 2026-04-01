@@ -1,63 +1,18 @@
 """
 A Gated Delta Network, a linear-time transformer variant.
 
-This layer provides a sophisticated, recurrent mechanism for sequence modeling,
-designed to overcome the limitations of both standard quadratic attention and
-simpler linear-time architectures. It fuses concepts from associative memory,
-classic neural network learning rules, and modern gated state-space models
-to achieve high performance on tasks requiring long-context understanding and
-in-context retrieval.
-
-Architecture and Core Concepts:
-
-The Gated DeltaNet operates as a linear transformer, processing sequences
-with a recurrent state update that has linear time complexity O(N) with
-respect to sequence length. Its primary innovation lies in how it updates its
-internal state matrix `S`, which represents the model's associative memory.
-This update is governed by a "gated delta rule," which combines two
-complementary principles:
-
-1.  **The Delta Rule for Associative Memory:** At each timestep `t`, the model
-    updates its memory state `S` based on the current key-value pair
-    `(K_t, V_t)`. Unlike vanilla linear attention which uses a simple
-    additive update (`S_t = S_{t-1} + K_t ⊗ V_t`), this layer employs a
-    delta rule. Originating from error-correction learning (e.g., the
-    Widrow-Hoff rule), the delta rule performs a more targeted and powerful
-    update. It modifies the memory `S` to better associate `K_t` with `V_t`,
-    effectively minimizing the "prediction error" for the current step. This
-    makes the model exceptionally adept at forming and recalling precise
-    key-value associations, a crucial capability for in-context learning.
-
-2.  **Adaptive Gating Mechanism:** The delta update is modulated by two
-    learned, data-dependent gates, `α` (alpha) and `β` (beta), inspired by
-    the gating in LSTMs and other modern state-space models like Mamba.
-    -   `α_t` acts as a "forget" or "persistence" gate, controlling how much
-        of the previous memory state `S_{t-1}` is carried over to the next
-        step. A value near 1 preserves memory, while a value near 0 allows
-        for rapid erasure of outdated or irrelevant information.
-    -   `β_t` acts as a "learning rate" or "update strength" gate, scaling
-        the magnitude of the delta rule update for the current timestep.
-
-The synergy of these two components allows for highly flexible memory
-management. The gating enables the model to dynamically control the lifespan
-of information, while the delta rule provides a precise mechanism for writing
-new, error-corrected information into memory.
-
-This implementation is highly configurable, allowing for different normalization
-schemes for Q, K, and V, and a customizable output feed-forward network (FFN)
-to replace the default output gating mechanism.
+This layer provides a recurrent mechanism for sequence modeling that combines
+associative memory via the delta rule with adaptive gating for linear O(N)
+complexity. The gated delta rule update is:
+S_t = alpha_t * S_{t-1} + beta_t * (K_t outer V_t), where alpha controls
+memory persistence and beta controls update strength. This enables precise
+key-value association retrieval while allowing flexible memory management.
 
 References:
-
-This architecture builds upon a line of research aimed at creating more
-efficient and powerful sequence models. The core concepts are derived from:
--   Schlag, I., et al. (2021), which introduced the use of the delta rule
-    for associative memory in linear transformers (DeltaNet).
--   Recent work on state-space models like Mamba, which demonstrated the
-    power of selective, gated state updates.
--   The combined "Gated DeltaNet" architecture, which explicitly merges these
-    two ideas for improved performance on long-context tasks.
-
+    - Schlag, I., et al. (2021). Linear Transformers Are Secretly Fast Weight
+      Programmers (DeltaNet).
+    - Yang, S., et al. (2024). Gated Delta Networks: Improving Mamba2 with
+      Delta Rule.
 """
 
 import keras
@@ -78,92 +33,95 @@ from .norms import create_normalization_layer, NormalizationType
 @keras.saving.register_keras_serializable()
 class GatedDeltaNet(keras.layers.Layer):
     """
-    Gated DeltaNet layer combining delta rule updates with adaptive gating mechanism.
-    This layer is normally input length agnostic,
-    however due to limitations of tensorflow framework
-    we have to define a hard top limit named max_seq_len
+    Gated DeltaNet layer combining delta rule updates with adaptive gating.
 
-    This layer implements a sophisticated linear transformer variant that combines:
-    - Delta rule mechanism for targeted memory updates
-    - Adaptive gating for rapid memory erasure and control
-    - Configurable normalization (default: Zero-Centered RMS) for Q, K, V
-    - Short convolution for position-based addressing
-    - Configurable output FFN (default: Gated Linear Unit) for selective flow
+    Implements a linear transformer variant that combines delta rule mechanism
+    for targeted memory updates (S_t = alpha_t * S_{t-1} + beta_t * K_t outer V_t)
+    with adaptive gating (alpha for persistence, beta for update strength).
+    Features configurable normalization for Q/K/V, short convolution for
+    position-based addressing, and a configurable output FFN. Due to TensorFlow
+    framework limitations, requires a hard maximum sequence length parameter.
 
-    **Intent**: Provide an efficient alternative to standard attention that excels
-    at in-context retrieval and long-context understanding while maintaining
-    linear complexity. The gating mechanism enables flexible memory control.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, dim])
-           ↓
-    Q/K/V Linear Projections
-           ↓
-    Configurable Norm → Short Conv1D (Q, K, V) → Configurable Activation
-           ↓                                             ↓
-    Alpha/Beta Gating ←----------------------------------┘
-           ↓
-    Delta Rule Update (with gating)
-           ↓
-    Reshape & Project
-           ↓
-    Configurable Output FFN (default: GLU Gate) → Output
-    ```
+    .. code-block:: text
 
-    Args:
-        dim: Integer, the model dimension size. Must be positive.
-        num_heads: Integer, number of attention heads. Must be positive.
-        max_seq_len: Integer, the maximum sequence length for the `while_loop`.
-        head_dim: Optional integer, dimension per head. If None, defaults to dim // num_heads.
-        conv_kernel_size: Integer, kernel size for short convolution layers. Defaults to 4.
-        dropout_rate: Float, dropout rate for regularization. Defaults to 0.0.
-        activation: String or callable, activation function applied after convolutions. Defaults to 'silu'.
-        normalization_type: NormalizationType, type of normalization to use for Q, K, V.
-            Defaults to 'zero_centered_rms_norm'.
-        q_norm_args: Optional dict of arguments for the Q normalization layer.
-        k_norm_args: Optional dict of arguments for the K normalization layer.
-        v_norm_args: Optional dict of arguments for the V normalization layer.
-        ffn_type: Optional[FFNType], type of feed-forward network for the output stage.
-            If None (default), uses the original gated linear unit output.
-            Otherwise, replaces the output projection with a specified FFN from the factory.
-        ffn_args: Optional dict of arguments for the custom FFN layer.
-        intermediate_size: Optional int, intermediate size for standard FFNs if `ffn_type` is used.
-            Defaults to `dim * 4` if not provided.
-        use_bias: Boolean, whether to use bias in linear layers. Defaults to False.
-        kernel_initializer: String or initializer for weights. Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer for biases. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for weights.
-        bias_regularizer: Optional regularizer for biases.
-        **kwargs: Additional arguments for Layer base class.
+        ┌───────────────────────────────────────────────┐
+        │  Input [batch, seq_len, dim]                  │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Q/K/V Linear Projections                     │
+        └──────┬───────────┬───────────┬────────────────┘
+               ▼           ▼           ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Q Norm   │ │ K Norm   │ │ V Norm   │
+        │ Q Conv1D │ │ K Conv1D │ │ V Conv1D │
+        │ Activate │ │ Activate │ │ Activate │
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             ▼             ▼            ▼
+        ┌───────────────────────────────────────────────┐
+        │  Alpha/Beta Gating (sigmoid projections)      │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Delta Rule Update (recurrent, per timestep)  │
+        │  S_t = alpha_t * S_{t-1} + beta_t * K_t⊗V_t  │
+        │  out_t = Q_t @ S_t + V_t_residual             │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Reshape & Output FFN (default: GLU gate)     │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Output [batch, seq_len, dim]                 │
+        └───────────────────────────────────────────────┘
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-
-    Example:
-        ```python
-        # Default configuration (Zero-Centered RMSNorm, SiLU activation, GLU output)
-        layer = GatedDeltaNet(dim=768, num_heads=12, max_seq_len=2048)
-
-        # Using LayerNorm, GELU activation, and a SwiGLU FFN output
-        layer_custom = GatedDeltaNet(
-            dim=768,
-            num_heads=12,
-            max_seq_len=4096,
-            activation='gelu',
-            normalization_type='layer_norm',
-            ffn_type='swiglu',
-            intermediate_size=3072, # 768 * 4
-            dropout_rate=0.1
-        )
-
-        # Usage in model
-        inputs = keras.Input(shape=(None, 768))
-        outputs = layer_custom(inputs)
-        ```
+    :param dim: Model dimension size. Must be positive.
+    :type dim: int
+    :param num_heads: Number of attention heads. Must be positive.
+    :type num_heads: int
+    :param max_seq_len: Maximum sequence length for the while_loop.
+    :type max_seq_len: int
+    :param head_dim: Dimension per head. If None, defaults to dim // num_heads.
+    :type head_dim: Optional[int]
+    :param conv_kernel_size: Kernel size for short convolution layers. Defaults
+        to 4.
+    :type conv_kernel_size: int
+    :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
+    :type dropout_rate: float
+    :param activation: Activation function after convolutions. Defaults to 'silu'.
+    :type activation: Union[str, Callable]
+    :param normalization_type: Type of normalization for Q, K, V. Defaults to
+        'zero_centered_rms_norm'.
+    :type normalization_type: NormalizationType
+    :param q_norm_args: Optional arguments for Q normalization layer.
+    :type q_norm_args: Optional[Dict[str, Any]]
+    :param k_norm_args: Optional arguments for K normalization layer.
+    :type k_norm_args: Optional[Dict[str, Any]]
+    :param v_norm_args: Optional arguments for V normalization layer.
+    :type v_norm_args: Optional[Dict[str, Any]]
+    :param ffn_type: Type of FFN for output stage. If None, uses original gated
+        linear unit output.
+    :type ffn_type: Optional[FFNType]
+    :param ffn_args: Optional arguments for the custom FFN layer.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param intermediate_size: Intermediate size for standard FFNs. Defaults to
+        dim * 4 if not provided.
+    :type intermediate_size: Optional[int]
+    :param use_bias: Whether to use bias in linear layers. Defaults to False.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for weights. Defaults to
+        'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for biases. Defaults to 'zeros'.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for biases.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -292,7 +250,21 @@ class GatedDeltaNet(keras.layers.Layer):
         dropout_rate: float,
         max_seq_len: int,
     ) -> None:
-        """Validate layer initialization parameters."""
+        """Validate layer initialization parameters.
+
+        :param dim: Model dimension.
+        :type dim: int
+        :param num_heads: Number of heads.
+        :type num_heads: int
+        :param head_dim: Per-head dimension.
+        :type head_dim: Optional[int]
+        :param conv_kernel_size: Convolution kernel size.
+        :type conv_kernel_size: int
+        :param dropout_rate: Dropout rate.
+        :type dropout_rate: float
+        :param max_seq_len: Maximum sequence length.
+        :type max_seq_len: int
+        """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
@@ -316,7 +288,15 @@ class GatedDeltaNet(keras.layers.Layer):
     def _create_normalization_layer(
         self, name: str, custom_args: Dict[str, Any]
     ) -> keras.layers.Layer:
-        """Creates a normalization layer from the factory."""
+        """Create a normalization layer from the factory.
+
+        :param name: Layer name.
+        :type name: str
+        :param custom_args: Custom arguments for the normalization layer.
+        :type custom_args: Dict[str, Any]
+        :return: Normalization layer instance.
+        :rtype: keras.layers.Layer
+        """
         try:
             return create_normalization_layer(
                 normalization_type=self.normalization_type, name=name, **custom_args
@@ -328,7 +308,13 @@ class GatedDeltaNet(keras.layers.Layer):
             )
 
     def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
-        """Creates an FFN layer from the factory for the output stage."""
+        """Create an FFN layer from the factory for the output stage.
+
+        :param name: Layer name.
+        :type name: str
+        :return: FFN layer instance.
+        :rtype: keras.layers.Layer
+        """
         if self.intermediate_size is None:
             self.intermediate_size = self.dim * 4  # Sensible default
 
@@ -353,7 +339,11 @@ class GatedDeltaNet(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all sub-layers."""
+        """Build the layer and all sub-layers.
+
+        :param input_shape: Shape tuple (batch_size, sequence_length, dim).
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {input_shape}")
         batch_size, seq_len, features = input_shape
@@ -409,7 +399,23 @@ class GatedDeltaNet(keras.layers.Layer):
         beta: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Apply gated delta rule update using `keras.ops.while_loop`."""
+        """Apply gated delta rule update using ``keras.ops.while_loop``.
+
+        :param q: Query tensor of shape (batch, seq, heads, head_dim).
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape (batch, seq, heads, head_dim).
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape (batch, seq, heads, 2*head_dim).
+        :type v: keras.KerasTensor
+        :param alpha: Persistence gate of shape (batch, seq, heads).
+        :type alpha: keras.KerasTensor
+        :param beta: Update gate of shape (batch, seq, heads).
+        :type beta: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (batch, seq, heads, head_dim).
+        :rtype: keras.KerasTensor
+        """
         batch_size, seq_len, _, _ = ops.shape(q)
 
         i = ops.convert_to_tensor(0, dtype="int32")
@@ -455,7 +461,15 @@ class GatedDeltaNet(keras.layers.Layer):
     def call(
         self, inputs: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the Gated DeltaNet layer."""
+        """Forward pass through the Gated DeltaNet layer.
+
+        :param inputs: Input tensor of shape (batch, seq_len, dim).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (batch, seq_len, dim).
+        :rtype: keras.KerasTensor
+        """
         batch_size, seq_len, _ = ops.shape(inputs)
 
         q = self.q_proj(inputs, training=training)
@@ -497,11 +511,21 @@ class GatedDeltaNet(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape given input shape."""
+        """Compute the output shape given input shape.
+
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape (same as input).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {

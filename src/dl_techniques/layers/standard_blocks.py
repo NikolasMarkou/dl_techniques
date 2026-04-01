@@ -158,77 +158,72 @@ class ConvBlock(keras.layers.Layer):
     """
     Configurable convolutional block with normalization, activation, and optional pooling.
 
-    This layer implements a flexible convolutional building block consisting of:
-    Conv2D → Normalization → Activation → Optional Dropout → Optional Pooling
+    This layer implements a flexible convolutional building block using factory-based
+    selection of normalization and activation layers. The processing pipeline is
+    Conv2D followed by normalization, activation, optional dropout, and optional pooling.
 
-    **Intent**: Provide a highly configurable convolutional block that can adapt
-    to different architectural requirements through factory-based selection of
-    normalization and activation layers.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓
-    Conv2D(filters, kernel_size, strides, padding)
-           ↓
-    Normalization (configurable type: layer_norm, batch_norm, rms_norm, etc.)
-           ↓
-    Activation (configurable type: relu, gelu, mish, etc.)
-           ↓
-    Optional Dropout(rate)
-           ↓
-    Optional Pooling (max or average)
-           ↓
-    Output(shape=[batch, new_height, new_width, filters])
-    ```
+    .. code-block:: text
 
-    Args:
-        filters: Number of convolutional filters.
-        kernel_size: Size of convolutional kernel.
-        strides: Convolution strides.
-        padding: Padding mode ('same' or 'valid').
-        normalization_type: Type of normalization ('layer_norm', 'batch_norm', 'rms_norm', etc.).
-        activation_type: Type of activation ('relu', 'gelu', 'mish', etc.).
-        dropout_rate: Dropout rate (0.0 to disable).
-        use_pooling: Whether to apply pooling layer.
-        pool_size: Size of pooling window.
-        pool_type: Type of pooling ('max' or 'avg').
-        kernel_regularizer: Regularizer for convolution kernel.
-        kernel_initializer: Initializer for convolution kernel.
-        normalization_kwargs: Additional arguments for normalization layer.
-        activation_kwargs: Additional arguments for activation layer.
-        **kwargs: Additional arguments for Layer base class.
+        ┌───────────────────────────────────────┐
+        │  Input [B, H, W, C]                   │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │  Conv2D(filters, kernel, strides)     │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │  Normalization (configurable)         │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │  Activation (configurable)            │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │  Optional Dropout                     │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │  Optional Pooling (max / avg)         │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │  Output [B, H', W', filters]          │
+        └───────────────────────────────────────┘
 
-    Example:
-        ```python
-        # Standard conv block with batch normalization and ReLU
-        block1 = ConvBlock(
-            filters=64,
-            kernel_size=3,
-            normalization_type='batch_norm',
-            activation_type='relu'
-        )
-
-        # Advanced conv block with RMS normalization and Mish activation
-        block2 = ConvBlock(
-            filters=128,
-            kernel_size=3,
-            normalization_type='rms_norm',
-            activation_type='mish',
-            use_pooling=True,
-            pool_type='max',
-            normalization_kwargs={'use_scale': True, 'epsilon': 1e-5}
-        )
-
-        # Transformer-style conv block with layer normalization
-        block3 = ConvBlock(
-            filters=256,
-            kernel_size=1,
-            normalization_type='layer_norm',
-            activation_type='gelu',
-            normalization_kwargs={'axis': -1}
-        )
-        ```
+    :param filters: Number of convolutional filters.
+    :type filters: int
+    :param kernel_size: Size of convolutional kernel.
+    :type kernel_size: int or tuple[int, int]
+    :param strides: Convolution strides.
+    :type strides: int or tuple[int, int]
+    :param padding: Padding mode (``'same'`` or ``'valid'``).
+    :type padding: str
+    :param normalization_type: Type of normalization.
+    :type normalization_type: str
+    :param activation_type: Type of activation.
+    :type activation_type: str
+    :param dropout_rate: Dropout rate (0.0 to disable).
+    :type dropout_rate: float
+    :param use_pooling: Whether to apply pooling layer.
+    :type use_pooling: bool
+    :param pool_size: Size of pooling window.
+    :type pool_size: int or tuple[int, int]
+    :param pool_type: Type of pooling (``'max'`` or ``'avg'``).
+    :type pool_type: str
+    :param kernel_regularizer: Regularizer for convolution kernel.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param kernel_initializer: Initializer for convolution kernel.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param normalization_kwargs: Additional arguments for normalization layer.
+    :type normalization_kwargs: dict or None
+    :param activation_kwargs: Additional arguments for activation layer.
+    :type activation_kwargs: dict or None
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -404,80 +399,64 @@ class DenseBlock(keras.layers.Layer):
     """
     Configurable dense block with normalization, activation, and optional dropout.
 
-    This layer implements a flexible dense building block consisting of:
-    Dense → Optional Normalization → Activation → Optional Dropout
+    This layer implements a flexible dense building block using factory-based
+    selection of normalization and activation layers. The pipeline is
+    Dense, optional normalization, activation, and optional dropout.
 
-    **Intent**: Provide a highly configurable dense block that can adapt to
-    different architectural requirements through factory-based selection of
-    normalization and activation layers.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, input_features])
-           ↓
-    Dense(units, kernel_regularizer, kernel_initializer)
-           ↓
-    Optional Normalization (configurable type: layer_norm, rms_norm, etc.)
-           ↓
-    Activation (configurable type: relu, gelu, mish, etc.)
-           ↓
-    Optional Dropout(rate)
-           ↓
-    Output(shape=[batch, units])
-    ```
+    .. code-block:: text
 
-    Args:
-        units: Number of dense units.
-        normalization_type: Type of normalization ('layer_norm', 'rms_norm', etc.).
-            Set to None to disable normalization.
-        activation_type: Type of activation ('relu', 'gelu', 'mish', etc.).
-        dropout_rate: Dropout rate (0.0 to disable).
-        kernel_regularizer: Regularizer for dense kernel.
-        bias_regularizer: Regularizer for dense bias.
-        activity_regularizer: Regularizer for dense layer activity.
-        kernel_initializer: Initializer for dense kernel.
-        bias_initializer: Initializer for dense bias.
-        use_bias: Whether to use bias in dense layer.
-        normalization_kwargs: Additional arguments for normalization layer.
-        activation_kwargs: Additional arguments for activation layer.
-        **kwargs: Additional arguments for Layer base class.
+        ┌────────────────────────────────┐
+        │  Input [B, features]           │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  Dense(units)                  │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  Optional Normalization        │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  Activation (configurable)     │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  Optional Dropout              │
+        └──────────────┬─────────────────┘
+                       ▼
+        ┌────────────────────────────────┐
+        │  Output [B, units]             │
+        └────────────────────────────────┘
 
-    Example:
-        ```python
-        # Standard dense block with layer normalization and ReLU
-        block1 = DenseBlock(
-            units=512,
-            normalization_type='layer_norm',
-            activation_type='relu',
-            dropout_rate=0.1
-        )
-
-        # Transformer-style dense block with RMS normalization and GELU
-        block2 = DenseBlock(
-            units=2048,
-            normalization_type='rms_norm',
-            activation_type='gelu',
-            normalization_kwargs={'use_scale': True}
-        )
-
-        # Simple dense block without normalization
-        block3 = DenseBlock(
-            units=256,
-            normalization_type=None,  # No normalization
-            activation_type='mish',
-            dropout_rate=0.2
-        )
-
-        # Advanced block with custom regularization
-        block4 = DenseBlock(
-            units=1024,
-            normalization_type='zero_centered_rms_norm',
-            activation_type='hard_swish',
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            normalization_kwargs={'epsilon': 1e-5},
-            dropout_rate=0.15
-        )
-        ```
+    :param units: Number of dense units.
+    :type units: int
+    :param normalization_type: Type of normalization. None to disable.
+    :type normalization_type: str or None
+    :param activation_type: Type of activation.
+    :type activation_type: str
+    :param dropout_rate: Dropout rate (0.0 to disable).
+    :type dropout_rate: float
+    :param kernel_regularizer: Regularizer for dense kernel.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param bias_regularizer: Regularizer for dense bias.
+    :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param activity_regularizer: Regularizer for dense layer activity.
+    :type activity_regularizer: keras.regularizers.Regularizer or None
+    :param kernel_initializer: Initializer for dense kernel.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for dense bias.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param use_bias: Whether to use bias in dense layer.
+    :type use_bias: bool
+    :param normalization_kwargs: Additional arguments for normalization layer.
+    :type normalization_kwargs: dict or None
+    :param activation_kwargs: Additional arguments for activation layer.
+    :type activation_kwargs: dict or None
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -641,48 +620,56 @@ class ResidualDenseBlock(keras.layers.Layer):
     """
     Dense block with residual connection and configurable normalization/activation.
 
-    This layer implements a residual dense block consisting of:
-    Input → Dense → Optional Normalization → Activation → Optional Dropout → Add(Input) → Output
+    This layer applies Dense, optional normalization, activation, and optional
+    dropout, then adds the result to the original input via a skip connection.
+    If ``units`` is None, the dense layer matches the input dimension automatically.
 
-    **Intent**: Provide a residual dense block that enables deeper networks with
-    skip connections while maintaining configurability through factory patterns.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, features])
-           ↓                    ↘ (skip connection)
-    Dense(units=features)       ↓
-           ↓                    ↓
-    Optional Normalization      ↓
-           ↓                    ↓
-    Activation                  ↓
-           ↓                    ↓
-    Optional Dropout            ↓
-           ↓                    ↓
-    Add ←──────────────────────↙
-           ↓
-    Output(shape=[batch, features])
-    ```
+    .. code-block:: text
 
-    Args:
-        units: Number of dense units. If None, will match input dimension (determined in build()).
-        normalization_type: Type of normalization ('layer_norm', 'rms_norm', etc.).
-            Set to None to disable normalization.
-        activation_type: Type of activation ('relu', 'gelu', 'mish', etc.).
-        dropout_rate: Dropout rate (0.0 to disable).
-        kernel_regularizer: Regularizer for dense kernel.
-        kernel_initializer: Initializer for dense kernel.
-        use_bias: Whether to use bias in dense layer.
-        normalization_kwargs: Additional arguments for normalization layer.
-        activation_kwargs: Additional arguments for activation layer.
-        **kwargs: Additional arguments for Layer base class.
+        ┌──────────────────────────────┐
+        │  Input [B, features]         │
+        └──────┬───────────────┬───────┘
+               ▼               │ (skip)
+        ┌──────────────┐       │
+        │  Dense(units) │       │
+        ├──────────────┤       │
+        │  Opt. Norm    │       │
+        ├──────────────┤       │
+        │  Activation   │       │
+        ├──────────────┤       │
+        │  Opt. Dropout │       │
+        └──────┬───────┘       │
+               ▼               ▼
+        ┌──────────────────────────────┐
+        │  Add (residual + skip)       │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Output [B, features]        │
+        └──────────────────────────────┘
 
-    Note:
-        If units is None, the dense layer will have the same number of units as
-        the input features to enable the residual connection. The layer automatically
-        determines the correct number of units from the input shape during build.
-        If units is specified, it must match the input dimension for the residual
-        connection to work.
+    :param units: Number of dense units. None to match input dimension.
+    :type units: int or None
+    :param normalization_type: Type of normalization. None to disable.
+    :type normalization_type: str or None
+    :param activation_type: Type of activation.
+    :type activation_type: str
+    :param dropout_rate: Dropout rate (0.0 to disable).
+    :type dropout_rate: float
+    :param kernel_regularizer: Regularizer for dense kernel.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param kernel_initializer: Initializer for dense kernel.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param use_bias: Whether to use bias in dense layer.
+    :type use_bias: bool
+    :param normalization_kwargs: Additional arguments for normalization layer.
+    :type normalization_kwargs: dict or None
+    :param activation_kwargs: Additional arguments for activation layer.
+    :type activation_kwargs: dict or None
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -844,64 +831,48 @@ class BasicBlock(keras.layers.Layer):
     """
     Basic ResNet block with two 3x3 convolutions.
 
-    Used in ResNet-18 and ResNet-34. The block consists of:
-    - Conv 3x3, filters
-    - BatchNorm
-    - ReLU
-    - Conv 3x3, filters
-    - BatchNorm
-    - Add shortcut
-    - ReLU
+    Used in ResNet-18 and ResNet-34. The block applies two sequential 3x3
+    convolutions with normalization and activation, then adds the result to a
+    shortcut connection (optionally projected via 1x1 convolution).
 
-    **Intent**: Provide the basic building block for ResNet architectures,
-    enabling deep residual learning with two-layer transformations and
-    skip connections.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓                               ↘ (shortcut)
-    Conv2D(3x3, filters, stride)            ↓
-           ↓                                ↓
-    Normalization                           ↓
-           ↓                                ↓
-    Activation                              ↓
-           ↓                                ↓
-    Conv2D(3x3, filters)                    ↓
-           ↓                                ↓
-    Normalization                           ↓
-           ↓                                ↓
-    Add ←──────────────────────────────────↙
-           ↓
-    Activation
-           ↓
-    Output(shape=[batch, new_height, new_width, filters])
-    ```
+    .. code-block:: text
 
-    Args:
-        filters: Number of output filters.
-        stride: Stride for the first convolution. Default is 1.
-        use_projection: Whether to use a 1x1 projection for the shortcut.
-        kernel_regularizer: Regularizer for convolution kernels.
-        normalization_type: Type of normalization layer. Default is 'batch_norm'.
-        activation_type: Type of activation function. Default is 'relu'.
-        **kwargs: Additional keyword arguments for Layer.
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, C]                  │
+        └──────┬───────────────────────┬───────┘
+               ▼                       │ (shortcut)
+        ┌──────────────────┐           │
+        │  Conv2D 3x3      │           │ opt. Conv1x1
+        │  Norm → Act      │           │ + Norm
+        ├──────────────────┤           │
+        │  Conv2D 3x3      │           │
+        │  Norm            │           │
+        └──────┬───────────┘           │
+               ▼                       ▼
+        ┌──────────────────────────────────────┐
+        │  Add → Activation                    │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Output [B, H', W', filters]         │
+        └──────────────────────────────────────┘
 
-    Example:
-        ```python
-        # Basic block with stride 1 (no downsampling)
-        block1 = BasicBlock(64, stride=1, use_projection=False)
-
-        # Basic block with stride 2 (downsampling, requires projection)
-        block2 = BasicBlock(128, stride=2, use_projection=True)
-
-        # Basic block with custom normalization and activation
-        block3 = BasicBlock(
-            filters=256,
-            normalization_type='layer_norm',
-            activation_type='gelu'
-        )
-        ```
+    :param filters: Number of output filters.
+    :type filters: int
+    :param stride: Stride for the first convolution. Defaults to 1.
+    :type stride: int
+    :param use_projection: Whether to use a 1x1 projection for the shortcut.
+    :type use_projection: bool
+    :param kernel_regularizer: Regularizer for convolution kernels.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param normalization_type: Type of normalization layer. Defaults to ``'batch_norm'``.
+    :type normalization_type: str
+    :param activation_type: Type of activation function. Defaults to ``'relu'``.
+    :type activation_type: str
+    :param kwargs: Additional keyword arguments for Layer.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -1083,76 +1054,53 @@ class BasicBlock(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class BottleneckBlock(keras.layers.Layer):
     """
-    Bottleneck ResNet block with 1x1 → 3x3 → 1x1 convolutions.
+    Bottleneck ResNet block with 1x1, 3x3, 1x1 convolutions.
 
-    Used in ResNet-50, ResNet-101, and ResNet-152. The block consists of:
-    - Conv 1x1, filters (dimensionality reduction)
-    - BatchNorm
-    - ReLU
-    - Conv 3x3, filters (bottleneck)
-    - BatchNorm
-    - ReLU
-    - Conv 1x1, filters * 4 (dimensionality expansion)
-    - BatchNorm
-    - Add shortcut
-    - ReLU
+    Used in ResNet-50, ResNet-101, and ResNet-152. The block reduces dimensions
+    with a 1x1 conv, processes with a 3x3 conv, and expands back with a 1x1 conv
+    (output channels = ``filters * 4``), then adds to a shortcut connection.
 
-    **Intent**: Provide an efficient building block for deep ResNet architectures,
-    using bottleneck design to reduce computational cost while maintaining
-    representational capacity through dimensionality reduction and expansion.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, in_channels])
-           ↓                                  ↘ (shortcut)
-    Conv2D(1x1, filters)                      ↓
-           ↓                                  ↓
-    Normalization                             ↓
-           ↓                                  ↓
-    Activation                                ↓
-           ↓                                  ↓
-    Conv2D(3x3, filters, stride)              ↓
-           ↓                                  ↓
-    Normalization                             ↓
-           ↓                                  ↓
-    Activation                                ↓
-           ↓                                  ↓
-    Conv2D(1x1, filters * 4)                  ↓
-           ↓                                  ↓
-    Normalization                             ↓
-           ↓                                  ↓
-    Add ←─────────────────────────────────────↙
-           ↓
-    Activation
-           ↓
-    Output(shape=[batch, new_height, new_width, filters * 4])
-    ```
+    .. code-block:: text
 
-    Args:
-        filters: Number of filters in the bottleneck (middle layer).
-            Output will be filters * 4.
-        stride: Stride for the 3x3 convolution. Default is 1.
-        use_projection: Whether to use a 1x1 projection for the shortcut.
-        kernel_regularizer: Regularizer for convolution kernels.
-        normalization_type: Type of normalization layer. Default is 'batch_norm'.
-        activation_type: Type of activation function. Default is 'relu'.
-        **kwargs: Additional keyword arguments for Layer.
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, C_in]               │
+        └──────┬───────────────────────┬───────┘
+               ▼                       │ (shortcut)
+        ┌──────────────────┐           │
+        │  Conv1x1(filters)│           │ opt. Conv1x1
+        │  Norm → Act      │           │ (filters*4)
+        ├──────────────────┤           │ + Norm
+        │  Conv3x3(filters)│           │
+        │  Norm → Act      │           │
+        ├──────────────────┤           │
+        │  Conv1x1(filt*4) │           │
+        │  Norm            │           │
+        └──────┬───────────┘           │
+               ▼                       ▼
+        ┌──────────────────────────────────────┐
+        │  Add → Activation                    │
+        └──────────────┬───────────────────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Output [B, H', W', filters*4]       │
+        └──────────────────────────────────────┘
 
-    Example:
-        ```python
-        # Bottleneck block with stride 1 (no downsampling)
-        block1 = BottleneckBlock(64, stride=1, use_projection=True)
-
-        # Bottleneck block with stride 2 (downsampling, requires projection)
-        block2 = BottleneckBlock(128, stride=2, use_projection=True)
-
-        # Bottleneck block with custom normalization and activation
-        block3 = BottleneckBlock(
-            filters=256,
-            normalization_type='layer_norm',
-            activation_type='gelu'
-        )
-        ```
+    :param filters: Number of filters in the bottleneck (output = filters * 4).
+    :type filters: int
+    :param stride: Stride for the 3x3 convolution. Defaults to 1.
+    :type stride: int
+    :param use_projection: Whether to use a 1x1 projection for the shortcut.
+    :type use_projection: bool
+    :param kernel_regularizer: Regularizer for convolution kernels.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param normalization_type: Type of normalization layer. Defaults to ``'batch_norm'``.
+    :type normalization_type: str
+    :param activation_type: Type of activation function. Defaults to ``'relu'``.
+    :type activation_type: str
+    :param kwargs: Additional keyword arguments for Layer.
+    :type kwargs: Any
     """
 
     def __init__(

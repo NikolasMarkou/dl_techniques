@@ -72,48 +72,77 @@ from .pixel_shuffle import PixelShuffle
 
 @keras.saving.register_keras_serializable()
 class ModalityProjection(keras.layers.Layer):
-    """Modality projection layer for nanoVLM.
+    """Modality projection layer for Vision-Language Models.
 
     Projects visual features to language embedding space using pixel shuffle
-    for token reduction followed by linear projection.
+    for lossless token reduction followed by linear projection with optional
+    GELU activation and layer normalization. The pixel shuffle operation
+    rearranges ``s x s`` blocks of spatial tokens into a single token by
+    folding spatial dimensions into the channel dimension, reducing sequence
+    length by ``s^2`` while preserving all information. The dense projection
+    then learns an affine transformation ``y = xW + b`` to align the visual
+    feature space with the target language embedding space.
 
-    This layer combines token reduction through pixel shuffling with learnable
-    projection to align visual and textual representations in a shared embedding space.
+    **Architecture Overview:**
 
-    Args:
-        input_dim: Input feature dimension. Must be positive integer.
-        output_dim: Output embedding dimension. Must be positive integer.
-        scale_factor: Pixel shuffle scale factor for token reduction. Must be positive integer.
-            Defaults to 2. Higher values reduce more tokens but may lose spatial information.
-        use_gelu: Whether to use GELU activation after projection. Defaults to True.
-        use_layer_norm: Whether to apply layer normalization after projection. Defaults to True.
-        projection_kernel_initializer: Initializer for the projection layer weights.
-            Defaults to 'glorot_uniform'.
-        projection_bias_initializer: Initializer for the projection layer bias.
-            Defaults to 'zeros'.
-        projection_kernel_regularizer: Regularizer for the projection layer weights.
-            Defaults to None.
-        projection_bias_regularizer: Regularizer for the projection layer bias.
-            Defaults to None.
-        **kwargs: Additional keyword arguments passed to the base Layer class.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If input_dim, output_dim, or scale_factor are not positive integers.
+        ┌────────────────────────────────────┐
+        │  Input [B, num_tokens, input_dim]  │
+        └────────────────┬───────────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────────┐
+        │  PixelShuffle (scale_factor)       │
+        │  tokens: N → N/s^2                 │
+        │  channels: C → C*s^2              │
+        └────────────────┬───────────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────────┐
+        │  Dense(output_dim)                 │
+        └────────────────┬───────────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────────┐
+        │  GELU activation (optional)        │
+        └────────────────┬───────────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────────┐
+        │  LayerNormalization (optional)      │
+        └────────────────┬───────────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────────┐
+        │  Output [B, reduced_tokens,        │
+        │          output_dim]               │
+        └────────────────────────────────────┘
 
-    Example:
-        >>> # Create projection layer
-        >>> projection = ModalityProjection(
-        ...     input_dim=768,
-        ...     output_dim=512,
-        ...     scale_factor=2,
-        ...     use_gelu=True,
-        ...     use_layer_norm=True
-        ... )
-        >>>
-        >>> # Input: visual features [batch, 196, 768]
-        >>> visual_features = keras.random.normal((32, 196, 768))
-        >>> projected = projection(visual_features)
-        >>> print(projected.shape)  # (32, 49, 512) - tokens reduced by 4x
+    :param input_dim: Input feature dimension. Must be positive.
+    :type input_dim: int
+    :param output_dim: Output embedding dimension. Must be positive.
+    :type output_dim: int
+    :param scale_factor: Pixel shuffle scale factor for token reduction.
+        Must be positive. Defaults to 2.
+    :type scale_factor: int
+    :param use_gelu: Whether to use GELU activation. Defaults to True.
+    :type use_gelu: bool
+    :param use_layer_norm: Whether to apply layer normalization. Defaults to True.
+    :type use_layer_norm: bool
+    :param projection_kernel_initializer: Initializer for projection weights.
+        Defaults to ``'glorot_uniform'``.
+    :type projection_kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param projection_bias_initializer: Initializer for projection bias.
+        Defaults to ``'zeros'``.
+    :type projection_bias_initializer: Union[str, keras.initializers.Initializer]
+    :param projection_kernel_regularizer: Regularizer for projection weights.
+    :type projection_kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param projection_bias_regularizer: Regularizer for projection bias.
+    :type projection_bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the base Layer class.
+
+    :raises ValueError: If input_dim, output_dim, or scale_factor are not positive.
     """
 
     def __init__(
@@ -188,12 +217,9 @@ class ModalityProjection(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the modality projection components.
 
-        Args:
-            input_shape: Shape tuple indicating input shape. Expected format is
-                (batch_size, sequence_length, input_dim).
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible.
+        :param input_shape: Shape tuple ``(batch_size, sequence_length, input_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is invalid or incompatible.
         """
         # Store input shape for serialization
         self._build_input_shape = input_shape
@@ -228,15 +254,12 @@ class ModalityProjection(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply modality projection.
 
-        Args:
-            inputs: Visual features of shape [batch_size, num_tokens, input_dim].
-            training: Boolean indicating whether the layer should behave in training
-                mode or inference mode. Passed to sublayers that behave differently
-                during training and inference.
-
-        Returns:
-            Projected features of shape [batch_size, reduced_tokens, output_dim]
-            where reduced_tokens = 1 + (num_tokens-1) / (scale_factor ** 2).
+        :param inputs: Visual features of shape ``[batch_size, num_tokens, input_dim]``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training or inference mode.
+        :type training: Optional[bool]
+        :return: Projected features of shape ``[batch_size, reduced_tokens, output_dim]``.
+        :rtype: keras.KerasTensor
         """
         # Apply pixel shuffle to reduce number of tokens
         x = self.pixel_shuffle(inputs)
@@ -257,11 +280,10 @@ class ModalityProjection(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         # Get pixel shuffle output shape
         shuffled_shape = self.pixel_shuffle.compute_output_shape(input_shape)
@@ -273,10 +295,10 @@ class ModalityProjection(keras.layers.Layer):
         return tuple(output_shape_list)
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -295,10 +317,8 @@ class ModalityProjection(keras.layers.Layer):
     def get_build_config(self) -> Dict[str, Any]:
         """Get the config needed to build the layer from a config.
 
-        This method is needed for proper model saving and loading.
-
-        Returns:
-            Dictionary containing the build configuration.
+        :return: Dictionary containing the build configuration.
+        :rtype: Dict[str, Any]
         """
         return {
             "input_shape": self._build_input_shape,
@@ -307,8 +327,8 @@ class ModalityProjection(keras.layers.Layer):
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """Build the layer from a config created with get_build_config.
 
-        Args:
-            config: Dictionary containing the build configuration.
+        :param config: Dictionary containing the build configuration.
+        :type config: Dict[str, Any]
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])

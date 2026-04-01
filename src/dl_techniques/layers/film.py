@@ -1,70 +1,18 @@
 """
-Feature-wise Linear Modulation (FiLM) Layer
+Feature-wise Linear Modulation (FiLM) Layer.
 
-This module provides a highly configurable implementation of Feature-wise Linear Modulation,
-a powerful technique for conditional neural networks that enables dynamic feature modulation
-based on auxiliary conditioning information.
+Applies learned affine transformations to feature maps based on conditioning
+vectors, enabling conditional generation, style transfer, and multi-modal
+learning. The FiLM transformation is FiLM(x, z) = (lambda + gamma) * x + beta,
+where gamma, beta = f(z) are learned projections from the conditioning vector z.
 
-Feature-wise Linear Modulation applies learned affine transformations to feature maps based
-on conditioning vectors, enabling sophisticated conditional generation, style transfer, and
-multi-modal learning applications. The technique has proven particularly effective in visual
-reasoning, conditional image synthesis, and neural style transfer tasks.
-
-**Key Features:**
-- **Multi-modal modulation**: Supports multiplicative, additive, or combined modulation strategies
-- **Flexible architecture**: Configurable projection dimensions, activations, and preprocessing
-- **Advanced regularization**: Comprehensive support for weight constraints and regularizers
-- **Numerical robustness**: Configurable epsilon and scale factors for stable training
-- **Production ready**: Full serialization support and comprehensive error handling
-
-**Mathematical Foundation:**
-The FiLM transformation applies learnable per-channel affine transformations:
-
-    γᵢ, βᵢ = fᵢ(z)  for i ∈ {1, ..., C}
-
-    FiLM(x, z) = γ ⊙ x + β
-
-where x ∈ ℝᴮˣᴴˣᵂˣᶜ is the content tensor, z ∈ ℝᴮˣˢ is the conditioning vector,
-f: ℝˢ → ℝᶜˣ² is the learned projection function, and ⊙ denotes element-wise multiplication.
-
-This implementation extends the basic formulation with:
-- Configurable base scaling: FiLM(x, z) = (λ + γ) ⊙ x + β
-- Modal flexibility: Support for γ-only, β-only, or combined modulation
-- Style preprocessing: Optional normalization and dropout on conditioning vectors
-
-**References:**
-1. Perez, E., Strub, F., De Vries, H., Dumoulin, V., & Courville, A. (2018).
-   "FiLM: Visual reasoning with a general conditioning layer."
-   Proceedings of the AAAI Conference on Artificial Intelligence, 32(1).
-   https://doi.org/10.1609/aaai.v32i1.11671
-
-2. De Vries, H., Strub, F., Mary, J., Larochelle, H., Pietquin, O., & Courville, A. C. (2017).
-   "Modulating early visual processing by language."
-   Advances in Neural Information Processing Systems, 30.
-   https://papers.nips.cc/paper/7237-modulating-early-visual-processing-by-language
-
-3. Dumoulin, V., Perez, E., Schucher, N., Strub, F., De Vries, H., Courville, A., & Bengio, Y. (2018).
-   "Feature-wise transformations."
-   Distill, 3(7), e11.
-   https://doi.org/10.23915/distill.00011
-
-4. Zhang, H., Goodfellow, I., Metaxas, D., & Odena, A. (2019).
-   "Self-attention generative adversarial networks."
-   International Conference on Machine Learning (ICML).
-   [Shows FiLM usage in modern generative models]
-
-5. Park, T., Liu, M. Y., Wang, T. C., & Zhu, J. Y. (2019).
-   "Semantic image synthesis with spatially-adaptive normalization."
-   Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition.
-   https://doi.org/10.1109/CVPR.2019.00244
-   [SPADE - Related spatially-adaptive modulation technique]
-
-**Implementation Notes:**
-- Built following Modern Keras 3 patterns for robust serialization
-- Supports arbitrary tensor shapes beyond 4D (e.g., 3D, 5D tensors)
-- Memory efficient broadcasting for large feature maps
-- Thread-safe and suitable for distributed training
-- Comprehensive type hints and Sphinx-compatible documentation
+References:
+    1. Perez, E., et al. (2018). "FiLM: Visual reasoning with a general
+       conditioning layer." AAAI. https://doi.org/10.1609/aaai.v32i1.11671
+    2. De Vries, H., et al. (2017). "Modulating early visual processing by
+       language." NeurIPS. https://papers.nips.cc/paper/7237
+    3. Dumoulin, V., et al. (2018). "Feature-wise transformations." Distill.
+       https://doi.org/10.23915/distill.00011
 """
 
 import keras
@@ -78,99 +26,89 @@ class FiLMLayer(keras.layers.Layer):
     """
     Highly configurable Feature-wise Linear Modulation (FiLM) Layer.
 
-    Applies an affine transformation to content tensors based on style/condition vectors.
-    This layer learns projections from style vectors to generate per-channel scaling (gamma)
-    and shifting (beta) parameters for conditional feature modulation. Supports extensive
-    customization of architectures, activations, regularization, and projection strategies.
+    Applies an affine transformation to content tensors based on style/condition
+    vectors. Learns projections from style vectors to generate per-channel scaling
+    (gamma) and shifting (beta) parameters: output = content * (scale_factor + gamma)
+    + beta. Supports multiplicative-only, additive-only, or combined modulation modes,
+    with optional layer normalization and dropout on the conditioning vector.
 
-    **Intent**: Enable sophisticated conditional generation and style transfer by modulating
-    feature maps based on auxiliary condition vectors. Commonly used in conditional GANs,
-    style transfer networks, and conditional image synthesis where content needs to be
-    dynamically adjusted based on style or semantic conditions.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Content Tensor(B, H, W, C) + Style Vector(B, S)
-                        ↓
-    Style → [Optional: Norm] → Dense_γ(units, activation) → Gamma(B, 1, 1, C)
-         ↘ [Optional: Norm] → Dense_β(units, activation) → Beta(B, 1, 1, C)
-                        ↓
-    Output = Content * (scale_factor + Gamma) + Beta
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Gamma projection**: γ = f_γ(norm(style)) where f_γ is configurable projection
-    2. **Beta projection**: β = f_β(norm(style)) where f_β is configurable projection
-    3. **Modulation**: output = content ⊙ (λ + γ) + β, where λ is base scale factor
+        ┌──────────────────────┐  ┌──────────────────────┐
+        │Content [B, H, W, C]  │  │Style Vector [B, S]   │
+        └──────────┬───────────┘  └──────────┬───────────┘
+                   │                         ▼
+                   │              ┌──────────────────────┐
+                   │              │ LayerNorm (optional)  │
+                   │              │ Dropout (optional)    │
+                   │              └──────────┬───────────┘
+                   │                 ┌───────┴───────┐
+                   │                 ▼               ▼
+                   │          ┌───────────┐   ┌───────────┐
+                   │          │Dense_gamma│   │Dense_beta │
+                   │          │(act, bias)│   │(act, bias)│
+                   │          └─────┬─────┘   └─────┬─────┘
+                   │                ▼               ▼
+                   │          Gamma [B,1,1,C]  Beta [B,1,1,C]
+                   │                │               │
+                   ▼                ▼               ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Output = Content * (lambda + Gamma) + Beta     │
+        └──────────────────────┬──────────────────────────┘
+                               ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Output [B, H, W, C]                            │
+        └─────────────────────────────────────────────────┘
 
-    Args:
-        gamma_units: Output units for gamma projection. If None, uses content channels.
-        beta_units: Output units for beta projection. If None, uses content channels.
-        gamma_activation: Activation function for gamma projection. Can be string or callable.
-        beta_activation: Activation function for beta projection. Can be string or callable.
-        use_bias: Whether to use bias in projection layers.
-        scale_factor: Base scaling factor applied before gamma modulation.
-        projection_dropout: Dropout rate applied to style vector before projection.
-        use_layer_norm: Whether to apply LayerNormalization to style vector.
-        gamma_kernel_initializer: Initializer for gamma projection weights.
-        beta_kernel_initializer: Initializer for beta projection weights.
-        gamma_bias_initializer: Initializer for gamma projection bias.
-        beta_bias_initializer: Initializer for beta projection bias.
-        kernel_regularizer: Regularizer applied to projection layer weights.
-        bias_regularizer: Regularizer applied to projection layer biases.
-        activity_regularizer: Regularizer applied to projection layer outputs.
-        gamma_constraint: Constraint applied to gamma projection weights.
-        beta_constraint: Constraint applied to beta projection weights.
-        modulation_mode: Strategy for applying modulation ('multiplicative', 'additive', 'both').
-        epsilon: Small constant for numerical stability.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        List of two tensors:
-        - content_tensor: (batch_size, height, width, channels) or (batch_size, ..., channels)
-        - style_vector: (batch_size, style_features)
-
-    Output shape:
-        Same as content_tensor: (batch_size, height, width, channels) or (batch_size, ..., channels)
-
-    Attributes:
-        gamma_projection: Dense layer for scaling parameters
-        beta_projection: Dense layer for shifting parameters
-        layer_norm: Optional LayerNormalization for style preprocessing
-        dropout: Optional Dropout for style regularization
-        num_channels: Number of channels being modulated
-
-    Example:
-        ```python
-        # Basic usage
-        film = FiLMLayer()
-        content = keras.random.normal((2, 64, 64, 128))
-        style = keras.random.normal((2, 256))
-        output = film([content, style])
-
-        # Highly configured version
-        film = FiLMLayer(
-            gamma_activation='tanh',
-            beta_activation='linear',
-            use_layer_norm=True,
-            projection_dropout=0.1,
-            scale_factor=1.5,
-            kernel_regularizer='l2',
-            modulation_mode='both'
-        )
-
-        # Different projection dimensions
-        film = FiLMLayer(
-            gamma_units=64,  # Project to 64 units first
-            beta_units=64,
-            gamma_activation='gelu'
-        )
-        ```
-
-    Note:
-        When gamma_units or beta_units differ from content channels, an additional
-        projection layer maps to the correct channel dimension. This enables
-        dimensionality reduction or expansion in the modulation pathway.
+    :param gamma_units: Output units for gamma projection. If None, uses content
+        channels.
+    :type gamma_units: Optional[int]
+    :param beta_units: Output units for beta projection. If None, uses content
+        channels.
+    :type beta_units: Optional[int]
+    :param gamma_activation: Activation function for gamma projection. Defaults to
+        'tanh'.
+    :type gamma_activation: Union[str, Callable]
+    :param beta_activation: Activation function for beta projection. Defaults to
+        'linear'.
+    :type beta_activation: Union[str, Callable]
+    :param use_bias: Whether to use bias in projection layers.
+    :type use_bias: bool
+    :param scale_factor: Base scaling factor applied before gamma modulation.
+        Defaults to 1.0.
+    :type scale_factor: float
+    :param projection_dropout: Dropout rate applied to style vector before
+        projection. Defaults to 0.0.
+    :type projection_dropout: float
+    :param use_layer_norm: Whether to apply LayerNormalization to style vector.
+        Defaults to False.
+    :type use_layer_norm: bool
+    :param gamma_kernel_initializer: Initializer for gamma projection weights.
+    :type gamma_kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param beta_kernel_initializer: Initializer for beta projection weights.
+    :type beta_kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param gamma_bias_initializer: Initializer for gamma projection bias.
+    :type gamma_bias_initializer: Union[str, keras.initializers.Initializer]
+    :param beta_bias_initializer: Initializer for beta projection bias.
+    :type beta_bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for projection layer weights.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Regularizer for projection layer biases.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param activity_regularizer: Regularizer for projection layer outputs.
+    :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param gamma_constraint: Constraint for gamma projection weights.
+    :type gamma_constraint: Optional[Union[str, keras.constraints.Constraint]]
+    :param beta_constraint: Constraint for beta projection weights.
+    :type beta_constraint: Optional[Union[str, keras.constraints.Constraint]]
+    :param modulation_mode: Strategy for applying modulation ('multiplicative',
+        'additive', 'both'). Defaults to 'both'.
+    :type modulation_mode: Literal['multiplicative', 'additive', 'both']
+    :param epsilon: Small constant for numerical stability. Defaults to 1e-8.
+    :type epsilon: float
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -259,11 +197,10 @@ class FiLMLayer(keras.layers.Layer):
             )
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """
-        Build the layer's weights and sub-layers.
+        """Build the layer's weights and sub-layers.
 
-        Args:
-            input_shape: List of two shapes: [content_shape, style_shape].
+        :param input_shape: List of two shapes: [content_shape, style_shape].
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         if not isinstance(input_shape, list) or len(input_shape) != 2:
             raise ValueError(
@@ -359,15 +296,14 @@ class FiLMLayer(keras.layers.Layer):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply the configurable FiLM transformation.
+        """Apply the configurable FiLM transformation.
 
-        Args:
-            inputs: List containing [content_tensor, style_vector].
-            training: Whether the layer is in training mode.
-
-        Returns:
-            The modulated content tensor.
+        :param inputs: List containing [content_tensor, style_vector].
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: The modulated content tensor.
+        :rtype: keras.KerasTensor
         """
         if len(inputs) != 2:
             raise ValueError(f"FiLMLayer expects 2 inputs, got {len(inputs)}")
@@ -422,12 +358,22 @@ class FiLMLayer(keras.layers.Layer):
             self,
             input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape (same as content tensor)."""
+        """Compute output shape (same as content tensor).
+
+        :param input_shape: List of [content_shape, style_shape].
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape matching content tensor.
+        :rtype: Tuple[Optional[int], ...]
+        """
         content_shape, _ = input_shape
         return content_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the configuration dictionary for layer serialization."""
+        """Get the configuration dictionary for layer serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'gamma_units': self.gamma_units,

@@ -76,99 +76,56 @@ class SqueezeExcitation(layers.Layer):
 
     This layer implements the Squeeze-and-Excitation mechanism that adaptively
     recalibrates channel-wise feature responses by explicitly modeling
-    interdependencies between channels. The SE block enhances the representational
-    power of a network by enabling it to perform feature recalibration, through
-    which it can learn to use global information to selectively emphasise
-    informative features and suppress less useful ones.
+    interdependencies between channels. Given input ``X``, the SE block
+    computes: ``z = GAP(X)``, ``s = sigmoid(W2 * act(W1 * z))``,
+    ``output = X * s``, where ``W1`` reduces channels by ``reduction_ratio``
+    and ``W2`` restores the original channel count. The layer supports 2D, 3D,
+    and 4D inputs by internally expanding to 4D for the convolutional
+    infrastructure.
 
-    The SE block operates by:
-    1. **Squeeze**: Global information embedding via global average pooling
-    2. **Excitation**: Adaptive recalibration via a bottleneck transformation
-    3. **Scale**: Feature recalibration through channel-wise multiplication
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        Given input X ∈ R^(H×W×C), the SE block computes:
+    .. code-block:: text
 
-        z = GlobalAvgPool(X)  # Shape: (1, 1, C)
-        s = σ(W₂ · δ(W₁ · z))  # Shape: (1, 1, C)
-        output = X ⊙ s  # Element-wise multiplication
+        ┌────────────────────────────────────┐
+        │  Input [B, ..., C]                 │
+        └──────────────┬─────────────────────┘
+                       ▼
+        ┌────────────────────────────────────┐
+        │  Squeeze: GlobalAvgPool → [B,1,1,C]│
+        └──────────────┬─────────────────────┘
+                       ▼
+        ┌────────────────────────────────────┐
+        │  Excitation:                       │
+        │    Conv1x1(C→C*r) → Activation     │
+        │    Conv1x1(C*r→C) → Sigmoid        │
+        │    → attention weights [B,1,1,C]   │
+        └──────────────┬─────────────────────┘
+                       ▼
+        ┌────────────────────────────────────┐
+        │  Scale: Input * attention_weights  │
+        │  → Output [B, ..., C]             │
+        └────────────────────────────────────┘
 
-    Where δ is the reduction activation, σ is sigmoid, W₁ reduces channels by
-    reduction_ratio, and W₂ restores original channel count.
-
-    Args:
-        reduction_ratio: Float between 0 and 1, determining the bottleneck width.
-            Controls the capacity and computational cost of the SE block.
-            Smaller values create tighter bottlenecks. Must be positive.
-            Defaults to 0.25.
-        activation: Activation function for the reduction layer. Can be string
-            identifier ('relu', 'swish', 'gelu') or callable. The final
-            activation is always sigmoid. Defaults to 'relu'.
-        use_bias: Boolean, whether convolution layers use bias vectors.
-            Defaults to False as recommended in the original paper.
-        kernel_initializer: Initializer for convolution kernel weights.
-            Accepts string names ('glorot_normal', 'he_normal') or Initializer
-            instances. Defaults to 'glorot_normal'.
-        kernel_regularizer: Optional regularizer applied to kernel weights.
-            Accepts string names ('l1', 'l2') or Regularizer instances.
-            Defaults to None.
-        bias_initializer: Initializer for bias vectors (if use_bias=True).
-            Defaults to 'zeros'.
-        bias_regularizer: Optional regularizer applied to bias vectors.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        - 2D: ``(batch_size, channels)``
-        - 3D: ``(batch_size, steps, channels)``
-        - 4D: ``(batch_size, height, width, channels)``
-
-    Output shape:
-        Same shape as input.
-
-    Attributes:
-        global_pool: GlobalAveragePooling2D layer for squeeze operation.
-        conv_reduce: Conv2D layer for channel dimensionality reduction.
-        conv_restore: Conv2D layer for channel dimensionality restoration.
-        reduction_activation: Activation function applied after reduction.
-        input_channels: Number of input channels (set during build).
-        bottleneck_channels: Number of bottleneck channels (set during build).
-
-    Example:
-        ```python
-        # 4D Input (Image)
-        inputs = keras.Input(shape=(32, 32, 64))
-        se_layer = SqueezeExcitation(reduction_ratio=0.25)
-        outputs = se_layer(inputs) # (None, 32, 32, 64)
-
-        # 3D Input (Sequence)
-        inputs_seq = keras.Input(shape=(50, 64))
-        se_layer_seq = SqueezeExcitation(reduction_ratio=0.25)
-        outputs_seq = se_layer_seq(inputs_seq) # (None, 50, 64)
-
-        # Advanced configuration
-        se_layer = SqueezeExcitation(
-            reduction_ratio=0.125,  # Tighter bottleneck
-            activation='swish',
-            kernel_initializer='he_normal',
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-        ```
-
-    References:
-        - Squeeze-and-Excitation Networks, Hu et al., 2018
-        - https://arxiv.org/abs/1709.01507
-
-    Raises:
-        ValueError: If reduction_ratio is not in (0, 1] or input shape is invalid.
-
-    Note:
-        This layer creates sub-layers in build() rather than __init__() because
-        the SE mechanism requires knowledge of input channels. Extra care is taken
-        to ensure robust serialization by explicitly building all sub-layers.
-        The original paper recommends reduction_ratio=0.25 for most cases.
-        2D and 3D inputs are internally expanded to 4D to utilize the same
-        convolutional infrastructure.
+    :param reduction_ratio: Float in ``(0, 1]`` determining the bottleneck width.
+        Defaults to 0.25.
+    :type reduction_ratio: float
+    :param activation: Activation function for the reduction layer. String identifier
+        or callable. Final activation is always sigmoid. Defaults to ``'relu'``.
+    :type activation: str or callable
+    :param use_bias: Whether convolution layers use bias vectors. Defaults to False.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for convolution kernel weights.
+        Defaults to ``'glorot_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param bias_regularizer: Optional regularizer for bias vectors.
+    :type bias_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -215,17 +172,9 @@ class SqueezeExcitation(layers.Layer):
         """
         Build the layer and create all sub-layers.
 
-        This method creates sub-layers based on input shape since the SE block
-        fundamentally needs to know the number of input channels. Extra care
-        is taken to ensure robust serialization by explicitly building all
-        sub-layers.
-
-        Args:
-            input_shape: Shape of the input tensor.
-                Expected format: (batch, [spatial_dims...], channels)
-
-        Raises:
-            ValueError: If input_shape is invalid or channels are undefined.
+        :param input_shape: Shape of the input tensor in format
+            ``(batch, [spatial_dims...], channels)``.
+        :type input_shape: tuple
         """
         if len(input_shape) not in (2, 3, 4):
             raise ValueError(
@@ -307,20 +256,12 @@ class SqueezeExcitation(layers.Layer):
         """
         Forward pass of the SE block.
 
-        Args:
-            inputs: Input tensor. Supported shapes:
-                - (batch_size, channels)
-                - (batch_size, steps, channels)
-                - (batch_size, height, width, channels)
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Passed to sub-layers that
-                support training behavior.
-
-        Returns:
-            Output tensor after applying SE operations with same shape as input.
-
-        Raises:
-            RuntimeError: If layer hasn't been built (sub-layers are None).
+        :param inputs: Input tensor of shape ``(B, C)``, ``(B, S, C)``, or ``(B, H, W, C)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode.
+        :type training: bool or None
+        :return: Output tensor with same shape as input after SE recalibration.
+        :rtype: keras.KerasTensor
         """
         # Ensure layer is built
         if (self.global_pool is None or
@@ -371,11 +312,10 @@ class SqueezeExcitation(layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple (same as input shape for SE blocks).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple (same as input shape).
+        :rtype: tuple
         """
         return input_shape
 
@@ -383,13 +323,8 @@ class SqueezeExcitation(layers.Layer):
         """
         Return layer configuration for serialization.
 
-        This method returns all parameters needed to reconstruct the layer.
-        Note that shape-dependent attributes (input_channels, bottleneck_channels)
-        are not included as they are derived during build().
-
-        Returns:
-            Dictionary containing all configuration parameters needed to
-            reconstruct the layer.
+        :return: Dictionary containing all configuration parameters.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

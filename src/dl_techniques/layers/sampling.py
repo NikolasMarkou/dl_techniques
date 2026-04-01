@@ -56,90 +56,56 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class Sampling(keras.layers.Layer):
-    """
-    Uses reparameterization trick to sample from a Normal distribution.
+    """Sample from a latent Normal distribution via the reparameterisation trick.
 
-    This layer implements the reparameterization trick commonly used in Variational
-    Autoencoders (VAEs). It takes as input the mean and log variance of a latent
-    distribution and returns a sample from that distribution using the reparameterization
-    trick: z = mean + std * epsilon, where epsilon is sampled from a standard normal
-    distribution.
+    This stateless layer takes ``(z_mean, z_log_var)`` from a VAE encoder
+    and produces a differentiable sample
+    ``z = mu + exp(0.5 * log_var) * epsilon`` where
+    ``epsilon ~ N(0, I)``. Because the randomness is isolated in the
+    auxiliary variable ``epsilon``, gradients can flow through ``z`` back
+    to the encoder parameters, enabling end-to-end training of
+    Variational Autoencoders.
 
-    The reparameterization trick allows gradients to flow through the sampling operation
-    by expressing the random variable as a deterministic function of the parameters and
-    an auxiliary noise variable. This is essential for training VAEs end-to-end via
-    gradient descent.
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        z = μ + σ * ε
-        where σ = exp(0.5 * log_var) and ε ~ N(0, I)
+    .. code-block:: text
 
-    Args:
-        seed: Optional integer seed for random number generation. If None, uses
-            random seed for each call. Providing a seed ensures reproducible sampling.
-            Defaults to None.
-        **kwargs: Additional keyword arguments to pass to the Layer base class.
+        ┌──────────────┐   ┌──────────────────┐
+        │  z_mean      │   │  z_log_var       │
+        │  [B, D]      │   │  [B, D]          │
+        └──────┬───────┘   └────────┬─────────┘
+               │                    │
+               │         ┌─────────┴─────────┐
+               │         │ std = exp(0.5 *   │
+               │         │       log_var)    │
+               │         └─────────┬─────────┘
+               │                   │
+               │    ┌──────────────┤
+               │    │   epsilon    │
+               │    │   ~ N(0, I)  │
+               │    └──────┬───────┘
+               │           │
+               ▼           ▼
+        ┌──────────────────────────────────┐
+        │  z = z_mean + std * epsilon      │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [B, D]                   │
+        └──────────────────────────────────┘
 
-    Input shape:
-        A list/tuple of two tensors:
-        - z_mean: Tensor of shape `(batch_size, latent_dim)` representing the mean
-        - z_log_var: Tensor of shape `(batch_size, latent_dim)` representing the
-          log variance
-
-    Output shape:
-        Tensor of shape `(batch_size, latent_dim)` representing samples from the
-        latent distribution.
-
-    Returns:
-        A tensor containing samples from the Normal distribution parameterized by
-        the input mean and log variance.
-
-    Example:
-        ```python
-        # Basic usage in VAE encoder
-        encoded = encoder_layers(inputs)
-        z_mean = keras.layers.Dense(latent_dim, name="z_mean")(encoded)
-        z_log_var = keras.layers.Dense(latent_dim, name="z_log_var")(encoded)
-
-        # Sample from the latent distribution
-        z = Sampling()([z_mean, z_log_var])
-
-        # With deterministic seed for reproducibility
-        z_reproducible = Sampling(seed=42)([z_mean, z_log_var])
-
-        # In a complete VAE model
-        inputs = keras.Input(shape=(784,))
-        encoded = keras.layers.Dense(256, activation='relu')(inputs)
-        z_mean = keras.layers.Dense(2)(encoded)
-        z_log_var = keras.layers.Dense(2)(encoded)
-        z = Sampling()([z_mean, z_log_var])
-        decoded = keras.layers.Dense(784, activation='sigmoid')(z)
-        vae = keras.Model(inputs, decoded)
-        ```
-
-    Note:
-        This layer does not create any trainable parameters. It only performs
-        the sampling operation using the input mean and log variance tensors.
-        The layer is stateless except for the optional random seed.
-
-    Raises:
-        ValueError: If inputs don't contain exactly 2 tensors or if tensor
-            shapes are incompatible.
-    """
+    :param seed: Optional integer seed for reproducible sampling.
+    :type seed: Optional[int]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
         self,
         seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the Sampling layer.
-
-        Args:
-            seed: Optional integer seed for random number generation. If provided,
-                ensures reproducible sampling across calls.
-            **kwargs: Additional keyword arguments for the Layer parent class.
-        """
+        """Initialise the Sampling layer."""
         super().__init__(**kwargs)
 
         # Validate seed parameter
@@ -152,16 +118,11 @@ class Sampling(keras.layers.Layer):
         logger.debug(f"Initialized Sampling layer with seed={seed}")
 
     def build(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> None:
-        """
-        Build the layer and validate input shapes.
+        """Validate input shapes and build the layer.
 
-        Args:
-            input_shape: Tuple or list of two shape tuples for z_mean and z_log_var tensors.
-
-        Raises:
-            ValueError: If input_shape doesn't contain exactly 2 tensors or if the
-                tensor shapes are incompatible.
-        """
+        :param input_shape: List of two shape tuples for ``z_mean``
+            and ``z_log_var``.
+        :type input_shape: Union[Tuple[Tuple, ...], List[Tuple]]"""
         # Validate input structure
         if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
             raise ValueError(
@@ -200,21 +161,14 @@ class Sampling(keras.layers.Layer):
         inputs: Union[Tuple[keras.KerasTensor, keras.KerasTensor], List[keras.KerasTensor]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply reparameterization trick to sample from Normal distribution.
+        """Apply the reparameterisation trick to sample ``z``.
 
-        Args:
-            inputs: Tuple or list containing (z_mean, z_log_var) tensors.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Not used in this layer but
-                included for consistency with Layer interface.
-
-        Returns:
-            Sampled tensor from the latent distribution using the reparameterization trick.
-
-        Raises:
-            ValueError: If inputs doesn't contain exactly 2 tensors.
-        """
+        :param inputs: Tuple of ``(z_mean, z_log_var)`` tensors.
+        :type inputs: Union[Tuple, List]
+        :param training: Training flag (unused).
+        :type training: Optional[bool]
+        :return: Sampled latent tensor with same shape as ``z_mean``.
+        :rtype: keras.KerasTensor"""
         if not isinstance(inputs, (tuple, list)) or len(inputs) != 2:
             raise ValueError(
                 f"Sampling layer call expects exactly 2 inputs, got {len(inputs) if isinstance(inputs, (tuple, list)) else 'invalid'}"
@@ -240,15 +194,12 @@ class Sampling(keras.layers.Layer):
         return z_sample
 
     def compute_output_shape(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape (same as ``z_mean``).
 
-        Args:
-            input_shape: Tuple or list of two shape tuples for input tensors.
-
-        Returns:
-            Output shape tuple (same as z_mean shape).
-        """
+        :param input_shape: List of two input shape tuples.
+        :type input_shape: Union[Tuple[Tuple, ...], List[Tuple]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
             raise ValueError(f"Expected 2 input shapes, got {len(input_shape) if isinstance(input_shape, (tuple, list)) else 'invalid'}")
 
@@ -256,13 +207,10 @@ class Sampling(keras.layers.Layer):
         return tuple(z_mean_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration including all parameters
-            needed to reconstruct the layer.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             "seed": self.seed,

@@ -3,58 +3,10 @@
 
 This layer enhances the representational power of a standard convolution by
 dynamically adapting its behavior to each input instance. Instead of employing a
-single, static convolutional kernel, it maintains a set of `K` parallel
-"expert" kernels. For each input feature map, a lightweight attention mechanism
-generates a set of mixing coefficients, which are then used to compute a
-weighted sum of the outputs from the expert kernels.
-
-Architectural and Mathematical Underpinnings:
-
-The core principle is to replace the static linear transformation of a
-standard convolution with an input-dependent, non-linear function. This is
-achieved by aggregating multiple linear functions (the expert convolutions)
-with weights determined by the input itself.
-
-1.  **Parallel Convolution Experts**: The layer maintains `K` separate `Conv2D`
-    operations, each with its own learnable kernel `W_k` and bias `b_k`. For a
-    given input `x`, each expert computes a separate output feature map:
-
-        y_k = conv(x, W_k) + b_k
-
-2.  **Input-Dependent Attention Mechanism**: A small gating network computes `K`
-    attention scores, `π_k(x)`, that determine how to combine the expert
-    outputs. This network follows a Squeeze-and-Excitation architecture:
-    a.  **Squeeze**: The input `x` is spatially compressed into a channel
-        descriptor vector via Global Average Pooling (GAP). This vector serves
-        as a compact, global summary of the input's content.
-    b.  **Excitation**: This summary vector is passed through a two-layer
-        fully-connected network. This network learns a non-linear mapping
-        from the input's global features to the optimal mixing strategy for
-        the kernels.
-    c.  **Weight Generation**: The final layer of the attention network outputs
-        `K` logits, which are converted into a probability distribution over
-        the kernels using a temperature-controlled softmax function:
-
-            π(x) = softmax(attention_network(GAP(x)) / τ)
-
-        The temperature `τ` is a crucial hyperparameter that controls the
-        sparsity of the attention weights. High temperatures encourage smoother,
-        more uniform weights (useful for stabilizing early training), while
-        low temperatures lead to a "harder" selection where only a few expert
-        kernels are chosen.
-
-3.  **Dynamic Output Aggregation**: The final output of the layer is the
-    weighted sum of the individual expert outputs, using the dynamically
-    computed attention scores `π_k(x)` as the weights:
-
-        y_dynamic = Σ_{k=1 to K} π_k(x) * y_k
-
-This entire process is differentiable, allowing the kernel weights `W_k`, bias
-terms `b_k`, and the parameters of the attention network to be jointly
-optimized via backpropagation. The layer learns not only a set of specialized
-feature detectors (the kernels) but also the logic for when and how to combine
-them, effectively increasing the model's capacity without a significant increase
-in width or depth.
+single, static convolutional kernel, it maintains a set of K parallel "expert"
+kernels. For each input feature map, a lightweight attention mechanism generates
+mixing coefficients used to compute a weighted sum of expert outputs:
+y_dynamic = sum_k pi_k(x) * conv(x, W_k) where pi_k(x) = softmax(SE(GAP(x))/tau).
 
 References:
     - Chen, Y., et al. (2019). Dynamic Convolution: Attention over
@@ -70,131 +22,98 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 @keras.saving.register_keras_serializable()
 class DynamicConv2D(keras.layers.Layer):
     """
-    Dynamic 2D Convolution with Attention over Convolution Kernels.
+    Dynamic 2D Convolution with attention over convolution kernels.
 
-    This layer implements dynamic convolution as described in "Dynamic Convolution:
-    Attention over Convolution Kernels" (Chen et al., 2019). Instead of using a
-    single convolution kernel, it aggregates multiple parallel convolution kernels
-    dynamically based on input-dependent attention weights.
+    Implements dynamic convolution as described in Chen et al. (2019), where
+    K parallel convolution experts are aggregated using input-dependent attention
+    weights from a squeeze-and-excitation gating network. The attention uses
+    temperature-controlled softmax: pi(x) = softmax(SE(GAP(x)) / tau), and the
+    final output is y = sum_k pi_k(x) * conv(x, W_k). This provides increased
+    representation power without increasing network depth or width, with only
+    approximately 4% additional FLOPs overhead.
 
-    **Intent**: Increase model representation capability without increasing network
-    depth or width by using input-dependent kernel selection and aggregation.
+    **Architecture Overview:**
 
-    **Mathematical Formulation**:
-    Instead of standard convolution: y = conv(x, W) + b
-    Dynamic convolution computes:
-    ```
-    π_k(x) = softmax(attention_network(GAP(x)) / τ)
-    y_k = conv(x, W_k) + b_k  for each kernel k
-    y = Σ_k π_k(x) * y_k      (weighted combination of outputs)
-    ```
+    .. code-block:: text
 
-    Where:
-    - π_k(x) are input-dependent attention weights summing to 1
-    - W_k, b_k are the k-th convolution kernel and bias
-    - τ is the temperature parameter for softmax
-    - GAP is Global Average Pooling
+        ┌─────────────────────────────────────────────────┐
+        │  Input [batch, H, W, C]                         │
+        └──────────┬──────────────────────┬───────────────┘
+                   ▼                      ▼
+        ┌─────────────────────┐  ┌────────────────────────┐
+        │  Attention Network  │  │  K Parallel Conv2D     │
+        │  ┌───────────────┐  │  │  Expert_0 ──▶ y_0     │
+        │  │  GAP           │  │  │  Expert_1 ──▶ y_1     │
+        │  └───────┬───────┘  │  │  ...                   │
+        │          ▼          │  │  Expert_K ──▶ y_K      │
+        │  ┌───────────────┐  │  └────────────┬───────────┘
+        │  │ Dense(C//4,   │  │               ▼
+        │  │   ReLU)       │  │    Stack: [y_0, ..., y_K]
+        │  └───────┬───────┘  │               │
+        │          ▼          │               │
+        │  ┌───────────────┐  │               │
+        │  │ Dense(K)      │  │               │
+        │  └───────┬───────┘  │               │
+        │          ▼          │               │
+        │  ┌───────────────┐  │               │
+        │  │ Softmax(tau)  │  │               │
+        │  └───────┬───────┘  │               │
+        └──────────┼──────────┘               │
+                   ▼                          ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Weighted Sum: sum_k pi_k * y_k                 │
+        └──────────────────────┬──────────────────────────┘
+                               ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Activation (optional)                          │
+        └──────────────────────┬──────────────────────────┘
+                               ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Output [batch, H', W', filters]                │
+        └─────────────────────────────────────────────────┘
 
-    **Architecture**:
-    ```
-    Input Feature Map
-           ↓
-    ┌─────────────────┐  ┌─────────────────────────┐
-    │ Global Avg Pool │  │ K Parallel Convolutions │
-    │        ↓        │  │   W_1×x    W_2×x  ...   │
-    │ Dense(C//4,ReLU)│  │   y_1      y_2    ...   │
-    │        ↓        │  └─────────────────────────┘
-    │ Dense(K)        │              ↓
-    │        ↓        │    [y_1, y_2, ..., y_K]
-    │ Softmax(τ)      │              ↓
-    └─────────────────┘      Weighted Aggregation
-           ↓                  π_1×y_1 + π_2×y_2 + ...
-    [π_1, π_2, ..., π_K]            ↓
-           ↓                   Final Output
-           └─────→ Weights ─────────→
-    ```
-
-    **Key Benefits**:
-    - Increased representation power through non-linear kernel aggregation
-    - Input-dependent adaptation without architectural changes
-    - Computationally efficient (~4% FLOPs overhead)
-    - Drop-in replacement for standard Conv2D layers
-
-    Args:
-        filters: Integer, dimensionality of the output space (number of output filters).
-            Must be positive.
-        kernel_size: An integer or tuple/list of 2 integers, specifying the height
-            and width of the 2D convolution window. Must be positive.
-        num_kernels: Integer, number of parallel convolution kernels to aggregate.
-            More kernels provide higher representation power but increase computational
-            cost and training difficulty. Must be at least 2. Defaults to 4.
-        temperature: Float, temperature parameter for softmax attention. Higher values
-            create more uniform attention (helpful for training), lower values create
-            more sparse attention. Must be positive. Defaults to 30.0 as recommended.
-        attention_reduction_ratio: Integer, reduction ratio for attention mechanism.
-            The first dense layer reduces input channels by this factor. Must be positive.
-            Defaults to 4.
-        strides: An integer or tuple/list of 2 integers, specifying the strides of
-            the convolution. Defaults to (1, 1).
-        padding: String, either "valid" or "same" (case-insensitive). Defaults to "valid".
-        dilation_rate: An integer or tuple/list of 2 integers, specifying dilation rate.
-            Defaults to (1, 1).
-        groups: A positive integer specifying number of groups for grouped convolution.
-            Must divide both input and output channels evenly. Defaults to 1.
-        activation: Activation function. If None, no activation is applied. Defaults to None.
-        use_bias: Boolean, whether the layer uses bias vectors. Defaults to True.
-        kernel_initializer: Initializer for convolution kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias vectors. Defaults to 'zeros'.
-        kernel_regularizer: Regularizer function for kernel weights. Defaults to None.
-        bias_regularizer: Regularizer function for bias vectors. Defaults to None.
-        activity_regularizer: Regularizer function for layer output. Defaults to None.
-        kernel_constraint: Constraint function for kernel weights. Defaults to None.
-        bias_constraint: Constraint function for bias vectors. Defaults to None.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels) in channels_last format.
-
-    Output shape:
-        4D tensor with shape: (batch_size, new_height, new_width, filters) in channels_last format.
-
-    Example:
-        ```python
-        # Basic usage as drop-in replacement for Conv2D
-        x = keras.random.normal((32, 64, 64, 3))
-        layer = DynamicConv2D(filters=64, kernel_size=3, padding='same', activation='relu')
-        y = layer(x)  # Shape: (32, 64, 64, 64)
-
-        # With advanced configuration
-        layer = DynamicConv2D(
-            filters=128,
-            kernel_size=(3, 3),
-            num_kernels=6,
-            temperature=15.0,
-            strides=2,
-            padding='same',
-            activation='gelu'
-        )
-        y = layer(x)  # Shape: (32, 32, 32, 128)
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = DynamicConv2D(64, 7, strides=2, padding='same', activation='relu')(inputs)
-        x = keras.layers.MaxPooling2D(3, strides=2, padding='same')(x)
-        x = DynamicConv2D(128, 3, padding='same', activation='relu')(x)
-        outputs = keras.layers.GlobalAveragePooling2D()(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    Notes:
-        - This layer assumes channels_last data format (batch, height, width, channels)
-        - The attention mechanism uses a squeeze-and-excitation pattern which adds
-          minimal computational overhead (~4% FLOPs)
-        - Temperature parameter τ is crucial: start with default (30.0) and adjust if needed
-        - For best results, use K=4 kernels as recommended in the paper
-        - All convolution experts share the same parameters (strides, padding, etc.)
-          but have independent weights
+    :param filters: Dimensionality of the output space (number of output filters).
+        Must be positive.
+    :type filters: int
+    :param kernel_size: Height and width of the 2D convolution window.
+    :type kernel_size: Union[int, Tuple[int, int]]
+    :param num_kernels: Number of parallel convolution kernels to aggregate.
+        Must be at least 2. Defaults to 4.
+    :type num_kernels: int
+    :param temperature: Temperature parameter for softmax attention. Higher values
+        create more uniform attention. Defaults to 30.0.
+    :type temperature: float
+    :param attention_reduction_ratio: Reduction ratio for attention mechanism.
+        Defaults to 4.
+    :type attention_reduction_ratio: int
+    :param strides: Strides of the convolution. Defaults to (1, 1).
+    :type strides: Union[int, Tuple[int, int]]
+    :param padding: Either "valid" or "same". Defaults to "valid".
+    :type padding: str
+    :param dilation_rate: Dilation rate for convolution. Defaults to (1, 1).
+    :type dilation_rate: Union[int, Tuple[int, int]]
+    :param groups: Number of groups for grouped convolution. Defaults to 1.
+    :type groups: int
+    :param activation: Activation function. Defaults to None.
+    :type activation: Optional[Union[str, keras.layers.Activation]]
+    :param use_bias: Whether the layer uses bias vectors. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for convolution kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors. Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Regularizer for bias vectors.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param activity_regularizer: Regularizer for layer output.
+    :type activity_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_constraint: Constraint for kernel weights.
+    :type kernel_constraint: Optional[keras.constraints.Constraint]
+    :param bias_constraint: Constraint for bias vectors.
+    :type bias_constraint: Optional[keras.constraints.Constraint]
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -295,11 +214,10 @@ class DynamicConv2D(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer by creating all sub-layers.
+        """Build the layer by creating all sub-layers.
 
-        Args:
-            input_shape: Shape tuple with format (batch_size, height, width, channels).
+        :param input_shape: Shape tuple with format (batch_size, height, width, channels).
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 4:
             raise ValueError(
@@ -395,15 +313,14 @@ class DynamicConv2D(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass with dynamic kernel aggregation.
+        """Forward pass with dynamic kernel aggregation.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, height, width, channels).
-            training: Boolean or None, indicates whether in training mode.
-
-        Returns:
-            Output tensor with shape (batch_size, new_height, new_width, filters).
+        :param inputs: Input tensor with shape (batch_size, height, width, channels).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean or None, indicates whether in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor with shape (batch_size, new_height, new_width, filters).
+        :rtype: keras.KerasTensor
         """
         # Step 1: Compute attention weights
         # Global Average Pooling to compress spatial dimensions
@@ -456,14 +373,12 @@ class DynamicConv2D(keras.layers.Layer):
         return aggregated_output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple (batch_size, height, width, channels).
-
-        Returns:
-            Output shape tuple (batch_size, new_height, new_width, filters).
+        :param input_shape: Shape tuple (batch_size, height, width, channels).
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (batch_size, new_height, new_width, filters).
+        :rtype: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
@@ -498,11 +413,10 @@ class DynamicConv2D(keras.layers.Layer):
         return (batch_size, out_height, out_width, self.filters)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing layer configuration.
+        :return: Dictionary containing layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

@@ -107,36 +107,25 @@ def upsample(
         ln_params: Optional[Dict[str, Union[float, bool]]] = None
 ) -> Layer:
     """
-    Applies upsampling operation to the input layer based on specified strategy.
+    Apply upsampling operation to the input layer based on specified strategy.
 
-    This function supports various upsampling methods including transposed convolution,
-    bilinear interpolation, and nearest neighbor approaches. It can also apply batch
-    normalization and layer normalization after upsampling.
+    This factory function supports various upsampling methods including transposed
+    convolution, bilinear interpolation, and nearest neighbor approaches. It can
+    also apply batch normalization and layer normalization after upsampling.
 
-    Args:
-        input_layer: Input Keras layer to be upsampled
-        upsample_type: Type of upsampling operation to apply
-        conv_params: Dictionary containing convolution parameters such as:
-            - filters: Number of output filters
-            - activation: Activation function to use
-            - kernel_initializer: Weight initialization method
-            - kernel_regularizer: Weight regularization method
-        bn_params: Batch normalization parameters (optional)
-        ln_params: Layer normalization parameters (optional)
-
-    Returns:
-        Upsampled Keras layer
-
-    Raises:
-        ValueError: If upsample_type is None, empty, or unsupported
-
-    Example:
-        >>> conv_params = {
-        ...     "filters": 32,
-        ...     "activation": "relu",
-        ...     "kernel_initializer": "he_normal"
-        ... }
-        >>> x = upsample(input_layer, "conv2d_transpose", conv_params)
+    :param input_layer: Input Keras layer to be upsampled.
+    :type input_layer: keras.api.layers.Layer
+    :param upsample_type: Type of upsampling operation to apply.
+    :type upsample_type: UpsampleType
+    :param conv_params: Dictionary containing convolution parameters (filters,
+        activation, kernel_initializer, kernel_regularizer, etc.).
+    :type conv_params: dict or None
+    :param bn_params: Batch normalization parameters.
+    :type bn_params: dict or None
+    :param ln_params: Layer normalization parameters.
+    :type ln_params: dict or None
+    :return: Upsampled Keras layer.
+    :rtype: keras.api.layers.Layer
     """
     if not upsample_type:
         raise ValueError("upsample_type cannot be None or empty")

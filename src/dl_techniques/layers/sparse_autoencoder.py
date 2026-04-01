@@ -45,129 +45,82 @@ class SparseAutoencoder(keras.layers.Layer):
 
     This layer implements a sparse autoencoder that encodes input activations
     into a sparse, higher-dimensional latent space and reconstructs them.
-    Multiple sparsity mechanisms are supported to balance reconstruction
-    fidelity with interpretability.
+    Multiple sparsity mechanisms are supported (ReLU with L1 penalty, TopK,
+    BatchTopK, JumpReLU with learnable threshold, and Gated SAE) to balance
+    reconstruction fidelity with interpretability. An auxiliary loss mechanism
+    helps prevent dead latents.
 
-    Architecture
-    ------------
-    ::
+    **Architecture Overview:**
 
-        Input (d_input) -> Encoder (d_latent) -> Sparsity -> Decoder (d_input)
-                               |                    |
-                           W_enc + b_enc      Variant-specific
-                                                activation
+    .. code-block:: text
 
-    Parameters
-    ----------
-    d_input : int
-        Dimensionality of the input activations.
-    d_latent : int
-        Dimensionality of the latent (dictionary) space. Typically larger
-        than d_input (e.g., 4x to 32x expansion).
-    variant : SAEVariant, default='topk'
-        Sparsity enforcement variant:
-        - 'relu': Standard ReLU with L1 penalty
-        - 'topk': Keep top k activations per sample
-        - 'batch_topk': Batch-level TopK for adaptive allocation
-        - 'jumprelu': JumpReLU with learnable threshold
-        - 'gated': Gated SAE with separate detection/magnitude
-    k : int, optional
-        Number of active latents for TopK variants. Required for
-        'topk' and 'batch_topk'. Default is 32.
-    l1_coefficient : float, default=1e-3
-        L1 sparsity penalty coefficient for 'relu' variant.
-    l0_coefficient : float, default=1e-3
-        L0 sparsity penalty coefficient for 'jumprelu' variant.
-    tied_weights : bool, default=False
-        If True, decoder weights are transpose of encoder weights.
-    normalize_decoder : bool, default=True
-        If True, constrain decoder columns to unit norm.
-    use_pre_encoder_bias : bool, default=True
-        If True, subtract a learned bias before encoding (centering).
-    aux_k : int, optional
-        Number of dead latents to include in auxiliary loss.
-        Helps prevent dead features. Default is 256.
-    aux_coefficient : float, default=1/32
-        Coefficient for auxiliary loss that prevents dead latents.
-    kernel_initializer : str or Initializer, default='glorot_uniform'
-        Initializer for encoder/decoder weights.
-    bias_initializer : str or Initializer, default='zeros'
-        Initializer for bias vectors.
-    kernel_regularizer : Regularizer, optional
-        Regularizer for encoder/decoder weights.
-    **kwargs : Any
-        Additional arguments for the base Layer class.
+        ┌─────────────────────────────────┐
+        │  Input [..., d_input]           │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Pre-encoder Bias (optional)    │
+        │  x = x - pre_encoder_bias       │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Encoder: W_enc @ x + b_enc    │
+        │  → pre_activation [..., d_lat] │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Sparsity (variant-specific)    │
+        │  relu / topk / batch_topk /     │
+        │  jumprelu / gated               │
+        │  → sparse latents + loss        │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Decoder: W_dec @ latents       │
+        │  + decoder_bias                 │
+        │  + pre_encoder_bias (optional)  │
+        │  → reconstruction [..., d_in]   │
+        └─────────────────────────────────┘
 
-    Attributes
-    ----------
-    encoder_weight : keras.Variable
-        Encoder weight matrix of shape (d_input, d_latent).
-    decoder_weight : keras.Variable
-        Decoder weight matrix of shape (d_latent, d_input).
-        None if tied_weights is True.
-    encoder_bias : keras.Variable
-        Encoder bias of shape (d_latent,).
-    pre_encoder_bias : keras.Variable
-        Pre-encoder centering bias of shape (d_input,).
-        None if use_pre_encoder_bias is False.
-    decoder_bias : keras.Variable
-        Decoder bias of shape (d_input,).
-    threshold : keras.Variable
-        Learnable threshold for JumpReLU variant.
-        Shape (d_latent,). None for other variants.
-    gate_weight : keras.Variable
-        Gating weight for Gated variant.
-        Shape (d_input, d_latent). None for other variants.
-    gate_bias : keras.Variable
-        Gating bias for Gated variant.
-        Shape (d_latent,). None for other variants.
-
-    Examples
-    --------
-    Basic TopK SAE for LLM interpretability:
-
-    >>> sae = SparseAutoencoder(
-    ...     d_input=768,
-    ...     d_latent=768 * 8,  # 8x expansion
-    ...     variant='topk',
-    ...     k=64
-    ... )
-    >>> activations = keras.random.normal((32, 128, 768))
-    >>> reconstructed, latents, aux_loss = sae(activations, return_latents=True)
-
-    JumpReLU SAE with custom initialization:
-
-    >>> sae = SparseAutoencoder(
-    ...     d_input=1024,
-    ...     d_latent=16384,
-    ...     variant='jumprelu',
-    ...     l0_coefficient=1e-4,
-    ...     kernel_initializer='he_normal'
-    ... )
-
-    Gated SAE for fine-grained control:
-
-    >>> sae = SparseAutoencoder(
-    ...     d_input=512,
-    ...     d_latent=4096,
-    ...     variant='gated',
-    ...     normalize_decoder=True
-    ... )
-
-    Notes
-    -----
-    - For LLM interpretability, 'topk' or 'batch_topk' are recommended
-      as they allow direct control over sparsity level.
-    - 'jumprelu' offers the best reconstruction-sparsity tradeoff but
-      requires tuning the l0_coefficient.
-    - 'gated' provides the cleanest separation of feature detection
-      from magnitude estimation but has higher parameter count.
-    - Dead latent resampling can be implemented externally using the
-      auxiliary loss signal.
-
-    See Also
-    --------
-    SparseAutoencoderTrainer : Training utilities for SAEs
+    :param d_input: Dimensionality of the input activations.
+    :type d_input: int
+    :param d_latent: Dimensionality of the latent (dictionary) space. Typically
+        larger than d_input (e.g., 4x to 32x expansion).
+    :type d_latent: int
+    :param variant: Sparsity enforcement variant. One of ``'relu'``, ``'topk'``,
+        ``'batch_topk'``, ``'jumprelu'``, ``'gated'``. Defaults to ``'topk'``.
+    :type variant: SAEVariant
+    :param k: Number of active latents for TopK variants. Required for
+        ``'topk'`` and ``'batch_topk'``. Defaults to 32.
+    :type k: int or None
+    :param l1_coefficient: L1 sparsity penalty coefficient for ``'relu'`` variant.
+        Defaults to 1e-3.
+    :type l1_coefficient: float
+    :param l0_coefficient: L0 sparsity penalty coefficient for ``'jumprelu'`` variant.
+        Defaults to 1e-3.
+    :type l0_coefficient: float
+    :param tied_weights: If True, decoder weights are transpose of encoder weights.
+        Defaults to False.
+    :type tied_weights: bool
+    :param normalize_decoder: If True, constrain decoder columns to unit norm.
+        Defaults to True.
+    :type normalize_decoder: bool
+    :param use_pre_encoder_bias: If True, subtract a learned bias before encoding.
+        Defaults to True.
+    :type use_pre_encoder_bias: bool
+    :param aux_k: Number of dead latents to include in auxiliary loss. Defaults to 256.
+    :type aux_k: int or None
+    :param aux_coefficient: Coefficient for auxiliary loss. Defaults to 1/32.
+    :type aux_coefficient: float
+    :param kernel_initializer: Initializer for encoder/decoder weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for encoder/decoder weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param kwargs: Additional arguments for the base Layer class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -236,10 +189,8 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Build the layer weights.
 
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor. Last dimension must match d_input.
+        :param input_shape: Shape of the input tensor. Last dimension must match d_input.
+        :type input_shape: tuple
         """
         # Validate input dimension
         if input_shape[-1] is not None and input_shape[-1] != self.d_input:
@@ -328,10 +279,8 @@ class SparseAutoencoder(keras.layers.Layer):
         Returns the transposed encoder weight if tied_weights is True,
         otherwise returns the separate decoder weight.
 
-        Returns
-        -------
-        keras.Variable
-            Decoder weight matrix of shape (d_latent, d_input).
+        :return: Decoder weight matrix of shape ``(d_latent, d_input)``.
+        :rtype: keras.Variable
         """
         if self.tied_weights:
             return ops.transpose(self.encoder_weight)
@@ -341,15 +290,10 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Normalize decoder columns to unit norm.
 
-        Parameters
-        ----------
-        decoder_weight : keras.Variable
-            Decoder weight matrix of shape (d_latent, d_input).
-
-        Returns
-        -------
-        keras.Variable
-            Normalized decoder weight matrix.
+        :param decoder_weight: Decoder weight matrix of shape ``(d_latent, d_input)``.
+        :type decoder_weight: keras.Variable
+        :return: Normalized decoder weight matrix.
+        :rtype: keras.Variable
         """
         if not self.normalize_decoder:
             return decoder_weight
@@ -367,17 +311,12 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Encode inputs to pre-activation latent space.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (..., d_input).
-        training : bool, optional
-            Training mode flag.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Pre-activation latent tensor of shape (..., d_latent).
+        :param inputs: Input tensor of shape ``(..., d_input)``.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: bool or None
+        :return: Pre-activation latent tensor of shape ``(..., d_latent)``.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -398,18 +337,12 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Apply variant-specific sparsity mechanism.
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation latent tensor of shape (..., d_latent).
-        training : bool, optional
-            Training mode flag.
-
-        Returns
-        -------
-        tuple
-            - Sparse latent activations of shape (..., d_latent)
-            - Sparsity loss tensor (scalar)
+        :param pre_activation: Pre-activation latent tensor of shape ``(..., d_latent)``.
+        :type pre_activation: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: bool or None
+        :return: Tuple of (sparse latent activations, sparsity loss scalar).
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         if self.variant == 'relu':
             return self._apply_relu_sparsity(pre_activation)
@@ -431,16 +364,10 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Apply ReLU activation with L1 sparsity penalty.
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation tensor.
-
-        Returns
-        -------
-        tuple
-            - ReLU activations
-            - L1 sparsity loss
+        :param pre_activation: Pre-activation tensor.
+        :type pre_activation: keras.KerasTensor
+        :return: Tuple of (ReLU activations, L1 sparsity loss).
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         latents = ops.relu(pre_activation)
 
@@ -454,18 +381,12 @@ class SparseAutoencoder(keras.layers.Layer):
         pre_activation: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Apply TopK sparsity - keep only top k activations per sample.
+        Apply TopK sparsity -- keep only top k activations per sample.
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation tensor of shape (..., d_latent).
-
-        Returns
-        -------
-        tuple
-            - Sparse latents with only top k non-zero
-            - Zero sparsity loss (sparsity is implicit)
+        :param pre_activation: Pre-activation tensor of shape ``(..., d_latent)``.
+        :type pre_activation: keras.KerasTensor
+        :return: Tuple of (sparse latents with only top k non-zero, zero sparsity loss).
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Get shape info
         original_shape = ops.shape(pre_activation)
@@ -513,23 +434,17 @@ class SparseAutoencoder(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Apply BatchTopK sparsity - batch-level top k constraint.
+        Apply BatchTopK sparsity -- batch-level top k constraint.
 
-        This allows variable number of active latents per sample while
+        Allows variable number of active latents per sample while
         maintaining average sparsity across the batch.
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation tensor of shape (..., d_latent).
-        training : bool, optional
-            Training mode flag.
-
-        Returns
-        -------
-        tuple
-            - Sparse latents with batch-level TopK
-            - Zero sparsity loss
+        :param pre_activation: Pre-activation tensor of shape ``(..., d_latent)``.
+        :type pre_activation: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: bool or None
+        :return: Tuple of (sparse latents with batch-level TopK, zero sparsity loss).
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Get shape info
         original_shape = ops.shape(pre_activation)
@@ -568,19 +483,13 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Apply JumpReLU activation with learnable threshold.
 
-        JumpReLU: f(x) = x * (x > theta), where theta is learnable.
+        JumpReLU: ``f(x) = x * (x > theta)``, where theta is learnable.
         Uses straight-through estimator for gradient through discontinuity.
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation tensor.
-
-        Returns
-        -------
-        tuple
-            - JumpReLU activations
-            - L0 sparsity loss (approximated)
+        :param pre_activation: Pre-activation tensor.
+        :type pre_activation: keras.KerasTensor
+        :return: Tuple of (JumpReLU activations, approximated L0 sparsity loss).
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # JumpReLU: zero out values below threshold, keep values above
         # mask = (pre_activation > threshold)
@@ -613,20 +522,11 @@ class SparseAutoencoder(keras.layers.Layer):
         Apply Gated SAE sparsity mechanism.
 
         Separates feature detection (gate) from magnitude estimation (encoder).
-        gate_pre = W_gate @ x + b_gate
-        gate = sigmoid(gate_pre)  # or step function
-        latents = ReLU(pre_activation) * gate
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation tensor from main encoder.
-
-        Returns
-        -------
-        tuple
-            - Gated sparse latents
-            - L1 loss on gate pre-activations
+        :param pre_activation: Pre-activation tensor from main encoder.
+        :type pre_activation: keras.KerasTensor
+        :return: Tuple of (gated sparse latents, L1 loss on gate activations).
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # We need the original centered input for gating
         # This is stored during encode, but we recompute for cleaner code
@@ -661,15 +561,10 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Decode sparse latents back to input space.
 
-        Parameters
-        ----------
-        latents : keras.KerasTensor
-            Sparse latent tensor of shape (..., d_latent).
-
-        Returns
-        -------
-        keras.KerasTensor
-            Reconstructed tensor of shape (..., d_input).
+        :param latents: Sparse latent tensor of shape ``(..., d_latent)``.
+        :type latents: keras.KerasTensor
+        :return: Reconstructed tensor of shape ``(..., d_input)``.
+        :rtype: keras.KerasTensor
         """
         decoder_weight = self._get_decoder_weight()
         decoder_weight = self._normalize_decoder_columns(decoder_weight)
@@ -694,19 +589,14 @@ class SparseAutoencoder(keras.layers.Layer):
         Reconstructs using the top aux_k dead (inactive) latents
         to encourage their activation.
 
-        Parameters
-        ----------
-        pre_activation : keras.KerasTensor
-            Pre-activation tensor.
-        latents : keras.KerasTensor
-            Current sparse latents.
-        inputs : keras.KerasTensor
-            Original input for computing reconstruction error.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Auxiliary reconstruction loss.
+        :param pre_activation: Pre-activation tensor.
+        :type pre_activation: keras.KerasTensor
+        :param latents: Current sparse latents.
+        :type latents: keras.KerasTensor
+        :param inputs: Original input for computing reconstruction error.
+        :type inputs: keras.KerasTensor
+        :return: Auxiliary reconstruction loss.
+        :rtype: keras.KerasTensor
         """
         if self.aux_k is None or self.aux_k <= 0:
             return ops.zeros(())
@@ -765,25 +655,16 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Forward pass through the Sparse Autoencoder.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input activations of shape (..., d_input).
-        training : bool, optional
-            Training mode flag. Affects some sparsity mechanisms.
-        return_latents : bool, default=False
-            If True, return latents and losses along with reconstruction.
-
-        Returns
-        -------
-        keras.KerasTensor or tuple
-            If return_latents is False:
-                Reconstructed tensor of shape (..., d_input).
-            If return_latents is True:
-                Tuple of (reconstruction, latents, total_loss) where:
-                - reconstruction: shape (..., d_input)
-                - latents: sparse latent tensor, shape (..., d_latent)
-                - total_loss: combined sparsity and auxiliary losses
+        :param inputs: Input activations of shape ``(..., d_input)``.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag. Affects some sparsity mechanisms.
+        :type training: bool or None
+        :param return_latents: If True, return latents and losses along with
+            reconstruction. Defaults to False.
+        :type return_latents: bool
+        :return: Reconstructed tensor if return_latents is False, otherwise
+            tuple of (reconstruction, latents, total_loss).
+        :rtype: keras.KerasTensor or tuple
         """
         # Handle Gated variant specially (needs centered input for gate)
         if self.variant == 'gated':
@@ -822,19 +703,14 @@ class SparseAutoencoder(keras.layers.Layer):
 
         Implements full gated architecture with separate detection and magnitude.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input activations.
-        training : bool, optional
-            Training mode flag.
-        return_latents : bool, default=False
-            Whether to return intermediate values.
-
-        Returns
-        -------
-        keras.KerasTensor or tuple
-            Same as call().
+        :param inputs: Input activations.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: bool or None
+        :param return_latents: Whether to return intermediate values. Defaults to False.
+        :type return_latents: bool
+        :return: Same as ``call()``.
+        :rtype: keras.KerasTensor or tuple
         """
         # Center input
         if self.use_pre_encoder_bias:
@@ -884,15 +760,10 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
-
-        Returns
-        -------
-        tuple
-            Output shape (same as input for reconstruction).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape (same as input for reconstruction).
+        :rtype: tuple
         """
         return input_shape
 
@@ -900,10 +771,8 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Return the configuration of the layer.
 
-        Returns
-        -------
-        dict
-            Configuration dictionary for serialization.
+        :return: Configuration dictionary for serialization.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -929,15 +798,10 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Create layer from configuration dictionary.
 
-        Parameters
-        ----------
-        config : dict
-            Configuration dictionary.
-
-        Returns
-        -------
-        SparseAutoencoder
-            Instantiated layer.
+        :param config: Configuration dictionary.
+        :type config: dict
+        :return: Instantiated layer.
+        :rtype: SparseAutoencoder
         """
         config = config.copy()
         config['kernel_initializer'] = initializers.deserialize(
@@ -966,28 +830,18 @@ def create_sparse_autoencoder(
     """
     Factory function to create Sparse Autoencoder with common configurations.
 
-    Parameters
-    ----------
-    d_input : int
-        Input dimensionality.
-    d_latent : int, optional
-        Latent dimensionality. If not provided, uses expansion_factor.
-    variant : SAEVariant, default='topk'
-        SAE variant to use.
-    expansion_factor : int, optional
-        If provided, sets d_latent = d_input * expansion_factor.
-    **kwargs : Any
-        Additional arguments passed to SparseAutoencoder.
-
-    Returns
-    -------
-    SparseAutoencoder
-        Configured SAE instance.
-
-    Examples
-    --------
-    >>> sae = create_sparse_autoencoder(768, expansion_factor=8, variant='topk', k=64)
-    >>> sae = create_sparse_autoencoder(1024, 16384, variant='jumprelu')
+    :param d_input: Input dimensionality.
+    :type d_input: int
+    :param d_latent: Latent dimensionality. If not provided, uses expansion_factor.
+    :type d_latent: int
+    :param variant: SAE variant to use. Defaults to ``'topk'``.
+    :type variant: SAEVariant
+    :param expansion_factor: If provided, sets ``d_latent = d_input * expansion_factor``.
+    :type expansion_factor: int or None
+    :param kwargs: Additional arguments passed to SparseAutoencoder.
+    :type kwargs: Any
+    :return: Configured SAE instance.
+    :rtype: SparseAutoencoder
     """
     if expansion_factor is not None:
         d_latent = d_input * expansion_factor

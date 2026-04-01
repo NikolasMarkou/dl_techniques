@@ -99,39 +99,106 @@ from .blt_blocks import (
 
 @keras.saving.register_keras_serializable()
 class ByteLatentReasoningCore(keras.layers.Layer):
-    """
-    Core hierarchical reasoning model that operates on dynamic byte patches.
+    """Core hierarchical reasoning model that operates on dynamic byte patches.
 
-    This layer combines the Byte Latent Transformer's dynamic patching with
-    Hierarchical Reasoning Model's iterative reasoning capabilities. It processes
-    raw byte sequences through entropy-based patching and applies hierarchical
-    reasoning cycles at both local (byte) and global (patch) levels.
+    Combines entropy-based dynamic patching from the Byte Latent Transformer
+    with an iterative hierarchical reasoning engine (HRE) that maintains
+    dual latent states ``z_h`` (abstract plan) and ``z_l`` (detailed features).
+    Bytes are processed through local encoding, entropy-driven patching, and
+    global transformer context, while the HRE iteratively refines its
+    understanding through alternating high-level and low-level reasoning cycles.
+    An adaptive ``q_head`` predicts halting to allocate compute dynamically.
 
-    Args:
-        vocab_size: Size of byte vocabulary (typically 256 + special tokens).
-        seq_len: Maximum sequence length in bytes.
-        embed_dim: Embedding dimension for reasoning states.
-        local_dim: Hidden dimension for local byte processing.
-        global_dim: Hidden dimension for global patch processing.
-        max_patches: Maximum number of patches per sequence.
-        num_puzzle_identifiers: Number of puzzle identifiers.
-        puzzle_emb_dim: Puzzle embedding dimension (0 to disable).
-        batch_size: Batch size for training.
-        h_layers: Number of high-level (global) reasoning layers.
-        l_layers: Number of low-level (local) reasoning layers.
-        h_cycles: Number of high-level reasoning cycles.
-        l_cycles: Number of low-level reasoning cycles.
-        num_heads: Number of attention heads.
-        entropy_threshold: Threshold for dynamic byte patching.
-        pos_encodings: Type of positional encodings ("rope" or "learned").
-        rope_theta: RoPE theta parameter.
-        dropout_rate: Dropout rate.
-        use_bias: Whether to use bias in linear layers.
-        embeddings_initializer: Initializer for embeddings.
-        kernel_initializer: Initializer for kernel weights.
-        embeddings_regularizer: Regularizer for embeddings.
-        kernel_regularizer: Regularizer for kernel weights.
-        **kwargs: Additional layer arguments.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────────────────────────────────┐
+        │  byte_tokens (B, S)   puzzle_ids (B,)           │
+        └──────────┬────────────────────┬─────────────────┘
+                   ▼                    │
+        ┌────────────────────┐          │
+        │  EntropyModel      │          │
+        │  ──► entropy (B,S) │          │
+        └──────────┬─────────┘          │
+                   ▼                    │
+        ┌────────────────────┐          │
+        │  DynamicPatcher    │          │
+        │  ──► patch_ids     │          │
+        └──────────┬─────────┘          │
+                   ▼                    │
+        ┌────────────────────┐          │
+        │  LocalEncoder      │          │
+        │  ──► patch_reps    │          │
+        └──────────┬─────────┘          │
+                   ▼                    ▼
+        ┌──────────────────────────────────────┐
+        │  Reasoning Embeddings                │
+        │  patch_reps + puzzle_emb + entropy   │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  HRE: h_cycles x l_cycles            │
+        │  z_l = L_reasoning(z_l, z_h + input) │
+        │  z_h = H_reasoning(z_h, z_l)         │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  GlobalTransformer(proj(z_h))        │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  LocalDecoder ──► logits (B,S,V)     │
+        │  q_head ──► halt/continue            │
+        └──────────────────────────────────────┘
+
+    :param vocab_size: Size of byte vocabulary (typically 256 + special tokens).
+    :type vocab_size: int
+    :param seq_len: Maximum sequence length in bytes.
+    :type seq_len: int
+    :param embed_dim: Embedding dimension for reasoning states.
+    :type embed_dim: int
+    :param local_dim: Hidden dimension for local byte processing.
+    :type local_dim: int
+    :param global_dim: Hidden dimension for global patch processing.
+    :type global_dim: int
+    :param max_patches: Maximum number of patches per sequence.
+    :type max_patches: int
+    :param num_puzzle_identifiers: Number of puzzle identifiers.
+    :type num_puzzle_identifiers: int
+    :param puzzle_emb_dim: Puzzle embedding dimension (0 to disable).
+    :type puzzle_emb_dim: int
+    :param batch_size: Batch size for training.
+    :type batch_size: int
+    :param h_layers: Number of high-level reasoning layers.
+    :type h_layers: int
+    :param l_layers: Number of low-level reasoning layers.
+    :type l_layers: int
+    :param h_cycles: Number of high-level reasoning cycles.
+    :type h_cycles: int
+    :param l_cycles: Number of low-level reasoning cycles.
+    :type l_cycles: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param entropy_threshold: Threshold for dynamic byte patching.
+    :type entropy_threshold: float
+    :param pos_encodings: Type of positional encodings (``"rope"`` or ``"learned"``).
+    :type pos_encodings: str
+    :param rope_theta: RoPE theta parameter.
+    :type rope_theta: float
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear layers.
+    :type use_bias: bool
+    :param embeddings_initializer: Initializer for embeddings.
+    :type embeddings_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param embeddings_regularizer: Regularizer for embeddings.
+    :type embeddings_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional layer arguments.
     """
 
     def __init__(
@@ -467,13 +534,11 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         """
         Forward pass through the byte latent hierarchical reasoning core.
 
-        Args:
-            carry: Current carry state dict with reasoning and byte processing states.
-            inputs: Dict with "byte_tokens" and optionally "puzzle_ids".
-            training: Whether in training mode.
+            :param carry: Current carry state dict with reasoning and byte processing states.
+            :param inputs: Dict with "byte_tokens" and optionally "puzzle_ids".
+            :param training: Whether in training mode.
 
-        Returns:
-            Tuple of (new_carry, outputs_dict).
+            :return: Tuple of (new_carry, outputs_dict).
         """
         byte_tokens = inputs["byte_tokens"]
         puzzle_ids = inputs.get("puzzle_ids")

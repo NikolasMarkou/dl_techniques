@@ -73,96 +73,97 @@ from .squeeze_excitation import SqueezeExcitation
 
 @keras.saving.register_keras_serializable()
 class HANCBlock(keras.layers.Layer):
-    """
-    Hierarchical Aggregation of Neighborhood Context (HANC) Block.
+    """Hierarchical Aggregation of Neighborhood Context (HANC) Block.
 
     This block implements the main building block from ACC-UNet, providing
     long-range dependencies through hierarchical pooling operations while
-    maintaining efficiency through depthwise separable convolutions.
+    maintaining efficiency through depthwise separable convolutions. It
+    approximates self-attention by aggregating multi-scale statistics with
+    linear computational complexity ``O(k)``, where ``k`` is the number of
+    hierarchical levels. The block combines an inverted bottleneck expansion,
+    depthwise spatial processing, hierarchical context aggregation, residual
+    connections, and Squeeze-and-Excitation channel recalibration into a
+    single cohesive unit.
 
-    **Intent**: To serve as a drop-in replacement for standard convolutional
-    blocks or Transformer blocks in U-Net architectures, providing global
-    context awareness with linear computational complexity O(k).
+    The core mathematical operations are:
+    ``X_exp = sigma(BN(W_exp * X))``,
+    ``X_dw = sigma(BN(W_dw * X_exp))``,
+    ``X_ctx = Agg({P_s(X_dw)} for s=1..k)`` where ``P_s`` are pooling
+    operations at scale ``s``,
+    ``Y = SE(sigma(BN(W_proj * X_ctx)))``.
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_channels])
-           ↓
-    Expand: Conv1x1(expanded_channels) → BN → LeakyReLU
-           ↓
-    Spatial: DepthwiseConv3x3 → BN → LeakyReLU
-           ↓
-    Context: HANCLayer(k levels)
-           ↓
-    Residual: + Input (if input_channels == filters) → BN
-           ↓
-    Project: Conv1x1(filters) → BN → LeakyReLU
-           ↓
-    Calibrate: SqueezeExcitation
-           ↓
-    Output(shape=[..., filters])
-    ```
+    **Architecture Overview:**
 
-    **Mathematical Operation**:
-    The block approximates self-attention by aggregating multi-scale statistics:
-    1.  **Expansion**: $X_{exp} = \sigma(BN(W_{exp} * X))$
-    2.  **Spatial**: $X_{dw} = \sigma(BN(W_{dw} * X_{exp}))$
-    3.  **HANC**: $X_{ctx} = \text{Agg}(\{P_s(X_{dw})\}_{s=1}^k)$
-        where $P_s$ are pooling operations at scale $s$.
-    4.  **Projection**: $Y = \text{SE}(\sigma(BN(W_{proj} * X_{ctx})))$
+    .. code-block:: text
 
-    Args:
-        filters: Integer, number of output filters. Must be positive.
-        input_channels: Integer, number of input channels. Must be positive.
-        k: Integer, hierarchical levels for HANC operation (1-5 supported).
-            Determines the granularity of context aggregation.
-        inv_factor: Integer, inverted bottleneck expansion factor.
-            Determines the channel width of the internal processing.
-        kernel_initializer: Initializer for convolution kernels.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias vectors.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional Regularizer for convolution kernels.
-        bias_regularizer: Optional Regularizer for bias vectors.
-        **kwargs: Additional arguments for the Layer base class.
+        ┌─────────────────────────────────┐
+        │         Input [H, W, C_in]      │
+        └───────────────┬─────────────────┘
+                        │
+                        ▼
+        ┌─────────────────────────────────┐
+        │  Conv1x1 → BN → LeakyReLU      │
+        │  (Expand: C_in → C_in*inv)      │
+        └───────────────┬─────────────────┘
+                        │
+                        ▼
+        ┌─────────────────────────────────┐
+        │  DepthwiseConv3x3 → BN → ReLU  │
+        │  (Spatial feature extraction)   │
+        └───────────────┬─────────────────┘
+                        │
+                        ▼
+        ┌─────────────────────────────────┐
+        │  HANCLayer (k hierarchical      │
+        │  pooling levels)                │
+        └───────────────┬─────────────────┘
+                        │
+                ┌───────┴───────┐
+                │   if C_in==F  │
+                │   + Input     │
+                │   → BN        │
+                └───────┬───────┘
+                        │
+                        ▼
+        ┌─────────────────────────────────┐
+        │  Conv1x1 → BN → LeakyReLU      │
+        │  (Project: C_in → filters)      │
+        └───────────────┬─────────────────┘
+                        │
+                        ▼
+        ┌─────────────────────────────────┐
+        │  Squeeze-and-Excitation         │
+        └───────────────┬─────────────────┘
+                        │
+                        ▼
+        ┌─────────────────────────────────┐
+        │       Output [H, W, filters]    │
+        └─────────────────────────────────┘
 
-    Input shape:
-        4D tensor with shape `(batch_size, height, width, input_channels)`.
+    :param filters: Number of output filters. Must be positive.
+    :type filters: int
+    :param input_channels: Number of input channels. Must be positive.
+    :type input_channels: int
+    :param k: Hierarchical levels for HANC operation (1-5 supported).
+        Determines the granularity of context aggregation.
+    :type k: int
+    :param inv_factor: Inverted bottleneck expansion factor.
+        Determines the channel width of the internal processing.
+    :type inv_factor: int
+    :param kernel_initializer: Initializer for convolution kernels.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors.
+        Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for convolution kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias vectors.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for the Layer base class.
 
-    Output shape:
-        4D tensor with shape `(batch_size, height, width, filters)`.
-
-    Attributes:
-        expand_conv: 1x1 convolution for channel expansion.
-        depthwise_conv: 3x3 depthwise convolution for spatial processing.
-        hanc_layer: Hierarchical context aggregation layer.
-        output_conv: 1x1 convolution for output projection.
-        squeeze_excitation: Squeeze-Excitation attention mechanism.
-
-    Example:
-        ```python
-        # Basic usage in a model
-        inputs = keras.Input(shape=(256, 256, 32))
-        x = HANCBlock(
-            filters=64,
-            input_channels=32,
-            k=3,
-            inv_factor=3
-        )(inputs)
-
-        # High-capacity configuration
-        x = HANCBlock(
-            filters=128,
-            input_channels=64,
-            k=5,
-            inv_factor=4,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )(x)
-        ```
-
-    Raises:
-        ValueError: If filters, input_channels, or inv_factor are not positive.
-        ValueError: If k is not between 1 and 5.
+    :raises ValueError: If filters, input_channels, or inv_factor are not positive.
+    :raises ValueError: If k is not between 1 and 5.
     """
 
     def __init__(
@@ -270,11 +271,10 @@ class HANCBlock(keras.layers.Layer):
         self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all its sub-layers in computational order.
 
-        CRITICAL: Explicitly builds sub-layers in computational order to ensure
-        weights are created and shapes are validated before training/loading.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -326,15 +326,14 @@ class HANCBlock(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass computation.
+        """Forward pass computation.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, input_channels).
-            training: Boolean indicating training mode for batch normalization.
-
-        Returns:
-            Output tensor of shape (batch, height, width, filters).
+        :param inputs: Input tensor of shape ``(batch, height, width, input_channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode for batch normalization.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch, height, width, filters)``.
+        :rtype: keras.KerasTensor
         """
         # 1. Expansion phase
         x = self.expand_conv(inputs)
@@ -365,18 +364,23 @@ class HANCBlock(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape of the layer."""
+        """Compute output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 
         return tuple(list(input_shape[:-1]) + [self.filters])
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

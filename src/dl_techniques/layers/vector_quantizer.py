@@ -10,100 +10,61 @@ class VectorQuantizer(layers.Layer):
     """
     Vector Quantization layer for discrete latent representations.
 
-    This layer implements the vector quantization (VQ) mechanism that maps continuous
-    encoder outputs to discrete codes by finding the nearest embedding vector in a
-    learned codebook. It uses straight-through gradient estimation to enable
-    end-to-end training.
+    This layer maps continuous encoder outputs to discrete codes by finding the
+    nearest embedding vector in a learned codebook of size ``K``. It uses a
+    straight-through gradient estimator to enable end-to-end training: the
+    forward pass uses quantized values while the backward pass copies gradients
+    directly. Two losses are added during each call: a codebook loss
+    (``||sg[z_e] - e||^2``) that moves embeddings toward encoder outputs, and a
+    commitment loss (``beta * ||z_e - sg[e]||^2``) that prevents encoder outputs
+    from growing unbounded. Optional EMA-based codebook updates provide more
+    stable training.
 
-    **Architecture**:
-    ```
-    Input: z_e(x) ∈ ℝ^(H×W×D)
-         ↓
-    ┌─────────────────────────────────────┐
-    │  For each spatial position (h,w):   │
-    │                                     │
-    │  1. Compute distances to all codes: │
-    │     d_j = ||z_e[h,w] - e_j||²       │
-    │                                     │
-    │  2. Find nearest:                   │
-    │     k* = argmin_j d_j               │
-    │                                     │
-    │  3. Replace with embedding:         │
-    │     z_q[h,w] = e_k*                 │
-    └─────────────────────────────────────┘
-         ↓
-    Output: z_q(x) ∈ ℝ^(H×W×D)
+    **Architecture Overview:**
 
-    Gradient flow (straight-through estimator):
-         Forward:  z_q = embedding_lookup(k*)
-         Backward: ∇z_e = ∇z_q  (gradients copied)
-    ```
+    .. code-block:: text
 
-    **Loss Components**:
-    - Codebook loss: Moves embeddings toward encoder outputs
-    - Commitment loss: Encourages encoder to commit to embeddings
+        ┌────────────────────────────────────────┐
+        │  Input z_e [B, ..., D]                 │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Flatten spatial dims → [N, D]         │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Compute L2 distances to codebook      │
+        │  d_j = ||z_e - e_j||^2                │
+        │  k* = argmin_j d_j                     │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Quantize: z_q = e_{k*}               │
+        │  Straight-through: z_q = z_e +         │
+        │    stop_gradient(z_q - z_e)            │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Reshape to [B, ..., D]                │
+        │  + add codebook & commitment losses    │
+        └────────────────────────────────────────┘
 
-    Args:
-        num_embeddings: Size of the discrete codebook (K). Number of possible codes.
-        embedding_dim: Dimensionality of each embedding vector (D).
-        commitment_cost: Weight for commitment loss (β). Prevents encoder output
-            from growing unbounded. Typically 0.25. Default: 0.25.
-        initializer: Initializer for embedding vectors. Default: 'uniform'.
-        use_ema: Whether to use exponential moving average for codebook updates
-            instead of gradient-based updates. EMA is more stable but requires
-            careful tuning. Default: False.
-        ema_decay: Decay rate for EMA updates (γ). Only used if use_ema=True.
-            Default: 0.99.
-        epsilon: Small constant for numerical stability in EMA updates.
-            Default: 1e-5.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        Tensor with shape: `(batch_size, height, width, embedding_dim)` for 2D data,
-        or `(batch_size, sequence_length, embedding_dim)` for 1D data.
-        The last dimension must match `embedding_dim`.
-
-    Output shape:
-        Same as input shape. The quantized representation z_q(x).
-
-    Attributes:
-        embeddings: The codebook of embedding vectors with shape
-            `(num_embeddings, embedding_dim)`.
-        ema_cluster_size: Cluster sizes for EMA updates. Only created if use_ema=True.
-        ema_embeddings: EMA accumulator for embeddings. Only created if use_ema=True.
-
-    Example:
-        >>> # Quantize 2D feature maps
-        >>> quantizer = VectorQuantizer(
-        ...     num_embeddings=512,
-        ...     embedding_dim=64,
-        ...     commitment_cost=0.25
-        ... )
-        >>> z_e = keras.random.normal((8, 32, 32, 64))  # Encoder output
-        >>> z_q = quantizer(z_e)  # Quantized output
-        >>> print(z_q.shape)  # (8, 32, 32, 64)
-        >>>
-        >>> # Get quantization losses
-        >>> losses = quantizer.losses
-        >>> print(f"Codebook loss: {losses[0]}, Commitment loss: {losses[1]}")
-        >>>
-        >>> # Use with EMA updates
-        >>> quantizer_ema = VectorQuantizer(
-        ...     num_embeddings=512,
-        ...     embedding_dim=64,
-        ...     use_ema=True,
-        ...     ema_decay=0.99
-        ... )
-
-    Notes:
-        - The layer adds two losses during the call: codebook loss and commitment loss
-        - With EMA updates, embeddings are updated via moving averages during training
-        - The straight-through estimator copies gradients through the quantization
-        - Codebook usage statistics are tracked for monitoring dead codes
-
-    References:
-        van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017).
-        Neural Discrete Representation Learning. NeurIPS 2017.
+    :param num_embeddings: Size of the discrete codebook (K).
+    :type num_embeddings: int
+    :param embedding_dim: Dimensionality of each embedding vector (D).
+    :type embedding_dim: int
+    :param commitment_cost: Weight for commitment loss (beta). Defaults to 0.25.
+    :type commitment_cost: float
+    :param initializer: Initializer for embedding vectors. Defaults to ``'uniform'``.
+    :type initializer: str or keras.initializers.Initializer
+    :param use_ema: Whether to use EMA for codebook updates. Defaults to False.
+    :type use_ema: bool
+    :param ema_decay: Decay rate for EMA updates. Defaults to 0.99.
+    :type ema_decay: float
+    :param epsilon: Small constant for numerical stability. Defaults to 1e-5.
+    :type epsilon: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -161,12 +122,9 @@ class VectorQuantizer(layers.Layer):
         """
         Create the embedding codebook and EMA variables if needed.
 
-        Args:
-            input_shape: Shape of input tensor. Last dimension must match
-                embedding_dim.
-
-        Raises:
-            ValueError: If last dimension doesn't match embedding_dim.
+        :param input_shape: Shape of input tensor. Last dimension must match
+            ``embedding_dim``.
+        :type input_shape: tuple
         """
         if input_shape[-1] != self.embedding_dim:
             raise ValueError(
@@ -210,23 +168,12 @@ class VectorQuantizer(layers.Layer):
         """
         Quantize inputs using nearest neighbor lookup in embedding space.
 
-        This method:
-        1. Flattens spatial dimensions
-        2. Computes distances to all embeddings
-        3. Finds nearest embedding for each position
-        4. Looks up corresponding embedding vectors
-        5. Reshapes back to original spatial structure
-        6. Applies straight-through estimator for gradients
-        7. Computes and adds quantization losses
-
-        Args:
-            inputs: Encoder outputs z_e(x) with shape
-                `(batch, height, width, embedding_dim)` or
-                `(batch, sequence_length, embedding_dim)`.
-            training: Whether in training mode. Affects EMA updates.
-
-        Returns:
-            Quantized outputs z_q(x) with same shape as inputs.
+        :param inputs: Encoder outputs with shape ``(batch, ..., embedding_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode. Affects EMA updates.
+        :type training: bool or None
+        :return: Quantized outputs with same shape as inputs.
+        :rtype: keras.KerasTensor
         """
         # Get input shape for later reshaping
         input_shape = ops.shape(inputs)
@@ -289,22 +236,12 @@ class VectorQuantizer(layers.Layer):
         """
         Update embeddings using exponential moving averages.
 
-        EMA update equations:
-            N_i^(t) = γ * N_i^(t-1) + (1 - γ) * n_i^(t)
-            m_i^(t) = γ * m_i^(t-1) + (1 - γ) * Σ_j z_j (where cluster(z_j) = i)
-            e_i^(t) = m_i^(t) / N_i^(t)
-
-        where:
-            N_i: cluster size for embedding i
-            m_i: sum of encoder outputs assigned to embedding i
-            γ: decay rate (ema_decay)
-            n_i: number of vectors assigned to i in current batch
-
-        Args:
-            flat_inputs: Flattened encoder outputs with shape
-                `(batch*spatial, embedding_dim)`.
-            encodings: One-hot encoding of nearest embeddings with shape
-                `(batch*spatial, num_embeddings)`.
+        :param flat_inputs: Flattened encoder outputs with shape
+            ``(batch*spatial, embedding_dim)``.
+        :type flat_inputs: keras.KerasTensor
+        :param encodings: One-hot encoding of nearest embeddings with shape
+            ``(batch*spatial, num_embeddings)``.
+        :type encodings: keras.KerasTensor
         """
         # Count how many vectors were assigned to each embedding in this batch
         cluster_size = ops.sum(encodings, axis=0)  # (num_embeddings,)
@@ -346,26 +283,10 @@ class VectorQuantizer(layers.Layer):
         """
         Get discrete codebook indices for given inputs.
 
-        This is useful for:
-        - Training autoregressive priors over discrete codes
-        - Analyzing codebook usage
-        - Compressing representations
-
-        Args:
-            inputs: Encoder outputs with shape
-                `(batch, height, width, embedding_dim)` or
-                `(batch, sequence_length, embedding_dim)`.
-
-        Returns:
-            Integer tensor of codebook indices with shape
-                `(batch, height, width)` or `(batch, sequence_length)`.
-
-        Example:
-            >>> z_e = encoder(images)
-            >>> indices = quantizer.get_codebook_indices(z_e)
-            >>> # Train PixelCNN prior on indices
-            >>> prior = PixelCNN(num_classes=quantizer.num_embeddings)
-            >>> prior.fit(indices)
+        :param inputs: Encoder outputs with shape ``(batch, ..., embedding_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Integer tensor of codebook indices with shape ``(batch, ...)``.
+        :rtype: keras.KerasTensor
         """
         # Ensure layer is built if called directly without prior build
         if not self.built:
@@ -400,26 +321,10 @@ class VectorQuantizer(layers.Layer):
         """
         Convert discrete indices back to continuous embeddings.
 
-        This is the inverse of get_codebook_indices() and is useful for:
-        - Sampling from autoregressive priors
-        - Decoding discrete representations
-
-        Args:
-            indices: Integer tensor of codebook indices with shape
-                `(batch, height, width)` or `(batch, sequence_length)`.
-
-        Returns:
-            Quantized embeddings with shape
-                `(batch, height, width, embedding_dim)` or
-                `(batch, sequence_length, embedding_dim)`.
-
-        Example:
-            >>> # Sample indices from prior
-            >>> sampled_indices = prior.sample(batch_size=4)
-            >>> # Convert to embeddings
-            >>> z_q = quantizer.quantize_from_indices(sampled_indices)
-            >>> # Decode to images
-            >>> generated_images = decoder(z_q)
+        :param indices: Integer tensor of codebook indices with shape ``(batch, ...)``.
+        :type indices: keras.KerasTensor
+        :return: Quantized embeddings with shape ``(batch, ..., embedding_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Ensure layer is built
         if not self.built:
@@ -455,11 +360,10 @@ class VectorQuantizer(layers.Layer):
         """
         Compute output shape (same as input shape).
 
-        Args:
-            input_shape: Shape tuple of input.
-
-        Returns:
-            Shape tuple of output (identical to input).
+        :param input_shape: Shape tuple of input.
+        :type input_shape: tuple
+        :return: Shape tuple of output (identical to input).
+        :rtype: tuple
         """
         return input_shape
 
@@ -467,9 +371,8 @@ class VectorQuantizer(layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters needed to
-            reconstruct the layer.
+        :return: Dictionary containing all configuration parameters.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

@@ -60,86 +60,69 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 
 @keras.saving.register_keras_serializable()
 class HANCLayer(keras.layers.Layer):
-    """
-    Hierarchical Aggregation of Neighborhood Context (HANC) Layer.
+    """Hierarchical Aggregation of Neighborhood Context (HANC) Layer.
 
     This layer approximates global self-attention by aggregating statistical
     summaries (mean and max) from local neighborhoods at multiple scales.
     It combines these multi-scale context features with the original input
-    to create a rich, context-aware representation with linear complexity O(k).
+    to create a rich, context-aware representation with linear complexity
+    ``O(k)``. For scales ``s in {1, ..., k-1}``, the layer computes
+    ``C_avg^(s) = Up(AvgPool_{2^s}(X))``,
+    ``C_max^(s) = Up(MaxPool_{2^s}(X))``, concatenates them with the
+    original input to form
+    ``X_concat = [X, C_avg^(1), C_max^(1), ..., C_avg^(k-1), C_max^(k-1)]``,
+    and projects through ``Y = sigma(BN(W * X_concat))``.
 
-    **Intent**: To provide a computationally efficient alternative to
-    self-attention for high-resolution feature maps, bridging the gap between
-    local convolution and global transformer contexts.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[H, W, C])
-           ↓
-    Path 1: Identity
-    Path 2..k:
-       ├─ AvgPool(2^s) → Resize(H, W)
-       └─ MaxPool(2^s) → Resize(H, W)
-           ↓
-    Concatenate(axis=-1)  [Channels = C * (2k - 1)]
-           ↓
-    Conv1x1(out_channels)
-           ↓
-    BatchNorm → LeakyReLU
-           ↓
-    Output(shape=[H, W, out_channels])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    Let $X$ be the input. For scales $s \in \{1, \dots, k-1\}$:
-    1.  $C_{avg}^{(s)} = \text{Up}(\text{AvgPool}_{2^s}(X))$
-    2.  $C_{max}^{(s)} = \text{Up}(\text{MaxPool}_{2^s}(X))$
-    3.  $X_{concat} = [X, C_{avg}^{(1)}, C_{max}^{(1)}, \dots, C_{avg}^{(k-1)}, C_{max}^{(k-1)}]$
-    4.  $Y = \sigma(BN(W * X_{concat}))$
+        ┌──────────────────────────────────┐
+        │        Input [H, W, C]           │
+        └──────┬───────┬──────┬────────────┘
+               │       │      │
+               │       │      ▼
+               │       │   ┌──────────────────────┐
+               │       │   │ For each scale s=1..k-1│
+               │       │   │  ├─ AvgPool(2^s)      │
+               │       │   │  │   → Resize(H, W)   │
+               │       │   │  └─ MaxPool(2^s)      │
+               │       │   │      → Resize(H, W)   │
+               │       │   └──────────┬───────────┘
+               │       │              │
+               ▼       ▼              ▼
+        ┌──────────────────────────────────┐
+        │  Concatenate(axis=-1)            │
+        │  [C * (2k - 1) channels]         │
+        └───────────────┬──────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Conv1x1(out_channels) → BN      │
+        │  → LeakyReLU                     │
+        └───────────────┬──────────────────┘
+                        │
+                        ▼
+        ┌──────────────────────────────────┐
+        │     Output [H, W, out_channels]  │
+        └──────────────────────────────────┘
 
-    Args:
-        in_channels: Integer, number of input channels. Must be positive.
-        out_channels: Integer, number of output channels after projection.
-            Must be positive.
-        k: Integer, number of hierarchical levels (1-5).
-            k=1: Identity only (no pooling).
-            k=2: Adds 2x2 pooling context.
-            k=3: Adds 2x2 and 4x4 pooling context.
-        kernel_initializer: Initializer for the 1x1 convolution kernel.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional Regularizer for the convolution kernel.
-        **kwargs: Additional arguments for the Layer base class.
+    :param in_channels: Number of input channels. Must be positive.
+    :type in_channels: int
+    :param out_channels: Number of output channels after projection. Must be positive.
+    :type out_channels: int
+    :param k: Number of hierarchical levels (1-5). k=1: identity only (no pooling),
+        k=2: adds 2x2 pooling context, k=3: adds 2x2 and 4x4 pooling context.
+    :type k: int
+    :param kernel_initializer: Initializer for the 1x1 convolution kernel.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for the convolution kernel.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for the Layer base class.
 
-    Input shape:
-        4D tensor with shape `(batch_size, height, width, in_channels)`.
-
-    Output shape:
-        4D tensor with shape `(batch_size, height, width, out_channels)`.
-
-    Attributes:
-        conv: 1x1 Convolution for feature fusion and dimension reduction.
-        batch_norm: BatchNormalization applied after convolution.
-        avg_pooling_layers: List of AveragePooling2D layers.
-        max_pooling_layers: List of MaxPooling2D layers.
-
-    Example:
-        ```python
-        # Standard usage (Context from 2x2 and 4x4 neighborhoods)
-        layer = HANCLayer(in_channels=64, out_channels=64, k=3)
-        y = layer(x)
-
-        # High-level context (up to 16x16 neighborhoods)
-        layer = HANCLayer(
-            in_channels=128,
-            out_channels=256,
-            k=5,
-            kernel_regularizer='l2'
-        )
-        ```
-
-    Raises:
-        ValueError: If in_channels, out_channels are not positive.
-        ValueError: If k is not between 1 and 5.
+    :raises ValueError: If in_channels or out_channels are not positive.
+    :raises ValueError: If k is not between 1 and 5.
     """
 
     def __init__(
@@ -220,10 +203,10 @@ class HANCLayer(keras.layers.Layer):
         self.activation = keras.layers.LeakyReLU(negative_slope=0.01, name='activation')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all its sub-layers in computational order.
 
-        CRITICAL: Explicitly builds sub-layers in computational order.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -263,15 +246,14 @@ class HANCLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass computation.
+        """Forward pass computation.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, in_channels).
-            training: Boolean indicating training mode for batch normalization.
-
-        Returns:
-            Output tensor of shape (batch, height, width, out_channels).
+        :param inputs: Input tensor of shape ``(batch, height, width, in_channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode for batch normalization.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch, height, width, out_channels)``.
+        :rtype: keras.KerasTensor
         """
         if self.k == 1:
             # Even if k=1, we might need to project channels if in != out
@@ -316,18 +298,23 @@ class HANCLayer(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape."""
+        """Compute output shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
 
         return tuple(list(input_shape[:-1]) + [self.out_channels])
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

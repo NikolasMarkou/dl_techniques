@@ -1,11 +1,14 @@
-"""
-Bias-Free 1D Convolutional Layer
+"""Bias-free 1D convolutional building block for scaling-invariant networks.
 
-A building block for bias-free CNNs that removes all additive constants
-to enable better generalization across noise levels in time series denoising tasks.
+Removes all additive constants (convolution bias and batch normalization
+center/beta) to enable better generalization across noise levels in time
+series denoising tasks. The forward computation is
+``y = activation(BN(Conv1D(x)))`` where both BN and Conv1D are bias-free,
+ensuring that ``f(alpha * x) = alpha * f(x)`` for any positive scalar alpha.
 
 Based on "Robust and Interpretable Blind Image Denoising via Bias-Free
-Convolutional Neural Networks" (Mohan et al., ICLR 2020), adapted for 1D signals.
+Convolutional Neural Networks" (Mohan et al., ICLR 2020), adapted for 1D
+signals.
 """
 
 import keras
@@ -23,78 +26,57 @@ from ..utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class BiasFreeConv1D(keras.layers.Layer):
-    """
-    Bias-free 1D convolutional layer with batch normalization and activation.
+    """Bias-free 1D convolutional layer with optional batch normalization and activation.
 
-    This layer implements a convolution without bias, followed by bias-free
-    batch normalization (center=False) and activation. This ensures no
-    additive constants are introduced at any stage, which is crucial for
-    achieving scaling invariance and better generalization across noise levels
-    in time series data.
+    Implements a convolution without bias, followed by bias-free batch
+    normalization (``center=False``) and activation. No additive constants are
+    introduced at any stage, which is crucial for achieving scaling invariance
+    and better generalization across noise levels. The mathematical formulation
+    is ``y = activation(BN(Conv1D(x)))`` where BN has no beta term and Conv1D
+    has ``use_bias=False``.
 
-    The key modifications from standard Conv1D layers:
-    - Conv1D uses use_bias=False
-    - BatchNormalization uses center=False (removes beta/bias parameter)
-    - All sub-layers are created in __init__ and built explicitly for serialization
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        y = activation(BN(Conv1D(x)))
-        where BN has no bias term (center=False) and Conv1D has no bias
+    .. code-block:: text
 
-    Args:
-        filters: Integer, number of output filters for the convolution. Must be positive.
-        kernel_size: Integer, size of the convolutional kernel along the time dimension.
-            Must be positive and odd for symmetric filtering. Defaults to 3.
-        activation: String name of activation function or callable. Common choices
-            include 'relu', 'gelu', 'swish'. Defaults to 'relu'.
-        kernel_initializer: String or Initializer instance for convolution weights.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: String or Regularizer instance for convolution weights.
-            None means no regularization. Defaults to None.
-        use_batch_norm: Boolean, whether to use batch normalization. When False,
-            only convolution and activation are applied. Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌───────────────────────────────┐
+        │  Input (B, T, C_in)           │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │  Conv1D (no bias, same pad)   │
+        │  filters=F, kernel_size=K     │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │  BatchNorm (center=False)     │  ← optional
+        │  scale=True, no beta          │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │  Activation (e.g. ReLU)       │  ← optional
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │  Output (B, T, F)             │
+        └───────────────────────────────┘
 
-    Input shape:
-        3D tensor with shape: `(batch_size, time_steps, features)`
-
-    Output shape:
-        3D tensor with shape: `(batch_size, time_steps, filters)`
-        Time dimension is preserved due to 'same' padding.
-
-    Example:
-        ```python
-        # Basic usage for time series denoising
-        layer = BiasFreeConv1D(filters=64, kernel_size=3, activation='relu')
-
-        # Use in a denoising model
-        inputs = keras.Input(shape=(1000, 1))  # 1000 time steps, 1 feature
-        x = BiasFreeConv1D(32, kernel_size=5)(inputs)
-        x = BiasFreeConv1D(64, kernel_size=3)(x)
-        outputs = BiasFreeConv1D(1, kernel_size=1, activation='linear')(x)
-        model = keras.Model(inputs, outputs)
-
-        # Without batch normalization
-        layer_no_bn = BiasFreeConv1D(
-            filters=32,
-            kernel_size=3,
-            use_batch_norm=False,
-            kernel_regularizer='l2'
-        )
-        ```
-
-    Note:
-        This layer follows the bias-free principle essential for denoising tasks
-        where scaling invariance is required. All additive constants are removed
-        to prevent the network from learning to add noise patterns.
-
-    References:
-        - Mohan et al., "Robust and Interpretable Blind Image Denoising via
-          Bias-Free Convolutional Neural Networks", ICLR 2020
-
-    Raises:
-        ValueError: If filters is not positive or kernel_size is invalid.
-        TypeError: If activation, initializer or regularizer types are invalid.
+    :param filters: Number of output filters for the convolution. Must be positive.
+    :type filters: int
+    :param kernel_size: Size of the convolutional kernel along the time dimension.
+        Must be positive. Defaults to 3.
+    :type kernel_size: int
+    :param activation: Activation function name or callable. Defaults to ``'relu'``.
+    :type activation: Union[str, callable]
+    :param kernel_initializer: Initializer for convolution weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for convolution weights.
+        Defaults to ``None``.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_batch_norm: Whether to use batch normalization. Defaults to ``True``.
+    :type use_batch_norm: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -160,14 +142,10 @@ class BiasFreeConv1D(keras.layers.Layer):
                     f"kernel_size={kernel_size}, batch_norm={use_batch_norm}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-
-        Args:
-            input_shape: Shape tuple indicating the input shape.
-                Expected format: (batch_size, time_steps, features)
+        :param input_shape: Shape tuple ``(batch_size, time_steps, features)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -201,17 +179,14 @@ class BiasFreeConv1D(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward computation through the bias-free 1D convolution layer.
+        """Forward computation through the bias-free 1D convolution layer.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, time_steps, features).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Passed to batch normalization.
-
-        Returns:
-            Output tensor after bias-free convolution, normalization and activation
-            with shape (batch_size, time_steps, filters).
+        :param inputs: Input tensor of shape ``(batch_size, time_steps, features)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, time_steps, filters)``.
+        :rtype: keras.KerasTensor
         """
         # Apply convolution (no bias)
         x = self.conv(inputs)
@@ -227,26 +202,21 @@ class BiasFreeConv1D(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape tuple. Since we use 'same' padding, the time
-            dimension is preserved and only the feature dimension changes.
+        :param input_shape: Shape of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         # Use conv layer's output shape computation
         return self.conv.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the layer configuration for serialization.
+        """Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration including all parameters
-            needed to reconstruct the layer.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -267,76 +237,60 @@ class BiasFreeConv1D(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class BiasFreeResidualBlock1D(keras.layers.Layer):
-    """
-    Bias-free residual block for ResNet-style architecture with 1D convolutions.
+    """Bias-free residual block for 1D convolutions with skip connections.
 
-    Implements a residual block using BiasFreeConv1D layers with a skip connection.
-    The block performs: output = activation(input + F(input)), where F is the
-    residual function computed by two bias-free convolution layers.
+    Implements a residual block using two ``BiasFreeConv1D`` layers: the first
+    applies activation, the second does not. A skip connection adds the input
+    (or a 1x1 shortcut projection when dimensions differ) before a final
+    activation. The formulation is ``output = activation(shortcut(x) + F(x))``
+    where ``F(x) = BiasFreeConv1D(BiasFreeConv1D(x))``. All paths are bias-free
+    to preserve scaling invariance.
 
-    Designed for time series data with shape [batch, time, features] where
-    scaling invariance is crucial for robust denoising performance.
+    **Architecture Overview:**
 
-    Architecture:
-        input -> BiasFreeConv1D -> BiasFreeConv1D -> Add(input) -> Activation
+    .. code-block:: text
 
-    Mathematical formulation:
-        F(x) = BiasFreeConv1D(BiasFreeConv1D(x))
-        output = activation(x + F(x))  [if input_filters == output_filters]
-        output = activation(shortcut(x) + F(x))  [if dimensions don't match]
+        ┌───────────────────────────────┐
+        │  Input (B, T, C_in)           │
+        └───────┬───────────┬───────────┘
+                │           │
+                │     ┌─────┴─────────────────┐
+                │     │  BiasFreeConv1D + act  │
+                │     └─────┬─────────────────┘
+                │           ▼
+                │     ┌───────────────────────┐
+                │     │  BiasFreeConv1D (lin)  │
+                │     └─────┬─────────────────┘
+                │           │
+                ▼           ▼
+        ┌───────────┐  ┌────────┐
+        │ shortcut  │  │  F(x)  │
+        │ (1x1 or   │  │        │
+        │  identity) │  │        │
+        └─────┬─────┘  └───┬────┘
+              └──────┬──────┘
+                     ▼
+              ┌──────────────┐
+              │   Add + Act  │
+              └──────┬───────┘
+                     ▼
+              ┌──────────────┐
+              │ Output (B,T,F)│
+              └──────────────┘
 
-    Args:
-        filters: Integer, number of filters in the convolutional layers. Must be positive.
-        kernel_size: Integer, size of convolutional kernels along time dimension.
-            Must be positive and typically odd for symmetric filtering. Defaults to 3.
-        activation: String name of activation function or callable. Applied after
-            the residual addition. Common choices: 'relu', 'gelu'. Defaults to 'relu'.
-        kernel_initializer: String or Initializer instance for convolution weights.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: String or Regularizer instance for convolution weights.
-            Applied to all convolutions in the block. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        3D tensor with shape: `(batch_size, time_steps, features)`
-
-    Output shape:
-        3D tensor with shape: `(batch_size, time_steps, filters)`
-
-    Example:
-        ```python
-        # Basic residual block for time series
-        block = BiasFreeResidualBlock1D(filters=64, kernel_size=3)
-
-        # Use in a deep denoising network
-        inputs = keras.Input(shape=(1000, 32))  # 1000 time steps, 32 features
-        x = BiasFreeResidualBlock1D(64)(inputs)
-        x = BiasFreeResidualBlock1D(64)(x)  # Same filters, pure residual
-        x = BiasFreeResidualBlock1D(128)(x)  # Different filters, with shortcut conv
-        outputs = BiasFreeConv1D(1, kernel_size=1, activation='linear')(x)
-        model = keras.Model(inputs, outputs)
-
-        # With regularization for better generalization
-        regularized_block = BiasFreeResidualBlock1D(
-            filters=32,
-            kernel_size=5,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-        ```
-
-    Note:
-        When input_filters != output_filters, a 1x1 convolution shortcut is added
-        to match dimensions. This shortcut is also bias-free to maintain the
-        scaling invariance property essential for robust denoising.
-
-    References:
-        - He et al., "Deep Residual Learning for Image Recognition", CVPR 2016
-        - Mohan et al., "Robust and Interpretable Blind Image Denoising via
-          Bias-Free Convolutional Neural Networks", ICLR 2020
-
-    Raises:
-        ValueError: If filters is not positive or kernel_size is invalid.
-        TypeError: If activation, initializer or regularizer types are invalid.
+    :param filters: Number of filters in the convolutional layers. Must be positive.
+    :type filters: int
+    :param kernel_size: Size of convolutional kernels. Defaults to 3.
+    :type kernel_size: int
+    :param activation: Activation function name or callable. Defaults to ``'relu'``.
+    :type activation: Union[str, callable]
+    :param kernel_initializer: Initializer for convolution weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for convolution weights.
+        Defaults to ``None``.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -405,14 +359,10 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
                     f"kernel_size={kernel_size}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the residual block components.
+        """Build the residual block components.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-
-        Args:
-            input_shape: Shape tuple indicating the input shape.
-                Expected format: (batch_size, time_steps, features)
+        :param input_shape: Shape tuple ``(batch_size, time_steps, features)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -459,16 +409,14 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the residual block.
+        """Forward pass through the residual block.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, time_steps, features).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Passed to sub-layers.
-
-        Returns:
-            Output tensor with shape (batch_size, time_steps, filters).
+        :param inputs: Input tensor of shape ``(batch_size, time_steps, features)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, time_steps, filters)``.
+        :rtype: keras.KerasTensor
         """
         # Main residual path: F(x)
         x = self.conv1(inputs, training=training)
@@ -490,26 +438,22 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute output shape.
 
-        Args:
-            input_shape: Shape of the input.
-
-        Returns:
-            Output shape tuple with updated feature dimension.
+        :param input_shape: Shape of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with updated feature dimension.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.filters  # Update feature dimension
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration including all parameters
-            needed to reconstruct the layer.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

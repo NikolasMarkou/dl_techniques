@@ -54,19 +54,43 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 # ---------------------------------------------------------------------
 
 class ScaleEnsemble(keras.layers.Layer):
-    """Enhanced ensemble adapter with learnable scaling weights.
+    """
+    Learnable per-feature scaling for ensemble members.
 
-    This layer implements efficient learnable scaling for ensemble members,
-    inspired by the project's scaling layer patterns with improved initialization
-    and regularization support.
+    This layer applies a learnable, per-feature scaling factor to each of ``k``
+    ensemble members, allowing each member to specialize by learning the
+    relative importance of different features. The operation is
+    ``output = input * weight`` with broadcasting over the batch dimension.
 
-    Args:
-        k: Number of ensemble members.
-        input_dim: Input feature dimension.
-        init_distribution: Initialization distribution ('normal' or 'random-signs').
-        kernel_initializer: Initializer for the scaling weights.
-        kernel_regularizer: Optional regularizer for scaling weights.
-        **kwargs: Additional layer arguments.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────────────┐
+        │  Input [B, K, D]            │
+        └──────────────┬──────────────┘
+                       ▼
+        ┌─────────────────────────────┐
+        │  Element-wise multiply      │
+        │  with weight [K, D]         │
+        └──────────────┬──────────────┘
+                       ▼
+        ┌─────────────────────────────┐
+        │  Output [B, K, D]           │
+        └─────────────────────────────┘
+
+    :param k: Number of ensemble members.
+    :type k: int
+    :param input_dim: Input feature dimension.
+    :type input_dim: int
+    :param init_distribution: Initialization distribution (``'normal'`` or ``'random-signs'``).
+    :type init_distribution: str
+    :param kernel_initializer: Initializer for the scaling weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for scaling weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional layer arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -109,11 +133,11 @@ class ScaleEnsemble(keras.layers.Layer):
     def call(self, inputs: Any) -> Any:
         """Apply ensemble scaling to inputs.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, k, input_dim).
+            :param inputs: Input tensor of shape (batch_size, k, input_dim).
+            :type inputs: keras.KerasTensor
 
-        Returns:
-            Scaled tensor of shape (batch_size, k, input_dim).
+            :return: Scaled tensor of shape (batch_size, k, input_dim).
+            :rtype: keras.KerasTensor
         """
         # Efficient broadcasting: inputs (B, K, D) * weight (K, D) -> (B, K, D)
         return ops.multiply(inputs, ops.expand_dims(self.weight, axis=0))
@@ -137,22 +161,61 @@ class ScaleEnsemble(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 class LinearEfficientEnsemble(keras.layers.Layer):
-    """Efficient ensemble linear layer with separate input/output scaling.
+    """
+    Efficient ensemble linear layer with rank-1 perturbations.
 
-    This layer implements efficient ensemble linear transformations with optional
-    input and output scaling, following the project's patterns for robust layer design.
+    This layer performs a shared linear transformation across ``k`` ensemble
+    members, with optional learnable input scaling (``r``) and output scaling
+    (``s``) vectors per member. The result is equivalent to applying unique
+    diagonal transformations to the shared kernel for each member, providing
+    ensemble diversity without the cost of ``k`` independent weight matrices.
 
-    Args:
-        units: Output dimension.
-        k: Number of ensemble members.
-        use_bias: Whether to use bias.
-        ensemble_scaling_in: Whether to use input scaling.
-        ensemble_scaling_out: Whether to use output scaling.
-        kernel_initializer: Initializer for the main weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────┐
+        │  Input [B, K, D_in]              │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Opt. input scaling: x * r[K,D] │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Shared matmul: x @ W            │
+        │  W [D_in, units] (shared)       │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Opt. output scaling: x * s[K,U]│
+        │  + opt. bias [K, units]          │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [B, K, units]            │
+        └──────────────────────────────────┘
+
+    :param units: Output dimension.
+    :type units: int
+    :param k: Number of ensemble members.
+    :type k: int
+    :param use_bias: Whether to use bias.
+    :type use_bias: bool
+    :param ensemble_scaling_in: Whether to use input scaling.
+    :type ensemble_scaling_in: bool
+    :param ensemble_scaling_out: Whether to use output scaling.
+    :type ensemble_scaling_out: bool
+    :param kernel_initializer: Initializer for the main weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional layer arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -225,11 +288,11 @@ class LinearEfficientEnsemble(keras.layers.Layer):
     def call(self, inputs: Any) -> Any:
         """Forward pass through efficient ensemble layer.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, k, input_dim).
+            :param inputs: Input tensor of shape (batch_size, k, input_dim).
+            :type inputs: keras.KerasTensor
 
-        Returns:
-            Output tensor of shape (batch_size, k, units).
+            :return: Output tensor of shape (batch_size, k, units).
+            :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -274,21 +337,51 @@ class LinearEfficientEnsemble(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 class NLinear(keras.layers.Layer):
-    """N parallel linear layers for ensemble output with enhanced efficiency.
+    """
+    N fully independent parallel linear layers using einsum.
 
-    This layer implements efficient parallel linear transformations for ensemble
-    outputs using optimized tensor operations.
+    This layer implements ``n`` truly independent linear layers processed in
+    parallel via a single weight tensor of shape ``(n, input_dim, output_dim)``
+    and ``einsum``. Useful for final output heads of an ensemble where each
+    member needs its own independent classifier.
 
-    Args:
-        n: Number of parallel linear layers.
-        input_dim: Input dimension.
-        output_dim: Output dimension per linear layer.
-        use_bias: Whether to use bias.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────────────────┐
+        │  Input [B, N, D_in]             │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  einsum('bni,nio->bno',         │
+        │         input, kernels)         │
+        │  kernels [N, D_in, D_out]       │
+        │  + opt. bias [N, D_out]         │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Output [B, N, D_out]           │
+        └─────────────────────────────────┘
+
+    :param n: Number of parallel linear layers.
+    :type n: int
+    :param input_dim: Input dimension.
+    :type input_dim: int
+    :param output_dim: Output dimension per linear layer.
+    :type output_dim: int
+    :param use_bias: Whether to use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional layer arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -337,11 +430,11 @@ class NLinear(keras.layers.Layer):
     def call(self, inputs: Any) -> Any:
         """Forward pass through N parallel linear layers.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, n, input_dim).
+            :param inputs: Input tensor of shape (batch_size, n, input_dim).
+            :type inputs: keras.KerasTensor
 
-        Returns:
-            Output tensor of shape (batch_size, n, output_dim).
+            :return: Output tensor of shape (batch_size, n, output_dim).
+            :rtype: keras.KerasTensor
         """
         # Efficient parallel matrix multiplication using einsum
         outputs = ops.einsum('bni,nio->bno', inputs, self.kernels)
@@ -373,22 +466,57 @@ class NLinear(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 class MLPBlock(keras.layers.Layer):
-    """MLP block with efficient ensemble support and enhanced configurability.
+    """
+    MLP block with optional efficient ensemble support.
 
-    This layer implements a single MLP block that can work in both plain and ensemble
-    modes with proper regularization and initialization support.
+    This layer implements a single MLP block (linear + activation + optional
+    dropout) that can operate in plain mode (single model) or ensemble mode
+    (with ``k`` members using ``LinearEfficientEnsemble``).
 
-    Args:
-        units: Number of units in the hidden layer.
-        k: Number of ensemble members (None for plain MLP).
-        activation: Activation function.
-        dropout_rate: Dropout rate.
-        use_bias: Whether to use bias.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────────────────┐
+        │  Input [B, (K,) D]              │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Linear (Dense or Ensemble)     │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Activation                     │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Optional Dropout               │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Output [B, (K,) units]         │
+        └─────────────────────────────────┘
+
+    :param units: Number of units in the hidden layer.
+    :type units: int
+    :param k: Number of ensemble members (None for plain MLP).
+    :type k: int or None
+    :param activation: Activation function.
+    :type activation: str
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional layer arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -453,12 +581,13 @@ class MLPBlock(keras.layers.Layer):
     def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
         """Forward pass through MLP block.
 
-        Args:
-            inputs: Input tensor.
-            training: Training mode flag.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Training mode flag.
+            :type training: bool or None
 
-        Returns:
-            Output tensor after linear transformation, activation, and dropout.
+            :return: Output tensor after linear transformation, activation, and dropout.
+            :rtype: keras.KerasTensor
         """
         x = self.linear(inputs)
         x = self.activation(x)
@@ -494,22 +623,55 @@ class MLPBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 class TabMBackbone(keras.layers.Layer):
-    """TabM backbone MLP with ensemble support and proper layer management.
+    """
+    TabM backbone MLP with optional ensemble support.
 
-    This layer implements the core TabM backbone using a stack of MLP blocks
-    with proper weight sharing and ensemble support.
+    This layer stacks multiple ``MLPBlock`` layers to form a complete backbone.
+    It can operate in plain mode (single model) or ensemble mode by setting the
+    ``k`` parameter.
 
-    Args:
-        hidden_dims: List of hidden layer dimensions.
-        k: Number of ensemble members (None for plain MLP).
-        activation: Activation function.
-        dropout_rate: Dropout rate.
-        use_bias: Whether to use bias.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional layer arguments.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────────────────┐
+        │  Input [B, (K,) D]              │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  MLPBlock(hidden_dims[0])       │
+        ├─────────────────────────────────┤
+        │  MLPBlock(hidden_dims[1])       │
+        ├─────────────────────────────────┤
+        │  ...                            │
+        ├─────────────────────────────────┤
+        │  MLPBlock(hidden_dims[-1])      │
+        └──────────────┬──────────────────┘
+                       ▼
+        ┌─────────────────────────────────┐
+        │  Output [B, (K,) hidden[-1]]    │
+        └─────────────────────────────────┘
+
+    :param hidden_dims: List of hidden layer dimensions.
+    :type hidden_dims: list[int]
+    :param k: Number of ensemble members (None for plain MLP).
+    :type k: int or None
+    :param activation: Activation function.
+    :type activation: str
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for weights.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional layer arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -562,12 +724,13 @@ class TabMBackbone(keras.layers.Layer):
     def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
         """Forward pass through backbone MLP.
 
-        Args:
-            inputs: Input tensor.
-            training: Training mode flag.
+            :param inputs: Input tensor.
+            :type inputs: keras.KerasTensor
+            :param training: Training mode flag.
+            :type training: bool or None
 
-        Returns:
-            Output tensor after passing through all MLP blocks.
+            :return: Output tensor after passing through all MLP blocks.
+            :rtype: keras.KerasTensor
         """
         x = inputs
         for block in self.blocks:

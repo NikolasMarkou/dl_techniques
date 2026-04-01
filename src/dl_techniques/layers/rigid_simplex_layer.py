@@ -127,63 +127,65 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 
 @keras.saving.register_keras_serializable()
 class RigidSimplexLayer(keras.layers.Layer):
-    """
-    Projects inputs onto a fixed Simplex structure with learnable rotation and scaling.
+    """Project inputs onto a rigid Simplex with learnable rotation and scaling.
 
-    **Intent**: Implement a layer that maintains rigid geometric structure (Simplex)
-    while allowing training only for rotation alignment and bounded scaling. This
-    forces the network to perform template matching rather than learning arbitrary
-    filter shapes.
+    The layer maintains a frozen Equiangular Tight Frame (Simplex) weight
+    matrix whose rows are maximally separated unit vectors
+    (``v_i . v_j = -1/N`` for ``i != j``). Rather than learning arbitrary
+    filters, the network learns only a rotation matrix ``R`` (softly
+    constrained towards orthogonality via
+    ``Loss = lambda * ||R^T R - I||^2``) and a bounded global scale
+    ``s in [scale_min, scale_max]``. The forward pass is:
+    ``output = s * (x @ R) @ Simplex``.
+    This forces the model to perform template matching against a fixed
+    crystal structure rather than discovering arbitrary filter shapes.
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, ..., input_dim])
-           ↓
-    MatMul with rotation_kernel: [input_dim, input_dim]
-           ↓
-    Rotated Input (aligned to Simplex orientation)
-           ↓
-    MatMul with static_simplex: [input_dim, units] (NON-TRAINABLE)
-           ↓
-    Multiply by global_scale: scalar (BOUNDED to [scale_min, scale_max])
-           ↓
-    Output(shape=[batch, ..., units])
-    ```
+    **Architecture Overview:**
 
-    **Training Constraints**:
-    - `static_simplex`: Fixed geometry, trainable=False
-    - `rotation_kernel`: Learns optimal input rotation (soft orthogonality via loss)
-    - `global_scale`: Bounded scalar between [scale_min, scale_max]
+    .. code-block:: text
 
-    **Theoretical Implications**:
-    By using this layer, the network is forced to perform **Template Matching**:
-    - Standard Dense: "Learn any shape of filters that separate the data."
-    - This Layer: "Rotate the input data until it aligns with a fixed crystal structure."
+        ┌──────────────────────────────────┐
+        │  Input [..., input_dim]          │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  x @ rotation_kernel             │
+        │  [input_dim, input_dim]          │
+        │  (trainable, soft ortho loss)    │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  rotated @ static_simplex        │
+        │  [input_dim, units]              │
+        │  (NON-TRAINABLE, frozen ETF)     │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  * global_scale                  │
+        │  (bounded [scale_min, scale_max])│
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [..., units]             │
+        └──────────────────────────────────┘
 
-    Args:
-        units: Dimensionality of the output space (number of Simplex projections).
-        scale_min: Minimum allowed scaling factor. Defaults to 0.5.
-        scale_max: Maximum allowed scaling factor. Defaults to 2.0.
-        orthogonality_penalty: Weight for orthogonality regularization loss
-            (encourages R^T R ≈ I). Defaults to 1e-4.
-        rotation_initializer: Initializer for rotation matrix. Defaults to 'identity'.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        N-D tensor: `(batch_size, ..., input_dim)`.
-
-    Output shape:
-        N-D tensor: `(batch_size, ..., units)`.
-
-    Note:
-        The layer adds an orthogonality regularization loss during training to
-        encourage the rotation kernel to remain a valid rotation matrix.
-
-    Example:
-        >>> layer = RigidSimplexLayer(units=64, scale_min=0.1, scale_max=5.0)
-        >>> inputs = keras.random.normal((32, 128))
-        >>> outputs = layer(inputs)  # Shape: (32, 64)
-    """
+    :param units: Dimensionality of the output space (Simplex projections).
+    :type units: int
+    :param scale_min: Minimum allowed scaling factor.
+    :type scale_min: float
+    :param scale_max: Maximum allowed scaling factor.
+    :type scale_max: float
+    :param orthogonality_penalty: Weight for the orthogonality
+        regularisation loss on the rotation kernel.
+    :type orthogonality_penalty: float
+    :param rotation_initializer: Initializer for the rotation matrix.
+    :type rotation_initializer: Union[str, initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -226,22 +228,14 @@ class RigidSimplexLayer(keras.layers.Layer):
             input_dim: int,
             output_dim: int
     ) -> np.ndarray:
-        """
-        Generate Simplex weight matrix.
+        """Generate a centred, normalised Simplex weight matrix.
 
-        Creates a normalized Simplex structure in input_dim space with output_dim
-        vertices. The Simplex is centered at origin with unit-normalized vertices.
-
-        A natural Simplex has N+1 vertices in N dimensions. This method generates
-        the Simplex and tiles/slices to match the requested output dimensionality.
-
-        Args:
-            input_dim: Input dimensionality.
-            output_dim: Output dimensionality (number of Simplex projections).
-
-        Returns:
-            Weight matrix of shape (input_dim, output_dim) as float32.
-        """
+        :param input_dim: Input dimensionality.
+        :type input_dim: int
+        :param output_dim: Number of Simplex projections.
+        :type output_dim: int
+        :return: Weight matrix ``(input_dim, output_dim)`` as float32.
+        :rtype: np.ndarray"""
         dimensions = input_dim
         matrix = np.identity(dimensions, dtype=np.float32)
 
@@ -276,20 +270,10 @@ class RigidSimplexLayer(keras.layers.Layer):
         return W.astype(np.float32)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's weights.
+        """Create Simplex, rotation kernel, and scale weights.
 
-        Creates:
-        - static_simplex: Non-trainable Simplex geometry (input_dim, units)
-        - rotation_kernel: Trainable rotation matrix (input_dim, input_dim)
-        - global_scale: Trainable bounded scalar (1,)
-
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Raises:
-            ValueError: If last dimension of input is not defined.
-        """
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input must be defined")
@@ -332,19 +316,14 @@ class RigidSimplexLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass computation.
+        """Forward pass: rotate, project onto Simplex, and scale.
 
-        Applies rotation to inputs, projects onto static Simplex, and scales output.
-        Adds orthogonality regularization loss for the rotation kernel.
-
-        Args:
-            inputs: Input tensor of shape (batch, ..., input_dim).
-            training: Boolean flag for training mode (unused but kept for API).
-
-        Returns:
-            Output tensor of shape (batch, ..., units).
-        """
+        :param inputs: Input tensor ``(batch, ..., input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(batch, ..., units)``.
+        :rtype: keras.KerasTensor"""
         # 1. Add orthogonality regularization loss (soft constraint for rotation)
         # R^T * R should approximate Identity for valid rotation
         r_t_r = ops.matmul(
@@ -370,26 +349,21 @@ class RigidSimplexLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape from input shape.
+        """Compute output shape from input shape.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple with last dimension replaced by units.
-        """
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape with last dimension replaced by ``units``.
+        :rtype: Tuple[Optional[int], ...]"""
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Configuration dictionary containing all __init__ parameters.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'units': self.units,
@@ -402,15 +376,12 @@ class RigidSimplexLayer(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'RigidSimplexLayer':
-        """
-        Create layer from configuration.
+        """Create a layer instance from a configuration dictionary.
 
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            New RigidSimplexLayer instance.
-        """
+        :param config: Configuration from ``get_config()``.
+        :type config: Dict[str, Any]
+        :return: New ``RigidSimplexLayer`` instance.
+        :rtype: RigidSimplexLayer"""
         if 'rotation_initializer' in config:
             config['rotation_initializer'] = initializers.deserialize(
                 config['rotation_initializer']

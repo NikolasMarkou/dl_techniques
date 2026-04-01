@@ -57,56 +57,67 @@ from typing import Optional, Tuple, Any, Dict
 
 @keras.saving.register_keras_serializable()
 class PixelShuffle(keras.layers.Layer):
-    """
-    Pixel shuffle operation for reducing spatial tokens in vision_heads transformers.
+    """Pixel shuffle for reducing spatial tokens in vision transformers.
 
-    Implements pixel shuffle to reduce the number of visual tokens by rearranging
-    spatial information into channel dimensions, enabling more efficient processing
-    in vision_heads-language models. This operation is particularly useful for reducing
-    computational complexity while preserving spatial information.
+    This layer performs a space-to-depth rearrangement on the spatial token
+    portion of a sequence that starts with a CLS token. Given an input of
+    shape ``[B, 1 + H*W, C]`` it separates the CLS token, reshapes the
+    remaining tokens into a 2-D grid, groups ``scale_factor x scale_factor``
+    spatial blocks into the channel dimension, and re-flattens back to a
+    shorter sequence with wider channels:
+    ``output = [B, 1 + (H/s)*(W/s), C*s^2]`` where ``s`` is the
+    ``scale_factor``. The CLS token is zero-padded to match the new channel
+    width. The operation is lossless and fully differentiable.
 
-    The layer assumes input tokens are arranged as [CLS_token, spatial_tokens] where
-    spatial tokens represent a square spatial grid.
+    **Architecture Overview:**
 
-    Args:
-        scale_factor: Integer, factor by which to reduce spatial dimensions. Must be a
-            positive integer that evenly divides the spatial dimensions. Defaults to 2.
-        validate_spatial_dims: Boolean, whether to validate that spatial dimensions are
-            perfect squares and divisible by scale_factor. Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, num_tokens, channels)` where
-        num_tokens = 1 + H*W (CLS token + spatial tokens).
+        ┌───────────────────────────────────────┐
+        │  Input [B, 1 + H*W, C]               │
+        │  (CLS token + spatial tokens)         │
+        └──────────────────┬────────────────────┘
+                           │
+                ┌──────────┴──────────┐
+                ▼                     ▼
+        ┌──────────────┐   ┌──────────────────┐
+        │  CLS token   │   │  Spatial tokens   │
+        │  [B, 1, C]   │   │  [B, H*W, C]      │
+        └──────┬───────┘   └────────┬──────────┘
+               │                    │
+               │                    ▼
+               │           ┌──────────────────┐
+               │           │  Reshape to grid  │
+               │           │  [B, H, W, C]     │
+               │           └────────┬──────────┘
+               │                    │
+               │                    ▼
+               │           ┌──────────────────┐
+               │           │  Space-to-depth   │
+               │           │  [B, H/s, W/s,   │
+               │           │   C*s^2]          │
+               │           └────────┬──────────┘
+               │                    │
+               ▼                    ▼
+        ┌──────────────┐   ┌──────────────────┐
+        │  Pad to C*s^2│   │  Flatten grid     │
+        └──────┬───────┘   └────────┬──────────┘
+               │                    │
+               └────────┬───────────┘
+                        ▼
+        ┌───────────────────────────────────────┐
+        │  Concatenate along sequence axis      │
+        │  Output [B, 1+(H/s)*(W/s), C*s^2]    │
+        └───────────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, 1 + (H//scale_factor)*(W//scale_factor),
-        channels*scale_factor^2)`.
-
-    Example:
-        ```python
-        # Input: [batch, 197, 768] (196 spatial tokens + 1 CLS token, 14x14 spatial)
-        pixel_shuffle = PixelShuffle(scale_factor=2)
-        # Output: [batch, 50, 3072] (49 spatial tokens + 1 CLS token, 7x7 spatial)
-
-        # Basic usage
-        inputs = keras.Input(shape=(197, 768))
-        outputs = PixelShuffle(scale_factor=2)(inputs)
-
-        # With validation disabled for performance
-        fast_shuffle = PixelShuffle(scale_factor=2, validate_spatial_dims=False)
-        ```
-
-    Raises:
-        ValueError: If scale_factor is not a positive integer.
-        ValueError: If spatial dimensions are not compatible with scale_factor
-            when validate_spatial_dims is True.
-
-    Note:
-        The layer assumes square spatial arrangements (H = W) and that CLS tokens
-        are preserved and not affected by the shuffle operation. The operation is
-        fully differentiable and suitable for end-to-end training.
-    """
+    :param scale_factor: Factor by which to reduce each spatial dimension.
+        Must be a positive integer dividing the spatial side length.
+    :type scale_factor: int
+    :param validate_spatial_dims: Whether to validate spatial dimension
+        compatibility at build time.
+    :type validate_spatial_dims: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
         self,
@@ -127,17 +138,10 @@ class PixelShuffle(keras.layers.Layer):
         self.validate_spatial_dims = validate_spatial_dims
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Validate input shape and build the layer.
+        """Validate input shape and build the layer.
 
-        This layer creates no weights, only validates input compatibility.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible with scale_factor.
-        """
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(
@@ -179,18 +183,14 @@ class PixelShuffle(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply pixel shuffle operation.
+        """Apply the pixel shuffle (space-to-depth) operation.
 
-        Args:
-            inputs: Input tensor of shape [batch, num_tokens, channels] where
-                num_tokens = 1 + H*W (CLS token + spatial tokens).
-            training: Boolean indicating training mode (unused for this layer).
-
-        Returns:
-            Shuffled tensor with reduced spatial tokens of shape
-            [batch, 1 + (H//scale_factor)*(W//scale_factor), channels*scale_factor^2].
-        """
+        :param inputs: Input tensor ``[batch, 1+H*W, C]``.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag (unused).
+        :type training: Optional[bool]
+        :return: Shuffled tensor ``[batch, 1+(H/s)*(W/s), C*s^2]``.
+        :rtype: keras.KerasTensor"""
         # Identity operation for scale_factor=1
         if self.scale_factor == 1:
             return inputs
@@ -236,15 +236,12 @@ class PixelShuffle(keras.layers.Layer):
         return ops.concatenate([cls_token_expanded, shuffled], axis=1)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple.
-        """
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         input_shape_list = list(input_shape)
         batch_size, seq_len, channels = input_shape_list
 
@@ -263,12 +260,10 @@ class PixelShuffle(keras.layers.Layer):
         return tuple([batch_size, new_seq_len, new_channels])
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             "scale_factor": self.scale_factor,

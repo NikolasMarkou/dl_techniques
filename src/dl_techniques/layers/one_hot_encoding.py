@@ -52,15 +52,57 @@ from typing import Dict, List, Optional, Tuple, Any
 
 @keras.saving.register_keras_serializable()
 class OneHotEncoding(keras.layers.Layer):
-    """One-hot encoding layer for categorical features with enhanced efficiency.
+    """One-hot encoding layer for multiple categorical features.
 
-    This layer efficiently converts categorical features to one-hot encoded representations
-    using vectorized operations and proper memory management.
+    This layer converts integer-encoded categorical features into binary
+    one-hot vectors and concatenates them into a single wide tensor. It
+    handles multiple features simultaneously via a list of per-feature
+    cardinalities, applying the backend-optimised ``keras.ops.one_hot``
+    independently to each column and joining the results along the last
+    axis. Encapsulating the encoding inside the model graph eliminates
+    the need for a separate preprocessing step at inference time.
 
-    Args:
-        cardinalities: List of cardinalities for each categorical feature.
-        **kwargs: Additional layer arguments.
-    """
+    The forward computation for a batch of ``F`` features with
+    cardinalities ``(c_1, c_2, ..., c_F)`` is:
+    ``y = concat(one_hot(x[:, 0], c_1), ..., one_hot(x[:, F-1], c_F))``,
+    producing an output of width ``sum(c_i)``.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────┐
+        │  Input [batch, num_features]     │
+        │  (integer-encoded categoricals)  │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Cast to int32                   │
+        └──────────────┬───────────────────┘
+                       │
+            ┌──────────┼──────────┐
+            ▼          ▼          ▼
+        ┌────────┐ ┌────────┐ ┌────────┐
+        │one_hot │ │one_hot │ │one_hot │
+        │(c_1)   │ │(c_2)   │ │(c_F)   │
+        └───┬────┘ └───┬────┘ └───┬────┘
+            │          │          │
+            └──────────┼──────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Concatenate along last axis     │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [batch, sum(c_i)]        │
+        └──────────────────────────────────┘
+
+    :param cardinalities: List of integers giving the number of unique
+        categories for each input feature column.
+    :type cardinalities: List[int]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -73,7 +115,10 @@ class OneHotEncoding(keras.layers.Layer):
         self.cumulative_cardinalities = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer by computing cumulative cardinalities for efficient indexing."""
+        """Build the layer by pre-computing cumulative cardinalities.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         if self.cardinalities:
             # Precompute cumulative cardinalities for efficient slicing
             self.cumulative_cardinalities = [0]
@@ -84,12 +129,12 @@ class OneHotEncoding(keras.layers.Layer):
     def call(self, inputs: Any) -> Any:
         """Apply one-hot encoding to categorical inputs.
 
-        Args:
-            inputs: Categorical input tensor of shape (batch_size, n_cat_features).
-
-        Returns:
-            One-hot encoded tensor of shape (batch_size, total_categorical_dim).
-        """
+        :param inputs: Categorical input tensor of shape
+            ``(batch_size, n_cat_features)``.
+        :type inputs: Any
+        :return: One-hot encoded tensor of shape
+            ``(batch_size, total_categorical_dim)``.
+        :rtype: Any"""
         if len(self.cardinalities) == 0:
             batch_size = ops.shape(inputs)[0]
             return ops.zeros((batch_size, 0), dtype=self.compute_dtype)
@@ -118,11 +163,19 @@ class OneHotEncoding(keras.layers.Layer):
             return ops.zeros((batch_size, 0), dtype=self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], int]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], int]"""
         return (input_shape[0], self.total_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             "cardinalities": self.cardinalities,

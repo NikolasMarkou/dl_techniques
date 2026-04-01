@@ -3,52 +3,14 @@ An FNet block using Fourier Transforms for token mixing.
 
 This layer constitutes a complete encoder block from the FNet architecture,
 serving as a highly efficient drop-in replacement for a standard Transformer
-encoder. It adheres to the canonical pre-normalization structure of
-`[sublayer -> residual -> norm]`, but critically substitutes the computationally
-expensive self-attention mechanism with a parameter-free Fourier Transform.
-
-Architectural and Mathematical Foundations:
-The design philosophy of FNet is rooted in the hypothesis that the primary
-role of the self-attention layer in models like BERT is to facilitate token
-mixing across the sequence, and that this can be achieved far more
-efficiently without the need for content-based, quadratic-complexity dot-
-product attention.
-
-The block consists of two main sub-layers:
-1.  **Token Mixing Sub-layer**: This is where FNet diverges from the standard
-    Transformer. Instead of self-attention, it applies a 2D Discrete Fourier
-    Transform (DFT) to the input sequence. The input tensor, with shape
-    `(sequence_length, hidden_dim)`, is treated as a 2D signal.
-    -   First, a DFT is applied along the sequence length dimension. The DFT
-        decomposes the sequence of token vectors into its frequency
-        components. A fundamental property of the DFT is that each frequency
-        component is a linear combination of *all* input elements.
-    -   Second, another DFT is applied along the hidden dimension.
-    -   The real part of the resulting complex tensor is retained.
-
-    This two-dimensional Fourier Transform operation, `y = Real(FFT(FFT(x)))`,
-    ensures that every element in the output tensor is a function of every
-    element in the input tensor. It provides a comprehensive, global mixing of
-    information both across tokens and within the feature dimensions of each
-    token. This entire operation is parameter-free and can be computed
-    efficiently with the Fast Fourier Transform (FFT) algorithm in
-    O(N log N) time, a significant improvement over self-attention's O(N^2).
-
-2.  **Channel Mixing Sub-layer**: This is a standard position-wise Feed-Forward
-    Network (FFN), identical to the one used in the original Transformer. This
-    sub-layer is responsible for learning complex, content-based feature
-    transformations.
-
-The core trade-off is sacrificing the dynamic, content-aware weighting of
-self-attention for the static, parameter-free mixing of the Fourier Transform.
-The FNet model demonstrates that for many tasks, the powerful FFN is capable of
-learning the necessary content-specific relationships, while the Fourier
-Transform provides a sufficiently effective and much faster mechanism for
-global information exchange.
+encoder. It substitutes the computationally expensive self-attention mechanism
+with a parameter-free 2D Discrete Fourier Transform for O(N log N) token mixing,
+while retaining a standard position-wise FFN for channel mixing. The mixing
+operation y = Real(FFT(FFT(x))) ensures every output element depends on every
+input element, providing comprehensive global information exchange.
 
 References:
     - Lee-Thorp et al. "FNet: Mixing Tokens with Fourier Transforms".
-      The original paper proposing the FNet architecture.
       https://arxiv.org/abs/2105.03824
 """
 
@@ -70,77 +32,64 @@ from .attention.fnet_fourier_transform import FNetFourierTransform
 @keras.saving.register_keras_serializable()
 class FNetEncoderBlock(keras.layers.Layer):
     """
-    Complete FNet encoder block with Fourier mixing and feed-forward components using factory patterns.
+    Complete FNet encoder block with Fourier mixing and feed-forward components.
 
-    This layer implements a complete FNet encoder block as described in the paper,
-    combining the FNet Fourier Transform with a configurable feed-forward network.
-    The architecture mirrors Transformer encoder blocks but replaces expensive
-    self-attention with efficient Fourier-based token mixing.
+    Implements a pre-normalization encoder block that replaces self-attention
+    with parameter-free Fourier-based token mixing, followed by a configurable
+    feed-forward network. The architecture follows the structure
+    [sublayer -> residual -> norm] for both the Fourier mixing and FFN stages.
+    Uses factory patterns for normalization and FFN layer creation, supporting
+    all dl_techniques normalization and FFN types.
 
-    **Key Improvements**:
-    - Uses normalization factory for consistent normalization layer creation
-    - Uses FFN factory for modular feed-forward network selection
-    - Supports all dl_techniques normalization types
-    - Supports all dl_techniques FFN types
-    - Better configurability and experimentation support
+    **Architecture Overview:**
 
-    **Intent**: Provide a drop-in replacement for Transformer encoder blocks that maintains
-    comparable modeling capacity while achieving significant speedup through parameter-free
-    token mixing and reduced computational complexity.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, hidden_dim], mask=[batch, seq_len])
-           ↓
-    FNet Fourier Transform (preserves mask)
-           ↓
-    Residual Connection + Normalization (configurable type, preserves mask)
-           ↓
-    Feed-Forward Network (configurable type, preserves mask)
-           ↓
-    Residual Connection + Normalization (configurable type, preserves mask)
-           ↓
-    Output(shape=[batch, seq_len, hidden_dim], mask=[batch, seq_len])
-    ```
+        ┌───────────────────────────────────────────────┐
+        │  Input [batch, seq_len, hidden_dim]           │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  FNet Fourier Transform                       │
+        │  y = Real(FFT2D(x))  ── parameter-free       │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Residual Add + Normalization                 │
+        │  x = Norm(input + fourier_out)                │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Feed-Forward Network (configurable type)     │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Residual Add + Normalization                 │
+        │  output = Norm(ffn_input + ffn_out)           │
+        └──────────────────┬────────────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────────────┐
+        │  Output [batch, seq_len, hidden_dim]          │
+        └───────────────────────────────────────────────┘
 
-    **Design Principles**:
-    - **Masking Support**: Correctly propagates masks through all sub-layers.
-    - **Efficiency**: Fourier mixing is faster than self-attention, especially for long sequences.
-    - **Modularity**: Uses factory patterns for consistent layer creation.
-    - **Flexibility**: Supports multiple normalization and FFN types.
-    - **Compatibility**: Same input/output interface as standard Transformer blocks.
-
-    Args:
-        intermediate_dim: Integer, hidden size of feed-forward intermediate layer.
-            Ignored if ffn_type requires different parameters (e.g., 'swiglu' uses ffn_expansion_factor).
-        dropout_rate: Float between 0 and 1, dropout probability for FFN.
-        fourier_config: Optional dictionary of FNetFourierTransform configuration.
-        normalization_type: NormalizationType, type of normalization to use.
-        normalization_kwargs: Optional dictionary of normalization-specific parameters.
-        ffn_type: FFNType, type of feed-forward network to use.
-        ffn_kwargs: Optional dictionary of FFN-specific parameters.
-        **kwargs: Additional Layer base class arguments.
-
-    Examples:
-        # Standard FNet with layer normalization and MLP
-        fnet_block = FNetEncoderBlock(intermediate_dim=2048)
-
-        # Modern FNet with RMS normalization and SwiGLU
-        fnet_block = FNetEncoderBlock(
-            intermediate_dim=None,  # Not used for SwiGLU
-            normalization_type='rms_norm',
-            normalization_kwargs={'use_scale': True},
-            ffn_type='swiglu',
-            ffn_kwargs={'ffn_expansion_factor': 4}
-        )
-
-        # Efficient FNet with Band RMS and GLU
-        fnet_block = FNetEncoderBlock(
-            intermediate_dim=1024,
-            normalization_type='band_rms',
-            normalization_kwargs={'max_band_width': 0.1},
-            ffn_type='glu'
-        )
+    :param intermediate_dim: Hidden size of feed-forward intermediate layer.
+        Ignored if ffn_type requires different parameters.
+    :type intermediate_dim: Optional[int]
+    :param dropout_rate: Dropout probability for FFN. Defaults to 0.1.
+    :type dropout_rate: float
+    :param fourier_config: Optional dictionary of FNetFourierTransform
+        configuration.
+    :type fourier_config: Optional[Dict[str, Any]]
+    :param normalization_type: Type of normalization to use. Defaults to
+        'layer_norm'.
+    :type normalization_type: NormalizationType
+    :param normalization_kwargs: Optional normalization-specific parameters.
+    :type normalization_kwargs: Optional[Dict[str, Any]]
+    :param ffn_type: Type of feed-forward network to use. Defaults to 'mlp'.
+    :type ffn_type: FFNType
+    :param ffn_kwargs: Optional FFN-specific parameters.
+    :type ffn_kwargs: Optional[Dict[str, Any]]
+    :param kwargs: Additional Layer base class arguments.
     """
 
     def __init__(
@@ -181,7 +130,12 @@ class FNetEncoderBlock(keras.layers.Layer):
         self.output_layer_norm = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build encoder block and all sub-layers with proper shape inference."""
+        """Build encoder block and all sub-layers with proper shape inference.
+
+        :param input_shape: Shape tuple of the input tensor (batch, seq_len,
+            hidden_dim).
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input, got {len(input_shape)}D: {input_shape}")
 
@@ -255,17 +209,16 @@ class FNetEncoderBlock(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through complete FNet encoder block.
+        """Forward pass through complete FNet encoder block.
 
-        Args:
-            inputs: Input tensor of shape [batch, seq_len, hidden_dim].
-            attention_mask: Optional attention mask tensor of shape [batch, seq_len].
-                Will be passed to Fourier transform if provided.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of same shape as input: [batch, seq_len, hidden_dim].
+        :param inputs: Input tensor of shape [batch, seq_len, hidden_dim].
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional mask tensor of shape [batch, seq_len].
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Fourier mixing with residual connection (pass mask)
         fourier_output = self.fourier_transform(
@@ -288,15 +241,33 @@ class FNetEncoderBlock(keras.layers.Layer):
         inputs: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None
     ) -> Optional[keras.KerasTensor]:
-        """Propagate the input mask unchanged."""
+        """Propagate the input mask unchanged.
+
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :param mask: Input mask.
+        :type mask: Optional[keras.KerasTensor]
+        :return: Unchanged mask.
+        :rtype: Optional[keras.KerasTensor]
+        """
         return mask
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Encoder block preserves input shape."""
+        """Encoder block preserves input shape.
+
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape (same as input).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return complete configuration for serialization."""
+        """Return complete configuration for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'intermediate_dim': self.intermediate_dim,
@@ -311,7 +282,13 @@ class FNetEncoderBlock(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'FNetEncoderBlock':
-        """Create layer from configuration dictionary."""
+        """Create layer from configuration dictionary.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New layer instance.
+        :rtype: FNetEncoderBlock
+        """
         return cls(**config)
 
 # ---------------------------------------------------------------------

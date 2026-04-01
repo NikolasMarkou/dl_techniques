@@ -59,128 +59,76 @@ class KANvolution(keras.layers.Layer):
     functions are replaced with learnable univariate functions based on B-splines.
     Each kernel element applies adaptive non-linear transformations that combine
     B-spline interpolation with SiLU activation for enhanced feature extraction.
+    The KAN combination is K(x) = w_spline * B(x) + w_silu * SiLU(x), where B(x)
+    uses linear interpolation over a grid of control points in [-1, 1] and input
+    values are normalized using tanh for stable gradient flow.
 
-    **Intent**: Replace standard convolution with Kolmogorov-Arnold Network principles
-    to create more expressive and adaptive convolutional layers. The learnable
-    univariate functions enable better feature representation with potentially
-    fewer parameters than traditional approaches.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓
-    Patch Extraction: Extract kernel-sized patches
-           ↓
-    KAN Transformation: K(x) = w_spline·B(x) + w_silu·SiLU(x)
-    ├── B-spline: Learnable spline interpolation
-    └── SiLU: x·sigmoid(x) activation
-           ↓
-    Convolution: Apply transformed kernels
-           ↓
-    Bias Addition: + bias (if use_bias=True)
-           ↓
-    Activation: f(·) (if activation specified)
-           ↓
-    Output(shape=[batch, new_height, new_width, filters])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **B-spline Interpolation**: B(x) = Σᵢ Nᵢ(x)·cᵢ where Nᵢ are basis functions
-    2. **SiLU Activation**: SiLU(x) = x·σ(x) where σ is sigmoid
-    3. **KAN Combination**: K(x) = w_spline·B(x) + w_silu·SiLU(x)
-    4. **Convolution**: output = conv(input, K) + bias
+        ┌─────────────────────────────────────────────────┐
+        │  Input [batch, height, width, channels]         │
+        └────────────────────┬────────────────────────────┘
+                             ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Patch Extraction: extract kernel-sized patches  │
+        └────────────────────┬────────────────────────────┘
+                             ▼
+        ┌─────────────────────────────────────────────────┐
+        │  KAN Transformation                             │
+        │  ┌──────────────────┬──────────────────────┐    │
+        │  │  B-spline: Σ Nᵢ(x)·cᵢ │  SiLU: x·σ(x)│    │
+        │  └──────────┬───────┴──────────┬───────────┘    │
+        │             ▼                  ▼                 │
+        │     w_spline·B(x)    +    w_silu·SiLU(x)       │
+        └────────────────────┬────────────────────────────┘
+                             ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Convolution: apply transformed kernels          │
+        └────────────────────┬────────────────────────────┘
+                             ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Bias Addition (optional) + Activation (optional)│
+        └────────────────────┬────────────────────────────┘
+                             ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Output [batch, new_height, new_width, filters]  │
+        └─────────────────────────────────────────────────┘
 
-    The B-spline uses linear interpolation over a grid of control points in [-1,1],
-    with input values normalized using tanh for stable gradient flow.
-
-    Args:
-        filters: Integer, number of output filters/channels. Must be positive.
-            This determines the depth of the output feature maps.
-        kernel_size: Integer or tuple of 2 integers, spatial size of convolution kernel.
-            Defines the receptive field for feature extraction. Must be positive.
-        grid_size: Integer, number of B-spline control points for learnable functions.
-            Higher values allow more complex activation shapes. Must be > 1.
-            Defaults to 16.
-        strides: Integer or tuple of 2 integers, stride length of convolution.
-            Controls spatial downsampling. Values > 1 reduce output size.
-            Defaults to (1, 1).
-        padding: String, either 'valid' or 'same' (case-insensitive).
-            'valid' means no padding, 'same' preserves input size when strides=1.
-            Defaults to 'same'.
-        dilation_rate: Integer or tuple of 2 integers, dilation rate for convolution.
-            Values > 1 create dilated/atrous convolution for larger receptive fields.
-            Incompatible with strides > 1. Defaults to (1, 1).
-        activation: Optional activation function applied after convolution.
-            Can be string name ('relu', 'gelu') or callable. None means linear.
-            Defaults to None.
-        use_bias: Boolean, whether to add learnable bias vector to outputs.
-            When True, adds bias after convolution operation. Defaults to True.
-        kernel_initializer: Initializer for kernel weight matrices (control points,
-            spline weights, SiLU weights). Accepts string names or Initializer instances.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias vector. Only used when use_bias=True.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer applied to all kernel weights.
-            Helps prevent overfitting of the learnable activation functions.
-        bias_regularizer: Optional regularizer applied to bias vector.
-        activity_regularizer: Optional regularizer applied to layer output.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, input_channels)`.
-        Assumes channels_last data format.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, new_height, new_width, filters)`.
-        Spatial dimensions depend on padding, strides, and kernel_size.
-        For 'same' padding: new_size = ceil(input_size / stride)
-        For 'valid' padding: new_size = ceil((input_size - kernel_size + 1) / stride)
-
-    Attributes:
-        control_points: B-spline control points, shape (filters, input_channels,
-            kernel_h, kernel_w, grid_size + 1). Defines learnable activation curves.
-        w_spline: Combination weights for B-spline component, shape (filters,
-            input_channels, kernel_h, kernel_w).
-        w_silu: Combination weights for SiLU component, same shape as w_spline.
-        bias: Bias vector of shape (filters,) if use_bias=True, else None.
-        grid: Fixed grid points for B-spline interpolation in [-1, 1].
-
-    Example:
-        ```python
-        # Basic KAN convolution
-        kan_layer = KANvolution(filters=32, kernel_size=3)
-        inputs = keras.Input(shape=(224, 224, 3))
-        outputs = kan_layer(inputs)  # Shape: (batch, 224, 224, 32)
-
-        # Advanced configuration with regularization
-        kan_layer = KANvolution(
-            filters=64,
-            kernel_size=(5, 5),
-            grid_size=20,           # More complex activations
-            strides=(2, 2),         # Spatial downsampling
-            activation='gelu',
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a CNN architecture
-        inputs = keras.Input(shape=(32, 32, 3))
-        x = KANvolution(32, 3, activation='gelu')(inputs)
-        x = keras.layers.BatchNormalization()(x)
-        x = KANvolution(64, 3, strides=2)(x)
-        x = keras.layers.GlobalAveragePooling2D()(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    Note:
-        This implementation uses linear B-splines for computational efficiency
-        while preserving the learnable univariate function property central to
-        KAN theory. Input normalization via tanh ensures stable training dynamics.
-
-    Raises:
-        ValueError: If filters <= 0, grid_size <= 1, or kernel_size <= 0.
-        ValueError: If padding not in ['valid', 'same'].
-        ValueError: If input shape is not 4D during build.
+    :param filters: Number of output filters/channels. Must be positive.
+    :type filters: int
+    :param kernel_size: Spatial size of convolution kernel.
+    :type kernel_size: Union[int, Tuple[int, int]]
+    :param grid_size: Number of B-spline control points for learnable functions.
+        Higher values allow more complex activation shapes. Must be > 1.
+        Defaults to 16.
+    :type grid_size: int
+    :param strides: Stride length of convolution. Values > 1 reduce output size.
+        Defaults to (1, 1).
+    :type strides: Union[int, Tuple[int, int]]
+    :param padding: Either 'valid' or 'same' (case-insensitive). Defaults to 'same'.
+    :type padding: str
+    :param dilation_rate: Dilation rate for convolution. Values > 1 create
+        dilated/atrous convolution. Incompatible with strides > 1. Defaults to (1, 1).
+    :type dilation_rate: Union[int, Tuple[int, int]]
+    :param activation: Optional activation function applied after convolution.
+        Can be string name or callable. None means linear. Defaults to None.
+    :type activation: Optional[Union[str, Callable]]
+    :param use_bias: Whether to add learnable bias vector to outputs. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weight matrices. Defaults to
+        'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vector. Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer applied to all kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer applied to bias vector.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param activity_regularizer: Optional regularizer applied to layer output.
+    :type activity_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional arguments for Layer base class.
     """
 
     def __init__(
@@ -237,7 +185,13 @@ class KANvolution(keras.layers.Layer):
         self.grid = None
 
     def _normalize_kernel_size(self, kernel_size: Union[int, Tuple[int, int]]) -> Tuple[int, int]:
-        """Normalize kernel size to tuple format with validation."""
+        """Normalize kernel size to tuple format with validation.
+
+        :param kernel_size: Kernel size as int or tuple.
+        :type kernel_size: Union[int, Tuple[int, int]]
+        :return: Normalized kernel size tuple.
+        :rtype: Tuple[int, int]
+        """
         if isinstance(kernel_size, int):
             if kernel_size <= 0:
                 raise ValueError(f"kernel_size must be positive, got {kernel_size}")
@@ -257,7 +211,17 @@ class KANvolution(keras.layers.Layer):
         n: int,
         name: str
     ) -> Tuple[int, int]:
-        """Normalize tuple parameters with validation."""
+        """Normalize tuple parameters with validation.
+
+        :param value: Value to normalize.
+        :type value: Union[int, Tuple[int, int]]
+        :param n: Expected tuple length.
+        :type n: int
+        :param name: Parameter name for error messages.
+        :type name: str
+        :return: Normalized tuple.
+        :rtype: Tuple[int, int]
+        """
         if isinstance(value, int):
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
@@ -272,14 +236,10 @@ class KANvolution(keras.layers.Layer):
         return tuple(value)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's weights including B-spline control points and combination weights.
+        """Create the layer's weights including B-spline control points and combination weights.
 
-        This method creates all weight variables needed for the KAN transformation:
-        - Control points for B-spline interpolation
-        - Combination weights for spline and SiLU components
-        - Bias vector (if enabled)
-        - Fixed grid points for interpolation
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         logger.info(f"Building KANvolution layer with input shape: {input_shape}")
 
@@ -343,17 +303,15 @@ class KANvolution(keras.layers.Layer):
         logger.info("KANvolution layer built successfully")
 
     def _compute_bspline_basis(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Compute linear B-spline basis functions for input values.
+        """Compute linear B-spline basis functions for input values.
 
         Uses linear B-splines (degree 1) for computational efficiency while
         maintaining the learnable univariate function property of KANs.
 
-        Args:
-            x: Input tensor values, should be normalized to [-1, 1] range.
-
-        Returns:
-            Basis function weights for each grid point, shape (..., grid_size + 1).
+        :param x: Input tensor values, should be normalized to [-1, 1] range.
+        :type x: keras.KerasTensor
+        :return: Basis function weights for each grid point.
+        :rtype: keras.KerasTensor
         """
         # Clamp input to valid grid range for numerical stability
         x_clamped = ops.clip(x, -1.0, 1.0)
@@ -380,19 +338,17 @@ class KANvolution(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass applying KAN transformation followed by convolution.
+        """Forward pass applying KAN transformation followed by convolution.
 
         For computational efficiency, this implementation creates effective kernels
-        by combining the spline and SiLU weights. A full patch-wise KAN implementation
-        would be more computationally intensive but could provide additional flexibility.
+        by combining the spline and SiLU weights.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, height, width, channels).
-            training: Boolean indicating training mode (unused in this layer).
-
-        Returns:
-            Output tensor with shape (batch_size, new_height, new_width, filters).
+        :param inputs: Input tensor with shape (batch_size, height, width, channels).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode (unused in this layer).
+        :type training: Optional[bool]
+        :return: Output tensor with shape (batch_size, new_height, new_width, filters).
+        :rtype: keras.KerasTensor
         """
         # Create effective kernel weights by combining spline and SiLU components
         # This is a simplified implementation for computational efficiency
@@ -423,14 +379,12 @@ class KANvolution(keras.layers.Layer):
         return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape based on input shape and layer parameters.
+        """Compute output shape based on input shape and layer parameters.
 
-        Args:
-            input_shape: Input tensor shape (batch_size, height, width, channels).
-
-        Returns:
-            Output shape tuple (batch_size, new_height, new_width, filters).
+        :param input_shape: Input tensor shape (batch_size, height, width, channels).
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (batch_size, new_height, new_width, filters).
+        :rtype: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {input_shape}")
@@ -464,13 +418,10 @@ class KANvolution(keras.layers.Layer):
         return (batch_size, out_height, out_width, self.filters)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Must include ALL parameters from __init__ for proper reconstruction.
-
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

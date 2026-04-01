@@ -80,124 +80,80 @@ from keras import ops, layers, initializers, regularizers, constraints
 
 @keras.saving.register_keras_serializable()
 class RFFKernelLayer(keras.layers.Layer):
-    """
-    Random Fourier Features layer for efficient kernel approximation.
+    """Random Fourier Features layer for efficient kernel approximation.
 
-    This layer implements Random Fourier Features (RFF) which provide an efficient
-    approximation to translation-invariant kernels using random projections. It achieves
-    significant memory reduction (up to 1200x) compared to full kernel matrices while
-    maintaining comparable accuracy.
+    This layer approximates translation-invariant kernels (e.g. Gaussian RBF)
+    using a fixed random projection followed by a learnable linear layer.
+    Random frequencies ``omega ~ N(0, gamma^2 I)`` and phase shifts
+    ``b ~ Uniform(0, 2*pi)`` are sampled once and frozen; the explicit
+    feature map ``phi(x) = sqrt(2/D) * cos(x @ omega + b)`` is then
+    passed through a trainable dense projection. By Bochner's theorem the
+    inner product ``phi(x)^T phi(y)`` approximates the kernel
+    ``k(x,y) = exp(-gamma^2 ||x-y||^2)`` with ``O(D)`` memory instead of
+    the ``O(N^2)`` required by a full kernel matrix.
 
-    **Mathematical Foundation**:
+    **Architecture Overview:**
 
-    For translation-invariant kernels k(x, y) = k(x - y), the approximation is:
+    .. code-block:: text
 
-    .. math::
-        k(x, y) ≈ \\frac{1}{D} \\sum_{i=1}^{D} \\cos(\\omega_i^T x + b_i) \\cos(\\omega_i^T y + b_i)
+        ┌──────────────────────────────────┐
+        │  Input [..., input_dim]          │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Random projection (frozen)      │
+        │  z = x @ omega + b              │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Feature map                     │
+        │  phi(x) = sqrt(2/D) * cos(z)    │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Dense(output_dim) (trainable)   │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Optional activation             │
+        └──────────────┬───────────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Output [..., output_dim]        │
+        └──────────────────────────────────┘
 
-    Where:
-    - ω_i ~ N(0, γ²I) are random frequencies sampled from a Gaussian
-    - b_i ~ Uniform(0, 2π) are random phase shifts
-    - D is the number of random features
-
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           ↓
-    Random Projection: z = x @ ω + b
-           ↓
-    Feature Map: φ(x) = √(2/D) * cos(z)
-           ↓
-    Linear Transform: output = φ(x) @ W
-           ↓
-    Output(shape=[..., output_dim])
-    ```
-
-    **Key Benefits**:
-    - **Memory Efficiency**: O(D) memory instead of O(N²) for kernel matrices
-    - **Linear Scaling**: Computational cost scales linearly with dataset size
-    - **Accuracy Preservation**: Maintains kernel approximation quality
-
-    Args:
-        input_dim: Integer, dimensionality of the input features. Must be positive.
-            This determines the size of the random projection matrix ω.
-        output_dim: Integer, dimensionality of the output space. Must be positive.
-            If None, defaults to input_dim for autoencoder-like architectures.
-        n_features: Integer, number of random Fourier features. Must be positive.
-            Higher values give better kernel approximation but increase memory.
-            Typical values: 100-10000. Defaults to 1000.
-        gamma: Float, bandwidth parameter for the RBF kernel. Must be positive.
-            Controls the width of the kernel. Smaller values create wider kernels.
-            Related to RBF kernel as k(x,y) = exp(-γ²||x-y||²). Defaults to 1.0.
-        use_bias: Boolean, whether to use bias in the output linear layer.
-            Defaults to True.
-        activation: Optional activation function to apply after the linear transform.
-            Can be string name ('relu', 'gelu') or callable. None means linear.
-            Defaults to None.
-        kernel_initializer: Initializer for the output weight matrix.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for the output bias vector.
-            Only used when use_bias=True. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for the output weight matrix.
-        bias_regularizer: Optional regularizer for the output bias vector.
-        kernel_constraint: Optional constraint for the output weight matrix.
-        bias_constraint: Optional constraint for the output bias vector.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-        Most common: 2D tensor with shape `(batch_size, input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., output_dim)`.
-        Same rank as input, but last dimension changed to `output_dim`.
-
-    Attributes:
-        omega: Non-trainable weight matrix of shape (input_dim, n_features).
-            Random frequencies sampled from N(0, gamma²).
-        b: Non-trainable bias vector of shape (n_features,).
-            Random phase shifts sampled from Uniform(0, 2π).
-        linear: Dense layer for output transformation.
-
-    Example:
-        ```python
-        # Basic RFF layer for kernel approximation
-        rff_layer = RFFKernelLayer(
-            input_dim=784,
-            output_dim=128,
-            n_features=2000,
-            gamma=0.1
-        )
-
-        # Using in a model
-        inputs = keras.Input(shape=(784,))
-        features = rff_layer(inputs)  # Shape: (batch, 128)
-
-        # For classification with RFF features
-        rff = RFFKernelLayer(input_dim=256, output_dim=512, n_features=5000)
-        classifier = keras.Sequential([
-            rff,
-            keras.layers.Dense(10, activation='softmax')
-        ])
-
-        # Memory-efficient kernel machine
-        rff_kernel = RFFKernelLayer(
-            input_dim=1024,
-            output_dim=1024,  # Same as input for kernel-like behavior
-            n_features=100,    # Much smaller than O(N²) kernel matrix
-            gamma=0.01         # Wide kernel
-        )
-        ```
-
-    References:
-        - Random Features for Large-Scale Kernel Machines (Rahimi & Recht, 2007)
-        - Weighted Sums of Random Kitchen Sinks (Rahimi & Recht, 2008)
-
-    Note:
-        The random features (omega and b) are fixed after initialization and not
-        learned during training. This is intentional and key to the method's
-        efficiency. Only the output linear transformation is learned.
-    """
+    :param input_dim: Dimensionality of input features. Must be positive.
+    :type input_dim: int
+    :param output_dim: Dimensionality of the output. Defaults to
+        ``input_dim`` when ``None``.
+    :type output_dim: Optional[int]
+    :param n_features: Number of random Fourier features (``D``).
+    :type n_features: int
+    :param gamma: RBF kernel bandwidth parameter.
+    :type gamma: float
+    :param use_bias: Whether the output dense layer uses a bias.
+    :type use_bias: bool
+    :param activation: Optional activation after the linear transform.
+    :type activation: Optional[Union[str, callable]]
+    :param kernel_initializer: Initializer for output weight matrix.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for output bias vector.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for output weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for output bias.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kernel_constraint: Optional constraint for output weights.
+    :type kernel_constraint: Optional[constraints.Constraint]
+    :param bias_constraint: Optional constraint for output bias.
+    :type bias_constraint: Optional[constraints.Constraint]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -262,15 +218,10 @@ class RFFKernelLayer(keras.layers.Layer):
         self._scale_factor = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's weights including random features and output projection.
+        """Create random features and build the output projection.
 
-        This method creates the non-trainable random features (omega and b) that
-        form the basis of the RFF approximation, and builds the output Dense layer.
-
-        Args:
-            input_shape: Shape tuple of the input.
-        """
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         # Validate input shape
         if input_shape[-1] != self.input_dim:
             raise ValueError(
@@ -325,21 +276,14 @@ class RFFKernelLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply Random Fourier Features transformation.
+        """Apply the Random Fourier Features transformation.
 
-        Computes the RFF approximation by:
-        1. Projecting inputs through random frequencies
-        2. Applying cosine transformation with phase shifts
-        3. Scaling and passing through linear output layer
-
-        Args:
-            inputs: Input tensor of shape (batch_size, ..., input_dim).
-            training: Boolean indicating training mode (unused but kept for compatibility).
-
-        Returns:
-            Output tensor of shape (batch_size, ..., output_dim).
-        """
+        :param inputs: Input tensor ``(batch, ..., input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag (unused).
+        :type training: Optional[bool]
+        :return: Output tensor ``(batch, ..., output_dim)``.
+        :rtype: keras.KerasTensor"""
         # Random projection: z = x @ omega + b
         # Shape: (..., input_dim) @ (input_dim, n_features) -> (..., n_features)
         projection = ops.matmul(inputs, self.omega) + self.b
@@ -359,26 +303,21 @@ class RFFKernelLayer(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Shape tuple of the output.
-        """
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
         output_shape = list(input_shape)
         output_shape[-1] = self.output_dim
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'input_dim': self.input_dim,

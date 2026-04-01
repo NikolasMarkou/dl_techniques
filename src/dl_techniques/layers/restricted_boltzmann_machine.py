@@ -81,87 +81,65 @@ from typing import Optional, Tuple, Dict, Any
 
 @keras.saving.register_keras_serializable()
 class RestrictedBoltzmannMachine(keras.layers.Layer):
-    """
-    Restricted Boltzmann Machine (RBM) layer for unsupervised feature learning.
+    """Restricted Boltzmann Machine layer for unsupervised feature learning.
 
-    An RBM is an energy-based generative model with visible and hidden units
-    connected through symmetric weights. It learns to model the probability
-    distribution of input data through contrastive divergence training.
+    An RBM is an energy-based generative model defined on a bipartite
+    graph of visible and hidden units connected by symmetric weights
+    ``W``. The energy function
+    ``E(v, h) = -v^T W h - b^T v - c^T h``
+    induces a joint probability ``p(v,h) ~ exp(-E(v,h))``. Training
+    uses the Contrastive Divergence (CD-k) algorithm: a positive
+    phase computes ``<v_i h_j>_data``, then ``k`` Gibbs sampling steps
+    approximate the model expectation for the negative phase. Supports
+    both binary (Bernoulli) and Gaussian visible units.
 
-    **Architecture**:
-    ```
-    Visible Units (n_visible)
-           ↕ (symmetric weights W)
-    Hidden Units (n_hidden)
-    ```
+    **Architecture Overview:**
 
-    **Key Features**:
-    - Gibbs sampling for generating samples
-    - Contrastive Divergence (CD-k) training
-    - Binary and Gaussian visible units support
+    .. code-block:: text
 
-    **Training Process**:
-    The RBM is trained using Contrastive Divergence:
-    1. Positive phase: compute p(h|v) from data
-    2. Negative phase: k steps of Gibbs sampling
-    3. Update weights to maximize data likelihood
+        ┌──────────────────────────────────┐
+        │  Visible Units [n_visible]       │
+        │  (input data)                    │
+        └──────────────┬───────────────────┘
+                       │
+                       │  W [n_visible, n_hidden]
+                       │  (symmetric weights)
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Hidden Units [n_hidden]         │
+        │  P(h_j=1|v) = sigmoid(c_j+W'v)  │
+        └──────────────┬───────────────────┘
+                       │
+                       │  W^T (top-down)
+                       │
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Reconstruction [n_visible]      │
+        │  P(v_i|h) via Gibbs sampling     │
+        └──────────────────────────────────┘
 
-    **Usage Example**:
-    ```python
-    # Create RBM
-    rbm = RestrictedBoltzmannMachine(
-        n_hidden=128,
-        learning_rate=0.01,
-        n_gibbs_steps=1
-    )
-
-    # Build and train
-    rbm.build((None, 784))  # MNIST example
-    for epoch in range(epochs):
-        for batch in dataset:
-            loss = rbm.contrastive_divergence(batch)
-
-    # Transform data
-    hidden_repr = rbm.sample_hidden_given_visible(visible_data)
-    ```
-
-    Args:
-        n_hidden: Integer, number of hidden units. Must be positive.
-        learning_rate: Float, learning rate for CD training. Default: 0.01.
-        n_gibbs_steps: Integer, number of Gibbs sampling steps for CD.
-            Default: 1 (CD-1 algorithm).
-        visible_unit_type: String, type of visible units. Options:
-            - 'binary': Binary Bernoulli units (default)
-            - 'gaussian': Gaussian units for continuous data
-        use_bias: Boolean, whether to include bias terms. Default: True.
-        kernel_initializer: Initializer for weight matrix W.
-            Default: 'glorot_uniform'.
-        visible_bias_initializer: Initializer for visible bias.
-            Default: 'zeros'.
-        hidden_bias_initializer: Initializer for hidden bias.
-            Default: 'zeros'.
-        kernel_regularizer: Optional regularizer for weights.
-        name: String, layer name.
-        **kwargs: Additional keyword arguments for base Layer.
-
-    Attributes:
-        W: Weight matrix connecting visible and hidden units.
-            Shape: (n_visible, n_hidden)
-        visible_bias: Bias vector for visible units. Shape: (n_visible,)
-        hidden_bias: Bias vector for hidden units. Shape: (n_hidden,)
-
-    Raises:
-        ValueError: If n_hidden <= 0.
-        ValueError: If learning_rate <= 0.
-        ValueError: If n_gibbs_steps <= 0.
-        ValueError: If visible_unit_type not in ['binary', 'gaussian'].
-
-    References:
-        - Hinton, G. E. (2002). Training products of experts by minimizing
-          contrastive divergence. Neural computation, 14(8), 1771-1800.
-        - Hinton, G. E. (2010). A practical guide to training restricted
-          Boltzmann machines. UTML TR 2010-003.
-    """
+    :param n_hidden: Number of hidden units. Must be positive.
+    :type n_hidden: int
+    :param learning_rate: Learning rate for CD training.
+    :type learning_rate: float
+    :param n_gibbs_steps: Number of Gibbs sampling steps (CD-k).
+    :type n_gibbs_steps: int
+    :param visible_unit_type: Type of visible units, ``'binary'`` or
+        ``'gaussian'``.
+    :type visible_unit_type: str
+    :param use_bias: Whether to include bias terms.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for weight matrix ``W``.
+    :type kernel_initializer: str
+    :param visible_bias_initializer: Initializer for visible bias.
+    :type visible_bias_initializer: str
+    :param hidden_bias_initializer: Initializer for hidden bias.
+    :type hidden_bias_initializer: str
+    :param kernel_regularizer: Optional regularizer for weights.
+    :type kernel_regularizer: Optional[Any]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
 
     def __init__(
             self,
@@ -215,18 +193,10 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
         self.n_visible = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create RBM weight variables based on input shape.
+        """Create weight matrix and bias vectors.
 
-        This method initializes the weight matrix W and bias vectors for both
-        visible and hidden units. Called automatically on first forward pass.
-
-        Args:
-            input_shape: Shape tuple of input tensor. Last dimension is n_visible.
-
-        Raises:
-            ValueError: If last dimension of input_shape is None.
-        """
+        :param input_shape: Shape tuple; last dimension is ``n_visible``.
+        :type input_shape: Tuple[Optional[int], ...]"""
         self.n_visible = input_shape[-1]
         if self.n_visible is None:
             raise ValueError("Last dimension of input must be defined")
@@ -263,20 +233,14 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass: compute hidden representation given visible units.
+        """Compute hidden unit probabilities given visible units.
 
-        This is equivalent to calling `sample_hidden_given_visible` with
-        sampling disabled, returning the hidden unit activations.
-
-        Args:
-            inputs: Input tensor representing visible units.
-                Shape: (batch_size, n_visible)
-            training: Boolean, whether in training mode (unused for RBM).
-
-        Returns:
-            Hidden unit probabilities. Shape: (batch_size, n_hidden)
-        """
+        :param inputs: Visible unit tensor ``(batch, n_visible)``.
+        :type inputs: keras.KerasTensor
+        :param training: Training flag (unused).
+        :type training: Optional[bool]
+        :return: Hidden probabilities ``(batch, n_hidden)``.
+        :rtype: keras.KerasTensor"""
         hidden_probs = self._compute_hidden_probabilities(inputs)
         return hidden_probs
 
@@ -284,18 +248,12 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             self,
             visible: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute P(h=1|v) for all hidden units.
+        """Compute ``P(h=1|v)`` for all hidden units.
 
-        The probability that hidden unit j is active given visible state:
-        P(h_j=1|v) = sigmoid(c_j + sum_i(W_ij * v_i))
-
-        Args:
-            visible: Visible unit states. Shape: (batch_size, n_visible)
-
-        Returns:
-            Hidden unit probabilities. Shape: (batch_size, n_hidden)
-        """
+        :param visible: Visible unit states ``(batch, n_visible)``.
+        :type visible: keras.KerasTensor
+        :return: Hidden unit probabilities ``(batch, n_hidden)``.
+        :rtype: keras.KerasTensor"""
         activation = ops.matmul(visible, self.W)
         if self.use_bias:
             activation = ops.add(activation, self.hidden_bias)
@@ -305,21 +263,12 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             self,
             hidden: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute P(v=1|h) for binary or mean for Gaussian visible units.
+        """Compute ``P(v|h)`` (binary) or mean (Gaussian) for visible units.
 
-        For binary units:
-        P(v_i=1|h) = sigmoid(b_i + sum_j(W_ij * h_j))
-
-        For Gaussian units:
-        mean(v_i|h) = b_i + sum_j(W_ij * h_j)
-
-        Args:
-            hidden: Hidden unit states. Shape: (batch_size, n_hidden)
-
-        Returns:
-            Visible unit probabilities/means. Shape: (batch_size, n_visible)
-        """
+        :param hidden: Hidden unit states ``(batch, n_hidden)``.
+        :type hidden: keras.KerasTensor
+        :return: Visible probabilities or means ``(batch, n_visible)``.
+        :rtype: keras.KerasTensor"""
         activation = ops.matmul(hidden, ops.transpose(self.W))
         if self.use_bias:
             activation = ops.add(activation, self.visible_bias)
@@ -333,15 +282,12 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             self,
             probabilities: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Sample binary states from Bernoulli distribution.
+        """Sample binary states from a Bernoulli distribution.
 
-        Args:
-            probabilities: Activation probabilities. Shape: (batch_size, n_units)
-
-        Returns:
-            Binary samples {0, 1}. Shape: (batch_size, n_units)
-        """
+        :param probabilities: Activation probabilities ``(batch, n_units)``.
+        :type probabilities: keras.KerasTensor
+        :return: Binary samples ``{0, 1}`` of the same shape.
+        :rtype: keras.KerasTensor"""
         random_uniform = keras.random.uniform(
             shape=ops.shape(probabilities),
             dtype=probabilities.dtype
@@ -356,20 +302,14 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             visible: keras.KerasTensor,
             sample: bool = True
     ) -> keras.KerasTensor:
-        """
-        Sample or compute hidden unit activations given visible units.
+        """Compute or sample hidden activations given visible units.
 
-        This implements the bottom-up pass in the RBM, computing the probability
-        that each hidden unit is active, and optionally sampling binary states.
-
-        Args:
-            visible: Visible unit states. Shape: (batch_size, n_visible)
-            sample: Boolean, whether to sample binary states (True) or
-                return probabilities (False). Default: True.
-
-        Returns:
-            Hidden unit states or probabilities. Shape: (batch_size, n_hidden)
-        """
+        :param visible: Visible states ``(batch, n_visible)``.
+        :type visible: keras.KerasTensor
+        :param sample: If ``True`` return binary samples, else probabilities.
+        :type sample: bool
+        :return: Hidden states or probabilities ``(batch, n_hidden)``.
+        :rtype: keras.KerasTensor"""
         hidden_probs = self._compute_hidden_probabilities(visible)
         if sample:
             return self._sample_binary(hidden_probs)
@@ -380,20 +320,15 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             hidden: keras.KerasTensor,
             sample: bool = True
     ) -> keras.KerasTensor:
-        """
-        Sample or compute visible unit activations given hidden units.
+        """Compute or sample visible activations given hidden units.
 
-        This implements the top-down pass in the RBM, computing the probability
-        or mean for each visible unit, and optionally sampling states.
-
-        Args:
-            hidden: Hidden unit states. Shape: (batch_size, n_hidden)
-            sample: Boolean, whether to sample states (True) or return
-                probabilities/means (False). Default: True.
-
-        Returns:
-            Visible unit states or probabilities. Shape: (batch_size, n_visible)
-        """
+        :param hidden: Hidden states ``(batch, n_hidden)``.
+        :type hidden: keras.KerasTensor
+        :param sample: If ``True`` return sampled states, else
+            probabilities/means.
+        :type sample: bool
+        :return: Visible states or probabilities ``(batch, n_visible)``.
+        :rtype: keras.KerasTensor"""
         visible_probs = self._compute_visible_probabilities(hidden)
 
         if sample:
@@ -413,22 +348,12 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             self,
             visible: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Perform one step of Gibbs sampling: v -> h -> v'.
+        """Perform one Gibbs sampling step: ``v -> h -> v'``.
 
-        This is the core operation for contrastive divergence, alternating
-        between sampling hidden given visible and visible given hidden.
-
-        Args:
-            visible: Current visible unit states. Shape: (batch_size, n_visible)
-
-        Returns:
-            Tuple of (new_visible, hidden_probs):
-                - new_visible: Reconstructed visible units after one Gibbs step.
-                    Shape: (batch_size, n_visible)
-                - hidden_probs: Hidden unit probabilities used for reconstruction.
-                    Shape: (batch_size, n_hidden)
-        """
+        :param visible: Current visible states ``(batch, n_visible)``.
+        :type visible: keras.KerasTensor
+        :return: Tuple of (reconstructed visible, hidden probabilities).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]"""
         # Sample hidden given visible
         hidden = self.sample_hidden_given_visible(visible, sample=True)
 
@@ -444,33 +369,12 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             self,
             visible_data: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, Dict[str, keras.KerasTensor]]:
-        """
-        Train RBM using Contrastive Divergence algorithm.
+        """Train the RBM using CD-k and update weights in-place.
 
-        Contrastive Divergence (CD-k) approximates maximum likelihood learning
-        by running k steps of Gibbs sampling to estimate the model distribution.
-
-        **Algorithm**:
-        1. Positive phase: compute p(h|v_data)
-        2. Run k steps of Gibbs sampling to get v_model
-        3. Negative phase: compute p(h|v_model)
-        4. Update weights: ΔW ∝ (v_data * h_data - v_model * h_model)
-
-        Args:
-            visible_data: Input data batch. Shape: (batch_size, n_visible)
-
-        Returns:
-            Tuple of (reconstruction_error, metrics):
-                - reconstruction_error: Mean squared error between input and
-                    reconstruction. Scalar tensor.
-                - metrics: Dictionary containing:
-                    - 'reconstruction_error': Same as first return value
-                    - 'free_energy_diff': Difference in free energy (positive/negative)
-
-        Notes:
-            This method updates the RBM weights in-place using gradient descent.
-            For integration with Keras training loops, use a custom training step.
-        """
+        :param visible_data: Input data batch ``(batch, n_visible)``.
+        :type visible_data: keras.KerasTensor
+        :return: Tuple of (reconstruction_error, metrics dict).
+        :rtype: Tuple[keras.KerasTensor, Dict[str, keras.KerasTensor]]"""
         # Ensure weights are built
         if not self.built:
             self.build(ops.shape(visible_data))
@@ -549,20 +453,12 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
         return reconstruction_error, metrics
 
     def _free_energy(self, visible: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Compute free energy of visible configuration.
+        """Compute free energy ``F(v) = -b'v - sum log(1+exp(c_j+W_j'v))``.
 
-        The free energy is used to compute the probability of a visible
-        configuration and monitor training progress.
-
-        F(v) = -b'v - sum_j log(1 + exp(c_j + W_j'v))
-
-        Args:
-            visible: Visible unit states. Shape: (batch_size, n_visible)
-
-        Returns:
-            Free energy for each sample. Shape: (batch_size,)
-        """
+        :param visible: Visible states ``(batch, n_visible)``.
+        :type visible: keras.KerasTensor
+        :return: Free energy per sample ``(batch,)``.
+        :rtype: keras.KerasTensor"""
         wx_b = ops.matmul(visible, self.W)
         if self.use_bias:
             wx_b = ops.add(wx_b, self.hidden_bias)
@@ -583,19 +479,14 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             visible: keras.KerasTensor,
             n_steps: int = 1
     ) -> keras.KerasTensor:
-        """
-        Reconstruct visible units through Gibbs sampling.
+        """Reconstruct visible units via Gibbs sampling.
 
-        This method is useful for visualization and assessing how well the
-        RBM has learned to model the data distribution.
-
-        Args:
-            visible: Input visible units. Shape: (batch_size, n_visible)
-            n_steps: Number of Gibbs sampling steps. Default: 1.
-
-        Returns:
-            Reconstructed visible units. Shape: (batch_size, n_visible)
-        """
+        :param visible: Input visible states ``(batch, n_visible)``.
+        :type visible: keras.KerasTensor
+        :param n_steps: Number of Gibbs steps.
+        :type n_steps: int
+        :return: Reconstructed visible ``(batch, n_visible)``.
+        :rtype: keras.KerasTensor"""
         reconstructed = visible
         for _ in range(n_steps):
             reconstructed, _ = self.gibbs_sampling_step(reconstructed)
@@ -605,27 +496,21 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape for forward pass.
+        """Compute the output shape of the forward pass.
 
-        Args:
-            input_shape: Input shape tuple. Shape: (batch_size, n_visible)
-
-        Returns:
-            Output shape tuple. Shape: (batch_size, n_hidden)
-        """
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ``(batch, n_hidden)``.
+        :rtype: Tuple[Optional[int], ...]"""
         output_shape = list(input_shape)
         output_shape[-1] = self.n_hidden
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return layer configuration for serialization.
+        """Return layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor arguments needed to
-            reconstruct the layer.
-        """
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'n_hidden': self.n_hidden,

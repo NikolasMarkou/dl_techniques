@@ -70,112 +70,71 @@ from .transformers.transformer import TransformerLayer
 
 @keras.saving.register_keras_serializable()
 class RouterLayer(keras.layers.Layer):
-    """
-    Wraps a TransformerLayer with a Dr.LLM-style dynamic routing mechanism.
+    """Dynamic router wrapping a TransformerLayer for adaptive computation.
 
-    This layer adds a lightweight router that decides on a per-sequence basis
-    whether to skip, execute once, or repeat the wrapped TransformerLayer.
-    This enables adaptive computation, saving resources on simpler inputs while
-    allowing deeper processing for more complex ones.
+    This layer adds a lightweight routing MLP that decides, on a
+    per-sequence basis, whether to **skip** (identity), **execute** once,
+    or **repeat** twice the wrapped ``TransformerLayer``. The decision
+    is based on a windowed mean-pooling summary of the input sequence
+    passed through a two-layer bottleneck MLP producing logits for
+    ``{SKIP=0, EXECUTE=1, REPEAT=2}``. During training, teacher-forced
+    decisions can be supplied; at inference, ``argmax`` is used. All
+    three computational paths are evaluated and selected via a one-hot
+    mask for hardware-accelerator-friendly execution.
 
-    **Intent**: To provide a retrofittable routing module that follows modern Keras
-    3 best practices, ensuring robust serialization and clear separation of concerns
-    as outlined in the comprehensive guide.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., seq_len, hidden_size])
-           │
-           ├─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
-           │                                                                 │
-           ↓                                                                 ↓
-    Windowed Mean Pooling (Summarize input)                             (Pass-through for execution)
-           ↓
-    Router MLP: Dense(bottleneck) -> GELU -> Dense(3)
-           ↓
-    Logits for {SKIP, EXECUTE, REPEAT}
-           ↓
-    Decision (argmax during inference, or teacher-forced)
-           │
-           ├──────────────────────────┬──────────────────────────┐
-           ↓                          ↓                          ↓
-    SKIP (Identity)         EXECUTE (x1 Transformer)    REPEAT (x2 Transformer)
-           │                          │                          │
-           └──────────────────────────┼──────────────────────────┘
-                                      ↓
-                      Output(shape=[..., seq_len, hidden_size])
-    ```
+    .. code-block:: text
 
-    **Data Flow**:
-    1.  **Summarization**: The input sequence is divided into N windows, and the
-        hidden states in each window are mean-pooled to create a compact summary.
-    2.  **Decision**: The summary is passed through a small bottleneck MLP to
-        produce logits for three actions: {SKIP, EXECUTE, REPEAT}.
-    3.  **Execution**: Based on the chosen action, the wrapped TransformerLayer
-        is applied 0, 1, or 2 times to the original, full-sequence input.
+        ┌────────────────────────────────────────┐
+        │  Input [B, seq_len, hidden_size]       │
+        └───────────┬────────────────────────────┘
+                    │
+            ┌───────┴──────────────────────┐
+            ▼                              ▼
+        ┌────────────────┐       ┌──────────────────┐
+        │ Windowed Mean  │       │ (pass-through    │
+        │ Pool → summary │       │  for execution)  │
+        └───────┬────────┘       └──────────────────┘
+                │
+                ▼
+        ┌────────────────────────────────┐
+        │  Router MLP:                   │
+        │  Dense(bottleneck) → GELU →   │
+        │  Dense(3) → logits            │
+        └───────┬────────────────────────┘
+                │
+        ┌───────┴───────┬───────────────┐
+        ▼               ▼               ▼
+    ┌────────┐   ┌────────────┐   ┌─────────────┐
+    │ SKIP   │   │ EXECUTE x1 │   │ REPEAT x2   │
+    │(ident.)│   │ Transformer│   │ Transformer  │
+    └───┬────┘   └─────┬──────┘   └──────┬──────┘
+        │              │                 │
+        └──────────────┼─────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Select path via one-hot mask          │
+        │  Output [B, seq_len, hidden_size]      │
+        │  + logits [B, 3]                       │
+        └────────────────────────────────────────┘
 
-    Args:
-        transformer_layer: An instantiated `TransformerLayer` to be wrapped.
-            This layer's configuration is preserved and serialized.
-        router_bottleneck_dim: Integer, the hidden dimension of the router's MLP.
-            Defaults to 128 as suggested in the Dr.LLM paper.
-        num_windows: Integer, the number of windows for pooling the input sequence
-            to generate the router's summary. Defaults to 8.
-        kernel_initializer: Initializer for the router's kernel weights.
-        bias_initializer: Initializer for the router's bias weights.
-        kernel_regularizer: Optional regularizer for the router's kernel weights.
-        bias_regularizer: Optional regularizer for the router's bias weights.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
-
-    Input shape:
-        - `inputs`: 3D tensor `(batch_size, sequence_length, hidden_size)`.
-        - `attention_mask`: Optional mask passed to the inner transformer.
-        - `layer_idx`: Integer layer index, passed to the inner transformer.
-        - `layer_decision`: Optional 1D int tensor `(batch_size,)` for
-          teacher-forcing. Values in {0: SKIP, 1: EXECUTE, 2: REPEAT}.
-        - `training`: Boolean flag for training mode.
-
-    Output:
-        A tuple containing:
-        - `layer_output`: 3D tensor `(batch_size, sequence_length, hidden_size)`.
-        - `logits`: 2D tensor `(batch_size, 3)` for the router's decision.
-
-    Attributes:
-        transformer_layer: The wrapped `TransformerLayer` instance.
-        router_bottleneck: The first Dense layer of the router MLP.
-        router_output: The final Dense layer of the router MLP producing logits.
-
-    Example:
-        ```python
-        # 1. Create the base transformer layer
-        transformer_block = TransformerLayer(
-            hidden_size=512,
-            num_heads=8,
-            intermediate_size=2048
-        )
-
-        # 2. Wrap it with the RouterLayer
-        router_block = RouterLayer(
-            transformer_layer=transformer_block,
-            router_bottleneck_dim=128,
-            num_windows=8
-        )
-
-        # 3. Use in a model
-        inputs = keras.Input(shape=(256, 512))
-        # The layer returns two outputs
-        processed_output, decision_logits = router_block(inputs)
-        model = keras.Model(inputs, [processed_output, decision_logits])
-
-        # During training, you might provide teacher-forced decisions
-        # and use the logits for a cross-entropy loss.
-        ```
-
-    Note:
-        This implementation follows the "Composite Layer" pattern. All sub-layers
-        are created in `__init__` and explicitly built in `build()` to guarantee
-        correct behavior during serialization and weight restoration.
-    """
+    :param transformer_layer: Instantiated ``TransformerLayer`` to wrap.
+    :type transformer_layer: TransformerLayer
+    :param router_bottleneck_dim: Hidden dimension of the router MLP.
+    :type router_bottleneck_dim: int
+    :param num_windows: Number of windows for input summarisation.
+    :type num_windows: int
+    :param kernel_initializer: Initializer for router kernel weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for router bias weights.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for router kernels.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for router biases.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
     def __init__(
         self,
         transformer_layer: TransformerLayer,
@@ -232,12 +191,10 @@ class RouterLayer(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization,
-        following the guide's "Composite Layer" pattern.
-        """
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]"""
         # --- Build Sub-layers ---
         # 1. Build the wrapped transformer layer with the main input shape
         self.transformer_layer.build(input_shape)
@@ -265,7 +222,20 @@ class RouterLayer(keras.layers.Layer):
         layer_decision: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Forward pass of the RouterLayer."""
+        """Forward pass: route input through skip, execute, or repeat.
+
+        :param inputs: Input tensor ``(batch, seq_len, hidden_size)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param layer_idx: Layer index passed to the transformer.
+        :type layer_idx: int
+        :param layer_decision: Optional teacher-forced decisions ``(batch,)``.
+        :type layer_decision: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Tuple of (output tensor, router logits).
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]"""
         # --- 1. Router Logic: Generate decision logits ---
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -341,13 +311,21 @@ class RouterLayer(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """Computes the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Tuple of (tensor shape, logits shape).
+        :rtype: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]"""
         tensor_shape = tuple(input_shape)
         logits_shape = (input_shape[0], 3)
         return tensor_shape, logits_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the configuration of the layer for serialization."""
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
         config = super().get_config()
         config.update({
             'transformer_layer': keras.saving.serialize_keras_object(self.transformer_layer),
@@ -362,7 +340,12 @@ class RouterLayer(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'RouterLayer':
-        """Creates a layer from its config, properly deserializing sub-layers."""
+        """Create a layer from its config, deserialising sub-layers.
+
+        :param config: Configuration dictionary from ``get_config()``.
+        :type config: Dict[str, Any]
+        :return: New ``RouterLayer`` instance.
+        :rtype: RouterLayer"""
         config['transformer_layer'] = keras.saving.deserialize_keras_object(config['transformer_layer'])
         return cls(**config)
 

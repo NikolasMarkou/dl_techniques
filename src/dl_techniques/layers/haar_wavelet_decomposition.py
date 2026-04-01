@@ -3,6 +3,8 @@ Haar Wavelet Decomposition Layer supporting multi-dimensional inputs.
 
 This module provides a Keras layer for Haar Discrete Wavelet Transform (DWT)
 decomposition that works with timeseries (1D), images (2D), and voxels (3D).
+The Haar wavelet computes averages (approximation) and differences (detail)
+coefficients at each level, halving spatial resolution per dimension.
 """
 
 import keras
@@ -14,65 +16,44 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 @keras.saving.register_keras_serializable()
 class HaarWaveletDecomposition(keras.layers.Layer):
     """
-    Performs Haar Discrete Wavelet Transform (DWT) decomposition.
+    Perform Haar Discrete Wavelet Transform (DWT) decomposition.
 
     Decomposes an input signal into multiple frequency bands using the Haar
-    wavelet basis. The Haar wavelet is the simplest wavelet and computes
-    averages (approximation) and differences (detail) coefficients.
+    wavelet basis, computing averages (low-pass / approximation) and differences
+    (high-pass / detail) at each level with normalization factor 1/sqrt(2).
+    Supports 1D signals [batch, seq_len, channels], 2D signals [batch, H, W,
+    channels] producing (LL, LH, HL, HH) subbands, and 3D signals [batch, D,
+    H, W, channels] producing 7 detail subbands per level.
 
-    Supports:
-        - 1D signals (timeseries): Input shape [batch, seq_len, channels]
-        - 2D signals (images): Input shape [batch, height, width, channels]
-        - 3D signals (voxels): Input shape [batch, depth, height, width, channels]
+    **Architecture Overview:**
 
-    **Architecture (1D example)**::
+    .. code-block:: text
 
-        Input(shape=[batch, seq_len, channels])
-               ↓
-        For each decomposition level:
-               ↓
-          +----+----+
-          ↓         ↓
-        Low-pass  High-pass
-        (approx)  (detail)
-          ↓         ↓
-          +----+----+
-               ↓
-        Output: List of [approx, detail_1, ..., detail_K]
-
-    **Architecture (2D example)**::
-
-        Input(shape=[batch, H, W, channels])
-               ↓
-        For each decomposition level:
-               ↓
-          +----+----+----+----+
-          ↓    ↓    ↓    ↓
-         LL   LH   HL   HH
-          ↓    ↓    ↓    ↓
-          +----+----+----+----+
-               ↓
-        Output: List of [approx, details_1, ..., details_K]
-                where each details_i is a tuple of (LH, HL, HH)
+        ┌────────────────────────────────────────────┐
+        │  Input (1D/2D/3D signal)                   │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │  For each decomposition level (1..K):      │
+        │  ┌────────────┬────────────┐               │
+        │  │  Low-pass   │  High-pass │  (1D)        │
+        │  │  (approx)   │  (detail)  │              │
+        │  └─────┬──────┴─────┬──────┘               │
+        │        │            │                       │
+        │  ┌─────┴────┐ ┌────┴─────────────────┐     │
+        │  │ LL (next  │ │ LH, HL, HH          │(2D) │
+        │  │  input)   │ │ (detail subbands)    │     │
+        │  └───────────┘ └─────────────────────┘     │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │  Output: [approx, details_K, ..., details_1]│
+        └────────────────────────────────────────────┘
 
     :param num_levels: Number of decomposition levels. Each level halves
         the spatial resolution along each dimension. Defaults to 3.
     :type num_levels: int
     :param kwargs: Additional arguments for the Layer base class.
-
-    :raises ValueError: If num_levels < 1.
-
-    Example::
-
-        # 1D timeseries
-        layer = HaarWaveletDecomposition(num_levels=3)
-        x = keras.random.normal((2, 128, 16))
-        coeffs = layer(x)  # [approx, detail_3, detail_2, detail_1]
-
-        # 2D images
-        layer = HaarWaveletDecomposition(num_levels=2)
-        x = keras.random.normal((2, 64, 64, 3))
-        coeffs = layer(x)  # [approx, (LH2, HL2, HH2), (LH1, HL1, HH1)]
     """
 
     def __init__(
@@ -80,8 +61,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         num_levels: int = 3,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the Haar Wavelet Decomposition layer.
+        """Initialize the Haar Wavelet Decomposition layer.
 
         :param num_levels: Number of decomposition levels.
         :type num_levels: int
@@ -98,8 +78,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self._ndim: Optional[int] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer by determining input dimensionality.
+        """Build the layer by determining input dimensionality.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
@@ -129,16 +108,15 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> List[Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]:
-        """
-        Apply Haar DWT decomposition.
+        """Apply Haar DWT decomposition.
 
         :param inputs: Input tensor.
         :type inputs: keras.KerasTensor
         :param training: Training mode flag (unused).
         :type training: Optional[bool]
-        :return: List of frequency bands. For 1D: [approx, detail_1, ..., detail_K].
-            For 2D/3D: [approx, (details_1), ..., (details_K)] where each
-            details tuple contains the detail coefficients for that level.
+        :return: List of frequency bands. For 1D: [approx, detail_1, ...,
+            detail_K]. For 2D/3D: [approx, (details_1), ..., (details_K)]
+            where each details tuple contains the detail coefficients.
         :rtype: List[Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]
         """
         if self._ndim == 1:
@@ -152,8 +130,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         inputs: keras.KerasTensor
     ) -> List[keras.KerasTensor]:
-        """
-        Perform 1D Haar wavelet decomposition.
+        """Perform 1D Haar wavelet decomposition.
 
         :param inputs: Input tensor of shape [batch, seq_len, channels].
         :type inputs: keras.KerasTensor
@@ -189,8 +166,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         inputs: keras.KerasTensor
     ) -> List[Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]:
-        """
-        Perform 2D Haar wavelet decomposition.
+        """Perform 2D Haar wavelet decomposition.
 
         :param inputs: Input tensor of shape [batch, height, width, channels].
         :type inputs: keras.KerasTensor
@@ -246,8 +222,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         inputs: keras.KerasTensor
     ) -> List[Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]:
-        """
-        Perform 3D Haar wavelet decomposition.
+        """Perform 3D Haar wavelet decomposition.
 
         :param inputs: Input tensor of shape [batch, depth, height, width, channels].
         :type inputs: keras.KerasTensor
@@ -340,8 +315,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]]:
-        """
-        Compute output shapes for all frequency bands.
+        """Compute output shapes for all frequency bands.
 
         :param input_shape: Input shape tuple.
         :type input_shape: Tuple[Optional[int], ...]
@@ -366,7 +340,13 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> List[Tuple[Optional[int], ...]]:
-        """Compute output shapes for 1D decomposition."""
+        """Compute output shapes for 1D decomposition.
+
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: List of output shapes.
+        :rtype: List[Tuple[Optional[int], ...]]
+        """
         batch_size = input_shape[0]
         seq_len = input_shape[1]
         channels = input_shape[2]
@@ -394,7 +374,13 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]]:
-        """Compute output shapes for 2D decomposition."""
+        """Compute output shapes for 2D decomposition.
+
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: List of output shapes.
+        :rtype: List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]]
+        """
         batch_size = input_shape[0]
         height = input_shape[1]
         width = input_shape[2]
@@ -430,7 +416,13 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]]:
-        """Compute output shapes for 3D decomposition."""
+        """Compute output shapes for 3D decomposition.
+
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: List of output shapes.
+        :rtype: List[Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]]
+        """
         batch_size = input_shape[0]
         depth = input_shape[1]
         height = input_shape[2]
@@ -470,8 +462,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         return shapes
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]
@@ -484,8 +475,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "HaarWaveletDecomposition":
-        """
-        Create layer from configuration dictionary.
+        """Create layer from configuration dictionary.
 
         :param config: Configuration dictionary.
         :type config: Dict[str, Any]
