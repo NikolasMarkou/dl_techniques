@@ -66,66 +66,55 @@ from typing import Optional, Union, Dict, Any, Tuple
 @keras.saving.register_keras_serializable()
 class SpatialAttention(keras.layers.Layer):
     """
-    Spatial attention module of CBAM (Convolutional Block Attention Module).
+    Spatial attention module from CBAM that identifies informative spatial regions.
 
-    This module applies spatial attention using channel-wise pooling operations
-    followed by a convolution operation to generate spatial attention maps.
-    The attention mechanism focuses on 'where' to pay attention in the spatial
-    dimension by utilizing inter-spatial relationships of features.
+    Implements the spatial attention mechanism from the Convolutional Block
+    Attention Module (CBAM). The module compresses channel information via
+    parallel average and max pooling along the channel axis, concatenates the
+    resulting 2D maps, and applies a convolution with sigmoid activation to
+    produce a spatial attention mask via
+    ``M_s(F) = sigma(f^{k x k}([AvgPool(F); MaxPool(F)]))``.
 
-    The spatial attention is computed as:
-    1. Apply average pooling and max pooling across the channel dimension
-    2. Concatenate the pooled feature maps
-    3. Apply a 7x7 convolution followed by sigmoid activation
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        Ms(F) = σ(f^(7×7)([AvgPool(F); MaxPool(F)]))
+    .. code-block:: text
 
-    Where σ denotes the sigmoid function, f^(7×7) represents a convolution
-    operation with a filter size of 7×7, and [;] denotes concatenation.
+        Input [B, H, W, C]
+              │
+              ├────────────────────┐
+              ▼                    ▼
+        ┌──────────────┐   ┌──────────────┐
+        │ AvgPool      │   │ MaxPool      │
+        │ axis=C       │   │ axis=C       │
+        │ → [B,H,W,1]  │   │ → [B,H,W,1]  │
+        └──────┬───────┘   └──────┬───────┘
+               │                   │
+               └──── Concat ───────┘
+                       ▼
+                 [B, H, W, 2]
+                       ▼
+               ┌───────────────┐
+               │ Conv2D(k×k,1) │
+               │ + Sigmoid     │
+               └───────┬───────┘
+                       ▼
+                 [B, H, W, 1]
 
-    Args:
-        kernel_size: Integer, size of the convolution kernel. Must be odd and positive.
-            Defaults to 7 following the original CBAM paper.
-        kernel_initializer: String or keras.initializers.Initializer instance.
-            Initializer for the convolution kernel weights.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional keras.regularizers.Regularizer instance.
-            Regularizer function applied to the convolution kernel weights.
-            Defaults to None.
-        use_bias: Boolean, whether to include bias in the convolution layer.
-            Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param kernel_size: Size of the convolution kernel. Must be odd and
+        positive. Defaults to 7 following the original CBAM paper.
+    :type kernel_size: int
+    :param kernel_initializer: Initializer for the convolution kernel
+        weights. Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for the convolution
+        kernel weights. Defaults to ``None``.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param use_bias: Whether to include bias in the convolution layer.
+        Defaults to ``True``.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, 1)`
-
-    Attributes:
-        conv: Conv2D layer that generates the spatial attention map.
-
-    Example:
-        ```python
-        # Basic usage
-        inputs = keras.Input(shape=(224, 224, 64))
-        attention = SpatialAttention()(inputs)
-        attended = keras.layers.Multiply()([inputs, attention])
-
-        # Custom configuration
-        spatial_attn = SpatialAttention(
-            kernel_size=5,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-        ```
-
-    References:
-        - CBAM: Convolutional Block Attention Module, Woo et al., ECCV 2018
-        - https://arxiv.org/abs/1807.06521
-
-    Raises:
-        ValueError: If kernel_size is not positive or not odd.
+    :raises ValueError: If ``kernel_size`` is not positive or not odd.
     """
 
     def __init__(
@@ -169,9 +158,9 @@ class SpatialAttention(keras.layers.Layer):
         Creates weight variables for the convolution layer based on the
         expected input shape after channel-wise pooling and concatenation.
 
-        Args:
-            input_shape: Shape tuple indicating the input shape of the layer.
-                Expected to be (batch_size, height, width, channels).
+        :param input_shape: Shape tuple of the input tensor. Expected to be
+            ``(batch_size, height, width, channels)``.
+        :type input_shape: tuple
         """
         # Build the convolution layer with concatenated pooling features (2 channels)
         # After avg_pool and max_pool concatenation, we have 2 channels
@@ -189,22 +178,19 @@ class SpatialAttention(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply spatial attention to input tensor.
+        Apply spatial attention to the input tensor.
 
-        Computes spatial attention by:
-        1. Applying average and max pooling across channel dimension
-        2. Concatenating the pooled features
-        3. Applying convolution with sigmoid activation
-
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            attention_mask: Optional attention mask tensor.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode. Passed to the convolution layer.
-
-        Returns:
-            Spatial attention map of shape (batch_size, height, width, 1).
-            Values are in range [0, 1] due to sigmoid activation.
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask tensor.
+        :type attention_mask: keras.KerasTensor or None
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: bool or None
+        :return: Spatial attention map of shape
+            ``(batch_size, height, width, 1)`` with values in ``[0, 1]``.
+        :rtype: keras.KerasTensor
         """
         # Apply channel-wise pooling to compress channel information
         avg_pool = keras.ops.mean(inputs, axis=-1, keepdims=True)  # (B, H, W, 1)
@@ -225,12 +211,10 @@ class SpatialAttention(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-                Expected format: (batch_size, height, width, channels)
-
-        Returns:
-            Output shape tuple: (batch_size, height, width, 1)
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple ``(batch_size, height, width, 1)``.
+        :rtype: tuple
         """
         # Output has same spatial dimensions but single channel
         output_shape = list(input_shape)
@@ -239,11 +223,10 @@ class SpatialAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the layer configuration for serialization.
+        Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration with all
-            parameters needed to reconstruct the layer.
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

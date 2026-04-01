@@ -6,28 +6,6 @@ creating an information bottleneck through a small, fixed set of "anchor"
 tokens. It is designed to reduce the quadratic complexity of attention for
 long sequences while preserving the model's ability to access global context.
 
-Architecture Overview::
-
-    Standard Self-Attention (O(N²)):
-    ┌─────────────────────────────────────┐
-    │  Token₁ ←→ Token₂ ←→ Token₃ ←→ ...  │  All tokens attend to all others
-    │    ↑↓       ↑↓       ↑↓             │  (quadratic in sequence length)
-    │  Token₄ ←→ Token₅ ←→ Token₆ ←→ ...  │
-    └─────────────────────────────────────┘
-
-    Anchor Attention (O(K² + (N-K)·K)):
-    ┌─────────────────────────────────────────────────────────────┐
-    │                    ANCHOR TOKENS (K)                        │
-    │              ┌───────────────────────┐                      │
-    │              │  A₁ ←→ A₂ ←→ ... ←→ Aₖ │  Full self-attention│
-    │              └───────────────────────┘  among anchors       │
-    │                  ↑   ↑   ↑   ↑   ↑                          │
-    │    ┌─────────────┼───┼───┼───┼───┼──────────────────┐       │
-    │    │             │   │   │   │   │                  │       │
-    │    Q₁           Q₂  Q₃  Q₄  ...  Qₘ                 │       │
-    │    QUERY TOKENS (N-K): Cross-attend to anchors only │       │
-    └─────────────────────────────────────────────────────────────┘
-
 The architecture transforms the standard all-to-all attention graph
 into a two-tier, hub-and-spoke model:
 
@@ -38,6 +16,11 @@ into a two-tier, hub-and-spoke model:
 2.  **Query Tokens**: The remaining tokens. To save computation, these
     tokens do not attend to each other. Instead, they perform cross-attention
     only to the anchor tokens, reading from the global summary.
+
+The complexity reduction is: standard self-attention is ``O(N^2 * d)``,
+while anchor attention is ``O(K^2 * d + (N-K) * K * d) ~ O(N * K * d)``
+when ``K << N``. For K=32 and N=4096, this yields approximately 128x
+reduction in attention computation.
 
 References:
     - Beltagy, I., et al. (2020). "Longformer: The Long-Document Transformer".
@@ -64,204 +47,123 @@ class AnchorAttention(keras.layers.Layer):
 
     This layer implements a memory-efficient attention mechanism that reduces
     computational complexity for long sequences while maintaining representational
-    power through a hierarchical two-tier structure.
+    power through a hierarchical two-tier structure. It operates in two modes:
 
-    **Intent**: Provide a scalable attention alternative that reduces the O(N²)
-    complexity of standard self-attention to approximately O(K² + N·K) where K
-    is a small fixed number of anchor tokens, enabling efficient processing of
-    long sequences.
+    - **Standard Mode** (``num_anchor_tokens=None``): Full self-attention over all
+      tokens with ``O(N^2)`` complexity, using configurable probability activation
+      (softmax, sparsemax, etc.).
+    - **Hierarchical Mode** (``num_anchor_tokens=K > 0``): Anchor tokens perform
+      full self-attention among themselves, while query tokens cross-attend only to
+      the anchors, achieving ``O(K^2 + N*K)`` complexity.
 
-    **Architecture**::
+    The mathematical operations are:
 
-        ┌──────────────────────────────────────────────────────────────────────┐
-        │                         STANDARD MODE                                │
-        │                    (num_anchor_tokens=None)                          │
-        │                                                                      │
-        │    Input(batch, seq, dim)                                            │
-        │           │                                                          │
-        │           ├──────────────┬──────────────┐                            │
-        │           ↓              ↓              ↓                            │
-        │      ┌────────┐    ┌────────┐    ┌────────┐                          │
-        │      │ Q Proj │    │ K Proj │    │ V Proj │                          │
-        │      └────┬───┘    └────┬───┘    └────┬───┘                          │
-        │           │             │             │                              │
-        │           ↓             ↓             ↓                              │
-        │    (batch, heads, seq, head_dim)     (batch, heads, seq, head_dim)   │
-        │           │             │             │                              │
-        │           └──────┬──────┘             │                              │
-        │                  ↓                    │                              │
-        │         ┌────────────────┐            │                              │
-        │         │  Scaled Dot-   │            │                              │
-        │         │  Product Attn  │            │                              │
-        │         │  Q @ K^T / √d  │            │                              │
-        │         └───────┬────────┘            │                              │
-        │                 ↓                     │                              │
-        │         ┌────────────────┐            │                              │
-        │         │  Probability   │            │                              │
-        │         │  Activation    │◄───────────┤                              │
-        │         └───────┬────────┘            │                              │
-        │                 ↓                     │                              │
-        │         ┌────────────────┐            │                              │
-        │         │    Dropout     │            │                              │
-        │         └───────┬────────┘            │                              │
-        │                 ↓                     ↓                              │
-        │         ┌────────────────────────────────┐                           │
-        │         │      Attn @ V                  │                           │
-        │         └───────────────┬────────────────┘                           │
-        │                         ↓                                            │
-        │                  ┌────────────┐                                      │
-        │                  │ Output Proj│                                      │
-        │                  └─────┬──────┘                                      │
-        │                        ↓                                             │
-        │               Output(batch, seq, dim)                                │
-        └──────────────────────────────────────────────────────────────────────┘
+    Standard: ``Q = X @ W_q, K = X @ W_k, V = X @ W_v;
+    Output = Probability(Q @ K^T / sqrt(d_k)) @ V @ W_o``
 
-        ┌──────────────────────────────────────────────────────────────────────┐
-        │                       HIERARCHICAL MODE                              │
-        │                   (num_anchor_tokens=K > 0)                          │
-        │                                                                      │
-        │    Input(batch, seq, dim)                                            │
-        │           │                                                          │
-        │           ├─────────────────────────────┐                            │
-        │           ↓                             ↓                            │
-        │    Anchor Tokens[:K]              Query Tokens[K:]                   │
-        │           │                             │                            │
-        │     ┌─────┴─────┐                       │                            │
-        │     ↓     ↓     ↓                       ↓                            │
-        │   Q_anc K_anc V_anc               Q_query (separate proj)            │
-        │     │     │     │                       │                            │
-        │     │     │     │                       │                            │
-        │     ↓     ↓     │                       │                            │
-        │  ┌──────────┐   │                       │                            │
-        │  │Reshape to│   │                       │                            │
-        │  │multi-head│   │                       │                            │
-        │  └────┬─────┘   │                       │                            │
-        │       │         │                       │                            │
-        │       ↓         ↓                       ↓                            │
-        │    Combined Q = [Q_anc; Q_query]                                     │
-        │    (batch, heads, seq, head_dim)                                     │
-        │           │                                                          │
-        │           ↓                                                          │
-        │    ┌─────────────────────────────────────┐                           │
-        │    │  All tokens attend ONLY to anchors  │                           │
-        │    │     scores = Q_all @ K_anc^T / √d   │                           │
-        │    │     (batch, heads, seq, K)          │                           │
-        │    └────────────────┬────────────────────┘                           │
-        │                     ↓                                                │
-        │           Probability Activation                                     │
-        │                     ↓                                                │
-        │                  Dropout                                             │
-        │                     ↓                                                │
-        │             ┌───────────────┐                                        │
-        │             │ Attn @ V_anc  │                                        │
-        │             └───────┬───────┘                                        │
-        │                     ↓                                                │
-        │              Output Projection                                       │
-        │                     ↓                                                │
-        │            Output(batch, seq, dim)                                   │
-        └──────────────────────────────────────────────────────────────────────┘
+    Hierarchical: ``Q_combined = [Q_anchor; Q_query];
+    scores = Q_combined @ K_anchor^T / sqrt(d_k);
+    Output = Probability(scores) @ V_anchor @ W_o``
 
-    **Mathematical Operations**:
+    **Architecture Overview:**
 
-    Standard Mode::
+    .. code-block:: text
 
-        Q = X @ W_q,  K = X @ W_k,  V = X @ W_v
-        Attention(Q, K, V) = Probability(Q @ K^T / √d_k) @ V
-        Output = Attention @ W_o
+        Standard Mode (num_anchor_tokens=None):
 
-    Hierarchical Mode::
+        ┌─────────────────────────────────────────────────────────┐
+        │  Input [B, seq, dim]                                    │
+        │         │                                               │
+        │         ├──────────────┬──────────────┐                 │
+        │         ▼              ▼              ▼                 │
+        │    ┌────────┐    ┌────────┐    ┌────────┐              │
+        │    │ Q Proj │    │ K Proj │    │ V Proj │              │
+        │    └───┬────┘    └───┬────┘    └───┬────┘              │
+        │        │             │             │                   │
+        │        ▼             ▼             │                   │
+        │     scores = Q @ K^T / sqrt(d_k)   │                   │
+        │        │                           │                   │
+        │        ▼                           │                   │
+        │   Probability Activation           │                   │
+        │        │                           │                   │
+        │        ▼                           ▼                   │
+        │     Dropout ──► weights @ V                            │
+        │        │                                               │
+        │        ▼                                               │
+        │   Output Projection                                    │
+        │        │                                               │
+        │        ▼                                               │
+        │  Output [B, seq, dim]                                  │
+        └─────────────────────────────────────────────────────────┘
 
-        X_anchor = X[:, :K, :],  X_query = X[:, K:, :]
-        Q_anchor = X_anchor @ W_q,  K_anchor = X_anchor @ W_k,  V_anchor = X_anchor @ W_v
-        Q_query = X_query @ W_q_token
-        Q_combined = Concat([Q_anchor, Q_query], axis=seq)
-        scores = Q_combined @ K_anchor^T / √d_k       # (batch, heads, N, K)
-        Attn = Probability(scores) @ V_anchor
-        Output = Attn @ W_o
+        Hierarchical Mode (num_anchor_tokens=K > 0):
 
-    **Complexity Analysis**::
+        ┌─────────────────────────────────────────────────────────┐
+        │  Input [B, seq, dim]                                    │
+        │         │                                               │
+        │         ├─────────────────────────────┐                 │
+        │         ▼                             ▼                 │
+        │  Anchor Tokens [:K]            Query Tokens [K:]        │
+        │         │                             │                 │
+        │   ┌─────┴─────┐                      │                 │
+        │   ▼     ▼     ▼                      ▼                 │
+        │  Q_a  K_a   V_a               Q_query (sep. proj)      │
+        │   │     │     │                      │                 │
+        │   │     │     │                      │                 │
+        │   ▼     │     │                      │                 │
+        │  Q_combined = [Q_a ; Q_query]         │                 │
+        │         │                             │                 │
+        │         ▼                             │                 │
+        │  scores = Q_combined @ K_a^T / sqrt(d_k)               │
+        │         │                                               │
+        │         ▼                                               │
+        │  Probability Activation                                 │
+        │         │                                               │
+        │         ▼                                               │
+        │      Dropout ──► weights @ V_a                         │
+        │         │                                               │
+        │         ▼                                               │
+        │  Output Projection                                      │
+        │         │                                               │
+        │         ▼                                               │
+        │  Output [B, seq, dim]                                   │
+        └─────────────────────────────────────────────────────────┘
 
-        Standard Self-Attention: O(N² · d)
-        Anchor Attention:        O(K² · d + (N-K) · K · d) ≈ O(N · K · d)  when K << N
-
-        For K=32 and N=4096: ~128x reduction in attention computation
-
-    Args:
-        dim: Integer, input/output dimension of the attention layer.
-            Must be positive and divisible by num_heads.
-        num_heads: Integer, number of attention heads.
-            Must be positive and divide dim evenly.
-        head_dim: Optional integer, dimension of each attention head.
-            If None, computed as dim // num_heads. Defaults to None.
-        dropout_rate: Float, dropout rate applied to attention weights.
-            Must be in range [0.0, 1.0]. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in linear projections.
-            Defaults to True.
-        probability_type: String, type of probability function for attention
-            scores (e.g., 'softmax', 'sparsemax', 'adaptive').
-            Defaults to 'softmax'.
-        probability_config: Optional dictionary containing configuration for
-            the probability layer. Defaults to None.
-        kernel_initializer: String or Initializer instance for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer instance for bias vectors.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-            Defaults to None.
-        bias_regularizer: Optional regularizer for bias weights.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        3D tensor with shape: ``(batch_size, sequence_length, dim)``.
-
-    Output shape:
-        3D tensor with shape: ``(batch_size, sequence_length, dim)``.
-        Shape is preserved through the attention operation.
-
-    Attributes:
-        dim: Output dimensionality.
-        num_heads: Number of attention heads.
-        head_dim: Dimension per attention head.
-        scale: Scaling factor (1/√head_dim) for attention scores.
-        query_proj: Dense projection for queries (anchor tokens and standard mode).
-        key_proj: Dense projection for keys.
-        value_proj: Dense projection for values.
-        query_token_proj: Separate Dense projection for query tokens in
-            hierarchical mode.
-        output_proj: Dense projection for output.
-        score_activation: ProbabilityOutput layer for attention normalization.
-        dropout_layer: Optional Dropout layer for attention weights.
-
-    Example:
-        >>> # Standard self-attention
-        >>> layer = AnchorAttention(dim=256, num_heads=8)
-        >>> x = keras.random.normal((2, 100, 256))
-        >>> output = layer(x)  # (2, 100, 256)
-        >>>
-        >>> # Hierarchical anchor attention with 16 anchors
-        >>> output = layer(x, num_anchor_tokens=16)  # (2, 100, 256)
-        >>>
-        >>> # With custom probability function and regularization
-        >>> layer = AnchorAttention(
-        ...     dim=512,
-        ...     num_heads=8,
-        ...     dropout_rate=0.1,
-        ...     probability_type='sparsemax',
-        ...     kernel_regularizer=keras.regularizers.L2(1e-4)
-        ... )
-
-    Note:
-        - When ``num_anchor_tokens`` is None or >= sequence_length, standard
-          self-attention is applied.
-        - Query tokens use a separate projection (``query_token_proj``) in
-          hierarchical mode to allow differentiated representations.
-        - The layer is designed for scenarios where global context is important
-          but quadratic attention is prohibitive (e.g., long documents, genomics).
-
-    References:
-        - Beltagy et al. (2020). "Longformer: The Long-Document Transformer"
-        - Lee et al. (2019). "Set Transformer"
+    :param dim: Integer, input/output dimension of the attention layer.
+        Must be positive and divisible by num_heads.
+    :type dim: int
+    :param num_heads: Integer, number of attention heads.
+        Must be positive and divide dim evenly.
+    :type num_heads: int
+    :param head_dim: Optional integer, dimension of each attention head.
+        If None, computed as ``dim // num_heads``. Defaults to None.
+    :type head_dim: Optional[int]
+    :param dropout_rate: Float, dropout rate applied to attention weights.
+        Must be in range [0.0, 1.0]. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Boolean, whether to use bias in linear projections.
+        Defaults to True.
+    :type use_bias: bool
+    :param probability_type: String, type of probability function for attention
+        scores (e.g., 'softmax', 'sparsemax', 'adaptive').
+        Defaults to 'softmax'.
+    :type probability_type: str
+    :param probability_config: Optional dictionary containing configuration for
+        the probability layer. Defaults to None.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param kernel_initializer: String or Initializer instance for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: String or Initializer instance for bias vectors.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+        Defaults to None.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+        Defaults to None.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
@@ -279,8 +181,7 @@ class AnchorAttention(keras.layers.Layer):
             bias_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the AnchorAttention layer.
+        """Initialize the AnchorAttention layer.
 
         Creates all sub-layers and validates configuration parameters.
         """
@@ -317,7 +218,7 @@ class AnchorAttention(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Scaling factor: 1/√d_k
+        # Scaling factor: 1/sqrt(d_k)
         self.scale = 1.0 / np.sqrt(float(self.head_dim))
 
         # ---------------------------------------------------------------------
@@ -385,12 +286,11 @@ class AnchorAttention(keras.layers.Layer):
         Validates input shape and explicitly builds all sub-layers to ensure
         proper weight initialization for serialization.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-                Expected format: ``(batch_size, sequence_length, dim)``.
+        :param input_shape: Shape tuple of the input tensor, expected as
+            ``(batch_size, sequence_length, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Raises:
-            ValueError: If input is not 3D or last dimension doesn't match dim.
+        :raises ValueError: If input is not 3D or last dimension does not match dim.
         """
         if len(input_shape) != 3:
             raise ValueError(f"Input must be 3D, got shape {input_shape}")
@@ -432,16 +332,17 @@ class AnchorAttention(keras.layers.Layer):
         Routes to either standard self-attention or hierarchical anchor attention
         based on the ``num_anchor_tokens`` parameter.
 
-        Args:
-            x: Input tensor of shape ``(batch_size, seq_len, dim)``.
-            num_anchor_tokens: Optional integer specifying number of anchor tokens
-                from the beginning of the sequence. If None, applies standard
-                self-attention to all tokens. Defaults to None.
-            training: Boolean indicating training mode for dropout.
-                Defaults to None.
-
-        Returns:
-            Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :param x: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type x: keras.KerasTensor
+        :param num_anchor_tokens: Optional integer specifying number of anchor tokens
+            from the beginning of the sequence. If None, applies standard
+            self-attention to all tokens. Defaults to None.
+        :type num_anchor_tokens: Optional[int]
+        :param training: Boolean indicating training mode for dropout.
+            Defaults to None.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :rtype: keras.KerasTensor
         """
         if num_anchor_tokens is None:
             return self._standard_attention(x, training)
@@ -456,14 +357,14 @@ class AnchorAttention(keras.layers.Layer):
         """
         Apply standard multi-head self-attention to all tokens.
 
-        All tokens attend to all other tokens with O(N²) complexity.
+        All tokens attend to all other tokens with ``O(N^2)`` complexity.
 
-        Args:
-            x: Input tensor of shape ``(batch_size, seq_len, dim)``.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :param x: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type x: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(x)[0]
         seq_len = ops.shape(x)[1]
@@ -514,13 +415,14 @@ class AnchorAttention(keras.layers.Layer):
         Anchor tokens perform full self-attention among themselves, while
         query tokens only cross-attend to the anchors.
 
-        Args:
-            x: Input tensor of shape ``(batch_size, seq_len, dim)``.
-            num_anchor_tokens: Number of anchor tokens (first K tokens).
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :param x: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type x: keras.KerasTensor
+        :param num_anchor_tokens: Number of anchor tokens (first K tokens).
+        :type num_anchor_tokens: int
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(x)[0]
         seq_len = ops.shape(x)[1]
@@ -608,24 +510,20 @@ class AnchorAttention(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute output shape, identical to input shape.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Shape tuple identical to input_shape (shape-preserving layer).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape tuple identical to input_shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor arguments needed to
-            recreate the layer.
+        :return: Dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

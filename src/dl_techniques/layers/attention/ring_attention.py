@@ -4,58 +4,16 @@ Exact attention for long sequences via blockwise processing.
 This layer implements Ring Attention, a memory-efficient algorithm that
 makes it possible to apply transformer attention to sequences of nearly
 unlimited length. It overcomes the quadratic memory complexity of standard
-attention by computing the attention matrix in smaller, fixed-size blocks.
-
-Architecture:
-    The primary obstacle in scaling attention is the materialization of the
-    full attention matrix `A = Q @ K.T`, which has a memory footprint of
-    O(N^2) where N is the sequence length. Ring Attention avoids this by
-    never constructing the full matrix.
-
-    The core architectural change is to partition the sequence into blocks of a
-    fixed `block_size`. The computation is then restructured as a nested
-    loop: for each query block `Q_i`, the algorithm iterates through all
-    key-value blocks `(K_j, V_j)`. At each step, it computes a partial score
-    matrix of size `(block_size, block_size)`, uses it to update a running
-    tally of the attention output for `Q_i`, and then discards the partial
-    matrix. The memory usage is thus decoupled from the sequence length N
-    and instead depends on the `block_size`, reducing memory complexity
-    from O(N^2) to O(block_size^2).
-
-Foundational Mathematics:
-    The key challenge is ensuring that this blockwise computation is
-    mathematically identical to standard attention. This is achieved using
-    an "online softmax" algorithm. The standard softmax function requires a
-    normalization term (the sum of all exponentials) that can only be
-    computed after seeing all scores.
-
-    The online softmax overcomes this by maintaining running statistics. For
-    each query block, as it iterates through key blocks, it tracks:
-    1.  `m_i`: The maximum score encountered so far.
-    2.  `O_i`: The accumulated, unnormalized attention output.
-    3.  `l_i`: The accumulated softmax denominator (sum of exponentials).
-
-    When a new block of scores is computed, the new global maximum `m_{i+1}`
-    is found. The previous running statistics `O_i` and `l_i` are then
-    rescaled by a factor of `exp(m_i - m_{i+1})` to align them with the new
-    maximum. The contributions from the current block are then computed
-    using this new maximum and added to the rescaled running statistics.
-    This iterative update, particularly the rescaling step, is a numerically
-    stable way to compute the exact softmax value without needing all scores
-    simultaneously. The final, correctly normalized attention output for the
-    query block is obtained only after iterating through all key-value blocks.
+attention by computing the attention matrix in smaller, fixed-size blocks,
+reducing memory from ``O(N^2)`` to ``O(block_size^2)`` while maintaining
+exact mathematical equivalence through online softmax computation.
 
 References:
-    - The primary algorithm and its application in blockwise transformers:
-      Liu, H., et al. (2023). "Ring Attention with Blockwise Transformers for
+    - Liu, H., et al. (2023). "Ring Attention with Blockwise Transformers for
       Near-Infinite Context."
-
-    - The foundational online softmax algorithm:
-      Milakov, M. & Gimelshein, N. (2018). "Online normalizer calculation
+    - Milakov, M. & Gimelshein, N. (2018). "Online normalizer calculation
       for softmax."
-
-    - A related work that popularized blockwise attention for hardware efficiency:
-      Dao, T., et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact
+    - Dao, T., et al. (2022). "FlashAttention: Fast and Memory-Efficient Exact
       Attention with IO-Awareness."
 """
 
@@ -75,177 +33,94 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class RingAttention(keras.layers.Layer):
-    """
-    Ring Attention layer with blockwise processing for extremely long sequences.
+    """Ring Attention with blockwise processing for extremely long sequences.
 
-    This layer implements the Ring Attention algorithm that enables processing of
-    very long sequences (millions of tokens) by computing attention in blocks while
-    maintaining exact mathematical equivalence to standard attention through online
-    softmax computation.
+    Implements the Ring Attention algorithm that partitions the sequence into
+    fixed-size blocks and computes attention incrementally using online softmax.
+    For each query block ``Q_i``, the algorithm iterates through all key-value
+    blocks ``(K_j, V_j)``, computing partial scores
+    ``S_ij = Q_i K_j^T / sqrt(d_k)`` and maintaining running statistics:
+    ``m_new = max(m_prev, max(S_ij))``,
+    ``O_new = O_prev * exp(m_prev - m_new) + exp(S_ij - m_new) V_j``,
+    ``l_new = l_prev * exp(m_prev - m_new) + sum(exp(S_ij - m_new))``.
+    The final output is ``O / l``, which is mathematically identical to standard
+    attention without ever materializing the full ``N x N`` attention matrix.
 
-    **Intent**: Provide a production-ready Ring Attention implementation that enables
-    transformer models to process extremely long sequences without memory constraints,
-    particularly beneficial for document understanding, long-form generation, and
-    scientific text processing.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input [B, seq_len, dim]
-           ↓
-    Q_proj → Q [B, seq_len, num_heads, head_dim]
-    K_proj → K [B, seq_len, num_heads, head_dim]
-    V_proj → V [B, seq_len, num_heads, head_dim]
-           ↓
-    Split into blocks: Q_blocks, K_blocks, V_blocks
-           ↓
-    For each Q_block:
-      ├─ Initialize running stats (max, sum, output)
-      ├─ For each K_block, V_block:
-      │   ├─ Compute scores: S = Q_block @ K_block^T
-      │   ├─ Update max and renormalize previous
-      │   ├─ Compute attention: exp(S - max) @ V_block
-      │   └─ Accumulate to running output
-      └─ Normalize final output
-           ↓
-    Concatenate Q_block outputs → [B, seq_len, num_heads, head_dim]
-           ↓
-    Reshape → [B, seq_len, dim]
-           ↓
-    Output_proj → Output [B, seq_len, dim]
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Projections**: Q = X W_q, K = X W_k, V = X W_v
-    2. **Blocking**: Split along seq_len into blocks of size block_size
-    3. **Online Softmax**: For each (Q_i, K_j, V_j) block pair:
-       - S_ij = Q_i K_j^T / √d_k
-       - m_new = max(m_prev, max(S_ij))
-       - prev_renorm = exp(m_prev - m_new)
-       - curr_weights = exp(S_ij - m_new)
-       - output = prev_output * prev_renorm + curr_weights @ V_j
-    4. **Final normalization**: output / sum_exp
+        ┌───────────────────────────────┐
+        │ Input [B, seq_len, dim]       │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Q = W_q(X), K = W_k(X),      │
+        │ V = W_v(X)                    │
+        │ [B, heads, seq_len, head_dim] │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Split into blocks of size B_s │
+        │ Q_blocks, K_blocks, V_blocks  │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │ For each Q_block_i:                   │
+        │ ┌───────────────────────────────────┐ │
+        │ │ Init: m=-inf, l=0, O=0            │ │
+        │ ├───────────────────────────────────┤ │
+        │ │ For each (K_j, V_j):              │ │
+        │ │  S = Q_i @ K_j^T * scale          │ │
+        │ │  m_new = max(m, max(S))           │ │
+        │ │  O = O * exp(m-m_new)             │ │
+        │ │      + exp(S-m_new) @ V_j         │ │
+        │ │  l = l * exp(m-m_new)             │ │
+        │ │      + sum(exp(S-m_new))          │ │
+        │ │  m = m_new                        │ │
+        │ └───────────────────────────────────┘ │
+        │ Output_i = O / l                      │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Concatenate block outputs     │
+        │ Reshape → [B, seq_len, dim]   │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ W_o output projection         │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Output [B, seq_len, dim]      │
+        └───────────────────────────────┘
 
-    Args:
-        dim: Integer, input/output dimension (embedding size). Must be positive and
-            divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive. Defaults to 8.
-        block_size: Integer, sequence block size for processing. Larger blocks use
-            more memory but may be more efficient. Must be positive. Defaults to 512.
-        dropout_rate: Float, dropout rate applied to attention weights.
-            Must be between 0.0 and 1.0. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in linear projections.
-            Defaults to False.
-        kernel_initializer: String or initializer instance, initializer for
-            kernel weights. Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer instance, initializer for
-            bias weights. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer parent class.
+    :param dim: Input/output dimension (embedding size). Must be positive and
+        divisible by num_heads.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param block_size: Sequence block size for processing. Larger blocks use
+        more memory but may be more efficient.
+    :type block_size: int
+    :param dropout_rate: Dropout rate for attention weights, between 0.0 and 1.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear projections.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer parent class.
+    :type kwargs: Any
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`
-
-    Attributes:
-        w_q: Dense layer for query projection with shape (dim, num_heads * head_dim).
-        w_k: Dense layer for key projection with shape (dim, num_heads * head_dim).
-        w_v: Dense layer for value projection with shape (dim, num_heads * head_dim).
-        w_o: Dense layer for output projection with shape (num_heads * head_dim, dim).
-        dropout: Dropout layer for attention weights.
-
-    Call arguments:
-        inputs: Input tensor of shape `(batch_size, seq_len, dim)`.
-        training: Boolean indicating training or inference mode. Affects dropout.
-        attention_mask: Optional attention mask of shape `(batch_size, seq_len, seq_len)`
-            or `(batch_size, 1, seq_len, seq_len)`. Values should be 1 for
-            positions to attend to and 0 for masked positions.
-        return_attention_weights: Boolean, whether to return attention weights
-            along with the output. Defaults to False. Note: Returns None for
-            attention_weights due to blockwise computation.
-
-    Returns:
-        If return_attention_weights=False:
-            Output tensor of shape `(batch_size, seq_len, dim)`
-        If return_attention_weights=True:
-            Tuple of (output, None) where None is returned for attention_weights
-            as full attention matrix is not materialized in blockwise computation.
-
-    Example:
-        ```python
-        # Basic usage for very long sequences
-        ring_attn = RingAttention(
-            dim=768,
-            num_heads=12,
-            block_size=1024,  # Process in 1K token blocks
-            dropout_rate=0.1
-        )
-
-        # Process 100K token sequence
-        long_inputs = keras.Input(shape=(100000, 768))
-        outputs = ring_attn(long_inputs)
-
-        # Advanced configuration
-        ring_attn = RingAttention(
-            dim=1024,
-            num_heads=16,
-            block_size=512,
-            dropout_rate=0.05,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a transformer decoder for long context
-        class LongContextTransformerBlock(keras.layers.Layer):
-            def __init__(self, dim, **kwargs):
-                super().__init__(**kwargs)
-                self.attention = RingAttention(
-                    dim=dim, num_heads=16, block_size=1024
-                )
-                self.norm1 = keras.layers.LayerNormalization()
-                self.norm2 = keras.layers.LayerNormalization()
-                self.ffn = keras.Sequential([
-                    keras.layers.Dense(dim * 4, activation='gelu'),
-                    keras.layers.Dense(dim)
-                ])
-
-            def call(self, inputs):
-                # Self-attention with Ring Attention
-                normed = self.norm1(inputs)
-                attn_out = self.attention(normed)
-                x = inputs + attn_out
-
-                # Feed-forward network
-                normed = self.norm2(x)
-                ffn_out = self.ffn(normed)
-                return x + ffn_out
-
-        # Multi-layer long context model
-        def create_long_context_model(seq_len=1000000, dim=1024):
-            inputs = keras.Input(shape=(seq_len, dim))
-            x = inputs
-            for i in range(12):  # 12 layers
-                x = LongContextTransformerBlock(dim, name=f'layer_{i}')(x)
-            return keras.Model(inputs, x)
-        ```
-
-    Raises:
-        ValueError: If dim is not positive or not divisible by num_heads.
-        ValueError: If num_heads or block_size are not positive.
-        ValueError: If dropout_rate is not between 0.0 and 1.0.
-
-    Note:
-        This implementation focuses on memory efficiency for extremely long sequences.
-        The block_size parameter controls the memory-compute tradeoff: larger blocks
-        use more memory but may have better computational efficiency.
-
-        For distributed training across multiple devices (as in the original paper),
-        additional infrastructure would be needed to handle ring communication
-        patterns between devices.
-
-        The attention_weights return is None because Ring Attention doesn't
-        materialize the full attention matrix, which is key to its memory efficiency.
+    :raises ValueError: If dim is not positive or not divisible by num_heads.
+    :raises ValueError: If num_heads or block_size are not positive.
+    :raises ValueError: If dropout_rate is not between 0.0 and 1.0.
     """
 
     def __init__(
@@ -335,17 +210,18 @@ class RingAttention(keras.layers.Layer):
             block_size: int,
             dropout_rate: float
     ) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        Args:
-            dim: Model dimension to validate.
-            num_heads: Number of attention heads to validate.
-            block_size: Block size for sequence processing to validate.
-            dropout_rate: Dropout rate to validate.
+        :param dim: Model dimension to validate.
+        :type dim: int
+        :param num_heads: Number of attention heads to validate.
+        :type num_heads: int
+        :param block_size: Block size for sequence processing to validate.
+        :type block_size: int
+        :param dropout_rate: Dropout rate to validate.
+        :type dropout_rate: float
 
-        Raises:
-            ValueError: If any parameter is invalid.
+        :raises ValueError: If any parameter is invalid.
         """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -359,14 +235,10 @@ class RingAttention(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers for robust serialization.
 
-        This method explicitly builds each sub-layer for robust serialization
-        support, ensuring all weight variables exist before weight restoration.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build sub-layers in computational order
         self.w_q.build(input_shape)
@@ -390,24 +262,23 @@ class RingAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             return_attention_weights: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, None]]:
-        """
-        Apply ring attention with blockwise processing.
+        """Apply ring attention with blockwise processing.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim).
-            training: Boolean, whether in training mode. Affects dropout behavior.
-            attention_mask: Optional attention mask of shape (batch_size, seq_len, seq_len)
-                or (batch_size, 1, seq_len, seq_len). Values should be 1 for
-                positions to attend to and 0 for masked positions.
-            return_attention_weights: Boolean, whether to return attention weights.
-                Always returns None for attention weights due to blockwise processing.
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode. Affects dropout behavior.
+        :type training: Optional[bool]
+        :param attention_mask: Optional attention mask of shape
+            ``(batch_size, seq_len, seq_len)`` or
+            ``(batch_size, 1, seq_len, seq_len)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param return_attention_weights: Whether to return attention weights.
+            Always returns ``None`` due to blockwise processing.
+        :type return_attention_weights: bool
 
-        Returns:
-            If return_attention_weights=False:
-                Output tensor of shape (batch_size, seq_len, dim)
-            If return_attention_weights=True:
-                Tuple of (output, None) - None returned for attention_weights
-                as full attention matrix is not materialized.
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+            If return_attention_weights is ``True``, returns ``(output, None)``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, None]]
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -455,24 +326,21 @@ class RingAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Core blockwise attention computation with online softmax.
+        """Compute blockwise attention with online softmax.
 
-        This implements the Ring Attention algorithm:
-        1. Split sequence into blocks
-        2. For each query block, process all key/value blocks incrementally
-        3. Maintain running softmax statistics for numerical stability
-        4. Accumulate attention outputs
+        :param queries: Query tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type queries: keras.KerasTensor
+        :param keys: Key tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type keys: keras.KerasTensor
+        :param values: Value tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type values: keras.KerasTensor
+        :param attention_mask: Optional mask for attention computation.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
 
-        Args:
-            queries: Query tensor of shape (batch, num_heads, seq_len, head_dim).
-            keys: Key tensor of shape (batch, num_heads, seq_len, head_dim).
-            values: Value tensor of shape (batch, num_heads, seq_len, head_dim).
-            attention_mask: Optional mask for attention computation.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Attention output of shape (batch, num_heads, seq_len, head_dim).
+        :return: Attention output of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(queries)[0]
         num_heads = self.num_heads
@@ -587,27 +455,21 @@ class RingAttention(keras.layers.Layer):
         return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Output shape tuple, same as input shape for attention layers.
+        :return: Output shape tuple, same as input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns ALL configuration parameters passed to __init__ for proper
-        serialization and deserialization.
-
-        Returns:
-            Dictionary containing the layer configuration with all parameters
-            required to recreate this layer.
+        :return: Dictionary containing all parameters required to recreate this layer.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

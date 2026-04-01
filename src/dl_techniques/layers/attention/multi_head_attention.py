@@ -21,15 +21,15 @@ through learned linear projections: a Query (Q), a Key (K), and a Value (V).
 The core mathematical operation computes a compatibility score between the
 Query of one element and the Key of every other element in the sequence via a
 dot product. These scores are then scaled and passed through a softmax
-function to create a set of attention weights—a probability distribution
+function to create a set of attention weights---a probability distribution
 indicating how much attention the current element should pay to every other
 element. The final output for the current element is a weighted sum of all
 Value vectors in the sequence, using the computed attention weights.
 
-The formula is: `Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V`
+The formula is: ``Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V``
 
 The "multi-head" aspect enhances this mechanism's power. Instead of a single
-set of Q, K, V projections, the input is projected into multiple (`h`) lower-
+set of Q, K, V projections, the input is projected into multiple (``h``) lower-
 dimensional subspaces. Scaled dot-product attention is then performed in
 parallel within each of these "heads." This allows the model to jointly attend
 to information from different representation subspaces at different positions.
@@ -62,85 +62,70 @@ class MultiHeadAttention(keras.layers.Layer):
     Multi-Head Self-Attention mechanism with comprehensive masking support.
 
     This layer provides a clean interface for self-attention operations by wrapping
-    the more general `MultiHeadCrossAttention` layer. It demonstrates the wrapper
+    the more general ``MultiHeadCrossAttention`` layer. It demonstrates the wrapper
     pattern for creating specialized interfaces while maintaining robust serialization
     and leveraging existing, well-tested implementations.
 
-    **Intent**: Provide a streamlined, user-friendly interface specifically for
-    self-attention use cases (vision_heads transformers, sequence modeling) while
-    internally leveraging the robust `MultiHeadCrossAttention` implementation
-    with its comprehensive serialization support and flexible masking capabilities.
+    The self-attention computation follows: ``Attention(Q, K, V) = softmax((QK^T) / sqrt(d_k)) * V``
+    where Q, K, and V are all derived from the same input via learned linear projections.
+    The "multi-head" mechanism projects input into ``num_heads`` parallel subspaces, performs
+    scaled dot-product attention independently in each, concatenates the results, and applies
+    a final linear projection.
 
-    **Architecture**:
-    ```
-    Input [B, seq, dim]
-           ↓
-    MultiHeadCrossAttention(shared_qk_projections=True)
-           ↓ (self-attention mode)
-    Q, K, V = QKV_proj(input)
-           ↓
-    Attention(Q, K, V) + Masking
-           ↓
-    Output [B, seq, dim]
-    ```
+    **Architecture Overview:**
 
-    **Wrapper Pattern Benefits**:
-    - **Simplified Interface**: Focused API for self-attention use cases
-    - **Robust Implementation**: Leverages battle-tested `MultiHeadCrossAttention`
-    - **Consistent Behavior**: Same masking and serialization as cross-attention
-    - **Maintenance**: Single source of truth for attention mechanisms
+    .. code-block:: text
 
-    Args:
-        dim: Integer, dimension of input embeddings. Must be positive
-            and divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive.
-            Defaults to 8.
-        dropout_rate: Float, dropout rate for attention weights. Must be between
-            0.0 and 1.0. Defaults to 0.0.
-        kernel_initializer: String or Initializer for weight matrices.
-            Defaults to "he_normal".
-        kernel_regularizer: Optional regularizer for weight matrices.
-        use_bias: Boolean, whether to use bias in dense layers.
-            Defaults to False.
-        **kwargs: Additional layer arguments.
+        ┌───────────────────────────────────────────────────────┐
+        │              MultiHeadAttention Wrapper                │
+        │                                                       │
+        │   Input [B, seq, dim]                                 │
+        │          │                                            │
+        │          ▼                                            │
+        │   ┌─────────────────────────────────────────────┐     │
+        │   │  MultiHeadCrossAttention                    │     │
+        │   │  (shared_qk_projections=True, self-attn)    │     │
+        │   │                                             │     │
+        │   │   Input ──► QKV_proj ──► Q, K, V            │     │
+        │   │                  │                          │     │
+        │   │                  ▼                          │     │
+        │   │        scores = Q @ K^T / sqrt(d_k)         │     │
+        │   │                  │                          │     │
+        │   │                  ▼                          │     │
+        │   │        [+ attention_mask]                    │     │
+        │   │                  │                          │     │
+        │   │                  ▼                          │     │
+        │   │        softmax ──► weights @ V              │     │
+        │   │                  │                          │     │
+        │   │                  ▼                          │     │
+        │   │           Output Projection                 │     │
+        │   └─────────────────────────────────────────────┘     │
+        │          │                                            │
+        │          ▼                                            │
+        │   Output [B, seq, dim]                                │
+        └───────────────────────────────────────────────────────┘
 
-    Call arguments:
-        x: Input tensor of shape (batch_size, seq_len, dim).
-        attention_mask: Optional attention mask tensor. Supported shapes:
-            - (batch_size, seq_len): mask for each sequence position
-            - (batch_size, seq_len, seq_len): full attention mask
-            - (batch_size, num_heads, seq_len, seq_len): per-head mask
-            Values should be 1 for positions to attend to and 0 for masked positions.
-        training: Boolean indicating whether in training mode.
+    :param dim: Integer, dimension of input embeddings. Must be positive
+        and divisible by num_heads.
+    :type dim: int
+    :param num_heads: Integer, number of attention heads. Must be positive.
+        Defaults to 8.
+    :type num_heads: int
+    :param dropout_rate: Float, dropout rate for attention weights. Must be between
+        0.0 and 1.0. Defaults to 0.0.
+    :type dropout_rate: float
+    :param kernel_initializer: String or Initializer for weight matrices.
+        Defaults to "he_normal".
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for weight matrices.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_bias: Boolean, whether to use bias in dense layers.
+        Defaults to False.
+    :type use_bias: bool
+    :param kwargs: Additional layer arguments.
 
-    Returns:
-        Attention output tensor of shape (batch_size, seq_len, dim).
-
-    Raises:
-        ValueError: If dim is not divisible by num_heads.
-        ValueError: If parameters are invalid (negative values, etc.).
-
-    Example:
-        ```python
-        # Basic usage
-        attn = MultiHeadAttention(dim=512, num_heads=8, dropout_rate=0.1)
-        output = attn(input_tensor)
-
-        # With padding mask
-        padding_mask = keras.ops.ones((batch_size, seq_len))
-        masked_positions = keras.ops.zeros((batch_size, 50))
-        padding_mask = keras.ops.concatenate([
-            padding_mask[:, :-50], masked_positions
-        ], axis=1)
-        output = attn(input_tensor, attention_mask=padding_mask)
-
-        # In a Transformer block
-        inputs = keras.Input(shape=(seq_len, dim))
-        attention_output = MultiHeadAttention(
-            dim=256, num_heads=4, dropout_rate=0.1
-        )(inputs)
-        model = keras.Model(inputs=inputs, outputs=attention_output)
-        ```
+    :raises ValueError: If dim is not divisible by num_heads.
+    :raises ValueError: If parameters are invalid (negative values, etc.).
     """
 
     def __init__(
@@ -194,9 +179,13 @@ class MultiHeadAttention(keras.layers.Layer):
         """
         Build the layer by creating weight variables and building sub-layers.
 
-        CRITICAL: Explicitly build the wrapped MultiHeadCrossAttention for
-        robust serialization. This ensures all weight variables exist before
-        weight restoration during model loading.
+        Explicitly builds the wrapped ``MultiHeadCrossAttention`` for robust
+        serialization, ensuring all weight variables exist before weight
+        restoration during model loading.
+
+        :param input_shape: Shape tuple of the input tensor, expected as
+            ``(batch_size, seq_len, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if isinstance(input_shape, list):
@@ -222,8 +211,20 @@ class MultiHeadAttention(keras.layers.Layer):
         """
         Forward pass through self-attention mechanism.
 
-        This method delegates to the underlying MultiHeadCrossAttention layer
-        in self-attention mode (kv_input=None).
+        Delegates to the underlying ``MultiHeadCrossAttention`` layer in
+        self-attention mode (kv_input=None).
+
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask tensor. Supported shapes:
+            ``(batch_size, seq_len)``, ``(batch_size, seq_len, seq_len)``, or
+            ``(batch_size, num_heads, seq_len, seq_len)``. Values of 1 indicate
+            positions to attend to, 0 for masked positions.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Boolean indicating whether in training mode.
+        :type training: Optional[bool]
+        :return: Attention output tensor of shape ``(batch_size, seq_len, dim)``.
+        :rtype: keras.KerasTensor
         """
         return self.cross_attention(
             query_input=inputs,
@@ -236,11 +237,21 @@ class MultiHeadAttention(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape - same as input shape for self-attention."""
+        """Compute output shape, same as input shape for self-attention.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, identical to input shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization - includes ALL constructor parameters."""
+        """Return configuration for serialization, includes all constructor parameters.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,

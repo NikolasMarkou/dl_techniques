@@ -72,132 +72,88 @@ from .transformer import TransformerLayer
 @keras.saving.register_keras_serializable()
 class EomtTransformer(keras.layers.Layer):
     """
-    Configurable Encoder-only Mask Transformer layer for vision_heads segmentation.
+    Configurable Encoder-only Mask Transformer layer for vision segmentation.
 
-    This layer extends the standard TransformerLayer with masked attention capabilities
-    for instance segmentation tasks. It processes both patch tokens and learnable
-    query tokens together, with optional masked attention during training to encourage
-    object-centric learning.
+    Extends ``TransformerLayer`` with optional masked self-attention for
+    instance segmentation. Patch tokens and learnable query tokens are
+    concatenated and processed jointly; during training, query-to-patch
+    attention can be constrained by ground-truth object masks with
+    configurable probability and optional linear annealing.
 
-    **Intent**: Provide a highly configurable transformer layer that leverages the
-    dl_techniques framework's factory systems while adding segmentation-specific
-    masked attention mechanisms.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input: [patches; queries] → [batch, seq_len, embed_dim]
-           ↓
-    Pre/Post-Norm (configurable)
-           ↓
-    Attention Block (configurable type)
-      - Optional masked attention for queries
-           ↓
-    Residual Connection
-           ↓
-    Pre/Post-Norm (configurable)
-           ↓
-    FFN Block (configurable type)
-           ↓
-    Residual Connection
-           ↓
-    Output: [patches; queries] → [batch, seq_len, embed_dim]
-    ```
+    .. code-block:: text
 
-    **Masked Attention Mechanism**:
-    During training, query-to-patch attention can be masked based on ground truth
-    segmentation masks. This is applied on top of any attention type selected
-    through the attention factory.
+        ┌──────────────────────────────────────────┐
+        │  Input: [patches; queries]               │
+        │  (B, seq_len, hidden_size)               │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  [Masked Attention Modulation]           │
+        │  (training only, if enabled)             │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  TransformerLayer                        │
+        │  (Norm ─► Attention ─► Residual          │
+        │   Norm ─► FFN ─► Residual)               │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Output (B, seq_len, hidden_size)        │
+        └──────────────────────────────────────────┘
 
-    Args:
-        hidden_size: Integer, dimension of input/output embeddings. Must be positive
-            and divisible by num_heads.
-        num_heads: Integer, number of attention heads. Defaults to 8.
-        intermediate_size: Integer, dimension of FFN intermediate layer.
-            Defaults to 4 * hidden_size if None.
-        attention_type: String, type of attention mechanism from factory.
-            Options: 'multi_head', 'window', 'group_query', etc. Defaults to 'multi_head'.
-        attention_args: Optional dict of custom arguments for attention layer.
-        normalization_type: String, type of normalization from factory.
-            Options: 'layer_norm', 'rms_norm', 'band_rms', etc. Defaults to 'layer_norm'.
-        normalization_position: 'pre' or 'post' normalization. Defaults to 'pre'.
-        attention_norm_args: Optional dict of custom arguments for attention normalization.
-        ffn_norm_args: Optional dict of custom arguments for FFN normalization.
-        ffn_type: String, type of feed-forward network from factory.
-            Options: 'mlp', 'swiglu', 'geglu', etc. Defaults to 'mlp'.
-        ffn_args: Optional dict of custom arguments for FFN layer.
-        dropout_rate: Float between 0 and 1, dropout rate for FFN and projections.
-            Defaults to 0.0.
-        attention_dropout_rate: Float between 0 and 1, dropout rate for attention.
-            Defaults to 0.0.
-        use_stochastic_depth: Boolean, whether to use stochastic depth.
-            Defaults to False.
-        stochastic_depth_rate: Float, drop path rate if using stochastic depth.
-            Defaults to 0.1.
-        activation: String or callable, activation function for FFN.
-            Defaults to 'gelu'.
-        use_bias: Boolean, whether to use bias in linear layers.
-            Defaults to True.
-        use_masked_attention: Boolean, whether to enable segmentation-specific
-            masked attention. Defaults to False.
-        mask_probability: Float between 0 and 1, probability of applying masked
-            attention during training. Defaults to 1.0.
-        mask_annealing_steps: Integer, number of steps to linearly anneal mask
-            probability from 0 to mask_probability. Defaults to 0 (no annealing).
-        kernel_initializer: Initializer for dense layer kernels.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for dense layer biases.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        - inputs: `(batch_size, seq_len, hidden_size)` where seq_len = patches + queries
-        - mask (optional): `(batch_size, num_queries, H, W)` for masked attention
-
-    Output shape:
-        `(batch_size, seq_len, hidden_size)` - same as input
-
-    Attributes:
-        base_transformer: Internal TransformerLayer handling core computation.
-        mask_projection: Optional dense layer for mask dimension matching.
-        current_step: Training step counter for mask annealing.
-
-    Example:
-        ```python
-        # Standard configuration
-        layer = EomtTransformer(
-            hidden_size=768,
-            num_heads=12,
-            ffn_type='swiglu',
-            normalization_type='rms_norm'
-        )
-
-        # With masked attention for segmentation
-        layer = EomtTransformer(
-            hidden_size=768,
-            num_heads=12,
-            attention_type='multi_head',
-            ffn_type='geglu',
-            normalization_type='layer_norm',
-            use_masked_attention=True,
-            mask_probability=0.8,
-            mask_annealing_steps=10000
-        )
-
-        # Advanced configuration
-        layer = EomtTransformer(
-            hidden_size=1024,
-            num_heads=16,
-            attention_type='group_query',
-            attention_args={'n_kv_head': 4},
-            normalization_type='band_rms',
-            attention_norm_args={'max_band_width': 0.1},
-            ffn_type='differential',
-            ffn_args={'branch_activation': 'relu'},
-            use_masked_attention=True
-        )
-        ```
+    :param hidden_size: Dimension of input/output embeddings.
+    :type hidden_size: int
+    :param num_heads: Number of attention heads. Default: 8.
+    :type num_heads: int
+    :param intermediate_size: FFN intermediate dimension. Default: ``4 * hidden_size``.
+    :type intermediate_size: Optional[int]
+    :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
+    :type attention_type: str
+    :param attention_args: Custom arguments for the attention layer.
+    :type attention_args: Optional[Dict[str, Any]]
+    :param normalization_type: Normalization type. Default: ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` or ``'post'``. Default: ``'pre'``.
+    :type normalization_position: Literal['pre', 'post']
+    :param attention_norm_args: Custom args for attention normalization.
+    :type attention_norm_args: Optional[Dict[str, Any]]
+    :param ffn_norm_args: Custom args for FFN normalization.
+    :type ffn_norm_args: Optional[Dict[str, Any]]
+    :param ffn_type: FFN architecture type. Default: ``'mlp'``.
+    :type ffn_type: FFNType
+    :param ffn_args: Custom arguments for the FFN layer.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param dropout_rate: FFN / projection dropout. Default: 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention dropout. Default: 0.0.
+    :type attention_dropout_rate: float
+    :param use_stochastic_depth: Enable stochastic depth. Default: False.
+    :type use_stochastic_depth: bool
+    :param stochastic_depth_rate: Drop-path rate. Default: 0.1.
+    :type stochastic_depth_rate: float
+    :param activation: FFN activation. Default: ``'gelu'``.
+    :type activation: Union[str, keras.layers.Activation]
+    :param use_bias: Whether layers use bias. Default: True.
+    :type use_bias: bool
+    :param use_masked_attention: Enable segmentation masked attention.
+    :type use_masked_attention: bool
+    :param mask_probability: Probability of applying mask. Default: 1.0.
+    :type mask_probability: float
+    :param mask_annealing_steps: Steps to anneal mask probability. Default: 0.
+    :type mask_annealing_steps: int
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Bias weight initializer.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Bias weight regularizer.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -314,7 +270,11 @@ class EomtTransformer(keras.layers.Layer):
             self.mask_projection = None
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]) -> None:
-        """Build the layer and all its sub-layers."""
+        """Build the layer and all sub-layers.
+
+        :param input_shape: Shape tuple or dict of shapes.
+        :type input_shape: Union[Tuple, Dict]
+        """
         # Handle both single tensor and dict inputs
         if isinstance(input_shape, dict):
             main_shape = input_shape.get('inputs', input_shape.get('x'))
@@ -339,11 +299,16 @@ class EomtTransformer(keras.layers.Layer):
             mask: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply masked attention by modifying the input or attention pattern.
+        """Apply masked attention by modifying query-token representations.
 
-        Since we're using a pre-built TransformerLayer, we need to apply masking
-        in a way that's compatible with any attention type. We'll do this by
-        creating an attention mask that can be passed to the layer.
+        :param inputs: Concatenated patch+query tensor ``(B, seq, D)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Segmentation mask ``(B, num_queries, H, W)``.
+        :type mask: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Modulated inputs.
+        :rtype: keras.KerasTensor
         """
         if not training or mask is None:
             return inputs
@@ -442,13 +407,14 @@ class EomtTransformer(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the EoMT transformer layer.
 
-        Args:
-            inputs: Either a tensor [batch, seq_len, hidden_size] or dict with 'inputs' key
-            mask: Optional mask tensor [batch, num_queries, H, W] for masked attention
-            training: Boolean indicating training mode
-
-        Returns:
-            Output tensor [batch, seq_len, hidden_size]
+        :param inputs: Tensor ``(B, seq, hidden_size)`` or dict with ``'inputs'`` key.
+        :type inputs: Union[keras.KerasTensor, Dict]
+        :param mask: Optional segmentation mask ``(B, num_queries, H, W)``.
+        :type mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(B, seq, hidden_size)``.
+        :rtype: keras.KerasTensor
         """
         # Handle dict input format
         if isinstance(inputs, dict):
@@ -475,13 +441,23 @@ class EomtTransformer(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape (same as input)."""
+        """Compute the output shape (same as input).
+
+        :param input_shape: Input shape or dict of shapes.
+        :type input_shape: Union[Tuple, Dict]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if isinstance(input_shape, dict):
             return input_shape.get('inputs', input_shape.get('x'))
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration dictionary for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'hidden_size': self.hidden_size,

@@ -57,57 +57,58 @@ from dl_techniques.utils.logger import logger
 @keras.saving.register_keras_serializable()
 class FNetFourierTransform(keras.layers.Layer):
     """
-    FNet Fourier Transform layer that replaces self-attention with parameter-free mixing.
+    Parameter-free token mixing via 2D Discrete Fourier Transform.
 
-    This layer implements the core innovation from "FNet: Mixing Tokens with Fourier Transforms"
-    by applying a 2D Discrete Fourier Transform to input embeddings. The transform applies
-    1D DFT along both sequence and hidden dimensions, taking only the real part of the result
-    for efficient O(N log N) token mixing without learnable parameters.
+    Implements the core innovation from FNet by applying sequential 1D DFTs
+    along the sequence and hidden dimensions, then extracting the real part.
+    This achieves global token mixing in ``O(N log N)`` complexity without
+    any learnable parameters, replacing the ``O(N^2)`` self-attention
+    mechanism. The transform is computed as
+    ``output = Re(DFT_hidden(DFT_seq(X)))``.
 
-    **Intent**: Replace computationally expensive self-attention (O(N²)) with a parameter-free
-    Fourier Transform that achieves comparable token mixing performance while being significantly
-    faster and more memory efficient, particularly for longer sequences.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, hidden_dim])
-           ↓
-    DFT along sequence dimension → Complex[batch, seq_len, hidden_dim]
-           ↓
-    DFT along hidden dimension → Complex[batch, seq_len, hidden_dim]
-           ↓
-    Extract real part: ℜ(result) → Real[batch, seq_len, hidden_dim]
-           ↓
-    (If masked) Zero out masked positions
-           ↓
-    Output(shape=[batch, seq_len, hidden_dim])
-    ```
+    .. code-block:: text
 
-    **Key Properties**:
-    - **Masking Support**: Propagates masks and zeros out masked timesteps in the output.
-    - **Parameter-free**: Zero learnable weights, reducing model complexity.
-    - **Efficient**: O(N log N) theoretical complexity vs O(N²) for attention.
+        Input [B, S, D]
+              │
+              ▼
+        ┌─────────────────────────┐
+        │ DFT along seq dim (S)   │
+        │ Complex[B, S, D]        │
+        └────────────┬────────────┘
+                     ▼
+        ┌─────────────────────────┐
+        │ DFT along hidden dim (D)│
+        │ Complex[B, S, D]        │
+        └────────────┬────────────┘
+                     ▼
+        ┌─────────────────────────┐
+        │ Extract real part: Re() │
+        └────────────┬────────────┘
+                     ▼
+          (if masked) zero out
+              padded positions
+                     ▼
+              Output [B, S, D]
 
-    Args:
-        implementation: Strategy for computing DFT. Options:
-            - 'matrix': Use cached DFT matrix multiplication (default, most compatible)
-            - 'fft': Use Fast Fourier Transform when available (faster for long sequences)
-        normalize_dft: Boolean, whether to apply 1/√N normalization to DFT matrices.
-            This ensures energy preservation and numerical stability. Defaults to True.
-        epsilon: Small constant for numerical stability. Defaults to 1e-12.
-        **kwargs: Additional arguments for Layer base class.
+    :param implementation: Strategy for computing DFT. ``'matrix'`` uses
+        cached DFT matrix multiplication (default, most compatible);
+        ``'fft'`` uses Fast Fourier Transform when available.
+    :type implementation: str
+    :param normalize_dft: Whether to apply ``1/sqrt(N)`` normalization to
+        DFT matrices for energy preservation and numerical stability.
+        Defaults to ``True``.
+    :type normalize_dft: bool
+    :param epsilon: Small constant for numerical stability.
+        Defaults to ``1e-12``.
+    :type epsilon: float
+    :param kwargs: Additional arguments for the ``Layer`` base class.
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_dim)`.
-        Both sequence_length and hidden_dim must be known at build time for matrix caching.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_dim)`.
-        Shape is preserved through the Fourier transform operation.
-
-    Raises:
-        ValueError: If input is not 3D or dimensions are unknown at build time.
-        ValueError: If implementation type is invalid.
+    :raises ValueError: If input is not 3D or dimensions are unknown at
+        build time.
+    :raises ValueError: If ``implementation`` is not ``'matrix'`` or
+        ``'fft'``.
     """
 
     def __init__(
@@ -149,6 +150,10 @@ class FNetFourierTransform(keras.layers.Layer):
 
         Pre-computes DFT matrices for both sequence and hidden dimensions,
         storing them as non-trainable weights for fast matrix multiplication.
+
+        :param input_shape: Shape tuple of the input tensor. Expected to be
+            ``(batch_size, sequence_length, hidden_dim)``.
+        :type input_shape: tuple
         """
         if len(input_shape) != 3:
             raise ValueError(
@@ -182,7 +187,17 @@ class FNetFourierTransform(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_dft_matrix(self, size: int, name: str) -> keras.Variable:
-        """Create a DFT matrix as a non-trainable variable."""
+        """
+        Create a DFT matrix as a non-trainable variable.
+
+        :param size: Dimension size for the DFT matrix.
+        :type size: int
+        :param name: Name for the weight variable.
+        :type name: str
+        :return: Non-trainable DFT matrix variable of shape
+            ``(size, size, 2)``.
+        :rtype: keras.Variable
+        """
         norm_factor = 1.0 / np.sqrt(size) if self.normalize_dft else 1.0
         n = np.arange(size, dtype=np.float32)[:, np.newaxis]
         k = np.arange(size, dtype=np.float32)[np.newaxis, :]
@@ -202,7 +217,16 @@ class FNetFourierTransform(keras.layers.Layer):
             matrix: keras.KerasTensor,
             vector: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Efficient complex matrix-vector multiplication using real arithmetic."""
+        """
+        Perform complex matrix-vector multiplication using real arithmetic.
+
+        :param matrix: Complex matrix stored as ``(..., 2)`` real/imag pair.
+        :type matrix: keras.KerasTensor
+        :param vector: Complex vector stored as ``(..., 2)`` real/imag pair.
+        :type vector: keras.KerasTensor
+        :return: Complex result stored as ``(..., 2)`` real/imag pair.
+        :rtype: keras.KerasTensor
+        """
         a, b = matrix[..., 0], matrix[..., 1]
         c, d = vector[..., 0], vector[..., 1]
         real_part = ops.matmul(c, a) - ops.matmul(d, b)
@@ -215,7 +239,19 @@ class FNetFourierTransform(keras.layers.Layer):
             dft_matrix: keras.Variable,
             axis: int
     ) -> keras.KerasTensor:
-        """Apply DFT matrix multiplication along specified axis."""
+        """
+        Apply DFT matrix multiplication along a specified axis.
+
+        :param inputs_complex: Complex input tensor with trailing
+            ``(..., 2)`` real/imag dimension.
+        :type inputs_complex: keras.KerasTensor
+        :param dft_matrix: Pre-computed DFT matrix variable.
+        :type dft_matrix: keras.Variable
+        :param axis: Axis along which to apply the DFT (``-1`` or ``-2``).
+        :type axis: int
+        :return: Transformed complex tensor.
+        :rtype: keras.KerasTensor
+        """
         if axis == -2:
             inputs_transposed = ops.transpose(inputs_complex, [0, 2, 1, 3])
             result = self._complex_matmul(dft_matrix, inputs_transposed)
@@ -233,6 +269,19 @@ class FNetFourierTransform(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """
         Apply 2D Fourier Transform for token mixing.
+
+        :param inputs: Input tensor of shape
+            ``(batch_size, sequence_length, hidden_dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional mask of shape
+            ``(batch_size, sequence_length)`` to zero out padded positions.
+        :type attention_mask: keras.KerasTensor or None
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: bool or None
+        :return: Mixed output tensor of shape
+            ``(batch_size, sequence_length, hidden_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Convert real input to complex representation
         zeros_like_input = ops.zeros_like(inputs)
@@ -265,15 +314,36 @@ class FNetFourierTransform(keras.layers.Layer):
         inputs: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None
     ) -> Optional[keras.KerasTensor]:
-        """Propagate the input mask."""
+        """
+        Propagate the input mask.
+
+        :param inputs: Input tensor (unused).
+        :type inputs: keras.KerasTensor
+        :param mask: Input mask to propagate.
+        :type mask: keras.KerasTensor or None
+        :return: The propagated mask.
+        :rtype: keras.KerasTensor or None
+        """
         return mask
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Fourier transform preserves input shape."""
+        """
+        Compute the output shape (preserved from input).
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple (same as input).
+        :rtype: tuple
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'implementation': self.implementation,

@@ -63,105 +63,72 @@ from .spatial_attention import SpatialAttention
 @keras.saving.register_keras_serializable()
 class CBAM(keras.layers.Layer):
     """
-    Convolutional Block Attention Module for feature refinement.
+    Convolutional Block Attention Module for sequential channel-spatial feature refinement.
 
-    This layer implements the CBAM attention mechanism that sequentially applies
-    channel and spatial attention to input feature maps. CBAM is designed to
-    improve representation power of CNNs by focusing on important features
-    while suppressing unnecessary ones.
+    Implements the CBAM attention mechanism that sequentially applies channel
+    and spatial attention to input feature maps. Channel attention first
+    recalibrates "what" features matter, then spatial attention refines "where"
+    to focus. The complete operation is
+    ``F'' = M_s(M_c(F) * F) * (M_c(F) * F)``, where ``M_c`` and ``M_s``
+    are channel and spatial attention maps respectively.
 
-    The module operates in two sequential stages:
-    1. Channel Attention: Computes channel-wise attention weights using global
-       average and max pooling followed by a shared MLP
-    2. Spatial Attention: Computes spatial attention weights using channel-wise
-       pooling followed by a convolutional layer
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        F' = Ms(F) ⊗ (Mc(F) ⊗ F)
+    .. code-block:: text
 
-    Where F is input feature, Mc is channel attention, Ms is spatial attention,
-    and ⊗ denotes element-wise multiplication.
+        Input [B, H, W, C]
+              │
+              ▼
+        ┌─────────────────────┐
+        │  Channel Attention   │
+        │  M_c: [B,1,1,C]     │
+        └──────────┬──────────┘
+                   ▼
+            F' = M_c ⊗ F
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │  Spatial Attention   │
+        │  M_s: [B,H,W,1]     │
+        └──────────┬──────────┘
+                   ▼
+            F'' = M_s ⊗ F'
+                   │
+                   ▼
+            Output [B, H, W, C]
 
-    Args:
-        channels: Integer, number of input channels. Must be positive.
-        ratio: Integer, reduction ratio for channel attention MLP.
-            Controls the bottleneck size in the shared MLP. Higher values
-            reduce parameters but may limit representation capacity.
-            Must be positive. Defaults to 8.
-        kernel_size: Integer, kernel size for spatial attention convolution.
-            Typically uses 7x7 convolution as in the original paper.
-            Must be positive and odd. Defaults to 7.
-        channel_kernel_initializer: String or Initializer, kernel initializer
-            for channel attention layers. Defaults to 'glorot_uniform'.
-        spatial_kernel_initializer: String or Initializer, kernel initializer
-            for spatial attention layers. Defaults to 'glorot_uniform'.
-        channel_kernel_regularizer: Optional Regularizer, kernel regularizer
-            for channel attention layers. Defaults to None.
-        spatial_kernel_regularizer: Optional Regularizer, kernel regularizer
-            for spatial attention layers. Defaults to None.
-        channel_use_bias: Boolean, whether to use bias in channel attention
-            layers. Channel attention typically doesn't use bias in MLP.
-            Defaults to False.
-        spatial_use_bias: Boolean, whether to use bias in spatial attention
-            convolution. Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param channels: Number of input channels. Must be positive.
+    :type channels: int
+    :param ratio: Reduction ratio for channel attention MLP bottleneck.
+        Higher values reduce parameters but may limit representation
+        capacity. Must be positive. Defaults to 8.
+    :type ratio: int
+    :param kernel_size: Kernel size for spatial attention convolution.
+        Must be positive and odd. Defaults to 7.
+    :type kernel_size: int
+    :param channel_kernel_initializer: Kernel initializer for channel
+        attention layers. Defaults to ``'glorot_uniform'``.
+    :type channel_kernel_initializer: str or keras.initializers.Initializer
+    :param spatial_kernel_initializer: Kernel initializer for spatial
+        attention layers. Defaults to ``'glorot_uniform'``.
+    :type spatial_kernel_initializer: str or keras.initializers.Initializer
+    :param channel_kernel_regularizer: Optional kernel regularizer for
+        channel attention layers. Defaults to ``None``.
+    :type channel_kernel_regularizer: keras.regularizers.Regularizer or None
+    :param spatial_kernel_regularizer: Optional kernel regularizer for
+        spatial attention layers. Defaults to ``None``.
+    :type spatial_kernel_regularizer: keras.regularizers.Regularizer or None
+    :param channel_use_bias: Whether to use bias in channel attention
+        dense layers. Defaults to ``False``.
+    :type channel_use_bias: bool
+    :param spatial_use_bias: Whether to use bias in spatial attention
+        convolution. Defaults to ``True``.
+    :type spatial_use_bias: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    Input shape:
-        4D tensor with shape (batch_size, height, width, channels) for
-        channels-last data format, or (batch_size, channels, height, width)
-        for channels-first data format.
-
-    Output shape:
-        Same as input shape. CBAM preserves spatial and channel dimensions
-        while refining the feature representations.
-
-    Attributes:
-        channel_attention: ChannelAttention sub-module for channel refinement.
-        spatial_attention: SpatialAttention sub-module for spatial refinement.
-
-    Example:
-        ```python
-        # Basic usage for ResNet-style features
-        inputs = keras.Input(shape=(56, 56, 256))
-        cbam_layer = CBAM(channels=256)
-        refined_features = cbam_layer(inputs)
-
-        # Advanced configuration with regularization
-        cbam_layer = CBAM(
-            channels=512,
-            ratio=16,  # Stronger bottleneck
-            kernel_size=5,  # Smaller spatial kernel
-            channel_kernel_regularizer=keras.regularizers.L2(1e-4),
-            spatial_kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Integration in CNN architecture
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = keras.layers.Conv2D(64, 3, activation='relu')(inputs)
-        x = keras.layers.Conv2D(128, 3, activation='relu')(x)
-
-        # Apply CBAM attention
-        x = CBAM(channels=128)(x)
-
-        x = keras.layers.GlobalAveragePooling2D()(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - CBAM: Convolutional Block Attention Module, Woo et al., 2018
-        - https://arxiv.org/abs/1807.06521v2
-
-    Raises:
-        ValueError: If channels is not positive.
-        ValueError: If ratio is not positive.
-        ValueError: If kernel_size is not positive.
-
-    Note:
-        This implementation follows the modern Keras 3 pattern where sub-layers
-        are created in __init__ and built explicitly in build() for robust
-        serialization support.
+    :raises ValueError: If ``channels`` is not positive.
+    :raises ValueError: If ``ratio`` is not positive.
+    :raises ValueError: If ``kernel_size`` is not positive.
     """
 
     def __init__(
@@ -221,12 +188,12 @@ class CBAM(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures that when a model is saved and loaded, all weight variables
-        exist before weight restoration occurs.
+        Explicitly builds each sub-layer for robust serialization, ensuring
+        all weight variables exist before weight restoration during model
+        loading.
 
-        Args:
-            input_shape: Shape tuple indicating the input shape of the layer.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
         """
         # BUILD sub-layers explicitly for serialization robustness
         self.channel_attention.build(input_shape)
@@ -241,19 +208,17 @@ class CBAM(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply CBAM attention to input tensor.
+        Apply sequential channel-then-spatial CBAM attention to the input tensor.
 
-        Implements the sequential attention mechanism:
-        1. Channel attention: F' = Mc(F) ⊗ F
-        2. Spatial attention: F'' = Ms(F') ⊗ F'
-
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Refined feature map of shape (batch_size, height, width, channels).
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: bool or None
+        :return: Refined feature map of shape
+            ``(batch_size, height, width, channels)``.
+        :rtype: keras.KerasTensor
         """
         # Step 1: Apply channel attention
         # Generate channel attention map (batch, 1, 1, channels)
@@ -275,23 +240,19 @@ class CBAM(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple (same as input shape for CBAM).
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple (same as input shape).
+        :rtype: tuple
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return configuration for serialization.
+        Return the layer configuration for serialization.
 
-        Returns ALL parameters needed to reconstruct the layer during
-        model loading. This must include every parameter from __init__.
-
-        Returns:
-            Dictionary containing the complete layer configuration.
+        :return: Dictionary containing the complete layer configuration.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

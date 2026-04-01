@@ -37,41 +37,67 @@ from .group_query_attention import GroupedQueryAttention
 @keras.saving.register_keras_serializable()
 class MobileMQA(GroupedQueryAttention):
     """
-    Mobile Multi-Query Attention (MobileMQA) block.
+    Mobile Multi-Query Attention block with optional spatial downsampling and learnable residual.
 
-    A specialized subclass of GroupedQueryAttention that enforces Multi-Query
-    Attention (1 KV head), supports optional spatial downsampling for Key/Value
-    projections, and utilizes a learnable residual connection.
+    A specialized subclass of ``GroupedQueryAttention`` that enforces
+    Multi-Query Attention (single KV head), supports optional spatial
+    downsampling for Key/Value projections via depthwise convolution, and
+    uses a learnable lambda-scaled residual connection
+    ``output = input + lambda * Attention(input)``.
 
-    Architecture:
+    **Architecture Overview:**
+
+    .. code-block:: text
+
         Input [B, H, W, C]
-               ↓
-        Projections (Q, K, V) -- Shared K/V head
-               ↓
-        (Optional) Downsample K, V (Depthwise Conv stride 2)
-               ↓
-        Flatten & Broadcast K, V to match Q heads
-               ↓
-        Attention(Q, K, V)
-               ↓
-        Output Projection
-               ↓
-        Residual: Input + lambda * Output
+              │
+              ├───────────────────┬──────────────┐
+              ▼                   ▼              ▼
+        ┌──────────┐       ┌──────────┐   ┌──────────┐
+        │  W_q     │       │  W_k     │   │  W_v     │
+        │  Dense   │       │  Dense   │   │  Dense   │
+        └────┬─────┘       └────┬─────┘   └────┬─────┘
+             │                  │              │
+             │           (Optional DW Conv    (Optional DW Conv
+             │            stride=2)            stride=2)
+             │                  │              │
+             ▼                  ▼              ▼
+        Flatten [B,HW,H,D] Flatten [B,M,1,D] Flatten [B,M,1,D]
+             │                  │              │
+             │           Broadcast to H heads  │
+             │                  │              │
+             ▼                  ▼              ▼
+        ┌──────────────────────────────────────────┐
+        │     Scaled Dot-Product Attention          │
+        │     softmax(QK^T / √d_k) · V             │
+        └─────────────────────┬────────────────────┘
+                              ▼
+                     Reshape [B, H, W, C]
+                              ▼
+                     ┌──────────────┐
+                     │   W_output   │
+                     └──────┬───────┘
+                            ▼
+                   Input + λ · Output
+                            ▼
+                     Output [B, H, W, C]
 
-    Args:
-        dim: Integer, input/output dimension. Must be positive and divisible by num_heads.
-        num_heads: Integer, number of attention heads.
-        use_downsampling: Boolean, whether to use spatial downsampling (stride 2
-            DepthwiseConv2D) for keys and values. Defaults to False.
-        kernel_initializer: Initializer for kernels. Defaults to 'he_normal'.
-        kernel_regularizer: Optional regularizer.
-        **kwargs: Additional arguments passed to GroupedQueryAttention.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, dim)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, dim)`
+    :param dim: Input/output dimension. Must be positive and divisible
+        by ``num_heads``.
+    :type dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param use_downsampling: Whether to use spatial downsampling
+        (stride-2 ``DepthwiseConv2D``) for keys and values.
+        Defaults to ``False``.
+    :type use_downsampling: bool
+    :param kernel_initializer: Initializer for kernels.
+        Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for kernels.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param kwargs: Additional arguments passed to
+        ``GroupedQueryAttention``.
     """
 
     def __init__(
@@ -115,8 +141,10 @@ class MobileMQA(GroupedQueryAttention):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer. Calls super().build() for GQA weights, then adds
-        MobileMQA-specific components (downsample, lambda).
+        Build the layer including GQA weights and MobileMQA-specific components.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
         """
         # Build standard GQA weights (w_q, w_k, w_v, w_o)
         super().build(input_shape)
@@ -152,10 +180,23 @@ class MobileMQA(GroupedQueryAttention):
         return_attention_weights: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """
-        Forward pass of MobileMQA.
+        Forward pass of MobileMQA with optional downsampling and lambda-residual.
 
-        Overrides GQA.call to inject spatial downsampling logic and
-        apply the specific lambda-residual connection.
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training or inference mode.
+        :type training: bool or None
+        :param attention_mask: Optional attention mask tensor.
+        :type attention_mask: keras.KerasTensor or None
+        :param return_attention_weights: Whether to return attention
+            weights alongside the output.
+        :type return_attention_weights: bool
+        :return: Output tensor of shape
+            ``(batch_size, height, width, dim)``, or tuple of
+            ``(output, attention_weights)`` if
+            ``return_attention_weights=True``.
+        :rtype: keras.KerasTensor or tuple[keras.KerasTensor, keras.KerasTensor]
         """
         input_shape = ops.shape(inputs)
         batch_size = input_shape[0]
@@ -227,7 +268,12 @@ class MobileMQA(GroupedQueryAttention):
         return output
 
     def get_config(self) -> Dict[str, Any]:
-        """Return config with MobileMQA specific parameters."""
+        """
+        Return the layer configuration for serialization.
+
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict
+        """
         config = super().get_config()
         # Remove GQA-specific fields that we hardcoded/derived to avoid duplication in init
         # or keep them if we want full transparency.

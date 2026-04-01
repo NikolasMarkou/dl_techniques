@@ -8,62 +8,13 @@ standard dot-product attention. This is achieved by approximating the
 softmax kernel using the FAVOR+ (Fast Attention Via positive Orthogonal
 Random features) algorithm.
 
-Architecture:
-    The quadratic bottleneck in standard attention arises from the explicit
-    computation of the `N x N` attention matrix `A = Q @ K.T`, where `N` is
-    the sequence length. The Performer architecture circumvents this by
-    leveraging the associativity of matrix multiplication.
-
-    Instead of computing `(Q @ K.T) @ V`, the Performer approximates `Q` and `K`
-    with random feature maps `φ(Q)` and `φ(K)` and reorders the computation
-    to `φ(Q) @ (φ(K).T @ V)`. The key steps are:
-    1.  Project the standard query and key matrices (`Q`, `K`) into a lower-
-        dimensional random feature space to get `φ(Q)` and `φ(K)`. The
-        dimension of this space (`nb_features`) is much smaller than the
-        sequence length `N`.
-    2.  First, compute the matrix `φ(K).T @ V`. This intermediate result has a
-        shape of `(nb_features, head_dim)`, avoiding any `N x N` computation.
-    3.  Multiply `φ(Q)` with this intermediate matrix.
-    4.  A similar re-associated computation is performed for the softmax
-        denominator to produce the final normalized output.
-
-    This reordering reduces the complexity from O(N² * d) to
-    O(N * r * d), where `r` is the number of random features.
-
-Foundational Mathematics:
-    The core of the Performer is the approximation of the softmax kernel.
-    The attention mechanism `softmax( (Q @ K.T) / sqrt(d) )` can be viewed as
-    a kernel function `K(q, k) = exp(q.k)`. This exponential kernel can be
-    approximated by the dot product of two high-dimensional random feature
-    maps, `φ(q)` and `φ(k)`:
-
-        exp(q.k) ≈ <φ(q), φ(k)>
-
-    The FAVOR+ method constructs a specific positive feature map `φ` using
-    trigonometric functions and a random Gaussian projection matrix `ω`:
-
-        φ(x) = (1/sqrt(r)) * [f_1(x), ..., f_r(x)]
-        where f_i(x) = exp(-||x||²/2) * h_i(x)
-        and h_i(x) are random features like cos(ω_i.x) and sin(ω_i.x).
-
-    By replacing the exact kernel with this approximation, the attention
-    matrix `A` can be written as `A ≈ φ(Q) @ φ(K).T`. The final output is
-    then computed as:
-
-        Output ≈ (φ(Q) @ φ(K).T) @ V = φ(Q) @ (φ(K).T @ V)
-
-    The normalization term (the softmax denominator) is also approximated in
-    a linear fashion:
-
-        Denominator ≈ diag( φ(Q) @ (φ(K).T @ 1_N) )
-
-    This mathematical reformulation allows for an unbiased, low-variance
-    estimation of the attention matrix without ever explicitly constructing it,
-    leading to the significant gains in efficiency.
+The core idea replaces the explicit ``(Q @ K^T) @ V`` computation with
+``phi(Q) @ (phi(K)^T @ V)`` via random feature maps, reducing complexity
+from ``O(N^2 * d)`` to ``O(N * r * d)`` where ``r`` is the number of
+random features.
 
 References:
-    - The foundational paper for this mechanism:
-      Choromanski, K., Likhosherstov, V., Dohan, D., et al. (2020).
+    - Choromanski, K., Likhosherstov, V., Dohan, D., et al. (2020).
       "Rethinking Attention with Performers".
 """
 
@@ -76,138 +27,83 @@ from keras import ops, layers, initializers, regularizers
 
 @keras.saving.register_keras_serializable()
 class PerformerAttention(keras.layers.Layer):
-    """
-    Performer attention layer with linear complexity via FAVOR+ approximation.
+    """Performer attention with linear complexity via FAVOR+ kernel approximation.
 
-    This layer implements the Performer attention mechanism which uses Fast Attention
-    Via positive Orthogonal Random features (FAVOR+) to approximate standard attention
-    with linear time and memory complexity O(N) instead of O(N²), enabling efficient
-    processing of very long sequences (up to 65K tokens).
+    Implements the Performer attention mechanism using Fast Attention Via positive
+    Orthogonal Random features (FAVOR+) to approximate standard softmax attention
+    with linear time and memory complexity ``O(N)`` instead of ``O(N^2)``. The
+    standard attention ``softmax(Q K^T / sqrt(d_k)) V`` is approximated by
+    constructing positive random feature maps ``phi(Q)`` and ``phi(K)`` such that
+    ``exp(q . k) ~ <phi(q), phi(k)>``, then computing
+    ``phi(Q) (phi(K)^T V) / phi(Q) (phi(K)^T 1_N)`` which avoids materializing
+    the ``N x N`` attention matrix. The feature map uses trigonometric random
+    projections: ``phi(x) = (1/sqrt(r)) [cos(w_i . x), sin(w_i . x)]``
+    scaled by ``exp(-||x||^2 / 2)``.
 
-    **Mathematical Foundation**:
+    **Architecture Overview:**
 
-    Standard attention:
+    .. code-block:: text
 
-    .. math::
-        Attention(Q, K, V) = softmax(\\frac{QK^T}{\\sqrt{d_k}})V
+        ┌───────────────────────────────┐
+        │ Input [B, seq_len, dim]       │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Dense(3 * dim) → Q, K, V     │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Multi-Head Reshape            │
+        │ [B, heads, seq_len, head_dim] │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Random Feature Projection     │
+        │ phi(Q), phi(K)                │
+        │ [B, heads, seq_len, nb_feat]  │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Linear Attention              │
+        │ KV = phi(K)^T V              │
+        │ Z  = phi(Q) sum(phi(K))      │
+        │ Out = phi(Q) KV / Z          │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Concatenate Heads & Project   │
+        │ Dense(dim)                    │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Output [B, seq_len, dim]      │
+        └───────────────────────────────┘
 
-    FAVOR+ approximation:
-
-    .. math::
-        Attention(Q, K, V) ≈ \\frac{\\phi(Q)(\\phi(K)^T V)}{\\phi(Q)(\\phi(K)^T \\mathbf{1})}
-
-    Where φ is a positive random feature map that approximates the softmax kernel.
-
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, dim])
-           ↓
-    Linear Projection: Q, K, V = Linear(input)
-           ↓
-    Multi-Head Reshape: [batch, heads, seq_len, head_dim]
-           ↓
-    Random Feature Projection: φ(Q), φ(K)
-           ↓
-    Linear Attention: KV = φ(K)ᵀV, Z = φ(Q)·sum(φ(K))
-           ↓
-    Output: φ(Q)·KV / Z
-           ↓
-    Concatenate Heads & Project
-           ↓
-    Output(shape=[batch, seq_len, dim])
-    ```
-
-    **Key Benefits**:
-    - **Linear Complexity**: O(N) time and memory vs O(N²) for standard attention
-    - **Long Sequences**: Can process 65K+ token sequences efficiently
-    - **Memory Efficiency**: 4-8x memory reduction compared to standard attention
-    - **Accuracy Preservation**: Comparable performance to full attention
-
-    Args:
-        dim: Integer, dimensionality of the model. Must be positive and divisible
-            by num_heads. This is the size of input and output embeddings.
-        num_heads: Integer, number of attention heads. Must be positive and divide
-            evenly into dim. Defaults to 8.
-        nb_features: Integer, number of random features for kernel approximation.
-            Must be positive. Higher values give better approximation but use more
-            memory. Should be much smaller than sequence length. Defaults to 256.
-        ortho_scaling: Float, scaling factor for orthogonal features. Controls
-            the spread of the random projections. Defaults to 0.0 (disabled).
-        causal: Boolean, whether to use causal (autoregressive) attention mask.
-            If True, positions can only attend to previous positions. Defaults to False.
-        dropout_rate: Float between 0 and 1, dropout rate for attention weights.
-            Applied after the attention computation. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in Q, K, V projections.
-            Defaults to False.
-        kernel_initializer: Initializer for projection weight matrices.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for projection bias vectors.
-            Only used when use_bias=True. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for projection weights.
-        bias_regularizer: Optional regularizer for projection biases.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-        Same shape as input.
-
-    Attributes:
-        to_qkv: Dense layer projecting input to Q, K, V.
-        to_out: Dense layer for output projection.
-        dropout: Dropout layer for regularization.
-        projection_matrix: Non-trainable random projection matrix for FAVOR+.
-
-    Example:
-        ```python
-        # Basic Performer attention
-        performer = PerformerAttention(
-            dim=512,
-            num_heads=8,
-            nb_features=256
-        )
-
-        # Process long sequences
-        long_sequence = keras.random.normal((2, 8192, 512))
-        output = performer(long_sequence)  # Shape: (2, 8192, 512)
-
-        # Causal attention for autoregressive models
-        causal_performer = PerformerAttention(
-            dim=768,
-            num_heads=12,
-            nb_features=512,
-            causal=True,
-            dropout_rate=0.1
-        )
-
-        # Efficient transformer block
-        class PerformerBlock(keras.layers.Layer):
-            def __init__(self, dim, num_heads=8, **kwargs):
-                super().__init__(**kwargs)
-                self.attention = PerformerAttention(dim, num_heads)
-                self.norm1 = keras.layers.LayerNormalization()
-                self.norm2 = keras.layers.LayerNormalization()
-                self.ffn = keras.Sequential([
-                    keras.layers.Dense(dim * 4, activation='gelu'),
-                    keras.layers.Dense(dim)
-                ])
-
-            def call(self, x):
-                x = x + self.attention(self.norm1(x))
-                x = x + self.ffn(self.norm2(x))
-                return x
-        ```
-
-    References:
-        - Rethinking Attention with Performers (Choromanski et al., 2020)
-        - FAVOR+: Fast Attention Via positive Orthogonal Random features
-
-    Note:
-        The random projection matrix is regenerated in each forward pass to
-        provide better approximation through averaging. For deterministic behavior,
-        you can modify the implementation to use fixed projections.
+    :param dim: Model dimensionality. Must be positive and divisible by num_heads.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param nb_features: Number of random features for kernel approximation.
+        Higher values give better approximation at the cost of more memory.
+    :type nb_features: int
+    :param ortho_scaling: Scaling factor for orthogonal features. 0.0 disables.
+    :type ortho_scaling: float
+    :param causal: Whether to use causal (autoregressive) attention masking.
+    :type causal: bool
+    :param dropout_rate: Dropout rate for attention weights, between 0 and 1.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in Q, K, V projections.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for projection weight matrices.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for projection bias vectors.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for projection weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for projection biases.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -286,11 +182,10 @@ class PerformerAttention(keras.layers.Layer):
             self.dropout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and its sub-layers.
+        """Build the layer and its sub-layers.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -307,17 +202,14 @@ class PerformerAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def _create_projection_matrix(self, batch_size: int) -> keras.KerasTensor:
-        """
-        Create random projection matrix for FAVOR+ approximation.
+        """Create random projection matrix for FAVOR+ approximation.
 
-        This generates orthogonal random features that are used to approximate
-        the exponential kernel in the attention mechanism.
+        :param batch_size: Batch size for broadcasting.
+        :type batch_size: int
 
-        Args:
-            batch_size: Batch size for broadcasting.
-
-        Returns:
-            Projection matrix of shape (batch, num_heads, nb_features//2, head_dim).
+        :return: Projection matrix of shape
+            ``(batch, num_heads, nb_features//2, head_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Generate random Gaussian matrix
         # Shape: (num_heads, nb_features//2, head_dim)
@@ -352,16 +244,17 @@ class PerformerAttention(keras.layers.Layer):
             projection_matrix: keras.KerasTensor,
             is_query: bool = True
     ) -> keras.KerasTensor:
-        """
-        Create positive random features φ(x) for kernel approximation.
+        """Create positive random features for kernel approximation.
 
-        Args:
-            x: Input tensor of shape (batch, num_heads, seq_len, head_dim).
-            projection_matrix: Random projection matrix.
-            is_query: Whether this is for queries (affects normalization).
+        :param x: Input tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type x: keras.KerasTensor
+        :param projection_matrix: Random projection matrix.
+        :type projection_matrix: keras.KerasTensor
+        :param is_query: Whether this is for queries (affects normalization).
+        :type is_query: bool
 
-        Returns:
-            Random features of shape (batch, num_heads, seq_len, nb_features).
+        :return: Random features of shape ``(batch, num_heads, seq_len, nb_features)``.
+        :rtype: keras.KerasTensor
         """
         # Project input: x @ projection_matrix^T
         # x: (batch, num_heads, seq_len, head_dim)
@@ -395,16 +288,17 @@ class PerformerAttention(keras.layers.Layer):
             k: keras.KerasTensor,
             v: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Compute linear attention using FAVOR+ approximation.
+        """Compute linear attention using FAVOR+ approximation.
 
-        Args:
-            q: Query features of shape (batch, num_heads, seq_len, nb_features).
-            k: Key features of shape (batch, num_heads, seq_len, nb_features).
-            v: Value tensor of shape (batch, num_heads, seq_len, head_dim).
+        :param q: Query features of shape ``(batch, num_heads, seq_len, nb_features)``.
+        :type q: keras.KerasTensor
+        :param k: Key features of shape ``(batch, num_heads, seq_len, nb_features)``.
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type v: keras.KerasTensor
 
-        Returns:
-            Attention output of shape (batch, num_heads, seq_len, head_dim).
+        :return: Attention output of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Compute KV: φ(K)ᵀV
         # k: (batch, num_heads, seq_len, nb_features)
@@ -452,18 +346,19 @@ class PerformerAttention(keras.layers.Layer):
             training: Optional[bool] = None,
             return_attention_scores: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, None]]:
-        """
-        Apply Performer attention to inputs.
+        """Apply Performer attention to inputs.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim).
-            training: Boolean indicating training mode.
-            return_attention_scores: If True, returns (output, None) for compatibility.
-                Note: Performer doesn't compute explicit attention matrices.
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :param return_attention_scores: If ``True``, returns ``(output, None)``
+            for compatibility. Performer does not compute explicit attention matrices.
+        :type return_attention_scores: bool
 
-        Returns:
-            Output tensor of shape (batch_size, seq_len, dim).
-            If return_attention_scores=True, returns (output, None).
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+            If return_attention_scores is ``True``, returns ``(output, None)``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, None]]
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -519,23 +414,21 @@ class PerformerAttention(keras.layers.Layer):
         return out
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Shape tuple of the output (same as input).
+        :return: Shape tuple of the output (same as input).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+        """Return the configuration of the layer for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters.
+        :return: Dictionary containing all configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

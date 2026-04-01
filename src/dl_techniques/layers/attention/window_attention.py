@@ -105,30 +105,43 @@ class WindowAttention(keras.layers.Layer):
     """
     Unified window-based multi-head self-attention layer.
 
-    This layer implements an efficient self-attention mechanism by partitioning
-    an input sequence into local windows and applying attention within them.
-    It supports two partitioning strategies:
-    1.  `'grid'`: Standard spatial windowing inspired by Swin Transformer.
-    2.  `'zigzag'`: Reorders the sequence based on a 2D zigzag scan to group
-        frequency-proximate tokens before windowing.
+    Partitions a 1-D token sequence into local windows and computes
+    multi-head self-attention within each window via
+    ``SingleWindowAttention``. Two partitioning strategies are supported:
+    ``'grid'`` (Swin Transformer-style 2D spatial windowing) and
+    ``'zigzag'`` (2D zigzag scan grouping frequency-proximate tokens).
+    All padding, reshaping, partitioning, and merging are handled
+    internally, yielding ``O(N * k^2)`` complexity (linear in sequence
+    length, quadratic in window size ``k``).
 
-    All internal padding, reshaping, partitioning, and merging operations are
-    handled automatically.
+    **Architecture Overview:**
 
-    **Core Features (Configurable)**:
+    .. code-block:: text
 
-    1.  **Partitioning Mode (`partition_mode`)**:
-        -   `'grid'` (default): Reshapes the sequence into a 2D grid and
-            partitions it into non-overlapping spatial windows. Best for
-            tasks where 2D spatial locality is important.
-        -   `'zigzag'`: Reorders the sequence based on a 2D zigzag scan,
-            grouping tokens with similar frequency-domain characteristics
-            (inspired by JPEG). This induces a frequency-based locality bias.
-
-    2.  **Attention Mechanism**: All attention-related parameters are exposed
-        directly from the underlying `SingleWindowAttention` layer, allowing
-        fine-grained control over the attention mechanism (e.g., `attention_mode`,
-        `normalization`, `use_relative_position_bias`).
+        ┌───────────────────────────────────────────┐
+        │  Input: 1-D Sequence (B, N, dim)          │
+        └───────────────────┬───────────────────────┘
+                            ▼
+        ┌───────────────────────────────────────────┐
+        │  Pad N ─► Reshape to 2-D grid / zigzag   │
+        └───────────────────┬───────────────────────┘
+                            ▼
+        ┌───────────────────────────────────────────┐
+        │  Partition into non-overlapping windows   │
+        │  (B*num_win, ws^2, dim)                   │
+        └───────────────────┬───────────────────────┘
+                            ▼
+        ┌───────────────────────────────────────────┐
+        │  SingleWindowAttention per window         │
+        └───────────────────┬───────────────────────┘
+                            ▼
+        ┌───────────────────────────────────────────┐
+        │  Merge windows ─► Unpad / inverse zigzag  │
+        └───────────────────┬───────────────────────┘
+                            ▼
+        ┌───────────────────────────────────────────┐
+        │  Output: 1-D Sequence (B, N, dim)         │
+        └───────────────────────────────────────────┘
 
     :param dim: Dimension of the input tokens (channels).
     :type dim: int
@@ -279,7 +292,15 @@ class WindowAttention(keras.layers.Layer):
     def _generate_zigzag_indices(
         H: keras.KerasTensor, W: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Generate zigzag scan indices for an HxW grid."""
+        """Generate zigzag scan indices for an ``H x W`` grid.
+
+        :param H: Grid height.
+        :type H: keras.KerasTensor
+        :param W: Grid width.
+        :type W: keras.KerasTensor
+        :return: 1-D int32 index tensor of length ``H * W``.
+        :rtype: keras.KerasTensor
+        """
         r_coords = keras.ops.arange(0, H, dtype="int32")
         c_coords = keras.ops.arange(0, W, dtype="int32")
         r_grid, c_grid = keras.ops.meshgrid(r_coords, c_coords, indexing="ij")
@@ -294,7 +315,13 @@ class WindowAttention(keras.layers.Layer):
         return keras.ops.argsort(combined_key)
 
     def _window_partition(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Partition a 4D grid tensor into windows."""
+        """Partition a 4-D grid tensor into non-overlapping windows.
+
+        :param x: Tensor of shape ``(B, H, W, C)``.
+        :type x: keras.KerasTensor
+        :return: Windows of shape ``(B*num_windows, ws, ws, C)``.
+        :rtype: keras.KerasTensor
+        """
         B, H, W, C = keras.ops.shape(x)
         ws = self.window_size
         x = keras.ops.reshape(x, (B, H // ws, ws, W // ws, ws, C))
@@ -305,7 +332,17 @@ class WindowAttention(keras.layers.Layer):
     def _window_reverse(
         self, windows: keras.KerasTensor, H: int, W: int
     ) -> keras.KerasTensor:
-        """Merge windows back into a 4D grid tensor."""
+        """Merge windows back into a 4-D grid tensor.
+
+        :param windows: Window tensor of shape ``(B*num_windows, ws, ws, C)``.
+        :type windows: keras.KerasTensor
+        :param H: Padded grid height.
+        :type H: int
+        :param W: Padded grid width.
+        :type W: int
+        :return: Reconstructed grid of shape ``(B, H, W, C)``.
+        :rtype: keras.KerasTensor
+        """
         ws = self.window_size
         num_windows_h = H // ws
         num_windows_w = W // ws
@@ -319,7 +356,11 @@ class WindowAttention(keras.layers.Layer):
         return x
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build layer and precompute zigzag indices if needed."""
+        """Build the layer and precompute zigzag indices if needed.
+
+        :param input_shape: Shape tuple ``(batch, seq_len, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if self.partition_mode == "zigzag":
             N_actual = input_shape[1]
             if N_actual is None:
@@ -369,7 +410,17 @@ class WindowAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass for 'grid' partitioning."""
+        """Forward pass using grid-based spatial partitioning.
+
+        :param inputs: Sequence tensor ``(B, N, dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional mask ``(B, N)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(B, N, dim)``.
+        :rtype: keras.KerasTensor
+        """
         input_shape = keras.ops.shape(inputs)
         B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
         ws = self.window_size
@@ -420,7 +471,17 @@ class WindowAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass for 'zigzag' partitioning."""
+        """Forward pass using zigzag frequency-locality partitioning.
+
+        :param inputs: Sequence tensor ``(B, N, dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional mask ``(B, N)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(B, N, dim)``.
+        :rtype: keras.KerasTensor
+        """
         input_shape = keras.ops.shape(inputs)
         B, N_actual, C = input_shape[0], input_shape[1], input_shape[2]
         win_len = self.window_size * self.window_size
@@ -480,11 +541,21 @@ class WindowAttention(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape, which is identical to the input shape."""
+        """Compute the output shape (identical to the input shape).
+
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialize the layer's configuration."""
+        """Serialize the layer configuration.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -521,7 +592,13 @@ class WindowAttention(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "WindowAttention":
-        """Create a layer from its configuration."""
+        """Create a layer from its configuration dictionary.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New ``WindowAttention`` instance.
+        :rtype: WindowAttention
+        """
         return cls(**config)
 
 # ---------------------------------------------------------------------

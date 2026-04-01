@@ -1,64 +1,23 @@
 """
-Differential Multi-Head Attention Implementation
-=======================================================================
+Differential Multi-Head Attention Implementation.
 
-This module implements Differential Multi-Head Attention as described in the paper:
-"DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise"
+This module implements Differential Multi-Head Attention as described in the paper
+"DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise".
 
 The Differential Attention mechanism employs two separate Multi-Head Attention (MHA)
-layers and computes a weighted difference between them: Attention_diff = MHA1 - λ*MHA2.
+layers and computes a weighted difference between them:
+``Attention_diff = MHA1 - lambda * MHA2``.
 This design amplifies relevant context signals while attenuating noise, resulting
 in more focused attention patterns.
 
-Key Mathematical Operations:
----------------------------
-1. **Dual Attention Process**:
-   - Attention₁(X) = MultiHeadAttention₁(Q, K, V)  # Primary patterns
-   - Attention₂(X) = MultiHeadAttention₂(Q, K, V)  # Noise patterns
-
-2. **Differential Computation**:
-   - Output = Attention₁(X) - λ(layer_idx) * Attention₂(X)
-
-3. **Adaptive Lambda**:
-   - λ(l) = (0.8 - 0.6*exp(-0.3*(l-1))) * λ_learned
-   - Bounded: λ ∈ [0.1, 0.9] for training stability
-
-Architecture Flow:
------------------
-```
-Input(B, L, D)
-     ↓
-┌─────────────────┐  ┌─────────────────┐
-│ MultiHeadAttn₁  │  │ MultiHeadAttn₂  │
-│ (Primary)       │  │ (Noise)         │
-└─────────────────┘  └─────────────────┘
-     ↓                        ↓
-    MHA₁(X)          λ(layer_idx) * MHA₂(X)
-     ↓                        ↓
-     └────── Subtract ────────┘
-                  ↓
-            Differential Attention
-                  ↓
-              Dense Projection
-                  ↓
-                Dropout
-                  ↓
-            Output(B, L, D)
-```
-
-Performance Benefits:
---------------------
-- **65% efficiency**: Requires only 65% of parameters vs standard Transformer
-- **Enhanced focus**: Superior attention to relevant context
-- **Noise reduction**: Effective cancellation of irrelevant information
-- **Reduced hallucination**: Better factual accuracy in generation
-- **Quantization friendly**: Fewer activation outliers
-- **In-context learning**: More robust to order permutations
+The adaptive lambda parameter is computed as:
+``lambda(l) = (0.8 - 0.6 * exp(-0.3 * (l - 1))) * lambda_learned``
+and bounded to ``[0.1, 0.9]`` for training stability.
 
 References:
------------
-Ye, T., Dong, L., Xia, Y., Sun, Y., Zhu, Y., Huang, G., & Wei, F.
-"DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context while canceling noise"
+    Ye, T., Dong, L., Xia, Y., Sun, Y., Zhu, Y., Huang, G., & Wei, F.
+    "DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context
+    while canceling noise"
 """
 
 import keras
@@ -79,95 +38,88 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
 
     This layer implements differential attention that uses two separate MultiHeadAttention
     layers and computes their weighted difference to amplify relevant context while
-    canceling noise. The key innovation is the learnable λ parameter that balances
+    canceling noise. The key innovation is the learnable lambda parameter that balances
     the contribution of the two attention mechanisms.
 
     The differential attention is computed as:
-        Attention_diff = MHA1(x) - λ * MHA2(x)
+    ``Attention_diff = MHA1(x) - lambda * MHA2(x)``
+    where MHA1 captures primary patterns, MHA2 identifies noise, and lambda controls
+    the noise cancellation strength. The layer achieves approximately 65% of the
+    parameter count of a standard Transformer while delivering enhanced focus on
+    relevant context, reduced hallucination, and improved quantization friendliness.
 
-    Where MHA1 captures primary patterns, MHA2 identifies noise, and λ controls
-    the noise cancellation strength.
+    **Architecture Overview:**
 
-    Args:
-        dim: Integer, input and output dimension. Must be positive and should be
-            divisible by num_heads for optimal performance.
-        num_heads: Integer, number of attention heads for both attention mechanisms.
-            Must be positive and should divide dim evenly.
-        head_dim: Integer, dimension of each attention head. Must be positive.
-            Typically computed as dim // num_heads.
-        dropout_rate: Float, output dropout rate applied after projection.
-            Must be between 0 and 1. Defaults to 0.0.
-        attention_dropout_rate: Float, dropout rate applied to attention weights in
-            both MHA layers. Must be between 0 and 1. Defaults to 0.0.
-        lambda_init: Float, initial value for the λ parameter controlling the
-            balance between attention mechanisms. Should be between 0 and 1.
-            Defaults to 0.8.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional Regularizer, regularizer applied to kernel weights.
-        bias_initializer: String or Initializer, initializer for bias weights.
-            Defaults to 'zeros'.
-        bias_regularizer: Optional Regularizer, regularizer applied to bias weights.
-        activity_regularizer: Optional Regularizer, regularizer applied to layer output.
-        **kwargs: Additional keyword arguments passed to Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`
+        ┌─────────────────────────────────────────────────────────┐
+        │              DifferentialMultiHeadAttention               │
+        │                                                         │
+        │  Input [B, L, D]                                        │
+        │         │                                               │
+        │         ├─────────────────────────┐                     │
+        │         ▼                         ▼                     │
+        │  ┌──────────────────┐    ┌──────────────────┐           │
+        │  │ MultiHeadAttn_1  │    │ MultiHeadAttn_2  │           │
+        │  │   (Primary)      │    │   (Noise)        │           │
+        │  └────────┬─────────┘    └────────┬─────────┘           │
+        │           │                       │                     │
+        │           ▼                       ▼                     │
+        │        MHA_1(X)          lambda(layer_idx) * MHA_2(X)   │
+        │           │                       │                     │
+        │           └───────── subtract ────┘                     │
+        │                        │                                │
+        │                        ▼                                │
+        │              Differential Attention                      │
+        │                        │                                │
+        │                        ▼                                │
+        │                 Dense Projection                         │
+        │                        │                                │
+        │                        ▼                                │
+        │                     Dropout                              │
+        │                        │                                │
+        │                        ▼                                │
+        │               Output [B, L, D]                           │
+        └─────────────────────────────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`
+    :param dim: Integer, input and output dimension. Must be positive and should be
+        divisible by num_heads for optimal performance.
+    :type dim: int
+    :param num_heads: Integer, number of attention heads for both attention mechanisms.
+        Must be positive and should divide dim evenly.
+    :type num_heads: int
+    :param head_dim: Integer, dimension of each attention head. Must be positive.
+        Typically computed as ``dim // num_heads``.
+    :type head_dim: int
+    :param dropout_rate: Float, output dropout rate applied after projection.
+        Must be between 0 and 1. Defaults to 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Float, dropout rate applied to attention weights in
+        both MHA layers. Must be between 0 and 1. Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param lambda_init: Float, initial value for the lambda parameter controlling the
+        balance between attention mechanisms. Should be between 0 and 1.
+        Defaults to 0.8.
+    :type lambda_init: float
+    :param kernel_initializer: String or Initializer, initializer for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional Regularizer, regularizer applied to kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: String or Initializer, initializer for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Optional Regularizer, regularizer applied to bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param activity_regularizer: Optional Regularizer, regularizer applied to layer output.
+    :type activity_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments passed to Layer base class.
 
-    Attributes:
-        attention1: First MultiHeadAttention layer capturing primary patterns.
-        attention2: Second MultiHeadAttention layer identifying noise patterns.
-        proj: Dense layer for final output projection.
-        dropout_layer: Dropout layer applied to final output.
-        lambda_param: Learnable parameter controlling attention balance.
-
-    Example:
-        ```python
-        # Basic usage
-        diff_attn = DifferentialMultiHeadAttention(dim=512, num_heads=8, head_dim=64)
-
-        # Advanced configuration with regularization
-        diff_attn = DifferentialMultiHeadAttention(
-            dim=768,
-            num_heads=12,
-            head_dim=64,
-            dropout_rate=0.1,
-            attention_dropout_rate=0.05,
-            lambda_init=0.7,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Use in transformer block
-        inputs = keras.Input(shape=(seq_len, 768))
-        x = keras.layers.LayerNormalization()(inputs)
-
-        # Pass layer_idx for optimal lambda computation
-        attn_out = diff_attn(x, layer_idx=3, training=True)
-        outputs = inputs + attn_out  # Residual connection
-
-        model = keras.Model(inputs, outputs)
-        ```
-
-    Raises:
-        ValueError: If dim is not positive.
-        ValueError: If num_heads is not positive.
-        ValueError: If head_dim is not positive.
-        ValueError: If dropout rates are not between 0 and 1.
-        ValueError: If lambda_init is not between 0 and 1.
-
-    References:
-        DIFFERENTIAL TRANSFORMER: Amplifying attention to the relevant context
-        while canceling noise. Paper describes the mathematical foundation and
-        empirical benefits of this attention mechanism.
-
-    Note:
-        For optimal performance, use this layer within pre-normalization transformer
-        architectures where LayerNormalization is applied before attention blocks.
-        The layer_idx parameter should be provided during forward pass for
-        layer-dependent lambda computation.
+    :raises ValueError: If dim is not positive.
+    :raises ValueError: If num_heads is not positive.
+    :raises ValueError: If head_dim is not positive.
+    :raises ValueError: If dropout rates are not between 0 and 1.
+    :raises ValueError: If lambda_init is not between 0 and 1.
     """
 
     def __init__(
@@ -273,8 +225,9 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         Creates the learnable lambda parameter and explicitly builds all sub-layers
         for robust serialization following modern Keras 3 patterns.
 
-        Args:
-            input_shape: Shape of the input tensor.
+        :param input_shape: Shape tuple of the input tensor, expected as
+            ``(batch_size, seq_len, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -314,18 +267,17 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         Compute the lambda value with layer-dependent adaptation.
 
         The lambda parameter is adapted based on layer depth following the paper's
-        initialization strategy: λ = 0.8 - 0.6*exp(-0.3*(layer_idx - 1)).
-        The learned lambda_param is then applied as a multiplicative factor.
+        initialization strategy: ``lambda = 0.8 - 0.6 * exp(-0.3 * (layer_idx - 1))``.
+        The learned ``lambda_param`` is then applied as a multiplicative factor.
 
-        Args:
-            layer_idx: Integer, index of the layer in the network stack (0-based).
-                Used to compute layer-dependent lambda initialization.
-
-        Returns:
-            Tensor containing the computed lambda value, bounded between 0.1 and 0.9.
+        :param layer_idx: Integer, index of the layer in the network stack (0-based).
+            Used to compute layer-dependent lambda initialization.
+        :type layer_idx: int
+        :return: Tensor containing the computed lambda value, bounded between 0.1 and 0.9.
+        :rtype: keras.KerasTensor
         """
         # Layer-dependent initialization following the paper
-        # λ_init = 0.8 - 0.6*exp(-0.3*(layer_idx - 1))
+        # lambda_init = 0.8 - 0.6*exp(-0.3*(layer_idx - 1))
         layer_factor = keras.ops.cast(layer_idx, dtype="float32")
         exp_term = keras.ops.exp(-0.3 * keras.ops.maximum(layer_factor - 1.0, 0.0))
         layer_dependent_init = 0.8 - 0.6 * exp_term
@@ -350,21 +302,24 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         """
         Apply differential attention mechanism.
 
-        Computes the differential attention as: Attention_diff = MHA1(x) - λ*MHA2(x)
+        Computes the differential attention as:
+        ``Attention_diff = MHA1(x) - lambda * MHA2(x)``
         where MHA1 captures primary attention patterns, MHA2 identifies noise patterns,
-        and λ controls the balance between them.
+        and lambda controls the balance between them.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, sequence_length, dim).
-            attention_mask: Optional attention mask tensor. Can be 2D, 3D, or 4D tensor
-                for different masking strategies.
-            layer_idx: Integer, index of the layer in the network stack (0-based).
-                Used for layer-dependent lambda computation. Defaults to 0.
-            training: Optional boolean indicating whether in training mode.
-
-        Returns:
-            Output tensor of shape (batch_size, sequence_length, dim) after
+        :param inputs: Input tensor of shape ``(batch_size, sequence_length, dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask tensor. Can be 2D, 3D, or 4D
+            for different masking strategies.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param layer_idx: Integer, index of the layer in the network stack (0-based).
+            Used for layer-dependent lambda computation. Defaults to 0.
+        :type layer_idx: int
+        :param training: Optional boolean indicating whether in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, sequence_length, dim)`` after
             applying differential attention and output projection.
+        :rtype: keras.KerasTensor
         """
         # Compute attention outputs from both attention mechanisms
         # Both use self-attention (query=key=value=inputs)
@@ -389,7 +344,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # Compute layer-dependent lambda value
         lambda_val = self.get_lambda(layer_idx)
 
-        # Apply differential attention: MHA1 - λ*MHA2
+        # Apply differential attention: MHA1 - lambda*MHA2
         # This is the core innovation - subtracting weighted noise attention
         diff_attention = attention_output1 - lambda_val * attention_output2
 
@@ -400,27 +355,21 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute output shape, same as input shape for attention layers.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple. Same as input shape for attention layers.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, identical to input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         # Output shape is identical to input shape
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return configuration for serialization, includes all constructor parameters.
 
-        Returns all parameters needed to reconstruct the layer during loading.
-        This must include ALL parameters passed to __init__.
-
-        Returns:
-            Dictionary containing the complete layer configuration.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

@@ -7,60 +7,18 @@ function is to create a scalable information bottleneck, enabling a deep
 transformer model to process very large and high-dimensional inputs (like
 images or audio) without incurring quadratic computational complexity.
 
-Architecture:
-    The key architectural innovation is the decoupling of the main processing
-    network's depth from the input data's size. This is achieved by
-    introducing an asymmetric attention mechanism that operates between two
-    distinct arrays:
-
-    1.  **A small, fixed-size latent array (Queries):** This is typically a
-        learnable embedding that acts as the network's internal state or
-        "working memory." Its size is a hyperparameter that remains constant
-        regardless of the input data size.
-
-    2.  **A large, variable-size data array (Keys and Values):** This is
-        derived directly from the high-dimensional input data (e.g., image
-        patches, text tokens, audio samples).
-
-    In each layer, the latent array forms the queries (`Q`) and "attends to"
-    the data array, which provides the keys (`K`) and values (`V`). This
-    forces the model to distill or "perceive" the most relevant information
-    from the large input data and summarize it into the compact latent
-    representation. Because the subsequent self-attention layers in a
-    Perceiver model only operate on this small latent array, the overall
-    computational cost becomes manageable and independent of the input size.
-
-Foundational Mathematics:
-    While the underlying mechanism is the standard scaled dot-product
-    attention, its application is asymmetric. Given a latent array `X_lat`
-    (of size `N x D`) and a data array `X_data` (of size `M x C`), the
-    computation is as follows:
-
-        Q = X_lat @ W_q
-        K = X_data @ W_k
-        V = X_data @ W_v
-
-        Attention(Q, K, V) = softmax( (Q @ K.T) / sqrt(d_k) ) @ V
-
-    The resulting attention matrix has a shape of `(N, M)`, where `N` is the
-    latent array size and `M` is the input data size. The computational
-    complexity is O(N * M), which is a significant improvement over the
-    O(M^2) complexity of applying self-attention directly to the large data
-    array, especially when `N << M`. This mechanism effectively performs a
-    set-to-set transformation, mapping a large, variable-sized input set to
-    a small, fixed-sized latent set.
+The key innovation is decoupling the processing network's depth from the
+input data's size via an asymmetric attention mechanism between a small,
+fixed-size latent array (queries) and a large, variable-size data array
+(keys and values). The resulting attention matrix has shape ``(N, M)``
+with complexity ``O(N * M)`` instead of ``O(M^2)``, where ``N << M``.
 
 References:
-    - The primary architecture was introduced in:
-      Jaegle, A., et al. (2021). "Perceiver: General Perception with
+    - Jaegle, A., et al. (2021). "Perceiver: General Perception with
       Iterative Attention".
-
-    - The concept was extended for structured outputs in:
-      Jaegle, A., et al. (2021). "Perceiver IO: A General Architecture for
+    - Jaegle, A., et al. (2021). "Perceiver IO: A General Architecture for
       Structured Inputs & Outputs".
-
-    - The underlying attention mechanism is from:
-      Vaswani, A., et al. (2017). "Attention Is All You Need".
+    - Vaswani, A., et al. (2017). "Attention Is All You Need".
 """
 
 import keras
@@ -76,114 +34,70 @@ from .multi_head_cross_attention import MultiHeadCrossAttention
 
 @keras.saving.register_keras_serializable()
 class PerceiverAttention(keras.layers.Layer):
-    """
-    Cross-attention mechanism from the Perceiver architecture with robust serialization.
+    """Perceiver-style asymmetric cross-attention with shared projection interface.
 
-    This layer implements cross-attention where queries and key-value pairs come from
-    different sources, following the Perceiver architecture design. It demonstrates
-    the wrapper pattern by leveraging the robust `MultiHeadCrossAttention` implementation
-    while providing a specialized interface for Perceiver-style cross-modal processing.
+    Implements cross-attention where queries and key-value pairs come from different
+    sources, following the Perceiver architecture. A small, fixed-size latent array
+    forms queries that attend to a large data array providing keys and values:
+    ``Q = X_lat W_q``, ``K = X_data W_k``, ``V = X_data W_v``,
+    ``Output = softmax(Q K^T / sqrt(d_k)) V``. This layer wraps
+    ``MultiHeadCrossAttention`` with ``shared_qk_projections=False`` to provide
+    a specialized Perceiver interface with separate projections for maximum
+    cross-modal flexibility.
 
-    **Intent**: Provide a clean, specialized interface for Perceiver-style cross-attention
-    that enables flexible cross-modal processing, set-to-set transformations, and latent
-    space learning while internally leveraging the well-tested `MultiHeadCrossAttention`
-    implementation for robust serialization and consistent behavior across attention layers.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Query Input [B, Q_seq, dim] ──→ MultiHeadCrossAttention
-                                     ↓ (cross-attention mode)
-    KV Input [B, KV_seq, dim] ────→ Q_proj, KV_proj (separate)
-                                     ↓
-    Cross-Attention(Q, K, V) ──────→ Output [B, Q_seq, dim]
-    ```
+    .. code-block:: text
 
-    **Key Differences from Self-Attention**:
-    - **Queries** come from one input (`query_input`)
-    - **Keys and Values** come from another input (`kv_input`)
-    - **Cross-modal capability**: Enables attention between different modalities
-    - **Separate projections**: Uses `shared_qk_projections=False` for maximum flexibility
+        ┌──────────────────────────┐   ┌──────────────────────────┐
+        │ Query Input              │   │ KV Input                 │
+        │ [B, Q_seq, dim]          │   │ [B, KV_seq, dim]         │
+        └────────────┬─────────────┘   └────────────┬─────────────┘
+                     │                              │
+                     ▼                              ▼
+        ┌────────────────────────────────────────────────────────┐
+        │           MultiHeadCrossAttention                      │
+        │  ┌──────────┐  ┌──────────┐  ┌──────────┐             │
+        │  │ Q_proj   │  │ K_proj   │  │ V_proj   │             │
+        │  │ (query)  │  │ (kv)     │  │ (kv)     │             │
+        │  └────┬─────┘  └────┬─────┘  └────┬─────┘             │
+        │       ▼              ▼              ▼                  │
+        │  ┌─────────────────────────────────────────┐           │
+        │  │ Cross-Attention(Q, K, V)                │           │
+        │  │ softmax(Q K^T / sqrt(d_k)) V            │           │
+        │  └──────────────────┬──────────────────────┘           │
+        │                     ▼                                  │
+        │  ┌─────────────────────────────────────────┐           │
+        │  │ Output Projection                       │           │
+        │  └──────────────────┬──────────────────────┘           │
+        └─────────────────────┼──────────────────────────────────┘
+                              ▼
+        ┌─────────────────────────────────────────────┐
+        │ Output [B, Q_seq, dim]                      │
+        └─────────────────────────────────────────────┘
 
-    **Wrapper Pattern Benefits**:
-    - **Perceiver-specific interface**: Clean API focused on cross-attention use cases
-    - **Robust implementation**: Leverages battle-tested `MultiHeadCrossAttention`
-    - **Consistent behavior**: Same serialization and computation patterns
-    - **Cross-modal optimized**: Separate projections for different input sources
+    :param dim: Input/output dimension. Must be positive and divisible by num_heads.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param dropout_rate: Dropout rate for attention weights, between 0.0 and 1.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear projections.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
 
-    Args:
-        dim: Integer, input/output dimension of the attention layer.
-            Must be positive and divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive
-            and divide dim evenly. Defaults to 8.
-        dropout_rate: Float, dropout rate for attention weights. Must be between
-            0.0 and 1.0. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in linear projections.
-            Defaults to True.
-        kernel_initializer: String or Initializer, initializer for the kernel weights.
-            Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer, initializer for the bias vector.
-            Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Call arguments:
-        query_input: Query tensor of shape (batch_size, query_seq_len, dim).
-        kv_input: Optional Key-Value tensor of shape (batch_size, kv_seq_len, dim).
-            If None, uses query_input for both (self-attention mode).
-        training: Boolean indicating whether the layer should behave in training
-            mode (applying dropout) or inference mode.
-
-    Returns:
-        Output tensor with same shape as query_input after cross-attention.
-
-    Raises:
-        ValueError: If dim is not divisible by num_heads.
-        ValueError: If input shapes are invalid.
-        ValueError: If parameters are out of valid ranges.
-
-    Example:
-        ```python
-        # Cross-attention between different modalities
-        visual_features = keras.random.normal((2, 196, 256))  # ViT patches
-        text_features = keras.random.normal((2, 77, 256))    # Text tokens
-
-        perceiver_attn = PerceiverAttention(dim=256, num_heads=8, dropout_rate=0.1)
-
-        # Text attending to visual features
-        text_to_visual = perceiver_attn(text_features, visual_features)
-        print(text_to_visual.shape)  # (2, 77, 256)
-
-        # Visual attending to text features
-        visual_to_text = perceiver_attn(visual_features, text_features)
-        print(visual_to_text.shape)  # (2, 196, 256)
-
-        # Self-attention mode (single input)
-        self_attended = perceiver_attn(visual_features)
-        print(self_attended.shape)  # (2, 196, 256)
-
-        # Cross-modal with regularization
-        regularized_attn = PerceiverAttention(
-            dim=512,
-            num_heads=16,
-            dropout_rate=0.2,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Latent bottleneck processing (Perceiver-style)
-        latent_queries = keras.random.normal((2, 64, 256))    # Compact latent
-        sensor_data = keras.random.normal((2, 1024, 256))    # High-dim input
-        compressed = perceiver_attn(latent_queries, sensor_data)
-        print(compressed.shape)  # (2, 64, 256) - Compressed representation
-        ```
-
-    Notes:
-        This layer is particularly useful for:
-        - Cross-modal attention (vision_heads-language, audio-visual)
-        - Latent bottleneck architectures (Perceiver, Perceiver IO)
-        - Set-to-set transformations with different cardinalities
-        - Memory-augmented networks with external memory
-        - Multimodal fusion where queries and context have different structures
+    :raises ValueError: If dim is not divisible by num_heads.
+    :raises ValueError: If input shapes are invalid.
+    :raises ValueError: If parameters are out of valid ranges.
     """
 
     def __init__(
@@ -239,16 +153,11 @@ class PerceiverAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> None:
-        """
-        Build the layer by creating weight variables and building sub-layers.
+        """Build the layer by creating weight variables and building sub-layers.
 
-        CRITICAL: Explicitly build the wrapped MultiHeadCrossAttention for
-        robust serialization. This ensures all weight variables exist before
-        weight restoration during model loading.
-
-        Args:
-            input_shape: Shape of input tensor(s). Can be a single shape tuple
-                or a list of two shape tuples for query and kv inputs.
+        :param input_shape: Shape of input tensor(s). Can be a single shape tuple
+            or a list of two shape tuples for query and kv inputs.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
         # Handle different input formats
         if isinstance(input_shape, list):
@@ -283,23 +192,21 @@ class PerceiverAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply Perceiver cross-attention.
+        """Apply Perceiver cross-attention.
 
-        This method delegates to the underlying MultiHeadCrossAttention layer
-        with separate projections for maximum cross-modal flexibility.
+        :param query_input: Query tensor of shape ``(batch_size, query_seq_len, dim)``.
+        :type query_input: keras.KerasTensor
+        :param kv_input: Key-Value tensor of shape ``(batch_size, kv_seq_len, dim)``.
+            If ``None``, uses query_input for self-attention mode.
+        :type kv_input: Optional[keras.KerasTensor]
+        :param attention_mask: Optional attention mask of shape
+            ``(batch_size, seq_len, seq_len)`` or ``(batch_size, 1, seq_len, seq_len)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
 
-        Args:
-            query_input: Query tensor of shape (batch_size, query_seq_len, dim).
-            kv_input: Key-Value tensor of shape (batch_size, kv_seq_len, dim).
-                If None, uses query_input for both (self-attention mode).
-            attention_mask: Optional attention mask of shape (batch_size, seq_len, seq_len)
-                or (batch_size, 1, seq_len, seq_len). Values should be 1 for
-                positions to attend to and 0 for masked positions.
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor with same shape as query_input.
+        :return: Output tensor with same shape as query_input.
+        :rtype: keras.KerasTensor
         """
         return self.cross_attention(
             query_input=query_input,
@@ -312,14 +219,13 @@ class PerceiverAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape - same as query input shape.
+        """Compute the output shape (same as query input shape).
 
-        Args:
-            input_shape: Input shape(s). Either single shape tuple or list of two shapes.
+        :param input_shape: Input shape(s), either single or list of two shapes.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
 
-        Returns:
-            Output shape tuple, same as query input shape.
+        :return: Output shape tuple, same as query input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, list):
             return input_shape[0]  # Same as query input shape
@@ -327,11 +233,10 @@ class PerceiverAttention(keras.layers.Layer):
             return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization - includes ALL constructor parameters.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

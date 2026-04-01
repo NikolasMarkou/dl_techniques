@@ -68,87 +68,67 @@ from typing import Optional, Union, Dict, Any, Tuple
 @keras.saving.register_keras_serializable()
 class ChannelAttention(keras.layers.Layer):
     """
-    Channel attention module of CBAM (Convolutional Block Attention Module).
+    Channel attention module from CBAM that learns per-channel importance weights.
 
-    This module applies channel-wise attention by using both max-pooling
-    and average-pooling features, followed by a shared MLP network to generate
-    channel attention weights. The attention mechanism allows the model to
-    focus on the most informative channels in the feature maps.
+    Implements the channel attention mechanism from the Convolutional Block
+    Attention Module (CBAM). The module aggregates spatial information via
+    dual-path global pooling (average and max), processes both descriptors
+    through a shared bottleneck MLP, and produces sigmoid-activated channel
+    weights via ``M_c(F) = sigma(W_1(ReLU(W_0(F_avg))) + W_1(ReLU(W_0(F_max))))``.
 
-    The operation can be summarized as:
-    1. Apply global average pooling and global max pooling to input
-    2. Pass both through a shared MLP (two Dense layers with ReLU activation)
-    3. Element-wise addition of the outputs
-    4. Apply sigmoid activation to get attention weights
-    5. The output can be multiplied with input features for channel attention
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        Mc(F) = σ(MLP(AvgPool(F)) + MLP(MaxPool(F)))
+    .. code-block:: text
 
-    Where σ is sigmoid activation, MLP is the shared multi-layer perceptron,
-    and F represents the input feature maps.
+        Input [B, H, W, C]
+              │
+              ├──────────────────────┐
+              ▼                      ▼
+        ┌───────────────┐   ┌───────────────┐
+        │ Global AvgPool│   │ Global MaxPool│
+        │  (H,W) → (1,1)│   │  (H,W) → (1,1)│
+        └───────┬───────┘   └───────┬───────┘
+                ▼                    ▼
+          [B, C] (flat)        [B, C] (flat)
+                │                    │
+                ├────── Shared ──────┤
+                ▼       MLP         ▼
+        ┌───────────────┐   ┌───────────────┐
+        │ Dense(C//r)   │   │ Dense(C//r)   │
+        │ + ReLU        │   │ + ReLU        │
+        ├───────────────┤   ├───────────────┤
+        │ Dense(C)      │   │ Dense(C)      │
+        └───────┬───────┘   └───────┬───────┘
+                │                    │
+                └────── Add ─────────┘
+                         ▼
+                    ┌─────────┐
+                    │ Sigmoid │
+                    └────┬────┘
+                         ▼
+                  [B, 1, 1, C] weights
 
-    Args:
-        channels: Integer, number of input channels. Must be positive and
-            divisible by ratio.
-        ratio: Integer, reduction ratio for the shared MLP. Controls the
-            bottleneck dimension in the MLP (channels // ratio). Must be
-            positive and divide evenly into channels. Defaults to 8.
-        kernel_initializer: String or initializer instance, initializer for
-            the dense layer kernels. Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional regularizer instance for the dense
-            layer kernels. Defaults to None.
-        use_bias: Boolean, whether to include bias in dense layers.
-            Defaults to False.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param channels: Number of input channels. Must be positive and
+        divisible by ``ratio``.
+    :type channels: int
+    :param ratio: Reduction ratio for the shared MLP bottleneck dimension
+        (``channels // ratio``). Must be positive and divide evenly into
+        ``channels``. Defaults to 8.
+    :type ratio: int
+    :param kernel_initializer: Initializer for the dense layer kernels.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for the dense layer
+        kernels. Defaults to ``None``.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param use_bias: Whether to include bias in dense layers.
+        Defaults to ``False``.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    Input shape:
-        4D tensor with shape: (batch_size, height, width, channels)
-
-    Output shape:
-        4D tensor with shape: (batch_size, 1, 1, channels)
-        This represents the channel attention weights that can be broadcasted
-        and multiplied with the input features.
-
-    Attributes:
-        dense1: First dense layer of the shared MLP (reduction layer).
-        dense2: Second dense layer of the shared MLP (expansion layer).
-
-    Example:
-        ```python
-        # Basic usage
-        attention = ChannelAttention(channels=256)
-        inputs = keras.Input(shape=(224, 224, 256))
-        attention_weights = attention(inputs)
-
-        # Apply attention to features
-        attended_features = keras.layers.Multiply()([inputs, attention_weights])
-
-        # With custom configuration
-        attention = ChannelAttention(
-            channels=512,
-            ratio=16,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a complete CBAM block
-        inputs = keras.Input(shape=(224, 224, 256))
-        channel_attention = ChannelAttention(channels=256)(inputs)
-        channel_refined = keras.layers.Multiply()([inputs, channel_attention])
-        ```
-
-    References:
-        - CBAM: Convolutional Block Attention Module, Woo et al., 2018
-        - https://arxiv.org/abs/1807.06521
-
-    Raises:
-        ValueError: If channels is not positive.
-        ValueError: If ratio is not positive or doesn't divide evenly into channels.
-
-    Note:
-        This implementation follows the modern Keras 3 pattern where sub-layers
-        are created in __init__ and explicitly built in build() for robust
-        serialization support.
+    :raises ValueError: If ``channels`` is not positive.
+    :raises ValueError: If ``ratio`` is not positive or does not divide
+        evenly into ``channels``.
     """
 
     def __init__(
@@ -202,13 +182,12 @@ class ChannelAttention(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures weight variables exist before weight restoration during
-        model loading.
+        Explicitly builds each sub-layer for robust serialization, ensuring
+        weight variables exist before weight restoration during model loading.
 
-        Args:
-            input_shape: Shape tuple indicating the input shape of the layer.
-                Expected to be (batch_size, height, width, channels).
+        :param input_shape: Shape tuple of the input tensor. Expected to be
+            ``(batch_size, height, width, channels)``.
+        :type input_shape: tuple
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -244,16 +223,17 @@ class ChannelAttention(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Apply channel attention to input tensor.
+        Apply channel attention to the input tensor.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Channel attention weights of shape (batch_size, 1, 1, channels).
-            These weights can be multiplied with the input to apply attention.
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: bool or None
+        :return: Channel attention weights of shape
+            ``(batch_size, 1, 1, channels)``.
+        :rtype: keras.KerasTensor
         """
         # Apply global pooling operations
         # Shape: (batch_size, height, width, channels) -> (batch_size, 1, 1, channels)
@@ -291,23 +271,19 @@ class ChannelAttention(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple (batch_size, 1, 1, channels).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple ``(batch_size, 1, 1, channels)``.
+        :rtype: tuple
         """
         return (input_shape[0], 1, 1, self.channels)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the layer configuration for serialization.
+        Return the layer configuration for serialization.
 
-        This method must include ALL parameters passed to __init__
-        for proper serialization and deserialization.
-
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

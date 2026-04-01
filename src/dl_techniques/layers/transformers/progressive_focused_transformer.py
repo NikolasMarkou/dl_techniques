@@ -73,224 +73,72 @@ class PFTBlock(keras.layers.Layer):
     """
     Progressive Focused Transformer Block.
 
-    A complete transformer block featuring progressive focused attention,
-    pre-normalization, configurable FFN, residual connections, and stochastic depth.
-    This block is the fundamental building unit of the PFT-SR architecture.
+    Combines progressive focused attention, pre-normalization, a configurable
+    FFN, residual connections, and stochastic depth into a single building
+    block for the PFT-SR architecture. Each layer receives the attention map
+    from the previous layer to hierarchically refine focus on relevant
+    features. Alternating blocks use shifted windows (SW-MSA) for
+    cross-window information flow.
 
-    **Design Philosophy:**
+    ``x' = x + DropPath(PFA(Norm1(x), prev_attn_map))``
+    ``y  = x' + DropPath(FFN(Norm2(x')))``
 
-    The PFT block is designed for vision tasks, particularly image super-resolution,
-    where spatial relationships and progressive feature refinement are critical.
-    Unlike standard transformers that treat all tokens equally, PFT progressively
-    focuses attention on increasingly relevant features across layers.
+    **Architecture Overview:**
 
-    **Architecture Details:**
+    .. code-block:: text
 
-    - **Pre-Normalization**: Applies normalization before attention/FFN rather than
-      after. This improves gradient flow and training stability in deep networks.
+        ┌────────────────────────────────────────┐
+        │  Input (B, H, W, dim)                  │
+        │  + prev_attn_map (optional)            │
+        └──────────────────┬─────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────┐
+        │  Norm1 ─► Progressive Focused Attn     │
+        │  ─► [StochasticDepth] ─► + Residual    │
+        └──────────────────┬─────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────┐
+        │  Norm2 ─► FFN (configurable type)      │
+        │  ─► [StochasticDepth] ─► + Residual    │
+        └──────────────────┬─────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────┐
+        │  Output (B, H, W, dim)                 │
+        │  + attn_map (for next block)           │
+        └────────────────────────────────────────┘
 
-    - **Windowed Attention**: Reduces computational complexity while maintaining
-      local spatial relationships. Window size is typically 7-16 for vision tasks.
-
-    - **Shifted Windows**: Alternating blocks use shifted windows to enable
-      cross-window connections, preventing information isolation within windows.
-
-    - **Progressive Focusing**: Each layer receives attention maps from the previous
-      layer, creating a hierarchical refinement of attention patterns.
-
-    **Usage Pattern:**
-
-    Typical usage involves alternating between regular windowed attention (W-MSA)
-    and shifted window attention (SW-MSA) in consecutive blocks:
-
-    - Block 0: shift_size=0 (W-MSA)
-    - Block 1: shift_size=window_size//2 (SW-MSA)
-    - Block 2: shift_size=0 (W-MSA)
-    - Block 3: shift_size=window_size//2 (SW-MSA)
-    - ...
-
-    Parameters
-    ----------
-    dim : int
-        The embedding dimension (number of channels). Must be divisible
-        by num_heads.
-    num_heads : int
-        Number of attention heads. Typical values: 3, 4, 6, 8, 12.
-    window_size : int, optional
-        Size of the attention window. Attention is computed within
-        non-overlapping windows of this size. Typical values: 7, 8, 16.
-        Larger windows capture more global context but increase computation.
-        Default is 8.
-    shift_size : int, optional
-        Shift size for shifted window attention (SW-MSA). Use 0 for regular
-        W-MSA, and ``window_size // 2`` for SW-MSA. Shifted blocks should
-        alternate with non-shifted blocks. Default is 0.
-    mlp_ratio : float, optional
-        Expansion ratio for the FFN hidden dimension.
-        hidden_dim = dim * mlp_ratio. Typical values: 2.0-4.0.
-        Higher values increase model capacity but also computation.
-        Default is 4.0.
-    qkv_bias : bool, optional
-        Whether to include bias terms in QKV projections. Including bias
-        can improve performance but adds parameters. Default is True.
-    attention_dropout : float, optional
-        Dropout rate for attention weights after softmax. Helps prevent
-        overfitting to specific attention patterns. Default is 0.0.
-    projection_dropout : float, optional
-        Dropout rate for attention output projection and FFN output.
-        Default is 0.0.
-    drop_path_rate : float, optional
-        Stochastic depth rate. Probability of dropping the entire layer
-        during training. This provides strong regularization in deep networks.
-        Typically increases with layer depth (e.g., 0.0 → 0.5 from shallow
-        to deep layers). Default is 0.0.
-    norm_type : NormalizationType, optional
-        Type of normalization to use. Supported options:
-
-        - ``'layer_norm'``: Standard Layer Normalization (default, stable)
-        - ``'rms_norm'``: RMS Normalization (faster, often equivalent)
-        - ``'zero_centered_rms_norm'``: Zero-centered RMS (improved stability)
-        - ``'band_rms'``: Band-RMS Normalization (vision-specific)
-        - ``'adaptive_band_rms'``: Adaptive Band-RMS (learnable bands)
-        - ``'dynamic_tanh'``: Dynamic tanh normalization
-
-        Default is ``'layer_norm'``.
-    norm_kwargs : dict, optional
-        Additional keyword arguments passed to the normalization layer factory.
-        For example, {'epsilon': 1e-6} for LayerNorm, or
-        {'max_band_width': 0.1} for BandRMS. Default is None.
-    ffn_type : FFNType, optional
-        Type of Feed-Forward Network to use. Supported options:
-
-        - ``'mlp'``: Standard MLP with activation (default, stable)
-        - ``'swiglu'``: SwiGLU (state-of-the-art for many tasks)
-        - ``'geglu'``: GeGLU (alternative gated activation)
-        - ``'glu'``: GLU (Gated Linear Unit)
-        - ``'swin_mlp'``: Swin Transformer MLP variant
-        - ``'differential'``: Differential FFN
-        - ``'residual'``: Residual FFN
-        - ``'orthoglu'``: Orthogonal GLU
-
-        Default is ``'mlp'``.
-    ffn_kwargs : dict, optional
-        Additional keyword arguments passed to the FFN factory.
-        Default is None.
-    ffn_activation : str, optional
-        Activation function for FFN (when using ``'mlp'`` type).
-        Common choices: 'gelu', 'relu', 'swish', 'mish'.
-        Default is ``'gelu'``.
-    use_lepe : bool, optional
-        Whether to use Locally-Enhanced Positional Encoding in the
-        attention mechanism. LePE provides position information through
-        depthwise convolution, which is more efficient than absolute
-        positional embeddings for vision tasks. Recommended: True.
-        Default is True.
-    **kwargs
-        Additional keyword arguments for the Layer base class
-        (e.g., name, dtype, trainable).
-
-    Attributes
-    ----------
-    _norm1 : keras.layers.Layer
-        First normalization layer (before attention).
-    _norm2 : keras.layers.Layer
-        Second normalization layer (before FFN).
-    _attn : ProgressiveFocusedAttention
-        Progressive focused attention layer.
-    _ffn : keras.layers.Layer
-        Feed-forward network layer.
-    _drop_path : StochasticDepth or None
-        Stochastic depth layer if drop_path_rate > 0.
-
-    Notes
-    -----
-    **Input Shape:**
-        Tuple or single tensor:
-
-        - If tuple: ``(x, prev_attn_map)`` where:
-            - x: ``(batch_size, height, width, dim)``
-            - prev_attn_map: Attention map from previous block
-        - If single: ``(batch_size, height, width, dim)``
-          (prev_attn_map assumed to be None)
-
-    **Output Shape:**
-        Tuple of:
-
-        - output: ``(batch_size, height, width, dim)`` - transformed features
-        - attn_map: Attention map for next block
-
-    **Important Constraints:**
-        - Height and width must be divisible by window_size
-        - dim must be divisible by num_heads
-        - shift_size must be less than window_size
-        - For shifted blocks (shift_size > 0), typically use window_size // 2
-
-    **Memory Considerations:**
-        - Attention complexity: O(H*W*window_size²) per block
-        - FFN complexity: O(H*W*dim*mlp_ratio*dim)
-        - Peak memory: During backpropagation through attention
-
-    Examples
-    --------
-    Basic usage with default settings (W-MSA):
-
-    >>> import keras
-    >>> x = keras.random.normal((2, 64, 64, 96))
-    >>> block = PFTBlock(dim=96, num_heads=3, window_size=8, shift_size=0)
-    >>> output, attn_map = block((x, None))
-    >>> print(output.shape)
-    (2, 64, 64, 96)
-
-    Shifted window block (SW-MSA) for alternating layers:
-
-    >>> shifted_block = PFTBlock(
-    ...     dim=96, num_heads=3, window_size=8, shift_size=4
-    ... )
-    >>> output, attn_map = shifted_block((output, attn_map))
-    >>> print(output.shape)
-    (2, 64, 64, 96)
-
-    Advanced configuration with SwiGLU FFN and RMSNorm:
-
-    >>> block = PFTBlock(
-    ...     dim=96,
-    ...     num_heads=3,
-    ...     window_size=8,
-    ...     mlp_ratio=4.0,
-    ...     norm_type='rms_norm',
-    ...     ffn_type='swiglu',
-    ...     drop_path_rate=0.1,
-    ...     attention_dropout=0.1,
-    ...     projection_dropout=0.1
-    ... )
-
-    Custom normalization with specific parameters:
-
-    >>> block = PFTBlock(
-    ...     dim=96,
-    ...     num_heads=3,
-    ...     norm_type='band_rms',
-    ...     norm_kwargs={'max_band_width': 0.1, 'epsilon': 1e-7}
-    ... )
-
-    Stack of blocks for deep network:
-
-    >>> import keras
-    >>> def build_pft_stage(dim, num_heads, depth, window_size):
-    ...     blocks = []
-    ...     for i in range(depth):
-    ...         # Alternate between W-MSA and SW-MSA
-    ...         shift = 0 if (i % 2 == 0) else window_size // 2
-    ...         # Increase drop_path_rate with depth
-    ...         drop_path = 0.1 * (i / depth)
-    ...         blocks.append(PFTBlock(
-    ...             dim=dim,
-    ...             num_heads=num_heads,
-    ...             window_size=window_size,
-    ...             shift_size=shift,
-    ...             drop_path_rate=drop_path
-    ...         ))
-    ...     return blocks
+    :param dim: Embedding dimension (number of channels).
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param window_size: Attention window size. Default: 8.
+    :type window_size: int
+    :param shift_size: Cyclic shift for SW-MSA. Default: 0.
+    :type shift_size: int
+    :param mlp_ratio: FFN expansion ratio. Default: 4.0.
+    :type mlp_ratio: float
+    :param qkv_bias: Whether QKV projections use bias. Default: True.
+    :type qkv_bias: bool
+    :param attention_dropout: Attention weight dropout. Default: 0.0.
+    :type attention_dropout: float
+    :param projection_dropout: Projection / FFN dropout. Default: 0.0.
+    :type projection_dropout: float
+    :param drop_path_rate: Stochastic depth rate. Default: 0.0.
+    :type drop_path_rate: float
+    :param norm_type: Normalization layer type. Default: ``'layer_norm'``.
+    :type norm_type: NormalizationType
+    :param norm_kwargs: Extra kwargs for the normalization factory.
+    :type norm_kwargs: Optional[Dict[str, Any]]
+    :param ffn_type: FFN architecture type. Default: ``'mlp'``.
+    :type ffn_type: FFNType
+    :param ffn_kwargs: Extra kwargs for the FFN factory.
+    :type ffn_kwargs: Optional[Dict[str, Any]]
+    :param ffn_activation: FFN activation function. Default: ``'gelu'``.
+    :type ffn_activation: str
+    :param use_lepe: Enable locally-enhanced positional encoding.
+    :type use_lepe: bool
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -312,7 +160,6 @@ class PFTBlock(keras.layers.Layer):
             use_lepe: bool = True,
             **kwargs: Any
     ) -> None:
-        """Initialize PFTBlock with given configuration."""
         super().__init__(**kwargs)
 
         # ============ Store Configuration Parameters ============
@@ -337,17 +184,9 @@ class PFTBlock(keras.layers.Layer):
         self._validate_config()
 
     def _validate_config(self) -> None:
-        """
-        Validate layer configuration parameters.
+        """Validate layer configuration parameters.
 
-        Performs comprehensive validation of all configuration parameters
-        to catch errors early before layer building. This helps provide
-        clear error messages for common misconfigurations.
-
-        Raises
-        ------
-        ValueError
-            If any configuration parameters are invalid or incompatible.
+        :raises ValueError: If any parameters are invalid or incompatible.
         """
         # Validate shift_size constraints
         if self._shift_size >= self._window_size:
@@ -396,39 +235,11 @@ class PFTBlock(keras.layers.Layer):
             )
 
     def build(self, input_shape: Union[tuple, list]) -> None:
-        """
-        Build layer components.
+        """Build all sub-layers with correct shapes.
 
-        Creates all sub-layers: normalization layers, attention, FFN, and
-        stochastic depth. This method follows Keras 3 best practices by
-        explicitly building all sub-layers to ensure proper weight
-        initialization and serialization.
-
-        **Build Order:**
-
-        1. Create normalization layers (Norm1, Norm2)
-        2. Create Progressive Focused Attention layer
-        3. Create Feed-Forward Network layer
-        4. Create Stochastic Depth layer (if needed)
-        5. Explicitly build all sub-layers with correct shapes
-
-        Parameters
-        ----------
-        input_shape : tuple or list
-            Shape tuple or list of shape tuples for inputs.
-            Can be either:
-
-            - Single tuple: ``(batch, height, width, dim)`` for x
-            - List of tuples: ``[(x_shape), (attn_map_shape)]``
-
-        Notes
-        -----
-        Explicit sub-layer building is critical for:
-
-        - Proper weight initialization
-        - Model serialization/deserialization
-        - Mixed precision training
-        - Distributed training
+        :param input_shape: Single shape tuple or list of
+            ``[x_shape, attn_map_shape]``.
+        :type input_shape: Union[tuple, list]
         """
         # ============ Extract Input Shape ============
         # Handle both single tensor and tuple inputs
@@ -504,34 +315,12 @@ class PFTBlock(keras.layers.Layer):
         super().build(input_shape)
 
     def _build_ffn(self, hidden_dim: int) -> keras.layers.Layer:
-        """
-        Build the Feed-Forward Network using factory pattern.
+        """Build the Feed-Forward Network using factory pattern.
 
-        Constructs the appropriate FFN architecture based on the specified
-        ffn_type. Different FFN types have different strengths:
-
-        - **MLP**: Standard and stable, good default choice
-        - **SwiGLU**: State-of-the-art for many tasks, more parameters
-        - **GeGLU**: Alternative to SwiGLU with similar performance
-        - **GLU**: Gated activation for better expressiveness
-        - **Swin MLP**: Optimized for vision tasks
-        - **OrthoGLU**: Uses orthogonal regularization
-
-        Parameters
-        ----------
-        hidden_dim : int
-            Hidden dimension for the FFN, computed as ``dim * mlp_ratio``.
-
-        Returns
-        -------
-        keras.layers.Layer
-            The configured FFN layer.
-
-        Notes
-        -----
-        The factory handles all FFN-specific parameter requirements.
-        Some FFN types ignore certain parameters (e.g., SwiGLU has its
-        own expansion logic and ignores the hidden_dim parameter).
+        :param hidden_dim: Hidden dimension (``dim * mlp_ratio``).
+        :type hidden_dim: int
+        :return: Configured FFN layer.
+        :rtype: keras.layers.Layer
         """
         # Prepare FFN configuration by copying user-provided kwargs
         ffn_config = self._ffn_kwargs.copy()
@@ -644,114 +433,17 @@ class PFTBlock(keras.layers.Layer):
             inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]],
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Forward pass of PFT block.
+        """Forward pass of the PFT block.
 
-        Implements the complete transformer block with pre-normalization,
-        progressive focused attention, FFN, and residual connections.
-
-        **Computation Flow:**
-
-        1. **Attention Sub-block:**
-           - Normalize input (Norm1)
-           - Apply Progressive Focused Attention with previous attention map
-           - Apply stochastic depth (optional)
-           - Add residual connection
-
-        2. **FFN Sub-block:**
-           - Normalize attention output (Norm2)
-           - Apply Feed-Forward Network
-           - Apply stochastic depth (optional)
-           - Add residual connection
-
-        **Mathematical Formulation:**
-
-        .. code-block:: text
-
-            # Attention sub-block
-            x_norm = Norm1(x)
-            attn_out, attn_map = PFA(x_norm, prev_attn_map)
-            x = x + DropPath(attn_out)
-
-            # FFN sub-block
-            x_norm = Norm2(x)
-            ffn_out = FFN(x_norm)
-            x = x + DropPath(ffn_out)
-
-        Parameters
-        ----------
-        inputs : tensor or tuple
-            Either a single tensor or a tuple of ``(x, prev_attn_map)`` where:
-
-            - **x**: Input tensor of shape ``(batch_size, height, width, dim)``.
-              The feature map to transform.
-            - **prev_attn_map**: Optional previous attention map for progressive
-              focusing. If None, standard attention is used (first layer behavior).
-
-        training : bool, optional
-            Whether in training mode. Affects:
-
-            - Dropout behavior (active only during training)
-            - Stochastic depth (active only during training)
-            - Batch normalization (if used in custom components)
-
-            Default is None (uses Keras learning phase).
-
-        Returns
-        -------
-        tuple
-            A tuple of ``(output, attention_map)`` where:
-
-            - **output**: Transformed feature tensor of shape
-              ``(batch_size, height, width, dim)``. Has the same spatial
-              dimensions as input but with refined features.
-            - **attention_map**: Attention weights from this block of shape
-              ``(batch*num_windows, num_heads, window_area, window_area)``.
-              Pass this to the next block as prev_attn_map for progressive focusing.
-
-        Notes
-        -----
-        **Pre-Normalization Benefits:**
-
-        - Better gradient flow to earlier layers
-        - More stable training in deep networks
-        - Less sensitive to learning rate
-        - Enables training of very deep transformers (50+ layers)
-
-        **Stochastic Depth:**
-
-        When drop_path_rate > 0, entire layers are randomly dropped during
-        training. This:
-
-        - Reduces overfitting in deep networks
-        - Encourages feature reuse across layers
-        - Acts as implicit ensemble of shallower networks
-        - Drop probability typically increases with layer depth
-
-        Examples
-        --------
-        Basic forward pass:
-
-        >>> import keras
-        >>> x = keras.random.normal((2, 64, 64, 96))
-        >>> block = PFTBlock(dim=96, num_heads=3, window_size=8)
-        >>> output, attn_map = block(x, training=True)
-
-        With previous attention map:
-
-        >>> output, new_attn_map = block((output, attn_map), training=True)
-
-        Sequential blocks with progressive focusing:
-
-        >>> blocks = [
-        ...     PFTBlock(96, 3, 8, shift_size=0),
-        ...     PFTBlock(96, 3, 8, shift_size=4),
-        ...     PFTBlock(96, 3, 8, shift_size=0),
-        ... ]
-        >>> x = keras.random.normal((2, 64, 64, 96))
-        >>> attn_map = None
-        >>> for block in blocks:
-        ...     x, attn_map = block((x, attn_map), training=True)
+        :param inputs: Single tensor ``(B, H, W, dim)`` or tuple
+            ``(x, prev_attn_map)`` where ``prev_attn_map`` is the
+            attention map from the preceding block (or ``None``).
+        :type inputs: Union[keras.KerasTensor, Tuple]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Tuple ``(output, attn_map)`` where ``output`` has shape
+            ``(B, H, W, dim)`` and ``attn_map`` is passed to the next block.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # ============ Unpack Inputs ============
         # Handle both single tensor and tuple inputs
@@ -808,19 +500,10 @@ class PFTBlock(keras.layers.Layer):
         return x, attn_map
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return layer configuration for serialization.
+        """Return configuration dictionary for serialization.
 
-        Returns
-        -------
-        dict
-            Configuration dictionary containing all parameters needed
-            to reconstruct this layer via ``from_config``.
-
-        Notes
-        -----
-        This method is called during model saving to serialize the layer.
-        All parameters needed to reconstruct the layer must be included.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -844,22 +527,12 @@ class PFTBlock(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "PFTBlock":
-        """
-        Create layer from configuration dictionary.
+        """Create layer from a configuration dictionary.
 
-        Parameters
-        ----------
-        config : dict
-            Configuration dictionary from ``get_config``.
-
-        Returns
-        -------
-        PFTBlock
-            New instance created from configuration.
-
-        Notes
-        -----
-        This method is called during model loading to deserialize the layer.
+        :param config: Configuration from ``get_config``.
+        :type config: Dict[str, Any]
+        :return: New ``PFTBlock`` instance.
+        :rtype: PFTBlock
         """
         return cls(**config)
 
@@ -867,33 +540,12 @@ class PFTBlock(keras.layers.Layer):
             self,
             input_shape: Union[tuple, list]
     ) -> Tuple[tuple, tuple]:
-        """
-        Compute output shape of the layer.
+        """Compute output shapes for feature tensor and attention map.
 
-        Parameters
-        ----------
-        input_shape : tuple or list
-            Input shape(s). Either:
-
-            - Single tuple: ``(batch, height, width, dim)`` for x
-            - List of tuples: ``[(x_shape), (attn_map_shape)]``
-
-        Returns
-        -------
-        tuple
-            Output shapes as ``(output_shape, attn_map_shape)`` where:
-
-            - **output_shape**: Same as input x shape
-              ``(batch_size, height, width, dim)``.
-              The block preserves spatial dimensions.
-            - **attn_map_shape**: Shape of attention weights
-              ``(batch*num_windows, num_heads, window_area, window_area)``.
-              Used as input to next block.
-
-        Notes
-        -----
-        The output spatial dimensions are always the same as input.
-        This makes PFT blocks stackable without dimension changes.
+        :param input_shape: Single shape or list of shapes.
+        :type input_shape: Union[tuple, list]
+        :return: Tuple ``(output_shape, attn_map_shape)``.
+        :rtype: Tuple[tuple, tuple]
         """
         # Extract x shape
         if isinstance(input_shape, list):

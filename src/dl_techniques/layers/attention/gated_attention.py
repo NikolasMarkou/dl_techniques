@@ -82,126 +82,96 @@ from dl_techniques.layers.embedding import create_embedding_layer
 @keras.saving.register_keras_serializable()
 class GatedAttention(keras.layers.Layer):
     """
-    Gated Attention layer with normalization, partial RoPE, and output gating.
+    Gated multi-head attention with Zero-Centered RMSNorm, partial RoPE, and sigmoid output gating.
 
-    This layer implements a sophisticated attention mechanism that includes:
-    - Input linear projection for feature transformation
-    - Separate Q/K/V projections with Zero-Centered RMS normalization
-    - Partial Rotary Position Embedding (RoPE) applied to queries and keys
-    - Scaled dot-product attention mechanism
-    - Output gating with sigmoid activation for selective information flow
+    Combines input linear projection, separate Q/K/V projections normalized
+    with Zero-Centered RMSNorm, partial Rotary Position Embedding on Q and K,
+    scaled dot-product attention, and a sigmoid gating mechanism. The forward
+    pass computes ``output = sigma(W_gate(A')) * A'`` where
+    ``A' = Attention(RoPE(RMSNorm(Q)), RoPE(RMSNorm(K)), RMSNorm(V))``.
 
-    **Intent**: Provide a high-performance attention layer that combines modern
-    techniques like RoPE and advanced normalization with gating mechanisms for
-    improved training stability and model expressiveness.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, dim])
-           ↓
-    Linear Projection
-           ↓
-    Split → Q Linear → Zero-Centered RMSNorm → Partial RoPE ↘
-         → K Linear → Zero-Centered RMSNorm → Partial RoPE → Attention
-         → V Linear → Zero-Centered RMSNorm ---------------→ ↗
-           ↓
-    Attention Output → (Optional Projection) → Linear → Sigmoid → Gate (⊗) → Output
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Input Transform**: x' = Linear(x)
-    2. **QKV Projections**: Q = Linear_q(x'), K = Linear_k(x'), V = Linear_v(x')
-    3. **Normalization**: Q_norm = RMSNorm(Q), K_norm = RMSNorm(K), V_norm = RMSNorm(V)
-    4. **RoPE**: Q_rope = RoPE(Q_norm), K_rope = RoPE(K_norm)
-    5. **Attention**: A = Attention(Q_rope, K_rope, V_norm)
-    6. **Projection**: A' = Linear_proj(A) if attention_dim != dim
-    7. **Gating**: gate = σ(Linear_gate(A')), output = gate ⊗ A'
+        Input [B, S, dim]
+              │
+              ▼
+        ┌──────────────┐
+        │ Input Linear │
+        └──────┬───────┘
+               │
+        ┌──────┼──────────────────────┐
+        ▼      ▼                      ▼
+      ┌────┐ ┌────┐               ┌────┐
+      │W_q │ │W_k │               │W_v │
+      └──┬─┘ └──┬─┘               └──┬─┘
+         ▼      ▼                    ▼
+      ┌──────┐┌──────┐          ┌──────┐
+      │RMSNrm││RMSNrm│          │RMSNrm│
+      └──┬───┘└──┬───┘          └──┬───┘
+         ▼      ▼                  │
+      ┌──────┐┌──────┐            │
+      │ RoPE ││ RoPE │            │
+      └──┬───┘└──┬───┘            │
+         ▼      ▼                  ▼
+        ┌─────────────────────────────┐
+        │  Scaled Dot-Product Attn    │
+        │  softmax(QK^T/√d_k) · V    │
+        └──────────────┬──────────────┘
+                       ▼
+              (Optional Output Proj)
+                       │
+              ┌────────┼────────┐
+              ▼                 ▼
+        ┌───────────┐    ┌──────────┐
+        │ W_gate    │    │ Identity │
+        │ + Sigmoid │    │          │
+        └─────┬─────┘    └────┬─────┘
+              │               │
+              └───── ⊗ ───────┘
+                     ▼
+              Output [B, S, dim]
 
-    Args:
-        dim: Integer, the model dimension size. Must be positive and divisible by num_heads
-            if head_dim is not specified. This determines the input/output feature size.
-        num_heads: Integer, number of attention heads. Must be positive.
-            More heads allow the model to attend to different representation subspaces.
-        head_dim: Optional integer, dimension per attention head. If None, defaults to
-            dim // num_heads. Allows for custom head dimensionality.
-        max_seq_len: Integer, maximum sequence length for RoPE precomputation.
-            Should be set to the maximum expected sequence length. Defaults to 4096.
-        rope_percentage: Float between 0 and 1, fraction of head dimensions to apply RoPE to.
-            Partial RoPE applies positional encoding only to a subset of dimensions.
-            Defaults to 0.5 (50% of dimensions).
-        dropout_rate: Float between 0 and 1, dropout rate for attention weights.
-            Applied during training for regularization. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias terms in linear layers.
-            Modern transformers often omit bias for efficiency. Defaults to False.
-        kernel_initializer: String or initializer, initialization for linear layer weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer, initialization for bias weights (if used).
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for linear layer weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for Layer base class.
+    :param dim: Model dimension size. Must be positive and divisible by
+        ``num_heads`` if ``head_dim`` is not specified.
+    :type dim: int
+    :param num_heads: Number of attention heads. Must be positive.
+    :type num_heads: int
+    :param head_dim: Optional dimension per attention head. If ``None``,
+        defaults to ``dim // num_heads``.
+    :type head_dim: int or None
+    :param max_seq_len: Maximum sequence length for RoPE precomputation.
+        Defaults to 4096.
+    :type max_seq_len: int
+    :param rope_percentage: Fraction of head dimensions to apply RoPE to
+        (partial RoPE). Must be in ``(0, 1]``. Defaults to 0.5.
+    :type rope_percentage: float
+    :param dropout_rate: Dropout rate for attention weights. Must be in
+        ``[0, 1]``. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias terms in linear layers.
+        Defaults to ``False``.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for linear layer weights.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias weights (if used).
+        Defaults to ``'zeros'``.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for linear layer weights.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param kwargs: Additional arguments for the ``Layer`` base class.
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-        Same shape as input, preserving sequence structure.
-
-    Attributes:
-        input_linear: Dense layer for input feature transformation.
-        q_linear, k_linear, v_linear: Dense layers for Q/K/V projections.
-        q_norm, k_norm, v_norm: Zero-Centered RMS normalization layers.
-        rope: Rotary Position Embedding layer for positional encoding.
-        output_proj: Optional Dense layer for dimension matching when attention_dim != dim.
-        dropout: Dropout layer for attention weight regularization.
-        output_gate_linear: Dense layer for computing gating weights.
-
-    Example:
-        ```python
-        # Standard configuration
-        attention = GatedAttention(
-            dim=768,
-            num_heads=12,
-            max_seq_len=2048,
-            dropout_rate=0.1
-        )
-
-        # Process a sequence
-        inputs = keras.Input(shape=(128, 768))
-        outputs = attention(inputs)  # Shape: (batch, 128, 768)
-
-        # Custom head dimension
-        attention = GatedAttention(
-            dim=768,
-            num_heads=8,
-            head_dim=96,  # Custom head size
-            rope_percentage=0.25  # Apply RoPE to 25% of dimensions
-        )
-
-        # With regularization
-        attention = GatedAttention(
-            dim=512,
-            num_heads=8,
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            dropout_rate=0.15
-        )
-        ```
-
-    Raises:
-        ValueError: If dim is not positive or not divisible by num_heads (when head_dim is None).
-        ValueError: If num_heads is not positive.
-        ValueError: If head_dim is not positive (when specified).
-        ValueError: If rope_percentage is not in (0, 1].
-        ValueError: If dropout_rate is not in [0, 1].
-        ValueError: If max_seq_len is not positive.
-
-    Note:
-        This implementation uses Zero-Centered RMSNorm for improved training stability
-        and Partial RoPE for efficient positional encoding. The gating mechanism allows
-        the model to selectively control information flow through the attention output.
-        When attention_dim != dim (custom head_dim case), an additional projection layer
-        ensures dimensional compatibility.
+    :raises ValueError: If ``dim`` is not positive or not divisible by
+        ``num_heads`` (when ``head_dim`` is ``None``).
+    :raises ValueError: If ``num_heads`` is not positive.
+    :raises ValueError: If ``head_dim`` is not positive (when specified).
+    :raises ValueError: If ``rope_percentage`` is not in ``(0, 1]``.
+    :raises ValueError: If ``dropout_rate`` is not in ``[0, 1]``.
+    :raises ValueError: If ``max_seq_len`` is not positive.
     """
 
     def __init__(
@@ -363,16 +333,20 @@ class GatedAttention(keras.layers.Layer):
         """
         Validate initialization parameters.
 
-        Args:
-            dim: Model dimension to validate.
-            num_heads: Number of attention heads to validate.
-            head_dim: Head dimension to validate (can be None).
-            max_seq_len: Maximum sequence length to validate.
-            rope_percentage: RoPE percentage to validate (must be > 0.0 and <= 1.0).
-            dropout_rate: Dropout rate to validate.
+        :param dim: Model dimension to validate.
+        :type dim: int
+        :param num_heads: Number of attention heads to validate.
+        :type num_heads: int
+        :param head_dim: Head dimension to validate (can be ``None``).
+        :type head_dim: int or None
+        :param max_seq_len: Maximum sequence length to validate.
+        :type max_seq_len: int
+        :param rope_percentage: RoPE percentage to validate.
+        :type rope_percentage: float
+        :param dropout_rate: Dropout rate to validate.
+        :type dropout_rate: float
 
-        Raises:
-            ValueError: If any parameter is invalid.
+        :raises ValueError: If any parameter is invalid.
         """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -393,11 +367,11 @@ class GatedAttention(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: This method explicitly builds each sub-layer for robust serialization
-        support, ensuring all weight variables exist before weight restoration.
+        Explicitly builds each sub-layer for robust serialization support,
+        ensuring all weight variables exist before weight restoration.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
         """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {input_shape}")
@@ -455,16 +429,23 @@ class GatedAttention(keras.layers.Layer):
         """
         Compute scaled dot-product attention.
 
-        Args:
-            q: Query tensor of shape [batch, seq_len, num_heads, head_dim]
-            k: Key tensor of shape [batch, seq_len, num_heads, head_dim]
-            v: Value tensor of shape [batch, seq_len, num_heads, head_dim]
-            attention_mask: Optional attention mask of shape `[batch, seq_len]`
-                or `[batch, seq_len, seq_len]`.
-            training: Training mode flag
-
-        Returns:
-            Attention output tensor of shape [batch, seq_len, num_heads, head_dim]
+        :param q: Query tensor of shape
+            ``[batch, seq_len, num_heads, head_dim]``.
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape
+            ``[batch, seq_len, num_heads, head_dim]``.
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape
+            ``[batch, seq_len, num_heads, head_dim]``.
+        :type v: keras.KerasTensor
+        :param attention_mask: Optional attention mask of shape
+            ``[batch, seq_len]`` or ``[batch, seq_len, seq_len]``.
+        :type attention_mask: keras.KerasTensor or None
+        :param training: Training mode flag.
+        :type training: bool or None
+        :return: Attention output tensor of shape
+            ``[batch, seq_len, num_heads, head_dim]``.
+        :rtype: keras.KerasTensor
         """
         # Transpose to [batch, num_heads, seq_len, head_dim] for attention computation
         q = ops.transpose(q, axes=[0, 2, 1, 3])
@@ -519,14 +500,16 @@ class GatedAttention(keras.layers.Layer):
         """
         Forward pass through the gated attention layer.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim).
-            attention_mask: Optional attention mask of shape
-                (batch_size, seq_len) or (batch_size, seq_len, seq_len).
-            training: Boolean indicating training or inference mode.
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, dim).
+        :param inputs: Input tensor of shape
+            ``(batch_size, seq_len, dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask of shape
+            ``(batch_size, seq_len)`` or ``(batch_size, seq_len, seq_len)``.
+        :type attention_mask: keras.KerasTensor or None
+        :param training: Whether in training or inference mode.
+        :type training: bool or None
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+        :rtype: keras.KerasTensor
         """
         # Input linear projection
         x = self.input_linear(inputs, training=training)
@@ -580,25 +563,19 @@ class GatedAttention(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple, same as input shape for attention layers.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape tuple (same as input shape).
+        :rtype: tuple
         """
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get layer configuration for serialization.
+        Return the layer configuration for serialization.
 
-        CRITICAL: Returns ALL configuration parameters passed to __init__ for proper
-        serialization and deserialization. Missing any parameter will cause
-        deserialization to fail.
-
-        Returns:
-            Dictionary containing the layer configuration with all parameters
-            required to recreate this layer.
+        :return: Dictionary containing the complete layer configuration.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

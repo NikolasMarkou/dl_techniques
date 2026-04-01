@@ -107,123 +107,79 @@ EmbeddingType = Literal['learned', 'shared', 'factorized']
 @keras.saving.register_keras_serializable()
 class TextDecoder(keras.layers.Layer):
     """
-    General-purpose configurable text decoder built upon a stack of TransformerLayers.
+    General-purpose configurable text decoder built on a TransformerLayer stack.
 
-    This layer orchestrates token and positional embeddings, a stack of configurable
-    transformer decoder blocks, and appropriate masking for autoregressive text generation.
-    It serves as a high-level interface for building decoder-only models, exposing key
-    architectural choices of its underlying components.
+    Orchestrates token and positional embeddings, causal masking, a stack of
+    configurable transformer decoder blocks, and final normalization for
+    autoregressive text generation. Causal masking is applied automatically;
+    an optional padding mask can be combined with it.
 
-    **Intent**: Provide a flexible, configurable transformer decoder that can be easily
-    adapted for different language modeling tasks by adjusting embedding strategies,
-    attention mechanisms, normalization types, and architectural depth.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input IDs (batch_size, seq_len)
-           ↓
-    Word Embeddings → Positional Embeddings
-           ↓                     ↓
-           └────── ADD ──────────┘
-                   ↓
-           Embedding Normalization
-                   ↓
-           Embedding Dropout
-                   ↓
-           Causal + Padding Mask
-                   ↓
-    ┌─────────────────────────────┐
-    │   TransformerLayer 0        │
-    │   TransformerLayer 1        │
-    │   ...                       │
-    │   TransformerLayer (depth-1)│
-    └─────────────────────────────┘
-                   ↓
-           Final Normalization
-                   ↓
-    Output (batch_size, seq_len, embed_dim)
-    ```
+    .. code-block:: text
 
-    **Embedding Strategies**:
-    - **learned**: Standard embedding lookup table
-    - **shared**: Weight sharing between input/output embeddings
-    - **factorized**: Low-rank factorized embeddings for memory efficiency
+        ┌──────────────────────────────────────────┐
+        │  Input IDs (B, seq_len)                  │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Word Embedding + Positional Embedding   │
+        │  ─► Embed Norm ─► Embed Dropout          │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Causal + Padding Mask                   │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  TransformerLayer x depth                │
+        │  (causal self-attention + FFN)           │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Final Normalization                     │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Output (B, seq_len, embed_dim)          │
+        └──────────────────────────────────────────┘
 
-    **Positional Encoding**:
-    - **learned**: Trainable positional embeddings
-    - **sincos**: Fixed sinusoidal positional encodings
+    :param vocab_size: Vocabulary size.
+    :type vocab_size: int
+    :param embed_dim: Token embedding / hidden dimension.
+    :type embed_dim: int
+    :param depth: Number of decoder layers.
+    :type depth: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param max_seq_len: Maximum sequence length. Default: 512.
+    :type max_seq_len: int
+    :param embedding_type: Word embedding strategy. Default: ``'learned'``.
+    :type embedding_type: EmbeddingType
+    :param positional_type: Positional encoding strategy. Default: ``'learned'``.
+    :type positional_type: PositionalType
+    :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
+    :type attention_type: AttentionType
+    :param normalization_type: Normalization type. Default: ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` or ``'post'``. Default: ``'post'``.
+    :type normalization_position: NormalizationPositionType
+    :param ffn_type: FFN architecture type. Default: ``'mlp'``.
+    :type ffn_type: FFNType
+    :param stochastic_depth_rate: Drop-path rate. Default: 0.0.
+    :type stochastic_depth_rate: float
+    :param dropout_rate: Dropout rate. Default: 0.1.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention dropout. Default: 0.1.
+    :type attention_dropout_rate: float
+    :param initializer_range: Std-dev for TruncatedNormal. Default: 0.02.
+    :type initializer_range: float
+    :param layer_norm_eps: Normalization epsilon. Default: 1e-12.
+    :type layer_norm_eps: float
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
 
-    Args:
-        vocab_size: Size of the vocabulary.
-        embed_dim: Embedding dimension for tokens and hidden states.
-        depth: Number of transformer decoder layers.
-        num_heads: Number of attention heads.
-        max_seq_len: Maximum sequence length for positional embeddings.
-        embedding_type: Strategy for word embeddings ('learned', 'shared', 'factorized').
-        positional_type: Strategy for positional embeddings ('learned', 'sincos').
-        attention_type: Attention mechanism for transformer layers.
-        normalization_type: Normalization layer type for all layers.
-        normalization_position: Position of normalization ('pre' or 'post').
-        ffn_type: Feed-forward network architecture for transformer layers.
-        stochastic_depth_rate: Rate for stochastic depth regularization.
-        dropout_rate: Dropout rate for FFN and final embedding dropout.
-        attention_dropout_rate: Dropout rate for attention weights.
-        initializer_range: Standard deviation for the TruncatedNormal initializer.
-        layer_norm_eps: Epsilon for normalization layers.
-        **kwargs: Additional keyword arguments for base Layer class.
-
-    Input shape:
-        - `input_ids`: 2D tensor of shape `(batch_size, sequence_length)` with integer token IDs
-        - `attention_mask` (optional): 2D tensor of shape `(batch_size, sequence_length)`
-          where 1 indicates valid tokens and 0 indicates padding
-
-    Output shape:
-        3D tensor of shape `(batch_size, sequence_length, embed_dim)` containing
-        contextualized token representations
-
-    Raises:
-        ValueError: If embed_dim is not divisible by num_heads, or if any dimension
-            parameters are not positive integers.
-
-    Example:
-        ```python
-        # Basic GPT-style decoder
-        decoder = TextDecoder(
-            vocab_size=50000,
-            embed_dim=768,
-            depth=12,
-            num_heads=12,
-            max_seq_len=2048
-        )
-
-        # Modern architecture with RMSNorm and SwiGLU
-        decoder = TextDecoder(
-            vocab_size=32000,
-            embed_dim=512,
-            depth=6,
-            num_heads=8,
-            max_seq_len=1024,
-            positional_type='sincos',
-            normalization_type='rms_norm',
-            normalization_position='pre',
-            ffn_type='swiglu'
-        )
-
-        # Memory-efficient with factorized embeddings
-        decoder = TextDecoder(
-            vocab_size=100000,
-            embed_dim=1024,
-            depth=24,
-            num_heads=16,
-            embedding_type='factorized',
-            stochastic_depth_rate=0.1
-        )
-        ```
-
-    Note:
-        This layer implements causal masking automatically for autoregressive generation.
-        The attention mask parameter allows for handling variable-length sequences with
-        padding, which is combined with the causal mask during forward pass.
+    :raises ValueError: If dimension parameters are invalid.
     """
 
     def __init__(
@@ -408,17 +364,16 @@ class TextDecoder(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the text decoder.
+        """Forward pass through the text decoder.
 
-        Args:
-            input_ids: Input token IDs of shape (batch_size, seq_len)
-            attention_mask: Optional padding mask of shape (batch_size, seq_len)
-                          where 1 indicates valid tokens and 0 indicates padding
-            training: Whether layer is in training mode
-
-        Returns:
-            Contextualized token representations of shape (batch_size, seq_len, embed_dim)
+        :param input_ids: Token IDs ``(B, seq_len)``.
+        :type input_ids: keras.KerasTensor
+        :param attention_mask: Optional padding mask ``(B, seq_len)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Contextualized representations ``(B, seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         seq_len = ops.shape(input_ids)[1]
         batch_size = ops.shape(input_ids)[0]

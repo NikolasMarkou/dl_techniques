@@ -1,5 +1,5 @@
 """
-A unified multi-head attention with adaptive temperature and optional hierarchical routing
+A unified multi-head attention with adaptive temperature and optional hierarchical routing.
 
 This layer provides a versatile implementation of multi-head attention that
 can operate in both self-attention and cross-attention modes. It extends
@@ -7,49 +7,32 @@ the standard mechanism with an optional adaptive temperature softmax, which
 dynamically adjusts the sharpness of the attention distribution based on
 the input, potentially improving model calibration and performance.
 
-Architecture:
-    The layer's architecture is designed for flexibility. It can function in
-    two primary configurations determined by the inputs:
+The layer's architecture is designed for flexibility. It can function in
+two primary configurations determined by the inputs:
 
-    1.  **Cross-Attention:** When provided with distinct `query` and `kv_input`
-        tensors, it performs cross-attention. This is an asymmetric setup
-        where a set of query vectors attends to a separate set of key-value
-        pairs. This mode is fundamental to encoder-decoder models and
-        architectures like Perceiver, where a small set of latent queries
-        attends to a large set of input features.
+1.  **Cross-Attention:** When provided with distinct ``query`` and ``kv_input``
+    tensors, it performs cross-attention. This is an asymmetric setup
+    where a set of query vectors attends to a separate set of key-value
+    pairs. This mode is fundamental to encoder-decoder models and
+    architectures like Perceiver, where a small set of latent queries
+    attends to a large set of input features.
 
-    2.  **Self-Attention:** When only a single input tensor is provided, it
-        performs self-attention. This is a symmetric setup where all
-        tokens in a sequence attend to all other tokens. The layer offers a
-        `shared_qk_projections` option for this mode, which uses a single
-        projection matrix to generate Q, K, and V. This is a parameter-
-        efficient variant suitable for standard transformer blocks.
+2.  **Self-Attention:** When only a single input tensor is provided, it
+    performs self-attention. This is a symmetric setup where all
+    tokens in a sequence attend to all other tokens. The layer offers a
+    ``shared_qk_projections`` option for this mode, which uses a single
+    projection matrix to generate Q, K, and V. This is a parameter-
+    efficient variant suitable for standard transformer blocks.
 
-Foundational Mathematics:
-    The core of this layer is the scaled dot-product attention mechanism.
-    However, it introduces a key enhancement in the normalization step. While
-    standard attention uses a fixed-temperature softmax, this layer can
-    employ an adaptive temperature `T` that is a function of the input:
+The core of this layer is the scaled dot-product attention mechanism
+with an optional adaptive temperature ``T`` that is a function of the input:
 
-        Attention(Q, K, V) = softmax( (Q @ K.T) / (sqrt(d_k) * T) ) @ V
+    ``Attention(Q, K, V) = softmax( (Q @ K.T) / (sqrt(d_k) * T) ) @ V``
 
-    The adaptive temperature `T` is determined dynamically based on the
-    entropy of the pre-softmax attention scores for each query. The
-    intuition is to adjust the "sharpness" of the attention distribution:
-
-    -   **High Entropy (Uniform Scores):** When a query has similar scores
-        for many keys, the distribution is uncertain. The mechanism assigns a
-        low temperature (`T < 1.0`), which sharpens the softmax output,
-        forcing the model to make a more confident decision.
-    -   **Low Entropy (Peaked Scores):** When a query is already highly
-        confident, with one or a few keys having very high scores, the
-        mechanism assigns a high temperature (`T > 1.0`). This softens the
-        distribution, spreading the probability mass slightly and preventing
-        overconfidence, which can improve model regularization.
-
-    The temperature `T` is calculated by a function `f` that maps the
-    normalized entropy `H` of the attention scores to a value within a
-    predefined range `[min_temp, max_temp]`: `T = f(H)`.
+The adaptive temperature ``T`` is determined dynamically based on the
+entropy of the pre-softmax attention scores for each query. High entropy
+(uniform scores) yields low temperature to sharpen the distribution, while
+low entropy (peaked scores) yields high temperature to soften it.
 
 References:
     - The scaled dot-product attention mechanism was introduced in:
@@ -83,132 +66,109 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     This layer serves as a versatile attention mechanism supporting both cross-attention
     and self-attention modes with flexible projection strategies, comprehensive masking,
     and optional adaptive temperature softmax for enhanced attention normalization.
-    It demonstrates modern Keras 3 best practices with robust serialization.
 
-    **Intent**: Provide a production-ready, unified attention mechanism that can serve
-    as both cross-attention (Perceiver, encoder-decoder) and self-attention (standard
-    transformer) component with advanced features including adaptive temperature softmax,
-    flexible masking, and parameter-efficient projection modes for diverse architectural
-    requirements.
+    In cross-attention mode, separate projection matrices generate Q from the query input
+    and K, V from a distinct key-value input. In self-attention mode with shared projections,
+    a single dense layer generates Q, K, and V from the same input. The core computation
+    follows: ``Attention(Q, K, V) = Normalize(Q @ K^T / sqrt(d_k)) @ V`` where
+    Normalize is either standard softmax, adaptive temperature softmax, or hierarchical
+    routing probabilities.
 
-    **Architecture Modes**:
+    **Architecture Overview:**
 
-    1. **Cross-Attention Mode (separate projections)**:
-    ```
-    Query Input [B, Q_seq, D] ──→ Q_proj ──→ Q [B, H, Q_seq, D_h]
-                                               ↓
-    KV Input [B, KV_seq, D] ────→ KV_proj ──→ K, V [B, H, KV_seq, D_h]
-                                               ↓
-    Mask [B, Q_seq, KV_seq] ────→ Apply ────→ Masked Scores
-                                               ↓
-    AdaptiveSoftmax/Softmax ────→ Attention(Q, K, V) ──→ Output [B, Q_seq, D]
-    ```
+    .. code-block:: text
 
-    2. **Self-Attention Mode (shared projections)**:
-    ```
-    Input [B, seq, D] ──→ QKV_proj ──→ Q, K, V [B, H, seq, D_h]
-                           ↓
-    Mask [B, seq, seq] ──→ Apply ────→ Masked Scores
-                           ↓
-    AdaptiveSoftmax/Softmax ──→ Attention(Q, K, V) ──→ Output [B, seq, D]
-    ```
+        Cross-Attention Mode (separate projections):
 
-    **Mathematical Operations**:
-    1. **Projections**: Q = X_q W_q, K = X_kv W_k, V = X_kv W_v
-    2. **Attention Scores**: S = QK^T / √d_k
-    3. **Masking**: S_masked = S + (1 - M) × (-1e9)
-    4. **Normalization**: A = AdaptiveSoftmax(S_masked) or Softmax(S_masked)
-    5. **Output**: O = proj(AV)
+        ┌───────────────────────────────────────────────────────────────┐
+        │                                                               │
+        │  Query Input [B, Q_seq, D] ──► Q_proj ──► Q [B, H, Q_seq, D_h]│
+        │                                             │                 │
+        │  KV Input [B, KV_seq, D] ──► KV_proj ──► K, V [B,H,KV_seq,D_h]│
+        │                                             │                 │
+        │                                             ▼                 │
+        │                               scores = Q @ K^T / sqrt(d_k)    │
+        │                                             │                 │
+        │  Mask [B, Q_seq, KV_seq] ──────────────► [+ mask]             │
+        │                                             │                 │
+        │                                             ▼                 │
+        │                               AdaptiveSoftmax / Softmax       │
+        │                                             │                 │
+        │                                             ▼                 │
+        │                                    weights @ V                │
+        │                                             │                 │
+        │                                             ▼                 │
+        │                                     Output Projection         │
+        │                                             │                 │
+        │                                             ▼                 │
+        │                                  Output [B, Q_seq, D]         │
+        └───────────────────────────────────────────────────────────────┘
 
-    **Advanced Features**:
-    - **Adaptive Temperature Softmax**: Optional entropy-based dynamic temperature
-    - **Flexible Masking**: Padding, full attention, and causal mask support
-    - **Projection Modes**: Shared QKV (efficient) vs separate Q/KV (flexible)
-    - **Robust Serialization**: Full compatibility with Keras save/load
+        Self-Attention Mode (shared projections):
 
-    Args:
-        dim: Integer, input/output dimension. Must be positive and divisible
-            by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive.
-            Defaults to 8.
-        dropout_rate: Float, dropout rate for attention weights. Must be between
-            0.0 and 1.0. Defaults to 0.0.
-        shared_qk_projections: Boolean, if True, uses a single dense layer for
-            Q, K, and V. Only valid for self-attention. Defaults to False.
-        use_bias: Boolean, whether to use bias in linear projections.
-            Defaults to True.
-        kernel_initializer: String or Initializer for kernel weights.
-            Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer for bias vectors.
-            Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        use_hierarchical_routing: Boolean, if True, uses hierarchical routing probability
-            instead of standard softmax for attention normalization.
-            Defaults to False.
-        use_adaptive_softmax: Boolean, if True, uses AdaptiveTemperatureSoftmax
-            instead of standard softmax for attention normalization.
-            Defaults to False.
-        adaptive_softmax_config: Optional dictionary of arguments for
-            AdaptiveTemperatureSoftmax. Used only when `use_adaptive_softmax=True`.
-            Defaults to None, which implies default values will be used.
-            Expected keys are:
-                - `min_temp` (float, default: 0.1): Minimum temperature.
-                - `max_temp` (float, default: 1.0): Maximum temperature.
-                - `entropy_threshold` (float, default: 0.5): Entropy threshold.
-                - `polynomial_coeffs` (list[float], optional): Polynomial coefficients.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌───────────────────────────────────────────────────────────────┐
+        │                                                               │
+        │  Input [B, seq, D] ──► QKV_proj ──► Q, K, V [B, H, seq, D_h] │
+        │                                        │                      │
+        │                                        ▼                      │
+        │                          scores = Q @ K^T / sqrt(d_k)         │
+        │                                        │                      │
+        │  Mask [B, seq, seq] ──────────────► [+ mask]                  │
+        │                                        │                      │
+        │                                        ▼                      │
+        │                          AdaptiveSoftmax / Softmax            │
+        │                                        │                      │
+        │                                        ▼                      │
+        │                               weights @ V                     │
+        │                                        │                      │
+        │                                        ▼                      │
+        │                                Output Projection              │
+        │                                        │                      │
+        │                                        ▼                      │
+        │                              Output [B, seq, D]               │
+        └───────────────────────────────────────────────────────────────┘
 
-    Call arguments:
-        query_input: Query tensor of shape `(batch, query_seq_len, dim)`.
-        kv_input: Optional Key-Value tensor of shape `(batch, kv_seq_len, dim)`.
-            If `None`, self-attention is performed on `query_input`.
-        attention_mask: Optional mask to prevent attention to certain positions.
-            Supports shapes: `(batch, query_seq_len, kv_seq_len)` (full mask),
-            `(batch, kv_seq_len)` (padding mask), or broadcastable shapes.
-        training: Boolean indicating training or inference mode.
+    :param dim: Integer, input/output dimension. Must be positive and divisible
+        by num_heads.
+    :type dim: int
+    :param num_heads: Integer, number of attention heads. Must be positive.
+        Defaults to 8.
+    :type num_heads: int
+    :param dropout_rate: Float, dropout rate for attention weights. Must be between
+        0.0 and 1.0. Defaults to 0.0.
+    :type dropout_rate: float
+    :param shared_qk_projections: Boolean, if True, uses a single dense layer for
+        Q, K, and V. Only valid for self-attention. Defaults to False.
+    :type shared_qk_projections: bool
+    :param use_bias: Boolean, whether to use bias in linear projections.
+        Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: String or Initializer for kernel weights.
+        Defaults to "glorot_uniform".
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: String or Initializer for bias vectors.
+        Defaults to "zeros".
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_hierarchical_routing: Boolean, if True, uses hierarchical routing probability
+        instead of standard softmax for attention normalization. Defaults to False.
+    :type use_hierarchical_routing: bool
+    :param use_adaptive_softmax: Boolean, if True, uses AdaptiveTemperatureSoftmax
+        instead of standard softmax for attention normalization. Defaults to False.
+    :type use_adaptive_softmax: bool
+    :param adaptive_softmax_config: Optional dictionary of arguments for
+        AdaptiveTemperatureSoftmax. Used only when ``use_adaptive_softmax=True``.
+        Expected keys: ``min_temp`` (float), ``max_temp`` (float),
+        ``entropy_threshold`` (float), ``polynomial_coeffs`` (list[float]).
+    :type adaptive_softmax_config: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Returns:
-        Output tensor with shape `(batch_size, query_seq_len, dim)`.
-
-    Raises:
-        ValueError: If `dim` is not divisible by `num_heads`, or if
-                    parameters are invalid.
-        ValueError: If `shared_qk_projections=True` is used with `kv_input`.
-
-    Example:
-        ```python
-        # Cross-Attention (Perceiver-style)
-        visual_features = keras.random.normal((2, 196, 256))
-        text_queries = keras.random.normal((2, 77, 256))
-        cross_attn = MultiHeadCrossAttention(dim=256, num_heads=8)
-        attended_text = cross_attn(text_queries, visual_features)
-        print(attended_text.shape)  # (2, 77, 256)
-
-        # Self-Attention with shared projections (parameter efficient)
-        self_attn_shared = MultiHeadCrossAttention(
-            dim=256, num_heads=8, shared_qk_projections=True
-        )
-        self_attended = self_attn_shared(visual_features)
-        print(self_attended.shape)  # (2, 196, 256)
-
-        # With adaptive temperature softmax for better normalization
-        adaptive_attn = MultiHeadCrossAttention(
-            dim=256,
-            num_heads=8,
-            use_adaptive_softmax=True,
-            adaptive_softmax_config={"min_temp": 0.1, "max_temp": 2.0}
-        )
-        adaptive_output = adaptive_attn(text_queries, visual_features)
-
-        # With attention masking
-        padding_mask = ops.ones((2, 196))
-        padding_mask = ops.slice_update(padding_mask, [0, 100], ops.zeros((2, 96)))
-        masked_output = cross_attn(
-            text_queries, visual_features, attention_mask=padding_mask
-        )
-        print(masked_output.shape)  # (2, 77, 256)
-        ```
+    :raises ValueError: If ``dim`` is not divisible by ``num_heads``, or if
+        parameters are invalid.
+    :raises ValueError: If ``shared_qk_projections=True`` is used with ``kv_input``.
     """
 
     def __init__(
@@ -334,8 +294,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         """
         Build the layer by creating weight variables and building sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures weight variables exist before weight restoration during loading.
+        Explicitly builds each sub-layer for robust serialization, ensuring
+        weight variables exist before weight restoration during loading.
+
+        :param input_shape: Shape tuple of the input tensor(s). A single tuple for
+            self-attention or a list of two tuples for cross-attention.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
         # Robustly determine if input_shape is a list of shapes (cross-attention)
         # or a single shape (self-attention). This works across backends.
@@ -399,15 +363,14 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         """
         Apply attention mask to scores tensor.
 
-        Args:
-            scores: Attention scores of shape (batch, num_heads, query_seq, kv_seq)
-            attention_mask: Attention mask with supported shapes:
-                - (batch, kv_seq): Padding mask
-                - (batch, query_seq, kv_seq): Full attention mask
-                - Other broadcastable shapes
-
-        Returns:
-            Masked scores tensor with same shape as input scores.
+        :param scores: Attention scores of shape ``(batch, num_heads, query_seq, kv_seq)``.
+        :type scores: keras.KerasTensor
+        :param attention_mask: Attention mask with supported shapes:
+            ``(batch, kv_seq)`` for padding mask, ``(batch, query_seq, kv_seq)``
+            for full attention mask, or other broadcastable shapes.
+        :type attention_mask: keras.KerasTensor
+        :return: Masked scores tensor with same shape as input scores.
+        :rtype: keras.KerasTensor
         """
         attention_mask = ops.cast(attention_mask, scores.dtype)
 
@@ -429,15 +392,24 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass through multi-head attention with optional masking and adaptive softmax or hierarchical routing.
+        Forward pass through multi-head attention with optional masking and adaptive softmax.
 
-        Shape Legend:
-            B: batch_size
-            Q_seq: query sequence length
-            KV_seq: key-value sequence length
-            D: model dimension (self.dim)
-            H: number of heads (self.num_heads)
-            D_h: dimension of each head (self.head_dim)
+        Computes scaled dot-product attention with optional adaptive temperature
+        softmax or hierarchical routing for attention weight normalization.
+
+        :param query_input: Query tensor of shape ``(batch, query_seq_len, dim)``.
+        :type query_input: keras.KerasTensor
+        :param kv_input: Optional Key-Value tensor of shape ``(batch, kv_seq_len, dim)``.
+            If ``None``, self-attention is performed on ``query_input``.
+        :type kv_input: Optional[keras.KerasTensor]
+        :param attention_mask: Optional mask to prevent attention to certain positions.
+            Supports shapes: ``(batch, kv_seq_len)`` for padding mask,
+            ``(batch, query_seq_len, kv_seq_len)`` for full mask, or broadcastable shapes.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Boolean indicating training or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor with shape ``(batch_size, query_seq_len, dim)``.
+        :rtype: keras.KerasTensor
         """
         # --- 1. Initial Setup and Shape Extraction ---
         # We extract the batch size and query sequence length from the query input.
@@ -580,7 +552,13 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]:
-        """Compute output shape - returns query input shape."""
+        """Compute output shape, returns query input shape.
+
+        :param input_shape: Shape tuple or list of shape tuples.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        :return: Output shape tuple.
+        :rtype: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        """
         is_list_of_shapes = (
             isinstance(input_shape, list) and
             len(input_shape) > 0 and
@@ -592,7 +570,11 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization - includes ALL constructor parameters."""
+        """Return configuration for serialization, includes all constructor parameters.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,

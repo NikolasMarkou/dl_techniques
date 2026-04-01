@@ -113,238 +113,120 @@ PositionalType = Literal['learned', 'rope', 'dual_rope', 'sincos']
 @keras.saving.register_keras_serializable()
 class TextEncoder(keras.layers.Layer):
     """
-    General purpose configurable text encoder using factory-based components.
+    General-purpose configurable text encoder using factory-based components.
 
-    This layer provides a highly flexible text encoder that can be configured to create
-    various natural language processing architectures. It uses factory patterns for all
-    major components (embeddings, attention, normalization, FFN) to enable easy
-    experimentation and architectural exploration.
+    Constructs a bidirectional Transformer encoder stack with configurable
+    word embeddings, positional encodings, attention, normalization, FFN,
+    and output pooling. Factory patterns allow replicating architectures
+    from classic BERT to modern RoPE + SwiGLU variants.
 
-    **Intent**: Provide a single, configurable text encoder that can replace multiple
-    specialized implementations by supporting different embedding strategies, attention
-    mechanisms, normalization types, and feed-forward networks through factory-based
-    component creation.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input Token IDs (batch, seq_len)
-           ↓
-    Configurable Word Embedding:
-      - 'learned': Standard embedding table
-      - 'shared': Shared input/output embeddings
-      - 'factorized': Factorized embeddings for large vocab
-           ↓
-    Add Token Type Embeddings (optional)
-           ↓
-    Configurable Positional Encoding:
-      - 'learned': Learned absolute positions
-      - 'rope': Rotary position embeddings
-      - 'dual_rope': Dual RoPE for long context
-      - 'sincos': Fixed sinusoidal embeddings
-           ↓
-    Embedding Dropout + Normalization
-           ↓
-    TransformerLayer × depth (configurable components)
-           ↓
-    Optional Final Normalization
-           ↓
-    Output Features (configurable pooling via SequencePooling layer)
-    ```
+    .. code-block:: text
 
-    **Key Features**:
-    - Factory-based component creation for maximum flexibility
-    - Support for multiple embedding and positional encoding strategies
-    - Configurable attention mechanisms (MHA, Window, GQA, etc.)
-    - Multiple normalization options (LayerNorm, RMSNorm, etc.)
-    - Various FFN architectures (MLP, SwiGLU, etc.)
-    - Flexible output modes using SequencePooling layer
-    - Support for token type embeddings for multi-segment inputs
+        ┌──────────────────────────────────────────┐
+        │  Input Token IDs (B, seq_len)            │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Word Embedding (learned/factorized)     │
+        │  + Token Type Embedding (optional)       │
+        │  + Positional Encoding                   │
+        │  + [CLS token] (optional)                │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Embed Norm ─► Embed Dropout             │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  TransformerLayer x depth                │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  [Final Normalization] (pre-norm only)   │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  SequencePooling (cls/mean/max/none)     │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Output Features                         │
+        └──────────────────────────────────────────┘
 
-    Args:
-        vocab_size: Integer, size of the vocabulary. Must be positive. This determines
-            the number of unique tokens the encoder can handle.
-        embed_dim: Integer, embedding dimension. Must be positive. This is the
-            dimensionality of the token embeddings and hidden states.
-        depth: Integer, number of transformer layers. Must be positive. Defaults to 12.
-        num_heads: Integer, number of attention heads. Must be positive and divide
-            embed_dim. Defaults to 12.
-        mlp_ratio: Float, MLP expansion ratio. Must be positive. The intermediate
-            size will be embed_dim * mlp_ratio. Defaults to 4.0.
-        max_seq_len: Integer, maximum sequence length. Must be positive. This determines
-            the maximum number of tokens the encoder can process. Defaults to 512.
-        embedding_type: EmbeddingType, word embedding strategy:
-            - 'learned': Standard learnable embedding table
-            - 'shared': Shared input/output embeddings (ties weights)
-            - 'factorized': Factorized embeddings for large vocabularies
-            Defaults to 'learned'.
-        positional_type: PositionalType, positional encoding strategy:
-            - 'learned': Learned absolute positional embeddings
-            - 'rope': Rotary position embeddings
-            - 'dual_rope': Dual RoPE for long context modeling
-            - 'sincos': Fixed sinusoidal positional embeddings
-            Defaults to 'learned'.
-        attention_type: AttentionType, attention mechanism to use:
-            - 'multi_head_attention': Standard multi-head self-attention
-            - 'window_attention': Windowed attention for efficiency
-            - 'group_query_attention': Grouped query attention
-            - 'differential_attention': Differential attention for noise reduction
-            Defaults to 'multi_head_attention'.
-        normalization_type: NormalizationType, normalization layer type:
-            - 'layer_norm': Standard layer normalization
-            - 'rms_norm': Root mean square normalization
-            - 'band_rms': Band-constrained RMS normalization
-            - 'dynamic_tanh': Dynamic Tanh normalization
-            Defaults to 'layer_norm'.
-        normalization_position: NormalizationPosition, normalization position:
-            - 'post': Post-normalization (original Transformer)
-            - 'pre': Pre-normalization (often more stable)
-            Defaults to 'post'.
-        ffn_type: FFNType, feed-forward network architecture:
-            - 'mlp': Standard MLP with intermediate expansion
-            - 'swiglu': SwiGLU activation with gating mechanism
-            - 'differential': Differential FFN with separate pathways
-            - 'geglu': GELU-based Gated Linear Unit
-            Defaults to 'mlp'.
-        use_token_type_embedding: Boolean, whether to add token type embeddings for
-            multi-segment inputs (like BERT's segment embeddings). Defaults to False.
-        type_vocab_size: Integer, size of token type vocabulary. Only used when
-            use_token_type_embedding=True. Defaults to 2.
-        use_cls_token: Boolean, whether to prepend a special CLS token for classification.
-            When True, adds learnable CLS token at sequence start. Defaults to False.
-        output_mode: PoolingMode, output mode for feature extraction:
-            - 'cls': Return CLS token features (requires use_cls_token=True)
-            - 'mean': Global average pooling over sequence
-            - 'max': Global max pooling over sequence
-            - 'first': Return first token features
-            - 'last': Return last token features
-            - 'none': Return full sequence features
-            Defaults to 'none'.
-        dropout_rate: Float, general dropout rate between 0 and 1. Applied to embeddings
-            and in transformer layers. Defaults to 0.1.
-        attention_dropout_rate: Float, attention-specific dropout rate. Applied to
-            attention weights. Defaults to 0.1.
-        embed_dropout_rate: Float, embedding dropout rate. Applied after embedding layers.
-            Defaults to 0.1.
-        stochastic_depth_rate: Float, stochastic depth drop path rate for regularization.
-            When > 0, applies stochastic depth to transformer layers. Defaults to 0.0.
-        activation: Union[str, Callable], activation function for FFN layers.
-            Defaults to 'gelu'.
-        use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
-        kernel_initializer: Union[str, Initializer], initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Union[str, Initializer], initializer for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional[Regularizer], regularizer for kernel weights.
-            Defaults to None.
-        bias_regularizer: Optional[Regularizer], regularizer for bias weights.
-            Defaults to None.
-        initializer_range: Float, standard deviation for weight initialization.
-            Used for embedding layers and custom initializers. Defaults to 0.02.
-        layer_norm_eps: Float, epsilon value for normalization layers. Must be positive.
-            Used in LayerNorm and RMSNorm layers. Defaults to 1e-12.
-        rope_theta: Float, theta parameter for RoPE. Only used when positional_type
-            is 'rope' or 'dual_rope'. Defaults to 10000.0.
-        rope_percentage: Float, percentage of dimensions to apply RoPE to. Only used
-            when positional_type is 'rope'. Must be in (0, 1]. Defaults to 1.0.
-        attention_args: Optional[Dict[str, Any]], custom arguments for attention layer.
-            These override default parameters for the specific attention type.
-            Defaults to None.
-        norm_args: Optional[Dict[str, Any]], custom arguments for normalization layers.
-            Applied to all normalization layers in the encoder. Defaults to None.
-        ffn_args: Optional[Dict[str, Any]], custom arguments for FFN layers.
-            These override default parameters for the FFN type. Defaults to None.
-        embedding_args: Optional[Dict[str, Any]], custom arguments for embedding layers.
-            Type-specific parameters for embedding layers. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param vocab_size: Vocabulary size.
+    :type vocab_size: int
+    :param embed_dim: Token embedding dimension.
+    :type embed_dim: int
+    :param depth: Number of transformer layers. Default: 12.
+    :type depth: int
+    :param num_heads: Number of attention heads. Default: 12.
+    :type num_heads: int
+    :param mlp_ratio: MLP expansion ratio. Default: 4.0.
+    :type mlp_ratio: float
+    :param max_seq_len: Maximum sequence length. Default: 512.
+    :type max_seq_len: int
+    :param embedding_type: Word embedding strategy. Default: ``'learned'``.
+    :type embedding_type: EmbeddingType
+    :param positional_type: Positional encoding strategy. Default: ``'learned'``.
+    :type positional_type: PositionalType
+    :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
+    :type attention_type: AttentionType
+    :param normalization_type: Normalization type. Default: ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` or ``'post'``. Default: ``'post'``.
+    :type normalization_position: NormalizationPositionType
+    :param ffn_type: FFN architecture type. Default: ``'mlp'``.
+    :type ffn_type: FFNType
+    :param use_token_type_embedding: Add BERT-style segment embeddings.
+    :type use_token_type_embedding: bool
+    :param type_vocab_size: Token type vocabulary size. Default: 2.
+    :type type_vocab_size: int
+    :param use_cls_token: Prepend a learnable CLS token.
+    :type use_cls_token: bool
+    :param output_mode: Pooling strategy for output features.
+    :type output_mode: PoolingStrategy
+    :param dropout_rate: General dropout rate. Default: 0.1.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention dropout. Default: 0.1.
+    :type attention_dropout_rate: float
+    :param embed_dropout_rate: Embedding dropout. Default: 0.1.
+    :type embed_dropout_rate: float
+    :param stochastic_depth_rate: Drop-path rate. Default: 0.0.
+    :type stochastic_depth_rate: float
+    :param activation: FFN activation. Default: ``'gelu'``.
+    :type activation: Union[str, Callable]
+    :param use_bias: Whether layers use bias. Default: True.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Bias weight initializer.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Bias weight regularizer.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param initializer_range: Std-dev for weight initialization. Default: 0.02.
+    :type initializer_range: float
+    :param layer_norm_eps: Normalization epsilon. Default: 1e-12.
+    :type layer_norm_eps: float
+    :param rope_theta: RoPE theta parameter. Default: 10000.0.
+    :type rope_theta: float
+    :param rope_percentage: Fraction of dims for RoPE. Default: 1.0.
+    :type rope_percentage: float
+    :param attention_args: Custom attention layer arguments.
+    :type attention_args: Optional[Dict[str, Any]]
+    :param norm_args: Custom normalization layer arguments.
+    :type norm_args: Optional[Dict[str, Any]]
+    :param ffn_args: Custom FFN layer arguments.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param embedding_args: Custom embedding layer arguments.
+    :type embedding_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
 
-    Input shape:
-        2D tensor with shape: `(batch_size, sequence_length)` containing token IDs
-
-        Optional additional inputs (when use_token_type_embedding=True):
-        - token_type_ids: 2D tensor with shape: `(batch_size, sequence_length)`
-        - attention_mask: 2D/3D tensor for masking padded positions
-
-    Output shape:
-        Depends on output_mode:
-        - 'cls', 'mean', 'max', 'first', 'last': `(batch_size, embed_dim)`
-        - 'none': `(batch_size, sequence_length, embed_dim)`
-
-    Attributes:
-        seq_len: Integer, effective sequence length including CLS token if used.
-        intermediate_size: Integer, intermediate dimension for FFN layers.
-        word_embeddings: Word embedding layer created by factory.
-        token_type_embeddings: Optional token type embedding layer.
-        positional_embeddings: Positional encoding layer.
-        embed_norm: Embedding normalization layer.
-        embed_dropout_rate: Embedding dropout layer.
-        transformer_layers: List of TransformerLayer instances.
-        final_norm: Optional final normalization layer.
-        cls_token: Optional learnable CLS token weight.
-        pooling_layer: SequencePooling layer for output pooling.
-
-    Example:
-        ```python
-        # Standard BERT-like encoder
-        encoder = TextEncoder(
-            vocab_size=30522,
-            embed_dim=768,
-            depth=12,
-            num_heads=12,
-            max_seq_len=512,
-            embedding_type='learned',
-            positional_type='learned',
-            use_token_type_embedding=True,
-            use_cls_token=True,
-            output_mode='cls'
-        )
-
-        # Modern encoder with advanced components
-        modern_encoder = TextEncoder(
-            vocab_size=50000,
-            embed_dim=1024,
-            depth=24,
-            num_heads=16,
-            max_seq_len=2048,
-            embedding_type='factorized',
-            positional_type='rope',
-            attention_type='differential_attention',
-            normalization_type='rms_norm',
-            normalization_position='pre',
-            ffn_type='swiglu',
-            rope_percentage=0.5
-        )
-
-        # Efficient encoder for long sequences
-        efficient_encoder = TextEncoder(
-            vocab_size=32000,
-            embed_dim=512,
-            depth=8,
-            num_heads=8,
-            max_seq_len=4096,
-            positional_type='dual_rope',
-            attention_type='window_attention',
-            normalization_type='rms_norm',
-            ffn_type='swiglu',
-            attention_args={'window_size': 128},
-            stochastic_depth_rate=0.1
-        )
-
-        # Usage
-        input_ids = keras.Input(shape=(512,), dtype='int32', name='input_ids')
-        features = encoder(input_ids)  # Shape depends on output_mode
-        ```
-
-    Note:
-        All components are created using factory functions to ensure consistency
-        and enable easy experimentation with different architectural choices.
-        The encoder follows modern Keras 3 patterns for robust serialization.
-
-    Raises:
-        ValueError: If vocab_size or embed_dim are not positive.
-        ValueError: If embed_dim is not divisible by num_heads.
-        ValueError: If any dimension parameter is not positive.
-        ValueError: If use_cls_token=False but output_mode='cls'.
-        ValueError: If positional_type requires parameters not provided.
+    :raises ValueError: If dimension parameters are invalid.
     """
 
     def __init__(
@@ -550,10 +432,7 @@ class TextEncoder(keras.layers.Layer):
                     f"depth={depth}, max_seq_len={max_seq_len}, output_mode={output_mode}")
 
     def _create_word_embeddings(self) -> None:
-        """
-        Create word embedding layer(s) based on specified strategy.
-        This method sets attributes on `self` instead of returning for serialization robustness.
-        """
+        """Create word embedding layer(s) based on the specified strategy."""
         base_args = {
             'embeddings_initializer': initializers.TruncatedNormal(stddev=self.initializer_range),
             'embeddings_regularizer': self.kernel_regularizer,
@@ -593,11 +472,10 @@ class TextEncoder(keras.layers.Layer):
             )
 
     def _create_positional_embeddings(self) -> Optional[keras.layers.Layer]:
-        """
-        Create positional embedding layer based on specified type.
+        """Create positional embedding layer based on the specified type.
 
-        Returns:
-            Positional embedding layer or None for RoPE (applied in attention).
+        :return: Positional embedding layer or ``None`` for RoPE.
+        :rtype: Optional[keras.layers.Layer]
         """
         if self.positional_type == 'learned':
             # Standard learned positional embeddings
@@ -640,20 +518,11 @@ class TextEncoder(keras.layers.Layer):
             )
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]], Dict[str, Any]]) -> None:
-        """
-        Build the text encoder and all its sub-layers.
+        """Build the text encoder and all sub-layers.
 
-        This method validates input shape and explicitly builds sub-layers
-        for robust serialization following modern Keras 3 patterns.
-
-        Args:
-            input_shape: Shape tuple(s) of input tensors. Can be:
-                - Single tuple (batch_size, seq_len) for input_ids only
-                - List of tuples for multiple inputs (input_ids, token_type_ids, etc.)
-                - Dict of shapes for named inputs
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible with configuration.
+        :param input_shape: Shape tuple(s) or dict of shapes.
+        :type input_shape: Union[Tuple, List[Tuple], Dict]
+        :raises ValueError: If shape is invalid.
         """
         # Handle multiple input shapes
         if isinstance(input_shape, dict):
@@ -728,21 +597,18 @@ class TextEncoder(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the text encoder.
+        """Forward pass through the text encoder.
 
-        Args:
-            inputs: Input tensor(s). Can be:
-                - Single tensor: input_ids of shape [batch_size, seq_len]
-                - Dict: {'input_ids': tensor, 'token_type_ids': tensor, ...}
-            token_type_ids: Optional token type IDs for segment embeddings
-                of shape [batch_size, seq_len]. Used when use_token_type_embedding=True.
-            attention_mask: Optional attention mask to avoid attention on padding
-                tokens of shape [batch_size, seq_len] or [batch_size, seq_len, seq_len].
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            Output tensor with shape depending on output_mode configuration.
+        :param inputs: Token IDs ``(B, seq_len)`` or dict with ``'input_ids'``.
+        :type inputs: Union[keras.KerasTensor, Dict]
+        :param token_type_ids: Optional segment IDs ``(B, seq_len)``.
+        :type token_type_ids: Optional[keras.KerasTensor]
+        :param attention_mask: Optional mask ``(B, seq_len)`` or ``(B, seq, seq)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output features (shape depends on ``output_mode``).
+        :rtype: keras.KerasTensor
         """
         # Extract input_ids and optional token_type_ids from inputs
         if isinstance(inputs, dict):
@@ -832,17 +698,18 @@ class TextEncoder(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Get full sequence features regardless of output_mode.
+        """Get full sequence features regardless of output_mode.
 
-        Args:
-            inputs: Input tensor(s) as in call method.
-            token_type_ids: Optional token type IDs.
-            attention_mask: Optional attention mask.
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            Full sequence features tensor of shape [batch_size, seq_len, embed_dim].
+        :param inputs: Input tensor(s).
+        :type inputs: Union[keras.KerasTensor, Dict]
+        :param token_type_ids: Optional segment IDs.
+        :type token_type_ids: Optional[keras.KerasTensor]
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Sequence features ``(B, seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Temporarily save original pooling strategy and set to 'none'
         original_strategy = self.pooling_layer.strategy
@@ -868,18 +735,20 @@ class TextEncoder(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Get pooled features with specified pooling strategy.
+        """Get pooled features with a specified pooling strategy.
 
-        Args:
-            inputs: Input tensor(s) as in call method.
-            pooling_mode: Pooling strategy to use.
-            token_type_ids: Optional token type IDs.
-            attention_mask: Optional attention mask.
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            Pooled features tensor of shape [batch_size, embed_dim].
+        :param inputs: Input tensor(s).
+        :type inputs: Union[keras.KerasTensor, Dict]
+        :param pooling_mode: Pooling strategy to use. Default: ``'mean'``.
+        :type pooling_mode: PoolingStrategy
+        :param token_type_ids: Optional segment IDs.
+        :type token_type_ids: Optional[keras.KerasTensor]
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Pooled features ``(B, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Temporarily save original pooling strategy and set to requested mode
         original_strategy = self.pooling_layer.strategy
@@ -899,14 +768,12 @@ class TextEncoder(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]], Dict[str, Any]]) -> \
     Tuple[Optional[int], ...]:
-        """
-        Compute output shape given input shape.
+        """Compute the output shape.
 
-        Args:
-            input_shape: Input shape tuple(s) or dict.
-
-        Returns:
-            Output shape tuple based on output_mode configuration.
+        :param input_shape: Input shape(s) or dict.
+        :type input_shape: Union[Tuple, List[Tuple], Dict]
+        :return: Output shape (depends on ``output_mode``).
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, dict):
             main_input_shape = input_shape['input_ids']
@@ -925,13 +792,10 @@ class TextEncoder(keras.layers.Layer):
         return self.pooling_layer.compute_output_shape(transformer_output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return configuration dictionary for serialization.
 
-        Returns ALL parameters passed to __init__ for complete reconstruction.
-
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -999,48 +863,32 @@ def create_text_encoder(
     text encoders with different architectural configurations. It supports all
     major transformer variants through configurable components.
 
-    Args:
-        vocab_size: Size of the vocabulary.
-        embed_dim: Embedding dimension.
-        depth: Number of transformer layers.
-        num_heads: Number of attention heads.
-        max_seq_len: Maximum sequence length.
-        embedding_type: Type of word embedding strategy.
-        positional_type: Type of positional encoding.
-        attention_type: Type of attention mechanism.
-        normalization_type: Type of normalization.
-        normalization_position: Position of normalization layers.
-        ffn_type: Type of feed-forward network.
-        **kwargs: Additional arguments for TextEncoder constructor.
-
-    Returns:
-        Configured TextEncoder instance.
-
-    Raises:
-        ValueError: If any parameter validation fails.
-
-    Example:
-        ```python
-        # Standard BERT-style encoder
-        encoder = create_text_encoder(
-            vocab_size=30522,
-            embed_dim=768,
-            depth=12,
-            num_heads=12
-        )
-
-        # Modern encoder with advanced components
-        encoder = create_text_encoder(
-            vocab_size=50000,
-            embed_dim=1024,
-            depth=24,
-            num_heads=16,
-            positional_type='rope',
-            attention_type='differential_attention',
-            normalization_type='rms_norm',
-            ffn_type='swiglu'
-        )
-        ```
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param embed_dim: Embedding dimension.
+    :type embed_dim: int
+    :param depth: Number of transformer layers.
+    :type depth: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param max_seq_len: Maximum sequence length.
+    :type max_seq_len: int
+    :param embedding_type: Type of word embedding strategy.
+    :type embedding_type: EmbeddingType
+    :param positional_type: Type of positional encoding.
+    :type positional_type: PositionalType
+    :param attention_type: Type of attention mechanism.
+    :type attention_type: AttentionType
+    :param normalization_type: Type of normalization.
+    :type normalization_type: NormalizationType
+    :param normalization_position: Position of normalization layers.
+    :type normalization_position: NormalizationPositionType
+    :param ffn_type: Type of feed-forward network.
+    :type ffn_type: FFNType
+    :param kwargs: Additional arguments for TextEncoder constructor.
+    :return: Configured TextEncoder instance.
+    :rtype: TextEncoder
+    :raises ValueError: If any parameter validation fails.
     """
     # Validate basic parameters
     if vocab_size <= 0:

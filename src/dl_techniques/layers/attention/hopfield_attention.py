@@ -67,96 +67,101 @@ from dl_techniques.utils.logger import logger
 @keras.saving.register_keras_serializable()
 class HopfieldAttention(keras.layers.Layer):
     """
-    Modern Hopfield layer implementation as described in 'Hopfield Networks is All You Need'.
+    Modern Hopfield Network with iterative attention-based pattern retrieval.
 
-    This layer implements a modern Hopfield network that can store exponentially many patterns
-    and converges with one update. It uses a transformer-like attention mechanism as its core
-    operation. For detailed theoretical background and implementation details, please refer to
-    the accompanying documentation file.
+    Implements a content-addressable associative memory using scaled dot-product
+    attention as the update rule. When ``update_steps_max=0``, behaves as
+    standard single-step attention. When ``update_steps_max > 0``, iteratively
+    refines the query state ``xi_{t+1} = softmax(xi_t K^T / sqrt(d_k)) V``
+    until convergence (Frobenius norm of attention difference below
+    ``update_steps_eps``) or maximum iterations are reached.
 
-    Args:
-        num_heads: Integer, number of attention heads. Must be positive.
-        key_dim: Integer, size of each attention head for key and query. Must be positive.
-        value_dim: Optional integer, size of each attention head for value.
-            If None, defaults to key_dim.
-        dropout_rate: Float, dropout probability for attention weights.
-            Must be between 0.0 and 1.0. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in the attention projections.
-            Defaults to True.
-        kernel_initializer: String or initializer instance for projection matrices.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer instance for bias vectors.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for projection matrices.
-        bias_regularizer: Optional regularizer for bias vectors.
-        activity_regularizer: Optional regularizer for layer output.
-        normalize_patterns: Boolean, whether to apply layer normalization to patterns.
-            Defaults to True.
-        update_steps_max: Integer, maximum number of association update steps.
-            0 means single-step (standard attention). Must be non-negative.
-            Defaults to 0.
-        update_steps_eps: Float, minimum difference threshold between update steps
-            for convergence detection. Must be positive. Defaults to 1e-4.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        - Single tensor: (batch_size, seq_len, input_dim) for self-attention
-        - List of tensors: [query, key, value] where each has shape
-          (batch_size, seq_len, input_dim)
+    .. code-block:: text
 
-    Output shape:
-        Tensor with shape (batch_size, seq_len_query, input_dim).
+        Input(s) [B, S, D]
+              │
+              ├── (self-attn: Q=K=V=Input)
+              │   or
+              ├── [Query, Key, Value]
+              │
+              ▼
+        ┌───────────┬───────────┬───────────┐
+        │  W_query   │  W_key    │  W_value   │
+        │  Dense     │  Dense    │  Dense     │
+        └─────┬─────┘─────┬─────┘─────┬─────┘
+              ▼           ▼           ▼
+          Reshape     Reshape     Reshape
+        [B,H,Sq,Dk] [B,H,Sk,Dk] [B,H,Sk,Dv]
+              │           │           │
+              ▼           ▼           │
+        (Optional LayerNorm)         │
+              │           │           │
+              ▼           ▼           ▼
+        ┌─────────────────────────────────┐
+        │   Iterative Hopfield Update     │
+        │   ┌───────────────────────┐     │
+        │   │ scores = Q·K^T/√d_k  │◄──┐ │
+        │   │ attn = softmax(scores)│   │ │
+        │   │ out = attn · V        │   │ │
+        │   │ Q_new = attn · K      │───┘ │
+        │   │ (repeat until conv.)  │     │
+        │   └───────────────────────┘     │
+        └──────────────┬──────────────────┘
+                       ▼
+                 Reshape → [B, Sq, H*Dv]
+                       ▼
+                 ┌───────────┐
+                 │  W_output  │
+                 │  Dense     │
+                 └─────┬─────┘
+                       ▼
+                 Output [B, Sq, D]
 
-    Attributes:
-        query_dense: Dense layer for query projection.
-        key_dense: Dense layer for key projection.
-        value_dense: Dense layer for value projection.
-        output_dense: Dense layer for final output projection.
-        dropout_layer: Dropout layer for attention weights (if dropout_rate > 0).
-        layernorm: LayerNormalization for pattern normalization (if normalize_patterns=True).
+    :param num_heads: Number of attention heads. Must be positive.
+    :type num_heads: int
+    :param key_dim: Size of each attention head for key and query.
+        Must be positive.
+    :type key_dim: int
+    :param value_dim: Optional size of each attention head for value.
+        If ``None``, defaults to ``key_dim``.
+    :type value_dim: int or None
+    :param dropout_rate: Dropout probability for attention weights.
+        Must be in ``[0, 1]``. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in the attention projections.
+        Defaults to ``True``.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for projection matrices.
+        Defaults to ``'glorot_uniform'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param bias_initializer: Initializer for bias vectors.
+        Defaults to ``'zeros'``.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional regularizer for projection matrices.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param bias_regularizer: Optional regularizer for bias vectors.
+    :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param activity_regularizer: Optional regularizer for layer output.
+    :type activity_regularizer: keras.regularizers.Regularizer or None
+    :param normalize_patterns: Whether to apply layer normalization to
+        projected query and key patterns. Defaults to ``True``.
+    :type normalize_patterns: bool
+    :param update_steps_max: Maximum number of iterative Hopfield update
+        steps. 0 means single-step (standard attention). Must be
+        non-negative. Defaults to 0.
+    :type update_steps_max: int
+    :param update_steps_eps: Convergence threshold for the Frobenius norm
+        of attention difference between steps. Must be positive.
+        Defaults to ``1e-4``.
+    :type update_steps_eps: float
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    Example:
-        ```python
-        # Self-attention with iterative updates (Hopfield dynamics)
-        layer = HopfieldAttention(
-            num_heads=8,
-            key_dim=64,
-            update_steps_max=3,
-            normalize_patterns=True
-        )
-        inputs = keras.Input(shape=(128, 512))
-        outputs = layer(inputs)
-
-        # Cross-attention (standard attention behavior)
-        layer = HopfieldAttention(
-            num_heads=8,
-            key_dim=64,
-            update_steps_max=0  # Single step
-        )
-        query = keras.Input(shape=(32, 512))
-        key_value = keras.Input(shape=(64, 512))
-        outputs = layer([query, key_value, key_value])
-
-        # With custom regularization
-        layer = HopfieldAttention(
-            num_heads=12,
-            key_dim=64,
-            dropout_rate=0.1,
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            update_steps_max=5,
-            update_steps_eps=1e-5
-        )
-        ```
-
-    Raises:
-        ValueError: If num_heads <= 0 or key_dim <= 0.
-        ValueError: If dropout_rate is not in [0, 1].
-        ValueError: If update_steps_max < 0.
-        ValueError: If update_steps_eps <= 0.
-
-    Note:
-        This implementation follows the modern Keras 3 pattern where all sub-layers
-        are created in __init__ and explicitly built in build() for robust serialization.
+    :raises ValueError: If ``num_heads <= 0`` or ``key_dim <= 0``.
+    :raises ValueError: If ``dropout_rate`` is not in ``[0, 1]``.
+    :raises ValueError: If ``update_steps_max < 0``.
+    :raises ValueError: If ``update_steps_eps <= 0``.
     """
 
     def __init__(
@@ -280,11 +285,12 @@ class HopfieldAttention(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization
-        following the Modern Keras 3 pattern.
+        Explicitly builds each sub-layer for robust serialization following
+        the Modern Keras 3 pattern.
 
-        Args:
-            input_shape: Shape of input tensor or list of shapes for [query, key, value].
+        :param input_shape: Shape of input tensor or list of shapes for
+            ``[query, key, value]``.
+        :type input_shape: tuple or list
         """
         # Handle different input formats to extract query shape
         if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
@@ -354,15 +360,21 @@ class HopfieldAttention(keras.layers.Layer):
         """
         Perform one Hopfield update step using scaled dot-product attention.
 
-        Args:
-            query: Query tensor of shape (batch, num_heads, seq_len_q, head_dim).
-            key: Key tensor of shape (batch, num_heads, seq_len_k, head_dim).
-            value: Value tensor of shape (batch, num_heads, seq_len_v, value_dim).
-            attention_mask: Optional attention mask.
-            training: Whether in training mode.
-
-        Returns:
-            Tuple of (updated_output, attention_weights).
+        :param query: Query tensor of shape
+            ``(batch, num_heads, seq_len_q, head_dim)``.
+        :type query: keras.KerasTensor
+        :param key: Key tensor of shape
+            ``(batch, num_heads, seq_len_k, head_dim)``.
+        :type key: keras.KerasTensor
+        :param value: Value tensor of shape
+            ``(batch, num_heads, seq_len_v, value_dim)``.
+        :type value: keras.KerasTensor
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: keras.KerasTensor or None
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Tuple of ``(updated_output, attention_weights)``.
+        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Scaled dot-product attention
         scale = ops.sqrt(ops.cast(self.key_dim, query.dtype))
@@ -409,17 +421,23 @@ class HopfieldAttention(keras.layers.Layer):
         """
         Forward pass of the Hopfield attention layer.
 
-        Args:
-            inputs: Input tensor or list of tensors [query, key, value].
-                For self-attention, pass a single tensor.
-                For cross-attention, pass [query, key, value] or [query, key_value].
-            attention_mask: Optional attention mask tensor.
-            return_attention_scores: Boolean, whether to return attention scores along with output.
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            If return_attention_scores=False: Output tensor of shape (batch_size, seq_len_query, input_dim).
-            If return_attention_scores=True: Tuple of (output tensor, attention_weights tensor).
+        :param inputs: Input tensor or list of tensors
+            ``[query, key, value]``. For self-attention, pass a single
+            tensor. For cross-attention, pass ``[query, key, value]`` or
+            ``[query, key_value]``.
+        :type inputs: keras.KerasTensor or list[keras.KerasTensor]
+        :param attention_mask: Optional attention mask tensor.
+        :type attention_mask: keras.KerasTensor or None
+        :param return_attention_scores: Whether to return attention scores
+            along with output.
+        :type return_attention_scores: bool
+        :param training: Whether in training mode.
+        :type training: bool or None
+        :return: Output tensor of shape
+            ``(batch_size, seq_len_query, input_dim)``, or tuple of
+            ``(output, attention_weights)`` if
+            ``return_attention_scores=True``.
+        :rtype: keras.KerasTensor or tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Handle input formats
         if isinstance(inputs, (list, tuple)):
@@ -521,11 +539,10 @@ class HopfieldAttention(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input or list of input shapes.
-
-        Returns:
-            Output shape tuple. Same as query input shape for Hopfield attention.
+        :param input_shape: Shape of the input or list of input shapes.
+        :type input_shape: tuple or list
+        :return: Output shape tuple (same as query input shape).
+        :rtype: tuple
         """
         # Handle different input formats
         if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
@@ -545,13 +562,10 @@ class HopfieldAttention(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return the configuration of the layer for serialization.
+        Return the layer configuration for serialization.
 
-        This method must include ALL parameters passed to __init__ for proper
-        serialization and deserialization.
-
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({

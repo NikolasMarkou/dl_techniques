@@ -73,71 +73,39 @@ class BinaryMapper(keras.layers.Layer):
     """
     Samples one-hot vectors from bit logits with gradient pass-through.
 
-    This layer implements the Binary Mapper described in Section 3.4 of "The Free
-    Transformer" paper. It converts H independent bit logits into a one-hot vector
-    of dimension 2^H through the following process:
+    Converts ``H`` independent bit logits into a one-hot vector of
+    dimension ``2^H`` via Bernoulli sampling, binary-to-integer
+    conversion, and a straight-through gradient estimator. The gradient
+    pass-through adds ``P(sampled) - stop_gradient(P(sampled))`` to the
+    one-hot output, providing gradients without altering forward values.
 
-    1. Interpret input logits as H independent Bernoulli distributions
-    2. Sample H bits: B_h ~ Bernoulli(sigmoid(logit_h))
-    3. Convert bit vector to integer: index = Σ(B_h * 2^h)
-    4. Create one-hot vector: Z[index] = 1, Z[others] = 0
-    5. Add gradient pass-through for training (Equation 8 in paper)
+    **Architecture Overview:**
 
-    **Architecture Flow**:
-    ```
-    Input: Bit Logits (B, T, H)
-           ↓
-    Sigmoid → Probabilities p_h = σ(logit_h)
-           ↓
-    Sample Binary Bits: B_h ~ Bernoulli(p_h)
-           ↓
-    Binary-to-Integer: index = Σ(B_h × 2^h)
-           ↓
-    One-Hot Encoding: Z[index] = 1
-           ↓
-    [Training Only] Gradient Pass-Through
-           ↓
-    Z ← Z + [G(Z) - stop_gradient(G(Z))]
-    where G(Z) = exp(Σ log P(B_h))
-           ↓
-    Output: One-Hot Z (B, T, 2^H)
-    ```
+    .. code-block:: text
 
-    The gradient pass-through mechanism enables backpropagation despite the discrete
-    sampling operation. It works by computing the probability of the sampled vector
-    under the current logits and using a straight-through estimator:
+        ┌──────────────────────────────────┐
+        │  Bit Logits (B, T, H)           │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Sigmoid ─► Bernoulli sample     │
+        │  ─► Binary-to-Integer            │
+        │  ─► One-Hot (B, T, 2^H)         │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  [Training] Gradient pass-through│
+        │  Z + G(Z) - stop_grad(G(Z))     │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output (B, T, 2^H)             │
+        └──────────────────────────────────┘
 
-        output = one_hot(sampled_index) + [P(sampled) - stop_gradient(P(sampled))]
-
-    This adds the gradient of P(sampled) without changing the forward pass value.
-
-    Args:
-        num_bits: Integer, number of latent bits H. The output dimension will be 2^H.
-            Paper uses H=16, giving 65,536 latent categories.
-        **kwargs: Additional layer arguments.
-
-    Input Shape:
-        (batch_size, sequence_length, num_bits): Bit logits for each token
-
-    Output Shape:
-        (batch_size, sequence_length, 2^num_bits): One-hot encoded latent variables
-
-    Example:
-        ```python
-        # Create mapper for 4 bits (16 categories)
-        mapper = BinaryMapper(num_bits=4)
-
-        # Sample from logits
-        bit_logits = keras.random.normal((2, 10, 4))  # (batch, seq, bits)
-        z_one_hot = mapper(bit_logits, training=True)  # (2, 10, 16)
-
-        # z_one_hot contains one-hot vectors with gradient flow
-        ```
-
-    Note:
-        The monotonicity of the sigmoid function ensures stable gradients through
-        the binary encoding, which is why binary encoding is preferred over directly
-        outputting 2^H logits.
+    :param num_bits: Number of latent bits ``H``. Output has ``2^H`` dims.
+    :type num_bits: int
+    :param kwargs: Additional layer arguments.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -173,19 +141,14 @@ class BinaryMapper(keras.layers.Layer):
             bit_logits: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass: sample one-hot vectors from bit logits.
+        """Forward pass: sample one-hot vectors from bit logits.
 
-        Args:
-            bit_logits: Tensor of shape (batch_size, sequence_length, num_bits)
-                containing logits for each independent bit.
-            training: Boolean flag for training mode. When True, applies gradient
-                pass-through mechanism. When False, uses standard sampling.
-
-        Returns:
-            One-hot tensor of shape (batch_size, sequence_length, 2^num_bits).
-            During training, includes gradient pass-through via straight-through
-            estimator.
+        :param bit_logits: Logits tensor ``(B, T, num_bits)``.
+        :type bit_logits: keras.KerasTensor
+        :param training: Training flag; enables gradient pass-through.
+        :type training: Optional[bool]
+        :return: One-hot tensor ``(B, T, 2^num_bits)``.
+        :rtype: keras.KerasTensor
         """
         # Step 1: Compute bit probabilities
         # P(B_h = 1) = sigmoid(logit_h)
@@ -247,16 +210,19 @@ class BinaryMapper(keras.layers.Layer):
         """
         Compute output shape: replace last dimension with 2^num_bits.
 
-        Args:
-            input_shape: Input shape tuple (batch, sequence, num_bits)
-
-        Returns:
-            Output shape tuple (batch, sequence, 2^num_bits)
+        :param input_shape: Input shape ``(batch, seq, num_bits)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ``(batch, seq, 2^num_bits)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape[:-1] + (self.num_categories,)
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialize layer configuration."""
+        """Return configuration dictionary for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_bits': self.num_bits
@@ -270,233 +236,75 @@ class BinaryMapper(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class FreeTransformerLayer(TransformerLayer):
     """
-    A Transformer layer extended with the Free Transformer C-VAE architecture.
+    Transformer layer extended with the Free Transformer C-VAE architecture.
 
-    This layer can function as either:
-    1. A standard transformer block (when use_free_transformer=False)
-    2. The "injection layer" of a Free Transformer (when use_free_transformer=True)
+    When ``use_free_transformer=False``, behaves as a standard
+    ``TransformerLayer``. When enabled, acts as the injection layer that
+    conditions generation on a discrete latent variable ``Z`` sampled from
+    ``2^H`` categories. During training an encoder infers ``Z`` from the
+    sequence; during inference ``Z`` is sampled uniformly.
 
-    When functioning as the injection layer, it:
-    - Runs an encoder during training to infer latent variable Z from the sequence
-    - Samples Z uniformly during inference
-    - Modifies the attention mechanism to condition on Z by injecting it into keys/values
+    The training loss is:
+    ``L = CE(S) + beta * max(0, KL(Q(Z|S) || P(Z)) - kappa)``
 
-    **Full Model Architecture** (showing injection at layer L/2):
-    ```
-    ┌─────────────────────────────────────────────────┐
-    │            Free Transformer Model               │
-    ├─────────────────────────────────────────────────┤
-    │ Input Sequence S                                │
-    │       ↓                                         │
-    │ Embedding Layer                                 │
-    │       ↓                                         │
-    │ ┌──────────────────────────────┐                │
-    │ │  First Half (Layers 0..L/2-1)│                │
-    │ │  - Standard Transformer Blocks│               │
-    │ │  - Causal Attention           │               │
-    │ │  - Feed-Forward Networks      │               │
-    │ └──────────┬───────────────────┘                │
-    │            ↓                                    │
-    │ ┌──────────────────────────────────────────┐    │
-    │ │    INJECTION LAYER (L/2)                 │    │
-    │ │  ┌──────────────┐  ┌──────────────────┐  │    │
-    │ │  │   Encoder    │  │    Decoder       │  │    │
-    │ │  │  (Training)  │  │   (Always)       │  │    │
-    │ │  │      ↓       │  │      ↓           │  │    │
-    │ │  │  Infer Z     │  │  Attention       │  │    │
-    │ │  │      ↓       │  │      +           │  │    │
-    │ │  └──────┬───────┘  │  Inject Z        │  │    │
-    │ │         ↓           │      ↓          │  │    │
-    │ │    [Sample Z] ←─────┤  FFN            │  │    │
-    │ │                     └────────┬─────────┘ │    │
-    │ └─────────────────────────────┼────────────┘    │
-    │                               ↓                 │
-    │ ┌──────────────────────────────┐                │
-    │ │ Second Half (Layers L/2+1..L)│                │
-    │ │  - Standard Transformer Blocks│               │
-    │ │  - Causal Attention           │               │
-    │ │  - Feed-Forward Networks      │               │
-    │ └──────────┬───────────────────┘                │
-    │            ↓                                    │
-    │ Output Logits                                   │
-    └─────────────────────────────────────────────────┘
-    ```
+    **Architecture Overview:**
 
-    **Injection Layer Architecture** (Pre-Normalization):
-    ```
-    ═══════════════════════════════════════════════════════════
-                        INJECTION LAYER L/2
-    ═══════════════════════════════════════════════════════════
+    .. code-block:: text
 
-    Input: X (B, T, D)
-           ↓
-    ┌──────────────────────────────────────────────────────┐
-    │              ATTENTION SUB-LAYER                     │
-    ├──────────────────────────────────────────────────────┤
-    │  Residual ← X                                        │
-    │      ↓                                               │
-    │  Normalize(X)                                        │
-    │      ↓                                               │
-    │  Multi-Head Causal Attention                         │
-    │      ↓                                               │
-    │  Dropout                                             │
-    │      ↓                                               │
-    │  Add(Residual)                                       │
-    │      ↓                                               │
-    │  Attention Output → X_attn (B, T, D)                 │
-    └──────────┬───────────────────────────────────────────┘
-               ↓
-    ┌──────────────────────────────────────────────────────┐
-    │          ENCODER PATH (Training/Prefill Only)        │
-    ├──────────────────────────────────────────────────────┤
-    │  Learned Query ζ (1, 1, D)                           │
-    │      ↓                                               │
-    │  Tile to (B, T, D)                                   │
-    │      ↓                                               │
-    │  Normalize(ζ)                                        │
-    │      ↓                                               │
-    │  Non-Causal Cross-Attention:                         │
-    │    Q = ζ (normalized)                                │
-    │    K, V = X_attn (from above)                        │
-    │      ↓                                               │
-    │  Dropout + Add(ζ)                                    │
-    │      ↓                                               │
-    │  Normalize + FFN + Dropout + Residual                │
-    │      ↓                                               │
-    │  Linear Readout: D → H bits                          │
-    │      ↓                                               │
-    │  bit_logits (B, T, H)                                │
-    │      ↓                                               │
-    │  Binary Mapper: H bits → 2^H one-hot                 │
-    │      ↓                                               │
-    │  Z (B, T, 2^H) ───────────────────┐                  │
-    └───────────────────────────────────┼──────────────────┘
-                                        ↓
-    ┌──────────────────────────────────────────────────────┐
-    │          INFERENCE PATH (Inference Only)             │
-    ├──────────────────────────────────────────────────────┤
-    │  Sample indices ~ Uniform(0, 2^H - 1)                │
-    │      ↓                                               │
-    │  One-Hot Encode                                      │
-    │      ↓                                               │
-    │  Z (B, T, 2^H) ───────────────────┐                  │
-    └───────────────────────────────────┼──────────────────┘
-                                        ↓
-    ┌──────────────────────────────────────────────────────┐
-    │              CONDITIONING STEP                       │
-    ├──────────────────────────────────────────────────────┤
-    │  Z (B, T, 2^H)                                       │
-    │      ↓                                               │
-    │  Post-Sampler Linear: 2^H → D                        │
-    │      ↓                                               │
-    │  R (B, T, D)                                         │
-    │      ↓                                               │
-    │  Conditioned = X_attn + R                            │
-    └──────────┬───────────────────────────────────────────┘
-               ↓
-    ┌──────────────────────────────────────────────────────┐
-    │              FFN SUB-LAYER                           │
-    ├──────────────────────────────────────────────────────┤
-    │  Residual ← Conditioned                              │
-    │      ↓                                               │
-    │  Normalize(Conditioned)                              │
-    │      ↓                                               │
-    │  Feed-Forward Network                                │
-    │      ↓                                               │
-    │  Dropout                                             │
-    │      ↓                                               │
-    │  Add(Residual)                                       │
-    │      ↓                                               │
-    │  Output (B, T, D)                                    │
-    └──────────────────────────────────────────────────────┘
+        ┌────────────────────────────────────────────┐
+        │  Input X (B, T, D)                         │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │  Causal Self-Attention + Residual          │
+        │  ─► X_attn                                 │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+               ┌───────────┴───────────┐
+               ▼                       ▼
+        ┌────────────┐         ┌────────────┐
+        │  Encoder   │         │  Uniform   │
+        │ (training) │         │  Sample    │
+        │  ─► Z      │         │  ─► Z      │
+        └──────┬─────┘         └──────┬─────┘
+               └───────────┬──────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │  R = Linear(Z)                             │
+        │  Conditioned = X_attn + R                  │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │  FFN + Residual                            │
+        └──────────────────┬─────────────────────────┘
+                           ▼
+        ┌────────────────────────────────────────────┐
+        │  Output (B, T, D)                          │
+        │  + bit_logits (training only)              │
+        └────────────────────────────────────────────┘
 
-    ═══════════════════════════════════════════════════════════
-                    Return (Output, bit_logits) if training
-                    Return Output only if inference
-    ═══════════════════════════════════════════════════════════
-    ```
-
-    Architecture Details:
-    --------------------
-    For the injection layer (use_free_transformer=True), the forward pass is:
-
-    1. **Pre-Injection**: Standard self-attention with causal masking
-    2. **Encoder Path** (training/prefill only):
-       - Learned query ζ → Non-causal encoder block ← First-half output (KV)
-       - Encoder output → Linear readout → H bit logits
-       - Bit logits → Binary Mapper → Z (one-hot, dim 2^H)
-    3. **Conditioning**:
-       - Project Z: R = Linear(Z), shape (T, D)
-       - Modified attention: Attention(Q=X, K=X+R, V=X+R)
-    4. **Post-Injection**: Standard FFN and residual connections
-
-    Training Considerations:
-    -----------------------
-    When use_free_transformer=True and training=True, this layer returns a tuple:
-        (output, bit_logits)
-
-    The bit_logits must be used to compute the KL divergence term:
-        KL_loss = compute_kl_divergence(bit_logits, threshold=kappa)
-
-    The total loss should be:
-        total_loss = cross_entropy_loss + beta * KL_loss
-
-    Args:
-        hidden_size: Integer, hidden size of the layer.
-        num_heads: Integer, number of attention heads.
-        intermediate_size: Integer, size of the intermediate (feed-forward) layer.
-        use_free_transformer: Boolean, whether to enable the VAE mechanism.
-            When False, behaves as a standard TransformerLayer.
-            When True, acts as the injection layer. Default: False.
-        num_latent_bits: Integer, number of latent bits H. The latent space will
-            have 2^H categories. Paper uses H=16 (65,536 categories). Default: 16.
-        encoder_attention_type: AttentionType, type of attention for the encoder block.
-            Default: 'multi_head'. The encoder uses non-causal attention.
-        encoder_ffn_type: FFNType, type of FFN for the encoder block.
-            Default: 'swiglu' (same as paper's baseline).
-        encoder_attention_args: Optional dictionary of arguments for encoder attention.
-            These override defaults (e.g., {'causal': False} is enforced).
-        encoder_ffn_args: Optional dictionary of arguments for encoder FFN.
-        encoder_normalization_type: NormalizationType, normalization for encoder.
-            Default: 'rms_norm' (same as paper's baseline).
-        **kwargs: All other arguments passed to base TransformerLayer.
-
-    Example:
-        ```python
-        # Build a simple model with Free Transformer injection at middle layer
-        inputs = keras.Input(shape=(sequence_length, hidden_size))
-
-        # First half: standard layers
-        x = TransformerLayer(hidden_size=768, num_heads=12,
-                            intermediate_size=3072)(inputs)
-        x = TransformerLayer(hidden_size=768, num_heads=12,
-                            intermediate_size=3072)(x)
-
-        # Injection layer
-        x, bit_logits = FreeTransformerLayer(
-            hidden_size=768,
-            num_heads=12,
-            intermediate_size=3072,
-            use_free_transformer=True,
-            num_latent_bits=16
-        )(x, training=True)
-
-        # Second half: standard layers
-        x = TransformerLayer(hidden_size=768, num_heads=12,
-                            intermediate_size=3072)(x)
-
-        # Output
-        logits = keras.layers.Dense(vocab_size)(x)
-
-        # Loss computation
-        ce_loss = compute_cross_entropy(true_labels, logits)
-        kl_loss = compute_kl_divergence_with_free_bits(bit_logits, kappa=0.5)
-        total_loss = ce_loss + kl_loss
-        ```
-
-    Note:
-        Only ONE layer in a model should have use_free_transformer=True,
-        typically positioned at the middle of the model (layer L/2).
+    :param hidden_size: Hidden dimension of the layer.
+    :type hidden_size: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param intermediate_size: FFN intermediate dimension.
+    :type intermediate_size: int
+    :param use_free_transformer: Enable the VAE mechanism. Default: False.
+    :type use_free_transformer: bool
+    :param num_latent_bits: Number of latent bits ``H`` (``2^H`` categories).
+    :type num_latent_bits: int
+    :param encoder_attention_type: Encoder attention type. Default: ``'multi_head'``.
+    :type encoder_attention_type: AttentionType
+    :param encoder_ffn_type: Encoder FFN type. Default: ``'swiglu'``.
+    :type encoder_ffn_type: FFNType
+    :param encoder_attention_args: Extra encoder attention arguments.
+    :type encoder_attention_args: Optional[Dict[str, Any]]
+    :param encoder_ffn_args: Extra encoder FFN arguments.
+    :type encoder_ffn_args: Optional[Dict[str, Any]]
+    :param encoder_normalization_type: Encoder normalization type.
+    :type encoder_normalization_type: NormalizationType
+    :param kwargs: All other arguments forwarded to ``TransformerLayer``.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -555,11 +363,10 @@ class FreeTransformerLayer(TransformerLayer):
         self.post_sampler_fc = None  # Linear layer: 2^H → D
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build all sub-layers including encoder components if enabled.
+        """Build all sub-layers including encoder components if enabled.
 
-        Args:
-            input_shape: Shape tuple (batch_size, sequence_length, hidden_size)
+        :param input_shape: Shape ``(batch, seq_len, hidden_size)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build base transformer components
         super().build(input_shape)
@@ -702,34 +509,19 @@ class FreeTransformerLayer(TransformerLayer):
             layer_idx: int = 0,
             training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """
-        Forward pass of the Free Transformer layer.
+        """Forward pass of the Free Transformer layer.
 
-        Standard Mode (use_free_transformer=False):
-            Returns: output tensor of shape (batch, seq, hidden_size)
-
-        Free Mode (use_free_transformer=True):
-            Training: Returns (output, bit_logits) tuple
-            Inference: Returns output tensor only
-
-        Args:
-            inputs: Input tensor of shape (batch_size, sequence_length, hidden_size).
-            attention_mask: Optional attention mask. For the main (causal) attention,
-                typical shapes are:
-                - Padding mask: (batch_size, sequence_length)
-                - Causal mask: (sequence_length, sequence_length)
-                - Full mask: (batch_size, num_heads, sequence_length, sequence_length)
-            layer_idx: Integer layer index for certain attention types.
-            training: Boolean flag for training mode.
-
-        Returns:
-            If use_free_transformer=False or (use_free_transformer=True and not training):
-                output: Tensor of shape (batch_size, sequence_length, hidden_size)
-
-            If use_free_transformer=True and training=True:
-                (output, bit_logits): Tuple where:
-                    - output: Tensor (batch, seq, hidden_size)
-                    - bit_logits: Tensor (batch, seq, num_latent_bits) for KL computation
+        :param inputs: Input tensor ``(B, T, hidden_size)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param layer_idx: Layer index for differential attention.
+        :type layer_idx: int
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output ``(B, T, D)`` or tuple ``(output, bit_logits)``
+            during training when Free Transformer is enabled.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         # Standard transformer behavior when Free Transformer is disabled
         if not self.use_free_transformer:
@@ -936,17 +728,11 @@ class FreeTransformerLayer(TransformerLayer):
         """
         Compute output shape(s) of the layer.
 
-        Args:
-            input_shape: Shape tuple (batch, sequence, hidden_size)
-
-        Returns:
-            If use_free_transformer=False:
-                Single shape tuple (batch, sequence, hidden_size)
-
-            If use_free_transformer=True:
-                Tuple of two shapes:
-                    - (batch, sequence, hidden_size)
-                    - (batch, sequence, num_latent_bits)
+        :param input_shape: Shape tuple (batch, sequence, hidden_size).
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Single shape tuple if use_free_transformer=False, or tuple of
+            two shapes (output, bit_logits) if use_free_transformer=True.
+        :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]
         """
         if not self.use_free_transformer:
             return input_shape
@@ -1025,32 +811,15 @@ def compute_kl_divergence_uniform_prior(
         KL(Bernoulli(p) || Uniform) = H(1/2) - H(p)
                                      = log(2) - [p*log(p) + (1-p)*log(1-p)]
 
-    Args:
-        bit_logits: Tensor of shape (batch, sequence, num_bits) containing
-            logits for each independent bit.
-        num_bits: Integer H, number of bits.
-        axis: Integer, axis along which to sum the KL (typically -1 for bits).
-            Returns per-token KL of shape (batch, sequence).
-
-    Returns:
-        KL divergence tensor of shape (batch, sequence).
-        To get per-token KL, use axis=-1.
-        To get per-sequence KL, sum over sequence dimension after calling.
-
-    Example:
-        ```python
-        # Compute per-token KL
-        kl_per_token = compute_kl_divergence_uniform_prior(
-            bit_logits, num_bits=16, axis=-1
-        )
-        # Shape: (batch, sequence)
-
-        # Apply free bits threshold
-        kappa = 0.5  # 0.5 bits per token
-        kl_loss = keras.ops.mean(
-            keras.ops.maximum(0.0, kl_per_token - kappa)
-        )
-        ```
+    :param bit_logits: Tensor of shape (batch, sequence, num_bits) containing
+        logits for each independent bit.
+    :type bit_logits: keras.KerasTensor
+    :param num_bits: Number of bits H.
+    :type num_bits: int
+    :param axis: Axis along which to sum the KL (typically -1 for bits).
+    :type axis: int
+    :return: KL divergence tensor of shape (batch, sequence).
+    :rtype: keras.KerasTensor
     """
     # Compute bit probabilities: p_h = sigmoid(logit_h)
     probs = keras.ops.sigmoid(bit_logits)
@@ -1090,74 +859,42 @@ def compute_free_bits_kl_loss(
 
     where T is the sequence length.
 
-    **Free Bits Mechanism**:
-    ```
-    Input: Bit Logits (B, T, H)
-           ↓
-    Compute Per-Token KL → kl_t (B, T)
-           ↓
-    Apply Free Bits Threshold
-           ↓
-    ┌────────────────────────────┐
-    │  For each token position t:│
-    │                            │
-    │  if kl_t < κ:              │
-    │      kl_above_t = 0        │  ← Free bits (no penalty)
-    │  else:                     │
-    │      kl_above_t = kl_t - κ │  ← Penalize excess
-    │                            │
-    └────────┬───────────────────┘
-             ↓
-    Reduction (mean/sum/none)
-             ↓
-    Output: Scalar Loss
+    **Architecture Overview:**
 
-    Visual Example (κ = 0.5):
-    ────────────────────────────────
-    Token  │ KL  │ After Threshold
-    ───────┼─────┼─────────────────
-      1    │ 0.3 │     0.0    (below κ, free)
-      2    │ 0.5 │     0.0    (at κ, free)
-      3    │ 0.8 │     0.3    (penalized)
-      4    │ 1.2 │     0.7    (penalized)
-      5    │ 0.1 │     0.0    (below κ, free)
-    ────────────────────────────────
-    Mean Loss = (0.0 + 0.0 + 0.3 + 0.7 + 0.0) / 5 = 0.2
-    ```
+    .. code-block:: text
 
-    Args:
-        bit_logits: Tensor of shape (batch, sequence, num_bits).
-        num_bits: Integer H, number of latent bits.
-        kappa: Float, free bits threshold in bits per token.
-            Paper experiments with κ ∈ {log(2)/4, log(2)/2, log(2), 2*log(2)}
-            corresponding to {0.25, 0.5, 1.0, 2.0} bits.
-            Default: 0.5 bits (best performing in paper).
-        reduction: String, how to reduce the loss:
-            - 'mean': Average over batch and sequence (default)
-            - 'sum': Sum over batch and sequence
-            - 'none': Return per-token loss (batch, sequence)
+        Input: Bit Logits (B, T, H)
+               │
+               ▼
+        ┌─────────────────────────┐
+        │  Per-Token KL → (B, T)  │
+        └────────────┬────────────┘
+                     │
+                     ▼
+        ┌─────────────────────────┐
+        │  max(0, KL_t - κ)       │
+        │  (free bits threshold)  │
+        └────────────┬────────────┘
+                     │
+                     ▼
+        ┌─────────────────────────┐
+        │  Reduction (mean/sum)   │
+        └────────────┬────────────┘
+                     │
+                     ▼
+        Output: Scalar Loss
 
-    Returns:
-        Scalar loss tensor if reduction is 'mean' or 'sum'.
-        Tensor of shape (batch, sequence) if reduction is 'none'.
-
-    Example:
-        ```python
-        # During training
-        output, bit_logits = free_layer(x, training=True)
-
-        # Compute losses
-        ce_loss = keras.losses.sparse_categorical_crossentropy(y_true, output)
-        kl_loss = compute_free_bits_kl_loss(
-            bit_logits,
-            num_bits=16,
-            kappa=0.5,
-            reduction='mean'
-        )
-
-        # Total loss
-        total_loss = ce_loss + kl_loss
-        ```
+    :param bit_logits: Tensor of shape (batch, sequence, num_bits).
+    :type bit_logits: keras.KerasTensor
+    :param num_bits: Number of latent bits H.
+    :type num_bits: int
+    :param kappa: Free bits threshold in bits per token.
+    :type kappa: float
+    :param reduction: How to reduce the loss ('mean', 'sum', or 'none').
+    :type reduction: str
+    :return: Scalar loss tensor if reduction is 'mean' or 'sum',
+        or tensor of shape (batch, sequence) if reduction is 'none'.
+    :rtype: keras.KerasTensor
     """
     # Compute per-token KL divergence
     kl_per_token = compute_kl_divergence_uniform_prior(

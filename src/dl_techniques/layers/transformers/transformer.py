@@ -94,125 +94,93 @@ class TransformerLayer(keras.layers.Layer):
     """
     Generic transformer layer with configurable attention, FFN, and normalization.
 
-    This layer implements a standard transformer block with residual connections,
-    optional stochastic depth, and extensive configurability for its core
-    components.
+    Implements a standard transformer block consisting of multi-head
+    self-attention followed by a position-wise feed-forward network, each
+    wrapped in residual connections and normalization. The exact data flow
+    is determined by ``normalization_position`` (pre or post). All core
+    sub-components (attention, FFN, normalization) are constructed via
+    factory functions, enabling easy architectural exploration.
 
-    Args:
-        hidden_size: Integer, hidden size of the layer. Must be positive.
-        num_heads: Integer, number of attention heads. Must be positive and
-            a divisor of `hidden_size`.
-        intermediate_size: Integer, size of the intermediate (feed-forward)
-            layer. Ignored if `moe_config` is provided. Must be positive.
-        attention_type: The type of attention mechanism to use. Defaults to
-            'multi_head'. See `dl_techniques.layers.attention` for options.
-        attention_args: Optional dictionary of custom arguments for the
-            attention layer, overriding default parameters.
-        normalization_type: The type of normalization to use. Defaults to
-            'layer_norm'. See `dl_techniques.layers.norms` for options.
-        normalization_position: Position of normalization layers. 'post' for
-            the original Transformer design, or 'pre' for improved stability
-            in deep models. Defaults to 'post'.
-        attention_norm_args: Optional dictionary of custom arguments for the
-            attention normalization layer (e.g., `{'epsilon': 1e-5}`).
-        ffn_norm_args: Optional dictionary of custom arguments for the FFN
-            normalization layer.
-        ffn_type: The type of feed-forward network to use. Ignored if
-            `moe_config` is provided. Defaults to 'mlp'. See
-            `dl_techniques.layers.ffn` for options.
-        ffn_args: Optional dictionary of custom arguments for the FFN layer.
-            Ignored if `moe_config` is provided.
-        moe_config: Optional configuration for a Mixture of Experts layer.
-            If provided, replaces the standard FFN block.
-        dropout_rate: Float, dropout rate for the FFN output. Defaults to 0.1.
-        attention_dropout_rate: Float, dropout rate for the attention output.
-            Defaults to 0.1.
-        use_stochastic_depth: Boolean, whether to use stochastic depth
-            regularization. Defaults to False.
-        stochastic_depth_rate: Float, drop path rate for stochastic depth.
-            Only used if `use_stochastic_depth` is True. Defaults to 0.1.
-        activation: String or callable, activation function for the FFN.
-            Defaults to 'gelu'.
-        use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
-        kernel_initializer: Initializer for kernel weights. Defaults to
-            'glorot_uniform'.
-        bias_initializer: Initializer for bias weights. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        window_size: Integer, window size for windowed attention. Defaults to 8.
-        n_kv_head: Optional integer for grouped query attention, specifying the
-            number of key/value heads. Defaults to `num_heads`.
-        lambda_init: Float, initial lambda for differential attention.
-            Defaults to 0.8.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    ``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V``
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
+    **Architecture Overview:**
 
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
+    .. code-block:: text
 
-    Attributes:
-        attention_norm: Normalization layer for the attention block.
-        output_norm: Normalization layer for the FFN block.
-        attention: The attention layer instance (e.g., MultiHeadSelfAttention).
-        ffn_layer: The FFN layer instance (e.g., MLPBlock or MixtureOfExperts).
-        dropout: Dropout layer for the FFN output.
-        attention_stochastic_depth: StochasticDepth for the attention block.
-        ffn_stochastic_depth: StochasticDepth for the FFN block.
+        ┌───────────────────────────────────────┐
+        │  Input (B, seq_len, hidden_size)      │
+        └───────────────────┬───────────────────┘
+                            ▼
+        ┌───────────────────────────────────────┐
+        │  [Norm] ─► Attention ─► [Dropout]     │
+        │  ─► [StochasticDepth] ─► + Residual   │
+        └───────────────────┬───────────────────┘
+                            ▼
+        ┌───────────────────────────────────────┐
+        │  [Norm] ─► FFN/MoE ─► [Dropout]      │
+        │  ─► [StochasticDepth] ─► + Residual   │
+        └───────────────────┬───────────────────┘
+                            ▼
+        ┌───────────────────────────────────────┐
+        │  Output (B, seq_len, hidden_size)     │
+        └───────────────────────────────────────┘
 
-    Raises:
-        ValueError: If `hidden_size`, `num_heads`, or `intermediate_size` are
-            not positive, or if `hidden_size` is not divisible by `num_heads`.
-        ValueError: If sub-layer creation fails due to incompatible parameters
-            provided in `attention_args`, `ffn_args`, or `*_norm_args`.
+    :param hidden_size: Hidden dimension of the layer.
+    :type hidden_size: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param intermediate_size: FFN intermediate dimension (ignored when
+        ``moe_config`` is provided).
+    :type intermediate_size: int
+    :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
+    :type attention_type: AttentionType
+    :param attention_args: Custom arguments forwarded to the attention factory.
+    :type attention_args: Optional[Dict[str, Any]]
+    :param normalization_type: Normalization type. Default: ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` or ``'post'`` normalization.
+    :type normalization_position: NormalizationPositionType
+    :param attention_norm_args: Custom arguments for the attention norm layer.
+    :type attention_norm_args: Optional[Dict[str, Any]]
+    :param ffn_norm_args: Custom arguments for the FFN norm layer.
+    :type ffn_norm_args: Optional[Dict[str, Any]]
+    :param ffn_type: FFN architecture type. Default: ``'mlp'``.
+    :type ffn_type: FFNType
+    :param ffn_args: Custom arguments for the FFN factory.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param moe_config: Mixture-of-Experts configuration replacing the FFN.
+    :type moe_config: Optional[Union[MoEConfig, Dict[str, Any]]]
+    :param dropout_rate: FFN output dropout rate. Default: 0.1.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention output dropout rate. Default: 0.1.
+    :type attention_dropout_rate: float
+    :param use_stochastic_depth: Enable stochastic depth. Default: False.
+    :type use_stochastic_depth: bool
+    :param stochastic_depth_rate: Drop-path rate for stochastic depth.
+    :type stochastic_depth_rate: float
+    :param activation: Activation function for the FFN. Default: ``'gelu'``.
+    :type activation: Union[str, Callable]
+    :param use_bias: Whether linear layers use bias. Default: True.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Bias weight initializer.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Bias weight regularizer.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param window_size: Window size for windowed attention. Default: 8.
+    :type window_size: int
+    :param n_kv_head: Number of key/value heads for grouped-query attention.
+    :type n_kv_head: Optional[int]
+    :param lambda_init: Initial lambda for differential attention.
+    :type lambda_init: float
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
 
-    Example:
-        ```python
-        # Standard transformer layer with pre-normalization and SwiGLU FFN
-        inputs = keras.Input(shape=(128, 768))
-        layer = TransformerLayer(
-            hidden_size=768,
-            num_heads=12,
-            intermediate_size=3072,
-            normalization_position='pre',
-            ffn_type='swiglu',
-            use_stochastic_depth=True,
-            stochastic_depth_rate=0.1
-        )
-        outputs = layer(inputs)
-
-        # Using custom normalization (e.g., Band RMS) with specific arguments
-        layer_with_band_rms = TransformerLayer(
-            hidden_size=768,
-            num_heads=12,
-            intermediate_size=3072,
-            normalization_type='band_rms',
-            attention_norm_args={'max_band_width': 0.1, 'epsilon': 1e-7},
-            ffn_norm_args={'max_band_width': 0.05, 'epsilon': 1e-8}
-        )
-
-        # Using a Mixture of Experts layer with SwiGLU experts
-        from dl_techniques.layers.moe import MoEConfig, ExpertConfig
-
-        moe_config = MoEConfig(
-            num_experts=8,
-            expert_config=ExpertConfig(
-                ffn_config={
-                    "type": "swiglu",
-                    "output_dim": 768,
-                    "ffn_expansion_factor": 4
-                }
-            )
-        )
-        moe_layer = TransformerLayer(
-            hidden_size=768,
-            num_heads=12,
-            intermediate_size=3072,  # This will be ignored
-            moe_config=moe_config
-        )
-        outputs_moe = moe_layer(inputs)
-        ```
+    :raises ValueError: If dimension parameters are invalid or sub-layer
+        creation fails due to incompatible parameters.
     """
 
     def __init__(
@@ -351,19 +319,15 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _create_normalization_layer(self, name: str, layer_type: str = 'attention') -> keras.layers.Layer:
-        """
-        Create a normalization layer using the component factory.
+        """Create a normalization layer using the component factory.
 
-        Args:
-            name: Name for the layer.
-            layer_type: Type of layer ('attention' or 'ffn') to select the
-                correct custom arguments.
-
-        Returns:
-            An unbuilt normalization layer instance.
-
-        Raises:
-            ValueError: If layer creation fails due to invalid parameters.
+        :param name: Name for the layer.
+        :type name: str
+        :param layer_type: ``'attention'`` or ``'ffn'`` to select custom args.
+        :type layer_type: str
+        :return: An unbuilt normalization layer instance.
+        :rtype: keras.layers.Layer
+        :raises ValueError: If layer creation fails.
         """
         custom_args = self.attention_norm_args if layer_type == 'attention' else self.ffn_norm_args
         try:
@@ -380,14 +344,12 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _get_attention_params(self, name: str) -> Dict[str, Any]:
-        """
-        Consolidate parameters for attention layer creation.
+        """Consolidate parameters for attention layer creation.
 
-        Args:
-            name: Name for the attention layer.
-
-        Returns:
-            Dictionary of parameters for the attention layer factory.
+        :param name: Name for the attention layer.
+        :type name: str
+        :return: Parameter dictionary for the attention factory.
+        :rtype: Dict[str, Any]
         """
         if self.attention_type == 'multi_head':
             default_params = {
@@ -431,17 +393,13 @@ class TransformerLayer(keras.layers.Layer):
         return {**default_params, **self.attention_args}
 
     def _create_attention_layer(self, name: str) -> keras.layers.Layer:
-        """
-        Create an attention layer using the component factory.
+        """Create an attention layer using the component factory.
 
-        Args:
-            name: Name for the attention layer.
-
-        Returns:
-            An unbuilt attention layer instance.
-
-        Raises:
-            ValueError: If layer creation fails due to invalid parameters.
+        :param name: Name for the attention layer.
+        :type name: str
+        :return: An unbuilt attention layer instance.
+        :rtype: keras.layers.Layer
+        :raises ValueError: If creation fails due to invalid parameters.
         """
         params = self._get_attention_params(name)
         try:
@@ -457,14 +415,12 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _get_ffn_config(self, name: str) -> Dict[str, Any]:
-        """
-        Consolidate configuration for FFN layer creation.
+        """Consolidate configuration for FFN layer creation.
 
-        Args:
-            name: Name for the FFN layer.
-
-        Returns:
-            Dictionary of parameters for the FFN layer factory.
+        :param name: Name for the FFN layer.
+        :type name: str
+        :return: Parameter dictionary for the FFN factory.
+        :rtype: Dict[str, Any]
         """
         config = {
             'type': self.ffn_type,
@@ -499,17 +455,13 @@ class TransformerLayer(keras.layers.Layer):
         return config
 
     def _create_ffn_layer(self, name: str) -> keras.layers.Layer:
-        """
-        Create a feed-forward network or MoE layer.
+        """Create a feed-forward network or MoE layer.
 
-        Args:
-            name: Name for the FFN layer.
-
-        Returns:
-            An unbuilt FFN or MoE layer instance.
-
-        Raises:
-            ValueError: If layer creation fails due to invalid parameters.
+        :param name: Name for the FFN layer.
+        :type name: str
+        :return: An unbuilt FFN or MoE layer instance.
+        :rtype: keras.layers.Layer
+        :raises ValueError: If creation fails due to invalid parameters.
         """
         if self.moe_config is not None:
             return MixtureOfExperts(config=self.moe_config, name=name)
@@ -525,19 +477,11 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build all sub-layers with appropriate shapes.
+        """Build all sub-layers with appropriate shapes.
 
-        CRITICAL: For composite layers with sub-layers, explicitly building each
-        sub-layer in this method is essential for robust serialization. It
-        ensures that all weight variables are created before Keras attempts
-        to restore saved weights, preventing "Layer not built" errors.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible.
+        :param input_shape: Shape tuple ``(batch, seq_len, hidden_size)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is invalid or incompatible.
         """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D: {input_shape}")
@@ -567,20 +511,18 @@ class TransformerLayer(keras.layers.Layer):
             layer_idx: int = 0,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the transformer layer.
+        """Forward pass of the transformer layer.
 
-        Args:
-            inputs: Input tensor of shape `(batch_size, sequence_length, hidden_size)`.
-            attention_mask: Optional attention mask. Its shape depends on the
-                attention mechanism and masking type (e.g., padding, causal).
-            layer_idx: Integer index of the current layer, primarily used by
-                attention types like 'differential'.
-            training: Boolean flag for training mode, passed to dropout and
-                normalization layers.
-
-        Returns:
-            Output tensor of shape `(batch_size, sequence_length, hidden_size)`.
+        :param inputs: Input tensor ``(batch, seq_len, hidden_size)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param layer_idx: Layer index (used by differential attention).
+        :type layer_idx: int
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(batch, seq_len, hidden_size)``.
+        :rtype: keras.KerasTensor
         """
         residual = inputs
 
@@ -636,23 +578,20 @@ class TransformerLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape (same as input).
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Shape tuple of the output tensor, which is the same as the input.
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration dictionary for serialization.
 
-        This method returns a dictionary containing all constructor parameters,
-        allowing the layer to be fully reconstructed from its configuration.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

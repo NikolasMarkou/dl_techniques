@@ -98,203 +98,105 @@ PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 @keras.saving.register_keras_serializable()
 class VisionEncoder(keras.layers.Layer):
     """
-    General purpose configurable vision_heads encoder using factory-based components.
+    General-purpose configurable vision encoder using factory-based components.
 
-    This layer provides a highly flexible vision_heads encoder that can be configured to create
-    various vision_heads transformer architectures. It uses factory patterns for all major
-    components (patch embedding, attention, normalization, FFN) to enable easy
-    experimentation and architectural exploration.
+    Converts images into patch sequences, adds optional CLS token and
+    positional embeddings, processes through a configurable TransformerLayer
+    stack, and pools output features. Factory patterns allow replicating
+    architectures from standard ViT to SigLIP, DeiT, and modern variants
+    with RMSNorm + SwiGLU.
 
-    **Intent**: Provide a single, configurable vision_heads encoder that can replace multiple
-    specialized implementations by supporting different patch embedding strategies,
-    attention mechanisms, normalization types, and feed-forward networks through
-    factory-based component creation.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input Images (batch, height, width, channels)
-           ↓
-    Configurable Patch Embedding:
-      - 'linear': Single Conv2D layer
-      - 'siglip': Two-stage Conv2D with normalization
-      - 'conv': Multi-layer convolution
-      - 'hybrid': CNN backbone + patch embedding
-           ↓
-    Reshape to Patches (batch, num_patches, embed_dim)
-           ↓
-    Add CLS Token → (batch, seq_len, embed_dim)
-           ↓
-    Positional Embedding + Dropout
-           ↓
-    TransformerLayer × depth (configurable components)
-           ↓
-    Optional Final Normalization
-           ↓
-    Output Features (configurable pooling via SequencePooling)
-    ```
+    .. code-block:: text
 
-    **Key Features**:
-    - Factory-based component creation for maximum flexibility
-    - Support for multiple patch embedding strategies
-    - Configurable attention mechanisms (MHA, Window, GQA, etc.)
-    - Multiple normalization options (LayerNorm, RMSNorm, etc.)
-    - Various FFN architectures (MLP, SwiGLU, etc.)
-    - Flexible output modes using SequencePooling layer
+        ┌──────────────────────────────────────────┐
+        │  Input Image (B, H, W, C)                │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Patch Embedding (linear/siglip/conv)    │
+        │  ─► Reshape (B, num_patches, embed_dim)  │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  [CLS Token] + Positional Embedding      │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  TransformerLayer x depth                │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  [Final Normalization] (pre-norm only)   │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  SequencePooling (cls/mean/max/none)     │
+        └──────────────────┬───────────────────────┘
+                           ▼
+        ┌──────────────────────────────────────────┐
+        │  Output Features                         │
+        └──────────────────────────────────────────┘
 
-    Args:
-        img_size: Integer, input image size. Must be positive and divisible by patch_size.
-            Defaults to 224.
-        patch_size: Integer, size of image patches. Must be positive and divide img_size.
-            Defaults to 16.
-        embed_dim: Integer, embedding dimension. Must be positive. Defaults to 768.
-        depth: Integer, number of transformer blocks. Must be positive. Defaults to 12.
-        num_heads: Integer, number of attention heads. Must be positive and divide embed_dim.
-            Defaults to 12.
-        mlp_ratio: Float, MLP expansion ratio. Must be positive. Defaults to 4.0.
-        patch_embed_type: PatchEmbedType, patch embedding strategy:
-            - 'linear': Standard single convolution (ViT-style)
-            - 'siglip': Two-stage convolution with normalization (SigLIP-style)
-            - 'conv': Multi-layer convolution with non-linearity
-            - 'hybrid': CNN backbone followed by patch embedding
-            Defaults to 'linear'.
-        attention_type: AttentionType, attention mechanism to use:
-            - 'multi_head': Standard multi-head self-attention
-            - 'window': Windowed attention for efficiency
-            - 'group_query': Grouped query attention
-            - 'differential': Differential attention for noise reduction
-            Defaults to 'multi_head'.
-        normalization_type: NormalizationType, normalization layer type:
-            - 'layer_norm': Standard layer normalization
-            - 'rms_norm': Root mean square normalization
-            - 'band_rms': Band-constrained RMS normalization
-            - 'dynamic_tanh': Dynamic Tanh normalization
-            Defaults to 'layer_norm'.
-        normalization_position: NormalizationPosition, normalization position:
-            - 'post': Post-normalization (original Transformer)
-            - 'pre': Pre-normalization (often more stable)
-            Defaults to 'post'.
-        ffn_type: FFNType, feed-forward network architecture:
-            - 'mlp': Standard MLP with intermediate expansion
-            - 'swiglu': SwiGLU activation with gating mechanism
-            - 'differential': Differential FFN with separate pathways
-            - 'geglu': GELU-based Gated Linear Unit
-            Defaults to 'mlp'.
-        use_cls_token: Boolean, whether to add a CLS token for classification.
-            When True, adds learnable CLS token at sequence start. Defaults to True.
-        output_mode: PoolingMode, output mode for feature extraction:
-            - 'cls': Return CLS token features (requires use_cls_token=True)
-            - 'mean': Global average pooling over sequence
-            - 'max': Global max pooling over sequence
-            - 'none': Return full sequence features
-            Defaults to 'cls'.
-        dropout_rate: Float, general dropout rate between 0 and 1. Defaults to 0.0.
-        attention_dropout_rate: Float, attention-specific dropout rate. Defaults to 0.0.
-        pos_dropout_rate: Float, positional embedding dropout rate. Defaults to 0.0.
-        stochastic_depth_rate: Float, stochastic depth drop path rate. Defaults to 0.0.
-        activation: Union[str, Callable], activation function for FFN. Defaults to 'gelu'.
-        use_bias: Boolean, whether to use bias in linear layers. Defaults to True.
-        kernel_initializer: Union[str, Initializer], initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Union[str, Initializer], initializer for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional[Regularizer], regularizer for kernel weights.
-            Defaults to None.
-        bias_regularizer: Optional[Regularizer], regularizer for bias weights.
-            Defaults to None.
-        attention_args: Optional[Dict[str, Any]], custom arguments for attention layer.
-            These override default parameters for the specific attention type.
-            Defaults to None.
-        norm_args: Optional[Dict[str, Any]], custom arguments for normalization layers.
-            Applied to all normalization layers in the encoder. Defaults to None.
-        ffn_args: Optional[Dict[str, Any]], custom arguments for FFN layers.
-            These override default parameters for the FFN type. Defaults to None.
-        patch_embed_args: Optional[Dict[str, Any]], custom arguments for patch embedding.
-            Type-specific parameters for patch embedding layer. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param img_size: Input image spatial size. Default: 224.
+    :type img_size: int
+    :param patch_size: Patch side length. Default: 16.
+    :type patch_size: int
+    :param embed_dim: Embedding dimension. Default: 768.
+    :type embed_dim: int
+    :param depth: Number of transformer layers. Default: 12.
+    :type depth: int
+    :param num_heads: Number of attention heads. Default: 12.
+    :type num_heads: int
+    :param mlp_ratio: MLP expansion ratio. Default: 4.0.
+    :type mlp_ratio: float
+    :param patch_embed_type: Patch embedding strategy. Default: ``'linear'``.
+    :type patch_embed_type: PatchEmbedType
+    :param attention_type: Attention mechanism. Default: ``'multi_head'``.
+    :type attention_type: AttentionType
+    :param normalization_type: Normalization type. Default: ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` or ``'post'``. Default: ``'post'``.
+    :type normalization_position: NormalizationPositionType
+    :param ffn_type: FFN architecture. Default: ``'mlp'``.
+    :type ffn_type: FFNType
+    :param use_cls_token: Prepend a CLS token. Default: True.
+    :type use_cls_token: bool
+    :param output_mode: Pooling strategy. Default: ``'cls'``.
+    :type output_mode: PoolingStrategy
+    :param dropout_rate: General dropout. Default: 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention dropout. Default: 0.0.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Positional embedding dropout. Default: 0.0.
+    :type pos_dropout_rate: float
+    :param stochastic_depth_rate: Drop-path rate. Default: 0.0.
+    :type stochastic_depth_rate: float
+    :param activation: FFN activation. Default: ``'gelu'``.
+    :type activation: Union[str, Callable]
+    :param use_bias: Whether layers use bias. Default: True.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Bias weight initializer.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Bias weight regularizer.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param attention_args: Custom attention layer arguments.
+    :type attention_args: Optional[Dict[str, Any]]
+    :param norm_args: Custom normalization layer arguments.
+    :type norm_args: Optional[Dict[str, Any]]
+    :param ffn_args: Custom FFN layer arguments.
+    :type ffn_args: Optional[Dict[str, Any]]
+    :param patch_embed_args: Custom patch embedding arguments.
+    :type patch_embed_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-        - height and width should equal img_size
-        - channels is typically 3 for RGB images
-
-    Output shape:
-        Depends on output_mode:
-        - 'cls': `(batch_size, embed_dim)` - CLS token features
-        - 'mean': `(batch_size, embed_dim)` - Mean-pooled features
-        - 'max': `(batch_size, embed_dim)` - Max-pooled features
-        - 'none': `(batch_size, seq_len, embed_dim)` - Full sequence
-
-    Attributes:
-        num_patches: Integer, number of image patches.
-        seq_len: Integer, sequence length including CLS token if used.
-        patch_embed: Patch embedding layer created by factory.
-        pos_embed: Positional embedding layer.
-        transformer_layers: List of TransformerLayer instances.
-        norm: Optional final normalization layer.
-        cls_token: Optional learnable CLS token weight.
-        pooling_layer: SequencePooling layer for output pooling.
-
-    Example:
-        ```python
-        # Standard ViT-Base configuration
-        encoder = VisionEncoder(
-            img_size=224,
-            patch_size=16,
-            embed_dim=768,
-            depth=12,
-            num_heads=12,
-            patch_embed_type='linear',
-            attention_type='multi_head'
-        )
-
-        # SigLIP-style with modern components
-        siglip_encoder = VisionEncoder(
-            img_size=224,
-            patch_size=16,
-            embed_dim=768,
-            depth=12,
-            num_heads=12,
-            patch_embed_type='siglip',
-            attention_type='multi_head',
-            normalization_type='layer_norm',
-            ffn_type='mlp'
-        )
-
-        # Efficient configuration with advanced components
-        efficient_encoder = VisionEncoder(
-            img_size=224,
-            embed_dim=384,
-            depth=12,
-            num_heads=6,
-            patch_embed_type='conv',
-            attention_type='window',
-            normalization_type='rms_norm',
-            normalization_position='pre',
-            ffn_type='swiglu',
-            attention_args={'window_size': 7},
-            norm_args={'epsilon': 1e-6}
-        )
-
-        # Feature extraction mode
-        feature_encoder = VisionEncoder(
-            img_size=384,
-            embed_dim=768,
-            depth=6,
-            output_mode='mean',
-            dropout=0.1
-        )
-        ```
-
-    Note:
-        All components are created using factory functions to ensure consistency
-        and enable easy experimentation with different architectural choices.
-        The encoder follows modern Keras 3 patterns for robust serialization.
-
-    Raises:
-        ValueError: If img_size is not divisible by patch_size.
-        ValueError: If embed_dim is not divisible by num_heads.
-        ValueError: If any dimension parameter is not positive.
-        ValueError: If use_cls_token=False but output_mode='cls'.
+    :raises ValueError: If dimension parameters are invalid.
     """
 
     def __init__(
@@ -470,11 +372,10 @@ class VisionEncoder(keras.layers.Layer):
             )
 
     def _create_patch_embedding(self) -> keras.layers.Layer:
-        """
-        Create patch embedding layer based on specified type.
+        """Create patch embedding layer based on the specified type.
 
-        Returns:
-            Patch embedding layer configured for the specified strategy.
+        :return: Patch embedding layer.
+        :rtype: keras.layers.Layer
         """
         base_args = {
             'kernel_initializer': self.kernel_initializer,
@@ -590,17 +491,11 @@ class VisionEncoder(keras.layers.Layer):
             ], name='patch_embed_hybrid')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the vision_heads encoder and all its sub-layers.
+        """Build the vision encoder and all sub-layers.
 
-        This method validates input shape and explicitly builds sub-layers
-        for robust serialization following modern Keras 3 patterns.
-
-        Args:
-            input_shape: Shape tuple of input images (batch, height, width, channels)
-
-        Raises:
-            ValueError: If input shape is invalid or incompatible with configuration.
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If shape is invalid.
         """
         if len(input_shape) != 4:
             raise ValueError(
@@ -665,16 +560,16 @@ class VisionEncoder(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the vision_heads encoder.
+        """Forward pass through the vision encoder.
 
-        Args:
-            inputs: Input images tensor of shape [batch_size, height, width, channels]
-            attention_mask: Optional boolean mask of shape (batch, seq_len)
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            Output tensor with shape depending on output_mode configuration.
+        :param inputs: Image tensor ``(B, H, W, C)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional mask ``(B, seq_len)``.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output features (shape depends on ``output_mode``).
+        :rtype: keras.KerasTensor
         """
         x = self._get_full_sequence_features(inputs, training=training)
 
@@ -687,18 +582,15 @@ class VisionEncoder(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Extract CLS token features for classification tasks.
+        """Extract CLS token features for classification.
 
-        Args:
-            inputs: Input images tensor.
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            CLS token features tensor of shape [batch_size, embed_dim].
-
-        Raises:
-            ValueError: If use_cls_token=False.
+        :param inputs: Image tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: CLS features ``(B, embed_dim)``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If ``use_cls_token=False``.
         """
         if not self.use_cls_token:
             raise ValueError("CLS token is not available when use_cls_token=False")
@@ -711,15 +603,14 @@ class VisionEncoder(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Extract patch token features for dense prediction tasks.
+        """Extract patch token features for dense prediction.
 
-        Args:
-            inputs: Input images tensor.
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            Patch features tensor of shape [batch_size, num_patches, embed_dim].
+        :param inputs: Image tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Patch features ``(B, num_patches, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         features = self._get_full_sequence_features(inputs, training=training)
         if self.use_cls_token:
@@ -732,15 +623,14 @@ class VisionEncoder(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Get spatial features reshaped for dense prediction tasks.
+        """Get spatial features reshaped for dense prediction.
 
-        Args:
-            inputs: Input images tensor.
-            training: Optional boolean indicating training mode.
-
-        Returns:
-            Spatial features tensor of shape [batch_size, patch_height, patch_width, embed_dim].
+        :param inputs: Image tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Spatial features ``(B, patch_H, patch_W, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         patch_features = self.get_patch_features(inputs, training=training)
         batch_size = ops.shape(patch_features)[0]
@@ -754,14 +644,12 @@ class VisionEncoder(keras.layers.Layer):
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape given input shape.
+        """Compute the output shape.
 
-        Args:
-            input_shape: Input shape tuple (batch_size, height, width, channels)
-
-        Returns:
-            Output shape tuple based on output_mode configuration.
+        :param input_shape: Input shape ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape (depends on ``output_mode``).
+        :rtype: Tuple[Optional[int], ...]
         """
         batch_size = input_shape[0]
 
@@ -770,13 +658,10 @@ class VisionEncoder(keras.layers.Layer):
         return self.pooling_layer.compute_output_shape(sequence_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return configuration dictionary for serialization.
 
-        Returns ALL parameters passed to __init__ for complete reconstruction.
-
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -840,51 +725,38 @@ def create_vision_encoder(
     vision_heads encoders with different architectural configurations. It supports all
     major vision_heads transformer variants through configurable components.
 
-    Args:
-        img_size: Input image size. Must be divisible by patch_size.
-        patch_size: Size of image patches.
-        embed_dim: Embedding dimension.
-        depth: Number of transformer layers.
-        num_heads: Number of attention heads.
-        mlp_ratio: MLP expansion ratio.
-        patch_embed_type: Type of patch embedding strategy.
-        attention_type: Type of attention mechanism.
-        normalization_type: Type of normalization.
-        normalization_position: Position of normalization layers.
-        ffn_type: Type of feed-forward network.
-        use_cls_token: Whether to use CLS token.
-        output_mode: Output pooling mode.
-        dropout: General dropout rate.
-        **kwargs: Additional arguments for VisionEncoder constructor.
-
-    Returns:
-        Configured VisionEncoder instance.
-
-    Raises:
-        ValueError: If any parameter validation fails.
-
-    Example:
-        ```python
-        # Standard ViT-Base
-        encoder = create_vision_encoder(
-            img_size=224,
-            embed_dim=768,
-            depth=12,
-            num_heads=12
-        )
-
-        # Efficient encoder with modern components
-        encoder = create_vision_encoder(
-            img_size=224,
-            embed_dim=384,
-            depth=8,
-            num_heads=6,
-            patch_embed_type='siglip',
-            attention_type='window',
-            normalization_type='rms_norm',
-            ffn_type='swiglu'
-        )
-        ```
+    :param img_size: Input image size. Must be divisible by patch_size.
+    :type img_size: int
+    :param patch_size: Size of image patches.
+    :type patch_size: int
+    :param embed_dim: Embedding dimension.
+    :type embed_dim: int
+    :param depth: Number of transformer layers.
+    :type depth: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param mlp_ratio: MLP expansion ratio.
+    :type mlp_ratio: float
+    :param patch_embed_type: Type of patch embedding strategy.
+    :type patch_embed_type: str
+    :param attention_type: Type of attention mechanism.
+    :type attention_type: str
+    :param normalization_type: Type of normalization.
+    :type normalization_type: str
+    :param normalization_position: Position of normalization layers.
+    :type normalization_position: str
+    :param ffn_type: Type of feed-forward network.
+    :type ffn_type: str
+    :param use_cls_token: Whether to use CLS token.
+    :type use_cls_token: bool
+    :param output_mode: Output pooling mode.
+    :type output_mode: str
+    :param dropout: General dropout rate.
+    :type dropout: float
+    :param kwargs: Additional arguments for VisionEncoder constructor.
+    :return: Configured VisionEncoder instance.
+    :rtype: VisionEncoder
+    :raises ValueError: If any parameter validation fails.
     """
     # Validate basic parameters
     if img_size <= 0 or patch_size <= 0:

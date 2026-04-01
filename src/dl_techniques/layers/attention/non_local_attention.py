@@ -1,5 +1,5 @@
 """
-A self-attention mechanism for computer vision_heads tasks,
+A self-attention mechanism for computer vision tasks,
 based on the influential paper "Non-local Neural Networks".
 
 Standard convolutional layers operate on a small, local neighborhood of pixels,
@@ -11,45 +11,6 @@ complex scenes and objects.
 
 It functions as a self-attention block tailored for 4D image-like tensors
 (batch, height, width, channels).
-
-Architectural Breakdown:
-
-1.  **Spatial Pre-processing (Optional):**
-    -   An optional `DepthwiseConv2D` is first applied to the input. This step can
-        capture local spatial context and enrich the features before the global
-        attention mechanism is applied.
-    -   This is followed by an optional normalization layer (`BatchNormalization` or
-        `LayerNormalization`) to stabilize the activations.
-
-2.  **Query, Key, and Value Projection:**
-    -   The pre-processed feature map is then projected into three distinct
-        representations using 1x1 convolutions: Query (Q), Key (K), and Value (V).
-        This is a standard pattern in attention mechanisms.
-
-3.  **Attention Computation:**
-    -   The core of the layer. The 4D feature maps (Q, K, V) are flattened into
-        sequences of "pixels", effectively treating the entire spatial grid as a
-        sequence.
-    -   The attention mechanism then calculates a similarity score between every
-        Query pixel and every Key pixel. This score matrix determines how much
-        "attention" each position should pay to every other position.
-    -   These attention scores are used to compute a weighted sum of the Value pixels,
-        producing an output where each pixel's representation is a mixture of
-        information from all other pixels in the input.
-    -   The layer supports two operational modes inspired by the original paper:
-        'dot_product' (standard scaled dot-product attention) and 'gaussian'
-        (which is approximated by adjusting channel sizes as described in the paper).
-
-4.  **Output Transformation:**
-    -   The attended features, now rich with global context, are reshaped back into
-        their original 4D spatial format.
-    -   A final 1x1 convolution transforms these features into the desired output
-        channel dimension.
-    -   Optional dropout is applied for regularization.
-
-This layer is typically used as a block within a larger network (e.g., a ResNet),
-often with a residual connection around it (`output = inputs + NonLocalAttention(inputs)`),
-to augment standard convolutions with global reasoning capabilities.
 
 Reference:
 -   "Non-local Neural Networks" (https://arxiv.org/abs/1711.07971)
@@ -63,147 +24,99 @@ from typing import Any, Dict, Tuple, Optional, Literal, Union
 
 @keras.saving.register_keras_serializable()
 class NonLocalAttention(keras.layers.Layer):
-    """
-    Non-local Self Attention Layer for computer vision_heads tasks.
+    """Non-local self-attention layer for capturing long-range spatial dependencies.
 
-    Implementation of the self-attention mechanism from "Non-local Neural Networks"
-    (Wang et al., 2018) that captures long-range dependencies in feature
-    representations through self-attention mechanisms optimized for 4D image tensors.
+    Implements the self-attention mechanism from "Non-local Neural Networks"
+    (Wang et al., 2018) that enables convolutional networks to capture global
+    spatial dependencies by computing attention between all spatial positions in
+    a 4D feature map. The input is first spatially pre-processed with an optional
+    depthwise convolution and normalization, then projected into query, key, and
+    value representations via 1x1 convolutions. The spatial dimensions are flattened
+    into sequences for attention computation: ``A = Attention(Q, K, V)`` using either
+    scaled dot-product (``score = Q K^T / sqrt(d_k)``) or Gaussian mode (with reduced
+    key/value channels ``d_kv = d_attn / 8``). The attended output is reshaped back to
+    spatial format and projected to the desired output channels.
 
-    **Intent**: Provide a production-ready non-local attention block that enables
-    convolutional networks to capture long-range spatial dependencies by computing
-    attention between all spatial positions, overcoming the limited receptive field
-    of standard convolutions.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input [B, H, W, C]
-           ↓
-    DepthwiseConv2D(7×7) → Normalization (optional)
-           ↓
-    Q_proj → Q [B, H, W, attention_channels]
-    K_proj → K [B, H, W, key_value_channels]
-    V_proj → V [B, H, W, key_value_channels]
-           ↓
-    Reshape → Q [B, H*W, attention_channels]
-           → K [B, H*W, key_value_channels]
-           → V [B, H*W, key_value_channels]
-           ↓
-    Attention(Q, K, V) → [B, H*W, key_value_channels]
-           ↓
-    Reshape → [B, H, W, key_value_channels]
-           ↓
-    Output_proj → Output [B, H, W, output_channels]
-           ↓
-    Dropout (optional) → Final Output [B, H, W, output_channels]
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Spatial Pre-processing**: X' = DepthwiseConv2D(X), optionally normalized
-    2. **Projections**: Q = X' W_q, K = X' W_k, V = X' W_v
-    3. **Spatial Flattening**: Reshape (H,W) → (H*W) for sequence processing
-    4. **Attention**: A = Attention(Q, K, V) using scaled dot-product or Gaussian
-    5. **Spatial Reconstruction**: Reshape (H*W) → (H,W)
-    6. **Output**: O = A W_o, optionally with dropout
+        ┌─────────────────────────────┐
+        │   Input [B, H, W, C]        │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │ DepthwiseConv2D(kernel_size) │
+        │ + Normalization (optional)   │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │  1x1 Conv2D Projections     │
+        ├─────────┬─────────┬─────────┤
+        │ Q_proj  │ K_proj  │ V_proj  │
+        └────┬────┴────┬────┴────┬────┘
+             ▼         ▼         ▼
+        ┌────────────────────────────┐
+        │ Reshape (H,W) → (H*W)     │
+        │ Q [B, H*W, d_attn]        │
+        │ K [B, H*W, d_kv]          │
+        │ V [B, H*W, d_kv]          │
+        └─────────────┬──────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │ Attention(Q, V, K)          │
+        │ → [B, H*W, d_kv]           │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │ Reshape → [B, H, W, d_kv]  │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │ Output Conv2D 1x1           │
+        │ + Dropout (optional)        │
+        └─────────────┬───────────────┘
+                      ▼
+        ┌─────────────────────────────┐
+        │ Output [B, H, W, out_ch]    │
+        └─────────────────────────────┘
 
-    Args:
-        attention_channels: Integer, number of channels in attention mechanism.
-            Must be positive.
-        kernel_size: Integer or tuple, size of depthwise convolution kernel.
-            Defaults to (7, 7).
-        use_bias: Boolean, whether to use bias in convolution layers.
-            Defaults to False.
-        normalization: String, type of normalization to use ('batch', 'layer', or None).
-            Defaults to 'batch'.
-        intermediate_activation: String or callable, activation function for
-            intermediate layers. Defaults to 'relu'.
-        output_activation: String or callable, activation function for output.
-            Defaults to 'linear'.
-        output_channels: Integer, number of output channels (-1 for same as input).
-            Defaults to -1.
-        dropout_rate: Float, dropout rate (0 to disable). Must be between 0.0 and 1.0.
-            Defaults to 0.0.
-        attention_mode: String, type of attention mechanism ('gaussian', 'dot_product').
-            Defaults to 'gaussian'.
-        kernel_initializer: String or initializer instance, initializer for the
-            kernel weights. Defaults to 'glorot_normal'.
-        bias_initializer: String or initializer instance, initializer for the
-            bias vector. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        activity_regularizer: Optional regularizer for layer activity.
-        **kwargs: Additional keyword arguments for the Layer parent class.
+    :param attention_channels: Number of channels in the attention mechanism.
+        Must be positive.
+    :type attention_channels: int
+    :param kernel_size: Size of the depthwise convolution kernel.
+    :type kernel_size: Union[int, Tuple[int, int]]
+    :param use_bias: Whether to use bias in convolution layers.
+    :type use_bias: bool
+    :param normalization: Type of normalization (``'batch'``, ``'layer'``, or ``None``).
+    :type normalization: Optional[Literal['batch', 'layer']]
+    :param intermediate_activation: Activation function for intermediate layers.
+    :type intermediate_activation: Union[str, callable]
+    :param output_activation: Activation function for the output projection.
+    :type output_activation: Union[str, callable]
+    :param output_channels: Number of output channels (``-1`` to match input).
+    :type output_channels: int
+    :param dropout_rate: Dropout rate between 0.0 and 1.0.
+    :type dropout_rate: float
+    :param attention_mode: Attention type (``'gaussian'`` or ``'dot_product'``).
+    :type attention_mode: Literal['gaussian', 'dot_product']
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param activity_regularizer: Optional regularizer for layer activity.
+    :type activity_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer parent class.
+    :type kwargs: Any
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, output_channels)`
-        where output_channels is specified or same as input if -1.
-
-    Call arguments:
-        inputs: Input tensor of shape `(batch_size, height, width, channels)`.
-        training: Boolean indicating training or inference mode. Affects dropout
-            and normalization behavior.
-
-    Returns:
-        Output tensor with shape `(batch_size, height, width, output_channels)`
-        containing spatially attended features with long-range dependencies.
-
-    Example:
-        ```python
-        # Basic usage for feature map attention
-        inputs = keras.Input(shape=(32, 32, 256))
-        attention_layer = NonLocalAttention(attention_channels=128)
-        outputs = attention_layer(inputs)
-        print(outputs.shape)  # (None, 32, 32, 256)
-
-        # With residual connection (common pattern)
-        def residual_nonlocal_block(x):
-            attended = NonLocalAttention(
-                attention_channels=x.shape[-1] // 2,
-                dropout_rate=0.1
-            )(x)
-            return x + attended
-
-        # Advanced configuration for high-resolution inputs
-        nonlocal_layer = NonLocalAttention(
-            attention_channels=64,
-            kernel_size=(5, 5),
-            normalization='layer',
-            attention_mode='dot_product',
-            output_channels=512,
-            dropout_rate=0.2,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a ResNet-style architecture
-        def nonlocal_resnet_block(x, filters):
-            # Standard conv block
-            conv_out = keras.layers.Conv2D(filters, 3, padding='same')(x)
-            conv_out = keras.layers.BatchNormalization()(conv_out)
-            conv_out = keras.layers.ReLU()(conv_out)
-
-            # Non-local attention
-            attended = NonLocalAttention(
-                attention_channels=filters // 2
-            )(conv_out)
-
-            # Residual connection
-            return conv_out + attended
-        ```
-
-    Raises:
-        ValueError: If attention_channels <= 0.
-        ValueError: If dropout_rate not in [0, 1).
-        ValueError: If normalization not in ['batch', 'layer', None].
-        ValueError: If attention_mode not in ['gaussian', 'dot_product'].
-
-    Note:
-        This implementation follows modern Keras 3 patterns where all sub-layers
-        are created in __init__ and explicitly built in build() method for robust
-        serialization support. The layer is optimized for 4D image tensors and
-        includes spatial pre-processing for enhanced feature quality.
+    :raises ValueError: If attention_channels <= 0.
+    :raises ValueError: If dropout_rate not in [0, 1).
+    :raises ValueError: If normalization not in ['batch', 'layer', None].
+    :raises ValueError: If attention_mode not in ['gaussian', 'dot_product'].
     """
 
     def __init__(
@@ -340,17 +253,18 @@ class NonLocalAttention(keras.layers.Layer):
         normalization: Optional[str],
         attention_mode: str
     ) -> None:
-        """
-        Validate initialization parameters.
+        """Validate initialization parameters.
 
-        Args:
-            attention_channels: Number of attention channels to validate.
-            dropout_rate: Dropout rate to validate.
-            normalization: Normalization type to validate.
-            attention_mode: Attention mode to validate.
+        :param attention_channels: Number of attention channels to validate.
+        :type attention_channels: int
+        :param dropout_rate: Dropout rate to validate.
+        :type dropout_rate: float
+        :param normalization: Normalization type to validate.
+        :type normalization: Optional[str]
+        :param attention_mode: Attention mode to validate.
+        :type attention_mode: str
 
-        Raises:
-            ValueError: If any parameter is invalid.
+        :raises ValueError: If any parameter is invalid.
         """
         if attention_channels <= 0:
             raise ValueError(f"attention_channels must be positive, got {attention_channels}")
@@ -362,14 +276,10 @@ class NonLocalAttention(keras.layers.Layer):
             raise ValueError(f"attention_mode must be 'gaussian' or 'dot_product', got {attention_mode}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers for robust serialization.
 
-        This method explicitly builds each sub-layer for robust serialization
-        support, ensuring all weight variables exist before weight restoration.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         channels = input_shape[-1]
         actual_output_channels = (
@@ -427,19 +337,20 @@ class NonLocalAttention(keras.layers.Layer):
         training: Optional[bool] = None,
         **kwargs: Any
     ) -> keras.KerasTensor:
-        """
-        Apply non-local attention to input features.
+        """Apply non-local attention to input features.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            attention_mask: Optional attention mask tensor.
-            training: Boolean, whether in training mode. Affects dropout and
-                normalization behavior.
-            **kwargs: Additional arguments (unused but kept for compatibility).
+        :param inputs: Input tensor of shape ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask tensor.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode. Affects dropout and normalization.
+        :type training: Optional[bool]
+        :param kwargs: Additional arguments (unused, kept for compatibility).
+        :type kwargs: Any
 
-        Returns:
-            Output tensor of shape (batch_size, height, width, output_channels)
+        :return: Tensor of shape ``(batch_size, height, width, output_channels)``
             with spatially attended features incorporating long-range dependencies.
+        :rtype: keras.KerasTensor
         """
         # Apply depthwise convolution for spatial processing
         x = self.depthwise_conv(inputs, training=training)
@@ -484,14 +395,13 @@ class NonLocalAttention(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Output shape tuple. Spatial dimensions remain the same, only channels may change.
+        :return: Output shape tuple with spatial dimensions preserved.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         if self.output_channels > 0:
@@ -499,15 +409,10 @@ class NonLocalAttention(keras.layers.Layer):
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Get layer configuration for serialization.
 
-        Returns ALL configuration parameters passed to __init__ for proper
-        serialization and deserialization.
-
-        Returns:
-            Dictionary containing the layer configuration with all parameters
-            required to recreate this layer.
+        :return: Dictionary containing all parameters required to recreate this layer.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -529,4 +434,3 @@ class NonLocalAttention(keras.layers.Layer):
         return config
 
 # ---------------------------------------------------------------------
-

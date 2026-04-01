@@ -3,72 +3,18 @@ A parameter-efficient, bidirectional cross-attention mechanism.
 
 This layer facilitates information exchange between two distinct sets of
 tokens (modalities) through a cross-attention pattern where the projection
-weights for queries, keys, and values are shared. This design is highly
-parameter-efficient and encourages the model to learn a common, modality-
-invariant representation space for interaction.
-
-Architecture:
-    The core architectural principle is to force two different input
-    modalities (e.g., surface features and volume features) to communicate
-    using a single, shared set of transformation rules. The process is as
-    follows:
-
-    1.  **Shared Projection:** The input, a concatenation of tokens from
-        modality A and modality B, is passed through a single, shared projection
-        layer to generate queries (Q), keys (K), and values (V) for all
-        tokens simultaneously.
-
-    2.  **Bidirectional Cross-Attention:** The resulting Q, K, and V tensors
-        are split according to the original modalities. A bidirectional
-        attention is then computed:
-        -   The queries of modality A attend to the keys and values of
-            modality B.
-        -   Simultaneously, the queries of modality B attend to the keys
-            and values of modality A.
-
-    3.  **Optional Anchor-Query Hierarchy:** The layer also supports a more
-        complex, sparse attention pattern. In this mode, each modality is
-        further divided into "anchors" and "queries." The anchors are
-        intended to act as compressed summaries of their respective
-        modalities. The attention flow is then modified such that all tokens
-        from one modality (both its anchors and queries) attend *only* to the
-        anchors of the opposing modality. This creates an efficient, two-
-        tiered information exchange through a compact bottleneck.
-
-Foundational Mathematics:
-    The defining characteristic of this layer is its weight sharing. Let
-    `f_q`, `f_k`, and `f_v` be the shared linear projection functions. For
-    input sequences `X_A` and `X_B` from two modalities, the Q, K, and V
-    vectors are computed using these same functions:
-
-        Q_A, K_A, V_A = f_q(X_A), f_k(X_A), f_v(X_A)
-        Q_B, K_B, V_B = f_q(X_B), f_k(X_B), f_v(X_B)
-
-    The cross-attention outputs are then calculated as:
-
-        Output_A = Attention(Q_A, K_B, V_B)
-        Output_B = Attention(Q_B, K_A, V_A)
-
-    This shared projection acts as a strong inductive bias, forcing the model
-    to map both modalities into a common semantic space where their features
-    can be meaningfully compared and combined. This is a form of parameter
-    tying reminiscent of Siamese networks, which promotes generalization and
-    is highly efficient when the modalities share underlying structural or
-    semantic properties.
+weights for queries, keys, and values are shared. Given modalities ``X_A``
+and ``X_B``, shared projections compute ``Q_A, K_A, V_A = f_q(X_A), f_k(X_A),
+f_v(X_A)`` and ``Q_B, K_B, V_B = f_q(X_B), f_k(X_B), f_v(X_B)``, then
+cross-attend: ``Out_A = Attention(Q_A, K_B, V_B)`` and
+``Out_B = Attention(Q_B, K_A, V_A)``. This weight sharing forces both
+modalities into a common semantic space, similar to Siamese networks.
 
 References:
-    - The cross-attention mechanism is a cornerstone of encoder-decoder
-      architectures:
-      Vaswani, A., et al. (2017). "Attention Is All You Need".
-
-    - The concept of weight sharing across different inputs to learn a
-      common feature space is fundamental to Siamese Networks:
-      Bromley, J., et al. (1994). "Signature verification using a Siamese
+    - Vaswani, A., et al. (2017). "Attention Is All You Need".
+    - Bromley, J., et al. (1994). "Signature verification using a Siamese
       time delay neural network".
-
-    - The anchor-query structure is a form of sparse attention, related to
-      models that use global tokens as information hubs:
-      Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The
+    - Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The
       Long-Document Transformer".
 """
 
@@ -80,88 +26,78 @@ from typing import Any, List, Union, Tuple, Optional
 
 @keras.saving.register_keras_serializable()
 class SharedWeightsCrossAttention(keras.layers.Layer):
-    """Cross-attention between different modalities with shared weights.
+    """Bidirectional cross-attention between modalities with shared QKV projections.
 
-    This layer implements efficient cross-attention where:
-    - Different modalities (e.g., surface and volume data) cross-attend to each other
-    - Weights are shared across modalities for parameter efficiency
-    - Supports both anchor-only and anchor-query configurations
+    Implements parameter-efficient cross-attention where two modalities exchange
+    information through shared projection weights. The concatenated input is
+    projected via a single Dense layer to produce Q, K, V for all tokens, then
+    split by modality for bidirectional cross-attention:
+    ``scores_A = Q_A K_B^T / sqrt(d_k)``, ``Out_A = softmax(scores_A) V_B`` and
+    vice versa. Optionally supports an anchor-query hierarchy where each modality
+    is split into anchors and queries, and all tokens attend only to the opposing
+    modality's anchors for efficient bottleneck communication.
 
-    The attention pattern is:
-    - Modality A tokens attend to Modality B tokens
-    - Modality B tokens attend to Modality A tokens
-    - Optional query tokens attend to opposite modality anchors
+    **Architecture Overview:**
 
-    This is particularly useful for multi-modal learning where different
-    data types need to exchange information efficiently.
+    .. code-block:: text
 
-    Args:
-        dim: Integer, input/output dimension of the attention layer. Must be positive
-            and divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive. Defaults to 8.
-        dropout_rate: Float, dropout rate for attention weights. Must be between 0 and 1.
-            Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in linear projections. Defaults to True.
-        kernel_initializer: String or initializer instance for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer instance for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights. Defaults to None.
-        bias_regularizer: Optional regularizer for bias weights. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌────────────────────────────────────────────────┐
+        │ Input [B, total_seq, dim]                      │
+        │ (concatenated Modality A + Modality B tokens)  │
+        └───────────────────────┬────────────────────────┘
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │ Shared QKV Dense(dim * 3)                      │
+        │ → Q, K, V [B, heads, total_seq, head_dim]     │
+        └───────────────────────┬────────────────────────┘
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │ Split by modality (using split_sizes)          │
+        ├──────────────────┬─────────────────────────────┤
+        │ Q_A, K_A, V_A   │  Q_B, K_B, V_B              │
+        └────────┬─────────┴────────────┬────────────────┘
+                 │                      │
+                 ▼                      ▼
+        ┌────────────────┐    ┌─────────────────┐
+        │ Cross-Attend   │    │ Cross-Attend     │
+        │ Q_A → K_B, V_B │    │ Q_B → K_A, V_A  │
+        └───────┬────────┘    └────────┬─────────┘
+                │                      │
+                ▼                      ▼
+        ┌────────────────────────────────────────────────┐
+        │ Concatenate → [B, total_seq, dim]              │
+        └───────────────────────┬────────────────────────┘
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │ Output Projection Dense(dim)                   │
+        └───────────────────────┬────────────────────────┘
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │ Output [B, total_seq, dim]                     │
+        └────────────────────────────────────────────────┘
 
-    Input shape:
-        3D tensor with shape: `(batch_size, total_sequence_length, dim)`
-        where total_sequence_length is the sum of all modality sequences
+    :param dim: Input/output dimension. Must be positive and divisible by num_heads.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param dropout_rate: Dropout rate for attention weights, between 0 and 1.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear projections.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
 
-    Output shape:
-        3D tensor with same shape as input.
-
-    Call arguments:
-        x: Input tensor of shape (batch_size, total_seq_len, dim) containing
-           concatenated sequences from different modalities.
-        split_sizes: List of integers specifying how to split the input:
-            - Length 2: [modality_a_len, modality_b_len] for anchor-only mode
-            - Length 4: [mod_a_anchor, mod_a_query, mod_b_anchor, mod_b_query]
-        training: Boolean indicating training mode.
-
-    Returns:
-        Output tensor with cross-attended features, same shape as input.
-
-    Raises:
-        ValueError: If dim is not divisible by num_heads.
-        ValueError: If dim or num_heads are not positive.
-        ValueError: If dropout_rate is not between 0 and 1.
-
-    Example:
-        ```python
-        # Multi-modal cross-attention (surface and volume data)
-        surface_features = keras.random.normal((2, 100, 256))  # Surface data
-        volume_features = keras.random.normal((2, 150, 256))   # Volume data
-
-        # Concatenate modalities
-        combined = ops.concatenate([surface_features, volume_features], axis=1)
-
-        cross_attn = SharedWeightsCrossAttention(dim=256, num_heads=8)
-
-        # Cross-attention between modalities
-        output = cross_attn(combined, split_sizes=[100, 150])
-        print(output.shape)  # (2, 250, 256)
-
-        # With anchor-query structure
-        surface_anchors = keras.random.normal((2, 50, 256))
-        surface_queries = keras.random.normal((2, 50, 256))
-        volume_anchors = keras.random.normal((2, 75, 256))
-        volume_queries = keras.random.normal((2, 75, 256))
-
-        combined_aq = ops.concatenate([
-            surface_anchors, surface_queries,
-            volume_anchors, volume_queries
-        ], axis=1)
-
-        output_aq = cross_attn(combined_aq, split_sizes=[50, 50, 75, 75])
-        print(output_aq.shape)  # (2, 250, 256)
-        ```
+    :raises ValueError: If dim is not divisible by num_heads.
+    :raises ValueError: If dim or num_heads are not positive.
+    :raises ValueError: If dropout_rate is not between 0 and 1.
     """
 
     def __init__(
@@ -230,10 +166,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             self.dropout_layer = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers for robust serialization.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 3:
             raise ValueError(f"Input must be 3D, got shape {input_shape}")
@@ -261,16 +197,22 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply shared weights cross-attention.
+        """Apply shared-weights bidirectional cross-attention.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, total_seq_len, dim).
-            split_sizes: List specifying how to split input into modalities.
-            attention_mask: Optional attention mask tensor.
-            training: Boolean indicating training mode.
+        :param inputs: Input tensor of shape ``(batch_size, total_seq_len, dim)``
+            containing concatenated sequences from different modalities.
+        :type inputs: keras.KerasTensor
+        :param split_sizes: How to split the input. Length 2 for anchor-only mode
+            ``[mod_a_len, mod_b_len]`` or length 4 for anchor-query mode
+            ``[mod_a_anchor, mod_a_query, mod_b_anchor, mod_b_query]``.
+        :type split_sizes: Union[List[int], Tuple[int, ...]]
+        :param attention_mask: Optional attention mask tensor.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
 
-        Returns:
-            Output tensor with cross-attended features.
+        :return: Output tensor with cross-attended features, same shape as input.
+        :rtype: keras.KerasTensor
         """
         if not isinstance(split_sizes, (list, tuple)):
             raise ValueError("split_sizes must be a list or tuple")
@@ -308,7 +250,22 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         split_sizes: Union[List[int], Tuple[int, ...]],
         training: Optional[bool]
     ) -> keras.KerasTensor:
-        """Cross-attention between two modalities."""
+        """Cross-attention between two modalities.
+
+        :param q: Query tensor of shape ``(batch, heads, total_seq, head_dim)``.
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape ``(batch, heads, total_seq, head_dim)``.
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape ``(batch, heads, total_seq, head_dim)``.
+        :type v: keras.KerasTensor
+        :param split_sizes: Split sizes ``[mod_a_len, mod_b_len]``.
+        :type split_sizes: Union[List[int], Tuple[int, ...]]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+
+        :return: Cross-attended output tensor.
+        :rtype: keras.KerasTensor
+        """
         mod_a_len, mod_b_len = split_sizes
 
         # Split Q, K, V by modality
@@ -370,7 +327,23 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         split_sizes: Union[List[int], Tuple[int, ...]],
         training: Optional[bool]
     ) -> keras.KerasTensor:
-        """Attention with anchor-query structure for two modalities."""
+        """Attention with anchor-query structure for two modalities.
+
+        :param q: Query tensor of shape ``(batch, heads, total_seq, head_dim)``.
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape ``(batch, heads, total_seq, head_dim)``.
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape ``(batch, heads, total_seq, head_dim)``.
+        :type v: keras.KerasTensor
+        :param split_sizes: Split sizes
+            ``[mod_a_anchor, mod_a_query, mod_b_anchor, mod_b_query]``.
+        :type split_sizes: Union[List[int], Tuple[int, ...]]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+
+        :return: Cross-attended output tensor.
+        :rtype: keras.KerasTensor
+        """
         mod_a_anchor, mod_a_query, mod_b_anchor, mod_b_query = split_sizes
 
         # Combine modality A (anchors + queries) and modality B (anchors + queries)
@@ -413,11 +386,22 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         return self.proj_dense(combined_out)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: Output shape tuple, same as input shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> dict[str, Any]:
-        """Returns the layer configuration for serialization."""
+        """Return the layer configuration for serialization.
+
+        :return: Dictionary containing all configuration parameters.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,

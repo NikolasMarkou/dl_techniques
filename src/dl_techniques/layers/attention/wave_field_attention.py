@@ -52,32 +52,91 @@ class WaveFieldAttention(keras.layers.Layer):
     """
     Multi-head wave-field attention via FFT-based damped-wave convolution.
 
-    Args:
-        dim: Model dimension. Must be divisible by ``num_heads``.
-        num_heads: Number of attention heads. Defaults to 8.
-        field_size: 1-D field grid resolution. Defaults to 512.
-        max_seq_len: Maximum sequence length (determines stride).
-            Defaults to 128.
-        dropout_rate: Dropout on output. Defaults to 0.0.
-        use_bias: Whether projections use bias. Defaults to True.
-        gate_bias_init: Initial gate bias (positive = starts open).
-            Defaults to 2.0.
-        coupling_noise_stddev: Std of Gaussian noise added to identity
-            init of the head coupling matrix. Defaults to 0.01.
-        kernel_initializer: Initializer for projection kernels.
-        bias_initializer: Initializer for projection biases.
-        kernel_regularizer: Optional regularizer for projection kernels.
-        bias_regularizer: Optional regularizer for projection biases.
+    Replaces the standard dot-product attention with a physics-inspired
+    mechanism: tokens deposit information onto a 1-D field grid weighted by
+    key magnitude, a per-head damped-wave kernel is convolved via FFT, a
+    learnable coupling matrix mixes across heads at each field position,
+    and each token gathers from the convolved field. A query-dependent
+    sigmoid modulation and an input-based content gate further refine the
+    output before a final linear projection.
 
-    Call arguments:
-        inputs: ``(batch, seq_len, dim)``
-        attention_mask: Optional ``(batch, seq_len)`` float mask. 1.0 = valid,
-            0.0 = padding. Padded tokens are excluded from field
-            deposits and zeroed in output.
-        training: Boolean for training vs inference.
+    The damped-wave kernel ``k_h(t) = exp(-alpha*t) * cos(omega*t + phi)``
+    for ``t >= 0`` is causal (left-aligned), so the convolution output at
+    field position ``g`` depends only on positions ``<= g``, providing
+    autoregressive information flow without explicit masking. Complexity is
+    ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the field grid size.
 
-    Returns:
-        ``(batch, seq_len, dim)``
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────┐
+        │  Input (B, N, D)                │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  QKV Projection ─► Q, K, V      │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Deposit: V * ||K|| onto field  │
+        │  (bilinear scatter)             │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  FFT damped-wave convolution     │
+        │  (per-head causal kernels)       │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Multi-field coupling (head mix) │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Bilinear gather from field      │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Query modulation: sigmoid(Q/s)  │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Content gate: sigmoid(gate(x))  │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output projection + dropout     │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output (B, N, D)               │
+        └──────────────────────────────────┘
+
+    :param dim: Model dimension (must be divisible by ``num_heads``).
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param field_size: 1-D field grid resolution.
+    :type field_size: int
+    :param max_seq_len: Maximum sequence length (determines stride).
+    :type max_seq_len: int
+    :param dropout_rate: Dropout rate on output.
+    :type dropout_rate: float
+    :param use_bias: Whether projections use bias.
+    :type use_bias: bool
+    :param gate_bias_init: Initial gate bias (positive = starts open).
+    :type gate_bias_init: float
+    :param coupling_noise_stddev: Std-dev of Gaussian noise added to the
+        identity-initialized head coupling matrix.
+    :type coupling_noise_stddev: float
+    :param kernel_initializer: Initializer for projection kernels.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for projection biases.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for projection kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Regularizer for projection biases.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     """
 
     def __init__(
@@ -221,14 +280,26 @@ class WaveFieldAttention(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def _compute_field_positions(self, seq_len: int) -> keras.KerasTensor:
-        """Token i -> field position i * stride, clamped to [0, G-2]."""
+        """Map token index to field position via ``i * stride``, clamped to ``[0, G-2]``.
+
+        :param seq_len: Current sequence length.
+        :type seq_len: int
+        :return: Float tensor of field positions with shape ``(seq_len,)``.
+        :rtype: keras.KerasTensor
+        """
         seq_idx = ops.cast(ops.arange(seq_len), "float32")
         return ops.clip(seq_idx * self._field_stride, 0.0, float(self.field_size - 2))
 
     def _build_scatter_gather_matrices(
         self, field_pos: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Bilinear interpolation matrices: scatter (G, N) and gather (N, G)."""
+        """Build bilinear interpolation matrices for scatter ``(G, N)`` and gather ``(N, G)``.
+
+        :param field_pos: Float field positions of shape ``(N,)``.
+        :type field_pos: keras.KerasTensor
+        :return: Tuple of ``(scatter_mat, gather_mat)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        """
         G = self.field_size
 
         idx_lo = ops.cast(ops.floor(field_pos), "int32")
@@ -251,14 +322,14 @@ class WaveFieldAttention(keras.layers.Layer):
         return scatter_mat, gather_mat
 
     def _build_wave_kernels_fft(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Left-aligned causal damped-wave kernels in frequency domain.
+        """Build left-aligned causal damped-wave kernels in frequency domain.
 
-        k_h(t) = exp(-softplus(damping_h) * t) * cos(freq_h * t + phase_h)
-        L1-normalised, zero-padded to 2G, rfft'd.
+        Each head has a kernel
+        ``k_h(t) = exp(-softplus(damping_h) * t) * cos(freq_h * t + phase_h)``.
+        Kernels are L1-normalised, zero-padded to ``2G``, and rfft'd.
 
-        Returns:
-            (real, imag) each of shape (H, G+1).
+        :return: ``(real, imag)`` each of shape ``(H, G+1)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         G = self.field_size
         t = ops.cast(ops.arange(G), "float32")
@@ -285,7 +356,15 @@ class WaveFieldAttention(keras.layers.Layer):
         field: keras.KerasTensor,
         kernel_fft: Tuple[keras.KerasTensor, keras.KerasTensor],
     ) -> keras.KerasTensor:
-        """Per-head FFT convolution. field: (B, H, G, D_h) -> (B, H, G, D_h)."""
+        """Per-head FFT convolution on the field grid.
+
+        :param field: Field tensor of shape ``(B, H, G, D_h)``.
+        :type field: keras.KerasTensor
+        :param kernel_fft: Tuple of ``(real, imag)`` kernel spectra.
+        :type kernel_fft: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :return: Convolved field of shape ``(B, H, G, D_h)``.
+        :rtype: keras.KerasTensor
+        """
         G = self.field_size
 
         field_t = ops.transpose(field, (0, 1, 3, 2))  # (B, H, D_h, G)
@@ -306,7 +385,13 @@ class WaveFieldAttention(keras.layers.Layer):
         return ops.transpose(convolved, (0, 1, 3, 2))
 
     def _apply_field_coupling(self, field: keras.KerasTensor) -> keras.KerasTensor:
-        """Row-softmax coupling across heads. field: (B, H, G, D_h)."""
+        """Apply row-softmax coupling across heads at each spatial position.
+
+        :param field: Field tensor of shape ``(B, H, G, D_h)``.
+        :type field: keras.KerasTensor
+        :return: Coupled field of shape ``(B, H, G, D_h)``.
+        :rtype: keras.KerasTensor
+        """
         batch_size = ops.shape(field)[0]
         H = self.num_heads
         G = self.field_size
@@ -327,16 +412,17 @@ class WaveFieldAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass.
+        """Forward pass through the wave-field attention mechanism.
 
-        Args:
-            inputs: (B, N, D)
-            attention_mask: Optional (B, N) float tensor. 1.0 = valid, 0.0 = pad.
-            training: Training flag.
-
-        Returns:
-            (B, N, D)
+        :param inputs: Input tensor of shape ``(B, N, D)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional float mask ``(B, N)``. ``1.0`` = valid,
+            ``0.0`` = padding.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(B, N, D)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]

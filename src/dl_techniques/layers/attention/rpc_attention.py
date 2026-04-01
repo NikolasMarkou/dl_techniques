@@ -1,61 +1,16 @@
 """
 A robust attention mechanism via Principal Component Pursuit.
 
-This layer enhances the standard scaled dot-product attention by integrating
-Principal Component Pursuit (PCP), a matrix decomposition technique. The
-core idea is to make attention more robust to noise, adversarial
-perturbations, and out-of-distribution data by separating the underlying
-structure of the attention matrix from sparse, potentially disruptive
-elements.
-
-Architecture:
-    The standard attention mechanism computes an attention matrix `A` from
-    queries (Q) and keys (K). RPC-Attention intercepts this matrix `A`
-    before the softmax operation and decomposes it into two distinct
-    components:
-
-    1.  A low-rank matrix `L`: This component captures the principal,
-        globally smooth patterns and correlations within the sequence. It
-        represents the broad, foundational relationships between tokens.
-
-    2.  A sparse matrix `S`: This component captures localized, sharp, or
-        outlier information. It isolates features that are highly specific,
-        potentially representing noise, adversarial attacks, or uniquely
-        important token-to-token interactions that deviate from the global
-        pattern.
-
-    The robust attention matrix is then reconstructed as `A_robust = L + S`
-    before being passed to the final softmax function. This decomposition
-    and reconstruction filters the attention mechanism, preserving the
-    stable global structure while explicitly modeling sparse corruptions or
-    salient details, leading to improved generalization and robustness.
-
-Foundational Mathematics:
-    The decomposition is achieved by solving the Principal Component
-    Pursuit (PCP) convex optimization problem. Given the raw attention
-    matrix `A`, PCP seeks to find `L` and `S` such that:
-
-        min_{L,S} ||L||_* + lambda * ||S||_1   subject to   A = L + S
-
-    -   `||L||_*` is the **nuclear norm** of `L` (the sum of its singular
-        values). Minimizing the nuclear norm is a convex relaxation for
-        minimizing the rank of the matrix, thus encouraging `L` to be
-        low-rank.
-    -   `||S||_1` is the **L1 norm** of `S` (the sum of the absolute values
-        of its elements). Minimizing the L1 norm is a standard technique
-        for inducing sparsity, encouraging most elements of `S` to be zero.
-    -   `lambda` is a regularization parameter that balances the trade-off
-        between the low-rankness of `L` and the sparsity of `S`.
-
-    This problem is typically solved using iterative methods, such as the
-    Alternating Direction Method of Multipliers (ADMM), which involves
-    repeatedly applying singular value thresholding to update `L` and
-    soft-thresholding to update `S`.
+This layer enhances standard scaled dot-product attention by integrating
+Principal Component Pursuit (PCP), a matrix decomposition technique that
+separates the attention matrix into a low-rank component ``L`` (global
+patterns) and a sparse component ``S`` (localized details/outliers) by
+solving ``min_{L,S} ||L||_* + lambda ||S||_1  s.t.  A = L + S``. The
+robust attention is then ``softmax(L + S) V``, providing resilience
+against noise and adversarial perturbations.
 
 References:
-    - The foundational theory for Principal Component Pursuit was
-      introduced in:
-      Candès, E. J., Li, X., Ma, Y., & Wright, J. (2011). "Robust
+    - Candes, E. J., Li, X., Ma, Y., & Wright, J. (2011). "Robust
       Principal Component Analysis?". Journal of the ACM.
 """
 
@@ -68,148 +23,92 @@ from keras import ops, layers, initializers, regularizers
 
 @keras.saving.register_keras_serializable()
 class RPCAttention(keras.layers.Layer):
-    """
-    Robust Principal Components Attention layer.
+    """Robust Principal Components Attention via PCP decomposition.
 
-    This layer implements RPC-Attention, which decomposes the attention matrix into
-    low-rank and sparse components using Principal Component Pursuit (PCP). This
-    decomposition provides robustness against adversarial attacks and improves
-    generalization by separating global attention patterns (low-rank) from
-    localized important features (sparse).
+    Implements RPC-Attention which decomposes the raw attention score matrix
+    ``A = Q K^T / sqrt(d_k)`` into low-rank ``L`` and sparse ``S`` components
+    using iterative alternating minimization (ADMM-style). The low-rank component
+    is obtained via singular value thresholding:
+    ``L = U diag(max(sigma - tau, 0)) V^H`` where ``(U, sigma, V^H) = SVD(A - S)``.
+    The sparse component uses soft thresholding:
+    ``S = sign(A - L) max(|A - L| - lambda, 0)``. After ``max_pcp_iter``
+    iterations, the robust attention output is ``softmax(L + S) V``.
 
-    **Mathematical Foundation**:
+    **Architecture Overview:**
 
-    Principal Component Pursuit optimization:
+    .. code-block:: text
 
-    .. math::
-        \\min_{L,S} ||L||_* + \\lambda ||S||_1 \\text{ subject to } A = L + S
+        ┌───────────────────────────────┐
+        │ Input [B, seq_len, dim]       │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Dense(3*dim) → Q, K, V       │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Multi-Head Reshape            │
+        │ [B, heads, seq_len, head_dim] │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ A = Q K^T * scale             │
+        │ [B, heads, seq_len, seq_len]  │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────────────┐
+        │ PCP Decomposition (iterative):        │
+        │ ┌───────────────────────────────────┐ │
+        │ │ L = SVT(A - S, tau)   (low-rank)  │ │
+        │ │ S = soft(A - L, lambda) (sparse)  │ │
+        │ └───────────────────────────────────┘ │
+        │ Repeat max_pcp_iter times             │
+        └──────────────┬────────────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Robust Attn = softmax(L + S)  │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Output = Attn @ V             │
+        │ Reshape → [B, seq_len, dim]   │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Dense(dim) output projection  │
+        │ + Dropout (optional)          │
+        └──────────────┬────────────────┘
+                       ▼
+        ┌───────────────────────────────┐
+        │ Output [B, seq_len, dim]      │
+        └───────────────────────────────┘
 
-    Where:
-    - A is the attention matrix
-    - L is the low-rank component (captures global patterns)
-    - S is the sparse component (captures outliers/details)
-    - ||·||_* is the nuclear norm (sum of singular values)
-    - ||·||_1 is the L1 norm
-    - λ controls sparsity level
-
-    **Architecture**:
-    ```
-    Input(shape=[batch, seq_len, dim])
-           ↓
-    Linear Projection: Q, K, V = Linear(input)
-           ↓
-    Attention Matrix: A = softmax(QK^T/√d)
-           ↓
-    PCP Decomposition: A → L (low-rank) + S (sparse)
-           ↓
-    Robust Attention: Attn = softmax(L + S)
-           ↓
-    Output: Attn @ V
-           ↓
-    Linear Projection & Concatenate
-           ↓
-    Output(shape=[batch, seq_len, dim])
-    ```
-
-    **Key Benefits**:
-    - **Robustness**: 15-25% better performance under adversarial attacks
-    - **Accuracy**: >1% improvement on standard benchmarks
-    - **Out-of-Distribution**: ~3 AUPR improvement on OOD detection
-    - **Interpretability**: Separates global and local attention patterns
-
-    Args:
-        dim: Integer, dimensionality of the model. Must be positive and divisible
-            by num_heads. This is the size of input and output embeddings.
-        num_heads: Integer, number of attention heads. Must be positive and divide
-            evenly into dim. Defaults to 8.
-        lambda_sparse: Float, sparsity regularization parameter. Controls the
-            sparsity of the S component. Higher values create sparser attention.
-            Must be positive. Defaults to 0.1.
-        max_pcp_iter: Integer, maximum iterations for PCP decomposition.
-            More iterations give better decomposition but slower computation.
-            Defaults to 10.
-        svd_threshold: Float, threshold for singular value soft-thresholding
-            in low-rank approximation. Defaults to 1.0.
-        qkv_bias: Boolean, whether to use bias in Q, K, V projections.
-            Defaults to False.
-        dropout_rate: Float between 0 and 1, dropout rate for attention weights.
-            Applied after the attention computation. Defaults to 0.0.
-        kernel_initializer: Initializer for projection weight matrices.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for projection bias vectors.
-            Only used when qkv_bias=True. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for projection weights.
-        bias_regularizer: Optional regularizer for projection biases.
-        **kwargs: Additional arguments for Layer base class.
-
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, dim)`.
-        Same shape as input.
-
-    Attributes:
-        to_qkv: Dense layer projecting input to Q, K, V.
-        to_out: Dense layer for output projection.
-        dropout: Dropout layer for regularization.
-        attention_scale: Scale factor for attention scores.
-
-    Example:
-        ```python
-        # Basic RPC attention
-        rpc_attn = RPCAttention(
-            dim=512,
-            num_heads=8,
-            lambda_sparse=0.1
-        )
-
-        # Process sequence with robust attention
-        inputs = keras.random.normal((2, 100, 512))
-        outputs = rpc_attn(inputs)  # Shape: (2, 100, 512)
-
-        # More aggressive decomposition for adversarial robustness
-        robust_attn = RPCAttention(
-            dim=768,
-            num_heads=12,
-            lambda_sparse=0.2,  # Higher sparsity
-            max_pcp_iter=20,    # More iterations
-            svd_threshold=0.5   # Lower threshold
-        )
-
-        # Transformer block with RPC attention
-        class RPCTransformerBlock(keras.layers.Layer):
-            def __init__(self, dim, num_heads=8, **kwargs):
-                super().__init__(**kwargs)
-                self.attention = RPCAttention(
-                    dim=dim,
-                    num_heads=num_heads,
-                    lambda_sparse=0.15
-                )
-                self.norm1 = keras.layers.LayerNormalization()
-                self.norm2 = keras.layers.LayerNormalization()
-                self.ffn = keras.Sequential([
-                    keras.layers.Dense(dim * 4, activation='gelu'),
-                    keras.layers.Dense(dim)
-                ])
-
-            def call(self, x):
-                # Pre-norm architecture
-                attn_out = self.attention(self.norm1(x))
-                x = x + attn_out
-                ffn_out = self.ffn(self.norm2(x))
-                x = x + ffn_out
-                return x
-        ```
-
-    References:
-        - Robust Principal Component Analysis? (Candès et al., 2009)
-        - RPC-Attention: Robust Attention via Principal Component Pursuit
-
-    Note:
-        The PCP decomposition is computed dynamically for each forward pass.
-        For very long sequences, consider caching decompositions or using
-        approximation methods to reduce computational cost.
+    :param dim: Model dimensionality. Must be positive and divisible by num_heads.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param lambda_sparse: Sparsity regularization parameter for the ``S`` component.
+        Higher values create sparser attention.
+    :type lambda_sparse: float
+    :param max_pcp_iter: Maximum iterations for PCP decomposition.
+    :type max_pcp_iter: int
+    :param svd_threshold: Threshold for singular value soft-thresholding in low-rank
+        approximation.
+    :type svd_threshold: float
+    :param qkv_bias: Whether to use bias in Q, K, V projections.
+    :type qkv_bias: bool
+    :param dropout_rate: Dropout rate for output, between 0 and 1.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for projection weight matrices.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for projection bias vectors.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for projection weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for projection biases.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional arguments for Layer base class.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -292,11 +191,10 @@ class RPCAttention(keras.layers.Layer):
             self.dropout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and its sub-layers.
+        """Build the layer and its sub-layers.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -313,18 +211,15 @@ class RPCAttention(keras.layers.Layer):
         super().build(input_shape)
 
     def _soft_threshold(self, x: keras.KerasTensor, threshold: float) -> keras.KerasTensor:
-        """
-        Apply soft thresholding operator for sparse approximation.
+        """Apply soft thresholding: ``S_lambda(x) = sign(x) max(|x| - lambda, 0)``.
 
-        Soft thresholding is defined as:
-        S_λ(x) = sign(x) * max(|x| - λ, 0)
+        :param x: Input tensor.
+        :type x: keras.KerasTensor
+        :param threshold: Threshold value lambda.
+        :type threshold: float
 
-        Args:
-            x: Input tensor.
-            threshold: Threshold value λ.
-
-        Returns:
-            Soft-thresholded tensor.
+        :return: Soft-thresholded tensor.
+        :rtype: keras.KerasTensor
         """
         return ops.sign(x) * ops.maximum(ops.abs(x) - threshold, 0.0)
 
@@ -333,17 +228,15 @@ class RPCAttention(keras.layers.Layer):
             matrix: keras.KerasTensor,
             threshold: float
     ) -> keras.KerasTensor:
-        """
-        Minimize nuclear norm via singular value thresholding.
+        """Minimize nuclear norm via singular value thresholding.
 
-        Performs SVD and applies soft thresholding to singular values.
+        :param matrix: Input matrix to be approximated.
+        :type matrix: keras.KerasTensor
+        :param threshold: Threshold for singular values.
+        :type threshold: float
 
-        Args:
-            matrix: Input matrix to be approximated.
-            threshold: Threshold for singular values.
-
-        Returns:
-            Low-rank approximation of the input matrix.
+        :return: Low-rank approximation of the input matrix.
+        :rtype: keras.KerasTensor
         """
         # Perform SVD
         # Note: keras.ops.svd returns (u, s, v)
@@ -374,20 +267,15 @@ class RPCAttention(keras.layers.Layer):
             self,
             attention_matrix: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Perform Principal Component Pursuit decomposition.
+        """Perform Principal Component Pursuit decomposition via alternating minimization.
 
-        Decomposes attention matrix A into low-rank L and sparse S components
-        using alternating minimization.
+        :param attention_matrix: Input attention matrix of shape
+            ``(batch, num_heads, seq_len, seq_len)``.
+        :type attention_matrix: keras.KerasTensor
 
-        Args:
-            attention_matrix: Input attention matrix of shape
-                (batch, num_heads, seq_len, seq_len).
-
-        Returns:
-            Tuple of (L, S) where:
-            - L: Low-rank component (global patterns)
-            - S: Sparse component (local details)
+        :return: Tuple of ``(L, S)`` where ``L`` is the low-rank component and
+            ``S`` is the sparse component, both with the same shape as input.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Get shape info
         shape = ops.shape(attention_matrix)
@@ -431,17 +319,19 @@ class RPCAttention(keras.layers.Layer):
             v: keras.KerasTensor,
             mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
-        """
-        Compute robust attention using PCP decomposition.
+        """Compute robust attention using PCP decomposition.
 
-        Args:
-            q: Query tensor of shape (batch, num_heads, seq_len, head_dim).
-            k: Key tensor of shape (batch, num_heads, seq_len, head_dim).
-            v: Value tensor of shape (batch, num_heads, seq_len, head_dim).
-            mask: Optional attention mask.
+        :param q: Query tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type q: keras.KerasTensor
+        :param k: Key tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type k: keras.KerasTensor
+        :param v: Value tensor of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :type v: keras.KerasTensor
+        :param mask: Optional attention mask.
+        :type mask: Optional[keras.KerasTensor]
 
-        Returns:
-            Attention output of shape (batch, num_heads, seq_len, head_dim).
+        :return: Attention output of shape ``(batch, num_heads, seq_len, head_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Compute attention scores
         # Shape: (batch, num_heads, seq_len, seq_len)
@@ -489,18 +379,22 @@ class RPCAttention(keras.layers.Layer):
             training: Optional[bool] = None,
             return_attention_scores: bool = False
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """
-        Apply RPC attention to inputs.
+        """Apply RPC attention to inputs.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim).
-            mask: Optional attention mask of shape (batch_size, seq_len, seq_len).
-            training: Boolean indicating training mode.
-            return_attention_scores: If True, also returns the attention weights.
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, dim)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional attention mask of shape
+            ``(batch_size, seq_len, seq_len)``.
+        :type mask: Optional[keras.KerasTensor]
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :param return_attention_scores: If ``True``, also returns attention weights.
+        :type return_attention_scores: bool
 
-        Returns:
-            Output tensor of shape (batch_size, seq_len, dim).
-            If return_attention_scores=True, returns (output, attention_weights).
+        :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
+            If return_attention_scores is ``True``, returns
+            ``(output, attention_weights)``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -553,23 +447,21 @@ class RPCAttention(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Returns:
-            Shape tuple of the output (same as input).
+        :return: Shape tuple of the output (same as input).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+        """Return the configuration of the layer for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters.
+        :return: Dictionary containing all configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

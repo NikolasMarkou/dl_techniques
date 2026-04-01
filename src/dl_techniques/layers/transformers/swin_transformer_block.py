@@ -134,150 +134,91 @@ class SwinTransformerBlock(keras.layers.Layer):
     """
     Swin Transformer Block with windowed multi-head self-attention.
 
-    This layer implements a Swin Transformer block that performs windowed multi-head
-    self-attention followed by an MLP. It supports shifted windows for cross-window
-    connections and includes optional stochastic depth regularization.
+    Implements the core Swin Transformer block: pre-normalization windowed
+    multi-head self-attention with optional cyclic shift, followed by a
+    pre-normalization SwinMLP, both wrapped with residual connections and
+    optional stochastic depth regularization. Computational complexity is
+    ``O(M^2 * H * W)`` where ``M`` is the window size, providing linear
+    scaling with respect to input spatial resolution.
 
-    **Intent**: Implement the core building block of Swin Transformer architecture
-    for efficient vision_heads transformers with linear computational complexity relative
-    to input size through windowed attention mechanisms.
+    ``x' = x + DropPath(W-MSA(LN(x)))``
+    ``y  = x' + DropPath(MLP(LN(x')))``
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, height, width, channels])
-           ↓
-    LayerNorm → Window Partition → WindowAttention → Window Merge
-           ↓                                              ↓
-    StochasticDepth ←------------------------------------ ←
-           ↓
-    Residual Connection (+)
-           ↓
-    LayerNorm → SwinMLP
-           ↓         ↓
-    StochasticDepth ←
-           ↓
-    Residual Connection (+)
-           ↓
-    Output(shape=[batch, height, width, channels])
-    ```
+    **Architecture Overview:**
 
-    **Key Features**:
-    - Window-based attention for O(H*W) computational complexity
-    - Optional shifted windows for cross-window connections
-    - Stochastic depth regularization for training deep networks
-    - Configurable MLP expansion ratio
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Attention Block**: x' = x + DropPath(WindowAttn(LN(x)))
-    2. **MLP Block**: y = x' + DropPath(MLP(LN(x')))
-    3. **Window Partition**: Splits (H, W) into non-overlapping windows
-    4. **Shifted Windows**: Cyclically shifts windows by shift_size pixels
+        ┌──────────────────────────────────────┐
+        │  Input (B, H, W, C)                 │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  LayerNorm1                          │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  [Cyclic Shift]                      │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  Window Partition ─► Window Attention │
+        │  ─► Window Merge                     │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  [Reverse Cyclic Shift]              │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  StochasticDepth ─► + Residual       │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  LayerNorm2 ─► SwinMLP               │
+        │  ─► StochasticDepth ─► + Residual    │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  Output (B, H, W, C)                │
+        └──────────────────────────────────────┘
 
-    Args:
-        dim: Integer, number of input channels. Must be positive and should
-            match the last dimension of input tensors.
-        num_heads: Integer, number of attention heads. Must be positive and
-            divide dim evenly for proper head dimension calculation.
-        window_size: Integer, window size for attention computation. Must be positive.
-            Common values are 7 or 8. Defaults to 8.
-        shift_size: Integer, shift size for shifted window attention. Must be
-            non-negative and less than window_size. Use window_size//2 for
-            standard shifted windows. Defaults to 0 (no shifting).
-        mlp_ratio: Float, ratio of MLP hidden dimension to embedding dimension.
-            Must be positive. Standard value is 4.0. Defaults to 4.0.
-        qkv_bias: Boolean, whether to add learnable bias to query, key, value
-            projections in attention. Defaults to True.
-        dropout_rate: Float, dropout rate for MLP and attention projection.
-            Must be in [0, 1). Defaults to 0.0.
-        attention_dropout_rate: Float, dropout rate for attention weights.
-            Must be in [0, 1). Defaults to 0.0.
-        stochastic_depth_rate: Float, stochastic depth rate for DropPath regularization.
-            Must be in [0, 1). Higher values increase regularization. Defaults to 0.0.
-        activation: String name or callable, activation function for MLP.
-            Common choices: 'gelu', 'relu', 'swish'. Defaults to "gelu".
-        use_bias: Boolean, whether to use bias in layer normalization and
-            linear projections. Defaults to True.
-        kernel_initializer: String name or Initializer instance for kernel weights.
-            Defaults to "glorot_uniform".
-        bias_initializer: String name or Initializer instance for bias vectors.
-            Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias vectors.
-        activity_regularizer: Optional regularizer for layer output activations.
-        **kwargs: Additional keyword arguments for Layer base class.
+    :param dim: Number of input channels.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param window_size: Side length of attention windows. Default: 8.
+    :type window_size: int
+    :param shift_size: Cyclic shift amount for SW-MSA. Use
+        ``window_size // 2`` for standard shifted windows, 0 for regular.
+    :type shift_size: int
+    :param mlp_ratio: MLP hidden dim / embedding dim ratio. Default: 4.0.
+    :type mlp_ratio: float
+    :param qkv_bias: Whether QKV projections use bias. Default: True.
+    :type qkv_bias: bool
+    :param dropout_rate: Dropout rate for MLP and projections. Default: 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Dropout rate for attention weights.
+    :type attention_dropout_rate: float
+    :param stochastic_depth_rate: Drop-path rate. Default: 0.0.
+    :type stochastic_depth_rate: float
+    :param activation: Activation function for MLP. Default: ``'gelu'``.
+    :type activation: Union[str, Callable]
+    :param use_bias: Whether normalization and projections use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Bias weight initializer.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param bias_regularizer: Bias weight regularizer.
+    :type bias_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param activity_regularizer: Activity regularizer.
+    :type activity_regularizer: Optional[Union[str, regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-        - height and width should be divisible by window_size for optimal performance
-        - channels must equal the dim parameter
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-        - Shape is preserved through the transformation
-
-    Attributes:
-        norm1: First LayerNormalization layer (pre-attention).
-        attn: WindowAttention layer for windowed multi-head attention.
-        drop_path_layer: StochasticDepth layer for regularization (if drop_path > 0).
-        norm2: Second LayerNormalization layer (pre-MLP).
-        mlp: SwinMLP layer for feed-forward processing.
-
-    Example:
-        ```python
-        # Basic Swin Transformer block
-        block = SwinTransformerBlock(dim=96, num_heads=3, window_size=7)
-        inputs = keras.Input(shape=(224, 224, 96))
-        outputs = block(inputs)
-
-        # With shifted windows (typical for even-numbered layers)
-        shifted_block = SwinTransformerBlock(
-            dim=192,
-            num_heads=6,
-            window_size=7,
-            shift_size=3,  # Half of window_size
-            drop_path=0.1
-        )
-
-        # Deep network with regularization
-        deep_block = SwinTransformerBlock(
-            dim=384,
-            num_heads=12,
-            window_size=8,
-            mlp_ratio=6.0,
-            dropout_rate=0.1,
-            attn_dropout_rate=0.1,
-            drop_path=0.2,
-            activation='swish'
-        )
-
-        # In a complete Swin Transformer stage
-        stage_blocks = []
-        for i in range(6):  # 6 blocks per stage
-            shift_size = 0 if i % 2 == 0 else window_size // 2
-            block = SwinTransformerBlock(
-                dim=192,
-                num_heads=6,
-                window_size=7,
-                shift_size=shift_size,
-                drop_path=0.1 * i / 6  # Increasing stochastic depth
-            )
-            stage_blocks.append(block)
-        ```
-
-    Raises:
-        ValueError: If dim <= 0, num_heads <= 0, dim not divisible by num_heads,
-            window_size <= 0, shift_size < 0, shift_size >= window_size,
-            mlp_ratio <= 0, or dropout rates not in [0, 1).
-
-    References:
-        - Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
-          (Liu et al., 2021): https://arxiv.org/abs/2103.14030
-        - Official implementation: https://github.com/microsoft/Swin-Transformer
-
-    Note:
-        This implementation uses the window partitioning utilities from utils.tensors
-        and integrates with the dl-techniques framework's SwinMLP and WindowAttention
-        components for optimal performance and consistency.
+    :raises ValueError: If dimension, head, or rate parameters are invalid.
     """
 
     def __init__(
@@ -427,19 +368,11 @@ class SwinTransformerBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers for serialization safety.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures all weight variables exist before weight restoration during
-        model loading. Without this, sub-layers would be unbuilt and weight
-        loading would fail.
-
-        Args:
-            input_shape: Shape tuple of the input tensor (batch, height, width, channels).
-
-        Raises:
-            ValueError: If input_shape is not 4D or channels dimension doesn't match dim.
+        :param input_shape: Shape tuple ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If shape is not 4-D or channels != dim.
         """
         if len(input_shape) != 4:
             raise ValueError(
@@ -483,24 +416,15 @@ class SwinTransformerBlock(keras.layers.Layer):
         x: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the SwinTransformerBlock layer.
+        """Forward pass of the SwinTransformerBlock.
 
-        Implements the standard Swin Transformer block computation:
-        1. Attention block: x = x + DropPath(WindowAttn(LN(x)))
-        2. MLP block: x = x + DropPath(MLP(LN(x)))
-
-        Args:
-            x: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether the layer should behave in
-                training mode (apply dropout/stochastic depth) or inference mode.
-
-        Returns:
-            Output tensor of shape (batch_size, height, width, channels).
-            Values represent the transformed features after attention and MLP processing.
-
-        Raises:
-            ValueError: If input tensor is not 4D.
+        :param x: Input tensor ``(B, H, W, C)``.
+        :type x: keras.KerasTensor
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(B, H, W, C)``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If input tensor is not 4-D.
         """
         input_shape = ops.shape(x)
         if len(input_shape) != 4:
@@ -588,30 +512,20 @@ class SwinTransformerBlock(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape (same as input).
 
-        SwinTransformerBlock preserves the input shape through all transformations.
-        The window partitioning and attention operations maintain spatial dimensions.
-
-        Args:
-            input_shape: Shape of the input (batch, height, width, channels).
-
-        Returns:
-            Output shape tuple (batch, height, width, channels).
-            Shape is identical to input_shape.
+        :param input_shape: Input shape tuple.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration dictionary for serialization.
 
-        CRITICAL: Must include ALL __init__ parameters for proper serialization.
-        This ensures the layer can be reconstructed exactly when loading a saved model.
-
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

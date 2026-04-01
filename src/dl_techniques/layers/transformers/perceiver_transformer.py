@@ -73,80 +73,66 @@ from ..attention.perceiver_attention import PerceiverAttention
 
 @keras.saving.register_keras_serializable()
 class PerceiverTransformerLayer(keras.layers.Layer):
-    """Complete Perceiver transformer block with cross-attention.
+    """
+    Complete Perceiver transformer block with cross-attention.
 
-    This block implements a complete Perceiver transformer layer that combines:
-    1. Layer normalization
-    2. Perceiver cross-attention (queries from one input, keys/values from another)
-    3. Residual connection
-    4. Layer normalization
-    5. MLP (feed-forward network)
-    6. Residual connection
+    Implements asymmetric cross-attention where a small query array attends
+    to a (potentially much larger) key/value array, achieving ``O(M*N)``
+    complexity instead of ``O(N^2)``. The block uses pre-normalization
+    with residual connections around both the cross-attention and the MLP.
 
-    This is useful for cross-modal processing, set-to-set transformations,
-    and latent space learning where different inputs need to interact.
+    ``L' = L + CrossAttention(LN(L), LN(X))``
+    ``L_out = L' + MLP(LN(L'))``
 
-    Args:
-        dim: Integer, hidden dimension of the block. Must be positive.
-        num_heads: Integer, number of attention heads. Must be positive and divide dim.
-            Defaults to 8.
-        mlp_ratio: Float, ratio of MLP hidden dimension to input dimension.
-            Must be positive. Defaults to 4.0 (standard transformer ratio).
-        dropout_rate: Float, dropout rate for attention and MLP. Must be between 0 and 1.
-            Defaults to 0.0.
-        activation: String or callable, activation function for MLP. Defaults to "gelu".
-        use_bias: Boolean, whether to use bias in projections. Defaults to True.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer, initializer for bias vectors.
-            Defaults to "zeros".
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    **Architecture Overview:**
 
-    Input shape:
-        Two inputs (can be called with single input for self-attention):
-        - query_input: 3D tensor with shape `(batch_size, query_seq_len, dim)`
-        - kv_input: 3D tensor with shape `(batch_size, kv_seq_len, dim)` (optional)
+    .. code-block:: text
 
-    Output shape:
-        3D tensor with shape: `(batch_size, query_seq_len, dim)`
+        ┌───────────────────────────────────────┐
+        │  Query Input (B, M, dim)              │
+        │  KV Input    (B, N, dim)              │
+        └──────────┬────────────┬───────────────┘
+                   ▼            ▼
+        ┌───────────────────────────────────────┐
+        │  LN(query) ─► Q                       │
+        │  LN(kv)    ─► K, V                    │
+        │  Cross-Attention(Q, K, V)             │
+        │  + Residual (query)                   │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  LN ─► MLP ─► [Dropout]              │
+        │  + Residual                           │
+        └──────────────────┬────────────────────┘
+                           ▼
+        ┌───────────────────────────────────────┐
+        │  Output (B, M, dim)                   │
+        └───────────────────────────────────────┘
 
-    Call arguments:
-        query_input: Query tensor of shape (batch_size, query_seq_len, dim).
-        kv_input: Key-Value tensor of shape (batch_size, kv_seq_len, dim).
-            If None, uses query_input for both (self-attention mode).
-        training: Boolean indicating whether the layer should behave in training
-            mode or inference mode.
+    :param dim: Hidden dimension of the block.
+    :type dim: int
+    :param num_heads: Number of attention heads. Default: 8.
+    :type num_heads: int
+    :param mlp_ratio: MLP expansion ratio. Default: 4.0.
+    :type mlp_ratio: float
+    :param dropout_rate: Dropout rate. Default: 0.0.
+    :type dropout_rate: float
+    :param activation: Activation for the MLP. Default: ``'gelu'``.
+    :type activation: Union[str, callable]
+    :param use_bias: Whether projections use bias. Default: True.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Bias weight initializer.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Bias weight regularizer.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
 
-    Returns:
-        Output tensor with same shape as query_input.
-
-    Example:
-        ```python
-        # Cross-modal transformer block
-        text_features = keras.random.normal((2, 77, 512))    # Text tokens
-        visual_features = keras.random.normal((2, 196, 512)) # Image patches
-
-        perceiver_block = PerceiverBlock(dim=512, num_heads=8, mlp_ratio=4.0)
-
-        # Text attending to visual features and processing through MLP
-        output = perceiver_block(text_features, visual_features)
-        print(output.shape)  # (2, 77, 512) - same as query input
-
-        # Can also be used for latent-to-input processing
-        latents = keras.random.normal((2, 32, 512))  # Learned latent queries
-        processed_latents = perceiver_block(latents, visual_features)
-        print(processed_latents.shape)  # (2, 32, 512)
-
-        # Self-attention mode
-        output = perceiver_block(text_features)  # Uses text_features for both Q and KV
-        ```
-
-    Raises:
-        ValueError: If dim is not positive, num_heads doesn't divide dim, or mlp_ratio
-            is not positive.
-        ValueError: If dropout is not between 0 and 1.
+    :raises ValueError: If dim, num_heads, mlp_ratio, or dropout_rate are invalid.
     """
 
     def __init__(
@@ -245,9 +231,10 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             self.dropout = None
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]) -> None:
-        """Build the layer and all its sub-layers.
+        """Build the layer and all sub-layers for serialization safety.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        :param input_shape: Single shape or list of ``[query_shape, kv_shape]``.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
         # Handle different input formats
         if isinstance(input_shape, list):
@@ -304,16 +291,17 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             kv_input: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply Perceiver block processing.
+        """Forward pass through the Perceiver block.
 
-        Args:
-            query_input: Query tensor of shape (batch_size, query_seq_len, dim).
-            kv_input: Key-Value tensor of shape (batch_size, kv_seq_len, dim).
-                If None, uses query_input for both (self-attention mode).
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor with same shape as query_input.
+        :param query_input: Query tensor ``(B, M, dim)``.
+        :type query_input: keras.KerasTensor
+        :param kv_input: Key/value tensor ``(B, N, dim)``. If ``None``,
+            uses ``query_input`` (self-attention mode).
+        :type kv_input: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Output tensor ``(B, M, dim)``.
+        :rtype: keras.KerasTensor
         """
         if kv_input is None:
             kv_input = query_input
@@ -351,14 +339,24 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape (same as query input shape).
+
+        :param input_shape: Single shape or list of shapes.
+        :type input_shape: Union[Tuple, List[Tuple]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if isinstance(input_shape, list):
             return input_shape[0]  # Same as query input shape
         else:
             return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration dictionary for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,

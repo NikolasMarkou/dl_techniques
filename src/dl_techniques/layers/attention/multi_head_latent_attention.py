@@ -2,11 +2,21 @@
 Multi-Head Latent Attention (MLA) Layer.
 
 This module provides a Keras 3 implementation of the Multi-Head Latent Attention
-mechanism as proposed in DeepSeek-V2 architecture.
+mechanism as proposed in the DeepSeek-V2 architecture.
 
 MLA significantly reduces Key-Value (KV) cache memory usage during inference
 through low-rank compression, while maintaining performance comparable to
-standard Multi-Head Attention (MHA).
+standard Multi-Head Attention (MHA). The core idea is to compress KV
+representations into a low-dimensional latent space (``kv_latent_dim``) before
+expanding them back for attention computation. Combined with a decoupled
+Rotary Position Embedding (RoPE) strategy that separates content and
+positional components, MLA achieves up to 93% KV cache reduction.
+
+The attention score is computed as:
+``scores = (Q_nope @ K_nope^T + Q_pe @ K_pe^T) * scale``
+where ``Q_nope/K_nope`` carry content information and ``Q_pe/K_pe`` carry
+positional information via RoPE. ``K_pe`` is shared across all heads for
+additional memory savings.
 
 References:
     - DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model
@@ -33,167 +43,118 @@ class MultiHeadLatentAttention(keras.layers.Layer):
     """
     Multi-Head Latent Attention (MLA) as proposed in DeepSeek-V2.
 
-    MLA significantly reduces Key-Value (KV) cache memory usage during inference
-    through low-rank compression, while maintaining performance comparable to
-    standard Multi-Head Attention (MHA).
+    MLA reduces KV cache memory from ``O(batch * seq * num_heads * head_dim)`` to
+    ``O(batch * seq * kv_latent_dim)`` through low-rank compression of key-value
+    representations, achieving up to 93% smaller KV cache while maintaining
+    performance comparable to standard Multi-Head Attention.
 
-    Architecture Overview::
+    The layer uses a decoupled RoPE strategy that separates each query/key head into
+    content (``nope``) and positional (``pe``) components. Content components carry
+    semantic information through the latent bottleneck, while positional components
+    bypass the bottleneck via a separate projection with RoPE applied. The positional
+    key (``K_pe``) is shared across all heads for additional memory savings.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────────────────┐
         │                   MULTI-HEAD LATENT ATTENTION (MLA)                 │
         │                                                                     │
-        │  Standard MHA KV Cache: O(batch × seq × num_heads × head_dim)       │
-        │  MLA KV Cache:          O(batch × seq × kv_latent_dim)              │
-        │  Memory Reduction:      Up to 93% smaller KV cache!                 │
+        │                          Input (B, S, D)                            │
+        │                                │                                    │
+        │              ┌─────────────────┴─────────────────────┐              │
+        │              │                                       │              │
+        │              ▼                                       ▼              │
+        │      ┌───────────────┐                       ┌───────────────┐     │
+        │      │  Query Path   │                       │   KV Path     │     │
+        │      └───────┬───────┘                       └───────┬───────┘     │
+        │              │                                       │              │
+        │              ▼                                       ▼              │
+        │      ┌───────────────┐                       ┌───────────────┐     │
+        │      │ Down-Project  │ (optional)             │ Down-Project  │     │
+        │      │   D ──► c_q   │                       │   D ──► c_kv  │     │
+        │      └───────┬───────┘                       └───────┬───────┘     │
+        │              │                                       │              │
+        │              ▼                                       ▼              │
+        │      ┌───────────────┐                       ┌───────────────┐     │
+        │      │   RMS Norm    │                       │   RMS Norm    │     │
+        │      └───────┬───────┘                       └───────┬───────┘     │
+        │              │                                       │              │
+        │              ▼                                       ▼              │
+        │      ┌───────────────┐                       ┌───────────────┐     │
+        │      │  Up-Project   │                       │  Up-Project   │     │
+        │      │ c_q ──► Q     │                       │c_kv ──► K,V   │     │
+        │      └───────┬───────┘                       └───────┬───────┘     │
+        │              │                                       │              │
+        │              ▼                                 ┌─────┴─────┐        │
+        │      ┌───────────────┐                         │           │        │
+        │      │ Split Q into  │                         ▼           ▼        │
+        │      │ Q_nope, Q_pe  │                    K_nope, V    K_pe via     │
+        │      └───────┬───────┘                         │     separate proj  │
+        │              │                                 │        + RoPE      │
+        │              ▼                                 ▼           │        │
+        │      ┌──────────────────────────────────────────────────────┐       │
+        │      │              ATTENTION COMPUTATION                    │       │
+        │      │                                                      │       │
+        │      │  scores = (Q_nope @ K_nope^T) + (Q_pe @ K_pe^T)     │       │
+        │      │  scores = scores * scale                             │       │
+        │      │  weights = softmax(scores + mask)                    │       │
+        │      │  output = weights @ V                                │       │
+        │      └──────────────────────────┬───────────────────────────┘       │
+        │                                 │                                   │
+        │                                 ▼                                   │
+        │                         ┌───────────────┐                           │
+        │                         │ Output Proj   │                           │
+        │                         │  H*v ──► D    │                           │
+        │                         └───────┬───────┘                           │
+        │                                 │                                   │
+        │                                 ▼                                   │
+        │                          Output (B, S, D)                           │
         └─────────────────────────────────────────────────────────────────────┘
 
-    High-Level Data Flow::
+    :param dim: Model dimension (hidden size). Must be positive.
+    :type dim: int
+    :param num_heads: Number of attention heads. Must be positive.
+    :type num_heads: int
+    :param kv_latent_dim: Dimension of the compressed KV latent vector. Must be positive.
+    :type kv_latent_dim: int
+    :param qk_nope_head_dim: Dimension per head for non-positional content
+        (query/key). Defaults to 128.
+    :type qk_nope_head_dim: int
+    :param qk_rope_head_dim: Dimension per head for rotary positional embeddings.
+        Defaults to 64.
+    :type qk_rope_head_dim: int
+    :param v_head_dim: Dimension per head for values. Defaults to 128.
+    :type v_head_dim: int
+    :param q_latent_dim: Dimension of the compressed Query latent vector.
+        If None, Query compression is disabled (DeepSeek-V2 Lite style).
+        Defaults to None.
+    :type q_latent_dim: Optional[int]
+    :param dropout_rate: Dropout rate applied to attention weights.
+        Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in dense projections. Defaults to False.
+    :type use_bias: bool
+    :param max_seq_len: Maximum sequence length for RoPE. Defaults to 4096.
+    :type max_seq_len: int
+    :param rope_theta: Base frequency for RoPE. Defaults to 10000.0.
+    :type rope_theta: float
+    :param rope_percentage: Percentage of dimensions to apply RoPE. Defaults to 1.0.
+    :type rope_percentage: float
+    :param normalization_type: Type of normalization for latent vectors.
+        Defaults to 'rms_norm'.
+    :type normalization_type: str
+    :param kernel_initializer: Initializer for dense layer kernels.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernels.
+        Defaults to None.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments passed to the parent class.
 
-                                    Input (B, S, D)
-                                          │
-                    ┌─────────────────────┴─────────────────────┐
-                    │                                           │
-                    ▼                                           ▼
-            ┌───────────────┐                           ┌───────────────┐
-            │  Query Path   │                           │   KV Path     │
-            └───────┬───────┘                           └───────┬───────┘
-                    │                                           │
-                    ▼                                           ▼
-            ┌───────────────┐                           ┌───────────────┐
-            │ Down-Project  │ (optional)                │ Down-Project  │
-            │   D → c_q     │                           │   D → c_kv    │
-            └───────┬───────┘                           └───────┬───────┘
-                    │                                           │
-                    ▼                                           ▼
-            ┌───────────────┐                           ┌───────────────┐
-            │   RMS Norm    │                           │   RMS Norm    │
-            └───────┬───────┘                           └───────┬───────┘
-                    │                                           │
-                    ▼                                           ▼
-            ┌───────────────┐                           ┌───────────────┐
-            │  Up-Project   │                           │  Up-Project   │
-            │ c_q → Q_nope  │                           │c_kv → K_nope  │
-            │      + Q_pe   │                           │       + V     │
-            └───────┬───────┘                           └───────┬───────┘
-                    │                                           │
-                    │                               ┌───────────┴───────────┐
-                    │                               │                       │
-                    ▼                               ▼                       ▼
-            ┌───────────────┐               ┌───────────────┐       ┌───────────┐
-            │  Split Q into │               │  Split into   │       │  K_pe via │
-            │ Q_nope, Q_pe  │               │ K_nope, V     │       │ separate  │
-            └───────┬───────┘               └───────┬───────┘       │ projection│
-                    │                               │               └─────┬─────┘
-                    │                               │                     │
-                    ▼                               ▼                     ▼
-            ┌───────────────────────────────────────────────────────────────┐
-            │                      ATTENTION COMPUTATION                    │
-            │                                                               │
-            │   scores = (Q_nope @ K_nope.T) + (Q_pe @ K_pe.T)              │
-            │   scores = scores * scale                                     │
-            │   weights = softmax(scores + mask)                            │
-            │   output = weights @ V                                        │
-            └───────────────────────────────────────────────────────────────┘
-                                          │
-                                          ▼
-                                  ┌───────────────┐
-                                  │ Output Proj   │
-                                  │  H*v → D      │
-                                  └───────┬───────┘
-                                          │
-                                          ▼
-                                   Output (B, S, D)
-
-    Decoupled RoPE Strategy::
-
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │                    DECOUPLED ROPE MECHANISM                         │
-        │                                                                     │
-        │  Traditional RoPE: Apply rotation to full Q and K                   │
-        │  Decoupled RoPE:   Separate content (nope) and position (pe)        │
-        │                                                                     │
-        │  Query Head Structure:                                              │
-        │  ┌──────────────────────────────────────────────┐                   │
-        │  │    Q_nope (content)     │    Q_pe (position) │                   │
-        │  │   [128 dims/head]       │   [64 dims/head]   │                   │
-        │  └──────────────────────────────────────────────┘                   │
-        │           │                          │                              │
-        │           │                          ▼                              │
-        │           │                    ┌──────────┐                         │
-        │           │                    │  RoPE    │                         │
-        │           │                    │ rotation │                         │
-        │           │                    └──────────┘                         │
-        │           │                          │                              │
-        │           ▼                          ▼                              │
-        │     Content Score            Position Score                         │
-        │    (Q_nope @ K_nope.T)      (Q_pe @ K_pe.T)                         │
-        │           │                          │                              │
-        │           └──────────┬───────────────┘                              │
-        │                      ▼                                              │
-        │              Combined Score                                         │
-        │                                                                     │
-        │  Key Insight: K_pe is SHARED across heads (1 head broadcasted)      │
-        │  This further reduces memory while preserving positional info.      │
-        └─────────────────────────────────────────────────────────────────────┘
-
-    KV Compression Detail::
-
-        ┌─────────────────────────────────────────────────────────────────────┐
-        │                     KV LATENT COMPRESSION                           │
-        │                                                                     │
-        │  Standard MHA:                                                      │
-        │  ┌─────────┐                                                        │
-        │  │  Input  │ ──► W_k ──► K (H heads × head_dim)                     │
-        │  │ (D=2048)│ ──► W_v ──► V (H heads × head_dim)                     │
-        │  └─────────┘                                                        │
-        │  Cache Size: 2 × H × head_dim = 2 × 16 × 128 = 4096 per token       │
-        │                                                                     │
-        │  MLA:                                                               │
-        │  ┌─────────┐     ┌─────────┐     ┌─────────┐                        │
-        │  │  Input  │ ──► │  Down   │ ──► │ Latent  │ (c_kv = 512)           │
-        │  │ (D=2048)│     │  Proj   │     │  + Norm │                        │
-        │  └─────────┘     └─────────┘     └────┬────┘                        │
-        │                                       │                             │
-        │                         ┌─────────────┼─────────────┐               │
-        │                         ▼             │             ▼               │
-        │                    ┌─────────┐        │        ┌─────────┐          │
-        │                    │ Up Proj │        │        │ K_pe    │          │
-        │                    │ K_nope  │        │        │ Proj    │          │
-        │                    │   + V   │        │        │ (shared)│          │
-        │                    └─────────┘        │        └─────────┘          │
-        │                                       │                             │
-        │  Cache Size: c_kv + rope_dim = 512 + 64 = 576 per token             │
-        │  Reduction: (4096 - 576) / 4096 = 86% smaller!                      │
-        └─────────────────────────────────────────────────────────────────────┘
-
-    Attributes:
-        dim: Model dimension (hidden size).
-        num_heads: Number of attention heads.
-        kv_latent_dim: Dimension of the compressed KV latent vector.
-        q_latent_dim: Dimension of the compressed Query latent vector.
-        qk_nope_head_dim: Dimension per head for non-positional content.
-        qk_rope_head_dim: Dimension per head for rotary positional embeddings.
-        v_head_dim: Dimension per head for values.
-        dropout_rate: Dropout rate applied to attention weights.
-        use_bias: Whether to use bias in projections.
-        max_seq_len: Maximum sequence length for RoPE.
-        rope_theta: Base frequency for RoPE.
-        rope_percentage: Percentage of head dimensions to apply RoPE.
-
-    Example:
-        >>> mla = MultiHeadLatentAttention(
-        ...     dim=2048,
-        ...     num_heads=16,
-        ...     kv_latent_dim=512,
-        ...     q_latent_dim=1536,
-        ...     qk_nope_head_dim=128,
-        ...     qk_rope_head_dim=64,
-        ...     v_head_dim=128,
-        ... )
-        >>> x = keras.random.normal((2, 128, 2048))
-        >>> output = mla(x)
-        >>> output.shape
-        TensorShape([2, 128, 2048])
+    :raises ValueError: If dim, num_heads, or kv_latent_dim are not positive.
+    :raises ValueError: If dropout_rate is not in [0, 1].
     """
 
     def __init__(
@@ -215,57 +176,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
-        """
-        Initialize the Multi-Head Latent Attention layer.
-
-        Parameter Relationships::
-
-            ┌─────────────────────────────────────────────────────────────────┐
-            │                    DIMENSION RELATIONSHIPS                      │
-            │                                                                 │
-            │  dim (D)                    Model hidden dimension              │
-            │   │                                                             │
-            │   ├──► q_latent_dim         Query compression (optional)        │
-            │   │     │                                                       │
-            │   │     └──► num_heads × (qk_nope_head_dim + qk_rope_head_dim)  │
-            │   │                                                             │
-            │   └──► kv_latent_dim        KV compression                      │
-            │         │                                                       │
-            │         └──► num_heads × (qk_nope_head_dim + v_head_dim)        │
-            │                                                                 │
-            │  Output: num_heads × v_head_dim ──► dim                         │
-            └─────────────────────────────────────────────────────────────────┘
-
-        Args:
-            dim: Model dimension (hidden size).
-            num_heads: Number of attention heads.
-            kv_latent_dim: Dimension of the compressed KV latent vector.
-            qk_nope_head_dim: Dimension per head for non-positional content
-                (query/key). Defaults to 128.
-            qk_rope_head_dim: Dimension per head for rotary positional embeddings.
-                Defaults to 64.
-            v_head_dim: Dimension per head for values. Defaults to 128.
-            q_latent_dim: Dimension of the compressed Query latent vector.
-                If None, Query compression is disabled (DeepSeek-V2 Lite style).
-                Defaults to None.
-            dropout_rate: Dropout rate applied to attention weights.
-                Defaults to 0.0.
-            use_bias: Whether to use bias in dense projections. Defaults to False.
-            max_seq_len: Maximum sequence length for RoPE. Defaults to 4096.
-            rope_theta: Base frequency for RoPE. Defaults to 10000.0.
-            rope_percentage: Percentage of dimensions to apply RoPE. Defaults to 1.0.
-            normalization_type: Type of normalization for latent vectors.
-                Defaults to 'rms_norm'.
-            kernel_initializer: Initializer for dense layer kernels.
-                Defaults to 'glorot_uniform'.
-            kernel_regularizer: Optional regularizer for kernels.
-                Defaults to None.
-            **kwargs: Additional keyword arguments passed to the parent class.
-
-        Raises:
-            ValueError: If dim, num_heads, or kv_latent_dim are not positive.
-            ValueError: If dropout_rate is not in [0, 1].
-        """
+        """Initialize the Multi-Head Latent Attention layer."""
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -306,14 +217,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         # All sub-layers instantiated here, built in build()
         # ─────────────────────────────────────────────────────────────────────
 
-        # 1. Query Path: Optional compression via down-project → norm → up-project
-        #
-        #    With compression (q_latent_dim is set):
-        #    Input ──► q_down_proj ──► q_norm ──► q_up_proj ──► Q
-        #
-        #    Without compression (q_latent_dim is None):
-        #    Input ──► query_proj ──► Q
-        #
+        # 1. Query Path: Optional compression via down-project -> norm -> up-project
         if self.q_latent_dim is not None:
             self.q_down_proj = layers.Dense(
                 q_latent_dim,
@@ -344,11 +248,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             )
 
         # 2. KV Compression Path
-        #
-        #    Input ──► kv_down_proj ──► kv_norm ──► kv_up_proj ──► [K_nope, V]
-        #          │
-        #          └──► k_rope_proj ──► K_pe (shared across heads)
-        #
         self.kv_down_proj = layers.Dense(
             kv_latent_dim,
             use_bias=use_bias,
@@ -391,9 +290,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         )
 
         # 6. Output Projection: Combines all heads back to model dimension
-        #
-        #    Attention Output (H × v_head_dim) ──► output_proj ──► (D)
-        #
         self.output_proj = layers.Dense(
             dim,
             use_bias=use_bias,
@@ -412,44 +308,14 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         """
         Build the layer and all sub-layers.
 
-        This method explicitly builds all sub-layers for robust serialization
+        Explicitly builds all sub-layers for robust serialization
         as required by Keras 3 patterns.
 
-        Build Order::
-
-            ┌─────────────────────────────────────────────────────────────────┐
-            │                      BUILD SEQUENCE                             │
-            │                                                                 │
-            │  1. Query Path:                                                 │
-            │     q_down_proj.build(input_shape)                              │
-            │     q_norm.build(latent_shape)                                  │
-            │     q_up_proj.build(latent_shape)                               │
-            │     OR                                                          │
-            │     query_proj.build(input_shape)                               │
-            │                                                                 │
-            │  2. KV Path:                                                    │
-            │     kv_down_proj.build(kv_shape)                                │
-            │     kv_norm.build(kv_latent_shape)                              │
-            │     kv_up_proj.build(kv_latent_shape)                           │
-            │     k_rope_proj.build(kv_shape)                                 │
-            │                                                                 │
-            │  3. RoPE:                                                       │
-            │     rope.build(rope_input_shape)                                │
-            │                                                                 │
-            │  4. Output:                                                     │
-            │     output_proj.build(concat_shape)                             │
-            │                                                                 │
-            │  5. Dropout (if present):                                       │
-            │     dropout_layer.build(attn_weights_shape)                     │
-            └─────────────────────────────────────────────────────────────────┘
-
-        Args:
-            input_shape: Shape of the input tensor. Can be a single tuple for
-                self-attention or a list of tuples for cross-attention.
+        :param input_shape: Shape of the input tensor. Can be a single tuple for
+            self-attention or a list of tuples for cross-attention.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Handle input_shape being a list (cross-attention) or single tuple
-        # Check if input_shape is a list of shapes (cross-attn) or a single shape
-        # In Keras serialization, a single shape can be a list [None, 16, 256]
         is_list_of_shapes = isinstance(input_shape, list) and len(input_shape) > 0 and isinstance(input_shape[0], (list, tuple))
 
         if is_list_of_shapes:
@@ -483,7 +349,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.k_rope_proj.build(kv_shape)
 
         # Build RoPE embedding
-        # RoPE expects shape (batch, seq_len, num_heads, head_dim)
         rope_input_shape = (
             q_shape[0], q_shape[1], self.num_heads, self.qk_rope_head_dim
         )
@@ -497,7 +362,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # Build dropout if present
         if self.dropout_layer is not None:
-            # Dropout expects attention weights shape (B, H, S_q, S_kv)
             attn_shape = (q_shape[0], self.num_heads, q_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
 
@@ -513,52 +377,25 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         """
         Forward pass through the Multi-Head Latent Attention layer.
 
-        Computation Flow::
+        Computes attention via low-rank KV compression with decoupled RoPE:
+        content scores ``(Q_nope @ K_nope^T)`` are combined with positional
+        scores ``(Q_pe @ K_pe^T)`` before softmax normalization.
 
-            ┌─────────────────────────────────────────────────────────────────┐
-            │                      FORWARD PASS STEPS                         │
-            │                                                                 │
-            │  Step 1: QUERY GENERATION                                       │
-            │  ─────────────────────────────────────────                      │
-            │  query_input ──► [compress] ──► Q ──► split ──► Q_nope, Q_pe    │
-            │                                                                 │
-            │  Step 2: KEY-VALUE GENERATION                                   │
-            │  ─────────────────────────────────────────                      │
-            │  kv_input ──► kv_down ──► c_kv ──► kv_up ──► K_nope, V          │
-            │          └──► k_rope_proj ──────────────────► K_pe (shared)     │
-            │                                                                 │
-            │  Step 3: ROPE APPLICATION                                       │
-            │  ─────────────────────────────────────────                      │
-            │  Q_pe ──► RoPE ──► Q_pe_rotated                                 │
-            │  K_pe ──► RoPE ──► K_pe_rotated                                 │
-            │                                                                 │
-            │  Step 4: ATTENTION SCORES                                       │
-            │  ─────────────────────────────────────────                      │
-            │  score = (Q_nope @ K_nope.T + Q_pe @ K_pe.T) × scale            │
-            │                                                                 │
-            │  Step 5: MASKING & SOFTMAX                                      │
-            │  ─────────────────────────────────────────                      │
-            │  score ──► [+ mask] ──► softmax ──► [dropout] ──► weights       │
-            │                                                                 │
-            │  Step 6: OUTPUT                                                 │
-            │  ─────────────────────────────────────────                      │
-            │  weights @ V ──► reshape ──► output_proj ──► output             │
-            └─────────────────────────────────────────────────────────────────┘
-
-        Args:
-            query_input: Query tensor of shape (batch, seq_len_q, dim).
-            kv_input: Key-Value tensor of shape (batch, seq_len_kv, dim).
-                If None, uses query_input for self-attention. Defaults to None.
-            attention_mask: Optional attention mask. Supports shapes:
-                - (batch, seq_len_kv): Padding mask
-                - (batch, seq_len_q, seq_len_kv): Full attention mask
-                - (batch, 1, seq_len_q, seq_len_kv): Broadcasted mask
-                Values of 1 indicate positions to attend to, 0 indicates masked.
-                Defaults to None.
-            training: Whether the layer is in training mode. Defaults to None.
-
-        Returns:
-            Output tensor of shape (batch, seq_len_q, dim).
+        :param query_input: Query tensor of shape ``(batch, seq_len_q, dim)``.
+        :type query_input: keras.KerasTensor
+        :param kv_input: Key-Value tensor of shape ``(batch, seq_len_kv, dim)``.
+            If None, uses query_input for self-attention. Defaults to None.
+        :type kv_input: Optional[keras.KerasTensor]
+        :param attention_mask: Optional attention mask. Supports shapes:
+            ``(batch, seq_len_kv)`` for padding mask,
+            ``(batch, seq_len_q, seq_len_kv)`` for full attention mask,
+            ``(batch, 1, seq_len_q, seq_len_kv)`` for broadcasted mask.
+            Values of 1 indicate positions to attend to, 0 for masked.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Whether the layer is in training mode. Defaults to None.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch, seq_len_q, dim)``.
+        :rtype: keras.KerasTensor
         """
         # Default to self-attention if kv_input not provided
         if kv_input is None:
@@ -571,11 +408,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 1: QUERY GENERATION
-        #
-        #   With compression:     Input → Down → Norm → Up → Q
-        #   Without compression:  Input → Proj → Q
-        #
-        #   Q shape: (B, S_q, H, nope_dim + rope_dim)
         # ═══════════════════════════════════════════════════════════════════
         if self.q_latent_dim is not None:
             # Compressed Query Path (DeepSeek-V2 Standard)
@@ -586,7 +418,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             # Standard Query Path (DeepSeek-V2 Lite)
             q = self.query_proj(query_input)
 
-        # Reshape Q → (B, S_q, H, nope_dim + rope_dim)
+        # Reshape Q -> (B, S_q, H, nope_dim + rope_dim)
         q = ops.reshape(
             q,
             (batch_size, seq_len_q, self.num_heads,
@@ -594,19 +426,11 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         )
 
         # Split Q into Content (nope) and RoPE (pe) parts
-        # Q_nope: (B, S_q, H, nope_dim) - content/semantic information
-        # Q_pe:   (B, S_q, H, rope_dim) - positional information
         q_nope = q[..., :self.qk_nope_head_dim]
         q_pe = q[..., self.qk_nope_head_dim:]
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 2: KEY-VALUE GENERATION (MLA Core)
-        #
-        #   KV Latent Path:
-        #   Input → kv_down → c_kv → kv_norm → kv_up → [K_nope, V]
-        #
-        #   Decoupled RoPE Key (separate path, shared across heads):
-        #   Input → k_rope_proj → K_pe
         # ═══════════════════════════════════════════════════════════════════
 
         # a. Latent Compression for K_nope and V
@@ -622,36 +446,23 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         )
 
         # Split into K_nope and V
-        # K_nope: (B, S_kv, H, nope_dim)
-        # V:      (B, S_kv, H, v_dim)
         k_nope = kv_up[..., :self.qk_nope_head_dim]
         v = kv_up[..., self.qk_nope_head_dim:]
 
         # c. Decoupled RoPE Key (Shared)
         # K_pe is generated from original input, NOT latent vector
-        # This is key to MLA's efficiency - K_pe is shared across heads
         k_pe = self.k_rope_proj(kv_input)  # (B, S_kv, rope_dim)
         # Expand dims for heads to broadcast: (B, S_kv, 1, rope_dim)
         k_pe = ops.expand_dims(k_pe, axis=2)
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 3: ROPE APPLICATION
-        #
-        #   Apply rotary position embeddings to positional components only
-        #   Q_pe and K_pe get rotated, Q_nope and K_nope remain unchanged
         # ═══════════════════════════════════════════════════════════════════
         q_pe = self.rope(q_pe)
         k_pe = self.rope(k_pe)
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 4: ATTENTION SCORE CALCULATION
-        #
-        #   Total Score = Content Score + Positional Score
-        #
-        #   Content:   Q_nope @ K_nope.T  (semantic similarity)
-        #   Position:  Q_pe @ K_pe.T      (relative position)
-        #
-        #   Note: K_pe broadcasts along Head dimension (shape B,1,S,D)
         # ═══════════════════════════════════════════════════════════════════
 
         # Transpose for matmul: (B, H, S, D)
@@ -672,8 +483,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 5: MASKING & SOFTMAX
-        #
-        #   Apply attention mask (if provided) and compute attention weights
         # ═══════════════════════════════════════════════════════════════════
         if attention_mask is not None:
             scores = self._apply_attention_mask(scores, attention_mask)
@@ -685,22 +494,16 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         # ═══════════════════════════════════════════════════════════════════
         # STEP 6: OUTPUT COMPUTATION
-        #
-        #   Weighted sum of values, reshape, and project back to model dim
-        #
-        #   weights @ V → (B, H, S_q, v_dim)
-        #   reshape   → (B, S_q, H * v_dim)
-        #   project   → (B, S_q, dim)
         # ═══════════════════════════════════════════════════════════════════
 
-        # V shape: (B, S_kv, H, v_dim) → (B, H, S_kv, v_dim)
+        # V shape: (B, S_kv, H, v_dim) -> (B, H, S_kv, v_dim)
         v = ops.transpose(v, (0, 2, 1, 3))
 
-        # (B, H, S_q, S_kv) @ (B, H, S_kv, v_dim) → (B, H, S_q, v_dim)
+        # (B, H, S_q, S_kv) @ (B, H, S_kv, v_dim) -> (B, H, S_q, v_dim)
         out = ops.matmul(attn_weights, v)
 
         # Reshape for output projection
-        # (B, H, S_q, v_dim) → (B, S_q, H, v_dim) → (B, S_q, H*v_dim)
+        # (B, H, S_q, v_dim) -> (B, S_q, H, v_dim) -> (B, S_q, H*v_dim)
         out = ops.transpose(out, (0, 2, 1, 3))
         out = ops.reshape(
             out, (batch_size, seq_len_q, self.num_heads * self.v_head_dim)
@@ -716,41 +519,24 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         """
         Apply attention mask to scores.
 
-        Mask Broadcasting::
-
-            ┌─────────────────────────────────────────────────────────────────┐
-            │                    MASK SHAPE HANDLING                          │
-            │                                                                 │
-            │  Input Mask Shape          →  Broadcast To                      │
-            │  ─────────────────────────────────────────                      │
-            │  (B, S_kv)                 →  (B, 1, 1, S_kv)   Padding mask    │
-            │  (B, S_q, S_kv)            →  (B, 1, S_q, S_kv) Full mask       │
-            │  (B, 1, S_q, S_kv)         →  (B, 1, S_q, S_kv) Already correct │
-            │  (B, H, S_q, S_kv)         →  No change needed                  │
-            │                                                                 │
-            │  Mask Values:                                                   │
-            │  1 = attend to this position                                    │
-            │  0 = mask out (add -1e9 to scores)                              │
-            └─────────────────────────────────────────────────────────────────┘
-
-        Args:
-            scores: Attention scores of shape (B, H, S_q, S_kv).
-            attention_mask: Mask tensor with values 1 for positions to attend to.
-
-        Returns:
-            Masked scores tensor.
+        :param scores: Attention scores of shape ``(B, H, S_q, S_kv)``.
+        :type scores: keras.KerasTensor
+        :param attention_mask: Mask tensor with values 1 for positions to attend to.
+        :type attention_mask: keras.KerasTensor
+        :return: Masked scores tensor.
+        :rtype: keras.KerasTensor
         """
         # Get mask dimensions
         mask_ndim = len(ops.shape(attention_mask))
 
         # Expand mask for broadcasting if needed
         if mask_ndim == 2:
-            # (B, S_kv) → (B, 1, 1, S_kv)
+            # (B, S_kv) -> (B, 1, 1, S_kv)
             attention_mask = ops.expand_dims(
                 ops.expand_dims(attention_mask, axis=1), axis=1
             )
         elif mask_ndim == 3:
-            # (B, S_q, S_kv) → (B, 1, S_q, S_kv)
+            # (B, S_q, S_kv) -> (B, 1, S_q, S_kv)
             attention_mask = ops.expand_dims(attention_mask, axis=1)
 
         # Cast and apply additive mask
@@ -763,14 +549,12 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute output shape of the layer.
 
-        Args:
-            input_shape: Input shape tuple or list of tuples.
-
-        Returns:
-            Output shape tuple (batch, seq_len, dim).
+        :param input_shape: Input shape tuple or list of tuples.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple ``(batch, seq_len, dim)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         is_list_of_shapes = (
                 isinstance(input_shape, list) and
@@ -787,11 +571,10 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         return (q_shape[0], q_shape[1], self.dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Configuration dictionary containing all constructor arguments.
+        :return: Configuration dictionary containing all constructor arguments.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

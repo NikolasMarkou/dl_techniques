@@ -1,5 +1,5 @@
 """
-Capsule-based dynamic routing mechanism.
+Capsule-based dynamic routing mechanism for attention.
 
 This layer replaces the standard softmax normalization in multi-head
 attention with a structured, iterative agreement process inspired by Capsule
@@ -14,50 +14,21 @@ attention scores, which serve as initial "votes." These votes are then refined
 through two concurrent routing mechanisms:
 
 1.  **Vertical Routing (Head-wise):** For a single query token, the attention
-    distributions from all `H` heads are treated as low-level capsules.
-    Dynamic routing is then applied across these capsules. This process allows
-    the different "perspectives" captured by each head (e.g., positional,
-    syntactic, semantic) to influence one another and form a consensus. It
-    models the relationships *between feature subspaces* to produce a more
-    sophisticated aggregation than a simple concatenation of head outputs.
+    distributions from all ``H`` heads are treated as low-level capsules.
+    Dynamic routing is then applied across these capsules, allowing different
+    "perspectives" captured by each head to influence one another and form
+    a consensus.
 
 2.  **Horizontal Routing (Token-wise):** For a given query token, the
-    attention scores it receives from all source tokens are treated as input
-    capsules. The routing mechanism allows these source-token "perspectives"
-    to agree on a final attention distribution for the query token. This
-    models relationships *between source positions* when determining the
-    final attention weights for a specific target.
+    attention scores from all source tokens are treated as input capsules.
+    The routing mechanism allows these source-token "perspectives" to agree
+    on a final attention distribution.
 
-The foundational mathematical principle is the **Dynamic Routing** algorithm.
-This is an iterative process that refines the connection strengths (coupling
-coefficients) between lower-level capsules (initial scores) and higher-level
-capsules (refined scores). The algorithm proceeds as follows for a number of
-iterations:
-
-1.  **Coupling Coefficients (`c`):** The process starts with initial log-priors
-    (`b`), which are iteratively updated. In each step, these are converted
-    into coupling coefficients `c = softmax(b)`. These coefficients represent
-    the probability that a lower-level capsule's information should be routed
-    to a higher-level capsule.
-
-2.  **Weighted Sum (`s`):** The input to a higher-level capsule is the weighted
-    sum of all "votes" from the lower layer, using `c` as the weights. This
-    creates a candidate output vector representing a consensus.
-
-3.  **Squashing (`v`):** This candidate vector `s` is passed through a non-
-    linear "squashing" function: `v = squash(s)`. This function shrinks the
-    magnitude of small vectors towards zero while normalizing large vectors to
-    a length just below one. It acts as a filter, allowing only strong
-    consensus signals to pass through with significant magnitude.
-
-4.  **Agreement Update:** The log-priors `b` are updated by adding the
-    "agreement," which is the dot product between the output capsule `v` and
-    the input votes. This reinforces connections where the input and the
-    emerging consensus are aligned.
-
-This iterative process allows the model to dynamically discover and strengthen
-connections that form a coherent agreement, leading to attention weights that
-are refined by higher-order interactions rather than simple pairwise scores.
+The **Dynamic Routing** algorithm iteratively refines coupling coefficients
+``c = softmax(b)`` between lower-level (initial scores) and higher-level
+(refined scores) capsules. Each iteration: (1) compute weighted sum ``s``,
+(2) squash via ``v = squash(s) = ||s||^2 / (1 + ||s||^2) * s / ||s||``,
+(3) update log-priors ``b`` by agreement (dot product of ``v`` and votes).
 
 References:
     - Sabour, Frosst, & Hinton, 2017. Dynamic Routing Between Capsules.
@@ -83,150 +54,110 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
     attention distributions. The implementation includes both vertical (head-wise) and
     horizontal (token-wise) capsule routing with optional positional constraints.
 
-    **Intent**: Enhance standard attention mechanisms by applying capsule network principles
-    to attention weight computation, enabling more sophisticated information aggregation
-    across attention heads and sequence positions through dynamic routing algorithms.
+    Standard attention computes ``A = softmax(QK^T / sqrt(d)) @ V``. This layer
+    enhances the attention logits via capsule routing before the final softmax:
+    ``A_enhanced = logits + CapsuleRoute_vertical(logits) + CapsuleRoute_horizontal(logits)``.
+    The squashing function from capsule networks is used:
+    ``squash(s) = ||s||^2 / (1 + ||s||^2) * s / ||s||``.
 
-    **Architecture**:
-    ```
-    Standard Self-Attention:
-    Input → Q,K,V → Attention(Q,K^T)V → Output
+    **Architecture Overview:**
 
-    Capsule Routing Self-Attention:
-    Input → Q,K,V → Attention(Q,K^T) → Capsule_Routing → Enhanced_Attention → V → Output
-                                           ↓
-                    ┌─────────────────────────────────────┐
-                    │ Vertical Routing (Head-wise)        │
-                    │ + Horizontal Routing (Token-wise)   │
-                    │ + Dynamic Routing Algorithm         │
-                    └─────────────────────────────────────┘
-    ```
+    .. code-block:: text
 
-    **Capsule Routing Process**:
-    1. **Vertical Routing**: Treats attention heads as capsules, applies dynamic routing
-       to aggregate information across different attention perspectives
-    2. **Horizontal Routing**: Treats sequence tokens as capsules, with optional positional
-       constraints to preserve sequential information
-    3. **Dynamic Routing**: Iterative algorithm that computes capsule coupling coefficients
-       through agreement between prediction vectors and output capsules
+        ┌─────────────────────────────────────────────────────────────┐
+        │              CapsuleRoutingSelfAttention                     │
+        │                                                             │
+        │  Input [B, seq, embed_dim]                                  │
+        │         │                                                   │
+        │         ├──────────────┬──────────────┐                     │
+        │         ▼              ▼              ▼                     │
+        │    ┌────────┐    ┌────────┐    ┌────────┐                  │
+        │    │ Q Proj │    │ K Proj │    │ V Proj │                  │
+        │    └───┬────┘    └───┬────┘    └───┬────┘                  │
+        │        │             │             │                       │
+        │        ▼             ▼             │                       │
+        │     scores = Q @ K^T / sqrt(d_k)   │                       │
+        │        │                           │                       │
+        │        ├───────────────────┐       │                       │
+        │        ▼                   ▼       │                       │
+        │  ┌──────────────┐  ┌──────────────┐│                       │
+        │  │  Vertical    │  │ Horizontal   ││                       │
+        │  │  Routing     │  │ Routing      ││                       │
+        │  │ (head-wise)  │  │ (token-wise) ││                       │
+        │  └──────┬───────┘  └──────┬───────┘│                       │
+        │         │                 │        │                       │
+        │         └────────┬────────┘        │                       │
+        │                  ▼                 │                       │
+        │        scores + routing_output     │                       │
+        │                  │                 │                       │
+        │                  ▼                 │                       │
+        │           [+ attention_mask]       │                       │
+        │                  │                 │                       │
+        │                  ▼                 │                       │
+        │           softmax ──► dropout      │                       │
+        │                  │                 │                       │
+        │                  ▼                 ▼                       │
+        │              weights @ V                                   │
+        │                  │                                         │
+        │                  ▼                                         │
+        │           Output Projection                                │
+        │                  │                                         │
+        │                  ▼                                         │
+        │        Output [B, seq, embed_dim]                          │
+        └─────────────────────────────────────────────────────────────┘
 
-    **Mathematical Formulation**:
-    - Standard Attention: A = softmax(QK^T/√d)V
-    - Capsule Routing: A_enhanced = CapsuleRoute(A_vertical, A_horizontal)
-    - Squashing Function: squash(s) = ||s||²/(1+||s||²) * s/||s||
-    - Dynamic Routing: c_ij = softmax(b_ij), where b_ij updated by agreement
+    :param num_heads: Integer, number of attention heads. Must be positive and should
+        divide embed_dim evenly for optimal performance.
+    :type num_heads: int
+    :param key_dim: Optional integer, size of each attention head for query and key.
+        If None, defaults to ``embed_dim // num_heads``. Must be positive.
+    :type key_dim: Optional[int]
+    :param value_dim: Optional integer, size of each attention head for value.
+        If None, defaults to key_dim. Must be positive.
+    :type value_dim: Optional[int]
+    :param dropout_rate: Float, dropout rate applied to attention weights. Must be
+        in range [0, 1]. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Boolean, whether to use bias in linear projections. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: String or Initializer instance for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: String or Initializer instance for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights. Defaults to None.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights. Defaults to None.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param activity_regularizer: Optional regularizer for layer output. Defaults to None.
+    :type activity_regularizer: Optional[regularizers.Regularizer]
+    :param routing_iterations: Integer, number of dynamic routing iterations. Must be
+        positive. Higher values allow more sophisticated routing but increase
+        computational cost. Defaults to 3.
+    :type routing_iterations: int
+    :param use_vertical_routing: Boolean, whether to apply vertical (head-wise) capsule
+        routing. Enables information aggregation across attention heads.
+        Defaults to True.
+    :type use_vertical_routing: bool
+    :param use_horizontal_routing: Boolean, whether to apply horizontal (token-wise)
+        capsule routing. Enables information aggregation across sequence positions.
+        Defaults to True.
+    :type use_horizontal_routing: bool
+    :param use_positional_routing: Boolean, whether to use positional routing constraints
+        for horizontal capsules. When True, tokens can only route information from
+        previous positions, preserving sequential order. Defaults to True.
+    :type use_positional_routing: bool
+    :param epsilon: Float, small constant for numerical stability in norm calculations.
+        Must be positive. Defaults to 1e-8.
+    :type epsilon: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    **Computational Complexity**:
-    - Base attention: O(N²d) where N is sequence length, d is dimension
-    - Vertical routing: +O(H²NR) where H is heads, R is routing iterations
-    - Horizontal routing: +O(N²HR) with positional constraints
-
-    Args:
-        num_heads: Integer, number of attention heads. Must be positive and should
-            divide embed_dim evenly for optimal performance.
-        key_dim: Optional integer, size of each attention head for query and key.
-            If None, defaults to embed_dim // num_heads. Must be positive.
-        value_dim: Optional integer, size of each attention head for value.
-            If None, defaults to key_dim. Must be positive.
-        dropout_rate: Float, dropout rate applied to attention weights. Must be
-            in range [0, 1]. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in linear projections. Defaults to True.
-        kernel_initializer: String or Initializer instance for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer instance for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights. Defaults to None.
-        bias_regularizer: Optional regularizer for bias weights. Defaults to None.
-        activity_regularizer: Optional regularizer for layer output. Defaults to None.
-        routing_iterations: Integer, number of dynamic routing iterations. Must be
-            positive. Higher values allow more sophisticated routing but increase
-            computational cost. Defaults to 3.
-        use_vertical_routing: Boolean, whether to apply vertical (head-wise) capsule
-            routing. Enables information aggregation across attention heads.
-            Defaults to True.
-        use_horizontal_routing: Boolean, whether to apply horizontal (token-wise)
-            capsule routing. Enables information aggregation across sequence positions.
-            Defaults to True.
-        use_positional_routing: Boolean, whether to use positional routing constraints
-            for horizontal capsules. When True, tokens can only route information from
-            previous positions, preserving sequential order. Defaults to True.
-        epsilon: Float, small constant for numerical stability in norm calculations.
-            Must be positive. Defaults to 1e-8.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, embed_dim)`
-
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, embed_dim)`
-
-    Call arguments:
-        inputs: Input tensor of shape (batch_size, seq_len, embed_dim).
-        attention_mask: Optional tensor for masking attention weights. Can be:
-            - 2D: (batch_size, seq_len) - padding mask
-            - 3D: (batch_size, seq_len, seq_len) - causal or custom mask
-        training: Boolean indicating whether the layer should behave in training
-            mode (applying dropout) or inference mode.
-
-    Returns:
-        Output tensor with same shape as input, containing contextualized
-        representations enhanced by capsule routing mechanisms.
-
-    Raises:
-        ValueError: If num_heads, key_dim, or value_dim is not positive.
-        ValueError: If dropout_rate is not in range [0, 1].
-        ValueError: If routing_iterations is not positive.
-        ValueError: If epsilon is not positive.
-        ValueError: If embed_dim is not divisible by num_heads (when key_dim is None).
-
-    Example:
-        ```python
-        import keras
-        # Basic usage with default parameters
-        attention = CapsuleRoutingSelfAttention(num_heads=8)
-
-        # Custom configuration
-        attention = CapsuleRoutingSelfAttention(
-            num_heads=12,
-            key_dim=64,
-            dropout_rate=0.1,
-            routing_iterations=5,
-            use_vertical_routing=True,
-            use_horizontal_routing=True,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a transformer encoder block
-        inputs = keras.Input(shape=(16, 128))
-        attended = attention(inputs)
-
-        # With attention mask
-        mask = keras.Input(shape=(16,), dtype='bool')
-        attended = attention(inputs, attention_mask=mask)
-
-        # Disable specific routing mechanisms
-        attention_vertical_only = CapsuleRoutingSelfAttention(
-            num_heads=8,
-            use_vertical_routing=True,
-            use_horizontal_routing=False
-        )
-        ```
-
-    Note:
-        The layer implements the capsule routing mechanism as described in the
-        Capsule-Transformer paper, where attention weights are organized into
-        vertical and horizontal capsules, and dynamic routing is applied to
-        aggregate information. The routing process uses the squashing function
-        from the original capsule network paper.
-
-        For optimal performance, consider:
-        - Using embed_dim divisible by num_heads
-        - Adjusting routing_iterations based on sequence length
-        - Using positional routing for autoregressive tasks
-
-    References:
-        - Capsule-Transformer for Neural Machine Translation (Duan et al., 2019)
-        - Dynamic Routing Between Capsules (Sabour et al., 2017)
+    :raises ValueError: If num_heads, key_dim, or value_dim is not positive.
+    :raises ValueError: If dropout_rate is not in range [0, 1].
+    :raises ValueError: If routing_iterations is not positive.
+    :raises ValueError: If epsilon is not positive.
+    :raises ValueError: If embed_dim is not divisible by num_heads (when key_dim is None).
     """
 
     def __init__(
@@ -301,11 +232,11 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         proper serialization compatibility by explicitly building each sub-layer
         in computational order.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor, expected as
+            ``(batch_size, seq_len, embed_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Raises:
-            ValueError: If input is not 3D or dimensions are incompatible.
+        :raises ValueError: If input is not 3D or dimensions are incompatible.
         """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input, got shape {input_shape}")
@@ -418,13 +349,17 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         """
         Forward pass of capsule routing self-attention.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, embed_dim).
-            attention_mask: Optional attention mask tensor.
-            training: Boolean indicating training mode for dropout.
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, embed_dim).
+        :param inputs: Input tensor of shape ``(batch_size, seq_len, embed_dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional attention mask tensor. Can be
+            ``(batch_size, seq_len)`` for padding mask or
+            ``(batch_size, seq_len, seq_len)`` for causal/custom mask.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Boolean indicating training mode for dropout.
+        :type training: Optional[bool]
+        :return: Output tensor of shape ``(batch_size, seq_len, embed_dim)`` with
+            contextualized representations enhanced by capsule routing.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
@@ -493,12 +428,13 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         """
         Apply attention mask to logits.
 
-        Args:
-            attention_logits: Attention logits of shape (batch, num_heads, seq_len, seq_len).
-            attention_mask: Attention mask tensor.
-
-        Returns:
-            Masked attention logits.
+        :param attention_logits: Attention logits of shape
+            ``(batch, num_heads, seq_len, seq_len)``.
+        :type attention_logits: keras.KerasTensor
+        :param attention_mask: Attention mask tensor.
+        :type attention_mask: keras.KerasTensor
+        :return: Masked attention logits.
+        :rtype: keras.KerasTensor
         """
         # Expand mask to match attention shape
         if len(attention_mask.shape) == 2:
@@ -516,13 +452,12 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         """
         Squashing function from capsule networks.
 
-        Applies the squashing non-linearity: v_j = ||s_j||²/(1+||s_j||²) * s_j/||s_j||
+        Applies the non-linearity: ``v = ||s||^2 / (1 + ||s||^2) * s / ||s||``.
 
-        Args:
-            vectors: Input vectors to squash.
-
-        Returns:
-            Squashed vectors with same shape as input.
+        :param vectors: Input vectors to squash.
+        :type vectors: keras.KerasTensor
+        :return: Squashed vectors with same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Calculate squared norm along last axis
         squared_norm = ops.sum(ops.square(vectors), axis=-1, keepdims=True)
@@ -544,14 +479,15 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         coupling coefficients based on agreement between prediction vectors
         and output capsules.
 
-        Args:
-            vote_vectors: Vote vectors of shape (..., num_input, num_output, capsule_dim).
-            num_output_capsules: Number of output capsules.
-
-        Returns:
-            Tuple of (output_capsules, routing_weights) where:
-            - output_capsules: Final capsule outputs after routing
-            - routing_weights: Final routing coefficients
+        :param vote_vectors: Vote vectors of shape
+            ``(..., num_input, num_output, capsule_dim)``.
+        :type vote_vectors: keras.KerasTensor
+        :param num_output_capsules: Number of output capsules.
+        :type num_output_capsules: int
+        :return: Tuple of ``(output_capsules, routing_weights)`` where
+            output_capsules are final capsule outputs after routing and
+            routing_weights are final routing coefficients.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Get input dimensions for routing logits initialization
         input_shape = ops.shape(vote_vectors)
@@ -598,11 +534,11 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         Treats attention heads as capsules and applies dynamic routing to aggregate
         information across different attention perspectives for each query position.
 
-        Args:
-            attention_weights: Attention weights of shape (batch, num_heads, seq_len, seq_len).
-
-        Returns:
-            Vertical routing output of same shape as input.
+        :param attention_weights: Attention weights of shape
+            ``(batch, num_heads, seq_len, seq_len)``.
+        :type attention_weights: keras.KerasTensor
+        :return: Vertical routing output of same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Reshape for routing: treat each query position independently
         # (batch, num_heads, seq_len_q, seq_len_k) -> (batch, seq_len_q, num_heads, seq_len_k)
@@ -648,11 +584,11 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         information across token positions, with optional causal masking to preserve
         sequential information flow.
 
-        Args:
-            attention_weights: Attention weights of shape (batch, num_heads, seq_len, seq_len).
-
-        Returns:
-            Horizontal routing output of same shape as input.
+        :param attention_weights: Attention weights of shape
+            ``(batch, num_heads, seq_len, seq_len)``.
+        :type attention_weights: keras.KerasTensor
+        :return: Horizontal routing output of same shape as input.
+        :rtype: keras.KerasTensor
         """
         seq_len = ops.shape(attention_weights)[2]
 
@@ -701,29 +637,20 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute output shape, identical to input shape.
 
-        Output shape is identical to input shape since attention preserves
-        sequence length and embedding dimensions.
-
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple, identical to input shape.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, identical to input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration dictionary for serialization.
+        """Return configuration for serialization.
 
-        This method must include ALL constructor parameters to ensure complete
-        serialization and deserialization compatibility.
-
-        Returns:
-            Dictionary containing all initialization parameters and their values.
+        :return: Dictionary containing all initialization parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

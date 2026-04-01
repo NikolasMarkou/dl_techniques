@@ -11,12 +11,105 @@ class SingleWindowAttention(keras.layers.Layer):
     """
     Unified multi-head self-attention for a single window.
 
-    This class merges multiple attention mechanisms into a single, configurable
-    layer. It can perform standard linear attention, attention with a non-linear
-    KAN-based Key projection, and use different normalization schemes like
-    standard softmax, adaptive softmax, or hierarchical routing.
+    Merges multiple attention mechanisms into a single configurable layer
+    supporting standard linear QKV projection or non-linear KAN-based Key
+    projection, with selectable normalization: standard softmax, adaptive
+    temperature softmax, or hierarchical routing probabilities. Internal
+    padding ensures every window reaches ``window_size^2`` tokens before
+    attention is computed, then strips padding from the output.
 
-    This layer is designed for internal use by a parent windowing layer.
+    The scaled dot-product attention is computed as
+    ``Attention(Q, K, V) = norm(Q K^T / scale + bias) V``, where ``norm``
+    is one of the configurable normalization functions and ``bias`` is an
+    optional learnable relative position bias table.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌─────────────────────────────────┐
+        │  Input (B, N, dim)              │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Pad to window_size^2 tokens    │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  QKV Projection                 │
+        │  (Linear or KAN-Key mode)       │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Reshape to (B, heads, N, d_h)  │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Scaled Dot-Product Attention   │
+        │  + Relative Position Bias       │
+        │  + Padding Mask                 │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Normalization (softmax /       │
+        │  adaptive / hierarchical)       │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Dropout ─► Matmul(attn, V)     │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Output Projection ─► Unpad     │
+        └────────────┬────────────────────┘
+                     ▼
+        ┌─────────────────────────────────┐
+        │  Output (B, N_actual, dim)      │
+        └─────────────────────────────────┘
+
+    :param dim: Total model dimension (split across heads).
+    :type dim: int
+    :param window_size: Height/width of the square attention window.
+    :type window_size: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param attention_mode: Projection mode -- ``'linear'`` for standard
+        dense QKV or ``'kan_key'`` for a KAN-based Key projection.
+    :type attention_mode: str
+    :param normalization: Score normalization -- ``'softmax'``,
+        ``'adaptive_softmax'``, or ``'hierarchical_routing'``.
+    :type normalization: str
+    :param use_relative_position_bias: Whether to add a learnable relative
+        position bias to attention scores.
+    :type use_relative_position_bias: bool
+    :param qkv_bias: Whether the joint QKV dense uses bias (linear mode).
+    :type qkv_bias: bool
+    :param qk_scale: Override for the QK scaling factor; defaults to
+        ``head_dim ** -0.5``.
+    :type qk_scale: Optional[float]
+    :param dropout_rate: Dropout rate applied to attention weights.
+    :type dropout_rate: float
+    :param proj_bias: Whether the output projection uses bias.
+    :type proj_bias: bool
+    :param kan_grid_size: Grid size for the KAN layer (kan_key mode).
+    :type kan_grid_size: int
+    :param kan_spline_order: Spline order for the KAN layer.
+    :type kan_spline_order: int
+    :param kan_activation: Activation for the KAN layer.
+    :type kan_activation: str
+    :param adaptive_softmax_config: Config dict forwarded to
+        ``AdaptiveTemperatureSoftmax`` when that normalization is selected.
+    :type adaptive_softmax_config: Optional[Dict[str, Any]]
+    :param kernel_initializer: Initializer for kernel weights.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for kernel weights.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Regularizer for bias weights.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the base Layer.
+    :type kwargs: Any
     """
 
     def __init__(
@@ -164,7 +257,11 @@ class SingleWindowAttention(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer's weights."""
+        """Build the layer weights including the relative position bias table.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         if self.use_relative_position_bias:
             num_relative_positions = (2 * self.window_size - 1) ** 2
             self.relative_position_bias_table = self.add_weight(
@@ -212,7 +309,18 @@ class SingleWindowAttention(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass for the unified single window attention."""
+        """Forward pass for the unified single window attention.
+
+        :param inputs: Token embeddings of shape ``(B, N, dim)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional mask of shape ``(B, N)`` with 1 for
+            valid tokens and 0 for padding.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Training mode flag.
+        :type training: Optional[bool]
+        :return: Attended output of shape ``(B, N, dim)``.
+        :rtype: keras.KerasTensor
+        """
         input_shape = keras.ops.shape(inputs)
         B_actual, N_actual = input_shape[0], input_shape[1]
         N_target = self.window_size * self.window_size
@@ -309,7 +417,11 @@ class SingleWindowAttention(keras.layers.Layer):
         return output
 
     def get_config(self) -> Dict[str, Any]:
-        """Serialize the layer's configuration."""
+        """Serialize the layer configuration.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {

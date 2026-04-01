@@ -2,17 +2,19 @@
 TripSE: Triplet Squeeze and Excitation Attention Block.
 
 Implementation of "Achieving 3D Attention via Triplet Squeeze and Excitation Block"
-(Alhazmi & Altahhan, 2025, arXiv:2505.05943).
+(Alhazmi and Altahhan, 2025, arXiv:2505.05943).
 
-Combines Triplet Attention with Squeeze-and-Excitation to create 3D attention that captures:
-- Inter-dimensional relationships (from Triplet Attention)
-- Global channel importance (from SE)
+Combines Triplet Attention with Squeeze-and-Excitation to create 3D attention
+that captures inter-dimensional relationships (from Triplet Attention) and
+global channel importance (from SE).
 
-Four variants are implemented:
-- TripSE1: SE block after branch summation (Post-fusion SE).
-- TripSE2: SE block at beginning of each branch (Pre-process SE).
-- TripSE3: SE blocks embedded within branches (Parallel SE).
-- TripSE4: Hybrid with affine combination of spatial and channel descriptors (3D Attention).
+Four variants are provided:
+
+- **TripSE1**: SE block after branch summation (Post-fusion SE).
+- **TripSE2**: SE block at beginning of each branch (Pre-process SE).
+- **TripSE3**: SE blocks embedded within branches (Parallel SE).
+- **TripSE4**: Hybrid with affine combination of spatial and channel
+  descriptors (3D Attention).
 """
 
 import keras
@@ -31,27 +33,58 @@ from ..squeeze_excitation import SqueezeExcitation
 @keras.saving.register_keras_serializable()
 class TripletAttentionBranch(layers.Layer):
     """
-    Single branch of Triplet Attention mechanism.
+    Single branch of the Triplet Attention mechanism.
 
     Captures cross-dimensional interaction by rotating tensor dimensions,
-    applying Z-pooling (avg + max), convolution, and sigmoid activation.
+    applying Z-pooling (concatenation of channel-wise average and max),
+    convolution, batch normalization, and sigmoid activation. The resulting
+    spatial attention map is broadcast-multiplied onto the permuted input,
+    then the inverse permutation restores the original axis order.
 
-    Shape Flow:
-        Input (B, H, W, C) -> Permute -> (B, D1, D2, D3)
-        Z-Pool (D3) -> (B, D1, D2, 2)
-        Conv2D -> (B, D1, D2, 1)
-        Sigmoid -> Attention Map
-        Output -> Input * Attention Map (Broadcasted) -> Inverse Permute
+    **Architecture Overview:**
 
-    Parameters:
-        kernel_size: Int, kernel size for the convolution. Default 7.
-        permute_pattern: Tuple of 3 ints, permutation pattern.
-            (0, 1, 2) means no rotation (H-W plane).
-            (0, 2, 1) means C-W plane (rotate H-C).
-            (2, 1, 0) means H-C plane (rotate W-C).
-        use_bias: Bool, whether to use bias in convolution.
-        kernel_initializer: Initializer for kernel weights.
-        kernel_regularizer: Regularizer for kernel weights.
+    .. code-block:: text
+
+        ┌──────────────────────────────┐
+        │  Input (B, H, W, C)          │
+        └─────────────┬────────────────┘
+                      ▼
+        ┌──────────────────────────────┐
+        │  Permute axes                │
+        │  (B, D1, D2, D3)            │
+        └─────────────┬────────────────┘
+                      ▼
+        ┌──────────────────────────────┐
+        │  Z-Pool: mean + max on D3   │
+        │  ─► (B, D1, D2, 2)          │
+        └─────────────┬────────────────┘
+                      ▼
+        ┌──────────────────────────────┐
+        │  Conv2D ─► BN ─► Sigmoid    │
+        │  ─► (B, D1, D2, 1)          │
+        └─────────────┬────────────────┘
+                      ▼
+        ┌──────────────────────────────┐
+        │  x_permuted * attention_map  │
+        └─────────────┬────────────────┘
+                      ▼
+        ┌──────────────────────────────┐
+        │  Inverse Permute             │
+        │  Output (B, H, W, C)        │
+        └──────────────────────────────┘
+
+    :param kernel_size: Kernel size for the spatial convolution.
+    :type kernel_size: int
+    :param permute_pattern: Permutation of ``(H, W, C)`` axes.
+        ``(0, 1, 2)`` = H-W plane, ``(0, 2, 1)`` = C-W plane,
+        ``(2, 1, 0)`` = H-C plane.
+    :type permute_pattern: Tuple[int, int, int]
+    :param use_bias: Whether the convolution uses bias.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for convolution kernels.
+    :type kernel_initializer: str
+    :param kernel_regularizer: Regularizer for convolution kernels.
+    :type kernel_regularizer: Optional[Any]
     """
 
     def __init__(
@@ -85,7 +118,11 @@ class TripletAttentionBranch(layers.Layer):
         self.sigmoid = layers.Activation("sigmoid", name="sigmoid")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the branch layers."""
+        """Build sub-layers with shapes derived from the permutation pattern.
+
+        :param input_shape: 4-D shape ``(B, H, W, C)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         # Determine shape after permutation
         # input_shape is (B, H, W, C)
         # We need to simulate the permutation to know the spatial dims for logging/debug
@@ -179,17 +216,47 @@ class TripSE1(layers.Layer):
     """
     TripSE1: Triplet Attention with Post-Fusion Squeeze-and-Excitation.
 
-    Architecture:
-    1. Parallel Branches: H-W (no rot), C-W (rot), H-C (rot).
-    2. Summation: Combine outputs of all branches.
-    3. SE Block: Apply channel-wise recalibration to the summed features.
+    Three parallel Triplet Attention branches (H-W, C-W, H-C planes)
+    produce spatial attention maps. Their outputs are summed, and a
+    Squeeze-and-Excitation block performs channel-wise recalibration on
+    the fused result.
 
-    Parameters:
-        reduction_ratio: Float, SE reduction ratio.
-        kernel_size: Int, convolution kernel size.
-        use_bias: Bool, use bias in convolution.
-        kernel_initializer: Weights initializer.
-        kernel_regularizer: Weights regularizer.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌────────────────────────────────────┐
+        │  Input (B, H, W, C)               │
+        └──────┬─────────┬─────────┬────────┘
+               ▼         ▼         ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Branch   │ │ Branch   │ │ Branch   │
+        │ H-W      │ │ C-W      │ │ H-C      │
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             └─────┬──────┴──────┬─────┘
+                   ▼             │
+        ┌──────────────────────────────────┐
+        │  Element-wise Sum                │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Squeeze-and-Excitation          │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output (B, H, W, C)            │
+        └──────────────────────────────────┘
+
+    :param reduction_ratio: SE bottleneck reduction ratio.
+    :type reduction_ratio: float
+    :param kernel_size: Spatial convolution kernel size.
+    :type kernel_size: int
+    :param use_bias: Whether convolutions use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: str
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[Any]
     """
 
     def __init__(
@@ -282,11 +349,46 @@ class TripSE2(layers.Layer):
     """
     TripSE2: Pre-Process Squeeze-and-Excitation.
 
-    Architecture:
-    1. Permute Input for each branch.
-    2. Apply SE Block to the permuted input (treating permuted 'channels' as features).
-    3. Apply Triplet Attention (Z-Pool -> Conv -> BN -> Sigmoid) to SE output.
-    4. Inverse Permute and Average branches.
+    Each branch first permutes the input tensor, applies a
+    Squeeze-and-Excitation block on the permuted channels, then runs the
+    Triplet Attention core (Z-Pool, Conv, BN, Sigmoid) on the SE-refined
+    features. Outputs are inverse-permuted and averaged.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌────────────────────────────────────┐
+        │  Input (B, H, W, C)               │
+        └──────┬─────────┬─────────┬────────┘
+               ▼         ▼         ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Permute  │ │ Permute  │ │ Permute  │
+        │ + SE     │ │ + SE     │ │ + SE     │
+        │ + ZPool  │ │ + ZPool  │ │ + ZPool  │
+        │ + Conv   │ │ + Conv   │ │ + Conv   │
+        │ + InvPrm │ │ + InvPrm │ │ + InvPrm │
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             └─────┬──────┴──────┬─────┘
+                   ▼
+        ┌──────────────────────────────────┐
+        │  Average of 3 branches           │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output (B, H, W, C)            │
+        └──────────────────────────────────┘
+
+    :param reduction_ratio: SE bottleneck reduction ratio.
+    :type reduction_ratio: float
+    :param kernel_size: Spatial convolution kernel size.
+    :type kernel_size: int
+    :param use_bias: Whether convolutions use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: str
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[Any]
     """
 
     def __init__(
@@ -411,11 +513,48 @@ class TripSE3(layers.Layer):
     """
     TripSE3: Parallel Squeeze-and-Excitation.
 
-    Architecture:
-    1. For each branch, process Input via Triplet Attention (Spatial).
-    2. In parallel, process Input via SE Block (Channel).
-    3. Multiply Spatial Attention Map by Channel Attention Weights.
-    4. Scale Input by combined attention.
+    Each branch runs two parallel paths on the permuted input: a spatial
+    attention path (Z-Pool, Conv, BN, Sigmoid) and a channel attention
+    path (SE block). The SE-scaled features are element-wise multiplied
+    by the spatial attention map, producing a joint spatial-channel
+    attention. Results are inverse-permuted and averaged.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌────────────────────────────────────┐
+        │  Input (B, H, W, C)               │
+        └──────┬─────────┬─────────┬────────┘
+               ▼         ▼         ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Permute  │ │ Permute  │ │ Permute  │
+        │ ┌──┬──┐  │ │ ┌──┬──┐  │ │ ┌──┬──┐  │
+        │ │SE│Sp│  │ │ │SE│Sp│  │ │ │SE│Sp│  │
+        │ └──┴──┘  │ │ └──┴──┘  │ │ └──┴──┘  │
+        │ SE*Sp    │ │ SE*Sp    │ │ SE*Sp    │
+        │ InvPerm  │ │ InvPerm  │ │ InvPerm  │
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             └─────┬──────┴──────┬─────┘
+                   ▼
+        ┌──────────────────────────────────┐
+        │  Average of 3 branches           │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output (B, H, W, C)            │
+        └──────────────────────────────────┘
+
+    :param reduction_ratio: SE bottleneck reduction ratio.
+    :type reduction_ratio: float
+    :param kernel_size: Spatial convolution kernel size.
+    :type kernel_size: int
+    :param use_bias: Whether convolutions use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: str
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[Any]
     """
 
     def __init__(
@@ -537,11 +676,45 @@ class TripSE3(layers.Layer):
 @keras.saving.register_keras_serializable()
 class _SEWeights(layers.Layer):
     """
-    Internal helper layer to compute SE logits/weights.
-    
-    Duplicates logic of SqueezeExcitation but returns the transformed weights 
-    (before or after sigmoid) instead of scaling the input.
-    Used for TripSE4 where we need to add SE logits to spatial logits.
+    Internal helper that computes SE channel logits without scaling the input.
+
+    Mirrors the Squeeze-and-Excitation path (GAP, bottleneck MLP) but
+    returns the pre-sigmoid logits of shape ``(B, 1, 1, C)`` instead of
+    the full ``x * sigmoid(logits)`` product. This allows TripSE4 to fuse
+    spatial and channel logits in the logit domain before activation.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌────────────────────┐
+        │  Input (B, H, W, C)│
+        └────────┬───────────┘
+                 ▼
+        ┌────────────────────┐
+        │  GAP ─► (B,1,1,C) │
+        └────────┬───────────┘
+                 ▼
+        ┌────────────────────┐
+        │  Conv1x1 reduce    │
+        │  ─► activation     │
+        │  ─► Conv1x1 restore│
+        └────────┬───────────┘
+                 ▼
+        ┌────────────────────┐
+        │  Logits (B,1,1,C)  │
+        └────────────────────┘
+
+    :param reduction_ratio: Bottleneck reduction ratio.
+    :type reduction_ratio: float
+    :param activation: Activation inside the bottleneck.
+    :type activation: str
+    :param use_bias: Whether convolutions use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: str
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[Any]
     """
     def __init__(
         self,
@@ -621,17 +794,54 @@ class TripSE4(layers.Layer):
     """
     TripSE4: Hybrid 3D Attention with Affine Fusion.
 
-    Architecture:
-    1. Per Branch:
-       - Path A: Z-Pool -> Conv -> BN (Spatial Logits)
-       - Path B: GAP -> MLP (Channel Logits)
-       - Fusion: Spatial Logits + Channel Logits (Broadcasting addition)
-       - Activation: Sigmoid(Fused Logits) -> 3D Attention Tensor
-    2. Fuse branches (Sum).
-    3. Final SE Block on output.
-    
-    This variant constructs a true 3D attention map by fusing spatial and channel
-    contexts in the logit domain before activation.
+    Constructs a true 3D attention tensor per branch by fusing spatial
+    logits ``(B, D1, D2, 1)`` and channel logits ``(B, 1, 1, D3)`` via
+    broadcasting addition in the logit domain, then applying sigmoid. The
+    three branch outputs are summed and refined by a final
+    Squeeze-and-Excitation block.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────────────────────────────┐
+        │  Input (B, H, W, C)                 │
+        └──────┬─────────┬─────────┬──────────┘
+               ▼         ▼         ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Permute  │ │ Permute  │ │ Permute  │
+        │ ┌──────┐ │ │ ┌──────┐ │ │ ┌──────┐ │
+        │ │Spat. │ │ │ │Spat. │ │ │ │Spat. │ │
+        │ │logits│ │ │ │logits│ │ │ │logits│ │
+        │ └──┬───┘ │ │ └──┬───┘ │ │ └──┬───┘ │
+        │ ┌──────┐ │ │ ┌──────┐ │ │ ┌──────┐ │
+        │ │Chan. │ │ │ │Chan. │ │ │ │Chan. │ │
+        │ │logits│ │ │ │logits│ │ │ │logits│ │
+        │ └──┬───┘ │ │ └──┬───┘ │ │ └──┬───┘ │
+        │  Add+Sig │ │  Add+Sig │ │  Add+Sig │
+        │  *input  │ │  *input  │ │  *input  │
+        │  InvPerm │ │  InvPerm │ │  InvPerm │
+        └────┬─────┘ └────┬─────┘ └────┬─────┘
+             └─────┬──────┴──────┬─────┘
+                   ▼
+        ┌──────────────────────────────────┐
+        │  Sum + Final SE Block            │
+        └────────────┬─────────────────────┘
+                     ▼
+        ┌──────────────────────────────────┐
+        │  Output (B, H, W, C)            │
+        └──────────────────────────────────┘
+
+    :param reduction_ratio: SE bottleneck reduction ratio.
+    :type reduction_ratio: float
+    :param kernel_size: Spatial convolution kernel size.
+    :type kernel_size: int
+    :param use_bias: Whether convolutions use bias.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: str
+    :param kernel_regularizer: Kernel weight regularizer.
+    :type kernel_regularizer: Optional[Any]
     """
 
     def __init__(
