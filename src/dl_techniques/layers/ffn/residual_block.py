@@ -74,88 +74,78 @@ class ResidualBlock(keras.layers.Layer):
     """
     Residual block with linear transformations and configurable activation.
 
-    This layer implements a residual connection around a two-layer MLP. The main path
-    consists of:
-    1. Dense layer with configurable activation
-    2. Optional dropout for regularization
-    3. Dense layer (linear output)
+    This layer implements a residual connection around a two-layer MLP. The main
+    path computes ``F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2`` while the
+    residual path applies a learnable projection shortcut ``W_s @ x + b_s``.
+    The final output is ``y = F(x) + W_s @ x``, enabling stable gradient flow
+    even when input and output dimensions differ.
 
-    The residual path uses a separate dense layer to project the input to match
-    the output dimensionality, enabling residual connections even when input and
-    output dimensions differ.
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        hidden = activation(input @ W1 + b1)
-        hidden = dropout(hidden) if dropout_rate > 0
-        main_output = hidden @ W2 + b2
-        residual_output = input @ W_res + b_res
-        output = main_output + residual_output
+    .. code-block:: text
 
-    Args:
-        hidden_dim: Integer, dimensionality of the hidden layer. Must be positive.
-        output_dim: Integer, dimensionality of the output space. Must be positive.
-        dropout_rate: Float, dropout rate for regularization between 0 and 1.
-            Defaults to 0.0 (no dropout).
-        activation: String or callable, activation function for hidden layer.
-            Accepts string names ('relu', 'gelu') or callable functions.
-            Defaults to 'relu'.
-        use_bias: Boolean, whether to use bias in all dense layers. Defaults to True.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, initializer for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights. Accepts string
-            names ('l1', 'l2') or Regularizer instances. Defaults to None.
-        bias_regularizer: Optional regularizer for bias weights. Accepts string
-            names ('l1', 'l2') or Regularizer instances. Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        ┌──────────────────────────────┐
+        │    Input (..., input_dim)     │
+        └──────────────┬───────────────┘
+                       │
+                 ┌─────┴──────────┐
+                 ▼                ▼
+        ┌──────────────┐  ┌──────────────────┐
+        │ hidden_layer │  │ residual_layer    │
+        │Dense(hidden) │  │Dense(output_dim)  │
+        │+ activation  │  │ (linear shortcut) │
+        └──────┬───────┘  └────────┬─────────┘
+               ▼                   │
+        ┌──────────────┐           │
+        │   Dropout    │           │
+        │  (optional)  │           │
+        └──────┬───────┘           │
+               ▼                   │
+        ┌──────────────┐           │
+        │ output_layer │           │
+        │Dense(output) │           │
+        │  (linear)    │           │
+        └──────┬───────┘           │
+               │                   │
+               └────────┬──────────┘
+                        ▼
+        ┌──────────────────────────────┐
+        │     Element-wise Addition     │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │   Output (..., output_dim)    │
+        └──────────────────────────────┘
 
-    Input shape:
-        Tensor with shape `(batch_size, ..., input_dim)` where input_dim is the
-        size of the last dimension.
+    :param hidden_dim: Integer, dimensionality of the hidden layer. Must be positive.
+    :type hidden_dim: int
+    :param output_dim: Integer, dimensionality of the output space. Must be positive.
+    :type output_dim: int
+    :param dropout_rate: Dropout rate for regularization between 0 and 1.
+        Defaults to 0.0 (no dropout).
+    :type dropout_rate: float
+    :param activation: Activation function for hidden layer.
+        Accepts string names ('relu', 'gelu') or callable functions.
+        Defaults to 'relu'.
+    :type activation: Union[str, Callable]
+    :param use_bias: Whether to use bias in all dense layers. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights. Accepts string
+        names ('l1', 'l2') or Regularizer instances. Defaults to None.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer for bias weights. Accepts string
+        names ('l1', 'l2') or Regularizer instances. Defaults to None.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Output shape:
-        Tensor with shape `(batch_size, ..., output_dim)` where all dimensions
-        except the last are preserved from the input.
-
-    Attributes:
-        hidden_layer: Dense layer for hidden transformation.
-        output_layer: Dense layer for output transformation.
-        residual_layer: Dense layer for residual projection.
-        dropout: Dropout layer if dropout_rate > 0, otherwise None.
-
-    Example:
-        ```python
-        # Basic usage
-        block = ResidualBlock(hidden_dim=128, output_dim=64)
-
-        # With dropout and custom activation
-        block = ResidualBlock(
-            hidden_dim=256,
-            output_dim=128,
-            dropout_rate=0.2,
-            activation='gelu'
-        )
-
-        # With regularization
-        block = ResidualBlock(
-            hidden_dim=512,
-            output_dim=256,
-            kernel_regularizer='l2',
-            bias_regularizer=keras.regularizers.L1(1e-4)
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(784,))
-        x = ResidualBlock(hidden_dim=512, output_dim=256)(inputs)
-        x = keras.layers.LayerNormalization()(x)
-        outputs = keras.layers.Dense(10, activation='softmax')(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    Raises:
-        ValueError: If hidden_dim or output_dim is not positive.
-        ValueError: If dropout_rate is not between 0 and 1.
+    :raises ValueError: If hidden_dim or output_dim is not positive.
+    :raises ValueError: If dropout_rate is not between 0 and 1.
 
     Note:
         This implementation creates a learnable residual projection, making it suitable
@@ -247,12 +237,11 @@ class ResidualBlock(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures all weight variables exist before weight restoration during
-        model loading.
+        Explicitly builds each sub-layer for robust serialization, ensuring all
+        weight variables exist before weight restoration during model loading.
 
-        Args:
-            input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build sub-layers in computational order for robust serialization
         self.hidden_layer.build(input_shape)
@@ -282,12 +271,12 @@ class ResidualBlock(keras.layers.Layer):
         """
         Forward pass with residual connection.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, ..., input_dim).
-            training: Boolean indicating training mode for dropout.
-
-        Returns:
-            Output tensor of shape (batch_size, ..., output_dim).
+        :param inputs: Input tensor of shape (batch_size, ..., input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode for dropout.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (batch_size, ..., output_dim).
+        :rtype: keras.KerasTensor
         """
         # Main path: input -> hidden -> dropout -> output
         hidden = self.hidden_layer(inputs, training=training)
@@ -307,11 +296,10 @@ class ResidualBlock(keras.layers.Layer):
         """
         Compute output shape.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple with last dimension set to output_dim.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with last dimension set to output_dim.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.output_dim
@@ -321,9 +309,9 @@ class ResidualBlock(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters needed to
+        :return: Dictionary containing all configuration parameters needed to
             reconstruct this layer.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({

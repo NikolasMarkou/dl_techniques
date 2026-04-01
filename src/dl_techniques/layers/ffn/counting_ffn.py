@@ -97,106 +97,86 @@ from dl_techniques.utils.logger import logger
 @keras.saving.register_keras_serializable()
 class CountingFFN(keras.layers.Layer):
     """
-    A Feed-Forward Network that learns to count events in a sequence.
+    Feed-Forward Network that learns to count events in a sequence.
 
-    This layer identifies "countable" features in the input sequence, aggregates
-    their counts, and integrates this information back into each token's
-    representation. The counting can be performed globally, locally, or causally.
+    This layer identifies "countable" features via a sigmoid key projection
+    (``k_t = sigmoid(W_k @ x_t)``), aggregates their counts according to the
+    ``counting_scope`` ('global' sum, 'causal' cumsum, or 'local' bidirectional
+    cumsum), transforms the counts through a dense layer with activation, and
+    integrates count information back into each token via a learned gate
+    producing residual-style blending when ``output_dim == input_dim``.
 
-    The layer works by:
-    1.  A "key" projection identifies what to count, creating a "soft" event
-        occurrence probability for each token using a sigmoid activation.
-    2.  These events are aggregated based on the `counting_scope`:
-        - 'global': Sums events across the entire sequence.
-        - 'causal': A cumulative sum, counting events from the start.
-        - 'local': A bidirectional cumulative sum, capturing context from
-                   both directions.
-    3.  The aggregated counts are transformed into a feature-rich representation
-        using a configurable activation function.
-    4.  A learned gate controls the integration of count information:
-        - If output_dim == input_dim: Performs residual-style blending between
-          the original input and transformed counts.
-        - If output_dim != input_dim: Gates the transformed counts directly
-          (no residual connection possible due to dimension mismatch).
+    **Architecture Overview:**
 
-    Args:
-        output_dim: Integer, the final output dimension of the layer. For residual
-            architectures, this should match the input dimension to enable
-            residual-style blending. Must be positive.
-        count_dim: Integer, the intermediate dimension for the counting projection.
-            Controls the complexity of features that can be counted. Must be positive.
-        counting_scope: String, the scope of counting. Must be one of
-            'global', 'local', or 'causal'. Defaults to 'local'.
-        activation: String name of activation function or activation function to use
-            for the count transformation layer. Defaults to 'gelu'.
-        use_bias: Boolean, whether to use bias terms in dense layers.
-            Defaults to True.
-        kernel_initializer: String or initializer instance for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer instance for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, input_dim)`
+        ┌──────────────────────────────────────┐
+        │ Input (batch, seq_len, input_dim)     │
+        └──────────────────┬───────────────────┘
+                           │
+                     ┌─────┴─────┐
+                     ▼           ▼
+        ┌────────────────┐ ┌────────────────┐
+        │ key_projection │ │     gate       │
+        │ Dense(sigmoid) │ │ Dense(sigmoid) │
+        └───────┬────────┘ └───────┬────────┘
+                ▼                  │
+        ┌────────────────┐         │
+        │  Count Agg.    │         │
+        │ (scope-based)  │         │
+        └───────┬────────┘         │
+                ▼                  │
+        ┌────────────────┐         │
+        │count_transform │         │
+        │Dense(activation)│        │
+        └───────┬────────┘         │
+                │                  │
+                └────────┬─────────┘
+                         ▼
+        ┌──────────────────────────────────────┐
+        │  Gated Blend / Residual Integration   │
+        │  y = (1-g)*x + g*C'  (if dims match) │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │ Output (batch, seq_len, output_dim)   │
+        └──────────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, output_dim)`
+    :param output_dim: Integer, the final output dimension of the layer. For residual
+        architectures, this should match the input dimension to enable
+        residual-style blending. Must be positive.
+    :type output_dim: int
+    :param count_dim: Integer, the intermediate dimension for the counting projection.
+        Controls the complexity of features that can be counted. Must be positive.
+    :type count_dim: int
+    :param counting_scope: The scope of counting. Must be one of
+        'global', 'local', or 'causal'. Defaults to 'local'.
+    :type counting_scope: str
+    :param activation: Activation function name or callable to use
+        for the count transformation layer. Defaults to 'gelu'.
+    :type activation: Union[str, callable]
+    :param use_bias: Whether to use bias terms in dense layers.
+        Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Raises:
-        ValueError: If output_dim or count_dim is not positive.
-        ValueError: If counting_scope is not one of 'global', 'local', 'causal'.
-
-    Example:
-        ```python
-        # Residual-style usage (output_dim matches input_dim for blending)
-        input_dim = 768
-        inputs = keras.Input(shape=(128, input_dim))
-        counted_features = CountingFFN(
-            output_dim=input_dim,  # Same as input for residual blending
-            count_dim=128,
-            counting_scope='causal',
-            activation='gelu'
-        )(inputs)
-
-        # Dimension-changing usage (no residual blending)
-        projection_layer = CountingFFN(
-            output_dim=512,  # Different from input_dim
-            count_dim=64,
-            counting_scope='local',
-            activation='swish'
-        )(inputs)  # Input: 768-dim, Output: 512-dim
-
-        # Different counting scopes for different use cases
-        global_counts = CountingFFN(
-            output_dim=256,
-            count_dim=32,
-            counting_scope='global'  # Each token sees global sequence counts
-        )(inputs)
-
-        causal_counts = CountingFFN(
-            output_dim=256,
-            count_dim=32,
-            counting_scope='causal'  # For autoregressive models
-        )(inputs)
-
-        # Advanced configuration with regularization
-        layer = CountingFFN(
-            output_dim=512,
-            count_dim=128,
-            counting_scope='local',
-            activation='relu',
-            use_bias=False,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-        ```
+    :raises ValueError: If output_dim or count_dim is not positive.
+    :raises ValueError: If counting_scope is not one of 'global', 'local', 'causal'.
 
     Note:
         This layer is particularly effective for tasks requiring an understanding
         of feature frequency, enumeration, or relative positioning within a
-        sequence. The `counting_scope` parameter is crucial for tailoring the
+        sequence. The ``counting_scope`` parameter is crucial for tailoring the
         layer's behavior to the specific task (e.g., 'causal' for auto-regressive
         models). When output_dim matches input_dim, the layer performs residual-style
         blending; otherwise, it acts as a dimension-changing transformation layer.
@@ -290,7 +270,10 @@ class CountingFFN(keras.layers.Layer):
         """
         Build the Counting FFN and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        Explicitly builds each sub-layer for robust serialization.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if self.built:
             return
@@ -342,13 +325,13 @@ class CountingFFN(keras.layers.Layer):
         """
         Forward pass computation.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, sequence_length, input_dim).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor with shape (batch_size, sequence_length, output_dim).
+        :param inputs: Input tensor with shape (batch_size, sequence_length, input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor with shape (batch_size, sequence_length, output_dim).
+        :rtype: keras.KerasTensor
         """
         # 1. Identify what to count for each token
         # Shape: (batch, seq, count_dim)
@@ -403,20 +386,19 @@ class CountingFFN(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         return tuple(input_shape[:-1]) + (self.output_dim,)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the layer configuration for serialization.
+        Return the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

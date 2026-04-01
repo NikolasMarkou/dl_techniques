@@ -79,89 +79,80 @@ from typing import Optional, Union, Tuple, Literal, Any, Callable
 @keras.saving.register_keras_serializable()
 class GatedMLP(keras.layers.Layer):
     """
-    A Gated MLP layer implementation using 1x1 convolutions.
+    Gated MLP layer using 1x1 convolutions for spatial data.
 
-    This layer implements a gated MLP architecture where the input is processed through
+    This layer implements the gMLP architecture where the input is processed through
     three separate 1x1 convolution paths: gate, up, and down projections. The gating
-    mechanism allows the network to selectively focus on relevant features by computing
-    element-wise multiplication between gate and up projections before applying the
-    down projection.
+    mechanism computes ``output = activation_out(Conv1x1_down(activation_attn(Conv1x1_gate(x))
+    * activation_attn(Conv1x1_up(x))))``, allowing the network to selectively focus on
+    relevant spatial features via element-wise multiplication of the gate and up pathways.
 
-    The architecture follows the gMLP design from "Pay Attention to MLPs" which provides
-    an alternative to self-attention mechanisms while maintaining competitive performance.
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        gate = activation(Conv1x1_gate(x))
-        up = activation(Conv1x1_up(x))
-        gated = gate ⊙ up  # Element-wise multiplication
-        output = activation(Conv1x1_down(gated))
+    .. code-block:: text
 
-    Args:
-        filters: Integer, number of filters for all convolution layers. Must be positive.
-        use_bias: Boolean, whether to use bias in the convolution layers. Defaults to True.
-        kernel_initializer: String or Initializer, initializer for the kernel weights matrices.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, initializer for the bias vectors.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional Regularizer, regularizer function applied to kernel weights.
-            Defaults to None.
-        bias_regularizer: Optional Regularizer, regularizer function applied to bias vectors.
-            Defaults to None.
-        attention_activation: String, activation function for the gate and up projections.
-            Available options: 'relu', 'gelu', 'swish', 'silu', 'linear'. Defaults to 'relu'.
-        output_activation: String, activation function for the output projection.
-            Available options: 'relu', 'gelu', 'swish', 'silu', 'linear'. Defaults to 'linear'.
-        data_format: String, data format for convolutions. Either 'channels_last' or
-            'channels_first'. Defaults to None (uses Keras default).
-        **kwargs: Additional arguments passed to the parent Layer class.
+        ┌─────────────────────────────────────────┐
+        │  Input (batch, H, W, channels)           │
+        └───────────────────┬─────────────────────┘
+                            │
+                      ┌─────┴─────┐
+                      ▼           ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │  conv_gate (1x1)  │ │  conv_up (1x1)   │
+        └────────┬─────────┘ └────────┬─────────┘
+                 ▼                    ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ attn_activation   │ │ attn_activation   │
+        └────────┬─────────┘ └────────┬─────────┘
+                 │                    │
+                 └────────┬───────────┘
+                          ▼
+        ┌─────────────────────────────────────────┐
+        │         Element-wise Multiply            │
+        └───────────────────┬─────────────────────┘
+                            ▼
+        ┌─────────────────────────────────────────┐
+        │          conv_down (1x1)                 │
+        └───────────────────┬─────────────────────┘
+                            ▼
+        ┌─────────────────────────────────────────┐
+        │          output_activation               │
+        └───────────────────┬─────────────────────┘
+                            ▼
+        ┌─────────────────────────────────────────┐
+        │  Output (batch, H, W, filters)           │
+        └─────────────────────────────────────────┘
 
-    Input shape:
-        4D tensor with shape:
-        - If data_format='channels_last': (batch_size, height, width, channels)
-        - If data_format='channels_first': (batch_size, channels, height, width)
+    :param filters: Integer, number of filters for all convolution layers. Must be positive.
+    :type filters: int
+    :param use_bias: Whether to use bias in the convolution layers. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the kernel weights matrices.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for the bias vectors.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer function applied to kernel weights.
+        Defaults to None.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer function applied to bias vectors.
+        Defaults to None.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param attention_activation: Activation function for the gate and up projections.
+        Available options: 'relu', 'gelu', 'swish', 'silu', 'linear'. Defaults to 'relu'.
+    :type attention_activation: str
+    :param output_activation: Activation function for the output projection.
+        Available options: 'relu', 'gelu', 'swish', 'silu', 'linear'. Defaults to 'linear'.
+    :type output_activation: str
+    :param data_format: Data format for convolutions. Either 'channels_last' or
+        'channels_first'. Defaults to None (uses Keras default).
+    :type data_format: Optional[str]
+    :param kwargs: Additional arguments passed to the parent Layer class.
 
-    Output shape:
-        4D tensor with shape:
-        - If data_format='channels_last': (batch_size, height, width, filters)
-        - If data_format='channels_first': (batch_size, filters, height, width)
-
-    Attributes:
-        conv_gate: Conv2D layer for gate projection.
-        conv_up: Conv2D layer for up projection.
-        conv_down: Conv2D layer for down projection.
-
-    Example:
-        ```python
-        # Basic usage
-        x = keras.Input(shape=(32, 32, 64))
-        gmlp = GatedMLP(filters=128)
-        y = gmlp(x)
-        print(y.shape)  # (None, 32, 32, 128)
-
-        # Advanced configuration with regularization
-        gmlp = GatedMLP(
-            filters=256,
-            attention_activation='gelu',
-            output_activation='swish',
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            bias_regularizer=keras.regularizers.L1(1e-5)
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(224, 224, 3))
-        x = keras.layers.Conv2D(64, 3, padding='same')(inputs)
-        x = GatedMLP(128, attention_activation='gelu')(x)
-        outputs = keras.layers.GlobalAveragePooling2D()(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - Pay Attention to MLPs: https://arxiv.org/abs/2105.08050
-
-    Raises:
-        ValueError: If filters is not positive.
-        ValueError: If data_format is not 'channels_first' or 'channels_last'.
-        ValueError: If activation function is not supported.
+    :raises ValueError: If filters is not positive.
+    :raises ValueError: If data_format is not 'channels_first' or 'channels_last'.
+    :raises ValueError: If activation function is not supported.
 
     Note:
         This implementation uses 1x1 convolutions which are equivalent to dense layers
@@ -270,14 +261,11 @@ class GatedMLP(keras.layers.Layer):
         """
         Get activation function by name.
 
-        Args:
-            activation: String name of activation function.
-
-        Returns:
-            Callable activation function.
-
-        Raises:
-            ValueError: If activation is not supported.
+        :param activation: String name of activation function.
+        :type activation: str
+        :return: Callable activation function.
+        :rtype: Callable
+        :raises ValueError: If activation is not supported.
         """
         if activation == "relu":
             return keras.activations.relu
@@ -294,11 +282,11 @@ class GatedMLP(keras.layers.Layer):
         """
         Build the GatedMLP layer and all its sub-layers.
 
-        This explicitly builds all sub-layers to ensure robust serialization
+        Explicitly builds all sub-layers to ensure robust serialization
         following modern Keras 3 patterns.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build sub-layers in computational order for robust serialization
         self.conv_gate.build(input_shape)
@@ -325,18 +313,13 @@ class GatedMLP(keras.layers.Layer):
         """
         Forward pass for the GatedMLP layer.
 
-        Implements the gated MLP computation:
-        1. Compute gate and up projections with activation
-        2. Element-wise multiply gate and up outputs (gating mechanism)
-        3. Apply down projection with output activation
-
-        Args:
-            inputs: Input tensor of shape determined by data_format.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor after applying the Gated MLP operations.
+        :param inputs: Input tensor of shape determined by data_format.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor after applying the Gated MLP operations.
+        :rtype: keras.KerasTensor
         """
         # Gate branch: Conv1x1 + Activation
         x_gate = self.conv_gate(inputs, training=training)
@@ -359,11 +342,10 @@ class GatedMLP(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]
         """
         input_shape_list = list(input_shape)
 
@@ -376,8 +358,8 @@ class GatedMLP(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({

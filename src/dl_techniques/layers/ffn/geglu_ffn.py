@@ -93,112 +93,78 @@ class GeGLUFFN(keras.layers.Layer):
     """
     GELU Gated Linear Unit Feed-Forward Network (GeGLU).
 
-    This layer implements the GeGLU variant of a Gated Linear Unit, which has
-    shown strong performance in modern transformer architectures. The input is
-    projected to a higher-dimensional space using a single Dense layer and then
-    split into two equal parts: a 'gate' and a 'value' tensor. The gate is
-    passed through a GELU activation and then multiplied element-wise with the
-    value tensor.
+    This layer implements the GeGLU variant of a Gated Linear Unit, which projects
+    the input to twice the hidden dimension, splits into gate and value tensors,
+    applies GELU activation to the gate, and performs element-wise multiplication.
+    The computation is ``output = W_out @ (GELU(gate) * value) + b_out`` where
+    ``[gate, value] = split(W_in @ x + b_in)``.
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           │
-           ▼
-    Dense(hidden_dim * 2) ──> Split into (gate, value)
-           │                             │
-           ├─> gate ─> GELU Activation ──┐
-           │                             ▼
-           └─> value ──────────────────> Multiply ──> Dropout ──> Dense(output_dim)
-                                                                       │
-                                                                       ▼
-                                                           Output(shape=[..., output_dim])
-    ```
+    **Architecture Overview:**
 
-    **Mathematical Operation**:
-        ```
-        projected = input_proj(x)  # Shape: [..., hidden_dim * 2]
-        gate, value = split(projected, axis=-1)  # Each: [..., hidden_dim]
-        gated = gelu(gate) * value  # Element-wise multiplication
-        output = output_proj(dropout(gated))  # Shape: [..., output_dim]
-        ```
+    .. code-block:: text
 
-    **Data Flow**:
-    1. Linear projection to expand dimensionality by factor of 2
-    2. Split into gate and value tensors of equal size
-    3. Apply GELU activation to gate tensor
-    4. Element-wise multiplication of activated gate with value
-    5. Apply dropout for regularization
-    6. Final linear projection to target output dimension
+        ┌──────────────────────────────┐
+        │   Input (..., input_dim)      │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ input_proj: Dense(hidden*2)   │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Split into (gate, value)     │
+        └───────┬──────────────┬───────┘
+                ▼              │
+        ┌──────────────┐       │
+        │ GELU Activation│      │
+        └───────┬──────┘       │
+                │              │
+                └──────┬───────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │    Element-wise Multiply      │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │     Dropout (optional)        │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ output_proj: Dense(output_dim)│
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │  Output (..., output_dim)     │
+        └──────────────────────────────┘
 
-    This pattern enables the model to selectively pass information through the
-    network based on the learned gating mechanism.
-
-    Args:
-        hidden_dim: Integer, dimensionality of the intermediate hidden layer. This is
-            the size of the `gate` and `value` tensors after splitting. Must be positive.
-        output_dim: Integer, dimensionality of the final output. Must be positive.
-        activation: String name or callable, the activation function for the gate.
-            Common choices: 'gelu', 'relu', 'swish'. Defaults to 'gelu'.
-        dropout_rate: Float between 0 and 1, dropout rate applied after the
-            gating mechanism for regularization. Defaults to 0.0.
-        use_bias: Boolean, whether the dense layers should use bias vectors.
-            When False, only applies linear transformations. Defaults to True.
-        kernel_initializer: Initializer for the kernel weights of dense layers.
-            Accepts string names ('glorot_uniform', 'he_normal') or Initializer instances.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias vectors of dense layers.
-            Only used when use_bias=True. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights of dense layers.
-            Can help prevent overfitting in large models.
-        bias_regularizer: Optional regularizer for bias vectors of dense layers.
-            Only used when use_bias=True.
-        **kwargs: Additional keyword arguments for the `keras.layers.Layer` base class.
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-        Most common: 3D tensor with shape `(batch_size, sequence_length, input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., output_dim)`.
-        Same rank as input, but last dimension changed to `output_dim`.
-
-    Attributes:
-        input_proj: Dense layer projecting input to twice the hidden dimension.
-        output_proj: Dense layer projecting the gated value to the output dimension.
-        dropout: Dropout layer for regularization during training.
-
-    Example:
-        ```python
-        # Standard Transformer FFN block
-        model_dim = 512
-        ffn_dim = 2048  # Common 4x expansion factor
-
-        layer = GeGLUFFN(
-            hidden_dim=ffn_dim,
-            output_dim=model_dim,
-            dropout_rate=0.1
-        )
-        inputs = keras.Input(shape=(64, model_dim))  # (batch, seq_len, features)
-        outputs = layer(inputs)  # Shape: (batch, 64, 512)
-
-        # Custom activation and regularization
-        layer = GeGLUFFN(
-            hidden_dim=1024,
-            output_dim=768,
-            activation='swish',
-            dropout_rate=0.2,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # Without bias for specific architectures
-        layer = GeGLUFFN(
-            hidden_dim=512,
-            output_dim=256,
-            use_bias=False,
-            kernel_initializer='he_normal'
-        )
-        ```
+    :param hidden_dim: Integer, dimensionality of the intermediate hidden layer. This is
+        the size of the gate and value tensors after splitting. Must be positive.
+    :type hidden_dim: int
+    :param output_dim: Integer, dimensionality of the final output. Must be positive.
+    :type output_dim: int
+    :param activation: String name or callable, the activation function for the gate.
+        Common choices: 'gelu', 'relu', 'swish'. Defaults to 'gelu'.
+    :type activation: Union[str, Callable]
+    :param dropout_rate: Float between 0 and 1, dropout rate applied after the
+        gating mechanism for regularization. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether the dense layers should use bias vectors.
+        When False, only applies linear transformations. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the kernel weights of dense layers.
+        Accepts string names ('glorot_uniform', 'he_normal') or Initializer instances.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors of dense layers.
+        Only used when use_bias=True. Defaults to 'zeros'.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights of dense layers.
+        Can help prevent overfitting in large models.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias vectors of dense layers.
+        Only used when use_bias=True.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the ``keras.layers.Layer`` base class.
 
     Note:
         This implementation follows modern Keras 3 patterns where all sub-layers
@@ -277,8 +243,11 @@ class GeGLUFFN(keras.layers.Layer):
         """
         Create weights for all sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures all weight variables exist before weight restoration.
+        Explicitly build each sub-layer for robust serialization, ensuring
+        all weight variables exist before weight restoration.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined")
@@ -305,12 +274,12 @@ class GeGLUFFN(keras.layers.Layer):
         """
         Forward pass for the GeGLU FFN.
 
-        Args:
-            inputs: Input tensor of shape [..., input_dim].
-            training: Boolean indicating training mode for dropout.
-
-        Returns:
-            Output tensor of shape [..., output_dim].
+        :param inputs: Input tensor of shape [..., input_dim].
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode for dropout.
+        :type training: Optional[bool]
+        :return: Output tensor of shape [..., output_dim].
+        :rtype: keras.KerasTensor
         """
         # 1. Project input to expanded dimension and split
         gate_and_value = self.input_proj(inputs)
@@ -330,13 +299,12 @@ class GeGLUFFN(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Computes the output shape of the layer.
+        Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Shape tuple for output tensor.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape tuple for output tensor.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.output_dim
@@ -344,12 +312,10 @@ class GeGLUFFN(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the layer's configuration for serialization.
+        Return the layer's configuration for serialization.
 
-        CRITICAL: Must include ALL parameters from __init__ for proper reconstruction.
-
-        Returns:
-            Dictionary containing complete layer configuration.
+        :return: Dictionary containing complete layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

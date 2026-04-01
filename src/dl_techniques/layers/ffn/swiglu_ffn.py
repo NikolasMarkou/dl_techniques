@@ -84,89 +84,77 @@ class SwiGLUFFN(keras.layers.Layer):
 
     This layer implements the SwiGLU activation function within a feed-forward
     network, combining SiLU (Swish) activation with a gating mechanism for improved
-    performance in transformer architectures.
+    performance in transformer architectures. The transformation is
+    ``SwiGLU(x) = (Swish(x @ W_gate) * (x @ W_up)) @ W_down``, where ``*``
+    denotes element-wise multiplication (Hadamard product). The hidden dimension
+    is calculated using the 2/3 rule from the PaLM paper for optimal parameter
+    allocation, then rounded to ``ffn_multiple_of`` for hardware efficiency.
 
-    SwiGLU has been shown to outperform other gating mechanisms like GeGLU and
-    standard ReLU-based FFNs in large language models, providing better training
-    stability and model performance.
+    **Architecture Overview:**
 
-    The layer applies the following transformation:
-        1. Projects input to hidden dimension using two parallel Dense layers
-        2. Applies SiLU activation to gate projection
-        3. Element-wise multiplication of activated gate and up projection
-        4. Projects back to output dimension
-        5. Optional dropout for regularization
+    .. code-block:: text
 
-    Mathematical formulation:
-        gate = SiLU(input @ W_gate + b_gate)
-        up = input @ W_up + b_up
-        hidden = gate ⊗ up
-        output = hidden @ W_down + b_down
+        ┌──────────────────────────┐
+        │  Input (..., output_dim)  │
+        └─────────┬────────────────┘
+                  │
+            ┌─────┴─────┐
+            ▼           ▼
+        ┌────────┐  ┌────────┐
+        │gate_proj│  │ up_proj │
+        │ (Dense) │  │ (Dense) │
+        └───┬────┘  └───┬────┘
+            ▼           │
+        ┌────────┐      │
+        │  SiLU  │      │
+        └───┬────┘      │
+            │           │
+            └─────┬─────┘
+                  ▼
+        ┌──────────────────┐
+        │ Element-wise Mult │
+        └────────┬─────────┘
+                 ▼
+        ┌──────────────────────────┐
+        │ down_proj: Dense(out_dim) │
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │   Dropout (optional)      │
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │ Output (..., output_dim)  │
+        └──────────────────────────┘
 
-    Where ⊗ denotes element-wise multiplication.
+    :param output_dim: Integer, output dimension (model dimension).
+        Must be positive. This determines both input and output feature size.
+    :type output_dim: int
+    :param ffn_expansion_factor: Integer, factor by which to expand the hidden
+        dimension relative to output_dim. Must be positive. Defaults to 4.
+    :type ffn_expansion_factor: int
+    :param ffn_multiple_of: Integer, round hidden dimension to this multiple
+        for hardware efficiency. Must be positive. Defaults to 256.
+    :type ffn_multiple_of: int
+    :param dropout_rate: Dropout probability applied to the output.
+        Must be between 0.0 and 1.0. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear projections.
+        Defaults to False for memory efficiency.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Args:
-        output_dim: Integer, output dimension (model dimension).
-            Must be positive. This determines both input and output feature size.
-        ffn_expansion_factor: Integer, factor by which to expand the hidden
-            dimension relative to output_dim. Must be positive. Defaults to 4.
-        ffn_multiple_of: Integer, round hidden dimension to this multiple
-            for hardware efficiency. Must be positive. Defaults to 256.
-        dropout_rate: Float, dropout probability applied to the output.
-            Must be between 0.0 and 1.0. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias in linear projections.
-            Defaults to False for memory efficiency.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, initializer for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        N-D tensor with shape: (..., output_dim)
-
-    Output shape:
-        N-D tensor with shape: (..., output_dim)
-
-    Attributes:
-        gate_proj: Dense layer for gate projection with SiLU activation.
-        up_proj: Dense layer for up projection (linear).
-        down_proj: Dense layer for down projection back to output_dim.
-        dropout: Dropout layer for regularization.
-        hidden_dim: Computed hidden dimension after applying expansion and rounding.
-
-    Example:
-        ```python
-        # Basic usage
-        ffn = SwiGLUFFN(output_dim=512)
-
-        # Custom configuration
-        ffn = SwiGLUFFN(
-            output_dim=768,
-            ffn_expansion_factor=8,  # Larger expansion
-            ffn_multiple_of=128,     # Hardware-friendly multiple
-            dropout_rate=0.1,        # Regularization
-            use_bias=False           # Memory efficiency
-        )
-
-        # In a transformer block
-        inputs = keras.Input(shape=(seq_len, output_dim))
-        x = MultiHeadAttention(...)(inputs)
-        x = keras.layers.LayerNormalization()(inputs + x)
-        ffn_out = SwiGLUFFN(output_dim=output_dim)(x)
-        outputs = keras.layers.LayerNormalization()(x + ffn_out)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - Shazeer, N. (2020). "GLU Variants Improve Transformer."
-        - Chowdhery, A., et al. (2022). "PaLM: Scaling Language Modeling with Pathways."
-        - Touvron, H., et al. (2023). "LLaMA: Open and Efficient Foundation Language Models."
-
-    Raises:
-        ValueError: If output_dim, ffn_expansion_factor, or ffn_multiple_of are not positive,
+    :raises ValueError: If output_dim, ffn_expansion_factor, or ffn_multiple_of are not positive,
                    or if dropout_rate is not in [0, 1].
 
     Note:
@@ -273,14 +261,15 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Validate initialization parameters.
 
-        Args:
-            output_dim: Output dimension to validate.
-            ffn_expansion_factor: Expansion factor to validate.
-            ffn_multiple_of: Multiple constraint to validate.
-            dropout_rate: Dropout rate to validate.
-
-        Raises:
-            ValueError: If any parameter is invalid.
+        :param output_dim: Output dimension to validate.
+        :type output_dim: int
+        :param ffn_expansion_factor: Expansion factor to validate.
+        :type ffn_expansion_factor: int
+        :param ffn_multiple_of: Multiple constraint to validate.
+        :type ffn_multiple_of: int
+        :param dropout_rate: Dropout rate to validate.
+        :type dropout_rate: float
+        :raises ValueError: If any parameter is invalid.
         """
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
@@ -299,8 +288,8 @@ class SwiGLUFFN(keras.layers.Layer):
         1. Start with output_dim * expansion_factor * 2/3
         2. Round up to the nearest multiple of ffn_multiple_of
 
-        Returns:
-            Calculated hidden dimension as integer.
+        :return: Calculated hidden dimension as integer.
+        :rtype: int
         """
         # Apply 2/3 rule for optimal parameter allocation
         hidden_dim = int(self.output_dim * self.ffn_expansion_factor * 2 / 3)
@@ -318,8 +307,8 @@ class SwiGLUFFN(keras.layers.Layer):
 
         For robust serialization, explicitly build sub-layers in computational order.
 
-        Args:
-            input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build sub-layers in computational order
         self.gate_proj.build(input_shape)
@@ -345,19 +334,14 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Apply SwiGLU feed-forward transformation.
 
-        Performs the following computation:
-        1. Parallel projections to hidden dimension (gate and up)
-        2. Apply SiLU activation to gate projection
-        3. Element-wise multiplication of activated gate and up projection
-        4. Project back to output dimension
-        5. Apply dropout if configured
+        Performs the computation ``SwiGLU(x) = (SiLU(x @ W_gate) * (x @ W_up)) @ W_down``.
 
-        Args:
-            inputs: Input tensor of shape (..., output_dim).
-            training: Boolean indicating training mode for dropout.
-
-        Returns:
-            Output tensor of shape (..., output_dim).
+        :param inputs: Input tensor of shape (..., output_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode for dropout.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (..., output_dim).
+        :rtype: keras.KerasTensor
         """
         # SwiGLU formula: SiLU(xW₁ + b₁) ⊗ (xW₂ + b₂)
         # where ⊗ denotes element-wise multiplication
@@ -385,11 +369,10 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Compute output shape (same as input shape for FFN).
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple, same as input shape.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple, same as input shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
@@ -397,9 +380,9 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters needed
+        :return: Dictionary containing all configuration parameters needed
             to recreate the layer.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -420,9 +403,9 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Get the total number of parameters in the layer.
 
-        Returns:
-            Total number of trainable and non-trainable parameters.
+        :return: Total number of trainable and non-trainable parameters.
             Returns 0 if layer is not built.
+        :rtype: int
         """
         if not self.built:
             return 0

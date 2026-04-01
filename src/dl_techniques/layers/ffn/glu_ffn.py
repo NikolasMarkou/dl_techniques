@@ -84,143 +84,85 @@ from keras import layers, initializers, regularizers, activations
 @keras.saving.register_keras_serializable()
 class GLUFFN(keras.layers.Layer):
     """
-    Gated Linear Unit Feed Forward Network as described in "GLU Variants Improve Transformer".
+    Gated Linear Unit Feed-Forward Network.
 
     This layer implements a feed-forward block using a Gated Linear Unit (GLU),
-    which has been shown to improve performance in Transformer models. The GLU
-    mechanism applies a gating function to control information flow through
-    element-wise multiplication of two separate linear projections, providing
-    selective information processing and improved gradient flow.
+    which applies a gating function to control information flow through element-wise
+    multiplication of two separate linear projections. The computation is
+    ``output = W_out @ (activation(W_gate @ x) * (W_value @ x))``, where the
+    activation function defines the GLU variant (SwiGLU for 'swish', GeGLU for
+    'gelu', original GLU for 'sigmoid').
 
-    **Intent**: Provide a high-performance alternative to standard MLP blocks in
-    Transformers, with enhanced gradient flow and selective information processing
-    through the gating mechanism. Particularly effective for language models and
-    sequence processing tasks.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           ┃
-      ┏━━━━┻━━━━┓
-      ┃         ┃
-      ↓         ↓
-    gate_proj   value_proj
-    (Dense)     (Dense)
-      ┃         ┃
-      ↓         ┃
-    activation  ┃
-      ┃         ┃
-      ┗━━━━┓ ┏━━┛
-           ┃ ┃
-           ↓ ↓
-        Element-wise Multiply (gate ⊙ value)
-           ┃
-           ↓
-        Dropout (training only)
-           ┃
-           ↓
-        output_proj
-        (Dense)
-           ┃
-           ↓
-    Output(shape=[..., output_dim])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operation**:
-    1. **Gate Path**: gate = gate_proj(x) → activation(gate)
-    2. **Value Path**: value = value_proj(x)
-    3. **Gating**: gated = activation(gate) ⊙ value
-    4. **Output**: output = output_proj(dropout(gated, training))
+        ┌──────────────────────────────┐
+        │    Input (..., input_dim)     │
+        └──────────────┬───────────────┘
+                       │
+                 ┌─────┴─────┐
+                 ▼           ▼
+        ┌──────────────┐ ┌──────────────┐
+        │  gate_proj   │ │  value_proj  │
+        │   (Dense)    │ │   (Dense)    │
+        └──────┬───────┘ └──────┬───────┘
+               ▼                │
+        ┌──────────────┐        │
+        │  Activation  │        │
+        └──────┬───────┘        │
+               │                │
+               └────────┬───────┘
+                        ▼
+        ┌──────────────────────────────┐
+        │     Element-wise Multiply     │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │      Dropout (optional)       │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ output_proj: Dense(output_dim)│
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │   Output (..., output_dim)    │
+        └──────────────────────────────┘
 
-    Where ⊙ denotes element-wise multiplication and the activation is applied
-    only to the gate pathway, allowing learned control over information flow.
+    :param hidden_dim: Integer, dimensionality of the intermediate hidden layer.
+        Must be positive. Controls the capacity of the gating mechanism.
+        Typically larger than input_dim for feature expansion (e.g., 2-4x).
+    :type hidden_dim: int
+    :param output_dim: Integer, dimensionality of the final output. Must be positive.
+        Often equals input_dim in Transformer blocks for residual connections.
+    :type output_dim: int
+    :param activation: Activation function for the gate projection. Can be string name
+        ('gelu', 'swish', 'sigmoid', 'tanh') or callable. Defaults to 'swish'
+        (also known as SiLU), which is particularly effective for gating.
+    :type activation: Union[str, Callable]
+    :param dropout_rate: Float between 0 and 1, dropout rate applied after gating
+        mechanism for regularization. Only active during training. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to include bias terms in all Dense projections.
+        Can improve model expressiveness. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights in all Dense layers.
+        Affects convergence and training stability. Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param bias_initializer: Initializer for bias vectors in all Dense layers.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer applied to kernel weights of
+        all Dense layers for preventing overfitting. Defaults to None.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer applied to bias weights of
+        all Dense layers. Defaults to None.
+    :type bias_regularizer: Optional[regularizers.Regularizer]
+    :param kwargs: Additional keyword arguments for Layer base class (name, dtype, etc.).
 
-    Args:
-        hidden_dim: Integer, dimensionality of the intermediate hidden layer.
-            Must be positive. Controls the capacity of the gating mechanism.
-            Typically larger than input_dim for feature expansion (e.g., 2-4x).
-        output_dim: Integer, dimensionality of the final output. Must be positive.
-            Often equals input_dim in Transformer blocks for residual connections.
-        activation: Activation function for the gate projection. Can be string name
-            ('gelu', 'swish', 'sigmoid', 'tanh') or callable. Defaults to 'swish'
-            (also known as SiLU), which is particularly effective for gating.
-        dropout_rate: Float between 0 and 1, dropout rate applied after gating
-            mechanism for regularization. Only active during training. Defaults to 0.0.
-        use_bias: Boolean, whether to include bias terms in all Dense projections.
-            Can improve model expressiveness. Defaults to True.
-        kernel_initializer: Initializer for kernel weights in all Dense layers.
-            Affects convergence and training stability. Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for bias vectors in all Dense layers.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer applied to kernel weights of
-            all Dense layers for preventing overfitting. Defaults to None.
-        bias_regularizer: Optional regularizer applied to bias weights of
-            all Dense layers. Defaults to None.
-        **kwargs: Additional keyword arguments for Layer base class (name, dtype, etc.).
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-        Most commonly 3D: `(batch_size, sequence_length, input_dim)` for sequences,
-        or 2D: `(batch_size, input_dim)` for standard feedforward networks.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., output_dim)`.
-        Same rank as input tensor, with last dimension changed to output_dim.
-
-    Attributes:
-        gate_proj: Dense layer for gating pathway (input_dim → hidden_dim).
-        value_proj: Dense layer for value pathway (input_dim → hidden_dim).
-        output_proj: Dense layer for final projection (hidden_dim → output_dim).
-        dropout: Dropout layer for regularization during training.
-
-    Example:
-        ```python
-        # Standard Transformer FFN replacement with GLU
-        model_dim = 512
-        ffn_dim = int((2/3) * 4 * model_dim)  # SwiGLU convention: ~1365
-
-        layer = GLUFFN(
-            hidden_dim=ffn_dim,
-            output_dim=model_dim,
-            activation='swish',
-            dropout_rate=0.1
-        )
-        inputs = keras.Input(shape=(128, model_dim))  # (batch, seq_len, features)
-        outputs = layer(inputs)  # Shape: (batch, 128, 512)
-
-        # Binary gate with sigmoid activation
-        binary_glu = GLUFFN(
-            hidden_dim=256,
-            output_dim=128,
-            activation='sigmoid',
-            dropout_rate=0.2
-        )
-
-        # Classification head with GLU
-        classifier_glu = GLUFFN(
-            hidden_dim=512,
-            output_dim=10,  # num_classes
-            activation='gelu',
-            dropout_rate=0.3
-        )
-
-        # No bias for specific architectures
-        layer = GLUFFN(
-            hidden_dim=1024,
-            output_dim=768,
-            activation='swish',
-            use_bias=False,
-            kernel_regularizer='l2'
-        )
-        ```
-
-    References:
-        - Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint.
-        - Touvron, H., et al. (2021). Training data-efficient image transformers.
-
-    Raises:
-        ValueError: If hidden_dim or output_dim are not positive integers.
-        ValueError: If dropout_rate is not between 0 and 1.
+    :raises ValueError: If hidden_dim or output_dim are not positive integers.
+    :raises ValueError: If dropout_rate is not between 0 and 1.
 
     Note:
         The gating mechanism allows selective information flow, which can improve
@@ -305,12 +247,11 @@ class GLUFFN(keras.layers.Layer):
         """
         Build the layer and all its sub-layers for robust serialization.
 
-        This method explicitly builds each sub-layer to ensure all weight variables
+        Explicitly builds each sub-layer to ensure all weight variables
         are created before Keras attempts to restore saved weights during loading.
-        Critical for proper serialization/deserialization lifecycle.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape has defined last dimension
         if input_shape[-1] is None:
@@ -339,13 +280,12 @@ class GLUFFN(keras.layers.Layer):
         """
         Forward pass implementing the GLU gating mechanism.
 
-        Args:
-            inputs: Input tensor of any rank with last dimension as features.
-            training: Boolean indicating whether layer is in training mode.
-                Affects dropout behavior.
-
-        Returns:
-            Output tensor with same rank as input, last dimension = output_dim.
+        :param inputs: Input tensor of any rank with last dimension as features.
+        :type inputs: keras.KerasTensor
+        :param training: Whether layer is in training mode. Affects dropout behavior.
+        :type training: Optional[bool]
+        :return: Output tensor with same rank as input, last dimension = output_dim.
+        :rtype: keras.KerasTensor
         """
         # Dual pathway projections
         gate = self.gate_proj(inputs)      # Shape: (..., hidden_dim)
@@ -366,11 +306,10 @@ class GLUFFN(keras.layers.Layer):
         """
         Compute output shape transformation.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Shape tuple of output tensor with last dimension = output_dim.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape tuple of output tensor with last dimension = output_dim.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.output_dim
@@ -381,10 +320,10 @@ class GLUFFN(keras.layers.Layer):
         Get layer configuration for serialization.
 
         Returns ALL constructor parameters to ensure perfect reconstruction
-        during model loading. Critical for Keras serialization lifecycle.
+        during model loading.
 
-        Returns:
-            Dictionary containing complete layer configuration.
+        :return: Dictionary containing complete layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

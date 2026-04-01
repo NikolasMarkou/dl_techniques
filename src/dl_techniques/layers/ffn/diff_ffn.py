@@ -100,121 +100,97 @@ from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraint
 @keras.saving.register_keras_serializable()
 class DifferentialFFN(keras.layers.Layer):
     """
-    Differential Feed-Forward Network layer implementing dual-pathway processing.
+    Differential Feed-Forward Network with dual-pathway processing.
 
-    This layer creates a specialized feed-forward network with dual pathways that process
-    positive and negative components of the input separately. The architecture demonstrates
-    Pattern 2: Composite Layer from modern Keras 3 patterns, using explicit sub-layer
-    building for robust serialization.
+    This layer decomposes input into positive (``x_pos = ReLU(x)``) and negative
+    (``x_neg = ReLU(-x)``) components, processes each through independent
+    Dense-LayerNorm-Activation-Gate branches, computes their difference
+    ``h_diff = f_pos(x_pos) - f_neg(x_neg)``, and projects the result through
+    LayerNorm, Dropout, and a final Dense layer to produce the output. This
+    biologically-inspired opponent processing enables more disentangled feature
+    learning and improved gradient flow.
 
-    **Intent**: Implement a biologically-inspired dual-pathway architecture where excitatory
-    and inhibitory signals are processed separately, enabling more nuanced feature learning
-    and improved gradient flow through explicit positive/negative component separation.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           ↓
-    Split: [ReLU(x), ReLU(-x)]
-           ↓
-    Positive Branch: Dense(hidden_dim) → LayerNorm → Activation → Dense(hidden_dim//2, gate)
-           ↓
-    Negative Branch: Dense(hidden_dim) → LayerNorm → Activation → Dense(hidden_dim//2, gate)
-           ↓
-    Differential: pos_branch - neg_branch
-           ↓
-    LayerNorm → Dropout → Dense(output_dim)
-           ↓
-    Output(shape=[..., output_dim])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operations**:
-    1. **Input Splitting**: pos = ReLU(x), neg = ReLU(-x)
-    2. **Branch Processing**: Each branch applies Dense → LayerNorm → Activation → Gate
-    3. **Differential Computation**: diff = pos_gated - neg_gated
-    4. **Output Projection**: output = Dense(LayerNorm(Dropout(diff)))
+        ┌──────────────────────────────────┐
+        │     Input (..., input_dim)        │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │  Split: ReLU(x)  │  ReLU(-x)     │
+        └───────┬──────────┴───────┬───────┘
+                ▼                  ▼
+        ┌──────────────┐   ┌──────────────┐
+        │ Positive Path │   │ Negative Path │
+        │ Dense(hidden) │   │ Dense(hidden) │
+        │  LayerNorm    │   │  LayerNorm    │
+        │  Activation   │   │  Activation   │
+        │ Dense(hidden/2)│  │ Dense(hidden/2)│
+        │  Gate Activ.  │   │  Gate Activ.  │
+        └───────┬──────┘   └───────┬──────┘
+                │                  │
+                └────────┬─────────┘
+                         ▼
+        ┌──────────────────────────────────┐
+        │   Differential: pos - neg         │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │          LayerNorm                │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │       Dropout (optional)          │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │   output_proj: Dense(output_dim)  │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │     Output (..., output_dim)      │
+        └──────────────────────────────────┘
 
-    This dual-pathway approach enables explicit modeling of enhancing vs. suppressing
-    contributions, improving feature discrimination and gradient flow.
+    :param hidden_dim: Integer, dimension of the hidden layer in each branch. Must be positive
+        and divisible by 2 for proper gating projection.
+    :type hidden_dim: int
+    :param output_dim: Integer, dimension of the output. Must be positive.
+    :type output_dim: int
+    :param branch_activation: Activation function used in the branches.
+        Accepts standard activation names ('gelu', 'relu', 'swish') or callables.
+        Defaults to 'gelu'.
+    :type branch_activation: Union[str, Callable]
+    :param gate_activation: Activation function used in the gate projections.
+        Typically 'sigmoid' for proper gating behavior. Defaults to 'sigmoid'.
+    :type gate_activation: Union[str, Callable]
+    :param dropout_rate: Float between 0.0 and 1.0, dropout rate applied to differential features.
+        Provides regularization to prevent overfitting. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias terms in dense layers. Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+        If None, uses SoftOrthonormalConstraintRegularizer for stability.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer for bias weights.
+        Defaults to None.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Args:
-        hidden_dim: Integer, dimension of the hidden layer in each branch. Must be positive
-            and divisible by 2 for proper gating projection.
-        output_dim: Integer, dimension of the output. Must be positive.
-        branch_activation: String or callable, activation function used in the branches.
-            Accepts standard activation names ('gelu', 'relu', 'swish') or callables.
-            Defaults to 'gelu'.
-        gate_activation: String or callable, activation function used in the gate projections.
-            Typically 'sigmoid' for proper gating behavior. Defaults to 'sigmoid'.
-        dropout_rate: Float between 0.0 and 1.0, dropout rate applied to differential features.
-            Provides regularization to prevent overfitting. Defaults to 0.0.
-        use_bias: Boolean, whether to use bias terms in dense layers. Defaults to True.
-        kernel_initializer: String or Initializer, initializer for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, initializer for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional Regularizer, regularizer for kernel weights.
-            If None, uses SoftOrthonormalConstraintRegularizer for stability.
-        bias_regularizer: Optional Regularizer, regularizer for bias weights.
-            Defaults to None.
-        **kwargs: Additional keyword arguments for the Layer base class.
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-        Most common: 2D tensor with shape `(batch_size, input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., output_dim)`.
-        Same rank as input, last dimension becomes `output_dim`.
-
-    Attributes:
-        positive_dense: Dense layer for positive branch initial projection.
-        layer_norm_pos: LayerNormalization for positive branch.
-        positive_proj: Dense layer for positive branch gating.
-        negative_dense: Dense layer for negative branch initial projection.
-        layer_norm_neg: LayerNormalization for negative branch.
-        negative_proj: Dense layer for negative branch gating.
-        layer_norm_diff: LayerNormalization for differential features.
-        dropout: Dropout layer for regularization.
-        output_proj: Final dense projection to output dimension.
-
-    Example:
-        ```python
-        # Basic usage
-        layer = DifferentialFFN(hidden_dim=128, output_dim=64)
-        inputs = keras.Input(shape=(512,))
-        outputs = layer(inputs)  # Shape: (batch, 64)
-
-        # Advanced configuration with custom activations
-        layer = DifferentialFFN(
-            hidden_dim=256,
-            output_dim=128,
-            branch_activation='swish',
-            gate_activation='sigmoid',
-            dropout_rate=0.1,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a transformer-style model
-        inputs = keras.Input(shape=(seq_len, embed_dim))
-        x = DifferentialFFN(
-            hidden_dim=embed_dim * 4,
-            output_dim=embed_dim,
-            branch_activation='gelu',
-            dropout_rate=0.1
-        )(inputs)
-        model = keras.Model(inputs, x)
-        ```
-
-    Raises:
-        ValueError: If `hidden_dim` is not positive or not divisible by 2.
-        ValueError: If `output_dim` is not positive.
-        ValueError: If `dropout_rate` is not between 0.0 and 1.0.
+    :raises ValueError: If ``hidden_dim`` is not positive or not divisible by 2.
+    :raises ValueError: If ``output_dim`` is not positive.
+    :raises ValueError: If ``dropout_rate`` is not between 0.0 and 1.0.
 
     Note:
-        This implementation follows Pattern 2 (Composite Layer) from modern Keras 3 patterns.
-        The `hidden_dim` must be divisible by 2 because each branch's gating projection
-        maps to `hidden_dim // 2` dimensions, ensuring the final differential features
+        The ``hidden_dim`` must be divisible by 2 because each branch's gating projection
+        maps to ``hidden_dim // 2`` dimensions, ensuring the final differential features
         have consistent dimensionality.
     """
 
@@ -343,8 +319,11 @@ class DifferentialFFN(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This follows Pattern 2: Composite Layer from modern Keras 3 patterns.
+        Explicitly builds each sub-layer for robust serialization following
+        the modern Keras 3 composite layer pattern.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build positive branch sub-layers in computational order
         self.positive_dense.build(input_shape)
@@ -375,13 +354,13 @@ class DifferentialFFN(keras.layers.Layer):
         """
         Forward pass through the Differential FFN layer.
 
-        Args:
-            inputs: Input tensor with shape (..., input_dim).
-            training: Boolean indicating whether the layer should behave in
-                training mode (applies dropout) or inference mode.
-
-        Returns:
-            Output tensor with shape (..., output_dim).
+        :param inputs: Input tensor with shape (..., input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            (applies dropout) or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor with shape (..., output_dim).
+        :rtype: keras.KerasTensor
         """
         # Split input into positive and negative components
         inputs_positive = keras.ops.relu(inputs)
@@ -417,11 +396,10 @@ class DifferentialFFN(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple with last dimension as output_dim.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with last dimension as output_dim.
+        :rtype: Tuple[Optional[int], ...]
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.output_dim
@@ -431,8 +409,8 @@ class DifferentialFFN(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

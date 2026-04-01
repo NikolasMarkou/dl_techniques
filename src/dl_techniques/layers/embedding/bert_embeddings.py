@@ -78,57 +78,71 @@ from ..norms.band_rms import BandRMS
 
 @keras.saving.register_keras_serializable()
 class BertEmbeddings(keras.layers.Layer):
-    """
-    BERT embeddings layer combining word, position, and token type embeddings.
+    """BERT embedding layer combining word, position, and token type embeddings.
 
-    This layer implements the embedding component of BERT, which combines:
-    - Word embeddings: Map token IDs to dense vector representations
-    - Position embeddings: Add positional information to sequence tokens
-    - Token type embeddings: Distinguish between different sentence segments
+    Constructs composite token representations by summing three learnable
+    embedding lookups: word embeddings ``E_word(token_i)`` mapping token IDs to
+    dense vectors, positional embeddings ``E_position(i)`` encoding absolute
+    sequence position, and segment embeddings ``E_segment(A|B)`` distinguishing
+    sentence membership. The combined embedding
+    ``E = E_word + E_position + E_segment`` is then layer-normalized and passed
+    through dropout for regularization.
 
-    The embeddings are summed together, normalized, and passed through dropout
-    for regularization.
+    **Architecture Overview:**
 
-    Args:
-        vocab_size: Size of the vocabulary. Must be positive.
-        hidden_size: Hidden dimension for embeddings. Must be positive.
-        max_position_embeddings: Maximum sequence length for positional embeddings.
-            Must be positive.
-        type_vocab_size: Size of the token type vocabulary. Must be positive.
-        initializer_range: Standard deviation for weight initialization. Must be positive.
-        layer_norm_eps: Epsilon value for normalization layers. Must be positive.
-        dropout_rate: Dropout probability for embeddings. Must be between 0 and 1.
-        normalization_type: Type of normalization layer to use.
-            Supported: 'layer_norm', 'rms_norm', 'band_rms', 'batch_norm'.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        - input_ids: (batch_size, sequence_length)
-        - token_type_ids: (batch_size, sequence_length) - optional
-        - position_ids: (batch_size, sequence_length) - optional
+        ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐
+        │  input_ids   │  │ position_ids │  │ token_type_ids   │
+        │  (batch, L)  │  │ (batch, L)   │  │ (batch, L)       │
+        └──────┬───────┘  └──────┬───────┘  └──────┬───────────┘
+               ▼                 ▼                  ▼
+        ┌──────────────┐ ┌──────────────┐ ┌────────────────────┐
+        │ Word Embed   │ │ Pos Embed    │ │ Token Type Embed   │
+        │ (vocab, D)   │ │ (max_pos, D) │ │ (type_vocab, D)    │
+        └──────┬───────┘ └──────┬───────┘ └──────┬─────────────┘
+               └────────┬───────┴────────┬───────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Element-wise Sum                    │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  LayerNorm / RMSNorm / BandRMS       │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Dropout                             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output (batch, L, hidden_size)      │
+        └──────────────────────────────────────┘
 
-    Output shape:
-        (batch_size, sequence_length, hidden_size)
+    :param vocab_size: Size of the vocabulary. Must be positive.
+    :type vocab_size: int
+    :param hidden_size: Hidden dimension for embeddings. Must be positive.
+    :type hidden_size: int
+    :param max_position_embeddings: Maximum sequence length for positional
+        embeddings. Must be positive.
+    :type max_position_embeddings: int
+    :param type_vocab_size: Size of the token type vocabulary. Must be positive.
+    :type type_vocab_size: int
+    :param initializer_range: Standard deviation for weight initialization.
+        Must be positive.
+    :type initializer_range: float
+    :param layer_norm_eps: Epsilon value for normalization layers. Must be
+        positive.
+    :type layer_norm_eps: float
+    :param dropout_rate: Dropout probability for embeddings. Must be between
+        0 and 1.
+    :type dropout_rate: float
+    :param normalization_type: Type of normalization layer to use. Supported:
+        ``'layer_norm'``, ``'rms_norm'``, ``'band_rms'``, ``'batch_norm'``.
+    :type normalization_type: str
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Raises:
-        ValueError: If any parameter is invalid or out of expected range.
-
-    Example:
-        ```python
-        embeddings = BertEmbeddings(
-            vocab_size=30522,
-            hidden_size=768,
-            max_position_embeddings=512,
-            type_vocab_size=2,
-            initializer_range=0.02,
-            layer_norm_eps=1e-12,
-            dropout_rate=0.1,
-            normalization_type='layer_norm'
-        )
-
-        input_ids = keras.ops.array([[101, 2023, 2003, 102]])  # [CLS] this is [SEP]
-        embedded = embeddings(input_ids)
-        ```
+    :raises ValueError: If any parameter is invalid or out of expected range.
     """
 
     def __init__(
@@ -216,17 +230,13 @@ class BertEmbeddings(keras.layers.Layer):
                     f"vocab_size={vocab_size}, normalization_type={normalization_type}")
 
     def _create_normalization_layer(self, name: str) -> keras.layers.Layer:
-        """
-        Create a normalization layer based on the configuration type.
+        """Create a normalization layer based on the configuration type.
 
-        Args:
-            name: Name for the normalization layer.
-
-        Returns:
-            Configured normalization layer instance.
-
-        Raises:
-            ValueError: If normalization_type is not supported.
+        :param name: Name for the normalization layer.
+        :type name: str
+        :return: Configured normalization layer instance.
+        :rtype: keras.layers.Layer
+        :raises ValueError: If ``normalization_type`` is not supported.
         """
         if self.normalization_type == 'layer_norm':
             return keras.layers.LayerNormalization(
@@ -255,17 +265,12 @@ class BertEmbeddings(keras.layers.Layer):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the embeddings layer by explicitly building all sub-layers.
+        """Build the embeddings layer by explicitly building all sub-layers.
 
-        This follows the modern Keras 3 pattern where the parent layer
-        explicitly builds all child layers for robust serialization.
-
-        Args:
-            input_shape: Shape tuple for input_ids (batch_size, seq_length).
-
-        Raises:
-            ValueError: If input_shape is invalid.
+        :param input_shape: Shape tuple for input_ids
+            ``(batch_size, seq_length)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is invalid.
         """
         if self.built:
             return
@@ -297,20 +302,22 @@ class BertEmbeddings(keras.layers.Layer):
             position_ids: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply embeddings to input tokens.
+        """Compute composite embeddings from token, position, and segment IDs.
 
-        Args:
-            input_ids: Token IDs of shape (batch_size, seq_length).
-            token_type_ids: Token type IDs of shape (batch_size, seq_length).
-                If None, defaults to all zeros.
-            position_ids: Position IDs of shape (batch_size, seq_length).
-                If None, defaults to sequential positions.
-            training: Whether the layer is in training mode.
-
-        Returns:
-            Embedded and normalized tokens of shape
-            (batch_size, seq_length, hidden_size).
+        :param input_ids: Token IDs of shape ``(batch_size, seq_length)``.
+        :type input_ids: keras.KerasTensor
+        :param token_type_ids: Token type IDs of shape
+            ``(batch_size, seq_length)``. If ``None``, defaults to all zeros.
+        :type token_type_ids: Optional[keras.KerasTensor]
+        :param position_ids: Position IDs of shape
+            ``(batch_size, seq_length)``. If ``None``, defaults to sequential
+            positions.
+        :type position_ids: Optional[keras.KerasTensor]
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Embedded and normalized tokens of shape
+            ``(batch_size, seq_length, hidden_size)``.
+        :rtype: keras.KerasTensor
         """
         input_shape = ops.shape(input_ids)
         batch_size = input_shape[0]
@@ -341,11 +348,21 @@ class BertEmbeddings(keras.layers.Layer):
         return embeddings
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape given input shape."""
+        """Compute output shape given input shape.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ``(*input_shape, hidden_size)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return (*input_shape, self.hidden_size)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization."""
+        """Get layer configuration for serialization.
+
+        :return: Dictionary containing all ``__init__`` parameters.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'vocab_size': self.vocab_size,
@@ -361,7 +378,13 @@ class BertEmbeddings(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'BertEmbeddings':
-        """Create layer from configuration."""
+        """Create layer from configuration.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New ``BertEmbeddings`` instance.
+        :rtype: BertEmbeddings
+        """
         return cls(**{k: v for k, v in config.items() if k != 'name'})
 
 # ---------------------------------------------------------------------

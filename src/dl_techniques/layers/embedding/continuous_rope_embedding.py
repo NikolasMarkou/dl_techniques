@@ -73,62 +73,59 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class ContinuousRoPE(keras.layers.Layer):
-    """
-    Continuous Rotary Position Embedding for variable positions.
+    """Continuous multi-dimensional Rotary Position Embedding for spatial data.
 
-    This implements RoPE (Rotary Position Embedding) extended to continuous
-    coordinates rather than discrete sequence positions. It generates complex
-    frequencies that can be used to apply rotational position encoding to
-    query and key vectors in attention mechanisms.
+    Extends discrete 1D RoPE to continuous, multi-dimensional coordinates by
+    partitioning the embedding dimension ``dim`` among ``ndim`` spatial axes.
+    For each coordinate component ``p_k``, phase angles are computed as
+    ``phi_k = p_k * omega_i`` where ``omega_i = 1 / (max_wavelength^(2i/d'))``
+    forms a geometric frequency progression. The concatenated phase angles
+    ``[phi_1, ..., phi_ndim]`` can be used to apply N-dimensional rotations to
+    query and key vectors in attention, preserving the relative-position
+    property ``<R_p q, R_k k> = g(q, k, p-k)``.
 
-    Based on "RoFormer: Enhanced Transformer with Rotary Position Embedding"
-    but extended to handle continuous multi-dimensional coordinates.
+    **Architecture Overview:**
 
-    Args:
-        dim: Integer, dimensionality of the embedding (typically head_dim in attention).
-            Must be positive and should be divisible by ndim for optimal performance.
-        ndim: Integer, number of coordinate dimensions (e.g., 2 for 2D, 3 for 3D).
-            Must be positive and typically 2 or 3.
-        max_wavelength: Float, theta parameter for the embedding controlling the
-            frequency range. Higher values create lower frequencies. Defaults to 10000.0.
-        assert_positive: Boolean, ensures coordinates are positive (useful for
-            normalized coordinate systems). Defaults to True.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        2D tensor with shape: `(num_positions, ndim)` or
-        3D tensor with shape: `(batch_size, num_positions, ndim)`
+        ┌──────────────────────────────────┐
+        │  Input coords (..., ndim)        │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  For each coord dimension k:     │
+        │    phi_k = p_k * omega           │
+        │    omega_i = 1/Θ^(2i/d')        │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Concatenate [phi_1,...,phi_ndim] │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Pad if dim % ndim != 0          │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Output phase angles (..., dim)  │
+        └──────────────────────────────────┘
 
-    Output shape:
-        2D tensor with shape: `(num_positions, dim)` or
-        3D tensor with shape: `(batch_size, num_positions, dim)`
+    :param dim: Dimensionality of the embedding (typically ``head_dim`` in
+        attention). Must be positive and should be divisible by ``ndim``.
+    :type dim: int
+    :param ndim: Number of coordinate dimensions (e.g., 2 for 2D, 3 for 3D).
+        Must be positive.
+    :type ndim: int
+    :param max_wavelength: Theta parameter controlling the frequency range.
+        Higher values create lower frequencies. Defaults to ``10000.0``.
+    :type max_wavelength: float
+    :param assert_positive: Whether to check that coordinates are positive
+        (useful for normalized coordinate systems). Defaults to ``True``.
+    :type assert_positive: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Returns:
-        Complex frequencies as phase angles for applying rotational position encoding.
-
-    Raises:
-        ValueError: If dim is too small for the given ndim.
-        ValueError: If input shape is invalid.
-
-    Example:
-        ```python
-        # 3D coordinates for attention
-        positions = keras.random.uniform((32, 3)) * 1000
-        rope = ContinuousRoPE(dim=64, ndim=3)  # head_dim=64
-        freqs = rope(positions)
-        print(freqs.shape)  # (32, 64)
-
-        # 2D coordinates with batch dimension
-        positions = keras.random.uniform((8, 100, 2)) * 256
-        rope = ContinuousRoPE(dim=128, ndim=2)
-        freqs = rope(positions)
-        print(freqs.shape)  # (8, 100, 128)
-        ```
-
-    Notes:
-        The output represents phase angles that can be used to rotate query and key
-        vectors for position-aware attention. The layer automatically handles padding
-        when dim is not cleanly divisible by ndim.
+    :raises ValueError: If ``dim`` is too small for the given ``ndim``.
+    :raises ValueError: If input shape is invalid.
     """
 
     def __init__(
@@ -174,16 +171,11 @@ class ContinuousRoPE(keras.layers.Layer):
         self.omega = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's frequency weights.
+        """Create the layer's fixed frequency weights.
 
-        This is called automatically when the layer first processes input.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is invalid.
         """
         # Validate input shape
         if len(input_shape) < 2:
@@ -216,16 +208,15 @@ class ContinuousRoPE(keras.layers.Layer):
             coords: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Generate continuous RoPE frequencies.
+        """Generate continuous RoPE phase angles from spatial coordinates.
 
-        Args:
-            coords: Input tensor of coordinates with shape (..., ndim).
-            training: Boolean indicating training mode (unused).
-
-        Returns:
-            Complex frequencies tensor with shape (..., dim) representing
-            phase angles for rotational position encoding.
+        :param coords: Input tensor of coordinates with shape ``(..., ndim)``.
+        :type coords: keras.KerasTensor
+        :param training: Whether in training mode (unused).
+        :type training: Optional[bool]
+        :return: Phase angles tensor with shape ``(..., dim)`` for rotational
+            position encoding.
+        :rtype: keras.KerasTensor
         """
         if self.assert_positive:
             # Check if coordinates are positive
@@ -269,24 +260,21 @@ class ContinuousRoPE(keras.layers.Layer):
         return phases
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
+        """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple with last dimension changed to self.dim.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape with last dimension changed to ``dim``.
+        :rtype: Tuple[Optional[int], ...]
         """
         input_shape_list = list(input_shape)
         return tuple(input_shape_list[:-1] + [self.dim])
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all layer configuration parameters.
+        :return: Dictionary containing all layer configuration parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

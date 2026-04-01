@@ -78,97 +78,75 @@ class SwinMLP(keras.layers.Layer):
     """
     MLP module for Swin Transformer with configurable activation and regularization.
 
-    This layer implements a two-layer feedforward network (MLP) with configurable
-    hidden dimension, activation function, dropout, and regularization. Originally
-    designed for Swin Transformer blocks, it serves as a general-purpose MLP with
-    an expansion-contraction pattern for learning complex non-linear transformations.
+    This layer implements the standard transformer "expand-then-contract" FFN pattern
+    ``FFN(x) = W_2 * activation(W_1 @ x + b_1) + b_2`` with dual dropout layers
+    for regularization. Input is expanded to ``hidden_dim``, activated (default GELU),
+    dropped out, contracted to ``output_dim`` (or ``input_dim`` if ``output_dim`` is
+    None), and dropped out again before the residual connection.
 
-    The layer follows the standard transformer MLP pattern:
-    1. **Expansion**: Linear projection to higher-dimensional space (hidden_dim)
-    2. **Activation**: Non-linear transformation (default: GELU)
-    3. **Regularization**: Optional dropout for generalization
-    4. **Contraction**: Linear projection back to output dimension
-    5. **Final Regularization**: Optional dropout before residual connection
+    **Architecture Overview:**
 
-    Mathematical formulation:
-        h = Dense₁(x) -> activation(h) -> dropout(h) -> Dense₂(h) -> dropout(output)
+    .. code-block:: text
 
-    Where x ∈ ℝ^(input_dim), h ∈ ℝ^(hidden_dim), output ∈ ℝ^(output_dim).
+        ┌─────────────────────────────┐
+        │   Input (..., input_dim)     │
+        └────────────┬────────────────┘
+                     ▼
+        ┌─────────────────────────────┐
+        │   fc1: Dense(hidden_dim)     │
+        └────────────┬────────────────┘
+                     ▼
+        ┌─────────────────────────────┐
+        │  Activation (e.g. GELU)      │
+        └────────────┬────────────────┘
+                     ▼
+        ┌─────────────────────────────┐
+        │   drop1: Dropout             │
+        └────────────┬────────────────┘
+                     ▼
+        ┌─────────────────────────────┐
+        │   fc2: Dense(output_dim)     │
+        └────────────┬────────────────┘
+                     ▼
+        ┌─────────────────────────────┐
+        │   drop2: Dropout             │
+        └────────────┬────────────────┘
+                     ▼
+        ┌──────────────────────────────┐
+        │  Output (..., output_dim)     │
+        └──────────────────────────────┘
 
-    Key Features:
-    - Flexible dimensionality with configurable hidden and output dimensions
-    - Support for any Keras activation function or custom callables
-    - Built-in dropout regularization with configurable rates
-    - Comprehensive weight initialization and regularization options
-    - Optimized for both training stability and inference efficiency
+    :param hidden_dim: Integer, dimension of the hidden layer. Must be positive.
+    :type hidden_dim: int
+    :param use_bias: Whether to use bias in Dense layers. Defaults to True.
+    :type use_bias: bool
+    :param output_dim: Optional integer, dimension of the output layer. If None, uses
+        input dimension for identity output shape. Defaults to None.
+    :type output_dim: Optional[int]
+    :param activation: Activation function. Supports Keras activation names
+        ('gelu', 'relu', 'swish') or custom callables. Defaults to 'gelu'.
+    :type activation: Union[str, Callable]
+    :param dropout_rate: Dropout rate applied after activation and before
+        output. Must be between 0.0 and 1.0. Defaults to 0.0.
+    :type dropout_rate: float
+    :param kernel_initializer: Initializer for Dense layer kernels.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for Dense layer biases.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularization applied to Dense layer kernels.
+        Accepts L1, L2, or custom regularizers.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularization applied to Dense layer biases.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param activity_regularizer: Optional regularization applied to layer outputs.
+    :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kwargs: Additional keyword arguments for Layer base class.
 
-    Args:
-        hidden_dim: Integer, dimension of the hidden layer. Must be positive.
-        use_bias: Boolean, whether to use bias in Dense layers. Defaults to True.
-        output_dim: Optional integer, dimension of the output layer. If None, uses
-            input dimension for identity output shape. Defaults to None.
-        activation: String or callable, activation function. Supports Keras
-            activation names ('gelu', 'relu', 'swish') or custom callables.
-            Defaults to 'gelu'.
-        dropout_rate: Float, dropout rate applied after activation and before
-            output. Must be between 0.0 and 1.0. Defaults to 0.0.
-        kernel_initializer: String or Initializer, initializer for Dense layer
-            kernels. Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, initializer for Dense layer
-            biases. Defaults to 'zeros'.
-        kernel_regularizer: Optional Regularizer, regularization applied to
-            Dense layer kernels. Accepts L1, L2, or custom regularizers.
-        bias_regularizer: Optional Regularizer, regularization applied to
-            Dense layer biases.
-        activity_regularizer: Optional Regularizer, regularization applied to
-            layer outputs.
-        **kwargs: Additional keyword arguments for Layer base class.
-
-    Input shape:
-        N-D tensor with shape (..., input_dim) where input_dim is the size of
-        the last dimension.
-
-    Output shape:
-        N-D tensor with shape (..., output_dim) where output_dim is specified in
-        constructor or equals input_dim if output_dim=None.
-
-    Attributes:
-        fc1: First Dense layer (expansion to hidden_dim).
-        act: Activation layer.
-        drop1: First Dropout layer (applied after activation).
-        fc2: Second Dense layer (contraction to output_dim).
-        drop2: Second Dropout layer (applied before output).
-
-    Example:
-        ```python
-        # Basic usage in Swin Transformer
-        mlp = SwinMLP(hidden_dim=256, drop_rate=0.1)
-
-        # Custom configuration
-        mlp = SwinMLP(
-            hidden_dim=512,
-            output_dim=128,
-            activation='swish',
-            drop_rate=0.2,
-            kernel_regularizer=keras.regularizers.L2(1e-4)
-        )
-
-        # In a model
-        inputs = keras.Input(shape=(196, 384))  # Swin patches
-        x = SwinMLP(hidden_dim=1536, drop_rate=0.1)(inputs)
-        outputs = keras.layers.LayerNormalization()(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - Liu et al., "Swin Transformer: Hierarchical Vision Transformer using
-          Shifted Windows", ICCV 2021
-        - https://arxiv.org/abs/2103.14030
-
-    Raises:
-        ValueError: If hidden_dim is not positive.
-        ValueError: If drop_rate is not in [0.0, 1.0].
-        ValueError: If output_dim is specified but not positive.
+    :raises ValueError: If hidden_dim is not positive.
+    :raises ValueError: If dropout_rate is not in [0.0, 1.0].
+    :raises ValueError: If output_dim is specified but not positive.
 
     Note:
         This implementation creates all sub-layers during initialization and
@@ -241,11 +219,11 @@ class SwinMLP(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        This method creates the layer's structure and builds all sub-layers
-        for robust serialization following modern Keras 3 patterns.
+        Creates the layer's structure and builds all sub-layers for robust
+        serialization following modern Keras 3 patterns.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) < 2:
@@ -296,16 +274,15 @@ class SwinMLP(keras.layers.Layer):
         """
         Forward pass of the SwinMLP layer.
 
-        Applies the two-layer MLP transformation with activation and dropout.
-        The computation follows: fc1 -> activation -> dropout1 -> fc2 -> dropout2.
+        Applies the two-layer MLP transformation: fc1 -> activation -> dropout1 -> fc2 -> dropout2.
 
-        Args:
-            inputs: Input tensor of shape (..., input_dim).
-            training: Boolean indicating whether the layer should behave in
-                training mode (applying dropout) or inference mode.
-
-        Returns:
-            Output tensor of shape (..., output_dim) after MLP transformation.
+        :param inputs: Input tensor of shape (..., input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            (applying dropout) or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (..., output_dim) after MLP transformation.
+        :rtype: keras.KerasTensor
         """
         # First linear transformation (expansion)
         x = self.fc1(inputs)
@@ -328,11 +305,10 @@ class SwinMLP(keras.layers.Layer):
         """
         Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple with last dimension set to output_dim or input_dim.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with last dimension set to output_dim or input_dim.
+        :rtype: Tuple[Optional[int], ...]
         """
         # Convert to list for manipulation
         output_shape = list(input_shape)
@@ -349,10 +325,9 @@ class SwinMLP(keras.layers.Layer):
         Get layer configuration for serialization.
 
         Returns all constructor parameters needed to recreate the layer.
-        This is critical for proper serialization and deserialization.
 
-        Returns:
-            Dictionary containing the complete layer configuration.
+        :return: Dictionary containing the complete layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

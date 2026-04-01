@@ -80,100 +80,68 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class RotaryPositionEmbedding(keras.layers.Layer):
-    """
-    Rotary Position Embedding layer for transformer attention mechanisms.
+    """Rotary Position Embedding (RoPE) layer for transformer attention.
 
-    This layer applies rotary transformations to query and key vectors in attention
-    mechanisms, encoding relative positional information through trigonometric
-    rotation of vector pairs. RoPE enables natural relative position encoding
-    without explicit positional embeddings and supports sequence length extrapolation.
+    Applies rotary transformations to query and key vectors, encoding relative
+    positional information through trigonometric rotation of feature-dimension
+    pairs. For each pair ``[x_{2i}, x_{2i+1}]`` at position ``m``, RoPE
+    applies a 2D rotation by angle ``m * theta_i`` where
+    ``theta_i = 1 / (rope_theta^(2i/d))``. The resulting dot product
+    ``<f(q,m), f(k,n)>`` depends only on the relative displacement ``m - n``,
+    enabling natural relative position encoding without learned parameters.
+    Partial application (controlled by ``rope_percentage``) leaves remaining
+    dimensions unchanged for stability.
 
-    **Intent**: Provide efficient and mathematically sound positional encoding
-    for transformer models through rotary embeddings that preserve relative
-    position relationships and enable length generalization.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, heads, seq_len, head_dim])
-           ↓
-    Split: RoPE_dims | Pass_dims
-           ↓              ↓
-    Rotate(cos/sin)   Identity
-           ↓              ↓
-    Concat: Output(shape=[batch, heads, seq_len, head_dim])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operation**:
-        For vector pairs [x₂ᵢ, x₂ᵢ₊₁], applies rotation:
-        ```
-        [x'₂ᵢ]   [cos(mθᵢ)  -sin(mθᵢ)] [x₂ᵢ]
-        [x'₂ᵢ₊₁] = [sin(mθᵢ)   cos(mθᵢ)] [x₂ᵢ₊₁]
-        ```
-        where m is position index and θᵢ = 1/(10000^(2i/d))
+        ┌──────────────────────────────────────────┐
+        │  Input (batch, heads, seq_len, head_dim)  │
+        └───────────────────┬──────────────────────┘
+                            ▼
+        ┌───────────────────┬──────────────────────┐
+        │  x_rope           │  x_pass              │
+        │  [:rope_dim]      │  [rope_dim:]         │
+        └────────┬──────────┘──────────┬───────────┘
+                 ▼                     │
+        ┌────────────────────┐         │
+        │  Reshape to pairs  │         │
+        │  (rope_dim//2, 2)  │         │
+        └────────┬───────────┘         │
+                 ▼                     │
+        ┌────────────────────┐         │
+        │  Rotate each pair  │         │
+        │  [cos -sin] [x1]   │         │
+        │  [sin  cos] [x2]   │         │
+        └────────┬───────────┘         │
+                 ▼                     │
+        ┌────────────────────┐         │
+        │  Reshape back      │         │
+        └────────┬───────────┘         │
+                 └──────────┬──────────┘
+                            ▼
+        ┌──────────────────────────────────────────┐
+        │  Concatenate → Output (same shape)        │
+        └──────────────────────────────────────────┘
 
-    **Key Features**:
-    - Relative position encoding without learned parameters
-    - Sequence length extrapolation capability
-    - Partial application to maintain model stability
-    - Efficient cos/sin table caching
-    - Cross-backend compatibility via keras.ops
+    :param head_dim: Dimensionality of each attention head. Must be positive.
+    :type head_dim: int
+    :param max_seq_len: Maximum sequence length for precomputing rotary tables.
+        Must be positive.
+    :type max_seq_len: int
+    :param rope_theta: Base frequency for rotary computation. Higher values
+        work better for longer sequences. Defaults to ``10000.0``.
+    :type rope_theta: float
+    :param rope_percentage: Fraction of head dimensions to apply RoPE to.
+        Defaults to ``0.5`` for stability. Must be in ``(0, 1]``.
+    :type rope_percentage: float
+    :param kwargs: Additional Layer base class arguments.
 
-    Args:
-        head_dim: Integer, dimensionality of each attention head. Must be positive.
-        max_seq_len: Integer, maximum sequence length for precomputing rotary tables.
-            Must be positive.
-        rope_theta: Float, base frequency for rotary computation. Higher values
-            work better for longer sequences. Defaults to 10000.0. Must be positive.
-        rope_percentage: Float between 0.0 and 1.0, fraction of head dimensions
-            to apply RoPE to. Defaults to 0.5 for stability. Must be in (0, 1].
-        **kwargs: Additional Layer base class arguments.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, num_heads, seq_len, head_dim)`
-
-    Output shape:
-        4D tensor with shape: `(batch_size, num_heads, seq_len, head_dim)`
-        Same as input shape.
-
-    Attributes:
-        cos_cached: Non-trainable weight containing cached cosine values.
-        sin_cached: Non-trainable weight containing cached sine values.
-
-    Example:
-        ```python
-        # Basic usage for attention heads
-        rope = RotaryPositionEmbedding(head_dim=64, max_seq_len=512)
-        queries = keras.random.normal([2, 8, 128, 64])  # (batch, heads, seq, dim)
-        keys = keras.random.normal([2, 8, 128, 64])
-
-        q_rotated = rope(queries)
-        k_rotated = rope(keys)
-
-        # Use rotated Q/K in attention computation
-        attention_scores = keras.ops.matmul(q_rotated, k_rotated, transpose_b=True)
-
-        # Custom configuration for longer sequences
-        rope_long = RotaryPositionEmbedding(
-            head_dim=128,
-            max_seq_len=2048,
-            rope_theta=50000.0,      # Higher theta for better extrapolation
-            rope_percentage=0.25     # Apply to fewer dimensions
-        )
-        ```
-
-    Raises:
-        ValueError: If head_dim, max_seq_len, or rope_theta are not positive.
-        ValueError: If rope_percentage is not in the range (0, 1].
-        ValueError: If input sequence length exceeds max_seq_len.
-
-    Note:
-        This layer creates cos/sin lookup tables for efficiency. For very long
-        sequences, consider position interpolation techniques or increasing
-        rope_theta for better extrapolation behavior.
-
-    References:
-        RoFormer: Enhanced Transformer with Rotary Position Embedding
-        https://arxiv.org/abs/2104.09864
+    :raises ValueError: If ``head_dim``, ``max_seq_len``, or ``rope_theta``
+        are not positive.
+    :raises ValueError: If ``rope_percentage`` is not in the range ``(0, 1]``.
+    :raises ValueError: If input sequence length exceeds ``max_seq_len``.
     """
 
     def __init__(
@@ -216,17 +184,13 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         self.sin_cached = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's cos/sin lookup tables.
+        """Create the cos/sin lookup tables for RoPE computation.
 
-        This is called automatically when the layer first processes input.
-        Creates efficient cos/sin cache tables for RoPE computation.
-
-        Args:
-            input_shape: Expected shape (batch_size, num_heads, seq_len, head_dim)
-
-        Raises:
-            ValueError: If input shape is not 4D or head_dim doesn't match.
+        :param input_shape: Expected shape
+            ``(batch_size, num_heads, seq_len, head_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is not 4D or ``head_dim`` does not
+            match.
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -315,17 +279,17 @@ class RotaryPositionEmbedding(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply rotary position embedding to input tensor.
+        """Apply rotary position embedding to the input tensor.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, num_heads, seq_len, head_dim).
-            training: Boolean indicating training mode (not used in this layer).
-
-        Returns:
-            Output tensor with same shape, RoPE applied to first rope_dim dimensions.
-
-        Raises:
-            ValueError: If input sequence length exceeds max_seq_len.
+        :param inputs: Input tensor with shape
+            ``(batch_size, num_heads, seq_len, head_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode (unused by this layer).
+        :type training: Optional[bool]
+        :return: Output tensor with same shape, RoPE applied to the first
+            ``rope_dim`` dimensions.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If input sequence length exceeds ``max_seq_len``.
         """
         # Get sequence length from input
         seq_len = keras.ops.shape(inputs)[2]
@@ -351,12 +315,13 @@ class RotaryPositionEmbedding(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Apply rotary position embedding transformation.
 
-        Args:
-            x: Input tensor with shape (batch_size, num_heads, seq_len, head_dim)
-            seq_len: Current sequence length tensor
-
-        Returns:
-            Tensor with RoPE applied to the first rope_dim dimensions
+        :param x: Input tensor with shape
+            ``(batch_size, num_heads, seq_len, head_dim)``.
+        :type x: keras.KerasTensor
+        :param seq_len: Current sequence length tensor.
+        :type seq_len: keras.KerasTensor
+        :return: Tensor with RoPE applied to the first ``rope_dim`` dimensions.
+        :rtype: keras.KerasTensor
         """
         # Split into RoPE and pass-through dimensions
         x_rope = x[..., :self.rope_dim]     # Apply RoPE to these dimensions
@@ -408,13 +373,12 @@ class RotaryPositionEmbedding(keras.layers.Layer):
             return x_rope_rotated
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape - identical to input shape.
+        """Compute output shape (identical to input shape).
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple (same as input shape).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         # RoPE preserves tensor shape while applying rotational transformations
         return input_shape
@@ -422,8 +386,9 @@ class RotaryPositionEmbedding(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.
 
-        Returns:
-            Dictionary containing ALL __init__ parameters for proper serialization.
+        :return: Dictionary containing all ``__init__`` parameters for proper
+            serialization.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

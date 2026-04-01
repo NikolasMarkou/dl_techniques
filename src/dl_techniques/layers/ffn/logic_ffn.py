@@ -93,72 +93,78 @@ class LogicFFN(keras.layers.Layer):
     """
     Logic-based Feed-Forward Network using learnable soft logic operations.
 
-    This layer transforms input into soft-bit representations and applies
-    fundamental logic operations (AND, OR, XOR) with learnable gating mechanisms
-    to combine the results. The architecture is inspired by Neural Logic Machines
-    and provides a novel approach to information processing in neural networks.
+    This layer projects input into soft-bit operands via sigmoid, computes three
+    parallel differentiable logic operations -- Soft AND (``a * b``), Soft OR
+    (``a + b - a*b``), and Soft XOR (``(a - b)^2``) -- then dynamically gates
+    the results using a temperature-scaled softmax over learned weights. The
+    gated combination is projected to the output dimension, enabling the network
+    to learn interpretable logical reasoning patterns.
 
-    The layer works by:
-    1. Projecting input to logic space with two operands
-    2. Converting to soft-bits using sigmoid activation
-    3. Performing logic operations (AND, OR, XOR)
-    4. Learning dynamic gates to weight operation importance
-    5. Combining results and projecting back to output dimension
+    **Architecture Overview:**
 
-    Args:
-        output_dim: Integer, the final output dimension of the layer. Must be positive.
-        logic_dim: Integer, the intermediate dimension for logic operations.
-            Controls the complexity of logical reasoning. Must be positive.
-        use_bias: Boolean, whether to use bias terms in dense layers.
-            Defaults to True.
-        kernel_initializer: String or initializer instance for kernel weights.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or initializer instance for bias weights.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        temperature: Float, temperature parameter for softmax gating.
-            Higher values make gating more uniform. Must be positive. Defaults to 1.0.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, input_dim)`
+        ┌──────────────────────────────────────┐
+        │ Input (batch, seq_len, input_dim)     │
+        └──────────────────┬───────────────────┘
+                           │
+                     ┌─────┴─────┐
+                     ▼           ▼
+        ┌────────────────┐ ┌────────────────────┐
+        │logic_projection│ │  gate_projection    │
+        │Dense(logic*2)  │ │  Dense(3)           │
+        └───────┬────────┘ └───────┬────────────┘
+                ▼                  ▼
+        ┌────────────────┐ ┌────────────────────┐
+        │ Split (a, b)   │ │ softmax(g / temp)  │
+        │ sigmoid(a,b)   │ │ -> [g_and,g_or,g_xor]│
+        └───────┬────────┘ └───────┬────────────┘
+                ▼                  │
+        ┌────────────────┐         │
+        │ Parallel Logic │         │
+        │ AND: a*b       │         │
+        │ OR: a+b-a*b    │         │
+        │ XOR: (a-b)^2   │         │
+        └───────┬────────┘         │
+                │                  │
+                └────────┬─────────┘
+                         ▼
+        ┌──────────────────────────────────────┐
+        │  Gated Combination (weighted sum)     │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  output_projection: Dense(output_dim) │
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌──────────────────────────────────────┐
+        │ Output (batch, seq_len, output_dim)   │
+        └──────────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, output_dim)`
+    :param output_dim: Integer, the final output dimension of the layer. Must be positive.
+    :type output_dim: int
+    :param logic_dim: Integer, the intermediate dimension for logic operations.
+        Controls the complexity of logical reasoning. Must be positive.
+    :type logic_dim: int
+    :param use_bias: Whether to use bias terms in dense layers.
+        Defaults to True.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for kernel weights.
+        Defaults to 'glorot_uniform'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for bias weights.
+        Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param temperature: Temperature parameter for softmax gating.
+        Higher values make gating more uniform. Must be positive. Defaults to 1.0.
+    :type temperature: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Attributes:
-        logic_projection: Dense layer projecting input to logic space with 2 operands.
-        gate_projection: Dense layer learning weights for logic operation gating.
-        output_projection: Dense layer projecting combined logic results to output.
-        num_logic_ops: Number of logic operations (always 3: AND, OR, XOR).
-
-    Example:
-        ```python
-        # Basic usage
-        layer = LogicFFN(output_dim=768, logic_dim=256)
-
-        inputs = keras.Input(shape=(128, 768))
-        outputs = layer(inputs)
-        print(outputs.shape)  # (None, 128, 768)
-
-        # Advanced configuration with regularization
-        layer = LogicFFN(
-            output_dim=768,
-            logic_dim=256,
-            use_bias=False,
-            kernel_regularizer=keras.regularizers.L2(1e-4),
-            temperature=1.5
-        )
-
-        # In a transformer model
-        inputs = keras.Input(shape=(128, 768))
-        x = LogicFFN(output_dim=768, logic_dim=256)(inputs)
-        model = keras.Model(inputs, x)
-        ```
-
-    Raises:
-        ValueError: If output_dim, logic_dim, or temperature are not positive.
+    :raises ValueError: If output_dim, logic_dim, or temperature are not positive.
 
     Note:
         This layer is particularly effective for tasks requiring explicit
@@ -243,14 +249,12 @@ class LogicFFN(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        For robust serialization, explicitly build each sub-layer
-        following the Modern Keras 3 pattern.
+        Explicitly builds each sub-layer for robust serialization following
+        the modern Keras 3 pattern.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Raises:
-            ValueError: If input shape is invalid.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If input shape is invalid.
         """
         if self.built:
             return
@@ -293,12 +297,12 @@ class LogicFFN(keras.layers.Layer):
         """
         Forward pass through the logic FFN.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, sequence_length, input_dim).
-            training: Boolean indicating training mode.
-
-        Returns:
-            Output tensor of shape (batch_size, sequence_length, output_dim).
+        :param inputs: Input tensor of shape (batch_size, sequence_length, input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Boolean indicating training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (batch_size, sequence_length, output_dim).
+        :rtype: keras.KerasTensor
         """
         # Step 1: Project to logic space and split into two operands
         projected = self.logic_projection(inputs, training=training)
@@ -345,11 +349,10 @@ class LogicFFN(keras.layers.Layer):
         """
         Compute output shape given input shape.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
-
-        Returns:
-            Output shape tuple with last dimension changed to output_dim.
+        :param input_shape: Shape tuple of input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with last dimension changed to output_dim.
+        :rtype: Tuple[Optional[int], ...]
         """
         # Replace last dimension with output_dim
         output_shape_list = list(input_shape)
@@ -362,8 +365,8 @@ class LogicFFN(keras.layers.Layer):
 
         Returns ALL initialization parameters to ensure proper reconstruction.
 
-        Returns:
-            Dictionary containing complete layer configuration.
+        :return: Dictionary containing complete layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -387,12 +390,12 @@ def create_logic_ffn_standard(output_dim: int, logic_dim: int) -> LogicFFN:
     """
     Create a standard LogicFFN layer with recommended settings.
 
-    Args:
-        output_dim: Output dimension.
-        logic_dim: Logic operation dimension.
-
-    Returns:
-        Configured LogicFFN layer.
+    :param output_dim: Output dimension.
+    :type output_dim: int
+    :param logic_dim: Logic operation dimension.
+    :type logic_dim: int
+    :return: Configured LogicFFN layer.
+    :rtype: LogicFFN
     """
     return LogicFFN(
         output_dim=output_dim,
@@ -409,13 +412,14 @@ def create_logic_ffn_regularized(
     """
     Create a LogicFFN layer with L2 regularization.
 
-    Args:
-        output_dim: Output dimension.
-        logic_dim: Logic operation dimension.
-        l2_reg: L2 regularization strength.
-
-    Returns:
-        Configured LogicFFN layer with regularization.
+    :param output_dim: Output dimension.
+    :type output_dim: int
+    :param logic_dim: Logic operation dimension.
+    :type logic_dim: int
+    :param l2_reg: L2 regularization strength.
+    :type l2_reg: float
+    :return: Configured LogicFFN layer with regularization.
+    :rtype: LogicFFN
     """
     return LogicFFN(
         output_dim=output_dim,

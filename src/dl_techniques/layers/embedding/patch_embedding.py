@@ -72,57 +72,68 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class PatchEmbedding2D(keras.layers.Layer):
-    """2D Image to Patch Embedding Layer.
+    """2D image to patch embedding layer for Vision Transformers.
 
-    Splits images into patches and linearly embeds each patch into a feature vector.
-    This is commonly used as the first layer in Vision Transformers to convert
-    images into sequences of patch embeddings.
+    Splits images into non-overlapping patches and linearly projects each patch
+    into a fixed-dimensional embedding vector using a single ``Conv2D`` operation
+    whose kernel size and stride both equal the patch size. For an input image
+    ``X ∈ R^(H x W x C)``, the layer produces ``N = (H/P_h) * (W/P_w)`` patch
+    vectors of dimension ``embed_dim``, where ``P_h`` and ``P_w`` are the patch
+    height and width respectively. The projection ``z_i = x_p^(i) * E`` is
+    learned end-to-end, with ``E ∈ R^((P_h*P_w*C) x D)``.
 
-    This layer follows the modern Keras 3 pattern where sub-layers are created in
-    __init__() and explicitly built in build() for robust serialization.
+    **Architecture Overview:**
 
-    Args:
-        patch_size: Size of patches to split the input image into. Can be an integer
-            for square patches or a tuple (height, width) for rectangular patches.
-            Must be positive.
-        embed_dim: Embedding dimension for each patch. Must be positive.
-        kernel_initializer: Initializer for the projection matrix. Defaults to
-            "glorot_normal".
-        kernel_regularizer: Optional regularizer function for the projection matrix.
-        bias_initializer: Initializer for the bias vector. Defaults to "zeros".
-        bias_regularizer: Optional regularizer function for the bias vector.
-        activation: Activation function to apply after patch projection. Defaults
-            to "linear" (no activation).
-        use_bias: Boolean, whether to use bias in the projection layer. Defaults to True.
-        **kwargs: Additional layer arguments.
+    .. code-block:: text
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)` where
-        height and width must be divisible by the corresponding patch dimensions.
+        ┌──────────────────────────────────┐
+        │  Input (batch, H, W, C)          │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Conv2D(filters=embed_dim,       │
+        │    kernel=patch_size,            │
+        │    stride=patch_size)            │
+        │  → (batch, H/P_h, W/P_w, D)     │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Reshape → (batch, N, D)         │
+        │  N = (H/P_h) * (W/P_w)          │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Output (batch, num_patches, D)  │
+        └──────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, num_patches, embed_dim)` where
-        num_patches = (height // patch_height) * (width // patch_width).
+    :param patch_size: Size of patches to split the input image into. Can be an
+        integer for square patches or a tuple ``(height, width)`` for rectangular
+        patches. Must be positive.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param embed_dim: Embedding dimension for each patch. Must be positive.
+    :type embed_dim: int
+    :param kernel_initializer: Initializer for the projection matrix.
+        Defaults to ``"glorot_normal"``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer function for the projection
+        matrix.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_initializer: Initializer for the bias vector. Defaults to
+        ``"zeros"``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Optional regularizer function for the bias vector.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param activation: Activation function to apply after patch projection.
+        Defaults to ``"linear"`` (no activation).
+    :type activation: Optional[Union[str, callable]]
+    :param use_bias: Whether to use bias in the projection layer. Defaults to
+        ``True``.
+    :type use_bias: bool
+    :param kwargs: Additional layer arguments.
 
-    Raises:
-        ValueError: If patch_size or embed_dim are not positive.
-        ValueError: If input dimensions are not divisible by patch dimensions during call.
-
-    Example:
-        ```python
-        # Create patch embedding layer
-        patch_embed = PatchEmbedding2D(patch_size=16, embed_dim=768)
-
-        # Input image
-        inputs = keras.Input(shape=(224, 224, 3))  # Standard ImageNet size
-
-        # Convert to patches
-        patches = patch_embed(inputs)
-        print(patches.shape)  # (None, 196, 768) - 196 = 14*14 patches
-
-        # In a model
-        model = keras.Model(inputs, patches)
-        ```
+    :raises ValueError: If ``patch_size`` or ``embed_dim`` are not positive.
+    :raises ValueError: If input dimensions are not divisible by patch dimensions
+        during call.
     """
 
     def __init__(
@@ -182,8 +193,9 @@ class PatchEmbedding2D(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and its sub-layers.
 
-        Args:
-            input_shape: Shape of the input tensor (batch_size, height, width, channels).
+        :param input_shape: Shape of the input tensor
+            ``(batch_size, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 4:
@@ -208,15 +220,17 @@ class PatchEmbedding2D(keras.layers.Layer):
         logger.info(f"Built PatchEmbedding2D with input_shape={input_shape}")
 
     def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the layer.
+        """Project image patches into embedding vectors.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Embedded patches tensor of shape (batch_size, num_patches, embed_dim).
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode or
+            inference mode.
+        :type training: Optional[bool]
+        :return: Embedded patches tensor of shape
+            ``(batch_size, num_patches, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Apply convolution to extract and embed patches
         x = self.proj(inputs, training=training)  # (batch_size, h_patches, w_patches, embed_dim)
@@ -237,11 +251,10 @@ class PatchEmbedding2D(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple (batch_size, num_patches, embed_dim).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple ``(batch_size, num_patches, embed_dim)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")
@@ -262,8 +275,9 @@ class PatchEmbedding2D(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration of the layer for serialization.
 
-        Returns:
-            Dictionary containing ALL __init__ parameters for proper serialization.
+        :return: Dictionary containing all ``__init__`` parameters for proper
+            serialization.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -284,53 +298,61 @@ class PatchEmbedding2D(keras.layers.Layer):
 
 @keras.saving.register_keras_serializable()
 class PatchEmbedding1D(keras.layers.Layer):
-    """Patch embedding layer for time series data.
+    """1D patch embedding layer for time series data.
 
-    Converts time series into patches and embeds them into a higher dimensional space.
-    Supports overlapping patches through stride parameter.
+    Converts time series into patches and embeds them into a higher-dimensional
+    space using a single ``Conv1D`` operation. For an input sequence of length
+    ``L`` with ``F`` features, the layer extracts patches of size ``patch_size``
+    with a configurable ``stride`` (supporting overlapping patches) and projects
+    each patch to ``embed_dim`` dimensions. The convolution kernel weights serve
+    as the learnable projection matrix ``E ∈ R^(patch_size*F x embed_dim)``.
 
-    This layer follows the modern Keras 3 pattern where sub-layers are created in
-    __init__() and explicitly built in build() for robust serialization.
+    **Architecture Overview:**
 
-    Args:
-        patch_size: Integer, size of each patch. Must be positive.
-        embed_dim: Integer, embedding dimension. Must be positive.
-        stride: Integer, stride for patch extraction. If None, uses patch_size (non-overlapping).
-            Must be positive if provided.
-        padding: String, padding mode ('same', 'valid', or 'causal'). Defaults to 'causal'.
-        use_bias: Boolean, whether to use bias in the embedding layer. Defaults to True.
-        kernel_initializer: Initializer for the kernel weights. Defaults to "glorot_uniform".
-        bias_initializer: Initializer for the bias vector. Defaults to "zeros".
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, seq_len, features)`.
+        ┌──────────────────────────────────┐
+        │  Input (batch, seq_len, features)│
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  NaN → 0 replacement             │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Conv1D(filters=embed_dim,       │
+        │    kernel=patch_size,            │
+        │    stride=stride, padding=pad)   │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Output (batch, out_len, D)      │
+        └──────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, output_len, embed_dim)` where
-        output_len depends on padding mode and stride.
+    :param patch_size: Size of each patch. Must be positive.
+    :type patch_size: int
+    :param embed_dim: Embedding dimension. Must be positive.
+    :type embed_dim: int
+    :param stride: Stride for patch extraction. If ``None``, uses
+        ``patch_size`` (non-overlapping). Must be positive if provided.
+    :type stride: Optional[int]
+    :param padding: Padding mode (``'same'``, ``'valid'``, or ``'causal'``).
+        Defaults to ``'causal'``.
+    :type padding: str
+    :param use_bias: Whether to use bias in the embedding layer. Defaults to
+        ``True``.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for the kernel weights. Defaults to
+        ``"glorot_uniform"``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for the bias vector. Defaults to
+        ``"zeros"``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Raises:
-        ValueError: If patch_size, embed_dim, or stride are not positive.
-        ValueError: If padding is not one of the allowed values.
-
-    Example:
-        ```python
-        # Create 1D patch embedding layer
-        patch_embed = PatchEmbedding1D(patch_size=16, embed_dim=256)
-
-        # Input time series
-        inputs = keras.Input(shape=(128, 64))  # seq_len=128, features=64
-
-        # Convert to patches
-        patches = patch_embed(inputs)
-        print(patches.shape)  # (None, 8, 256) - 8 patches from 128 timesteps
-
-        # With overlapping patches
-        patch_embed_overlap = PatchEmbedding1D(patch_size=16, embed_dim=256, stride=8)
-        patches_overlap = patch_embed_overlap(inputs)
-        print(patches_overlap.shape)  # (None, 15, 256) - more patches due to overlap
-        ```
+    :raises ValueError: If ``patch_size``, ``embed_dim``, or ``stride`` are not
+        positive.
+    :raises ValueError: If ``padding`` is not one of the allowed values.
     """
 
     def __init__(
@@ -383,8 +405,9 @@ class PatchEmbedding1D(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and its sub-layers.
 
-        Args:
-            input_shape: Shape of the input tensor (batch_size, seq_len, features).
+        :param input_shape: Shape of the input tensor
+            ``(batch_size, seq_len, features)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -402,13 +425,15 @@ class PatchEmbedding1D(keras.layers.Layer):
     def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
         """Convert inputs to patches and embed them.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, features).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Embedded patches tensor of shape (batch_size, output_len, embed_dim).
+        :param inputs: Input tensor of shape
+            ``(batch_size, seq_len, features)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode or
+            inference mode.
+        :type training: Optional[bool]
+        :return: Embedded patches tensor of shape
+            ``(batch_size, output_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Handle NaN values by replacing with zeros
         x = ops.where(ops.isnan(inputs), 0.0, inputs)
@@ -421,11 +446,10 @@ class PatchEmbedding1D(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape after patch embedding.
 
-        Args:
-            input_shape: Shape of the input tensor.
-
-        Returns:
-            Output shape tuple (batch_size, output_len, embed_dim).
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple ``(batch_size, output_len, embed_dim)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D")
@@ -448,8 +472,9 @@ class PatchEmbedding1D(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing ALL __init__ parameters for proper serialization.
+        :return: Dictionary containing all ``__init__`` parameters for proper
+            serialization.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

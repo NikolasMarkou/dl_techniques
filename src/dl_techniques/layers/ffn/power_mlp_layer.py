@@ -93,90 +93,77 @@ from ..activations.basis_function import BasisFunction
 
 @keras.saving.register_keras_serializable()
 class PowerMLPLayer(keras.layers.Layer):
-    """PowerMLP layer with dual-branch architecture for enhanced expressiveness.
+    """
+    PowerMLP layer with dual-branch architecture for enhanced expressiveness.
 
-    This layer implements the PowerMLP architecture, which combines two parallel
-    branches to achieve superior function approximation capabilities compared to
-    standard dense layers:
+    This layer combines two parallel branches -- a piecewise polynomial pathway
+    (Dense followed by ReLU-k activation, ``y_main = (max(0, W @ x + b))^k``) and a
+    smooth function pathway (BasisFunction followed by Dense, ``y_basis = W_b @ phi(x)``)
+    -- whose outputs are summed element-wise: ``output = y_main + y_basis``. This
+    enables the layer to simultaneously capture sharp localized patterns and smooth
+    global trends.
 
-    1. **Main Branch**: Dense → ReLU-k activation
-    2. **Basis Branch**: BasisFunction → Dense (no bias)
+    **Architecture Overview:**
 
-    The outputs are combined via element-wise addition:
-        output = main_branch + basis_branch
+    .. code-block:: text
 
-    Where:
-        - main_branch = ReLU-k(Dense(x))
-        - basis_branch = Dense(BasisFunction(x))
+        ┌──────────────────────────────┐
+        │    Input (..., input_dim)     │
+        └──────────────┬───────────────┘
+                       │
+                 ┌─────┴─────┐
+                 ▼           ▼
+        ┌──────────────┐ ┌──────────────────┐
+        │  main_dense  │ │  basis_function   │
+        │   (Dense)    │ │ (BasisFunction)   │
+        └──────┬───────┘ └────────┬─────────┘
+               ▼                  ▼
+        ┌──────────────┐ ┌──────────────────┐
+        │   ReLU-k     │ │   basis_dense    │
+        │  max(0,x)^k  │ │  (Dense, no bias)│
+        └──────┬───────┘ └────────┬─────────┘
+               │                  │
+               └────────┬─────────┘
+                        ▼
+        ┌──────────────────────────────┐
+        │     Element-wise Addition     │
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │    Output (..., units)        │
+        └──────────────────────────────┘
 
-    The PowerMLP architecture leverages the complementary properties of ReLU-k
-    (for capturing sharp, piecewise patterns) and basis functions (for smooth,
-    differentiable transformations) to model complex non-linear relationships
-    more effectively than traditional MLPs.
+    :param units: Integer, number of output units/neurons in the layer. Must be positive.
+    :type units: int
+    :param k: Integer, power exponent for the ReLU-k activation function.
+        Must be positive. Higher values create more aggressive non-linearities.
+        Defaults to 3.
+    :type k: int
+    :param kernel_initializer: Initializer for the kernel weights in both branches.
+        Can be string name or Initializer instance. Defaults to 'he_normal'.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for the bias vector in the main branch.
+        Can be string name or Initializer instance. Defaults to 'zeros'.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer function applied to kernel weights
+        in both branches. Defaults to None.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Optional regularizer function applied to bias vector
+        in the main branch. Defaults to None.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_bias: Whether to use bias in the main branch dense layer.
+        The basis branch never uses bias by design. Defaults to True.
+    :type use_bias: bool
+    :param kwargs: Additional keyword arguments passed to the Layer parent class,
+        such as ``name``, ``dtype``, ``trainable``, etc.
 
-    Args:
-        units: Integer, number of output units/neurons in the layer. Must be positive.
-        k: Integer, power exponent for the ReLU-k activation function.
-            Must be positive. Higher values create more aggressive non-linearities.
-            Defaults to 3.
-        kernel_initializer: Initializer for the kernel weights in both branches.
-            Can be string name or Initializer instance. Defaults to 'he_normal'.
-        bias_initializer: Initializer for the bias vector in the main branch.
-            Can be string name or Initializer instance. Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer function applied to kernel weights
-            in both branches. Defaults to None.
-        bias_regularizer: Optional regularizer function applied to bias vector
-            in the main branch. Defaults to None.
-        use_bias: Boolean, whether to use bias in the main branch dense layer.
-            The basis branch never uses bias by design. Defaults to True.
-        **kwargs: Additional keyword arguments passed to the Layer parent class,
-            such as `name`, `dtype`, `trainable`, etc.
-
-    Input shape:
-        N-D tensor with shape: `(..., input_dim)`.
-        Most common case would be 2D input with shape `(batch_size, input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(..., units)`.
-        For instance, for 2D input with shape `(batch_size, input_dim)`,
-        the output would have shape `(batch_size, units)`.
-
-    Example:
-        ```python
-        # Create a PowerMLP layer
-        power_mlp = PowerMLPLayer(units=64, k=3)
-
-        # Use in a model
-        model = keras.Sequential([
-            keras.layers.Input(shape=(784,)),
-            PowerMLPLayer(units=128, k=2),
-            keras.layers.Dropout(0.2),
-            PowerMLPLayer(units=64, k=3),
-            keras.layers.Dense(10, activation='softmax')
-        ])
-
-        # Or in functional API
-        inputs = keras.Input(shape=(784,))
-        x = PowerMLPLayer(units=128, k=2)(inputs)
-        x = keras.layers.LayerNormalization()(x)
-        outputs = PowerMLPLayer(units=10, k=1)(x)
-        model = keras.Model(inputs, outputs)
-        ```
-
-    References:
-        - PowerMLP architectures for enhanced function approximation
-        - Combines benefits of ReLU-k and basis function activations
-        - Designed for improved gradient flow and expressiveness
-
-    Raises:
-        ValueError: If units or k are not positive integers.
-        TypeError: If k is not an integer.
+    :raises ValueError: If units or k are not positive integers.
+    :raises TypeError: If k is not an integer.
 
     Note:
-        - The main branch uses bias while the basis branch does not
-        - Both branches share the same kernel initializer and regularizer
-        - The layer requires both ReLUK and BasisFunction to be available
-        - For k=1, this reduces to standard ReLU in the main branch
+        The main branch uses bias while the basis branch does not.
+        Both branches share the same kernel initializer and regularizer.
+        For k=1, this reduces to standard ReLU in the main branch.
     """
 
     def __init__(
@@ -190,21 +177,26 @@ class PowerMLPLayer(keras.layers.Layer):
             use_bias: bool = True,
             **kwargs: Any
     ) -> None:
-        """Initialize the PowerMLP layer.
+        """
+        Initialize the PowerMLP layer.
 
-        Args:
-            units: Number of output units. Must be positive.
-            k: Power for ReLU-k activation. Must be positive integer.
-            kernel_initializer: Initializer for kernel weights.
-            bias_initializer: Initializer for bias vector.
-            kernel_regularizer: Regularizer for kernel weights.
-            bias_regularizer: Regularizer for bias vector.
-            use_bias: Whether to use bias in main branch.
-            **kwargs: Additional keyword arguments for Layer parent class.
-
-        Raises:
-            ValueError: If units or k are not positive integers.
-            TypeError: If k is not an integer.
+        :param units: Number of output units. Must be positive.
+        :type units: int
+        :param k: Power for ReLU-k activation. Must be positive integer.
+        :type k: int
+        :param kernel_initializer: Initializer for kernel weights.
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param bias_initializer: Initializer for bias vector.
+        :type bias_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Regularizer for kernel weights.
+        :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param bias_regularizer: Regularizer for bias vector.
+        :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+        :param use_bias: Whether to use bias in main branch.
+        :type use_bias: bool
+        :param kwargs: Additional keyword arguments for Layer parent class.
+        :raises ValueError: If units or k are not positive integers.
+        :raises TypeError: If k is not an integer.
         """
         super().__init__(**kwargs)
 
@@ -260,14 +252,15 @@ class PowerMLPLayer(keras.layers.Layer):
         logger.info(f"Initialized PowerMLP layer with {units} units, k={k}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer weights and initialize sublayers.
+        """
+        Build the layer weights and initialize sublayers.
 
-        This method explicitly builds all sub-layers to ensure robust serialization.
-        This is the modern Keras 3 pattern for composite layers.
+        Explicitly builds all sub-layers to ensure robust serialization
+        following the modern Keras 3 pattern for composite layers.
 
-        Args:
-            input_shape: Shape tuple of the input tensor, including the batch
-                dimension as None or an integer.
+        :param input_shape: Shape tuple of the input tensor, including the batch
+            dimension as None or an integer.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Build sub-layers in computational order for robust serialization
         self.main_dense.build(input_shape)
@@ -290,26 +283,24 @@ class PowerMLPLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass implementing the dual-branch PowerMLP architecture.
-
-        Computes:
-            main_branch = ReLU-k(Dense(inputs))
-            basis_branch = Dense(BasisFunction(inputs))
-            output = main_branch + basis_branch
-
-        Args:
-            inputs: Input tensor of shape (..., input_dim).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor of shape (..., units) after combining both branches.
         """
-        # Main branch: Dense → ReLU-k
+        Forward pass implementing the dual-branch PowerMLP architecture.
+
+        Computes ``output = ReLU_k(Dense(x)) + Dense(BasisFunction(x))``.
+
+        :param inputs: Input tensor of shape (..., input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode
+            or inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (..., units) after combining both branches.
+        :rtype: keras.KerasTensor
+        """
+        # Main branch: Dense -> ReLU-k
         main_branch = self.main_dense(inputs, training=training)
         main_branch = self.relu_k(main_branch, training=training)
 
-        # Basis branch: BasisFunction → Dense
+        # Basis branch: BasisFunction -> Dense
         basis_branch = self.basis_function(inputs, training=training)
         basis_branch = self.basis_dense(basis_branch, training=training)
 
@@ -322,13 +313,13 @@ class PowerMLPLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
+        """
+        Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-
-        Returns:
-            Output shape tuple with the last dimension replaced by units.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with the last dimension replaced by units.
+        :rtype: Tuple[Optional[int], ...]
         """
         # Convert to list for manipulation
         input_shape_list = list(input_shape)
@@ -340,11 +331,12 @@ class PowerMLPLayer(keras.layers.Layer):
         return tuple(output_shape_list)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get the layer configuration for serialization.
+        """
+        Get the layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration, including all
+        :return: Dictionary containing the layer configuration, including all
             constructor parameters and parent class configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -359,10 +351,11 @@ class PowerMLPLayer(keras.layers.Layer):
         return config
 
     def __repr__(self) -> str:
-        """Return string representation of the layer.
+        """
+        Return string representation of the layer.
 
-        Returns:
-            String representation including key parameters.
+        :return: String representation including key parameters.
+        :rtype: str
         """
         return f"PowerMLPLayer(units={self.units}, k={self.k}, name='{self.name}')"
 

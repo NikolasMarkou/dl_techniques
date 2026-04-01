@@ -7,60 +7,67 @@ from typing import Optional, Any, Dict, Tuple
 
 @keras.saving.register_keras_serializable()
 class ModernBertEmbeddings(keras.layers.Layer):
-    """
-    Computes embeddings for ModernBERT from token and type IDs.
+    """ModernBERT embedding layer combining word and token type embeddings.
 
-    This layer handles the initial embedding lookup for input tokens and segment
-    (token type) IDs. It combines these two embeddings and then applies layer
-    normalization and dropout. Notably, it does not include absolute position
-    embeddings, as positional information is handled by Rotary Position
-    Embeddings (RoPE) within the attention layers.
+    Computes initial token representations by summing word embeddings and
+    segment (token type) embeddings, then applying layer normalization and
+    dropout. Unlike classical BERT, this layer omits absolute positional
+    embeddings since positional information is handled by Rotary Position
+    Embeddings (RoPE) within the attention layers. The combined embedding is
+    ``E = E_word(token_i) + E_segment(type_i)``, followed by LayerNorm and
+    Dropout.
 
-    **Intent**:
-    To provide the initial, fixed-dimensional vector representations for input
-    tokens that serve as the input to the main transformer encoder stack,
-    following modern Keras patterns for robust serialization.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input (input_ids, token_type_ids)
-           ↓
-    Word Embeddings + Token Type Embeddings
-           ↓
-    Layer Normalization
-           ↓
-    Dropout
-           ↓
-    Output [batch, seq_len, hidden_size]
-    ```
+    .. code-block:: text
 
-    Args:
-        vocab_size: Integer, the size of the vocabulary.
-        hidden_size: Integer, the dimensionality of the embedding vectors.
-        type_vocab_size: Integer, the number of segment types (e.g., 2 for
-            sentence A/B).
-        initializer_range: Float, standard deviation for the truncated normal
-            initializer used for embedding weights.
-        layer_norm_eps: Float, a small epsilon value for numerical stability in
-            the layer normalization.
-        dropout_rate: Float, dropout rate applied to the final embeddings.
-        use_bias: Boolean, whether the layer normalization sub-layer should use
-            a bias term.
-        **kwargs: Additional arguments for the `keras.layers.Layer` base class.
+        ┌──────────────┐  ┌──────────────────┐
+        │  input_ids   │  │ token_type_ids   │
+        │  (batch, L)  │  │ (batch, L)       │
+        └──────┬───────┘  └──────┬───────────┘
+               ▼                  ▼
+        ┌──────────────┐ ┌────────────────────┐
+        │ Word Embed   │ │ Token Type Embed   │
+        │ (vocab, D)   │ │ (type_vocab, D)    │
+        └──────┬───────┘ └──────┬─────────────┘
+               └────────┬───────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Element-wise Sum                    │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  LayerNormalization                  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Dropout                             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Output (batch, L, hidden_size)      │
+        └──────────────────────────────────────┘
 
-    Input shape:
-        - `input_ids`: 2D tensor of shape `(batch_size, sequence_length)`.
-        - `token_type_ids`: (Optional) 2D tensor of shape
-          `(batch_size, sequence_length)`.
-
-    Output shape:
-        A 3D tensor of shape `(batch_size, sequence_length, hidden_size)`.
-
-    Attributes:
-        word_embeddings: `layers.Embedding` for token IDs.
-        token_type_embeddings: `layers.Embedding` for segment type IDs.
-        layer_norm: `layers.LayerNormalization` applied after embedding summation.
-        dropout: `layers.Dropout` applied as the final step.
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param hidden_size: Dimensionality of the embedding vectors.
+    :type hidden_size: int
+    :param type_vocab_size: Number of segment types (e.g., 2 for sentence
+        A/B).
+    :type type_vocab_size: int
+    :param initializer_range: Standard deviation for the truncated normal
+        initializer used for embedding weights.
+    :type initializer_range: float
+    :param layer_norm_eps: Small epsilon value for numerical stability in
+        layer normalization.
+    :type layer_norm_eps: float
+    :param dropout_rate: Dropout rate applied to the final embeddings.
+    :type dropout_rate: float
+    :param use_bias: Whether the layer normalization sub-layer should use a
+        bias term.
+    :type use_bias: bool
+    :param kwargs: Additional arguments for the ``keras.layers.Layer`` base
+        class.
     """
 
     def __init__(
@@ -107,7 +114,12 @@ class ModernBertEmbeddings(keras.layers.Layer):
         self.dropout = layers.Dropout(self.dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Creates the weights for the embedding, norm, and dropout layers."""
+        """Create weights for the embedding, norm, and dropout sub-layers.
+
+        :param input_shape: Shape of the input tensor
+            ``(batch_size, sequence_length)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
         # Build sub-layers explicitly in computational order for robust serialization
         self.word_embeddings.build(input_shape)
         self.token_type_embeddings.build(input_shape)
@@ -125,16 +137,19 @@ class ModernBertEmbeddings(keras.layers.Layer):
         token_type_ids: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Computes the final embedding vectors.
+        """Compute the final embedding vectors from token and segment IDs.
 
-        Args:
-            input_ids: Tensor of token indices.
-            token_type_ids: (Optional) Tensor of segment indices.
-            training: (Optional) Boolean indicating training mode for dropout.
-
-        Returns:
-            The combined, normalized, and regularized embedding tensor.
+        :param input_ids: Tensor of token indices of shape
+            ``(batch_size, seq_length)``.
+        :type input_ids: keras.KerasTensor
+        :param token_type_ids: Optional tensor of segment indices of shape
+            ``(batch_size, seq_length)``. Defaults to zeros if ``None``.
+        :type token_type_ids: Optional[keras.KerasTensor]
+        :param training: Whether in training mode for dropout.
+        :type training: Optional[bool]
+        :return: Combined, normalized, and regularized embedding tensor of
+            shape ``(batch_size, seq_length, hidden_size)``.
+        :rtype: keras.KerasTensor
         """
         seq_length = ops.shape(input_ids)[1]
         # Default token_type_ids to zeros if not provided
@@ -154,11 +169,21 @@ class ModernBertEmbeddings(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape: (batch_size, sequence_length, hidden_size)."""
+        """Compute output shape: ``(batch_size, sequence_length, hidden_size)``.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape with ``hidden_size`` appended.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape + (self.hidden_size,)
 
     def get_config(self) -> Dict[str, Any]:
-        """Returns the layer's configuration for serialization."""
+        """Return the layer's configuration for serialization.
+
+        :return: Dictionary containing all ``__init__`` parameters.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {

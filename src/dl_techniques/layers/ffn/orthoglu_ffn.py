@@ -97,69 +97,73 @@ class OrthoGLUFFN(keras.layers.Layer):
     """
     Orthogonally-Regularized Gated Linear Unit Feed-Forward Network.
 
-    This layer integrates the principles of the `OrthoBlock` into the Gated
-    Linear Unit (GLU) architecture. It replaces standard Dense projections with
-    `OrthoBlock` layers to enforce feature decorrelation and stability.
+    This layer integrates the principles of the ``OrthoBlock`` into the Gated
+    Linear Unit (GLU) architecture, replacing standard Dense projections with
+    orthogonally-regularized blocks to enforce feature decorrelation and stability.
+    The computation is ``output = O_out(activation(gate) * value)`` where
+    ``[gate, value] = split(O_in(x))`` and ``O_in``, ``O_out`` are orthogonally-
+    regularized linear transformations satisfying ``W^T W ≈ I``.
 
-    **Intent (Doctrine)**: Implement "disciplined routing".
-    1. **Discipline**: A first `OrthoBlock` projects the input into a
-       structured, decorrelated, and stable high-dimensional space.
-    2. **Routing**: This clean representation is then split into a `gate` and
-       `value`. The GLU mechanism performs dynamic, content-aware selection.
-    3. **Consolidation**: A second `OrthoBlock` projects the gated result to
-       the final output dimension, re-imposing structural order.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[..., input_dim])
-           ↓
-    OrthoBlock(hidden_dim * 2) ──> Split into (gate, value)
-           │                             │
-           ├─> gate ─> Activation ──────┐
-           │                             ▼
-           └─> value ──────────────────> Multiply ──> Dropout ──> OrthoBlock
-                                                                       │
-                                                                       ▼
-                                                           Output(shape=[...])
-    ```
+    .. code-block:: text
 
-    **Data Flow**:
-    1. Structured projection to expand dimensionality using `OrthoBlock`.
-    2. Split into `gate` and `value` tensors of equal size.
-    3. Apply activation function to the `gate` tensor.
-    4. Element-wise multiplication of the activated gate with the `value`.
-    5. Apply dropout for regularization.
-    6. Final structured projection to the target output dimension.
+        ┌──────────────────────────────────┐
+        │     Input (..., input_dim)        │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │ OrthoBlock(hidden_dim * 2)        │
+        │ (orthogonal regularization)       │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │    Split into (gate, value)       │
+        └───────┬──────────────────┬───────┘
+                ▼                  │
+        ┌──────────────┐           │
+        │  Activation   │           │
+        └───────┬──────┘           │
+                │                  │
+                └──────────┬───────┘
+                           ▼
+        ┌──────────────────────────────────┐
+        │      Element-wise Multiply        │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │       Dropout (optional)          │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │    OrthoBlock(output_dim)          │
+        │    (orthogonal regularization)     │
+        └──────────────┬───────────────────┘
+                       ▼
+        ┌──────────────────────────────────┐
+        │    Output (..., output_dim)        │
+        └──────────────────────────────────┘
 
-    Args:
-        hidden_dim: Integer, dimensionality of the intermediate hidden layer
-            (size of `gate` and `value` tensors). Must be positive.
-        output_dim: Integer, dimensionality of the final output. Must be
-            positive.
-        activation: Activation function for the gate. Can be a string name
-            ('gelu', 'relu') or a callable. Defaults to 'gelu'.
-        dropout_rate: Float between 0 and 1, dropout rate applied after
-            gating for regularization. Defaults to 0.0.
-        use_bias: Boolean, whether the internal `OrthoBlock` dense layers use
-            bias. Defaults to True.
-        ortho_reg_factor: Float or Tuple[float, float]. Regularization
-            strength for the input and output `OrthoBlock`s. If a single
-            float is provided, it is used for both. Defaults to 0.01.
-        scale_initial_value: Float or Tuple[float, float]. Initial value for
-            the constrained scaling gates inside the `OrthoBlock`s.
-            Defaults to 0.9.
-        **kwargs: Additional keyword arguments for the base Layer class.
-
-    Input shape:
-        N-D tensor with shape: `(batch_size, ..., input_dim)`.
-
-    Output shape:
-        N-D tensor with shape: `(batch_size, ..., output_dim)`.
-
-    Attributes:
-        input_proj_ortho: The first `OrthoBlock` for input projection.
-        output_proj_ortho: The second `OrthoBlock` for output projection.
-        dropout: Dropout layer for regularization.
+    :param hidden_dim: Integer, dimensionality of the intermediate hidden layer
+        (size of gate and value tensors). Must be positive.
+    :type hidden_dim: int
+    :param output_dim: Integer, dimensionality of the final output. Must be
+        positive.
+    :type output_dim: int
+    :param activation: Activation function for the gate. Can be a string name
+        ('gelu', 'relu') or a callable. Defaults to 'gelu'.
+    :type activation: Union[str, Callable]
+    :param dropout_rate: Float between 0 and 1, dropout rate applied after
+        gating for regularization. Defaults to 0.0.
+    :type dropout_rate: float
+    :param use_bias: Whether the internal OrthoBlock dense layers use
+        bias. Defaults to True.
+    :type use_bias: bool
+    :param ortho_reg_factor: Float or Tuple[float, float]. Regularization
+        strength for the input and output OrthoBlocks. If a single
+        float is provided, it is used for both. Defaults to 1.0.
+    :type ortho_reg_factor: Union[float, Tuple[float, float]]
+    :param kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -222,9 +226,11 @@ class OrthoGLUFFN(keras.layers.Layer):
         """
         Build the layer and all its sub-layers.
 
-        CRITICAL: For composite layers, you MUST explicitly build each
-        sub-layer. This ensures their weight variables are created before
-        Keras attempts to load saved weights during deserialization.
+        Explicitly builds each sub-layer to ensure their weight variables are
+        created before Keras attempts to load saved weights during deserialization.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined")
@@ -243,7 +249,16 @@ class OrthoGLUFFN(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass for the OrthoGLU FFN."""
+        """
+        Forward pass for the OrthoGLU FFN.
+
+        :param inputs: Input tensor of shape (..., input_dim).
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Output tensor of shape (..., output_dim).
+        :rtype: keras.KerasTensor
+        """
         gate_and_value = self.input_proj_ortho(inputs, training=training)
 
         gate, value = ops.split(gate_and_value, indices_or_sections=2, axis=-1)
@@ -259,17 +274,25 @@ class OrthoGLUFFN(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Computes the output shape of the layer."""
+        """
+        Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple with last dimension = output_dim.
+        :rtype: Tuple[Optional[int], ...]
+        """
         output_shape = list(input_shape)
         output_shape[-1] = self.output_dim
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the layer's configuration for serialization.
+        Return the layer's configuration for serialization.
 
-        CRITICAL: Must include ALL parameters from __init__ for proper
-        reconstruction.
+        :return: Dictionary containing all parameters from __init__ for proper
+            reconstruction.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update(

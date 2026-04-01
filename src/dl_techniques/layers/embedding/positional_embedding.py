@@ -74,62 +74,62 @@ from dl_techniques.utils.logger import logger
 
 @keras.saving.register_keras_serializable()
 class PositionalEmbedding(keras.layers.Layer):
-    """Learned positional embedding layer with enhanced stability.
+    """Learned absolute positional embedding layer with dropout regularization.
 
-    This layer adds learnable positional embeddings to input sequences, allowing
-    the model to understand the position of elements in the sequence. The embeddings
-    are learned during training and can capture complex positional relationships.
+    Adds learnable positional embeddings to input sequences, enabling the model
+    to encode absolute token positions. A weight matrix ``P ∈ R^(M x D)`` is
+    maintained as a lookup table; for an input sequence of length ``L``, the
+    first ``L`` rows are sliced and added element-wise:
+    ``Y_i = X_i + P_i  for i = 0, ..., L-1``. An optional dropout is applied
+    after the addition for regularization.
 
-    This layer follows the modern Keras 3 pattern where sub-layers are created in
-    __init__() and weights are created in build() for robust serialization.
+    **Architecture Overview:**
 
-    Args:
-        max_seq_len: Integer, maximum sequence length that this layer can handle.
-            Must be positive.
-        dim: Integer, embedding dimension. Must match the last dimension of input
-            and be positive.
-        dropout_rate: Float, dropout rate applied after adding positional embeddings.
-            Must be in [0, 1]. Default is 0.0 (no dropout).
-        pos_initializer: String or Initializer, initializer for positional embeddings.
-            Default is "truncated_normal".
-        scale: Float, standard deviation for truncated normal initialization when
-            using default initializer. Must be positive. Default is 0.02.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
 
-    Input shape:
-        3D tensor with shape: `(batch_size, seq_len, dim)` where seq_len <= max_seq_len.
+        ┌──────────────────────────────────┐
+        │  Input (batch, seq_len, dim)     │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Slice positional table P[:L]    │
+        │  P ∈ R^(1, max_seq_len, dim)    │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Add: X + P[:L]                  │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Dropout                         │
+        └───────────────┬──────────────────┘
+                        ▼
+        ┌──────────────────────────────────┐
+        │  Output (batch, seq_len, dim)    │
+        └──────────────────────────────────┘
 
-    Output shape:
-        3D tensor with shape: `(batch_size, seq_len, dim)` (same as input).
+    :param max_seq_len: Maximum sequence length that this layer can handle.
+        Must be positive.
+    :type max_seq_len: int
+    :param dim: Embedding dimension. Must match the last dimension of input
+        and be positive.
+    :type dim: int
+    :param dropout_rate: Dropout rate applied after adding positional
+        embeddings. Must be in ``[0, 1]``. Default is ``0.0``.
+    :type dropout_rate: float
+    :param pos_initializer: Initializer for positional embeddings. Default is
+        ``"truncated_normal"``.
+    :type pos_initializer: Union[str, keras.initializers.Initializer]
+    :param scale: Standard deviation for truncated normal initialization when
+        using default initializer. Must be positive. Default is ``0.02``.
+    :type scale: float
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
-    Raises:
-        ValueError: If max_seq_len, dim, or scale are not positive.
-        ValueError: If dropout_rate is not in [0, 1].
-        ValueError: If input dimension doesn't match expected dim during build.
-
-    Example:
-        ```python
-        # Create positional embedding layer
-        pos_embed = PositionalEmbedding(max_seq_len=512, dim=256)
-
-        # Input sequence
-        inputs = keras.Input(shape=(128, 256))  # seq_len=128, dim=256
-
-        # Add positional information
-        output = pos_embed(inputs)
-        print(output.shape)  # (None, 128, 256)
-
-        # With dropout for regularization
-        pos_embed_dropout = PositionalEmbedding(
-            max_seq_len=512,
-            dim=256,
-            dropout=0.1
-        )
-        output_dropout = pos_embed_dropout(inputs)
-
-        # In a model
-        model = keras.Model(inputs, output_dropout)
-        ```
+    :raises ValueError: If ``max_seq_len``, ``dim``, or ``scale`` are not
+        positive.
+    :raises ValueError: If ``dropout_rate`` is not in ``[0, 1]``.
+    :raises ValueError: If input dimension does not match expected ``dim``
+        during build.
     """
 
     def __init__(
@@ -180,8 +180,9 @@ class PositionalEmbedding(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer by creating weights and building sub-layers.
 
-        Args:
-            input_shape: Shape tuple of the input tensor (batch_size, seq_len, dim).
+        :param input_shape: Shape tuple of the input tensor
+            ``(batch_size, seq_len, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Validate input shape
         if len(input_shape) != 3:
@@ -218,13 +219,14 @@ class PositionalEmbedding(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Add positional embeddings to input tensor.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, seq_len, dim).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Output tensor with positional embeddings added.
+        :param inputs: Input tensor with shape ``(batch_size, seq_len, dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer should behave in training mode or
+            inference mode.
+        :type training: Optional[bool]
+        :return: Output tensor with positional embeddings added, same shape as
+            input.
+        :rtype: keras.KerasTensor
         """
         # Get sequence length using keras ops for backend compatibility
         input_shape = ops.shape(inputs)
@@ -248,19 +250,19 @@ class PositionalEmbedding(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple (same as input shape).
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (same as input shape).
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing ALL __init__ parameters for proper serialization.
+        :return: Dictionary containing all ``__init__`` parameters for proper
+            serialization.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

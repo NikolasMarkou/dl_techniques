@@ -62,82 +62,60 @@ from typing import Optional, Dict, Any, Tuple
 
 @keras.saving.register_keras_serializable()
 class PositionEmbeddingSine2D(keras.layers.Layer):
-    """
-    Generates 2D sinusoidal positional encodings for image-like feature maps.
+    """Fixed 2D sinusoidal positional encoding for image-like feature maps.
 
-    This layer creates fixed, non-learnable 2D positional encodings based on sine
-    and cosine functions of different frequencies. These encodings provide spatial
-    awareness to models like transformers when processing 2D data. The generated
-    encodings are typically added to the input feature map.
+    Generates non-learnable positional encodings using sine and cosine functions
+    of varying frequencies along both spatial axes independently. For a feature
+    map of shape ``(H, W)``, coordinate grids are created for both axes,
+    optionally normalized, and then encoded via
+    ``PE(pos, 2i) = sin(pos / T^(2i/d))`` and
+    ``PE(pos, 2i+1) = cos(pos / T^(2i/d))``, where ``T`` is the temperature
+    and ``d = num_pos_feats``. The y-axis and x-axis encodings are concatenated
+    to produce the final output of dimension ``2 * num_pos_feats``.
 
-    **Intent**: Provide a standard, non-learnable method for encoding spatial
-    information in 2D feature maps, critical for attention-based models that
-    do not inherently process positional data.
+    **Architecture Overview:**
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C])
-           ↓
-    Generate 1D coordinate grids for Y and X axes
-           ↓
-    Normalize coordinates to a fixed range (optional)
-           ↓
-    Apply sinusoidal functions of varying frequencies:
-      - PE(pos, 2i)   = sin(pos / temp^(2i/d))
-      - PE(pos, 2i+1) = cos(pos / temp^(2i/d))
-           ↓
-    Concatenate Y-axis and X-axis encodings
-           ↓
-    Transpose to channels-first format
-           ↓
-    Output(shape=[batch, 2 * num_pos_feats, H, W])
-    ```
+    .. code-block:: text
 
-    **Mathematical Operation**:
-    For each position `(y, x)` and feature dimension `i`, the encoding is:
-        P_y(y, 2i)   = sin(y / T^(2i/d))
-        P_y(y, 2i+1) = cos(y / T^(2i/d))
-        P_x(x, 2i)   = sin(x / T^(2i/d))
-        P_x(x, 2i+1) = cos(x / T^(2i/d))
-    Where:
-    - `d` is `num_pos_feats`
-    - `T` is `temperature`
+        ┌──────────────────────────────────────┐
+        │  Input (batch, H, W, C)              │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Generate Y / X coordinate grids     │
+        │  via cumulative sum over mask        │
+        └──────┬────────────────┬──────────────┘
+               ▼                ▼
+        ┌──────────────┐ ┌──────────────┐
+        │  Normalize Y │ │  Normalize X │
+        │  (optional)  │ │  (optional)  │
+        └──────┬───────┘ └──────┬───────┘
+               ▼                ▼
+        ┌──────────────┐ ┌──────────────┐
+        │  sin/cos(Y)  │ │  sin/cos(X)  │
+        │  → d feats   │ │  → d feats   │
+        └──────┬───────┘ └──────┬───────┘
+               └───────┬────────┘
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Concatenate → (batch, 2d, H, W)     │
+        └──────────────────────────────────────┘
 
-    Args:
-        num_pos_feats: Integer, the number of features for the positional encoding.
-            This corresponds to half the channel dimension of the final encoding.
-            Defaults to 64.
-        temperature: Float, the temperature value that controls the frequency of
-            the sine and cosine functions. Defaults to 10000.0.
-        normalize: Boolean, if True, normalizes the positional encodings by the
-            spatial dimensions before applying trigonometric functions.
-            Defaults to True.
-        scale: Float, a scaling factor for the normalized positional encodings.
-            Only used if `normalize` is True. Defaults to 2 * math.pi.
-        **kwargs: Additional arguments for the Layer base class.
-
-    Input shape:
-        A 4D tensor with shape `(batch_size, height, width, channels)`. The channel
-        dimension is not used but the spatial dimensions are required.
-
-    Output shape:
-        A 4D tensor with shape `(batch_size, 2 * num_pos_feats, height, width)`.
-
-    Example:
-        ```python
-        # For a feature map from a CNN
-        inputs = keras.Input(shape=(32, 32, 256))
-
-        # Create positional encoding layer
-        pos_encoding_layer = PositionEmbeddingSine2D(num_pos_feats=128)
-
-        # Generate positional encodings
-        # Output shape will be (batch, 256, 32, 32)
-        pos_encodings = pos_encoding_layer(inputs)
-
-        # The encodings would typically be added to the input features
-        # after reshaping/transposing the input.
-        ```
+    :param num_pos_feats: Number of features for the positional encoding,
+        corresponding to half the channel dimension of the final encoding.
+        Defaults to ``64``.
+    :type num_pos_feats: int
+    :param temperature: Temperature value that controls the frequency of the
+        sine and cosine functions. Defaults to ``10000.0``.
+    :type temperature: float
+    :param normalize: If ``True``, normalizes the positional encodings by the
+        spatial dimensions before applying trigonometric functions. Defaults
+        to ``True``.
+    :type normalize: bool
+    :param scale: Scaling factor for the normalized positional encodings. Only
+        used if ``normalize`` is ``True``. Defaults to ``2 * pi``.
+    :type scale: float
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -163,7 +141,17 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
         self.scale = scale
 
     def call(self, inputs: keras.KerasTensor, mask: Optional[keras.KerasTensor] = None) -> keras.KerasTensor:
-        """Forward pass to generate positional encodings."""
+        """Generate 2D sinusoidal positional encodings for the input feature map.
+
+        :param inputs: Input tensor of shape ``(batch, H, W, C)``.
+        :type inputs: keras.KerasTensor
+        :param mask: Optional boolean mask of shape ``(batch, H, W)``. Positions
+            where the mask is ``True`` are treated as padding.
+        :type mask: Optional[keras.KerasTensor]
+        :return: Positional encoding tensor of shape
+            ``(batch, 2 * num_pos_feats, H, W)``.
+        :rtype: keras.KerasTensor
+        """
         if mask is None:
             # Assumes a 4D input (B, H, W, C), mask should be (B, H, W)
             mask = ops.zeros(ops.shape(inputs)[:3], dtype="bool")
@@ -199,12 +187,23 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
         return pos
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple
+            ``(batch_size, 2 * num_pos_feats, H, W)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         batch_size, h, w = input_shape[0], input_shape[1], input_shape[2]
         return batch_size, 2 * self.num_pos_feats, h, w
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return configuration for serialization.
+
+        :return: Dictionary containing all ``__init__`` parameters.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_pos_feats": self.num_pos_feats,
