@@ -1,8 +1,9 @@
 """GPT-2 Pre-training Script with Causal Language Modeling.
 
-Pre-trains a GPT-2 decoder on a text dataset (IMDB reviews by default)
-using next-token prediction (causal LM). Saves the trained model for
-downstream fine-tuning or text generation.
+Pre-trains a GPT-2 decoder on a text dataset using next-token prediction
+(causal LM). Supports both TFDS datasets (IMDB) and HuggingFace datasets
+(Wikipedia, OpenWebText, etc.). Saves the trained model for downstream
+fine-tuning or text generation.
 """
 
 import argparse
@@ -21,6 +22,7 @@ from train.common.nlp import (
     create_nlp_callbacks,
 )
 
+from dl_techniques.datasets.nlp import load_wikipedia_dataset, load_hf_text_dataset
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 
@@ -54,9 +56,22 @@ class TrainingConfig:
     # Paths
     save_dir: str = "results/gpt2_pretrain"
 
-    # Data
+    # Data source: "huggingface" or "tfds"
+    dataset_source: str = "huggingface"
+
+    # TFDS settings (used when dataset_source="tfds")
     dataset_name: str = "imdb_reviews"
     max_samples: Optional[int] = 10000
+
+    # HuggingFace settings (used when dataset_source="huggingface")
+    hf_dataset_path: str = "wikimedia/wikipedia"
+    hf_dataset_name: Optional[str] = "20231101.en"
+    hf_text_field: str = "text"
+    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
+    min_article_length: int = 100
+    streaming: bool = True
+    steps_per_epoch: int = 5000
+    val_samples: int = 2000
 
     # Analysis
     run_epoch_analysis: bool = True
@@ -81,14 +96,137 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
     )
 
     # Build to count parameters
-    dummy = keras.random.uniform(
-        (1, config.max_seq_length - 1), 0, config.vocab_size, dtype="int32"
-    )
+    import numpy as np
+    dummy = np.random.randint(
+        0, config.vocab_size, size=(1, config.max_seq_length - 1)
+    ).astype("int32")
     _ = model(dummy, training=False)
 
     total_p = model.count_params()
     logger.info(f"GPT-2 model: {total_p:,} parameters")
     return model
+
+
+# ---------------------------------------------------------------------
+# Data Loading
+# ---------------------------------------------------------------------
+
+
+def _wrap_labels_for_dict_output(
+    dataset: tf.data.Dataset,
+) -> tf.data.Dataset:
+    """Wrap (input_ids, labels) → (input_ids, {"logits": labels}).
+
+    GPT-2 model returns ``{"logits": ..., "last_hidden_state": ...}``,
+    so Keras expects labels in dict format matching the output keys.
+    """
+    return dataset.map(
+        lambda x, y: (x, {"logits": y}),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
+
+def load_train_val_datasets(
+    config: TrainingConfig,
+    preprocessor,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    """Load and preprocess train/val datasets based on config."""
+    if config.dataset_source == "tfds":
+        train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
+    elif config.dataset_source == "huggingface":
+        train_ds, val_ds = _load_hf_datasets(config, preprocessor)
+    else:
+        raise ValueError(
+            f"Unknown dataset_source: {config.dataset_source!r}. "
+            f"Use 'tfds' or 'huggingface'."
+        )
+    return _wrap_labels_for_dict_output(train_ds), _wrap_labels_for_dict_output(val_ds)
+
+
+def _load_tfds_datasets(
+    config: TrainingConfig,
+    preprocessor,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    """Load train/val from TFDS (e.g. IMDB)."""
+    train_dataset = preprocess_clm_dataset(
+        load_text_dataset(config.dataset_name, "train", config.max_samples),
+        preprocessor,
+        config.max_seq_length,
+        config.batch_size,
+    )
+    val_dataset = preprocess_clm_dataset(
+        load_text_dataset(config.dataset_name, "test", config.max_samples),
+        preprocessor,
+        config.max_seq_length,
+        config.batch_size,
+    )
+    return train_dataset, val_dataset
+
+
+def _load_hf_datasets(
+    config: TrainingConfig,
+    preprocessor,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    """Load train/val from HuggingFace (e.g. Wikipedia)."""
+    # Training set: streaming for large datasets
+    if "wikipedia" in config.hf_dataset_path:
+        train_raw = load_wikipedia_dataset(
+            cache_dir=config.hf_cache_dir,
+            config_name=config.hf_dataset_name,
+            min_article_length=config.min_article_length,
+            max_samples=config.max_samples if not config.streaming else None,
+            streaming=config.streaming,
+        )
+    else:
+        train_raw = load_hf_text_dataset(
+            path=config.hf_dataset_path,
+            name=config.hf_dataset_name,
+            text_field=config.hf_text_field,
+            cache_dir=config.hf_cache_dir,
+            min_length=config.min_article_length,
+            max_samples=config.max_samples if not config.streaming else None,
+            streaming=config.streaming,
+        )
+
+    train_dataset = preprocess_clm_dataset(
+        train_raw,
+        preprocessor,
+        config.max_seq_length,
+        config.batch_size,
+        streaming=config.streaming,
+    )
+
+    # Validation set: always non-streaming, small subset
+    logger.info(
+        f"Loading validation set: {config.val_samples} samples (non-streaming)"
+    )
+    if "wikipedia" in config.hf_dataset_path:
+        val_raw = load_wikipedia_dataset(
+            cache_dir=config.hf_cache_dir,
+            config_name=config.hf_dataset_name,
+            min_article_length=config.min_article_length,
+            max_samples=config.val_samples,
+            streaming=True,
+        )
+    else:
+        val_raw = load_hf_text_dataset(
+            path=config.hf_dataset_path,
+            name=config.hf_dataset_name,
+            text_field=config.hf_text_field,
+            cache_dir=config.hf_cache_dir,
+            min_length=config.min_article_length,
+            max_samples=config.val_samples,
+            streaming=True,
+        )
+
+    val_dataset = preprocess_clm_dataset(
+        val_raw,
+        preprocessor,
+        config.max_seq_length,
+        config.batch_size,
+        streaming=False,
+    )
+    return train_dataset, val_dataset
 
 
 # ---------------------------------------------------------------------
@@ -115,8 +253,8 @@ def compile_model(
     )
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=["accuracy"],
+        loss={"logits": keras.losses.SparseCategoricalCrossentropy(from_logits=True)},
+        metrics={"logits": ["accuracy"]},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
@@ -147,25 +285,17 @@ def train_gpt2(
     )
 
     # Data
-    train_dataset = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "train", config.max_samples),
-        preprocessor,
-        config.max_seq_length,
-        config.batch_size,
-    )
-    val_dataset = preprocess_clm_dataset(
-        load_text_dataset(config.dataset_name, "test", config.max_samples),
-        preprocessor,
-        config.max_seq_length,
-        config.batch_size,
-    )
+    train_dataset, val_dataset = load_train_val_datasets(config, preprocessor)
+
+    # Steps per epoch
+    if config.dataset_source == "huggingface" and config.streaming:
+        steps_per_epoch = config.steps_per_epoch
+    elif config.max_samples:
+        steps_per_epoch = config.max_samples // config.batch_size
+    else:
+        steps_per_epoch = 1000
 
     # Model
-    steps_per_epoch = (
-        config.max_samples // config.batch_size
-        if config.max_samples
-        else 1000
-    )
     model = create_gpt2_model(config)
     compile_model(model, config, steps_per_epoch)
 
@@ -179,14 +309,20 @@ def train_gpt2(
     )
 
     # Train
-    logger.info("Starting training...")
-    history = model.fit(
-        train_dataset,
+    logger.info(
+        f"Starting training: source={config.dataset_source}, "
+        f"steps_per_epoch={steps_per_epoch}"
+    )
+    fit_kwargs = dict(
         epochs=config.num_epochs,
         callbacks=callbacks,
         validation_data=val_dataset,
         verbose=1,
     )
+    if config.dataset_source == "huggingface" and config.streaming:
+        fit_kwargs["steps_per_epoch"] = steps_per_epoch
+
+    history = model.fit(train_dataset, **fit_kwargs)
     logger.info("Training completed!")
 
     # Save
@@ -230,8 +366,8 @@ def main() -> None:
     parser.add_argument(
         "--max-samples",
         type=int,
-        default=10000,
-        help="Max training samples",
+        default=None,
+        help="Max training samples (None=unlimited for streaming)",
     )
     parser.add_argument(
         "--max-seq-length",
@@ -245,6 +381,68 @@ def main() -> None:
         default=5e-4,
         help="Peak learning rate",
     )
+
+    # Dataset source
+    parser.add_argument(
+        "--dataset-source",
+        type=str,
+        default="huggingface",
+        choices=["tfds", "huggingface"],
+        help="Dataset source: 'tfds' for TensorFlow Datasets, "
+             "'huggingface' for HuggingFace Hub",
+    )
+
+    # TFDS settings
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default="imdb_reviews",
+        help="TFDS dataset name (when --dataset-source=tfds)",
+    )
+
+    # HuggingFace settings
+    parser.add_argument(
+        "--hf-dataset",
+        type=str,
+        default="wikimedia/wikipedia",
+        help="HuggingFace dataset path (e.g. 'wikimedia/wikipedia', 'openwebtext')",
+    )
+    parser.add_argument(
+        "--hf-config",
+        type=str,
+        default="20231101.en",
+        help="HuggingFace dataset config name",
+    )
+    parser.add_argument(
+        "--hf-cache-dir",
+        type=str,
+        default="/media/arxwn/data0_4tb/datasets/wikipedia",
+        help="Local cache directory for HuggingFace datasets",
+    )
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        default=True,
+        help="Use streaming mode for HF datasets (default: True)",
+    )
+    parser.add_argument(
+        "--no-streaming",
+        dest="streaming",
+        action="store_false",
+        help="Disable streaming (downloads full dataset first)",
+    )
+    parser.add_argument(
+        "--steps-per-epoch",
+        type=int,
+        default=5000,
+        help="Steps per epoch when streaming (default: 5000)",
+    )
+    parser.add_argument(
+        "--val-samples",
+        type=int,
+        default=2000,
+        help="Number of validation samples (default: 2000)",
+    )
     args = parser.parse_args()
 
     setup_gpu(gpu_id=args.gpu)
@@ -253,14 +451,28 @@ def main() -> None:
     config.gpt2_variant = args.variant
     config.num_epochs = args.epochs
     config.batch_size = args.batch_size
-    config.max_samples = args.max_samples
     config.max_seq_length = args.max_seq_length
     config.learning_rate = args.learning_rate
+    config.dataset_source = args.dataset_source
+    config.streaming = args.streaming
+    config.steps_per_epoch = args.steps_per_epoch
+    config.val_samples = args.val_samples
+
+    if args.max_samples is not None:
+        config.max_samples = args.max_samples
+
+    # TFDS settings
+    config.dataset_name = args.dataset_name
+
+    # HuggingFace settings
+    config.hf_dataset_path = args.hf_dataset
+    config.hf_dataset_name = args.hf_config
+    config.hf_cache_dir = args.hf_cache_dir
 
     logger.info(
         f"Config: variant={config.gpt2_variant}, epochs={config.num_epochs}, "
         f"batch_size={config.batch_size}, lr={config.learning_rate}, "
-        f"max_samples={config.max_samples}, seq_len={config.max_seq_length}"
+        f"source={config.dataset_source}, streaming={config.streaming}"
     )
 
     model, history = train_gpt2(config)

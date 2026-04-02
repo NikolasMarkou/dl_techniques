@@ -147,6 +147,7 @@ def preprocess_clm_dataset(
     preprocessor: TiktokenPreprocessor,
     max_seq_length: int,
     batch_size: int,
+    streaming: bool = False,
 ) -> tf.data.Dataset:
     """Tokenize and batch a text dataset for CLM (causal language modeling) training.
 
@@ -159,6 +160,8 @@ def preprocess_clm_dataset(
     :param preprocessor: TiktokenPreprocessor for tokenization.
     :param max_seq_length: Maximum sequence length for tokenization.
     :param batch_size: Batch size for the output dataset.
+    :param streaming: If ``True``, skip ``.cache()`` to avoid OOM on
+        large streaming datasets (e.g. Wikipedia). Default ``False``.
     :return: Batched tf.data.Dataset of ``(input_ids, labels)`` tuples.
         ``input_ids`` shape: ``(batch, max_seq_length - 1)``,
         ``labels`` shape: ``(batch, max_seq_length - 1)``.
@@ -183,13 +186,23 @@ def preprocess_clm_dataset(
         return input_ids, labels
 
     dataset = dataset.map(make_clm_pair, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = (
-        dataset.cache()
-        .shuffle(buffer_size=1000)
-        .batch(batch_size, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
+    if streaming:
+        dataset = (
+            dataset.shuffle(buffer_size=1000)
+            .batch(batch_size, drop_remainder=True)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+    else:
+        dataset = (
+            dataset.cache()
+            .shuffle(buffer_size=1000)
+            .batch(batch_size, drop_remainder=True)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+    logger.info(
+        f"CLM dataset preprocessed: batch_size={batch_size}, "
+        f"seq_len={seq_len - 1}, streaming={streaming}"
     )
-    logger.info(f"CLM dataset preprocessed: batch_size={batch_size}, seq_len={seq_len - 1}")
     return dataset
 
 
