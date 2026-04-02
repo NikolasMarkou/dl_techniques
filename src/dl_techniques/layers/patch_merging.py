@@ -69,14 +69,14 @@ class PatchMerging(keras.layers.Layer):
                          ▼
         ┌───────────────────────────────────┐
         │  Extract 2x2 patches:             │
-        │  x0 (top-left), x1 (bottom-left) │
+        │  x0 (top-left), x1 (bottom-left)  │
         │  x2 (top-right), x3 (bottom-right)│
         └────────────────┬──────────────────┘
                          │
                          ▼
         ┌───────────────────────────────────┐
         │  Concatenate along channels       │
-        │  [batch, H/2, W/2, 4*C]          │
+        │  [batch, H/2, W/2, 4*C]           │
         └────────────────┬──────────────────┘
                          │
                          ▼

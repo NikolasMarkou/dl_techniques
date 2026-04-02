@@ -77,7 +77,7 @@ class MultiHeadAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────────────────────────────────────────┐
-        │              MultiHeadAttention Wrapper                │
+        │              MultiHeadAttention Wrapper               │
         │                                                       │
         │   Input [B, seq, dim]                                 │
         │          │                                            │
@@ -92,7 +92,7 @@ class MultiHeadAttention(keras.layers.Layer):
         │   │        scores = Q @ K^T / sqrt(d_k)         │     │
         │   │                  │                          │     │
         │   │                  ▼                          │     │
-        │   │        [+ attention_mask]                    │     │
+        │   │        [+ attention_mask]                   │     │
         │   │                  │                          │     │
         │   │                  ▼                          │     │
         │   │        softmax ──► weights @ V              │     │

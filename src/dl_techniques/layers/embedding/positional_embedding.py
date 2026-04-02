@@ -93,7 +93,7 @@ class PositionalEmbedding(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────┐
         │  Slice positional table P[:L]    │
-        │  P ∈ R^(1, max_seq_len, dim)    │
+        │  P ∈ R^(1, max_seq_len, dim)     │
         └───────────────┬──────────────────┘
                         ▼
         ┌──────────────────────────────────┐

@@ -64,7 +64,7 @@ class ConvBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────────┐
-        │  Input [B, H, W, C]            │
+        │  Input [B, H, W, C]             │
         └──────────────┬──────────────────┘
                        ▼
         ┌─────────────────────────────────┐
@@ -74,7 +74,7 @@ class ConvBlock(keras.layers.Layer):
         └──────────────┬──────────────────┘
                        ▼
         ┌─────────────────────────────────┐
-        │  Output [B, H', W', filters]   │
+        │  Output [B, H', W', filters]    │
         └─────────────────────────────────┘
 
     :param filters: Number of output filters. Must be positive.
@@ -250,24 +250,24 @@ class AreaAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────────────────────┐
-        │  Input [B, H, W, C]              │
+        │  Input [B, H, W, C]               │
         └──────────────┬────────────────────┘
                        ▼
         ┌───────────────────────────────────┐
-        │  QK = ConvBlock 1x1 → [B,H,W,2D]│
-        │  V  = ConvBlock 1x1 → [B,H,W,D] │
-        │  PE = DW ConvBlock 5x5 on V      │
+        │  QK = ConvBlock 1x1 → [B,H,W,2D]  │
+        │  V  = ConvBlock 1x1 → [B,H,W,D]   │
+        │  PE = DW ConvBlock 5x5 on V       │
         └──────────────┬────────────────────┘
                        ▼
         ┌───────────────────────────────────┐
-        │  Reshape to [B, areas, seq, D]   │
-        │  Multi-head scaled dot-product   │
-        │  attention within each area      │
+        │  Reshape to [B, areas, seq, D]    │
+        │  Multi-head scaled dot-product    │
+        │  attention within each area       │
         └──────────────┬────────────────────┘
                        ▼
         ┌───────────────────────────────────┐
-        │  Add PE + projection ConvBlock   │
-        │  Output [B, H, W, dim]           │
+        │  Add PE + projection ConvBlock    │
+        │  Output [B, H, W, dim]            │
         └───────────────────────────────────┘
 
     :param dim: Number of feature dimensions. Must be divisible by ``num_heads``.
@@ -520,7 +520,7 @@ class AttentionBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌────────────────────────────────┐
-        │  Input [B, H, W, C]           │
+        │  Input [B, H, W, C]            │
         └──────────────┬─────────────────┘
                        ▼
         ┌────────────────────────────────┐
@@ -531,11 +531,11 @@ class AttentionBlock(keras.layers.Layer):
         ┌────────────────────────────────┐
         │  MLP (Conv1x1 expand + shrink) │
         │  + Residual                    │
-        │  x = x + mlp2(mlp1(x))        │
+        │  x = x + mlp2(mlp1(x))         │
         └──────────────┬─────────────────┘
                        ▼
         ┌────────────────────────────────┐
-        │  Output [B, H, W, dim]        │
+        │  Output [B, H, W, dim]         │
         └────────────────────────────────┘
 
     :param dim: Number of feature dimensions. Must be positive.
@@ -696,7 +696,7 @@ class Bottleneck(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────┐
-        │  Input [B, H, W, C]         │
+        │  Input [B, H, W, C]          │
         └──────┬───────────────┬───────┘
                ▼               │ (shortcut if C=filters)
         ┌──────────────┐       │
@@ -710,7 +710,7 @@ class Bottleneck(keras.layers.Layer):
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │  Output [B, H, W, filters]  │
+        │  Output [B, H, W, filters]   │
         └──────────────────────────────┘
 
     :param filters: Number of output filters. Must be positive.
@@ -842,7 +842,7 @@ class C3k2Block(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input [B, H, W, C]             │
+        │  Input [B, H, W, C]              │
         └──────┬───────────────┬───────────┘
                ▼               ▼
         ┌────────────┐  ┌────────────┐
@@ -857,7 +857,7 @@ class C3k2Block(keras.layers.Layer):
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │  cv3 (1x1) → Output [B,H,W,F]  │
+        │  cv3 (1x1) → Output [B,H,W,F]    │
         └──────────────────────────────────┘
 
     :param filters: Number of output filters. Must be positive.
@@ -1028,23 +1028,23 @@ class A2C2fBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input [B, H, W, C]             │
+        │  Input [B, H, W, C]              │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │  cv1 (1x1) → y0 [B,H,W,F/2]   │
+        │  cv1 (1x1) → y0 [B,H,W,F/2]      │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │  AttentionBlock pair 1 → y1     │
-        │  AttentionBlock pair 2 → y2     │
+        │  AttentionBlock pair 1 → y1      │
+        │  AttentionBlock pair 2 → y2      │
         │  ...                             │
-        │  AttentionBlock pair n → yn     │
+        │  AttentionBlock pair n → yn      │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │  Concat [y0, y1, ..., yn]       │
-        │  cv2 (1x1) → Output [B,H,W,F]  │
+        │  Concat [y0, y1, ..., yn]        │
+        │  cv2 (1x1) → Output [B,H,W,F]    │
         └──────────────────────────────────┘
 
     :param filters: Number of output filters. Must be positive.

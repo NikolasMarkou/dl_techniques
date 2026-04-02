@@ -94,12 +94,12 @@ class PatchEmbedding2D(keras.layers.Layer):
         │  Conv2D(filters=embed_dim,       │
         │    kernel=patch_size,            │
         │    stride=patch_size)            │
-        │  → (batch, H/P_h, W/P_w, D)     │
+        │  → (batch, H/P_h, W/P_w, D)      │
         └───────────────┬──────────────────┘
                         ▼
         ┌──────────────────────────────────┐
         │  Reshape → (batch, N, D)         │
-        │  N = (H/P_h) * (W/P_w)          │
+        │  N = (H/P_h) * (W/P_w)           │
         └───────────────┬──────────────────┘
                         ▼
         ┌──────────────────────────────────┐

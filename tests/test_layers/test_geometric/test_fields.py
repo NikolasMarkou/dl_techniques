@@ -515,27 +515,20 @@ class TestHolonomyLayer:
         assert layer_instance.output_projection is not None
 
     def test_output_shape(self, hidden_dim, batch_size, seq_len, embeddings, connection):
-        """Test output shape (last two dims)."""
+        """Test output shape."""
         layer = HolonomyLayer(
             hidden_dim=hidden_dim, loop_sizes=[2], num_loops=1
         )
         output = layer([embeddings, connection])
-        # Note: HolonomyLayer has a known bug where ops.trace in
-        # _extract_holonomy_features corrupts the batch dimension.
-        # We verify rank and the last two dimensions.
-        assert len(output.shape) == 3
-        assert output.shape[1] == seq_len
-        assert output.shape[2] == hidden_dim
+        assert output.shape == (batch_size, seq_len, hidden_dim)
 
     def test_output_shape_triangular(self, hidden_dim, batch_size, seq_len, embeddings, connection):
-        """Test output shape with triangular loops (last two dims)."""
+        """Test output shape with triangular loops."""
         layer = HolonomyLayer(
             hidden_dim=hidden_dim, loop_sizes=[2], num_loops=1, loop_type="triangular"
         )
         output = layer([embeddings, connection])
-        assert len(output.shape) == 3
-        assert output.shape[1] == seq_len
-        assert output.shape[2] == hidden_dim
+        assert output.shape == (batch_size, seq_len, hidden_dim)
 
     def test_compute_output_shape(self, hidden_dim, batch_size, seq_len):
         """Test compute_output_shape matches actual."""
@@ -562,19 +555,17 @@ class TestHolonomyLayer:
         assert restored.num_loops == original.num_loops
 
     def test_gradient_flow(self, hidden_dim, embeddings, connection):
-        """Gradients propagate through the layer (at least to trainable weights)."""
+        """Gradients propagate through the layer."""
         layer = HolonomyLayer(
             hidden_dim=hidden_dim, loop_sizes=[2], num_loops=1
         )
-        # Note: HolonomyLayer uses Python for-loops with integer indexing
-        # (connection[:, pos, :, :]) which can break gradient flow to inputs
-        # in eager mode. We verify gradients reach the layer's own weights.
+        conn_var = tf.Variable(connection)
         with tf.GradientTape() as tape:
-            output = layer([embeddings, connection])
+            output = layer([embeddings, conn_var])
             loss = tf.reduce_mean(tf.square(output))
-        grads = tape.gradient(loss, layer.trainable_variables)
+        grads = tape.gradient(loss, conn_var)
         assert grads is not None
-        assert any(g is not None for g in grads)
+        assert np.any(grads.numpy() != 0)
 
 
 # ===========================================================================
@@ -1141,12 +1132,8 @@ class TestHolonomicTransformerLayer:
         assert output.shape == (batch_size, seq_len, hidden_dim)
         assert stress.shape == (batch_size, seq_len, 1)
 
-    @pytest.mark.skip(
-        reason="HolonomyLayer has a known batch-dimension bug in ops.trace "
-               "that causes shape mismatch in the holonomy addition"
-    )
     def test_output_shape_with_holonomy(self, hidden_dim, num_heads, batch_size, seq_len):
-        """Test output shape with holonomy features (use tiny dims)."""
+        """Test output shape with holonomy features."""
         layer = HolonomicTransformerLayer(
             hidden_dim=hidden_dim,
             num_heads=num_heads,

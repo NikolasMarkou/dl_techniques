@@ -93,7 +93,7 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────┐
-        │  Input (batch, heads, seq_len, head_dim)  │
+        │  Input (batch, heads, seq_len, head_dim) │
         └───────────────────┬──────────────────────┘
                             ▼
         ┌───────────────────────────────────────────┐
@@ -102,19 +102,19 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
                     ▼               ▼
         ┌───────────────┐  ┌────────────────┐
         │  Global RoPE  │  │  Local RoPE    │
-        │  θ=1/Θ_g^(.)  │  │  θ=1/Θ_l^(.)  │
+        │  θ=1/Θ_g^(.)  │  │  θ=1/Θ_l^(.)   │
         │  (low freq)   │  │  (high freq)   │
         └───────┬───────┘  └────────┬───────┘
                 └───────────┬───────┘
                             ▼
         ┌──────────────────────────────────────────┐
         │  Split: x1=[:d/2], x2=[d/2:]             │
-        │  rotated = [-x2, x1]                      │
-        │  output = x * cos + rotated * sin          │
+        │  rotated = [-x2, x1]                     │
+        │  output = x * cos + rotated * sin        │
         └───────────────────┬──────────────────────┘
                             ▼
         ┌──────────────────────────────────────────┐
-        │  Output (batch, heads, seq_len, head_dim) │
+        │  Output (batch, heads, seq_len, head_dim)│
         └──────────────────────────────────────────┘
 
     :param head_dim: Dimensionality of each attention head. Must be positive

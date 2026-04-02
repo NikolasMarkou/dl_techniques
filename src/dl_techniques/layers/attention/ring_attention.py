@@ -55,7 +55,7 @@ class RingAttention(keras.layers.Layer):
         └──────────────┬────────────────┘
                        ▼
         ┌───────────────────────────────┐
-        │ Q = W_q(X), K = W_k(X),      │
+        │ Q = W_q(X), K = W_k(X),       │
         │ V = W_v(X)                    │
         │ [B, heads, seq_len, head_dim] │
         └──────────────┬────────────────┘

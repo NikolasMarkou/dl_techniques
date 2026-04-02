@@ -46,6 +46,7 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class WaveFieldAttention(keras.layers.Layer):
@@ -71,16 +72,16 @@ class WaveFieldAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input (B, N, D)                │
+        │  Input (B, N, D)                 │
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
-        │  QKV Projection ─► Q, K, V      │
+        │  QKV Projection ─► Q, K, V       │
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
-        │  Deposit: V * ||K|| onto field  │
-        │  (bilinear scatter)             │
+        │  Deposit: V * ||K|| onto field   │
+        │  (bilinear scatter)              │
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
@@ -109,7 +110,7 @@ class WaveFieldAttention(keras.layers.Layer):
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
-        │  Output (B, N, D)               │
+        │  Output (B, N, D)                │
         └──────────────────────────────────┘
 
     :param dim: Model dimension (must be divisible by ``num_heads``).

@@ -51,17 +51,17 @@ class TripletAttentionBranch(layers.Layer):
                       ▼
         ┌──────────────────────────────┐
         │  Permute axes                │
-        │  (B, D1, D2, D3)            │
+        │  (B, D1, D2, D3)             │
         └─────────────┬────────────────┘
                       ▼
         ┌──────────────────────────────┐
-        │  Z-Pool: mean + max on D3   │
-        │  ─► (B, D1, D2, 2)          │
+        │  Z-Pool: mean + max on D3    │
+        │  ─► (B, D1, D2, 2)           │
         └─────────────┬────────────────┘
                       ▼
         ┌──────────────────────────────┐
-        │  Conv2D ─► BN ─► Sigmoid    │
-        │  ─► (B, D1, D2, 1)          │
+        │  Conv2D ─► BN ─► Sigmoid     │
+        │  ─► (B, D1, D2, 1)           │
         └─────────────┬────────────────┘
                       ▼
         ┌──────────────────────────────┐
@@ -70,7 +70,7 @@ class TripletAttentionBranch(layers.Layer):
                       ▼
         ┌──────────────────────────────┐
         │  Inverse Permute             │
-        │  Output (B, H, W, C)        │
+        │  Output (B, H, W, C)         │
         └──────────────────────────────┘
 
     :param kernel_size: Kernel size for the spatial convolution.

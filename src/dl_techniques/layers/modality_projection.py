@@ -95,7 +95,7 @@ class ModalityProjection(keras.layers.Layer):
         ┌────────────────────────────────────┐
         │  PixelShuffle (scale_factor)       │
         │  tokens: N → N/s^2                 │
-        │  channels: C → C*s^2              │
+        │  channels: C → C*s^2               │
         └────────────────┬───────────────────┘
                          │
                          ▼

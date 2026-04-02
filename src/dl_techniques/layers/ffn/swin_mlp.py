@@ -89,31 +89,31 @@ class SwinMLP(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────┐
-        │   Input (..., input_dim)     │
+        │   Input (..., input_dim)    │
         └────────────┬────────────────┘
                      ▼
         ┌─────────────────────────────┐
-        │   fc1: Dense(hidden_dim)     │
+        │   fc1: Dense(hidden_dim)    │
         └────────────┬────────────────┘
                      ▼
         ┌─────────────────────────────┐
-        │  Activation (e.g. GELU)      │
+        │  Activation (e.g. GELU)     │
         └────────────┬────────────────┘
                      ▼
         ┌─────────────────────────────┐
-        │   drop1: Dropout             │
+        │   drop1: Dropout            │
         └────────────┬────────────────┘
                      ▼
         ┌─────────────────────────────┐
-        │   fc2: Dense(output_dim)     │
+        │   fc2: Dense(output_dim)    │
         └────────────┬────────────────┘
                      ▼
         ┌─────────────────────────────┐
-        │   drop2: Dropout             │
+        │   drop2: Dropout            │
         └────────────┬────────────────┘
                      ▼
         ┌──────────────────────────────┐
-        │  Output (..., output_dim)     │
+        │  Output (..., output_dim)    │
         └──────────────────────────────┘
 
     :param hidden_dim: Integer, dimension of the hidden layer. Must be positive.

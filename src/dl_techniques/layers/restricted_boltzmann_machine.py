@@ -108,7 +108,7 @@ class RestrictedBoltzmannMachine(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────────┐
         │  Hidden Units [n_hidden]         │
-        │  P(h_j=1|v) = sigmoid(c_j+W'v)  │
+        │  P(h_j=1|v) = sigmoid(c_j+W'v)   │
         └──────────────┬───────────────────┘
                        │
                        │  W^T (top-down)

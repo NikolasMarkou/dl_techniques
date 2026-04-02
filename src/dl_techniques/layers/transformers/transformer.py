@@ -117,7 +117,7 @@ class TransformerLayer(keras.layers.Layer):
         └───────────────────┬───────────────────┘
                             ▼
         ┌───────────────────────────────────────┐
-        │  [Norm] ─► FFN/MoE ─► [Dropout]      │
+        │  [Norm] ─► FFN/MoE ─► [Dropout]       │
         │  ─► [StochasticDepth] ─► + Residual   │
         └───────────────────┬───────────────────┘
                             ▼

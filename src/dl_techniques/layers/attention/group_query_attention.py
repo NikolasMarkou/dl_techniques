@@ -58,41 +58,41 @@ class GroupedQueryAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────────────────────────┐
-        │                  GroupedQueryAttention                        │
+        │                  GroupedQueryAttention                       │
         │                                                              │
-        │  Input [B, seq, dim] or [B, H, W, dim]                      │
+        │  Input [B, seq, dim] or [B, H, W, dim]                       │
         │         │                                                    │
         │         ├──────────────────┬──────────────────┐              │
         │         ▼                  ▼                  ▼              │
-        │  ┌────────────┐    ┌────────────┐    ┌────────────┐         │
-        │  │  Q_proj    │    │  K_proj    │    │  V_proj    │         │
-        │  │ (num_heads)│    │(num_kv_hds)│    │(num_kv_hds)│         │
-        │  └─────┬──────┘    └─────┬──────┘    └─────┬──────┘         │
-        │        │                 │                 │                │
-        │        ▼                 ▼                 │                │
-        │  ┌────────────────────────────┐            │                │
-        │  │  (Optional) RoPE(Q, K)     │            │                │
-        │  └────────────┬───────────────┘            │                │
-        │               │                            │                │
-        │        ┌──────┴──────┐                     │                │
-        │        ▼             ▼                     ▼                │
-        │     Q [H]      K,V repeated ──────► K,V [H]                │
-        │        │         (group broadcast)    │                     │
-        │        └──────┬──────────────────────┘                     │
-        │               ▼                                            │
-        │     scores = Q @ K^T / sqrt(d_k)                           │
-        │               │                                            │
-        │               ▼                                            │
-        │         [+ attention_mask]                                  │
-        │               │                                            │
-        │               ▼                                            │
-        │        softmax ──► dropout ──► weights @ V                 │
-        │               │                                            │
-        │               ▼                                            │
-        │        Output Projection                                   │
-        │               │                                            │
-        │               ▼                                            │
-        │  Output [B, seq, dim] or [B, H, W, dim]                    │
+        │  ┌────────────┐    ┌────────────┐    ┌────────────┐          │
+        │  │  Q_proj    │    │  K_proj    │    │  V_proj    │          │
+        │  │ (num_heads)│    │(num_kv_hds)│    │(num_kv_hds)│          │
+        │  └─────┬──────┘    └─────┬──────┘    └─────┬──────┘          │
+        │        │                 │                 │                 │
+        │        ▼                 ▼                 │                 │
+        │  ┌────────────────────────────┐            │                 │
+        │  │  (Optional) RoPE(Q, K)     │            │                 │
+        │  └────────────┬───────────────┘            │                 │
+        │               │                            │                 │
+        │        ┌──────┴──────┐                     │                 │
+        │        ▼             ▼                     ▼                 │
+        │     Q [H]      K,V repeated ──────► K,V [H]                  │
+        │        │         (group broadcast)    │                      │
+        │        └──────┬───────────────────────┘                      │
+        │               ▼                                              │
+        │     scores = Q @ K^T / sqrt(d_k)                             │
+        │               │                                              │
+        │               ▼                                              │
+        │         [+ attention_mask]                                   │
+        │               │                                              │
+        │               ▼                                              │
+        │        softmax ──► dropout ──► weights @ V                   │
+        │               │                                              │
+        │               ▼                                              │
+        │        Output Projection                                     │
+        │               │                                              │
+        │               ▼                                              │
+        │  Output [B, seq, dim] or [B, H, W, dim]                      │
         └──────────────────────────────────────────────────────────────┘
 
     :param dim: Integer, input/output dimension (embedding size). Must be positive and

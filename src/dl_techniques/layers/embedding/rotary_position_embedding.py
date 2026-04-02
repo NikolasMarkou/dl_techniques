@@ -97,7 +97,7 @@ class RotaryPositionEmbedding(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────┐
-        │  Input (batch, heads, seq_len, head_dim)  │
+        │  Input (batch, heads, seq_len, head_dim) │
         └───────────────────┬──────────────────────┘
                             ▼
         ┌───────────────────┬──────────────────────┐
@@ -122,7 +122,7 @@ class RotaryPositionEmbedding(keras.layers.Layer):
                  └──────────┬──────────┘
                             ▼
         ┌──────────────────────────────────────────┐
-        │  Concatenate → Output (same shape)        │
+        │  Concatenate → Output (same shape)       │
         └──────────────────────────────────────────┘
 
     :param head_dim: Dimensionality of each attention head. Must be positive.

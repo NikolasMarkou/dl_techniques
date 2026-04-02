@@ -92,35 +92,35 @@ class GatedMLP(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────────────────┐
-        │  Input (batch, H, W, channels)           │
+        │  Input (batch, H, W, channels)          │
         └───────────────────┬─────────────────────┘
                             │
                       ┌─────┴─────┐
                       ▼           ▼
         ┌──────────────────┐ ┌──────────────────┐
-        │  conv_gate (1x1)  │ │  conv_up (1x1)   │
+        │  conv_gate (1x1) │ │  conv_up (1x1)   │
         └────────┬─────────┘ └────────┬─────────┘
                  ▼                    ▼
         ┌──────────────────┐ ┌──────────────────┐
-        │ attn_activation   │ │ attn_activation   │
+        │ attn_activation  │ │ attn_activation  │
         └────────┬─────────┘ └────────┬─────────┘
                  │                    │
                  └────────┬───────────┘
                           ▼
         ┌─────────────────────────────────────────┐
-        │         Element-wise Multiply            │
+        │         Element-wise Multiply           │
         └───────────────────┬─────────────────────┘
                             ▼
         ┌─────────────────────────────────────────┐
-        │          conv_down (1x1)                 │
+        │          conv_down (1x1)                │
         └───────────────────┬─────────────────────┘
                             ▼
         ┌─────────────────────────────────────────┐
-        │          output_activation               │
+        │          output_activation              │
         └───────────────────┬─────────────────────┘
                             ▼
         ┌─────────────────────────────────────────┐
-        │  Output (batch, H, W, filters)           │
+        │  Output (batch, H, W, filters)          │
         └─────────────────────────────────────────┘
 
     :param filters: Integer, number of filters for all convolution layers. Must be positive.

@@ -87,10 +87,10 @@ class HopfieldAttention(keras.layers.Layer):
               ├── [Query, Key, Value]
               │
               ▼
-        ┌───────────┬───────────┬───────────┐
-        │  W_query   │  W_key    │  W_value   │
-        │  Dense     │  Dense    │  Dense     │
-        └─────┬─────┘─────┬─────┘─────┬─────┘
+        ┌───────────┬───────────┬────────────┐
+        │  W_query  │  W_key    │  W_value   │
+        │  Dense    │  Dense    │  Dense     │
+        └─────┬─────┘─────┬─────┘─────┬──────┘
               ▼           ▼           ▼
           Reshape     Reshape     Reshape
         [B,H,Sq,Dk] [B,H,Sk,Dk] [B,H,Sk,Dv]
@@ -102,7 +102,7 @@ class HopfieldAttention(keras.layers.Layer):
         ┌─────────────────────────────────┐
         │   Iterative Hopfield Update     │
         │   ┌───────────────────────┐     │
-        │   │ scores = Q·K^T/√d_k  │◄──┐ │
+        │   │ scores = Q·K^T/√d_k   │◄──┐ │
         │   │ attn = softmax(scores)│   │ │
         │   │ out = attn · V        │   │ │
         │   │ Q_new = attn · K      │───┘ │
@@ -113,8 +113,8 @@ class HopfieldAttention(keras.layers.Layer):
                  Reshape → [B, Sq, H*Dv]
                        ▼
                  ┌───────────┐
-                 │  W_output  │
-                 │  Dense     │
+                 │  W_output │
+                 │  Dense    │
                  └─────┬─────┘
                        ▼
                  Output [B, Sq, D]

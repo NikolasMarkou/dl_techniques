@@ -85,8 +85,8 @@ class SelectiveGradientMask(keras.layers.Layer):
         ┌──────────────┐    ┌──────────────┐
         │  Signal      │    │  Mask        │
         │  [B, ...]    │    │  [B, ...]    │
-        └──────┬───────┘    └──────┬───────┘
-               │                   │
+        └──────┬───────┘    └─────┬────────┘
+               │                  │
                │        ┌─────────┴──────────┐
                │        │                    │
                ▼        ▼                    ▼
@@ -98,9 +98,9 @@ class SelectiveGradientMask(keras.layers.Layer):
                  └───────────┬───────────┘
                              ▼
         ┌──────────────────────────────────┐
-        │  Add → Output [B, ...]          │
-        │  (forward = signal, backward    │
-        │   grad *= (1 - mask))           │
+        │  Add → Output [B, ...]           │
+        │  (forward = signal, backward     │
+        │   grad *= (1 - mask))            │
         └──────────────────────────────────┘
 
     :param name: Optional layer name.

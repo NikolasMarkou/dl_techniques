@@ -115,7 +115,7 @@ class MPSLayer(keras.layers.Layer):
         ┌──────────────────────────────────────┐
         │  For i = 1 to input_dim:             │
         │    M_i = x_i * core[i]               │
-        │    B = B @ M_i                        │
+        │    B = B @ M_i                       │
         │  (sequential tensor contraction)     │
         └───────────────┬──────────────────────┘
                         │

@@ -104,7 +104,7 @@ class SqueezeExcitation(layers.Layer):
                        ▼
         ┌────────────────────────────────────┐
         │  Scale: Input * attention_weights  │
-        │  → Output [B, ..., C]             │
+        │  → Output [B, ..., C]              │
         └────────────────────────────────────┘
 
     :param reduction_ratio: Float in ``(0, 1]`` determining the bottleneck width.

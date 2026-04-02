@@ -82,7 +82,7 @@ class RBFLayer(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────────┐
         │  Squared Euclidean distance      │
-        │  ||x - c_i||^2  → [..., units]  │
+        │  ||x - c_i||^2  → [..., units]   │
         └──────────────┬───────────────────┘
                        │
                        ▼

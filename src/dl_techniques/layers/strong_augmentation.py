@@ -75,7 +75,7 @@ class StrongAugmentation(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input [B, H, W, C]             │
+        │  Input [B, H, W, C]              │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
@@ -86,13 +86,13 @@ class StrongAugmentation(keras.layers.Layer):
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │  CutMix (with prob cutmix_prob) │
+        │  CutMix (with prob cutmix_prob)  │
         │  paste random patch from         │
         │  shuffled batch                  │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │  Output [B, H, W, C]            │
+        │  Output [B, H, W, C]             │
         └──────────────────────────────────┘
 
     :param cutmix_prob: Probability of applying CutMix augmentation.

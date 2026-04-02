@@ -64,8 +64,8 @@ class SparseAutoencoder(keras.layers.Layer):
         └──────────────┬──────────────────┘
                        ▼
         ┌─────────────────────────────────┐
-        │  Encoder: W_enc @ x + b_enc    │
-        │  → pre_activation [..., d_lat] │
+        │  Encoder: W_enc @ x + b_enc     │
+        │  → pre_activation [..., d_lat]  │
         └──────────────┬──────────────────┘
                        ▼
         ┌─────────────────────────────────┐

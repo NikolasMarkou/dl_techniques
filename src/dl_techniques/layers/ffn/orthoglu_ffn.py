@@ -109,39 +109,39 @@ class OrthoGLUFFN(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │     Input (..., input_dim)        │
+        │     Input (..., input_dim)       │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │ OrthoBlock(hidden_dim * 2)        │
-        │ (orthogonal regularization)       │
+        │ OrthoBlock(hidden_dim * 2)       │
+        │ (orthogonal regularization)      │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │    Split into (gate, value)       │
+        │    Split into (gate, value)      │
         └───────┬──────────────────┬───────┘
                 ▼                  │
         ┌──────────────┐           │
-        │  Activation   │           │
+        │  Activation  │           │
         └───────┬──────┘           │
                 │                  │
                 └──────────┬───────┘
                            ▼
         ┌──────────────────────────────────┐
-        │      Element-wise Multiply        │
+        │      Element-wise Multiply       │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │       Dropout (optional)          │
+        │       Dropout (optional)         │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │    OrthoBlock(output_dim)          │
-        │    (orthogonal regularization)     │
+        │    OrthoBlock(output_dim)        │
+        │    (orthogonal regularization)   │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │    Output (..., output_dim)        │
+        │    Output (..., output_dim)      │
         └──────────────────────────────────┘
 
     :param hidden_dim: Integer, dimensionality of the intermediate hidden layer

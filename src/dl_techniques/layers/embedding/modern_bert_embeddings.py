@@ -25,7 +25,7 @@ class ModernBertEmbeddings(keras.layers.Layer):
         │  input_ids   │  │ token_type_ids   │
         │  (batch, L)  │  │ (batch, L)       │
         └──────┬───────┘  └──────┬───────────┘
-               ▼                  ▼
+               ▼                 ▼
         ┌──────────────┐ ┌────────────────────┐
         │ Word Embed   │ │ Token Type Embed   │
         │ (vocab, D)   │ │ (type_vocab, D)    │

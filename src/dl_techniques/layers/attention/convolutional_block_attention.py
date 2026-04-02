@@ -80,7 +80,7 @@ class CBAM(keras.layers.Layer):
               │
               ▼
         ┌─────────────────────┐
-        │  Channel Attention   │
+        │  Channel Attention  │
         │  M_c: [B,1,1,C]     │
         └──────────┬──────────┘
                    ▼
@@ -88,7 +88,7 @@ class CBAM(keras.layers.Layer):
                    │
                    ▼
         ┌─────────────────────┐
-        │  Spatial Attention   │
+        │  Spatial Attention  │
         │  M_s: [B,H,W,1]     │
         └──────────┬──────────┘
                    ▼

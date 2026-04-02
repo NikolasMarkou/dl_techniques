@@ -85,15 +85,15 @@ class ResidualBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────┐
-        │    Input (..., input_dim)     │
+        │    Input (..., input_dim)    │
         └──────────────┬───────────────┘
                        │
                  ┌─────┴──────────┐
                  ▼                ▼
         ┌──────────────┐  ┌──────────────────┐
-        │ hidden_layer │  │ residual_layer    │
-        │Dense(hidden) │  │Dense(output_dim)  │
-        │+ activation  │  │ (linear shortcut) │
+        │ hidden_layer │  │ residual_layer   │
+        │Dense(hidden) │  │Dense(output_dim) │
+        │+ activation  │  │ (linear shortcut)│
         └──────┬───────┘  └────────┬─────────┘
                ▼                   │
         ┌──────────────┐           │
@@ -110,11 +110,11 @@ class ResidualBlock(keras.layers.Layer):
                └────────┬──────────┘
                         ▼
         ┌──────────────────────────────┐
-        │     Element-wise Addition     │
+        │     Element-wise Addition    │
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │   Output (..., output_dim)    │
+        │   Output (..., output_dim)   │
         └──────────────────────────────┘
 
     :param hidden_dim: Integer, dimensionality of the hidden layer. Must be positive.

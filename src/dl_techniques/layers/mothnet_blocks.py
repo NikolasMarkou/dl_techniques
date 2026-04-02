@@ -79,7 +79,7 @@ class AntennalLobeLayer(keras.layers.Layer):
                       │
                       ▼
         ┌──────────────────────────────┐
-        │  Linear: h = W·x + b        │
+        │  Linear: h = W·x + b         │
         └─────────────┬────────────────┘
                       │
               ┌───────┴───────┐
@@ -256,9 +256,9 @@ class MushroomBodyLayer(keras.layers.Layer):
                       ▼
         ┌──────────────────────────────────┐
         │  Sparse Random Projection        │
-        │  h = W_sparse·x + b             │
+        │  h = W_sparse·x + b              │
         │  (~10% non-zero connections)     │
-        │  (input_dim → units, 20-50x)    │
+        │  (input_dim → units, 20-50x)     │
         └─────────────┬────────────────────┘
                       │
                       ▼
@@ -467,7 +467,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
                       │
                       ▼
         ┌──────────────────────────────────┐
-        │  Linear: logits = W·x + b       │
+        │  Linear: logits = W·x + b        │
         │  (W updated via Hebbian rule)    │
         └─────────────┬────────────────────┘
                       │

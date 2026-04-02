@@ -108,14 +108,14 @@ class PowerMLPLayer(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────┐
-        │    Input (..., input_dim)     │
+        │    Input (..., input_dim)    │
         └──────────────┬───────────────┘
                        │
                  ┌─────┴─────┐
                  ▼           ▼
         ┌──────────────┐ ┌──────────────────┐
-        │  main_dense  │ │  basis_function   │
-        │   (Dense)    │ │ (BasisFunction)   │
+        │  main_dense  │ │  basis_function  │
+        │   (Dense)    │ │ (BasisFunction)  │
         └──────┬───────┘ └────────┬─────────┘
                ▼                  ▼
         ┌──────────────┐ ┌──────────────────┐
@@ -126,11 +126,11 @@ class PowerMLPLayer(keras.layers.Layer):
                └────────┬─────────┘
                         ▼
         ┌──────────────────────────────┐
-        │     Element-wise Addition     │
+        │     Element-wise Addition    │
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │    Output (..., units)        │
+        │    Output (..., units)       │
         └──────────────────────────────┘
 
     :param units: Integer, number of output units/neurons in the layer. Must be positive.

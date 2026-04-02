@@ -42,8 +42,8 @@ class DynamicConv2D(keras.layers.Layer):
                    ▼                      ▼
         ┌─────────────────────┐  ┌────────────────────────┐
         │  Attention Network  │  │  K Parallel Conv2D     │
-        │  ┌───────────────┐  │  │  Expert_0 ──▶ y_0     │
-        │  │  GAP           │  │  │  Expert_1 ──▶ y_1     │
+        │  ┌───────────────┐  │  │  Expert_0 ──▶ y_0      │
+        │  │  GAP          │  │  │  Expert_1 ──▶ y_1      │
         │  └───────┬───────┘  │  │  ...                   │
         │          ▼          │  │  Expert_K ──▶ y_K      │
         │  ┌───────────────┐  │  └────────────┬───────────┘

@@ -95,11 +95,11 @@ class ContinuousRoPE(keras.layers.Layer):
         ┌──────────────────────────────────┐
         │  For each coord dimension k:     │
         │    phi_k = p_k * omega           │
-        │    omega_i = 1/Θ^(2i/d')        │
+        │    omega_i = 1/Θ^(2i/d')         │
         └───────────────┬──────────────────┘
                         ▼
         ┌──────────────────────────────────┐
-        │  Concatenate [phi_1,...,phi_ndim] │
+        │  Concatenate [phi_1,...,phi_ndim]│
         └───────────────┬──────────────────┘
                         ▼
         ┌──────────────────────────────────┐

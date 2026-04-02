@@ -109,26 +109,26 @@ class RepMixerBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input [B, H, W, C]             │
+        │  Input [B, H, W, C]              │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Norm1 → Token Mixer            │
-        │  DWConv3x3 → BN → Act →        │
-        │  DWConv1x1 → BN                 │
+        │  Norm1 → Token Mixer             │
+        │  DWConv3x3 → BN → Act →          │
+        │  DWConv1x1 → BN                  │
         └──────────────┬───────────────────┘
                        │ + residual
                        ▼
         ┌──────────────────────────────────┐
-        │  Norm2 → Channel Mixer          │
-        │  Conv1x1(expand) → Act →        │
-        │  Conv1x1(project)               │
+        │  Norm2 → Channel Mixer           │
+        │  Conv1x1(expand) → Act →         │
+        │  Conv1x1(project)                │
         └──────────────┬───────────────────┘
                        │ + residual
                        ▼
         ┌──────────────────────────────────┐
-        │  Output [B, H, W, C]            │
+        │  Output [B, H, W, C]             │
         └──────────────────────────────────┘
 
     :param dim: Input and output feature dimension. Must be positive.

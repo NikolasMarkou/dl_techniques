@@ -84,22 +84,22 @@ class BinaryMapper(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Bit Logits (B, T, H)           │
+        │  Bit Logits (B, T, H)            │
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
         │  Sigmoid ─► Bernoulli sample     │
         │  ─► Binary-to-Integer            │
-        │  ─► One-Hot (B, T, 2^H)         │
+        │  ─► One-Hot (B, T, 2^H)          │
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
         │  [Training] Gradient pass-through│
-        │  Z + G(Z) - stop_grad(G(Z))     │
+        │  Z + G(Z) - stop_grad(G(Z))      │
         └────────────┬─────────────────────┘
                      ▼
         ┌──────────────────────────────────┐
-        │  Output (B, T, 2^H)             │
+        │  Output (B, T, 2^H)              │
         └──────────────────────────────────┘
 
     :param num_bits: Number of latent bits ``H``. Output has ``2^H`` dims.

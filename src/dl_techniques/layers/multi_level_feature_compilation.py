@@ -114,7 +114,7 @@ class MLFCLayer(keras.layers.Layer):
         ┌──────────────────────────────────────────────────┐
         │  For each level i (repeat num_iterations times): │
         │    1. Resize all 4 levels to level i dimensions  │
-        │    2. Concatenate → Conv1x1 → BN → Activation   │
+        │    2. Concatenate → Conv1x1 → BN → Activation    │
         │    3. Concat with original → Conv1x1 → + residual│
         └──────────────────────────────────────────────────┘
              │            │            │            │

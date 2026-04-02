@@ -78,7 +78,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────────────────────────┐
-        │  Inputs: [P3, P4, P5]                │
+        │  Inputs: [P3, P4, P5]                 │
         └──────┬────────┬────────┬──────────────┘
                ▼        ▼        ▼
         ┌────────┐ ┌────────┐ ┌────────┐
@@ -91,7 +91,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             ▼          ▼          ▼
         ┌───────────────────────────────────────┐
         │  Concatenate along anchor dimension   │
-        │  → [B, total_anchors, 4R + num_cls]  │
+        │  → [B, total_anchors, 4R + num_cls]   │
         └───────────────────────────────────────┘
 
     :param num_classes: Number of object classes. Defaults to 80.

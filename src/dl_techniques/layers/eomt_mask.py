@@ -75,8 +75,8 @@ class EomtMask(keras.layers.Layer):
                                       │
                                       ▼
                               ┌───────────────┐
-                              │  Dot Product   │◀── Pixel Features
-                              │  m @ P^T       │    [B, H, W, D]
+                              │  Dot Product  │◀── Pixel Features
+                              │  m @ P^T      │    [B, H, W, D]
                               └───────┬───────┘
                                       ▼
                               Mask Logits

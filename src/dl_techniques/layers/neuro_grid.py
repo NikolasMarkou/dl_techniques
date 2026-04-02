@@ -117,16 +117,16 @@ class NeuroGrid(keras.layers.Layer):
                         │  (reshape to 2-D if 3-D)
                         ▼
         ┌──────────────────────────────────────┐
-        │  Dense_1(d1) → softmax(T) → P_1     │
-        │  Dense_2(d2) → softmax(T) → P_2     │
+        │  Dense_1(d1) → softmax(T) → P_1      │
+        │  Dense_2(d2) → softmax(T) → P_2      │
         │       ...                            │
-        │  Dense_N(dn) → softmax(T) → P_N     │
+        │  Dense_N(dn) → softmax(T) → P_N      │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
         │  Outer product: P_joint              │
-        │  [B, d1, d2, ..., dn]               │
+        │  [B, d1, d2, ..., dn]                │
         └───────────────┬──────────────────────┘
                         │
                         ▼

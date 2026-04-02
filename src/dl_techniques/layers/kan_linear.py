@@ -87,7 +87,7 @@ class KANLinear(keras.layers.Layer):
                          ▼
         ┌───────────────────────────────────┐
         │  phi_ij = base + spline           │
-        │  y_j = sum_i phi_ij(x_i)         │
+        │  y_j = sum_i phi_ij(x_i)          │
         └───────────────┬───────────────────┘
                         │
                         ▼

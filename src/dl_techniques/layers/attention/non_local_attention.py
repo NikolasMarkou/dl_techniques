@@ -46,8 +46,8 @@ class NonLocalAttention(keras.layers.Layer):
         └─────────────┬───────────────┘
                       ▼
         ┌─────────────────────────────┐
-        │ DepthwiseConv2D(kernel_size) │
-        │ + Normalization (optional)   │
+        │ DepthwiseConv2D(kernel_size)│
+        │ + Normalization (optional)  │
         └─────────────┬───────────────┘
                       ▼
         ┌─────────────────────────────┐
@@ -57,19 +57,19 @@ class NonLocalAttention(keras.layers.Layer):
         └────┬────┴────┬────┴────┬────┘
              ▼         ▼         ▼
         ┌────────────────────────────┐
-        │ Reshape (H,W) → (H*W)     │
-        │ Q [B, H*W, d_attn]        │
-        │ K [B, H*W, d_kv]          │
-        │ V [B, H*W, d_kv]          │
+        │ Reshape (H,W) → (H*W)      │
+        │ Q [B, H*W, d_attn]         │
+        │ K [B, H*W, d_kv]           │
+        │ V [B, H*W, d_kv]           │
         └─────────────┬──────────────┘
                       ▼
         ┌─────────────────────────────┐
         │ Attention(Q, V, K)          │
-        │ → [B, H*W, d_kv]           │
+        │ → [B, H*W, d_kv]            │
         └─────────────┬───────────────┘
                       ▼
         ┌─────────────────────────────┐
-        │ Reshape → [B, H, W, d_kv]  │
+        │ Reshape → [B, H, W, d_kv]   │
         └─────────────┬───────────────┘
                       ▼
         ┌─────────────────────────────┐

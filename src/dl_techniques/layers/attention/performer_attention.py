@@ -49,7 +49,7 @@ class PerformerAttention(keras.layers.Layer):
         └──────────────┬────────────────┘
                        ▼
         ┌───────────────────────────────┐
-        │ Dense(3 * dim) → Q, K, V     │
+        │ Dense(3 * dim) → Q, K, V      │
         └──────────────┬────────────────┘
                        ▼
         ┌───────────────────────────────┐
@@ -65,9 +65,9 @@ class PerformerAttention(keras.layers.Layer):
                        ▼
         ┌───────────────────────────────┐
         │ Linear Attention              │
-        │ KV = phi(K)^T V              │
-        │ Z  = phi(Q) sum(phi(K))      │
-        │ Out = phi(Q) KV / Z          │
+        │ KV = phi(K)^T V               │
+        │ Z  = phi(Q) sum(phi(K))       │
+        │ Out = phi(Q) KV / Z           │
         └──────────────┬────────────────┘
                        ▼
         ┌───────────────────────────────┐

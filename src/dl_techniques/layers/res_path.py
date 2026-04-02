@@ -102,24 +102,24 @@ class ResPath(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │  Input [B, H, W, C]             │
+        │  Input [B, H, W, C]              │
         └──────────────┬───────────────────┘
                        │
                        ▼  (repeat num_blocks times)
         ┌──────────────────────────────────┐
-        │  Conv2D 3x3 (same, no bias)     │
-        │  BatchNorm → SE → LeakyReLU     │
-        │  + residual shortcut            │
+        │  Conv2D 3x3 (same, no bias)      │
+        │  BatchNorm → SE → LeakyReLU      │
+        │  + residual shortcut             │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Final SE → LeakyReLU → BN      │
+        │  Final SE → LeakyReLU → BN       │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Output [B, H, W, C]            │
+        │  Output [B, H, W, C]             │
         └──────────────────────────────────┘
 
     :param channels: Number of channels (kept constant throughout).

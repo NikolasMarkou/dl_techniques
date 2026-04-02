@@ -92,7 +92,7 @@ class BertEmbeddings(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐
+        ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐
         │  input_ids   │  │ position_ids │  │ token_type_ids   │
         │  (batch, L)  │  │ (batch, L)   │  │ (batch, L)       │
         └──────┬───────┘  └──────┬───────┘  └──────┬───────────┘

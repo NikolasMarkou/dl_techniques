@@ -103,13 +103,13 @@ class RFFKernelLayer(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────────┐
         │  Random projection (frozen)      │
-        │  z = x @ omega + b              │
+        │  z = x @ omega + b               │
         └──────────────┬───────────────────┘
                        │
                        ▼
         ┌──────────────────────────────────┐
         │  Feature map                     │
-        │  phi(x) = sqrt(2/D) * cos(z)    │
+        │  phi(x) = sqrt(2/D) * cos(z)     │
         └──────────────┬───────────────────┘
                        │
                        ▼

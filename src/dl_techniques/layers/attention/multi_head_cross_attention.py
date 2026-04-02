@@ -108,7 +108,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         ┌───────────────────────────────────────────────────────────────┐
         │                                                               │
-        │  Input [B, seq, D] ──► QKV_proj ──► Q, K, V [B, H, seq, D_h] │
+        │  Input [B, seq, D] ──► QKV_proj ──► Q, K, V [B, H, seq, D_h]  │
         │                                        │                      │
         │                                        ▼                      │
         │                          scores = Q @ K^T / sqrt(d_k)         │

@@ -149,7 +149,7 @@ class SwinTransformerBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │  Input (B, H, W, C)                 │
+        │  Input (B, H, W, C)                  │
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
@@ -161,7 +161,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  Window Partition ─► Window Attention │
+        │  Window Partition ─► Window Attention│
         │  ─► Window Merge                     │
         └──────────────────┬───────────────────┘
                            ▼
@@ -179,7 +179,7 @@ class SwinTransformerBlock(keras.layers.Layer):
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  Output (B, H, W, C)                │
+        │  Output (B, H, W, C)                 │
         └──────────────────────────────────────┘
 
     :param dim: Number of input channels.

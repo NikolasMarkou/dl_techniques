@@ -64,16 +64,16 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         └──────────────────┬────────────────────────────┘
                            ▼
         ┌───────────────────────────────────────────────┐
-        │  Conv2D (1 x 1) ── Pointwise / channel mixing│
+        │  Conv2D (1 x 1) ── Pointwise / channel mixing │
         └──────────────────┬────────────────────────────┘
                            ▼
         ┌───────────────────────────────────────────────┐
         │  Normalization ──▶ Activation                 │
         └──────────────────┬────────────────────────────┘
                            ▼
-        ┌───────────────────────────────────────────────┐
+        ┌────────────────────────────────────────────────┐
         │  Output [batch, new_height, new_width, filters]│
-        └───────────────────────────────────────────────┘
+        └────────────────────────────────────────────────┘
 
     :param filters: Number of output filters (channels). Must be positive.
     :type filters: int

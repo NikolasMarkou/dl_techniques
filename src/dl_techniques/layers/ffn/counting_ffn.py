@@ -111,7 +111,7 @@ class CountingFFN(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │ Input (batch, seq_len, input_dim)     │
+        │ Input (batch, seq_len, input_dim)    │
         └──────────────────┬───────────────────┘
                            │
                      ┌─────┴─────┐
@@ -134,12 +134,12 @@ class CountingFFN(keras.layers.Layer):
                 └────────┬─────────┘
                          ▼
         ┌──────────────────────────────────────┐
-        │  Gated Blend / Residual Integration   │
+        │  Gated Blend / Residual Integration  │
         │  y = (1-g)*x + g*C'  (if dims match) │
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │ Output (batch, seq_len, output_dim)   │
+        │ Output (batch, seq_len, output_dim)  │
         └──────────────────────────────────────┘
 
     :param output_dim: Integer, the final output dimension of the layer. For residual

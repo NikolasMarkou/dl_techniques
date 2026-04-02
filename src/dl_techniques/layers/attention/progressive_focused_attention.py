@@ -54,7 +54,7 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                          ▼
         ┌─────────────────────────────────┐
         │ Window Partition                │
-        │ → [B*nW, ws, ws, C]            │
+        │ → [B*nW, ws, ws, C]             │
         └────────────────┬────────────────┘
                          ▼
         ┌─────────────────────────────────┐

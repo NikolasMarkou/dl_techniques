@@ -101,7 +101,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         └──────────────────┬────────────────────┘
                            ▼
         ┌───────────────────────────────────────┐
-        │  LN ─► MLP ─► [Dropout]              │
+        │  LN ─► MLP ─► [Dropout]               │
         │  + Residual                           │
         └──────────────────┬────────────────────┘
                            ▼

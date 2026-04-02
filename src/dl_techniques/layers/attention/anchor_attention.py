@@ -76,24 +76,24 @@ class AnchorAttention(keras.layers.Layer):
         │         │                                               │
         │         ├──────────────┬──────────────┐                 │
         │         ▼              ▼              ▼                 │
-        │    ┌────────┐    ┌────────┐    ┌────────┐              │
-        │    │ Q Proj │    │ K Proj │    │ V Proj │              │
-        │    └───┬────┘    └───┬────┘    └───┬────┘              │
-        │        │             │             │                   │
-        │        ▼             ▼             │                   │
-        │     scores = Q @ K^T / sqrt(d_k)   │                   │
-        │        │                           │                   │
-        │        ▼                           │                   │
-        │   Probability Activation           │                   │
-        │        │                           │                   │
-        │        ▼                           ▼                   │
-        │     Dropout ──► weights @ V                            │
-        │        │                                               │
-        │        ▼                                               │
-        │   Output Projection                                    │
-        │        │                                               │
-        │        ▼                                               │
-        │  Output [B, seq, dim]                                  │
+        │    ┌────────┐    ┌────────┐    ┌────────┐               │
+        │    │ Q Proj │    │ K Proj │    │ V Proj │               │
+        │    └───┬────┘    └───┬────┘    └───┬────┘               │
+        │        │             │             │                    │
+        │        ▼             ▼             │                    │
+        │     scores = Q @ K^T / sqrt(d_k)   │                    │
+        │        │                           │                    │
+        │        ▼                           │                    │
+        │   Probability Activation           │                    │
+        │        │                           │                    │
+        │        ▼                           ▼                    │
+        │     Dropout ──► weights @ V                             │
+        │        │                                                │
+        │        ▼                                                │
+        │   Output Projection                                     │
+        │        │                                                │
+        │        ▼                                                │
+        │  Output [B, seq, dim]                                   │
         └─────────────────────────────────────────────────────────┘
 
         Hierarchical Mode (num_anchor_tokens=K > 0):
@@ -105,22 +105,22 @@ class AnchorAttention(keras.layers.Layer):
         │         ▼                             ▼                 │
         │  Anchor Tokens [:K]            Query Tokens [K:]        │
         │         │                             │                 │
-        │   ┌─────┴─────┐                      │                 │
-        │   ▼     ▼     ▼                      ▼                 │
-        │  Q_a  K_a   V_a               Q_query (sep. proj)      │
-        │   │     │     │                      │                 │
-        │   │     │     │                      │                 │
-        │   ▼     │     │                      │                 │
+        │   ┌─────┴─────┐                       │                 │
+        │   ▼     ▼     ▼                       ▼                 │
+        │  Q_a  K_a   V_a               Q_query (sep. proj)       │
+        │   │     │     │                       │                 │
+        │   │     │     │                       │                 │
+        │   ▼     │     │                       │                 │
         │  Q_combined = [Q_a ; Q_query]         │                 │
         │         │                             │                 │
         │         ▼                             │                 │
-        │  scores = Q_combined @ K_a^T / sqrt(d_k)               │
+        │  scores = Q_combined @ K_a^T / sqrt(d_k)                │
         │         │                                               │
         │         ▼                                               │
         │  Probability Activation                                 │
         │         │                                               │
         │         ▼                                               │
-        │      Dropout ──► weights @ V_a                         │
+        │      Dropout ──► weights @ V_a                          │
         │         │                                               │
         │         ▼                                               │
         │  Output Projection                                      │

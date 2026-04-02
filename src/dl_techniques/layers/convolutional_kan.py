@@ -72,28 +72,28 @@ class KANvolution(keras.layers.Layer):
         └────────────────────┬────────────────────────────┘
                              ▼
         ┌─────────────────────────────────────────────────┐
-        │  Patch Extraction: extract kernel-sized patches  │
+        │  Patch Extraction: extract kernel-sized patches │
         └────────────────────┬────────────────────────────┘
                              ▼
         ┌─────────────────────────────────────────────────┐
         │  KAN Transformation                             │
         │  ┌──────────────────┬──────────────────────┐    │
-        │  │  B-spline: Σ Nᵢ(x)·cᵢ │  SiLU: x·σ(x)│    │
+        │  │  B-spline: Σ Nᵢ(x)·cᵢ │  SiLU: x·σ(x)   │    │
         │  └──────────┬───────┴──────────┬───────────┘    │
-        │             ▼                  ▼                 │
-        │     w_spline·B(x)    +    w_silu·SiLU(x)       │
+        │             ▼                  ▼                │
+        │     w_spline·B(x)    +    w_silu·SiLU(x)        │
         └────────────────────┬────────────────────────────┘
                              ▼
         ┌─────────────────────────────────────────────────┐
-        │  Convolution: apply transformed kernels          │
+        │  Convolution: apply transformed kernels         │
         └────────────────────┬────────────────────────────┘
                              ▼
-        ┌─────────────────────────────────────────────────┐
+        ┌──────────────────────────────────────────────────┐
         │  Bias Addition (optional) + Activation (optional)│
-        └────────────────────┬────────────────────────────┘
+        └────────────────────┬─────────────────────────────┘
                              ▼
         ┌─────────────────────────────────────────────────┐
-        │  Output [batch, new_height, new_width, filters]  │
+        │  Output [batch, new_height, new_width, filters] │
         └─────────────────────────────────────────────────┘
 
     :param filters: Number of output filters/channels. Must be positive.

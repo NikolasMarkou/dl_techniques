@@ -115,42 +115,42 @@ class DifferentialFFN(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────┐
-        │     Input (..., input_dim)        │
+        │     Input (..., input_dim)       │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
         │  Split: ReLU(x)  │  ReLU(-x)     │
         └───────┬──────────┴───────┬───────┘
                 ▼                  ▼
-        ┌──────────────┐   ┌──────────────┐
-        │ Positive Path │   │ Negative Path │
-        │ Dense(hidden) │   │ Dense(hidden) │
-        │  LayerNorm    │   │  LayerNorm    │
-        │  Activation   │   │  Activation   │
-        │ Dense(hidden/2)│  │ Dense(hidden/2)│
-        │  Gate Activ.  │   │  Gate Activ.  │
-        └───────┬──────┘   └───────┬──────┘
+        ┌────────────────┐   ┌────────────────┐
+        │ Positive Path  │   │ Negative Path  │
+        │ Dense(hidden)  │   │ Dense(hidden)  │
+        │  LayerNorm     │   │  LayerNorm     │
+        │  Activation    │   │  Activation    │
+        │ Dense(hidden/2)│   │ Dense(hidden/2)│
+        │  Gate Activ.   │   │  Gate Activ.   │
+        └───────┬────────┘   └─────┬──────────┘
                 │                  │
                 └────────┬─────────┘
                          ▼
         ┌──────────────────────────────────┐
-        │   Differential: pos - neg         │
+        │   Differential: pos - neg        │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │          LayerNorm                │
+        │          LayerNorm               │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │       Dropout (optional)          │
+        │       Dropout (optional)         │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │   output_proj: Dense(output_dim)  │
+        │   output_proj: Dense(output_dim) │
         └──────────────┬───────────────────┘
                        ▼
         ┌──────────────────────────────────┐
-        │     Output (..., output_dim)      │
+        │     Output (..., output_dim)     │
         └──────────────────────────────────┘
 
     :param hidden_dim: Integer, dimension of the hidden layer in each branch. Must be positive

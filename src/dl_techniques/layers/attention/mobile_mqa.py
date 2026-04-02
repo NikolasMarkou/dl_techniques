@@ -68,7 +68,7 @@ class MobileMQA(GroupedQueryAttention):
              │                  │              │
              ▼                  ▼              ▼
         ┌──────────────────────────────────────────┐
-        │     Scaled Dot-Product Attention          │
+        │     Scaled Dot-Product Attention         │
         │     softmax(QK^T / √d_k) · V             │
         └─────────────────────┬────────────────────┘
                               ▼

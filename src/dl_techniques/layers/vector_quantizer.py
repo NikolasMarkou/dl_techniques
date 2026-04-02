@@ -34,12 +34,12 @@ class VectorQuantizer(layers.Layer):
                        ▼
         ┌────────────────────────────────────────┐
         │  Compute L2 distances to codebook      │
-        │  d_j = ||z_e - e_j||^2                │
+        │  d_j = ||z_e - e_j||^2                 │
         │  k* = argmin_j d_j                     │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
-        │  Quantize: z_q = e_{k*}               │
+        │  Quantize: z_q = e_{k*}                │
         │  Straight-through: z_q = z_e +         │
         │    stop_gradient(z_q - z_e)            │
         └──────────────┬─────────────────────────┘

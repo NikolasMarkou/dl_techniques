@@ -53,7 +53,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────┐
-        │              DifferentialMultiHeadAttention               │
+        │              DifferentialMultiHeadAttention             │
         │                                                         │
         │  Input [B, L, D]                                        │
         │         │                                               │
@@ -70,16 +70,16 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         │           └───────── subtract ────┘                     │
         │                        │                                │
         │                        ▼                                │
-        │              Differential Attention                      │
+        │              Differential Attention                     │
         │                        │                                │
         │                        ▼                                │
-        │                 Dense Projection                         │
+        │                 Dense Projection                        │
         │                        │                                │
         │                        ▼                                │
-        │                     Dropout                              │
+        │                     Dropout                             │
         │                        │                                │
         │                        ▼                                │
-        │               Output [B, L, D]                           │
+        │               Output [B, L, D]                          │
         └─────────────────────────────────────────────────────────┘
 
     :param dim: Integer, input and output dimension. Must be positive and should be

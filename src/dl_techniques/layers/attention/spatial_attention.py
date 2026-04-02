@@ -87,7 +87,7 @@ class SpatialAttention(keras.layers.Layer):
         │ AvgPool      │   │ MaxPool      │
         │ axis=C       │   │ axis=C       │
         │ → [B,H,W,1]  │   │ → [B,H,W,1]  │
-        └──────┬───────┘   └──────┬───────┘
+        └──────┬───────┘   └───────┬──────┘
                │                   │
                └──── Concat ───────┘
                        ▼

@@ -98,7 +98,7 @@ class GLUFFN(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────┐
-        │    Input (..., input_dim)     │
+        │    Input (..., input_dim)    │
         └──────────────┬───────────────┘
                        │
                  ┌─────┴─────┐
@@ -115,19 +115,19 @@ class GLUFFN(keras.layers.Layer):
                └────────┬───────┘
                         ▼
         ┌──────────────────────────────┐
-        │     Element-wise Multiply     │
+        │     Element-wise Multiply    │
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │      Dropout (optional)       │
+        │      Dropout (optional)      │
         └──────────────┬───────────────┘
                        ▼
-        ┌──────────────────────────────┐
+        ┌───────────────────────────────┐
         │ output_proj: Dense(output_dim)│
-        └──────────────┬───────────────┘
+        └──────────────┬────────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │   Output (..., output_dim)    │
+        │   Output (..., output_dim)   │
         └──────────────────────────────┘
 
     :param hidden_dim: Integer, dimensionality of the intermediate hidden layer.

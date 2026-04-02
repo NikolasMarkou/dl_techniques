@@ -79,12 +79,12 @@ class SpatialLayer(keras.layers.Layer):
         └──────────────┬───────────────────────┘
                        ▼
         ┌──────────────────────────────────────┐
-        │  Resize to [1, H, W, 2]             │
+        │  Resize to [1, H, W, 2]              │
         │  (nearest / bilinear interpolation)  │
         └──────────────┬───────────────────────┘
                        ▼
         ┌──────────────────────────────────────┐
-        │  Tile to [B, H, W, 2]               │
+        │  Tile to [B, H, W, 2]                │
         └──────────────────────────────────────┘
 
     :param resolution: Tuple of integers ``(height, width)`` specifying the initial

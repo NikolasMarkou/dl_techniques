@@ -87,27 +87,27 @@ class MLPBlock(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────┐
-        │   Input (..., input_dim) │
+        │   Input (..., input_dim)│
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
-        │  fc1: Dense(hidden_dim)  │
+        │  fc1: Dense(hidden_dim) │
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
-        │   Activation (e.g. GELU) │
+        │   Activation (e.g. GELU)│
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
-        │   Dropout (optional)     │
+        │   Dropout (optional)    │
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
-        │  fc2: Dense(output_dim)  │
+        │  fc2: Dense(output_dim) │
         └────────────┬────────────┘
                      ▼
         ┌──────────────────────────┐
-        │  Output (..., output_dim) │
+        │  Output (..., output_dim)│
         └──────────────────────────┘
 
     :param hidden_dim: Integer, hidden dimension for the first dense layer (expansion).

@@ -65,45 +65,45 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────────┐
-        │              CapsuleRoutingSelfAttention                     │
+        │              CapsuleRoutingSelfAttention                    │
         │                                                             │
         │  Input [B, seq, embed_dim]                                  │
         │         │                                                   │
         │         ├──────────────┬──────────────┐                     │
         │         ▼              ▼              ▼                     │
-        │    ┌────────┐    ┌────────┐    ┌────────┐                  │
-        │    │ Q Proj │    │ K Proj │    │ V Proj │                  │
-        │    └───┬────┘    └───┬────┘    └───┬────┘                  │
-        │        │             │             │                       │
-        │        ▼             ▼             │                       │
-        │     scores = Q @ K^T / sqrt(d_k)   │                       │
-        │        │                           │                       │
-        │        ├───────────────────┐       │                       │
-        │        ▼                   ▼       │                       │
-        │  ┌──────────────┐  ┌──────────────┐│                       │
-        │  │  Vertical    │  │ Horizontal   ││                       │
-        │  │  Routing     │  │ Routing      ││                       │
-        │  │ (head-wise)  │  │ (token-wise) ││                       │
-        │  └──────┬───────┘  └──────┬───────┘│                       │
-        │         │                 │        │                       │
-        │         └────────┬────────┘        │                       │
-        │                  ▼                 │                       │
-        │        scores + routing_output     │                       │
-        │                  │                 │                       │
-        │                  ▼                 │                       │
-        │           [+ attention_mask]       │                       │
-        │                  │                 │                       │
-        │                  ▼                 │                       │
-        │           softmax ──► dropout      │                       │
-        │                  │                 │                       │
-        │                  ▼                 ▼                       │
-        │              weights @ V                                   │
-        │                  │                                         │
-        │                  ▼                                         │
-        │           Output Projection                                │
-        │                  │                                         │
-        │                  ▼                                         │
-        │        Output [B, seq, embed_dim]                          │
+        │    ┌────────┐    ┌────────┐    ┌────────┐                   │
+        │    │ Q Proj │    │ K Proj │    │ V Proj │                   │
+        │    └───┬────┘    └───┬────┘    └───┬────┘                   │
+        │        │             │             │                        │
+        │        ▼             ▼             │                        │
+        │     scores = Q @ K^T / sqrt(d_k)   │                        │
+        │        │                           │                        │
+        │        ├───────────────────┐       │                        │
+        │        ▼                   ▼       │                        │
+        │  ┌──────────────┐  ┌──────────────┐│                        │
+        │  │  Vertical    │  │ Horizontal   ││                        │
+        │  │  Routing     │  │ Routing      ││                        │
+        │  │ (head-wise)  │  │ (token-wise) ││                        │
+        │  └──────┬───────┘  └──────┬───────┘│                        │
+        │         │                 │        │                        │
+        │         └────────┬────────┘        │                        │
+        │                  ▼                 │                        │
+        │        scores + routing_output     │                        │
+        │                  │                 │                        │
+        │                  ▼                 │                        │
+        │           [+ attention_mask]       │                        │
+        │                  │                 │                        │
+        │                  ▼                 │                        │
+        │           softmax ──► dropout      │                        │
+        │                  │                 │                        │
+        │                  ▼                 ▼                        │
+        │              weights @ V                                    │
+        │                  │                                          │
+        │                  ▼                                          │
+        │           Output Projection                                 │
+        │                  │                                          │
+        │                  ▼                                          │
+        │        Output [B, seq, embed_dim]                           │
         └─────────────────────────────────────────────────────────────┘
 
     :param num_heads: Integer, number of attention heads. Must be positive and should

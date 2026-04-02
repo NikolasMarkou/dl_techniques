@@ -59,7 +59,7 @@ class GatedDeltaNet(keras.layers.Layer):
         │ Q Conv1D │ │ K Conv1D │ │ V Conv1D │
         │ Activate │ │ Activate │ │ Activate │
         └────┬─────┘ └────┬─────┘ └────┬─────┘
-             ▼             ▼            ▼
+             ▼            ▼            ▼
         ┌───────────────────────────────────────────────┐
         │  Alpha/Beta Gating (sigmoid projections)      │
         └──────────────────┬────────────────────────────┘

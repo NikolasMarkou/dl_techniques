@@ -80,23 +80,23 @@ class ShearletTransform(keras.layers.Layer):
         └──────────────┬──────────────────────────┘
                        ▼
         ┌─────────────────────────────────────────┐
-        │  Permute to [B, C, H, W]               │
+        │  Permute to [B, C, H, W]                │
         │  2D FFT (real → complex)                │
         └──────────────┬──────────────────────────┘
                        ▼
         ┌─────────────────────────────────────────┐
         │  Complex Multiply with Filter Bank      │
-        │  [1+S*(D+1) filters, H, W]             │
-        │  → [B, C, NumFilters, H, W]            │
+        │  [1+S*(D+1) filters, H, W]              │
+        │  → [B, C, NumFilters, H, W]             │
         └──────────────┬──────────────────────────┘
                        ▼
         ┌─────────────────────────────────────────┐
-        │  Inverse FFT via conj(FFT(conj(·)))/N  │
+        │  Inverse FFT via conj(FFT(conj(·)))/N   │
         │  Take real part → coefficients          │
         └──────────────┬──────────────────────────┘
                        ▼
         ┌─────────────────────────────────────────┐
-        │  Reshape to [B, H, W, C * NumFilters]  │
+        │  Reshape to [B, H, W, C * NumFilters]   │
         └─────────────────────────────────────────┘
 
     :param scales: Number of scales in the transform. Controls multi-resolution

@@ -102,7 +102,7 @@ class BitLinear(keras.layers.Layer):
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐
-        │  matmul(x_q, W_q)           │
+        │  matmul(x_q, W_q)            │
         │  + bias (optional)           │
         │  / (alpha_x * alpha_w)       │
         └──────────────┬───────────────┘
