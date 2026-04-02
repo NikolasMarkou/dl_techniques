@@ -1,6 +1,6 @@
 from .config import MoEConfig, ExpertConfig, GatingConfig
 from .integration import MoETrainingConfig
-from .layer import MixtureOfExperts
+from .layer import MixtureOfExperts, create_ffn_moe
 
 __all__ = [
     'MoEConfig',
@@ -8,5 +8,5 @@ __all__ = [
     'GatingConfig',
     'MoETrainingConfig',
     'MixtureOfExperts',
-    'MoETrainingConfig',
+    'create_ffn_moe',
 ]

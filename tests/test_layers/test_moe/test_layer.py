@@ -367,8 +367,8 @@ class TestMixtureOfExperts:
         assert stats['expert_ffn_type'] == 'mlp'
         assert stats['routing_type'] == 'linear'
         assert stats['top_k'] == 2
-        assert isinstance(stats['expert_capacity_train'], int)
-        assert isinstance(stats['expert_capacity_eval'], int)
+        assert stats['drop_tokens'] is True
+        assert stats['use_residual_connection'] is True
 
     def test_auxiliary_losses_training(self, base_moe_config, sample_input_2d):
         """Test auxiliary loss computation during training."""
@@ -572,8 +572,8 @@ class TestMixtureOfExperts:
         # Gating network should be built
         assert layer.gating_network.built
 
-    def test_capacity_calculation(self, base_moe_config, sample_input_2d):
-        """Test expert capacity calculation."""
+    def test_config_capacity_factors(self, base_moe_config, sample_input_2d):
+        """Test that capacity factor config values are stored correctly."""
         config = MoEConfig(**base_moe_config)
         config.train_capacity_factor = 2.0
         config.eval_capacity_factor = 1.0
@@ -582,12 +582,9 @@ class TestMixtureOfExperts:
         # Build layer
         _ = layer(sample_input_2d)
 
-        # Check capacity values were calculated
-        assert layer._expert_capacity_train is not None
-        assert layer._expert_capacity_eval is not None
-        assert layer._expert_capacity_train >= layer._expert_capacity_eval
-        assert layer._expert_capacity_train > 0
-        assert layer._expert_capacity_eval > 0
+        # Check config values are accessible
+        assert layer.config.train_capacity_factor == 2.0
+        assert layer.config.eval_capacity_factor == 1.0
 
     def test_weight_shape_consistency(self, base_moe_config, sample_input_2d):
         """Test that weight shapes are consistent across experts."""
@@ -718,7 +715,7 @@ class TestFFNExpert:
 
         assert expert.ffn_config['type'] == 'mlp'
         assert not expert.built
-        assert expert.ffn_block is None  # Created in build()
+        assert expert.ffn_block is not None  # Created in __init__ (Golden Rule)
 
     def test_mlp_expert_forward_pass(self, mlp_expert_config, sample_input):
         """Test MLP expert forward pass."""
@@ -1082,8 +1079,8 @@ class TestMoEPerformance:
             err_msg="Expected deterministic inference behavior"
         )
 
-    def test_expert_capacity_respects_settings(self):
-        """Test that expert capacity settings are respected."""
+    def test_config_capacity_factors_stored(self):
+        """Test that capacity factor config values are stored correctly."""
         config = MoEConfig(
             num_experts=2,
             expert_config=ExpertConfig(
@@ -1100,8 +1097,9 @@ class TestMoEPerformance:
         # Build layer
         _ = layer(sample_input)
 
-        # Check that capacity factors were applied
-        assert layer._expert_capacity_train > layer._expert_capacity_eval
+        # Check config round-trip
+        assert layer.config.train_capacity_factor == 2.0
+        assert layer.config.eval_capacity_factor == 1.0
 
     def test_gradient_flow_through_routing(self):
         """Test that gradients flow through the routing mechanism."""

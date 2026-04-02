@@ -136,18 +136,10 @@ class FFNExpert(BaseExpert):
         except ValueError as e:
             raise ValueError(f"Invalid FFN configuration for expert: {e}")
 
-        self.ffn_block = None  # Created in build()
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the FFN expert using the factory system."""
-        self._built_input_shape = input_shape
-
+        # CREATE the FFN block in __init__ (Golden Rule: create sub-layers here)
         try:
-            # Create FFN block using the factory system
-            # This handles all validation, parameter defaults, and layer creation
             self.ffn_block = create_ffn_from_config(self.ffn_config)
             logger.debug(f"Created {self.ffn_config['type']} expert using FFN factory")
-
         except Exception as e:
             raise ValueError(
                 f"Failed to create FFN expert using factory. "
@@ -155,7 +147,11 @@ class FFNExpert(BaseExpert):
                 f"Error: {e}"
             )
 
-        # Build the FFN block
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """BUILD the FFN expert sub-layers explicitly."""
+        self._built_input_shape = input_shape
+
+        # BUILD the FFN block (sub-layer created in __init__)
         self.ffn_block.build(input_shape)
         super().build(input_shape)
 

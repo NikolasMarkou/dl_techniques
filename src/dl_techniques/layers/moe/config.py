@@ -231,10 +231,20 @@ class MoEConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary for serialization."""
+        # Serialize ExpertConfig, handling Keras initializer/regularizer objects
+        expert_dict = {}
+        for k, v in self.expert_config.__dict__.items():
+            if isinstance(v, keras.initializers.Initializer):
+                expert_dict[k] = keras.initializers.serialize(v)
+            elif isinstance(v, keras.regularizers.Regularizer):
+                expert_dict[k] = keras.regularizers.serialize(v)
+            else:
+                expert_dict[k] = v
+
         return {
             'num_experts': self.num_experts,
-            'expert_config': self.expert_config.__dict__,
-            'gating_config': self.gating_config.__dict__,
+            'expert_config': expert_dict,
+            'gating_config': dict(self.gating_config.__dict__),
             'jitter_noise': self.jitter_noise,
             'drop_tokens': self.drop_tokens,
             'use_residual_connection': self.use_residual_connection,
@@ -245,8 +255,19 @@ class MoEConfig:
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'MoEConfig':
-        """Create configuration from dictionary."""
-        expert_config = ExpertConfig(**config_dict.pop('expert_config', {}))
+        """Create configuration from dictionary (does not mutate input)."""
+        config_dict = dict(config_dict)  # shallow copy to avoid mutating caller's dict
+
+        # Deserialize ExpertConfig, handling serialized Keras objects
+        expert_raw = config_dict.pop('expert_config', {})
+        for k in ('kernel_initializer', 'bias_initializer'):
+            if k in expert_raw and isinstance(expert_raw[k], dict):
+                expert_raw[k] = keras.initializers.deserialize(expert_raw[k])
+        for k in ('kernel_regularizer', 'bias_regularizer'):
+            if k in expert_raw and isinstance(expert_raw[k], dict):
+                expert_raw[k] = keras.regularizers.deserialize(expert_raw[k])
+        expert_config = ExpertConfig(**expert_raw)
+
         gating_config = GatingConfig(**config_dict.pop('gating_config', {}))
 
         return cls(

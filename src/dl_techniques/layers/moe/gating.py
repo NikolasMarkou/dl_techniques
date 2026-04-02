@@ -265,6 +265,18 @@ class LinearGating(BaseGating):
 
         return expert_weights, expert_indices, auxiliary_info
 
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Dict]:
+        """Compute output shapes for (expert_weights, expert_indices, aux_info)."""
+        # expert_weights: same leading dims + num_experts
+        weights_shape = tuple(list(input_shape[:-1]) + [self.num_experts])
+        # expert_indices: same leading dims + top_k (or num_experts)
+        k = self.top_k if self.top_k < self.num_experts else self.num_experts
+        indices_shape = tuple(list(input_shape[:-1]) + [k])
+        return weights_shape, indices_shape, {}
+
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization."""
         config = super().get_config()
@@ -467,6 +479,16 @@ class CosineGating(BaseGating):
 
         return expert_weights, expert_indices, auxiliary_info
 
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Dict]:
+        """Compute output shapes for (expert_weights, expert_indices, aux_info)."""
+        weights_shape = tuple(list(input_shape[:-1]) + [self.num_experts])
+        k = self.top_k if self.top_k < self.num_experts else self.num_experts
+        indices_shape = tuple(list(input_shape[:-1]) + [k])
+        return weights_shape, indices_shape, {}
+
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization."""
         config = super().get_config()
@@ -551,22 +573,11 @@ class SoftMoEGating(BaseGating):
             name='phi_dense'
         )
 
-        # Weight attributes created in build()
-        self.slot_embeddings = None
-
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the SoftMoE gating layers."""
         hidden_dim = input_shape[-1]
         if hidden_dim is None:
             raise ValueError("Hidden dimension must be known for SoftMoE")
-
-        # CREATE weights
-        self.slot_embeddings = self.add_weight(
-            name='slot_embeddings',
-            shape=(self.num_experts, self.num_slots, hidden_dim),
-            initializer=self.kernel_initializer,
-            trainable=True
-        )
 
         # BUILD sublayers explicitly
         self.phi_dense.build(input_shape)
@@ -625,6 +636,16 @@ class SoftMoEGating(BaseGating):
         }
 
         return expert_weights, expert_indices, auxiliary_info
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Dict]:
+        """Compute output shapes for (expert_weights, expert_indices, aux_info)."""
+        # SoftMoE: expert_weights shape = (batch, seq_len, num_experts)
+        weights_shape = tuple(list(input_shape[:-1]) + [self.num_experts])
+        indices_shape = weights_shape  # All experts used
+        return weights_shape, indices_shape, {}
 
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization."""
