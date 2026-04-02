@@ -80,21 +80,21 @@ class HierarchicalMLPStem(keras.layers.Layer):
                          │
                          ▼
         ┌─────────────────────────────────────────┐
-        │  Stage 0: Conv2D(dim1, k=4, s=4) → Norm│
+        │  Stage 0: Conv2D(dim1, k=4, s=4) → Norm │
         │           → Activation                  │
         │  (processes 4x4 patches independently)  │
         └────────────────┬────────────────────────┘
                          │
                          ▼
         ┌─────────────────────────────────────────┐
-        │  Stage 1: Conv2D(dim1, k=2, s=2) → Norm│
+        │  Stage 1: Conv2D(dim1, k=2, s=2) → Norm │
         │           → Activation                  │
         │  (processes 8x8 patches hierarchically) │
         └────────────────┬────────────────────────┘
                          │
                          ▼
         ┌─────────────────────────────────────────┐
-        │  Stage N: Conv2D(embed_dim, k=2, s=2)  │
+        │  Stage N: Conv2D(embed_dim, k=2, s=2)   │
         │           → Norm  (final stage, no act) │
         └────────────────┬────────────────────────┘
                          │

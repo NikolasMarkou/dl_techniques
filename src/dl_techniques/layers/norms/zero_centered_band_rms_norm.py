@@ -95,7 +95,7 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
                      │
                      ▼
         ┌───────────────────────────────┐
-        │  RMS = max(√(mean(x_c²)+ε),ε)│
+        │  RMS = max(√(mean(x_c²)+ε),ε) │
         └────────────┬──────────────────┘
                      │
                      ▼
@@ -106,8 +106,8 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
                      ▼
         ┌───────────────────────────────┐
         │  σ = sigmoid(5 × band_param)  │
-        │  scale = (1-α) + α × σ       │
-        │  scale ∈ [1-α, 1]            │
+        │  scale = (1-α) + α × σ        │
+        │  scale ∈ [1-α, 1]             │
         └────────────┬──────────────────┘
                      │
                      ▼

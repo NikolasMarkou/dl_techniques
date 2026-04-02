@@ -22,17 +22,17 @@ class PointCloudAutoencoder(keras.layers.Layer):
         │  Input: (Source PC, Target PC)  [B,N,3]   │
         └──────────────────┬────────────────────────┘
                            ▼
-        ┌───────────────────────────────────────────┐
-        │  Shared Encoder (per PC)                  │
-        │  ┌─────────────────────────────────────┐  │
-        │  │ EdgeConv 1  KNN→MLP[64,64]→Max→f1  │  │
-        │  │ EdgeConv 2  KNN→MLP[64,64]→Max→f2  │  │
-        │  │ EdgeConv 3  KNN→MLP[64]→Max→f3     │  │
-        │  └──────────────────┬──────────────────┘  │
-        │                     ▼                     │
+        ┌─────────────────────────────────────────────┐
+        │  Shared Encoder (per PC)                    │
+        │  ┌─────────────────────────────────────┐    │
+        │  │ EdgeConv 1  KNN→MLP[64,64]→Max→f1   │    │
+        │  │ EdgeConv 2  KNN→MLP[64,64]→Max→f2   │    │
+        │  │ EdgeConv 3  KNN→MLP[64]→Max→f3      │    │
+        │  └──────────────────┬──────────────────┘    │
+        │                     ▼                       │
         │  Concat[f1,f2,f3]→MLP[1024]→local [B,N,1024]│
-        │  MaxPool + AvgPool → global [B, 2048]     │
-        └──────────────────┬────────────────────────┘
+        │  MaxPool + AvgPool → global [B, 2048]       │
+        └──────────────────┬──────────────────────────┘
                            ▼
         ┌───────────────────────────────────────────┐
         │  Shared Decoder (per PC)                  │
@@ -40,9 +40,9 @@ class PointCloudAutoencoder(keras.layers.Layer):
         │  → Reshape → reconstruction [B, N, 3]     │
         └──────────────────┬────────────────────────┘
                            ▼
-        ┌───────────────────────────────────────────┐
+        ┌────────────────────────────────────────────┐
         │  Output: (reconstructions, locals, globals)│
-        └───────────────────────────────────────────┘
+        └────────────────────────────────────────────┘
 
     :param k_neighbors: Number of neighbours for k-NN graphs. Defaults to 20.
     :type k_neighbors: int

@@ -82,13 +82,13 @@ class RMSNorm(keras.layers.Layer):
                 │
                 ▼
         ┌───────────────────────────┐
-        │  Compute mean(x²) along  │
+        │  Compute mean(x²) along   │
         │  normalization axis       │
         └────────────┬──────────────┘
                      │
                      ▼
         ┌───────────────────────────┐
-        │  RMS = √(mean(x²) + ε)   │
+        │  RMS = √(mean(x²) + ε)    │
         └────────────┬──────────────┘
                      │
                      ▼

@@ -80,19 +80,19 @@ class DeepKernelPCA(keras.layers.Layer):
         │         Input (batch, features)   │
         └──────────────┬────────────────────┘
                        ▼
-        ┌──────────────────────────────────┐
+        ┌─────────────────────────────────────────┐
         │  Level 1: Kernel K^1 ─► PCA ─► alpha^1  │
-        └──────────────┬───────────────────┘
+        └──────────────┬──────────────────────────┘
                        │ forward coupling
                        ▼
-        ┌──────────────────────────────────┐
+        ┌─────────────────────────────────────────┐
         │  Level 2: Kernel K^2 ─► PCA ─► alpha^2  │
-        └──────────────┬───────────────────┘
+        └──────────────┬──────────────────────────┘
                        │ forward coupling
                        ▼
-        ┌──────────────────────────────────┐
+        ┌─────────────────────────────────────────┐
         │  Level L: Kernel K^L ─► PCA ─► alpha^L  │
-        └──────────────┬───────────────────┘
+        └──────────────┬──────────────────────────┘
                        │
                ┌───────┴───────┐
                │ Backward Pass │ (refine via gated coupling)
@@ -100,7 +100,7 @@ class DeepKernelPCA(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────────┐
         │  Weighted Concat ─► Output       │
-        │  (batch, sum(components))         │
+        │  (batch, sum(components))        │
         └──────────────────────────────────┘
 
     :param num_levels: Number of hierarchical KPCA levels. Must be positive.

@@ -154,7 +154,7 @@ class SOM2dLayer(SOMLayer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────┐
-        │             SOM2dLayer                    │
+        │             SOM2dLayer                   │
         │                                          │
         │  Input(batch, input_dim)                 │
         │         │                                │
@@ -172,7 +172,7 @@ class SOM2dLayer(SOMLayer):
         │         │                                │
         │         ▼                                │
         │  Output: BMU_coords(batch,2),            │
-        │          quant_errors(batch,)             │
+        │          quant_errors(batch,)            │
         └──────────────────────────────────────────┘
 
     :param map_size: Shape of the 2D SOM grid ``(height, width)``. Must contain

@@ -79,7 +79,7 @@ class AffineCouplingLayer(keras.layers.Layer):
         │  + Context (batch, context_dim)      │
         └────────────┬─────────────────────────┘
                      ▼
-        ┌────────────────────────┐
+        ┌───────────────────────┐
         │  Split: z_a | z_b     │
         └───┬────────────┬──────┘
             │            │
@@ -91,12 +91,12 @@ class AffineCouplingLayer(keras.layers.Layer):
         └───┬────────┘   │
             │            ▼
             │   ┌────────────────┐
-            └──►│ y_b = z_b*s+t │
+            └──►│ y_b = z_b*s+t  │
                 └───────┬────────┘
                         ▼
         ┌────────────────────────┐
-        │  Concat: z_a | y_b    │
-        │  ─► Output y          │
+        │  Concat: z_a | y_b     │
+        │  ─► Output y           │
         └────────────────────────┘
 
     :param input_dim: Dimensionality of the input data. Must be >= 2.

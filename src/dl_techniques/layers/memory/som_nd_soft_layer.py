@@ -314,7 +314,7 @@ class SoftSOMLayer(keras.layers.Layer):
         │  Input(batch, input_dim)                     │
         │         │                                    │
         │         ▼                                    │
-        │  Distance: ||x - w_{i,j}||^2                │
+        │  Distance: ||x - w_{i,j}||^2                 │
         │         │                                    │
         │         ▼                                    │
         │  Soft Assignment:                            │
@@ -322,7 +322,7 @@ class SoftSOMLayer(keras.layers.Layer):
         │    (per-dim or global)                       │
         │         │                                    │
         │         ▼                                    │
-        │  Reconstruction: sum(a_{i,j} * w_{i,j})     │
+        │  Reconstruction: sum(a_{i,j} * w_{i,j})      │
         │         │                                    │
         │         ├──► L_recon (MSE, optional)         │
         │         ├──► L_topo  (topological, optional) │

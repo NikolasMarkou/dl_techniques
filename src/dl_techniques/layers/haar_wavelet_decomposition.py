@@ -36,19 +36,19 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         ┌────────────────────────────────────────────┐
         │  For each decomposition level (1..K):      │
         │  ┌────────────┬────────────┐               │
-        │  │  Low-pass   │  High-pass │  (1D)        │
-        │  │  (approx)   │  (detail)  │              │
+        │  │  Low-pass  │  High-pass │  (1D)         │
+        │  │  (approx)  │  (detail)  │               │
         │  └─────┬──────┴─────┬──────┘               │
-        │        │            │                       │
-        │  ┌─────┴────┐ ┌────┴─────────────────┐     │
-        │  │ LL (next  │ │ LH, HL, HH          │(2D) │
-        │  │  input)   │ │ (detail subbands)    │     │
-        │  └───────────┘ └─────────────────────┘     │
+        │        │            │                      │
+        │  ┌─────┴─────┐ ┌────┴─────────────────┐    │
+        │  │ LL (next  │ │ LH, HL, HH           │(2D)│
+        │  │  input)   │ │ (detail subbands)    │    │
+        │  └───────────┘ └──────────────────────┘    │
         └──────────────────┬─────────────────────────┘
                            ▼
-        ┌────────────────────────────────────────────┐
+        ┌─────────────────────────────────────────────┐
         │  Output: [approx, details_K, ..., details_1]│
-        └────────────────────────────────────────────┘
+        └─────────────────────────────────────────────┘
 
     :param num_levels: Number of decomposition levels. Each level halves
         the spatial resolution along each dimension. Defaults to 3.

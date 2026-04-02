@@ -102,13 +102,13 @@ class HANCBlock(keras.layers.Layer):
                         │
                         ▼
         ┌─────────────────────────────────┐
-        │  Conv1x1 → BN → LeakyReLU      │
+        │  Conv1x1 → BN → LeakyReLU       │
         │  (Expand: C_in → C_in*inv)      │
         └───────────────┬─────────────────┘
                         │
                         ▼
         ┌─────────────────────────────────┐
-        │  DepthwiseConv3x3 → BN → ReLU  │
+        │  DepthwiseConv3x3 → BN → ReLU   │
         │  (Spatial feature extraction)   │
         └───────────────┬─────────────────┘
                         │
@@ -126,7 +126,7 @@ class HANCBlock(keras.layers.Layer):
                         │
                         ▼
         ┌─────────────────────────────────┐
-        │  Conv1x1 → BN → LeakyReLU      │
+        │  Conv1x1 → BN → LeakyReLU       │
         │  (Project: C_in → filters)      │
         └───────────────┬─────────────────┘
                         │

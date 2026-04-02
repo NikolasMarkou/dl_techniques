@@ -160,7 +160,7 @@ class SOMLayer(keras.layers.Layer):
         │  Input(batch, input_dim)                   │
         │         │                                  │
         │         ▼                                  │
-        │  Distance: ||x - w_i||^2  (vectorized)    │
+        │  Distance: ||x - w_i||^2  (vectorized)     │
         │         │                                  │
         │         ▼                                  │
         │  BMU = argmin_i (distances)                │
@@ -174,7 +174,7 @@ class SOMLayer(keras.layers.Layer):
         │         │                                  │
         │         ▼                                  │
         │  Output: BMU_coords(batch, grid_dim),      │
-        │          quant_errors(batch,)               │
+        │          quant_errors(batch,)              │
         └────────────────────────────────────────────┘
 
     :param grid_shape: Shape of the SOM neuron grid, e.g. ``(10, 10)`` for 2D

@@ -123,7 +123,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         ┌──────────────────────────────────────────────────┐
         │  For i = 1 .. num_layers:                        │
         │  ┌────────────────────────────────────────────┐  │
-        │  │ Message Passing (GCN/GraphSAGE/GAT/GIN)   │  │
+        │  │ Message Passing (GCN/GraphSAGE/GAT/GIN)    │  │
         │  └──────────────────┬─────────────────────────┘  │
         │                     ▼                            │
         │  ┌────────────────────────────────────────────┐  │

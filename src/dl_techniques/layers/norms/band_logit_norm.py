@@ -43,13 +43,13 @@ class BandLogitNorm(keras.layers.Layer):
                        │
                        ▼
         ┌──────────────────────────────┐
-        │  L2 Norm: √(max(Σ(x²), ε)) │
+        │  L2 Norm: √(max(Σ(x²), ε))   │
         └──────┬───────────────┬───────┘
                │               │
                ▼               ▼
         ┌──────────────┐ ┌─────────────┐
         │ Unit Norm:   │ │ LayerNorm   │
-        │ x / ||x||_2 │ │ on ||x||_2  │
+        │ x / ||x||_2  │ │ on ||x||_2  │
         └──────┬───────┘ └──────┬──────┘
                │                │
                │                ▼
@@ -65,13 +65,13 @@ class BandLogitNorm(keras.layers.Layer):
                │                │
                ▼                ▼
         ┌──────────────────────────────┐
-        │  Multiply: x_norm × scale   │
+        │  Multiply: x_norm × scale    │
         └──────────────┬───────────────┘
                        │
                        ▼
         ┌──────────────────────────────┐
-        │  Output: band-constrained   │
-        │  shape: (..., D)            │
+        │  Output: band-constrained    │
+        │  shape: (..., D)             │
         └──────────────────────────────┘
 
     :param max_band_width: Maximum allowed deviation from unit norm

@@ -118,8 +118,8 @@ class EntityGraphRefinement(keras.layers.Layer):
                            ▼                      ▼
         ┌─────────────────────────┐  ┌────────────────────┐
         │  Entity Extraction      │  │  Global Context    │
-        │  MHA(Q=Library, KV=X)   │  │  C = mean(X)      │
-        │  → Entities [B, M, D_e] │  │  [B, D]           │
+        │  MHA(Q=Library, KV=X)   │  │  C = mean(X)       │
+        │  → Entities [B, M, D_e] │  │  [B, D]            │
         │  → Activity Mask [B, M] │  └─────────┬──────────┘
         └────────────┬────────────┘            │
                      ├─────────────────────────┤

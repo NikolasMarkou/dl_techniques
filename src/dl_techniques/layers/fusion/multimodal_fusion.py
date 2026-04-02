@@ -62,9 +62,9 @@ class MultiModalFusion(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌───────────┐   ┌───────────┐        ┌───────────┐
-        │ Modality 1 │   │ Modality 2 │  ...  │ Modality N │
-        └─────┬─────┘   └─────┬─────┘        └─────┬─────┘
+        ┌───────────┐   ┌───────────┐        ┌────────────┐
+        │ Modality 1│   │ Modality 2│  ...   │ Modality N │
+        └─────┬─────┘   └─────┬─────┘        └──────┬─────┘
               │               │                     │
               └───────┬───────┴─────────┬───────────┘
                       │                 │
@@ -75,9 +75,9 @@ class MultiModalFusion(keras.layers.Layer):
                      │                 │
                      ▼                 ▼
               ┌─────────────────────────────┐
-              │     Fusion Strategy          │
-              │  (cross_attention │ gated │  │
-              │   concat │ bilinear │ ...)   │
+              │     Fusion Strategy         │
+              │  (cross_attention │ gated │ │
+              │   concat │ bilinear │ ...)  │
               └────────────┬────────────────┘
                            │
                            ▼

@@ -68,7 +68,7 @@ class LogitNorm(keras.layers.Layer):
                     ▼
         ┌─────────────────────────┐
         │  Sum along axis + ε     │
-        │  norm² = Σ(x²) + ε     │
+        │  norm² = Σ(x²) + ε      │
         └───────────┬─────────────┘
                     │
                     ▼
@@ -78,7 +78,7 @@ class LogitNorm(keras.layers.Layer):
                     │
                     ▼
         ┌─────────────────────────┐
-        │  Divide: x / (norm × τ)│
+        │  Divide: x / (norm × τ) │
         └───────────┬─────────────┘
                     │
                     ▼

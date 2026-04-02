@@ -51,7 +51,7 @@ class FNetEncoderBlock(keras.layers.Layer):
                            ▼
         ┌───────────────────────────────────────────────┐
         │  FNet Fourier Transform                       │
-        │  y = Real(FFT2D(x))  ── parameter-free       │
+        │  y = Real(FFT2D(x))  ── parameter-free        │
         └──────────────────┬────────────────────────────┘
                            ▼
         ┌───────────────────────────────────────────────┐

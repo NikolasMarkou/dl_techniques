@@ -31,7 +31,7 @@ class Canny(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────┐
         │  2. Sobel Gradient           │
-        │     Gx, Gy ──► Mag, Angle   │
+        │     Gx, Gy ──► Mag, Angle    │
         └──────────────┬───────────────┘
                        ▼
         ┌──────────────────────────────┐

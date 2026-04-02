@@ -41,8 +41,8 @@ class FiLMLayer(keras.layers.Layer):
         └──────────┬───────────┘  └──────────┬───────────┘
                    │                         ▼
                    │              ┌──────────────────────┐
-                   │              │ LayerNorm (optional)  │
-                   │              │ Dropout (optional)    │
+                   │              │ LayerNorm (optional) │
+                   │              │ Dropout (optional)   │
                    │              └──────────┬───────────┘
                    │                 ┌───────┴───────┐
                    │                 ▼               ▼

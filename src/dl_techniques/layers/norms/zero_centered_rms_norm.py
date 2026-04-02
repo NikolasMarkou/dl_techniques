@@ -97,7 +97,7 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
                      │
                      ▼
         ┌───────────────────────────────┐
-        │  RMS = √(mean(x_centered²)+ε)│
+        │  RMS = √(mean(x_centered²)+ε) │
         └────────────┬──────────────────┘
                      │
                      ▼

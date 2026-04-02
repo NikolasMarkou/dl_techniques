@@ -66,7 +66,7 @@ class GatedDeltaNet(keras.layers.Layer):
                            ▼
         ┌───────────────────────────────────────────────┐
         │  Delta Rule Update (recurrent, per timestep)  │
-        │  S_t = alpha_t * S_{t-1} + beta_t * K_t⊗V_t  │
+        │  S_t = alpha_t * S_{t-1} + beta_t * K_t⊗V_t   │
         │  out_t = Q_t @ S_t + V_t_residual             │
         └──────────────────┬────────────────────────────┘
                            ▼

@@ -98,24 +98,24 @@ class HierarchicalReasoningCore(keras.layers.Layer):
         ┌──────────────────────────────────────────────────────┐
         │           HierarchicalReasoningCore                  │
         │                                                      │
-        │  {token_ids, puzzle_ids} + Carry: {z_h, z_l}        │
+        │  {token_ids, puzzle_ids} + Carry: {z_h, z_l}         │
         │              │                                       │
         │              ▼                                       │
         │  Token Embedding + Puzzle Embedding (optional)       │
         │  + Positional Encoding (Learned / RoPE)              │
         │              │                                       │
         │              ▼                                       │
-        │  ┌─── Reasoning Cycles (stop_gradient) ───┐         │
+        │  ┌─── Reasoning Cycles (stop_gradient) ────┐         │
         │  │  for h in h_cycles:                     │         │
         │  │    for l in l_cycles:                   │         │
-        │  │      z_l ← L_Reasoning(z_l, z_h+emb)   │         │
-        │  │    z_h ← H_Reasoning(z_h, z_l)         │         │
+        │  │      z_l ← L_Reasoning(z_l, z_h+emb)    │         │
+        │  │    z_h ← H_Reasoning(z_h, z_l)          │         │
         │  └─────────────────────────────────────────┘         │
         │              │                                       │
         │              ▼                                       │
         │  Final Step (with gradients):                        │
-        │    z_l ← L_Reasoning(z_l, z_h + emb)                │
-        │    z_h ← H_Reasoning(z_h, z_l)                      │
+        │    z_l ← L_Reasoning(z_l, z_h + emb)                 │
+        │    z_h ← H_Reasoning(z_h, z_l)                       │
         │              │                                       │
         │         ┌────┴────┐                                  │
         │         ▼         ▼                                  │

@@ -50,9 +50,9 @@ class MixtureOfExperts(keras.layers.Layer):
         │  └─────────────────┘                             │
         │         │                                        │
         │         ▼                                        │
-        │  ┌─────┬─────┬─────┬─────┐                      │
-        │  │FFN_0│FFN_1│ ... │FFN_N│  (top-k activated)   │
-        │  └──┬──┴──┬──┴─────┴──┬──┘                      │
+        │  ┌─────┬─────┬─────┬─────┐                       │
+        │  │FFN_0│FFN_1│ ... │FFN_N│  (top-k activated)    │
+        │  └──┬──┴──┬──┴─────┴──┬──┘                       │
         │     │     │           │                          │
         │     ▼     ▼           ▼                          │
         │  Weighted Combination (weights * outputs)        │

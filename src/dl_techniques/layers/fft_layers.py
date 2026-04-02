@@ -1,5 +1,4 @@
 import keras
-from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -28,11 +27,11 @@ class FFTLayer(keras.layers.Layer):
         └──────────────────┬────────────────────┘
                            ▼
         ┌───────────────────────────────────────┐
-        │  Create (real, zeros) complex tuple    │
+        │  Create (real, zeros) complex tuple   │
         └──────────────────┬────────────────────┘
                            ▼
         ┌───────────────────────────────────────┐
-        │  FFT2D along spatial dims              │
+        │  FFT2D along spatial dims             │
         │  ──▶ (fft_real, fft_imag)             │
         └──────────────────┬────────────────────┘
                            ▼
@@ -41,7 +40,7 @@ class FFTLayer(keras.layers.Layer):
         └──────────────────┬────────────────────┘
                            ▼
         ┌───────────────────────────────────────┐
-        │  Concatenate [real, imag] along ch.    │
+        │  Concatenate [real, imag] along ch.   │
         └──────────────────┬────────────────────┘
                            ▼
         ┌───────────────────────────────────────┐

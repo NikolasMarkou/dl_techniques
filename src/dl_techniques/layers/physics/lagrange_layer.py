@@ -33,12 +33,12 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         │                    ▼                              │
         │         Automatic Differentiation                 │
         │         ├─ dL/dq        (gradient)                │
-        │         ├─ d²L/dq_dot²  (Hessian)                │
-        │         └─ d/dq(dL/dq_dot) (mixed)               │
+        │         ├─ d²L/dq_dot²  (Hessian)                 │
+        │         └─ d/dq(dL/dq_dot) (mixed)                │
         │                    │                              │
         │                    ▼                              │
         │         Euler-Lagrange Solver                     │
-        │         q_ddot = H^{-1} * [dL/dq - J*q_dot]      │
+        │         q_ddot = H^{-1} * [dL/dq - J*q_dot]       │
         │                    │                              │
         │                    ▼                              │
         │              Output: q_ddot                       │

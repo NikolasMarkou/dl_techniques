@@ -92,23 +92,23 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────┐
+        ┌──────────────────────────────────────────────────┐
         │        LearnableArithmeticOperator               │
         │                                                  │
         │  Input(s): x1, x2                                │
         │         │                                        │
         │         ▼                                        │
-        │  ┌─────┬─────────┬──────┬───────┬─────┬─────┐   │
+        │  ┌─────┬─────────┬──────┬───────┬─────┬───────┐  │
         │  │ add │multiply │ sub  │divide │power│max/min│  │
-        │  └──┬──┴────┬────┴───┬──┴───┬───┴──┬──┴──┬───┘  │
-        │     │       │       │      │      │     │       │
-        │     ▼       ▼       ▼      ▼      ▼     ▼       │
-        │  Weighted sum: p_i * f_i(x1, x2)                │
+        │  └──┬──┴────┬────┴───┬──┴───┬───┴──┬──┴──┬────┘  │
+        │     │       │        │      │      │     │       │
+        │     ▼       ▼        ▼      ▼      ▼     ▼       │
+        │  Weighted sum: p_i * f_i(x1, x2)                 │
         │         │                                        │
-        │         ├──► * scaling_factor                     │
+        │         ├──► * scaling_factor                    │
         │         ▼                                        │
         │  Output (same shape as input)                    │
-        └─────────────────────────────────────────────────┘
+        └──────────────────────────────────────────────────┘
 
     :param operation_types: List of operation types. Available:
         ``['add', 'multiply', 'subtract', 'divide', 'power', 'max', 'min']``.

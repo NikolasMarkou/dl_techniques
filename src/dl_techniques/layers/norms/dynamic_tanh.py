@@ -47,7 +47,7 @@ class DynamicTanh(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────┐
         │  Scale by alpha:             │
-        │  scaled = α × x             │
+        │  scaled = α × x              │
         └──────────────┬───────────────┘
                        │
                        ▼

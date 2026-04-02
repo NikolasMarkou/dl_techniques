@@ -128,32 +128,32 @@ class MannLayer(keras.layers.Layer):
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────────────────────┐
-        │                    MannLayer                         │
-        │                                                      │
-        │  Input(t) + prev_read_vectors                        │
-        │         │                                            │
-        │         ▼                                            │
-        │  ┌─────────────────────┐                             │
+        ┌───────────────────────────────────────────────────────┐
+        │                    MannLayer                          │
+        │                                                       │
+        │  Input(t) + prev_read_vectors                         │
+        │         │                                             │
+        │         ▼                                             │
+        │  ┌──────────────────────┐                             │
         │  │ Controller (LSTM/GRU)│──► Dense (param_generator)  │
-        │  └─────────────────────┘         │                   │
-        │                                  ▼                   │
-        │                    ┌──────────────────────┐          │
+        │  └──────────────────────┘        │                    │
+        │                                  ▼                    │
+        │                    ┌───────────────────────┐          │
         │                    │  Addressing Logic     │          │
         │                    │  ├─ Content (cosine)  │          │
         │                    │  ├─ Interpolation (g) │          │
         │                    │  ├─ Conv Shift (s)    │          │
         │                    │  └─ Sharpen (gamma)   │          │
-        │                    └──────────┬───────────┘          │
-        │                               │                      │
-        │                    ┌──────────▼───────────┐          │
+        │                    └──────────┬────────────┘          │
+        │                               │                       │
+        │                    ┌──────────▼────────────┐          │
         │                    │  External Memory      │          │
         │                    │  Write: M*(1-e)+a     │          │
         │                    │  Read: w^T * M        │          │
-        │                    └──────────────────────┘          │
-        │                               │                      │
-        │         Output = [controller_out; read_vectors]      │
-        └──────────────────────────────────────────────────────┘
+        │                    └───────────────────────┘          │
+        │                               │                       │
+        │         Output = [controller_out; read_vectors]       │
+        └───────────────────────────────────────────────────────┘
 
     :param memory_locations: Number of memory slots (rows) in the external memory matrix.
     :type memory_locations: int

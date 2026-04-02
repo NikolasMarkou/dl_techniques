@@ -152,7 +152,7 @@ class GaussianLikelihoodHead(keras.layers.Layer):
                     │
                     ├─────────────────────┐
                     ▼                     ▼
-            ┌──────────────┐     ┌──────────────────┐
+            ┌──────────────┐     ┌───────────────────┐
             │ Dense(units) │     │  Dense(units)     │
             │  (linear)    │     │  (linear logits)  │
             └──────┬───────┘     └────────┬──────────┘

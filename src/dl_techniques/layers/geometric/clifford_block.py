@@ -74,7 +74,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
                          ▼
         ┌────────────────────────────────────┐
         │  For each shift s:                 │
-        │  ├─ Wedge: Z_det·roll(Z_ctx,s)    │
+        │  ├─ Wedge: Z_det·roll(Z_ctx,s)     │
         │  │         - Z_ctx·roll(Z_det,s)   │
         │  └─ Dot:  SiLU(Z_det·roll(Z_ctx,s))│
         └───────────────┬────────────────────┘
@@ -84,7 +84,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         └───────────────┬────────────────────┘
                         ▼
         ┌────────────────────────────────────┐
-        │  Dense projection → [B,H,W,D]     │
+        │  Dense projection → [B,H,W,D]      │
         └────────────────────────────────────┘
 
     :param channels: Feature dimensionality D.

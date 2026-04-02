@@ -88,18 +88,18 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
     .. code-block:: text
 
         Context (batch, context_dim)          Lags (batch, num_lags)
-                │                                      │
-                ├──────────────┐                       │
-                ▼              ▼                       │
+                │                                     │
+                ├──────────────┐                      │
+                ▼              ▼                      │
         ┌──────────────┐ ┌──────────┐                 │
-        │ Dense(num_lags│ │ Dense(1) │                 │
+        │Dense(num_lags│ │ Dense(1) │                 │
         │  sigmoid)    │ │ sigmoid  │                 │
         └──────┬───────┘ └────┬─────┘                 │
                │              │                       │
                ▼              │                       ▼
         Attention Weights     │              ┌────────────────┐
-        (batch, num_lags)     │              │  Element-wise   │
-               │              │              │  Multiply       │
+        (batch, num_lags)     │              │  Element-wise  │
+               │              │              │  Multiply      │
                └──────────────┼──► w * lags ─┘
                               │         │
                               │         ▼
@@ -113,7 +113,7 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
                               │         │
                               ▼         ▼
                         ┌───────────────────┐
-                        │  g * weighted_sum  │
+                        │  g * weighted_sum │
                         └─────────┬─────────┘
                                   │
                                   ▼

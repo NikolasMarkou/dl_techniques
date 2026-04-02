@@ -94,7 +94,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
                        │                      │
                        ▼                      │
         ┌──────────────────────────────┐      │
-        │  γ × (X ⊙ norm') + β        │      │
+        │  γ × (X ⊙ norm') + β         │      │
         └──────────────┬───────────────┘      │
                        │                      │
                        ▼                      ▼
