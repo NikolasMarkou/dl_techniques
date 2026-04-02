@@ -905,8 +905,16 @@ class TestQwen3NextIntegration:
         batch_size, seq_len = 2, 16
         vocab_size = 1024
 
-        # Create very small model for training test
-        model = create_qwen3_next("tiny", task_type="generation", vocab_size=vocab_size)
+        # Create very small model for training test (reduced from "tiny" to fit RTX 4070 GPU)
+        model = create_qwen3_next(
+            "tiny",
+            task_type="generation",
+            vocab_size=vocab_size,
+            hidden_size=128,
+            num_layers=1,
+            num_experts=2,
+            max_seq_len=64,
+        )
 
         # Compile model
         model.compile(

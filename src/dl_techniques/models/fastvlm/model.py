@@ -18,7 +18,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.factory import AttentionType
 from dl_techniques.layers.repmixer_block import RepMixerBlock, ConvolutionalStem
 
-from .components import AttentionBlock
+from .components import AttentionBlockVLM
 
 # ---------------------------------------------------------------------
 
@@ -374,7 +374,7 @@ class FastVLM(keras.Model):
             ) if sum(self.depths) > 1 else 0.0
 
             stage3_blocks.append(
-                AttentionBlock(
+                AttentionBlockVLM(
                     dim=self.embed_dims[2],
                     num_heads=self.num_heads[2],
                     mlp_ratio=self.mlp_ratio,

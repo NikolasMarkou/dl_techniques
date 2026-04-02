@@ -12,7 +12,7 @@ from dl_techniques.layers.layer_scale import LearnableMultiplier, MultiplierType
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class AttentionBlock(keras.layers.Layer):
+class AttentionBlockVLM(keras.layers.Layer):
     """
     Attention block with vision_heads-specific adaptations.
 
@@ -78,12 +78,12 @@ class AttentionBlock(keras.layers.Layer):
     Example:
         ```python
         # Basic attention block
-        attn = AttentionBlock(dim=256, num_heads=8)
+        attn = AttentionBlockVLM(dim=256, num_heads=8)
         inputs = keras.Input(shape=(14, 14, 256))
         outputs = attn(inputs)  # Shape: (None, 14, 14, 256)
 
         # With window attention for efficiency
-        attn = AttentionBlock(
+        attn = AttentionBlockVLM(
             dim=512,
             num_heads=16,
             attention_type='window_attention',
@@ -91,7 +91,7 @@ class AttentionBlock(keras.layers.Layer):
         )
 
         # With custom dropout and layer scaling
-        attn = AttentionBlock(
+        attn = AttentionBlockVLM(
             dim=768,
             num_heads=12,
             dropout_rate=0.1,
@@ -102,7 +102,7 @@ class AttentionBlock(keras.layers.Layer):
         # In a vision_heads model pipeline
         x = ConvolutionalStem(64)(image_input)  # [H/4, W/4, 64]
         x = RepMixerBlock(64)(x)                # Local feature mixing
-        x = AttentionBlock(64, num_heads=4)(x)  # Global attention
+        x = AttentionBlockVLM(64, num_heads=4)(x)  # Global attention
         ```
 
     Note:
