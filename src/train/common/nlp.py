@@ -152,9 +152,9 @@ def preprocess_clm_dataset(
     """Tokenize and batch a text dataset for CLM (causal language modeling) training.
 
     Expects a dataset of raw text strings (not supervised).
-    Returns batched dataset of (input_ids, labels) tuples where labels are
-    input_ids shifted right by one position. The last token of input has no
-    corresponding label (truncated).
+    Returns batched dataset of ``(input_ids, labels, sample_weight)`` tuples.
+    The ``sample_weight`` masks out PAD positions so they don't contribute
+    to the loss — only real token predictions count.
 
     :param dataset: A tf.data.Dataset yielding raw text strings.
     :param preprocessor: TiktokenPreprocessor for tokenization.
@@ -162,28 +162,33 @@ def preprocess_clm_dataset(
     :param batch_size: Batch size for the output dataset.
     :param streaming: If ``True``, skip ``.cache()`` to avoid OOM on
         large streaming datasets (e.g. Wikipedia). Default ``False``.
-    :return: Batched tf.data.Dataset of ``(input_ids, labels)`` tuples.
-        ``input_ids`` shape: ``(batch, max_seq_length - 1)``,
-        ``labels`` shape: ``(batch, max_seq_length - 1)``.
+    :return: Batched tf.data.Dataset of ``(input_ids, labels, sample_weight)``
+        tuples. All shapes: ``(batch, max_seq_length - 1)``.
     """
+    pad_token_id = preprocessor.pad_token_id
+
     def tokenize_fn(text):
         encoded = preprocessor(decode_text(text), return_tensors='np')
         ids = encoded['input_ids'][0]
-        return ids
+        mask = encoded['attention_mask'][0]
+        return ids, mask
 
     dataset = dataset.map(
-        lambda x: tf.py_function(tokenize_fn, [x], tf.int32),
+        lambda x: tf.py_function(tokenize_fn, [x], [tf.int32, tf.int32]),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
     seq_len = max_seq_length
 
-    def make_clm_pair(ids):
+    def make_clm_pair(ids, mask):
         ids = tf.ensure_shape(ids, [seq_len])
+        mask = tf.ensure_shape(mask, [seq_len])
         # Input: tokens [0..n-2], Labels: tokens [1..n-1]
         input_ids = ids[:-1]
         labels = ids[1:]
-        return input_ids, labels
+        # Mask out PAD positions in labels so they don't affect loss
+        label_mask = tf.cast(mask[1:], tf.float32)
+        return input_ids, labels, label_mask
 
     dataset = dataset.map(make_clm_pair, num_parallel_calls=tf.data.AUTOTUNE)
     if streaming:
@@ -195,7 +200,7 @@ def preprocess_clm_dataset(
     else:
         dataset = (
             dataset.cache()
-            .shuffle(buffer_size=1000)
+            .shuffle(buffer_size=10000)
             .batch(batch_size, drop_remainder=True)
             .prefetch(tf.data.AUTOTUNE)
         )

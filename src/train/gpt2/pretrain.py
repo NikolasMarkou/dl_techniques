@@ -120,13 +120,14 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
 def _wrap_labels_for_dict_output(
     dataset: tf.data.Dataset,
 ) -> tf.data.Dataset:
-    """Wrap (input_ids, labels) → (input_ids, {"logits": labels}).
+    """Wrap (input_ids, labels, sample_weight) for dict-output model.
 
     GPT-2 model returns ``{"logits": ..., "last_hidden_state": ...}``,
     so Keras expects labels in dict format matching the output keys.
+    The ``sample_weight`` masks PAD positions out of the loss.
     """
     return dataset.map(
-        lambda x, y: (x, {"logits": y}),
+        lambda x, y, w: (x, {"logits": y}, {"logits": w}),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
