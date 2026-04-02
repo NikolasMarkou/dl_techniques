@@ -52,7 +52,7 @@ class TestDifferentiableStep:
     @pytest.fixture
     def sample_input_3d(self) -> keras.KerasTensor:
         """Sample 3D input for sequence/image testing."""
-        return keras.random.normal(shape=(2, 8, 16))
+        return keras.random.normal(shape=(2, 8, 16), seed=44)
 
     def test_initialization(self, scalar_config, per_axis_config):
         """Test layer initialization with valid parameters."""
@@ -210,6 +210,10 @@ class TestDifferentiableStepIntegration:
     @pytest.mark.parametrize("axis_mode", [-1])
     def test_in_gating_model(self, axis_mode):
         """Test layer in a complete gating model for both modes."""
+        # Fix seeds for reproducibility across test orderings
+        np.random.seed(42)
+        keras.utils.set_random_seed(42)
+
         inputs = keras.Input(shape=(64,))
         features = keras.layers.Dense(32, activation='relu')(inputs)
 
@@ -237,6 +241,10 @@ class TestDifferentiableStepIntegration:
     @pytest.mark.parametrize("axis_mode", [-1])
     def test_serialization_in_complete_model(self, axis_mode):
         """Test serialization of a complete model with the layer."""
+        # Fix seeds for reproducibility across test orderings
+        np.random.seed(43)
+        keras.utils.set_random_seed(43)
+
         inputs = keras.Input(shape=(20,))
         x = keras.layers.Dense(32)(inputs)
         outputs = DifferentiableStep(axis=axis_mode)(x)
