@@ -36,15 +36,17 @@ class TrainingConfig:
 
     # Model
     gpt2_variant: str = "tiny"
-    vocab_size: int = 100277  # Tiktoken cl100k_base
+    vocab_size: int = 50261  # Tiktoken gpt2 (50257) + 4 special tokens
     max_seq_length: int = 128
+    num_layers: int = 8  # Override tiny default (4) for better capacity
+    num_heads: int = 8  # More heads for 8-layer model
 
-    # Tokenizer (Tiktoken cl100k_base)
-    encoding_name: str = "cl100k_base"
-    cls_token_id: int = 100264
-    sep_token_id: int = 100265
-    pad_token_id: int = 100266
-    mask_token_id: int = 100267
+    # Tokenizer (Tiktoken gpt2 — 50K vocab, half the embedding cost)
+    encoding_name: str = "gpt2"
+    cls_token_id: int = 50257
+    sep_token_id: int = 50258
+    pad_token_id: int = 50259
+    mask_token_id: int = 50260
 
     # Training
     batch_size: int = 32
@@ -72,6 +74,7 @@ class TrainingConfig:
     streaming: bool = True
     steps_per_epoch: int = 5000
     val_samples: int = 2000
+    val_skip_samples: int = 500000
 
     # Analysis
     run_epoch_analysis: bool = True
@@ -91,6 +94,8 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
         variant=config.gpt2_variant,
         vocab_size=config.vocab_size,
         max_seq_len=config.max_seq_length,
+        depth=config.num_layers,
+        num_heads=config.num_heads,
         dropout_rate=0.1,
         attention_dropout_rate=0.1,
     )
@@ -196,9 +201,10 @@ def _load_hf_datasets(
         streaming=config.streaming,
     )
 
-    # Validation set: always non-streaming, small subset
+    # Validation set: skip first N articles to avoid train/val overlap
     logger.info(
-        f"Loading validation set: {config.val_samples} samples (non-streaming)"
+        f"Loading validation set: {config.val_samples} samples "
+        f"(skip_samples={config.val_skip_samples})"
     )
     if "wikipedia" in config.hf_dataset_path:
         val_raw = load_wikipedia_dataset(
@@ -206,6 +212,7 @@ def _load_hf_datasets(
             config_name=config.hf_dataset_name,
             min_article_length=config.min_article_length,
             max_samples=config.val_samples,
+            skip_samples=config.val_skip_samples,
             streaming=True,
         )
     else:
@@ -216,6 +223,7 @@ def _load_hf_datasets(
             cache_dir=config.hf_cache_dir,
             min_length=config.min_article_length,
             max_samples=config.val_samples,
+            skip_samples=config.val_skip_samples,
             streaming=True,
         )
 

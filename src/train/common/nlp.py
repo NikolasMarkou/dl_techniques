@@ -188,7 +188,7 @@ def preprocess_clm_dataset(
     dataset = dataset.map(make_clm_pair, num_parallel_calls=tf.data.AUTOTUNE)
     if streaming:
         dataset = (
-            dataset.shuffle(buffer_size=1000)
+            dataset.shuffle(buffer_size=10000)
             .batch(batch_size, drop_remainder=True)
             .prefetch(tf.data.AUTOTUNE)
         )
