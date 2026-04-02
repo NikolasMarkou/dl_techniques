@@ -142,6 +142,57 @@ def preprocess_mlm_dataset(
     return dataset
 
 
+def preprocess_clm_dataset(
+    dataset: tf.data.Dataset,
+    preprocessor: TiktokenPreprocessor,
+    max_seq_length: int,
+    batch_size: int,
+) -> tf.data.Dataset:
+    """Tokenize and batch a text dataset for CLM (causal language modeling) training.
+
+    Expects a dataset of raw text strings (not supervised).
+    Returns batched dataset of (input_ids, labels) tuples where labels are
+    input_ids shifted right by one position. The last token of input has no
+    corresponding label (truncated).
+
+    :param dataset: A tf.data.Dataset yielding raw text strings.
+    :param preprocessor: TiktokenPreprocessor for tokenization.
+    :param max_seq_length: Maximum sequence length for tokenization.
+    :param batch_size: Batch size for the output dataset.
+    :return: Batched tf.data.Dataset of ``(input_ids, labels)`` tuples.
+        ``input_ids`` shape: ``(batch, max_seq_length - 1)``,
+        ``labels`` shape: ``(batch, max_seq_length - 1)``.
+    """
+    def tokenize_fn(text):
+        encoded = preprocessor(decode_text(text), return_tensors='np')
+        ids = encoded['input_ids'][0]
+        return ids
+
+    dataset = dataset.map(
+        lambda x: tf.py_function(tokenize_fn, [x], tf.int32),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
+    seq_len = max_seq_length
+
+    def make_clm_pair(ids):
+        ids = tf.ensure_shape(ids, [seq_len])
+        # Input: tokens [0..n-2], Labels: tokens [1..n-1]
+        input_ids = ids[:-1]
+        labels = ids[1:]
+        return input_ids, labels
+
+    dataset = dataset.map(make_clm_pair, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = (
+        dataset.cache()
+        .shuffle(buffer_size=1000)
+        .batch(batch_size, drop_remainder=True)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    logger.info(f"CLM dataset preprocessed: batch_size={batch_size}, seq_len={seq_len - 1}")
+    return dataset
+
+
 def preprocess_classification_dataset(
     dataset: tf.data.Dataset,
     preprocessor: TiktokenPreprocessor,
