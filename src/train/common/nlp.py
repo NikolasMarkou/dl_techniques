@@ -152,9 +152,9 @@ def preprocess_clm_dataset(
     """Tokenize and batch a text dataset for CLM (causal language modeling) training.
 
     Expects a dataset of raw text strings (not supervised).
-    Returns batched dataset of ``(input_ids, labels, sample_weight)`` tuples.
-    The ``sample_weight`` masks out PAD positions so they don't contribute
-    to the loss — only real token predictions count.
+    Returns batched dataset of ``(input_ids, labels)`` tuples. PAD positions
+    in labels are set to ``-1`` so they can be ignored by the loss function
+    (use :class:`MaskedCLMLoss`).
 
     :param dataset: A tf.data.Dataset yielding raw text strings.
     :param preprocessor: TiktokenPreprocessor for tokenization.
@@ -162,10 +162,10 @@ def preprocess_clm_dataset(
     :param batch_size: Batch size for the output dataset.
     :param streaming: If ``True``, skip ``.cache()`` to avoid OOM on
         large streaming datasets (e.g. Wikipedia). Default ``False``.
-    :return: Batched tf.data.Dataset of ``(input_ids, labels, sample_weight)``
-        tuples. All shapes: ``(batch, max_seq_length - 1)``.
+    :return: Batched tf.data.Dataset of ``(input_ids, labels)`` tuples.
+        Both shapes: ``(batch, max_seq_length - 1)``. Labels use ``-1``
+        for PAD positions.
     """
-    pad_token_id = preprocessor.pad_token_id
 
     def tokenize_fn(text):
         encoded = preprocessor(decode_text(text), return_tensors='np')
@@ -186,9 +186,10 @@ def preprocess_clm_dataset(
         # Input: tokens [0..n-2], Labels: tokens [1..n-1]
         input_ids = ids[:-1]
         labels = ids[1:]
-        # Mask out PAD positions in labels so they don't affect loss
-        label_mask = tf.cast(mask[1:], tf.float32)
-        return input_ids, labels, label_mask
+        # Set PAD label positions to -1 so MaskedCLMLoss ignores them
+        label_mask = mask[1:]
+        labels = tf.where(label_mask == 1, labels, -1)
+        return input_ids, labels
 
     dataset = dataset.map(make_clm_pair, num_parallel_calls=tf.data.AUTOTUNE)
     if streaming:

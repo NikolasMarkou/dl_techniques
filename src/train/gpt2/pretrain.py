@@ -26,6 +26,40 @@ from dl_techniques.datasets.nlp import load_wikipedia_dataset, load_hf_text_data
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 
+
+# ---------------------------------------------------------------------
+# Masked CLM Loss (ignores PAD positions marked as -1)
+# ---------------------------------------------------------------------
+
+
+class MaskedCLMLoss(keras.losses.Loss):
+    """Sparse cross-entropy that ignores label positions set to -1.
+
+    PAD tokens in CLM labels are set to -1 by the preprocessing pipeline.
+    This loss computes cross-entropy only on real token positions, giving
+    an accurate measure of language modeling performance.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._base_loss = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True, reduction="none",
+        )
+
+    def call(self, y_true, y_pred):
+        # y_true: (batch, seq_len) with -1 for PAD
+        # y_pred: (batch, seq_len, vocab_size)
+        mask = keras.ops.cast(y_true != -1, "float32")
+        # Replace -1 with 0 to avoid index errors in cross-entropy
+        safe_labels = keras.ops.maximum(y_true, 0)
+        per_token_loss = self._base_loss(safe_labels, y_pred)
+        # Average only over non-PAD positions
+        masked_loss = keras.ops.sum(per_token_loss * mask) / (
+            keras.ops.sum(mask) + 1e-8
+        )
+        return masked_loss
+
+
 # ---------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------
@@ -120,14 +154,13 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
 def _wrap_labels_for_dict_output(
     dataset: tf.data.Dataset,
 ) -> tf.data.Dataset:
-    """Wrap (input_ids, labels, sample_weight) for dict-output model.
+    """Wrap (input_ids, labels) → (input_ids, {"logits": labels}).
 
     GPT-2 model returns ``{"logits": ..., "last_hidden_state": ...}``,
     so Keras expects labels in dict format matching the output keys.
-    The ``sample_weight`` masks PAD positions out of the loss.
     """
     return dataset.map(
-        lambda x, y, w: (x, {"logits": y}, {"logits": w}),
+        lambda x, y: (x, {"logits": y}),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
@@ -262,7 +295,7 @@ def compile_model(
     )
     model.compile(
         optimizer=optimizer,
-        loss={"logits": keras.losses.SparseCategoricalCrossentropy(from_logits=True)},
+        loss={"logits": MaskedCLMLoss()},
         metrics={"logits": ["accuracy"]},
     )
     logger.info(
