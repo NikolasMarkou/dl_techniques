@@ -51,7 +51,7 @@ class ManifoldStressLayer(keras.layers.Layer):
         │ Embeddings  │ │ Curvature    │ │ Connection   │
         │ [B, S, D]   │ │ [B, S, ...]  │ │ [B, S, D, D] │
         └──────┬──────┘ └──────┬───────┘ └──────┬───────┘
-               └───────────────┼─────────────────┘
+               └───────────────┼────────────────┘
                                ▼
         ┌──────────────────────────────────────────┐
         │  Per-type stress computation:            │
@@ -282,31 +282,25 @@ class ManifoldStressLayer(keras.layers.Layer):
         seq_len = ops.shape(connection)[1]
         conn_dim = ops.shape(connection)[2]
 
-        # Compute approximate holonomy around small loops
-        # Using small rectangular loops at each position
+        # Compute approximate holonomy around small loops at each position
+        # using the commutator [Γ_here, Γ_next] as a curvature proxy.
+        # For flat space, this should be zero.
 
-        stress_list = []
+        # Γ at each position and at the next position (boundary: repeat last)
+        gamma_here = connection  # (batch, seq_len, dim, dim)
+        gamma_next = ops.concatenate([
+            connection[:, 1:, :, :],
+            connection[:, -1:, :, :]
+        ], axis=1)  # (batch, seq_len, dim, dim)
 
-        for pos in range(seq_len):
-            # Get connections at pos and pos+1 (if available)
-            gamma_here = connection[:, pos, :, :]
+        # Commutator: [Γ_here, Γ_next] = Γ_here Γ_next - Γ_next Γ_here
+        comm_ab = ops.einsum('bsij,bsjk->bsik', gamma_here, gamma_next)
+        comm_ba = ops.einsum('bsij,bsjk->bsik', gamma_next, gamma_here)
+        commutator = comm_ab - comm_ba
 
-            if pos < seq_len - 1:
-                gamma_next = connection[:, pos + 1, :, :]
-            else:
-                gamma_next = gamma_here
-
-            # Approximate holonomy: [Γ_here, Γ_next] (commutator)
-            # For flat space, this should be zero
-            commutator = ops.matmul(gamma_here, gamma_next) - ops.matmul(gamma_next, gamma_here)
-
-            # Frobenius norm of commutator
-            holonomy_deviation = ops.sqrt(ops.sum(commutator ** 2, axis=(-2, -1)) + 1e-8)
-            stress_list.append(holonomy_deviation)
-
-        # Stack: (batch, seq_len)
-        stress = ops.stack(stress_list, axis=1)
-        stress = ops.expand_dims(stress, -1)
+        # Frobenius norm of commutator at each position
+        stress = ops.sqrt(ops.sum(commutator ** 2, axis=(-2, -1)) + 1e-8)
+        stress = ops.expand_dims(stress, -1)  # (batch, seq_len, 1)
 
         # Compare to expected holonomy
         if self.use_learnable_baseline:

@@ -57,7 +57,7 @@ class ParallelTransportLayer(keras.layers.Layer):
                          ▼
         ┌────────────────────────────────────────┐
         │ Transport (direct/iterative/path_ord)  │
-        │ V' = V - h·Γ(T,V) (per step)          │
+        │ V' = V - h·Γ(T,V) (per step)           │
         └────────────────┬───────────────────────┘
                          ▼
         ┌────────────────────────────────────────┐
@@ -164,14 +164,11 @@ class ParallelTransportLayer(keras.layers.Layer):
         :return: Transported vectors.
         :rtype: keras.KerasTensor
         """
-        # Compute connection action: Γ^k_{ij} T^i V^j
-        # connection: (batch, seq_len, dim, dim) as Γ^k_j with i contracted with T
-        # First contract with tangent: (batch, seq_len, dim, dim) @ (batch, seq_len, dim)
-        # Result: (batch, seq_len, dim)
-        gamma_t = ops.einsum('bsij,bsi->bsj', connection, tangent)
-
-        # Then contract with vectors
-        transport_term = ops.einsum('bsj,bsj->bsj', gamma_t, vectors)
+        # Compute connection action on vectors: A·V (matrix-vector product)
+        # connection: (batch, seq_len, dim, dim) as gauge matrix A^i_j
+        # vectors: (batch, seq_len, dim) as V^j
+        # transport_term^i = A^i_j V^j
+        transport_term = ops.einsum('bsij,bsj->bsi', connection, vectors)
 
         # Apply transport: V' = V - step_size * Γ(T, V)
         step = self.step_size
@@ -213,9 +210,8 @@ class ParallelTransportLayer(keras.layers.Layer):
 
         # Iterate transport steps
         for _ in range(self.num_steps):
-            # Compute transport increment
-            gamma_t = ops.einsum('bsij,bsi->bsj', connection, tangent)
-            transport_term = ops.einsum('bsj,bsj->bsj', gamma_t, current)
+            # Compute transport increment: A·V (matrix-vector product)
+            transport_term = ops.einsum('bsij,bsj->bsi', connection, current)
 
             # Update: Euler integration
             current = current - step * transport_term
@@ -263,9 +259,9 @@ class ParallelTransportLayer(keras.layers.Layer):
 
         # Build path-ordered product
         for _ in range(self.num_steps):
-            # Contract connection with tangent to get generator
+            # Generator is the connection matrix scaled by step size
             # Shape: (batch, seq_len, dim, dim)
-            generator = -step * ops.einsum('bsij,bsi->bsij', connection, tangent)
+            generator = -step * connection
 
             # Compute exponential approximation: exp(A) ≈ I + A + A²/2
             gen_sq = ops.matmul(generator, generator)

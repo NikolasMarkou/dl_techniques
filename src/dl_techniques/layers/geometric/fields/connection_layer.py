@@ -54,7 +54,7 @@ class ConnectionLayer(keras.layers.Layer):
                  └──────────┬─────────┘
                             ▼
         ┌────────────────────────────────────┐
-        │ Concat → [B, S, 2D]               │
+        │ Concat → [B, S, 2D]                │
         │ Dense + tanh → [B, S, H]           │
         └───────────────┬────────────────────┘
                         ▼
@@ -136,7 +136,8 @@ class ConnectionLayer(keras.layers.Layer):
         # Compute output dimension based on connection type
         if connection_type == 'yang_mills':
             # Yang-Mills: connection valued in Lie algebra
-            self.output_dim = self.connection_dim * self.num_generators
+            # One scalar coefficient per generator
+            self.output_dim = self.num_generators
         else:
             # Affine or Levi-Civita: connection has one index
             self.output_dim = self.connection_dim * self.connection_dim
@@ -248,23 +249,18 @@ class ConnectionLayer(keras.layers.Layer):
         batch_size = ops.shape(hidden)[0]
         seq_len = ops.shape(hidden)[1]
 
-        # Get connection coefficients: (batch, seq_len, connection_dim * num_generators)
+        # Get scalar coefficients per generator: (batch, seq_len, num_generators)
         coeffs = ops.matmul(hidden, self.connection_kernel_2) + self.connection_bias_2
-        coeffs = ops.reshape(
-            coeffs,
-            (batch_size, seq_len, self.connection_dim, self.num_generators)
-        )
 
-        # Expand generators for broadcasting
-        # generators: (num_generators, connection_dim, connection_dim)
         # Make generators antisymmetric for proper Lie algebra structure
+        # generators: (num_generators, connection_dim, connection_dim)
         generators = self._make_antisymmetric(self.lie_generators)
 
-        # Combine: sum over generators weighted by coefficients
-        # coeffs: (batch, seq_len, connection_dim, num_generators)
+        # Yang-Mills connection: A = sum_g c_g T_g (Lie algebra linear combination)
+        # coeffs: (batch, seq_len, num_generators)
         # generators: (num_generators, connection_dim, connection_dim)
         # Result: (batch, seq_len, connection_dim, connection_dim)
-        connection = ops.einsum('bsig,gij->bsij', coeffs, generators)
+        connection = ops.einsum('bsg,gij->bsij', coeffs, generators)
 
         return connection
 

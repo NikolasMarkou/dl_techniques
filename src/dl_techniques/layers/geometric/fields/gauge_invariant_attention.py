@@ -67,7 +67,7 @@ class GaugeInvariantAttention(keras.layers.Layer):
                            ▼
         ┌────────────────────────────────────────────┐
         │ Softmax → Dropout → Attend values          │
-        │ (optional parallel transport of V)          │
+        │ (optional parallel transport of V)         │
         └──────────────────┬─────────────────────────┘
                            ▼
         ┌────────────────────────────────────────────┐

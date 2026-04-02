@@ -54,10 +54,10 @@ class FieldEmbedding(keras.layers.Layer):
                  ├──────────────────────┐
                  ▼                      ▼
         ┌────────────────┐   ┌──────────────────────┐
-        │ Output:        │   │ Curvature Projection  │
-        │ embeddings     │   │ emb @ W + b → tanh    │
-        │ [B, S, D]      │   │ × scale               │
-        └────────────────┘   │ → curvature            │
+        │ Output:        │   │ Curvature Projection │
+        │ embeddings     │   │ emb @ W + b → tanh   │
+        │ [B, S, D]      │   │ × scale              │
+        └────────────────┘   │ → curvature          │
                              └──────────────────────┘
 
     :param vocab_size: Size of the vocabulary. Must be positive.

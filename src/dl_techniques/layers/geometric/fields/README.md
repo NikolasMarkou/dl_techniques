@@ -1,55 +1,149 @@
 # Holonomic Field Layers
 
-A Keras 3 implementation of field-based neural network layers inspired by gauge theory and differential geometry, implementing the core concepts of **Holonomic AI**.
+Keras 3 layers that replace flat vector representations with **gauge fields** ---
+vectors enriched with curvature, connection, and holonomy --- bringing the
+mathematics of differential geometry and gauge theory into neural network
+processing.
 
-## Overview
+## Introduction
 
-Traditional neural networks represent data as **point vectors** in a high-dimensional space. Holonomic AI represents data as **fields** on a manifold, complete with:
-- **Curvature**: How meaning varies locally
-- **Connection**: How to transport information between points
-- **Holonomy**: Global geometric invariants
+Standard neural network layers treat representations as point vectors in flat
+Euclidean space.  Every position gets a single vector, and information flows
+between positions through bilinear operations (dot-product attention, linear
+projections) that know nothing about the *geometry* of the representation
+space.
 
-This provides several key advantages:
+This package replaces that flat picture with one borrowed from **gauge theory**
+and **differential geometry** --- the same mathematics that describes
+electromagnetism, general relativity, and the Standard Model of particle
+physics.  The central idea is:
 
-| Traditional Approach | Holonomic Approach |
-|---------------------|-------------------|
-| Point embeddings | Field embeddings with curvature |
-| Euclidean distance | Geodesic distance on manifold |
-| Raw attention | Gauge-invariant attention |
-| Post-hoc anomaly detection | Built-in manifold stress detection |
-| Vulnerable to adversarial attacks | Geometric constraints reject inconsistent inputs |
+> **Represent each token not as a point in R^d, but as a local section of a
+> fibre bundle** --- a vector *plus* the curvature and connection that describe
+> how the space bends and twists around it.
+
+### Why geometry matters for neural networks
+
+When a network carries geometric structure, three things change:
+
+1. **Information transport becomes structure-aware.**
+   Moving a value from position *i* to position *j* is no longer a simple copy;
+   it passes through a **parallel transport** operator derived from the learned
+   connection.  The transport preserves inner products and respects curvature,
+   so the network learns *how* meaning transforms as it moves --- not just
+   *that* it moves.
+
+2. **Attention becomes gauge-invariant.**
+   Ordinary dot-product attention depends on the raw coordinate values of Q and
+   K.  A local change of basis (a *gauge transformation*) at one position can
+   arbitrarily change the attention pattern.  Gauge-invariant attention scores
+   depend only on geometric quantities --- curvature agreement, geodesic
+   distance, holonomy along the path between positions --- which are
+   independent of the choice of local frame.
+
+3. **Anomaly detection falls out of the geometry.**
+   Inputs that are consistent with the learned manifold structure have low
+   *manifold stress* (smooth curvature, small connection variation,
+   near-identity holonomy).  Adversarial perturbations, poisoned data, or
+   out-of-distribution samples break these geometric invariants and can be
+   detected without a separate classifier.
+
+### How the layers compose
+
+The layers form a pipeline that mirrors the mathematical structure of a
+gauge field theory:
+
+```
+tokens
+  |
+  v
+FieldEmbedding             token -> (embedding, curvature)
+  |
+  v
+ConnectionLayer            (embedding, curvature) -> connection Gamma
+  |
+  +---> ParallelTransport        transport vectors using Gamma
+  |
+  +---> HolonomyLayer            gauge-invariant loop features from Gamma
+  |
+  +---> GaugeInvariantAttention   attention scored by geometric quantities
+  |
+  +---> ManifoldStressLayer       anomaly detection via geometric stress
+  |
+  v
+HolonomicTransformerLayer  wraps all of the above into a single
+                           drop-in transformer block
+```
+
+Each layer can be used independently (e.g. plug `GaugeInvariantAttention`
+into an existing transformer) or composed through
+`HolonomicTransformerLayer` which orchestrates the full pipeline.
+
+### Key mathematical objects
+
+| Object | Symbol | Shape (per position) | Role |
+|---|---|---|---|
+| Embedding | *e* | `(D,)` | Representation vector |
+| Curvature | *R* | `(D,)` ricci / `(D,D)` metric | Local geometry |
+| Connection | *Gamma* | `(D, D)` | Parallel transport rule |
+| Holonomy | *H[gamma]* | scalar (trace) | Gauge-invariant loop feature |
+| Stress | *sigma* | scalar | Anomaly / inconsistency score |
+
+---
 
 ## Mathematical Foundation
 
-### Gauge Theory Basics
+### Gauge Theory for Neural Networks
 
-In physics, **gauge theory** describes how fields transform under local symmetries. A **gauge transformation** is a local change that doesn't affect observable physics. For neural networks:
+In physics, **gauge theory** describes how fields transform under local
+symmetries.  A **gauge transformation** is a local change of basis that does
+not affect observable (gauge-invariant) quantities.  Translating to neural
+networks:
 
-- **Field**: The representation at each position (not just a vector, but includes curvature)
-- **Connection (Γ)**: Describes how to parallel transport vectors between positions
-- **Curvature (R)**: Measures how the space is curved
-- **Holonomy (H)**: The result of transporting a vector around a closed loop
+- **Field** -- the representation at each position: a vector *plus*
+  curvature that describes how meaning varies locally.
+- **Connection (Gamma)** -- a matrix at each position prescribing how to
+  parallel-transport vectors between neighbouring positions.
+- **Curvature (R)** -- measures how much the space is curved; computed from
+  the connection or learned directly.
+- **Holonomy (H)** -- the net rotation accumulated by transporting a vector
+  around a closed loop.  Non-trivial holonomy signals curvature.
 
-### Key Equations
+### Core Equations
 
-**Parallel Transport**: Moving a vector V along a path while keeping it "parallel"
+**Parallel transport** -- move a vector *V* along a path keeping it "parallel":
+
 ```
-dV^k/dt + Γ^k_{ij} (dγ^i/dt) V^j = 0
-```
-
-**Holonomy**: The path-ordered exponential around a loop γ
-```
-H[γ] = P exp(-∮_γ Γ)
-```
-
-**Curvature**: Measures non-commutativity of transport
-```
-R^k_{lij} = ∂_i Γ^k_{jl} - ∂_j Γ^k_{il} + Γ^k_{im} Γ^m_{jl} - Γ^k_{jm} Γ^m_{il}
+dV^k / dt  +  Gamma^k_j  V^j  =  0
 ```
 
-## Installation
+In the discrete layer this becomes an Euler step
+`V' = V - h * Gamma @ V`, iterated `num_steps` times for higher accuracy.
 
-The field layers are part of the `dl_techniques` package. Import them as:
+**Holonomy** -- the path-ordered exponential around a closed loop gamma:
+
+```
+H[gamma]  =  P exp( -oint_gamma  Gamma )
+```
+
+Approximated in the layer via the commutator `[Gamma_s, Gamma_{s+k}]` at
+different offsets *k*, whose trace `Tr([A,B]^2)` is a gauge-invariant
+scalar feature.
+
+**Curvature** -- measures non-commutativity of transport:
+
+```
+F_ij  =  d_i Gamma_j  -  d_j Gamma_i  +  [Gamma_i, Gamma_j]
+```
+
+The learned curvature tensor serves as a soft metric on the representation
+space; positions with similar curvature attend to each other more strongly.
+
+---
+
+## Usage
+
+### Imports
 
 ```python
 from dl_techniques.layers.geometric.fields import (
@@ -61,456 +155,356 @@ from dl_techniques.layers.geometric.fields import (
     GaugeInvariantAttention,
     ManifoldStressLayer,
     HolonomicTransformerLayer,
+    FieldNormalization,
 )
 ```
 
-## Quick Start
-
-### Using the Factory
-
-The recommended way to create field layers:
+### Factory construction (recommended)
 
 ```python
-from dl_techniques.layers.geometric.fields import create_field_layer
-
-# Create a complete holonomic transformer layer
 layer = create_field_layer(
     'holonomic_transformer',
     hidden_dim=256,
     num_heads=8,
     use_holonomy_features=True,
-    use_anomaly_detection=True
+    use_anomaly_detection=True,
 )
 
-# Process input
-x = keras.ops.random.normal((batch_size, seq_len, 256))
-output, anomaly_scores = layer(x)
+output, anomaly_scores = layer(x)   # x: (batch, seq_len, 256)
 ```
 
-### Direct Instantiation
+### Direct instantiation
 
 ```python
-from dl_techniques.layers.geometric.fields import (
-    FieldEmbedding,
-    HolonomicTransformerLayer
-)
-
-# Field embedding for vocabulary
 embedding = FieldEmbedding(
     vocab_size=10000,
     embed_dim=256,
     curvature_type='ricci',
-    curvature_regularization=0.01
 )
-
-# Get embeddings and curvature
-tokens = keras.ops.convert_to_tensor([[1, 2, 3, 4]])
-embeddings, curvature = embedding(tokens)
+embeddings, curvature = embedding(token_ids)  # token_ids: (batch, seq_len)
 ```
+
+---
 
 ## Layer Reference
 
 ### FieldEmbedding
 
-Embeds tokens as fields with curvature information.
+Maps integer token ids to `(embedding, curvature)` pairs.
 
 ```python
-embedding = FieldEmbedding(
-    vocab_size=10000,           # Vocabulary size
-    embed_dim=256,              # Embedding dimension
-    curvature_type='ricci',     # 'metric', 'riemann', 'ricci', 'scalar'
-    curvature_scale=0.1,        # Scale of curvature values
-    curvature_regularization=0.01  # Smoothness regularization
+FieldEmbedding(
+    vocab_size,                       # vocabulary size
+    embed_dim,                        # embedding dimension D
+    curvature_type='ricci',           # 'metric' | 'riemann' | 'ricci' | 'scalar'
+    curvature_scale=0.1,              # initial curvature magnitude
+    curvature_regularization=0.01,    # smoothness penalty
 )
-
-# Returns tuple: (embeddings, curvature)
-embeddings, curvature = embedding(token_ids)
+# call(token_ids) -> (embeddings [B,S,D], curvature [B,S,...])
 ```
 
-**Curvature Types:**
-- `'metric'`: Full metric tensor (d × d matrix per position)
-- `'riemann'`: Riemann-like curvature tensor (antisymmetric)
-- `'ricci'`: Ricci curvature (diagonal, d values per position)
-- `'scalar'`: Single scalar curvature per position
+| `curvature_type` | Output shape | Description |
+|---|---|---|
+| `'metric'` | `(B, S, D, D)` | Full symmetric positive-definite metric tensor |
+| `'riemann'` | `(B, S, D, D)` | Antisymmetric Riemann-like curvature tensor |
+| `'ricci'` | `(B, S, D)` | Diagonal Ricci curvature (one value per dimension) |
+| `'scalar'` | `(B, S, 1)` | Single scalar curvature per position |
 
 ### ConnectionLayer
 
-Computes the gauge connection from field representations.
+Computes a gauge connection matrix from embeddings and curvature.
 
 ```python
-connection = ConnectionLayer(
-    hidden_dim=256,
-    connection_type='yang_mills',  # 'yang_mills', 'levi_civita', 'affine'
-    num_generators=8,              # Number of Lie algebra generators
-    use_metric=True,               # Metric-compatible connection
-    antisymmetric=True             # Enforce antisymmetry
+ConnectionLayer(
+    hidden_dim,                       # representation dimension
+    connection_type='yang_mills',     # 'yang_mills' | 'levi_civita' | 'affine'
+    num_generators=8,                 # Lie algebra generators (yang_mills only)
+    use_metric=True,                  # learn a metric tensor
+    antisymmetric=True,               # enforce Lie algebra antisymmetry
 )
-
-# Compute connection from embeddings and curvature
-conn = connection([embeddings, curvature])
-# conn shape: (batch, seq_len, dim, dim)
+# call([embeddings, curvature]) -> connection [B, S, D, D]
 ```
 
-**Connection Types:**
-- `'yang_mills'`: Non-abelian gauge connection (most general)
-- `'levi_civita'`: Metric-compatible, torsion-free
-- `'affine'`: General affine connection
+| `connection_type` | Description |
+|---|---|
+| `'yang_mills'` | Non-abelian gauge connection: `A = sum_g c_g T_g` where `T_g` are learnable antisymmetric generators |
+| `'levi_civita'` | Metric-compatible, torsion-free (symmetrised affine) |
+| `'affine'` | General affine connection (optionally antisymmetrised) |
 
 ### ParallelTransportLayer
 
-Transports vectors along paths using the connection.
+Transports vectors along the sequence using the connection.
 
 ```python
-transport = ParallelTransportLayer(
-    transport_dim=256,
-    num_steps=10,                 # Integration steps
-    transport_method='iterative',  # 'direct', 'iterative', 'path_ordered'
-    step_size=0.1
+ParallelTransportLayer(
+    transport_dim,                    # vector dimension (must match connection)
+    num_steps=10,                     # Euler integration steps
+    transport_method='iterative',     # 'direct' | 'iterative' | 'path_ordered'
+    step_size=0.1,                    # integration step size
 )
-
-# Transport vectors
-transported = transport([vectors, connection])
+# call([vectors, connection]) -> transported [B, S, D]
 ```
 
-**Transport Methods:**
-- `'direct'`: Single-step (fast but less accurate)
-- `'iterative'`: Multi-step Euler integration
-- `'path_ordered'`: Full path-ordered exponential (most accurate)
+| `transport_method` | Cost | Description |
+|---|---|---|
+| `'direct'` | 1 matmul | Single Euler step `V' = V - h * A @ V` |
+| `'iterative'` | `num_steps` matmuls | Multi-step Euler integration |
+| `'path_ordered'` | `num_steps` matmuls + exp approx | Second-order exponential: `exp(A) ~ I + A + A^2/2` |
 
 ### HolonomyLayer
 
-Computes holonomy around loops for gauge-invariant features.
+Computes gauge-invariant holonomy features at every sequence position.
 
 ```python
-holonomy = HolonomyLayer(
-    hidden_dim=256,
-    loop_sizes=[2, 4, 8],         # Sizes of loops to compute
-    loop_type='rectangular',       # 'rectangular', 'triangular', 'circular'
-    num_loops=4,                   # Number of loop orientations
-    use_trace=True                 # Return Wilson loop (trace)
+HolonomyLayer(
+    hidden_dim,                       # output projection dimension
+    loop_sizes=[2, 4, 8],             # offsets for commutator computation
+    num_loops=4,                      # orientations per loop size
+    use_trace=True,                   # True: Tr([A,B]^2), False: Frobenius norm
 )
-
-# Compute holonomy features
-holonomy_features = holonomy([embeddings, connection])
+# call([embeddings, connection]) -> features [B, S, hidden_dim]
 ```
 
-**Loop Types:**
-- `'rectangular'`: Axis-aligned rectangular loops
-- `'triangular'`: Triangular paths
-- `'circular'`: Approximate circular loops (for 2D data)
+Internally computes the commutator `[Gamma_s, Gamma_{s+offset}]` at each
+position for each `(loop_size, orientation)` pair, extracts a scalar feature
+(trace of squared commutator or Frobenius norm), and projects the stacked
+features to `hidden_dim`.  Fully vectorised --- no Python loops over the
+sequence dimension.
 
 ### GaugeInvariantAttention
 
-Attention mechanism that respects gauge structure.
+Multi-head attention whose scores incorporate geometric information.
 
 ```python
-attention = GaugeInvariantAttention(
-    hidden_dim=256,
-    num_heads=8,
-    attention_metric='hybrid',     # 'holonomy', 'geodesic', 'curvature', 'hybrid'
-    use_curvature_gating=True,     # Gate attention by curvature
-    use_parallel_transport=True    # Transport values before aggregation
+GaugeInvariantAttention(
+    hidden_dim,                       # model dimension
+    num_heads=8,                      # attention heads
+    attention_metric='hybrid',        # 'holonomy' | 'geodesic' | 'curvature' | 'hybrid'
+    use_curvature_gating=True,        # gate scores by local curvature
+    use_parallel_transport=True,      # transport values before aggregation
+    dropout_rate=0.0,
 )
-
-# Compute attention
-output = attention([embeddings, curvature, connection])
+# call([embeddings, curvature, connection]) -> output [B, S, hidden_dim]
 ```
 
-**Attention Metrics:**
-- `'holonomy'`: Based on holonomy between positions
-- `'geodesic'`: Uses curvature-weighted distance
-- `'curvature'`: Attends more to similar curvature
-- `'hybrid'`: Combines all metrics
+| `attention_metric` | What it adds to standard QK scores |
+|---|---|
+| `'holonomy'` | Penalises pairs with large connection difference (high holonomy) |
+| `'geodesic'` | Penalises pairs separated by high-curvature regions |
+| `'curvature'` | Boosts pairs with similar local curvature (cosine similarity) |
+| `'hybrid'` | Weighted combination of all available metrics |
 
 ### ManifoldStressLayer
 
-Detects anomalies through geometric inconsistency.
+Measures geometric inconsistency to flag anomalous inputs.
 
 ```python
-stress = ManifoldStressLayer(
-    hidden_dim=256,
+ManifoldStressLayer(
+    hidden_dim,
     stress_types=['curvature', 'connection', 'combined'],
-    stress_threshold=0.5,
-    use_learnable_baseline=True
+    stress_threshold=0.5,             # initial anomaly threshold
+    use_learnable_baseline=True,      # learn expected curvature/connection values
+    return_components=False,          # True: return per-type stress
 )
-
-# Compute stress and anomaly mask
-stress_values, anomaly_mask = stress([embeddings, curvature, connection])
+# call([embeddings, curvature, connection]) -> (stress [B,S,1], anomaly_mask [B,S,1])
 ```
 
-**Use Cases:**
-- Detect adversarial inputs
-- Identify poisoned training data
-- Flag out-of-distribution samples
-- Confidence scoring
+| `stress_type` | What it measures |
+|---|---|
+| `'curvature'` | `\|\|R - R_baseline\|\|` -- deviation from learned curvature baseline |
+| `'connection'` | Local variation `\|\|Gamma_{s+1} - Gamma_s\|\|` plus magnitude |
+| `'holonomy'` | Commutator Frobenius norm (curvature proxy) |
+| `'metric'` | Variation in embedding finite-difference norms |
+| `'combined'` | Mean of all available stress types |
+
+### FieldNormalization
+
+Layer normalisation that scales by inverse curvature magnitude: high-curvature
+regions receive less aggressive normalisation.
+
+```python
+FieldNormalization(
+    epsilon=1e-6,
+    use_curvature_scaling=True,       # scale by 1/(1 + alpha * ||curv||)
+    center=True,
+    scale=True,
+)
+# call(embeddings) or call([embeddings, curvature]) -> normalised [B, S, D]
+```
 
 ### HolonomicTransformerLayer
 
-Complete transformer layer with all holonomic components.
+Drop-in transformer block that orchestrates all field components.
 
 ```python
-layer = HolonomicTransformerLayer(
-    hidden_dim=256,
+HolonomicTransformerLayer(
+    hidden_dim,
     num_heads=8,
-    ffn_dim=1024,
+    ffn_dim=None,                     # defaults to 4 * hidden_dim
     curvature_type='ricci',
     connection_type='yang_mills',
     attention_metric='hybrid',
-    use_holonomy_features=True,
-    use_anomaly_detection=True,
+    use_holonomy_features=True,       # add holonomy features to the residual
+    use_anomaly_detection=True,       # compute manifold stress
     dropout_rate=0.1,
-    normalization_type='field_norm',
-    activation='gelu'
+    normalization_type='field_norm',  # 'field_norm' | 'layer_norm' | 'rms_norm'
+    activation='gelu',
 )
-
-# Forward pass
-output, anomaly_scores = layer(x, training=True)
+# call(x)           -> output [B,S,D]                     (anomaly off)
+# call(x)           -> (output [B,S,D], stress [B,S,1])   (anomaly on)
 ```
+
+**Internal pipeline:**
+
+```
+x
+|-> curvature = tanh(Dense(x)) * 0.1
+|-> connection = ConnectionLayer([x, curvature])
+|-> attn_out = GaugeInvariantAttention([Norm(x), curvature, connection])
+|-> x = ParallelTransport([x, connection]) + Dropout(attn_out)
+|-> x += 0.1 * HolonomyProj(HolonomyLayer([x, connection]))   (optional)
+|-> x += Dropout(FFN(Norm(x)))
+|-> stress = ManifoldStressLayer([x, curvature, connection])    (optional)
+```
+
+---
 
 ## Architecture Patterns
 
-### Building a Holonomic Transformer
+### Full holonomic transformer
 
 ```python
 class HolonomicTransformer(keras.Model):
-    def __init__(
-        self,
-        vocab_size: int,
-        num_layers: int = 6,
-        hidden_dim: int = 256,
-        num_heads: int = 8,
-        **kwargs
-    ):
+    def __init__(self, vocab_size, num_layers=6, hidden_dim=256,
+                 num_heads=8, **kwargs):
         super().__init__(**kwargs)
-        
-        # Field embedding with curvature
         self.embedding = FieldEmbedding(
-            vocab_size=vocab_size,
-            embed_dim=hidden_dim,
-            curvature_type='ricci'
+            vocab_size=vocab_size, embed_dim=hidden_dim,
+            curvature_type='ricci',
         )
-        
-        # Stack of holonomic transformer layers
-        self.layers_list = [
+        self.blocks = [
             HolonomicTransformerLayer(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads,
-                use_holonomy_features=True,
-                use_anomaly_detection=True
+                hidden_dim=hidden_dim, num_heads=num_heads,
+                use_holonomy_features=True, use_anomaly_detection=True,
             )
             for _ in range(num_layers)
         ]
-        
-        # Final projection
-        self.output_projection = keras.layers.Dense(vocab_size)
-    
+        self.head = keras.layers.Dense(vocab_size)
+
     def call(self, tokens, training=None):
-        # Embed tokens as fields
-        embeddings, curvature = self.embedding(tokens, training=training)
-        
-        # Accumulate anomaly scores
-        total_anomaly = None
-        x = embeddings
-        
-        # Process through layers
-        for layer in self.layers_list:
-            x, anomaly = layer(x, training=training)
-            if total_anomaly is None:
-                total_anomaly = anomaly
-            else:
-                total_anomaly = total_anomaly + anomaly
-        
-        # Output
-        logits = self.output_projection(x)
-        
-        return logits, total_anomaly / len(self.layers_list)
+        x, _ = self.embedding(tokens, training=training)
+        total_stress = 0.0
+        for block in self.blocks:
+            x, stress = block(x, training=training)
+            total_stress = total_stress + stress
+        return self.head(x), total_stress / len(self.blocks)
 ```
 
-### Anomaly-Aware Training
+### Retrofitting an existing transformer
+
+Swap standard attention for `GaugeInvariantAttention` without touching
+the rest of the architecture:
 
 ```python
-# Custom training step that uses anomaly scores
+class GeometricAttentionBlock(keras.layers.Layer):
+    def __init__(self, hidden_dim, num_heads, **kwargs):
+        super().__init__(**kwargs)
+        self.attention = GaugeInvariantAttention(
+            hidden_dim=hidden_dim, num_heads=num_heads,
+            attention_metric='curvature',
+        )
+        self.curvature_proj = keras.layers.Dense(
+            hidden_dim, activation='tanh',
+        )
+        self.ffn1 = keras.layers.Dense(hidden_dim * 4, activation='gelu')
+        self.ffn2 = keras.layers.Dense(hidden_dim)
+        self.norm1 = keras.layers.LayerNormalization()
+        self.norm2 = keras.layers.LayerNormalization()
+
+    def call(self, x, training=None):
+        curvature = self.curvature_proj(x) * 0.1
+        attn = self.attention(
+            [self.norm1(x), curvature], training=training,
+        )
+        x = x + attn
+        x = x + self.ffn2(self.ffn1(self.norm2(x)))
+        return x
+```
+
+### Anomaly-aware training
+
+Down-weight high-stress samples during training:
+
+```python
 class AnomalyAwareModel(keras.Model):
     def train_step(self, data):
         x, y = data
-        
         with tf.GradientTape() as tape:
-            # Forward pass
-            logits, anomaly_scores = self(x, training=True)
-            
-            # Standard loss
+            logits, stress = self(x, training=True)
             task_loss = self.compute_loss(y=y, y_pred=logits)
-            
-            # Weight samples by inverse anomaly (downweight anomalous)
-            sample_weights = 1.0 / (1.0 + anomaly_scores)
-            weighted_loss = task_loss * keras.ops.squeeze(sample_weights)
-            
-            # Mean loss
-            loss = keras.ops.mean(weighted_loss) + sum(self.losses)
-        
-        # Update
-        gradients = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-        
-        return {'loss': loss, 'anomaly_mean': keras.ops.mean(anomaly_scores)}
+            sample_weights = 1.0 / (1.0 + stress)
+            loss = keras.ops.mean(
+                task_loss * keras.ops.squeeze(sample_weights)
+            ) + sum(self.losses)
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        return {
+            'loss': loss,
+            'anomaly_mean': keras.ops.mean(stress),
+        }
 ```
 
-## Security Benefits
-
-### Adversarial Robustness
-
-The holonomic approach provides natural adversarial robustness:
-
-1. **Perturbations must respect geometry**: Random noise increases manifold stress and is detected
-2. **Gauge invariance**: Transformations that don't affect holonomy are recognized as equivalent
-3. **Curvature consistency**: Adversarial examples often have inconsistent local curvature
-
-```python
-# Example: Filtering adversarial inputs
-stress_layer = ManifoldStressLayer(hidden_dim=256, stress_threshold=0.3)
-
-def filter_adversarial(model, inputs):
-    embeddings, curvature, connection = model.compute_field_structure(inputs)
-    stress, anomaly_mask = stress_layer([embeddings, curvature, connection])
-    
-    # Reject high-stress inputs
-    clean_mask = ~anomaly_mask
-    return inputs[clean_mask]
-```
-
-### Poison Detection
-
-Poisoned training data increases manifold stress:
-
-```python
-# During data loading
-def detect_poison(dataset, model, threshold=0.5):
-    stress_scores = []
-    
-    for batch in dataset:
-        _, anomaly = model(batch, training=False)
-        stress_scores.extend(anomaly.numpy())
-    
-    # Flag potential poison
-    poison_candidates = [
-        i for i, score in enumerate(stress_scores) 
-        if score > threshold
-    ]
-    
-    return poison_candidates
-```
+---
 
 ## Performance Considerations
 
-### Computational Complexity
+### Computational cost
 
-| Layer | Complexity | Notes |
-|-------|-----------|-------|
-| FieldEmbedding | O(n·d) | Same as standard embedding |
-| ConnectionLayer | O(n·d²) | Quadratic in dimension |
-| ParallelTransport | O(n·k·d²) | k = num_steps |
-| HolonomyLayer | O(n·L·s·d²) | L = loops, s = loop size |
-| GaugeInvariantAttention | O(n²·d/h) | h = num_heads |
-| ManifoldStressLayer | O(n·d²) | One-time computation |
-| HolonomicTransformer | O(n²·d + n·d²) | Dominated by attention |
+| Layer | Time complexity | Dominant operation |
+|---|---|---|
+| FieldEmbedding | O(n d) | Embedding lookup + curvature projection |
+| ConnectionLayer | O(n d^2) | Two-layer MLP + generator combination |
+| ParallelTransport | O(n k d^2) | k Euler steps, each a batched matmul |
+| HolonomyLayer | O(n L d^2) | L commutator matmuls (fully vectorised) |
+| GaugeInvariantAttention | O(n^2 d / h) | Standard QKV attention + geometric corrections |
+| ManifoldStressLayer | O(n d^2) | Commutator + norm computation |
 
-### Memory Usage
+*n* = sequence length, *d* = hidden dimension, *h* = number of heads,
+*k* = transport steps, *L* = `len(loop_sizes) * num_loops`.
 
-The field representation requires additional memory for curvature and connection:
-- Curvature (ricci): O(n·d) additional
-- Connection: O(n·d²) additional
+### Memory overhead
 
-For large models, consider:
-- Using `'scalar'` curvature type
-- Reducing `num_generators` in connection
-- Using `'direct'` transport method
+The field representation adds curvature `O(n d)` and connection `O(n d^2)`
+tensors on top of the standard `O(n d)` embeddings.  To reduce memory:
 
-### Optimization Tips
+- Use `curvature_type='scalar'` (adds only `O(n)`)
+- Reduce `num_generators` in the connection layer
+- Use `transport_method='direct'` (single step, no intermediate tensors)
+- Disable `use_holonomy_features` and `use_anomaly_detection` at inference time
 
-1. **Start with defaults**: The factory provides sensible defaults
-2. **Adjust curvature type**: Use `'scalar'` for memory efficiency
-3. **Tune regularization**: Higher `curvature_regularization` for stability
-4. **Use anomaly detection wisely**: Can be disabled for inference speed
+---
 
-## Integration with Existing Models
+## Factory API
 
-### Adding Holonomic Layers to Existing Architectures
+### `create_field_layer(layer_type, name=None, **kwargs)`
 
-```python
-# Replace standard attention with gauge-invariant
-class EnhancedTransformerBlock(keras.layers.Layer):
-    def __init__(self, hidden_dim, num_heads, **kwargs):
-        super().__init__(**kwargs)
-        
-        # Replace standard attention
-        self.attention = GaugeInvariantAttention(
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            attention_metric='curvature'
-        )
-        
-        # Add curvature computation
-        self.curvature_proj = keras.layers.Dense(hidden_dim, activation='tanh')
-        
-        # Keep standard FFN
-        self.ffn = keras.layers.Dense(hidden_dim * 4, activation='gelu')
-        self.ffn_out = keras.layers.Dense(hidden_dim)
-        
-        self.norm1 = keras.layers.LayerNormalization()
-        self.norm2 = keras.layers.LayerNormalization()
-    
-    def call(self, x, training=None):
-        # Compute curvature
-        curvature = self.curvature_proj(x) * 0.1
-        
-        # Gauge-invariant attention (no connection for simplicity)
-        attn = self.attention([self.norm1(x), curvature, None], training=training)
-        x = x + attn
-        
-        # Standard FFN
-        ffn = self.ffn_out(self.ffn(self.norm2(x)))
-        return x + ffn
-```
+Create a field layer with validated parameters and sensible defaults.
 
-## API Reference
+`layer_type` is one of: `'field_embedding'`, `'connection'`,
+`'parallel_transport'`, `'holonomy'`, `'gauge_attention'`,
+`'manifold_stress'`, `'holonomic_transformer'`, `'field_norm'`.
 
-### Factory Functions
+### `create_field_layer_from_config(config)`
 
-#### `create_field_layer(layer_type, name=None, **kwargs)`
+Create a field layer from a dictionary containing a `'type'` key and
+layer-specific parameters.
 
-Main factory function for creating field layers.
+### `validate_field_config(layer_type, **kwargs)`
 
-**Parameters:**
-- `layer_type`: One of `'field_embedding'`, `'connection'`, `'parallel_transport'`, `'holonomy'`, `'gauge_attention'`, `'manifold_stress'`, `'holonomic_transformer'`, `'field_norm'`
-- `name`: Optional layer name
-- `**kwargs`: Layer-specific parameters
+Check that required parameters are present and `layer_type` is valid.
+Raises `ValueError` on failure.
 
-**Returns:** Configured `keras.layers.Layer` instance
+### `get_field_layer_info()`
 
-#### `create_field_layer_from_config(config)`
-
-Create layer from configuration dictionary.
-
-**Parameters:**
-- `config`: Dictionary with `'type'` key and layer parameters
-
-**Returns:** Configured `keras.layers.Layer` instance
-
-#### `get_field_layer_info()`
-
-Get information about available layer types.
-
-**Returns:** Dictionary mapping types to info including `'class'`, `'required_params'`, `'default_params'`, `'description'`
-
-#### `validate_field_config(layer_type, **kwargs)`
-
-Validate configuration before layer creation.
-
-**Raises:** `ValueError` if invalid
-
-## References
-
-- Holonomic AI concepts
-- Differential geometry and gauge theory
-- Fiber bundles in machine learning
-- Non-Abelian geometric deep learning
+Returns a dictionary mapping each layer type to its class, required
+parameters, default parameters, and a short description.
