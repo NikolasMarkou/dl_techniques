@@ -6,12 +6,15 @@ Pre-trains a GPT-2 decoder on a text dataset using next-token prediction
 fine-tuning or text generation.
 """
 
-import argparse
 import os
-
 import keras
+import argparse
 import tensorflow as tf
 from typing import Optional, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from train.common import setup_gpu
 from train.common.nlp import (
@@ -22,42 +25,10 @@ from train.common.nlp import (
     create_nlp_callbacks,
 )
 
-from dl_techniques.datasets.nlp import load_wikipedia_train_val, load_hf_text_dataset
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
-
-
-# ---------------------------------------------------------------------
-# Masked CLM Loss (ignores PAD positions marked as -1)
-# ---------------------------------------------------------------------
-
-
-class MaskedCLMLoss(keras.losses.Loss):
-    """Sparse cross-entropy that ignores label positions set to -1.
-
-    PAD tokens in CLM labels are set to -1 by the preprocessing pipeline.
-    This loss computes cross-entropy only on real token positions, giving
-    an accurate measure of language modeling performance.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._base_loss = keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True, reduction="none",
-        )
-
-    def call(self, y_true, y_pred):
-        # y_true: (batch, seq_len) with -1 for PAD
-        # y_pred: (batch, seq_len, vocab_size)
-        mask = keras.ops.cast(y_true != -1, "float32")
-        # Replace -1 with 0 to avoid index errors in cross-entropy
-        safe_labels = keras.ops.maximum(y_true, 0)
-        per_token_loss = self._base_loss(safe_labels, y_pred)
-        # Average only over non-PAD positions
-        masked_loss = keras.ops.sum(per_token_loss * mask) / (
-            keras.ops.sum(mask) + 1e-8
-        )
-        return masked_loss
+from dl_techniques.datasets.nlp import load_wikipedia_train_val
+from dl_techniques.losses import MaskedCausalLMLoss
 
 
 # ---------------------------------------------------------------------
@@ -248,7 +219,7 @@ def compile_model(
     )
     model.compile(
         optimizer=optimizer,
-        loss={"logits": MaskedCLMLoss()},
+        loss={"logits": MaskedCausalLMLoss()},
         metrics={"logits": ["accuracy"]},
     )
     logger.info(

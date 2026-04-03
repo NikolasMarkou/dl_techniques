@@ -102,6 +102,7 @@ from .hrm_loss import HRMLoss, StableMaxCrossEntropy, create_hrm_loss
 
 from .huber_loss import HuberLoss
 
+from .masked_causal_lm_loss import MaskedCausalLMLoss, PrefixMaskedCausalLMLoss
 from .mase_loss import MASELoss, mase_metric
 
 from .quantile_loss import MQLoss, QuantileLoss
@@ -200,6 +201,10 @@ __all__ = [
     "create_hrm_loss",
     # huber_loss
     "HuberLoss",
+    # mase_loss
+    # masked_causal_lm_loss
+    "MaskedCausalLMLoss",
+    "PrefixMaskedCausalLMLoss",
     # mase_loss
     "MASELoss",
     "mase_metric",

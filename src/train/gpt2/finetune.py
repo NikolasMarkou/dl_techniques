@@ -48,30 +48,7 @@ from train.common.nlp import (
 from dl_techniques.datasets.nlp import load_hf_text_dataset
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
-
-
-# ---------------------------------------------------------------------
-# Masked CLM Loss (shared with pretrain.py)
-# ---------------------------------------------------------------------
-
-
-class MaskedCLMLoss(keras.losses.Loss):
-    """Sparse cross-entropy that ignores label positions set to -1."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._base_loss = keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True, reduction="none",
-        )
-
-    def call(self, y_true, y_pred):
-        mask = keras.ops.cast(y_true != -1, "float32")
-        safe_labels = keras.ops.maximum(y_true, 0)
-        per_token_loss = self._base_loss(safe_labels, y_pred)
-        masked_loss = keras.ops.sum(per_token_loss * mask) / (
-            keras.ops.sum(mask) + 1e-8
-        )
-        return masked_loss
+from dl_techniques.losses import MaskedCausalLMLoss
 
 
 # ---------------------------------------------------------------------
@@ -264,7 +241,7 @@ def load_pretrained_model(config: FinetuneConfig) -> GPT2:
     logger.info(f"Loading pre-trained model from: {config.pretrained_path}")
     model = keras.models.load_model(
         config.pretrained_path,
-        custom_objects={"MaskedCLMLoss": MaskedCLMLoss},
+        custom_objects={"MaskedCausalLMLoss": MaskedCausalLMLoss},
     )
     total_p = model.count_params()
     logger.info(f"Loaded GPT-2: {total_p:,} parameters")
@@ -312,7 +289,7 @@ def compile_model(
     )
     model.compile(
         optimizer=optimizer,
-        loss={"logits": MaskedCLMLoss()},
+        loss={"logits": MaskedCausalLMLoss()},
         metrics={"logits": ["accuracy"]},
     )
     logger.info(
