@@ -29,6 +29,106 @@ from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss
+from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
+
+
+# ---------------------------------------------------------------------
+# Step-based Checkpoint & Analysis Callback
+# ---------------------------------------------------------------------
+
+
+class StepCheckpointCallback(keras.callbacks.Callback):
+    """Save model checkpoints and run analyzer at fixed step intervals.
+
+    For large datasets where one epoch = 300K+ steps, epoch-level
+    checkpoints are too infrequent. This callback saves the model and
+    optionally runs weight/spectral analysis every ``save_every_steps``
+    training steps.
+
+    :param save_dir: Directory for checkpoint files.
+    :param save_every_steps: Save checkpoint every N steps.
+    :param analyze_every_steps: Run model analysis every N steps.
+        Set to 0 to disable analysis. Defaults to ``save_every_steps``.
+    :param model_name: Name used in analyzer output.
+    """
+
+    def __init__(
+        self,
+        save_dir: str,
+        save_every_steps: int = 25000,
+        analyze_every_steps: int = 25000,
+        model_name: str = "gpt2",
+    ):
+        super().__init__()
+        self.save_dir = save_dir
+        self.save_every_steps = save_every_steps
+        self.analyze_every_steps = analyze_every_steps
+        self.model_name = model_name
+        self._global_step = 0
+
+        self._ckpt_dir = os.path.join(save_dir, "checkpoints")
+        self._analysis_dir = os.path.join(save_dir, "step_analysis")
+        os.makedirs(self._ckpt_dir, exist_ok=True)
+        if analyze_every_steps > 0:
+            os.makedirs(self._analysis_dir, exist_ok=True)
+
+        self._analysis_config = AnalysisConfig(
+            analyze_weights=True,
+            analyze_spectral=True,
+            analyze_calibration=False,
+            analyze_information_flow=False,
+            analyze_training_dynamics=False,
+            verbose=False,
+        )
+
+        logger.info(
+            f"StepCheckpointCallback: save every {save_every_steps} steps, "
+            f"analyze every {analyze_every_steps} steps"
+        )
+
+    def on_train_batch_end(self, batch, logs=None):
+        self._global_step += 1
+
+        if self._global_step % self.save_every_steps == 0:
+            self._save_checkpoint()
+
+        if (
+            self.analyze_every_steps > 0
+            and self._global_step % self.analyze_every_steps == 0
+        ):
+            self._run_analysis()
+
+    def _save_checkpoint(self):
+        path = os.path.join(
+            self._ckpt_dir, f"step_{self._global_step:07d}.keras"
+        )
+        self.model.save(path)
+        logger.info(
+            f"Checkpoint saved: {path} (step {self._global_step:,})"
+        )
+
+    def _run_analysis(self):
+        step_dir = os.path.join(
+            self._analysis_dir, f"step_{self._global_step:07d}"
+        )
+        try:
+            analyzer = ModelAnalyzer(
+                models={self.model_name: self.model},
+                config=self._analysis_config,
+                output_dir=step_dir,
+            )
+            _ = analyzer.analyze()
+            logger.info(
+                f"Step analysis complete: step {self._global_step:,}"
+            )
+        except Exception as e:
+            logger.error(f"Step analysis failed at step {self._global_step}: {e}")
+
+    def on_train_end(self, logs=None):
+        # Always save final checkpoint
+        path = os.path.join(self._ckpt_dir, "final.keras")
+        self.model.save(path)
+        logger.info(f"Final checkpoint saved: {path}")
 
 
 # ---------------------------------------------------------------------
@@ -78,10 +178,9 @@ class TrainingConfig:
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
 
-    # Analysis
-    run_epoch_analysis: bool = True
-    analysis_start_epoch: int = 1
-    analysis_epoch_frequency: int = 5
+    # Checkpointing & Analysis (step-based for large datasets)
+    checkpoint_every_steps: int = 25000
+    analyze_every_steps: int = 25000
 
 
 # ---------------------------------------------------------------------
@@ -267,10 +366,16 @@ def train_gpt2(
     callbacks, results_dir = create_nlp_callbacks(
         model_name=f"GPT2-{config.gpt2_variant}",
         results_dir_prefix="gpt2_pretrain",
-        include_analyzer=config.run_epoch_analysis,
-        analyzer_epoch_frequency=config.analysis_epoch_frequency,
-        analyzer_start_epoch=config.analysis_start_epoch,
+        include_analyzer=False,  # Use step-based analysis instead
     )
+
+    # Step-based checkpointing + analysis (for large datasets)
+    callbacks.append(StepCheckpointCallback(
+        save_dir=results_dir,
+        save_every_steps=config.checkpoint_every_steps,
+        analyze_every_steps=config.analyze_every_steps,
+        model_name=f"GPT2-{config.gpt2_variant}",
+    ))
 
     # Train
     logger.info(
@@ -380,6 +485,20 @@ def main() -> None:
         default=0.02,
         help="Fraction of articles for validation holdout (default: 0.02)",
     )
+
+    # Checkpointing & Analysis
+    parser.add_argument(
+        "--checkpoint-every-steps",
+        type=int,
+        default=25000,
+        help="Save checkpoint every N steps (default: 25000)",
+    )
+    parser.add_argument(
+        "--analyze-every-steps",
+        type=int,
+        default=25000,
+        help="Run model analysis every N steps (default: 25000, 0=disable)",
+    )
     args = parser.parse_args()
 
     setup_gpu(gpu_id=args.gpu)
@@ -393,6 +512,8 @@ def main() -> None:
     config.dataset_source = args.dataset_source
     config.hf_cache_dir = args.hf_cache_dir
     config.val_fraction = args.val_fraction
+    config.checkpoint_every_steps = args.checkpoint_every_steps
+    config.analyze_every_steps = args.analyze_every_steps
 
     if args.max_samples is not None:
         config.max_samples = args.max_samples
