@@ -9,13 +9,13 @@ without PAD token inflation.
 .. code-block:: text
 
     ┌─────────────────────────────────────────────────────┐
-    │  Labels:   [  42,  17, 305,  -1,  -1,  -1,  -1 ]   │
-    │  Logits:   [  ▓▓,  ▓▓,  ▓▓,  ░░,  ░░,  ░░,  ░░ ]   │
-    │                                                       │
+    │  Labels:   [  42,  17, 305,  -1,  -1,  -1,  -1 ]    │
+    │  Logits:   [  ▓▓,  ▓▓,  ▓▓,  ░░,  ░░,  ░░,  ░░ ]    │
+    │                                                     │
     │  Mask:     [  1,    1,   1,   0,   0,   0,   0  ]   │
-    │                                                       │
+    │                                                     │
     │  Loss = mean(CE[42,▓▓], CE[17,▓▓], CE[305,▓▓])      │
-    │          ↑ only real tokens, PAD ignored              │
+    │          ↑ only real tokens, PAD ignored            W│
     └─────────────────────────────────────────────────────┘
 
 This is the standard approach used by GPT-2, GPT-3, LLaMA, and most
@@ -117,12 +117,14 @@ class MaskedCausalLMLoss(keras.losses.Loss):
         # Optional label smoothing applied manually
         if self.label_smoothing > 0.0:
             vocab_size = ops.cast(ops.shape(y_pred)[-1], "float32")
-            smooth_loss = -ops.mean(
-                ops.log(ops.softmax(y_pred, axis=-1) + 1e-8),
-                axis=-1,
-            ) if self.from_logits else -ops.mean(
-                ops.log(y_pred + 1e-8), axis=-1,
-            )
+            if self.from_logits:
+                # Use log-softmax for numerical stability
+                log_probs = y_pred - ops.logsumexp(y_pred, axis=-1, keepdims=True)
+                smooth_loss = -ops.mean(log_probs, axis=-1)
+            else:
+                smooth_loss = -ops.mean(
+                    ops.log(y_pred + 1e-8), axis=-1,
+                )
             per_token_loss = (
                 (1.0 - self.label_smoothing) * per_token_loss
                 + self.label_smoothing * smooth_loss

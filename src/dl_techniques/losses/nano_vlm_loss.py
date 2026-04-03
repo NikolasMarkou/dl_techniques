@@ -137,10 +137,11 @@ class NanoVLMLoss(keras.losses.Loss):
         self.from_logits = from_logits
 
         # Initialize the underlying sparse categorical crossentropy loss
+        # Note: SparseCategoricalCrossentropy does not support label_smoothing;
+        # label smoothing is applied manually in call() when needed
         self.sparse_ce = keras.losses.SparseCategoricalCrossentropy(
             from_logits=from_logits,
             reduction='none',  # We handle reduction manually for masking
-            label_smoothing=label_smoothing
         )
 
         logger.info(
@@ -216,6 +217,20 @@ class NanoVLMLoss(keras.losses.Loss):
 
         # Compute per-token loss
         loss_per_token = self.sparse_ce(y_true_flat, y_pred_flat)
+
+        # Apply label smoothing manually if configured
+        if self.label_smoothing > 0.0:
+            if self.from_logits:
+                log_probs = y_pred_flat - ops.logsumexp(
+                    y_pred_flat, axis=-1, keepdims=True
+                )
+            else:
+                log_probs = ops.log(y_pred_flat + 1e-8)
+            smooth_loss = -ops.mean(log_probs, axis=-1)
+            loss_per_token = (
+                (1.0 - self.label_smoothing) * loss_per_token
+                + self.label_smoothing * smooth_loss
+            )
 
         # Create mask to ignore specified tokens (e.g., padding)
         mask = ops.cast(

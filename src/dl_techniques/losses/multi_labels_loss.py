@@ -114,9 +114,11 @@ class PerChannelBinaryLoss(keras.losses.Loss):
             loss_tensor = -bce
 
         elif self.base_loss is not None:
-            # Assume custom loss class returns element-wise structure
-            # (WeightedBinaryFocalLoss is designed to do this)
-            loss_tensor = self.base_loss.call(y_true, y_pred)
+            # Handle both Loss instances and plain callables
+            if hasattr(self.base_loss, 'call'):
+                loss_tensor = self.base_loss.call(y_true, y_pred)
+            else:
+                loss_tensor = self.base_loss(y_true, y_pred)
 
         else:
             # Fallback for string aliases using standard factory

@@ -151,20 +151,13 @@ class SparsemaxLoss(keras.losses.Loss):
             Sparsemax()  # Sparse probabilities
         ])
 
-        # Use sparsemax loss for training
-        loss_fn = SparsemaxLoss(from_logits=False)  # Model outputs probs
-        model.compile(
-            optimizer='adam',
-            loss=loss_fn,
-            metrics=['accuracy']
-        )
-
-        # Alternatively, apply sparsemax in loss
+        # Use sparsemax loss for training (requires logits, not probabilities)
+        # The loss applies sparsemax internally
         model_logits = keras.Sequential([
             keras.layers.Dense(128, activation='relu'),
             keras.layers.Dense(num_classes)  # Just logits
         ])
-        loss_fn = SparsemaxLoss(from_logits=True)  # Apply sparsemax in loss
+        loss_fn = SparsemaxLoss(from_logits=True)
         model_logits.compile(optimizer='adam', loss=loss_fn)
 
         # Direct loss computation
@@ -216,6 +209,14 @@ class SparsemaxLoss(keras.losses.Loss):
                 f"reduction must be one of {valid_reductions}, got '{reduction}'"
             )
 
+        if not from_logits:
+            raise ValueError(
+                "SparsemaxLoss requires from_logits=True. The Fenchel-Young "
+                "loss formula requires the original logits z to compute "
+                "0.5 * ||z - sparsemax(z)||^2 - z^T y. When from_logits=False, "
+                "the logits are not available and the loss cannot be computed correctly."
+            )
+
         self.from_logits = from_logits
 
         # Create sparsemax layer if computing from logits
@@ -249,11 +250,8 @@ class SparsemaxLoss(keras.losses.Loss):
             Loss value per sample, shape (batch_size,) before reduction.
             Scalar after reduction (except if reduction='none').
         """
-        # Compute sparsemax probabilities if needed
-        if self.from_logits:
-            p = self.sparsemax(y_pred)
-        else:
-            p = y_pred
+        # Compute sparsemax probabilities from logits
+        p = self.sparsemax(y_pred)
 
         # Compute loss components
         # 1. Squared Euclidean distance: 0.5 * ||z - p||²

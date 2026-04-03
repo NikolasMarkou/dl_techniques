@@ -66,9 +66,7 @@ import os
 import keras
 import numpy as np
 from keras import ops
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from sklearn.metrics import silhouette_score
 from typing import Optional, Union, List, Any, Dict
 
 # ---------------------------------------------------------------------
@@ -314,6 +312,7 @@ class ClusteringMetricsCallback(keras.callbacks.Callback):
             metrics (ClusteringMetrics): Computed clustering metrics.
         """
         try:
+            import matplotlib.pyplot as plt
             # Create figure with multiple subplots
             fig, axes = plt.subplots(2, 2, figsize=(15, 15))
 
@@ -414,6 +413,7 @@ def compute_clustering_metrics(
     try:
         unique_labels = np.unique(hard_assignments)
         if len(unique_labels) > 1 and len(unique_labels) < len(data):
+            from sklearn.metrics import silhouette_score
             silhouette = silhouette_score(data, hard_assignments)
         else:
             silhouette = -1.0  # Invalid clustering (all same cluster or each point its own cluster)

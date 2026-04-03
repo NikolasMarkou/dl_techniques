@@ -348,17 +348,17 @@ class TestCreateMultilabelSegmentationLoss:
             assert not np.isnan(float(loss_val)), f"{loss_type} produced NaN"
             assert float(loss_val) >= 0, f"{loss_type} produced negative loss"
 
-    def test_weighted_bce_has_callable_bug(self):
-        """Document that weighted_bce factory has a bug with callable base_loss."""
+    def test_weighted_bce_callable_works(self):
+        """Test that weighted_bce factory correctly handles callable base_loss."""
         loss_fn = create_multilabel_segmentation_loss(loss_type='weighted_bce')
         y_true = keras.random.uniform((2, 8, 8, 3), minval=0, maxval=1)
         y_true = ops.cast(y_true > 0.5, "float32")
         y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9)
 
-        # Current implementation passes a function, but PerChannelBinaryLoss.call()
-        # tries to invoke .call() on it which fails
-        with pytest.raises(AttributeError, match="'function' object has no attribute 'call'"):
-            loss_fn(y_true, y_pred)
+        # Should work now — callable base_loss is handled properly
+        loss_val = loss_fn(y_true, y_pred)
+        assert not np.isnan(float(loss_val))
+        assert float(loss_val) >= 0
 
 
 class TestModelSaveLoad:

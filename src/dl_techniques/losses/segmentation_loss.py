@@ -365,14 +365,16 @@ class SegmentationLosses:
             target_flat = ops.reshape(target_c, [-1])
             pred_flat = ops.reshape(pred_c, [-1])
 
-            # Sort by prediction values in descending order
-            # Since argsort doesn't support direction, we negate values to sort descending
-            sorted_indices = ops.argsort(-pred_flat)
+            # Compute per-pixel errors and sort by descending error
+            # (following Berman et al. "The Lovász-Softmax loss")
+            errors = ops.abs(target_flat - pred_flat)
+            sorted_indices = ops.argsort(-errors)
+            errors_sorted = ops.take(errors, sorted_indices)
             target_sorted = ops.take(target_flat, sorted_indices)
 
             grad = lovasz_grad(target_sorted)
-            loss_c = ops.sum(grad * ops.take(-pred_flat, sorted_indices))  # Use negated values
-            losses.append(-loss_c)  # Negate back to get correct sign
+            loss_c = ops.sum(errors_sorted * grad)
+            losses.append(loss_c)
 
         return ops.mean(ops.stack(losses))
 
@@ -551,6 +553,7 @@ def create_loss_function(
 
     losses = SegmentationLosses(config)
 
+    @keras.saving.register_keras_serializable()
     class WrappedLoss(keras.losses.Loss):
         """Wrapper class to make segmentation losses compatible with Keras."""
 

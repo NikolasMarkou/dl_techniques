@@ -148,15 +148,12 @@ class HRMLoss(keras.losses.Loss):
         else:
             self.lm_loss_fn = keras.losses.SparseCategoricalCrossentropy(
                 from_logits=True,
-                ignore_class=ignore_index if ignore_index >= 0 else None
+                ignore_class=ignore_index if ignore_index >= 0 else None,
+                reduction="none",
             )
 
         # Q-learning loss
         self.q_loss_fn = keras.losses.BinaryCrossentropy(from_logits=True)
-
-        # Metrics
-        self.accuracy_metric = keras.metrics.SparseCategoricalAccuracy()
-        self.exact_accuracy_metric = keras.metrics.BinaryAccuracy()
 
     def call(self, y_true, y_pred):
         """

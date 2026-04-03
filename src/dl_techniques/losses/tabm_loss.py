@@ -3,7 +3,7 @@ from keras import ops
 from typing import Union
 
 # ---------------------------------------------------------------------
-# lolca imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
@@ -11,6 +11,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 
+@keras.saving.register_keras_serializable()
 class TabMLoss(keras.losses.Loss):
     """Custom loss for TabM ensemble training.
 
@@ -47,10 +48,7 @@ class TabMLoss(keras.losses.Loss):
         if self.share_training_batches:
             # Repeat true labels for each ensemble member
             k = ops.shape(y_pred)[1]
-            if len(ops.shape(y_true)) == 1:
-                y_true_expanded = ops.repeat(y_true, k, axis=0)
-            else:
-                y_true_expanded = ops.repeat(y_true, k, axis=0)
+            y_true_expanded = ops.repeat(y_true, k, axis=0)
         else:
             # Labels are already arranged for each ensemble member
             y_true_expanded = y_true

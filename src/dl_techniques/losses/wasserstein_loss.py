@@ -404,11 +404,8 @@ def compute_gradient_penalty(
     batch_size = ops.shape(real_samples)[0]
 
     # Sample random points along lines between real and fake samples
-    alpha = tf.random.uniform([batch_size, 1, 1, 1], 0.0, 1.0)
-
-    # Ensure alpha has the same number of dimensions as the samples
-    while len(alpha.shape) < len(real_samples.shape):
-        alpha = ops.expand_dims(alpha, axis=-1)
+    alpha_shape = [batch_size] + [1] * (len(real_samples.shape) - 1)
+    alpha = keras.random.uniform(alpha_shape, minval=0.0, maxval=1.0)
 
     # Interpolate between real and fake samples
     interpolated = alpha * real_samples + (1 - alpha) * fake_samples

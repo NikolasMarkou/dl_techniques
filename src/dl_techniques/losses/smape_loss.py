@@ -56,7 +56,7 @@ from keras import ops
 class SMAPELoss(keras.losses.Loss):
     """Symmetric Mean Absolute Percentage Error (SMAPE) loss.
 
-    This implementation of SMAPE is a common variant that is bounded between 0 and 100.
+    This implementation of SMAPE is a common variant that is bounded between 0 and 200.
     It's commonly used in time series forecasting competitions.
 
     The formula used is:

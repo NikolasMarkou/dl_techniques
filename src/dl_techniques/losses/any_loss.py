@@ -68,11 +68,6 @@ Combined with BCE::
 
     loss = WeightedCrossEntropyWithAnyLoss(anyloss=F1Loss(), alpha=0.7)
 
-List available losses::
-
-    from dl_techniques.losses.anyloss import print_available_losses
-    print_available_losses()
-
 Selection Guide
 ---------------
 ================= ============================================================

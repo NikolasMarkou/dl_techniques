@@ -148,9 +148,9 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
         scaled_logits_per_text = logits_per_text * temperature
 
         # Compute sigmoid loss for both directions
-        # Loss = log(1 + exp(-labels * logits))
-        image_loss = ops.log(1.0 + ops.exp(-labels * scaled_logits_per_image))
-        text_loss = ops.log(1.0 + ops.exp(-labels * scaled_logits_per_text))
+        # Loss = softplus(-labels * logits), numerically stable form of log(1 + exp(x))
+        image_loss = ops.softplus(-labels * scaled_logits_per_image)
+        text_loss = ops.softplus(-labels * scaled_logits_per_text)
 
         # Average over batch dimension
         image_loss = ops.mean(image_loss)
@@ -259,9 +259,9 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         scaled_logits_per_image = logits_per_image * self.adaptive_temperature
         scaled_logits_per_text = logits_per_text * self.adaptive_temperature
 
-        # Compute sigmoid loss
-        image_loss = ops.log(1.0 + ops.exp(-labels * scaled_logits_per_image))
-        text_loss = ops.log(1.0 + ops.exp(-labels * scaled_logits_per_text))
+        # Compute sigmoid loss (softplus for numerical stability)
+        image_loss = ops.softplus(-labels * scaled_logits_per_image)
+        text_loss = ops.softplus(-labels * scaled_logits_per_text)
 
         # Average losses
         total_loss = (ops.mean(image_loss) + ops.mean(text_loss)) / 2.0
@@ -348,9 +348,15 @@ class HybridContrastiveLoss(keras.losses.Loss):
             noisy_image_emb = image_emb + noise_image
             noisy_text_emb = text_emb + noise_text
 
-            # Score matching loss (denoising objective)
-            score_loss_image = ops.mean(ops.square(noisy_image_emb - image_emb - noise_image))
-            score_loss_text = ops.mean(ops.square(noisy_text_emb - text_emb - noise_text))
+            # Cross-modal denoising objective: noisy embeddings from one
+            # modality should remain close to clean embeddings of the other.
+            # This regularizes the embedding space for noise robustness.
+            score_loss_image = ops.mean(
+                ops.sum(ops.square(noisy_image_emb - text_emb), axis=-1)
+            )
+            score_loss_text = ops.mean(
+                ops.sum(ops.square(noisy_text_emb - image_emb), axis=-1)
+            )
 
             score_loss = (score_loss_image + score_loss_text) / 2.0
         else:

@@ -2,6 +2,8 @@ import keras
 
 # ---------------------------------------------------------------------
 
+
+@keras.saving.register_keras_serializable()
 class ChamferLoss(keras.losses.Loss):
     """Computes the Chamfer distance between two point clouds.
 

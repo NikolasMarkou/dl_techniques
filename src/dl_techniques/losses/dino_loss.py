@@ -235,9 +235,10 @@ class DINOLoss(keras.losses.Loss):
         batch_center = ops.mean(teacher_logits, axis=0, keepdims=True)
 
         # Handle distributed training
-        if keras.distribution.distribution().num_replicas_in_sync > 1:
+        dist = keras.distribution.distribution()
+        if dist is not None and dist.num_replicas_in_sync > 1:
             # Average across all replicas
-            batch_center = keras.distribution.distribution().reduce(
+            batch_center = dist.reduce(
                 'mean', batch_center, axis=None
             )
 
@@ -425,8 +426,9 @@ class iBOTPatchLoss(keras.losses.Loss):
         batch_center = ops.mean(teacher_patch_logits, axis=[0, 1], keepdims=True)
 
         # Handle distributed training
-        if keras.distribution.distribution().num_replicas_in_sync > 1:
-            batch_center = keras.distribution.distribution().reduce(
+        dist = keras.distribution.distribution()
+        if dist is not None and dist.num_replicas_in_sync > 1:
+            batch_center = dist.reduce(
                 'mean', batch_center, axis=None
             )
 

@@ -946,27 +946,27 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
     def _build_uncertainty_weights(self) -> None:
         """Create learnable log-variance weights for each enabled task."""
         if self.task_config.has_detection():
-            self.detection_log_var = self.add_weight(
-                name="detection_log_var",
+            self.detection_log_var = keras.Variable(
+                initializer=keras.initializers.Zeros(),
                 shape=(),
-                initializer="zeros",
-                trainable=True
+                name="detection_log_var",
+                trainable=True,
             )
 
         if self.task_config.has_segmentation():
-            self.segmentation_log_var = self.add_weight(
-                name="segmentation_log_var",
+            self.segmentation_log_var = keras.Variable(
+                initializer=keras.initializers.Zeros(),
                 shape=(),
-                initializer="zeros",
-                trainable=True
+                name="segmentation_log_var",
+                trainable=True,
             )
 
         if self.task_config.has_classification():
-            self.classification_log_var = self.add_weight(
-                name="classification_log_var",
+            self.classification_log_var = keras.Variable(
+                initializer=keras.initializers.Zeros(),
                 shape=(),
-                initializer="zeros",
-                trainable=True
+                name="classification_log_var",
+                trainable=True,
             )
 
     def _infer_task_from_shapes(
