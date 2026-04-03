@@ -9,7 +9,7 @@ The Model Analyzer is designed to provide deep insights into your neural network
 ### Key Features
 
 -   **Comprehensive Analysis**: Five specialized analysis modules covering weights, calibration, information flow, training dynamics, and spectral properties.
--   **Advanced Spectral Analysis (WeightWatcher)**: Assess training quality, complexity, and generalization potential using power-law and concentration analysis. This implementation is highly optimized for speed ($O(N)$ complexity), handling large layers efficiently.
+-   **Advanced Spectral Analysis (WeightWatcher/SETOL)**: Assess training quality, complexity, and generalization potential using power-law and concentration analysis. This implementation is highly optimized for speed ($O(N)$ complexity), handling large layers efficiently.
 -   **Rich Visualizations**: Publication-ready plots and summary dashboards with consistent styling and color schemes.
 -   **Modular & Extensible**: Each analysis is independent. The architecture is designed for adding custom analyzers and visualizers.
 -   **Training & Hyperparameter Insights**: Deep analysis of training history, convergence patterns, and a powerful Pareto-front analysis for optimal model selection.
@@ -44,6 +44,7 @@ analyzer/
 ├── spectral_utils.py                   # Utilities for spectral analysis
 ├── utils.py                            # General utility functions and helpers
 ├── model_analyzer.py                   # Main coordinator class
+├── SETOL.md                            # SETOL theory documentation
 └── README.md                           # This file
 ```
 
@@ -204,19 +205,160 @@ This analysis inspects the internal parameters of the model to diagnose its stru
 | **Sparsity**          | The fraction of weights in a layer that are very close to zero.                                         | High sparsity can indicate that many neurons are not contributing to the model's predictions (i.e., they are "dead" or under-utilized).            |
 | **Health Score**      | A composite score (0-1) derived from norm, sparsity, and distribution health.                           | A single-glance metric for layer health. Higher scores (closer to 1) indicate a healthier, more balanced weight distribution.                 |
 
-### Spectral Analysis Metrics (WeightWatcher)
+### Spectral Analysis Metrics (WeightWatcher/SETOL)
 
-This analysis examines the eigenvalue spectrum of weight matrices to assess training quality and complexity without requiring test data. It is based on the theory of **Heavy-Tailed Self-Regularization (HTSR)**, which posits that SGD implicitly regularizes deep neural networks, causing the distribution of eigenvalues of their weight matrices—the Empirical Spectral Density (ESD)—to develop a characteristic heavy-tailed shape. This shape, quantifiable with a power-law, correlates strongly with the model's ability to generalize.
+This analysis examines the eigenvalue spectrum of weight matrices to assess training quality and complexity **without requiring test data**. It is based on the theory of **Heavy-Tailed Self-Regularization (HTSR)** and the **Semi-Empirical Theory of Learning (SETOL)**, which posit that Stochastic Gradient Descent (SGD) implicitly regularizes deep neural networks, causing the distribution of eigenvalues of their weight matrices — the Empirical Spectral Density (ESD) — to develop a characteristic heavy-tailed shape. This shape, quantifiable with a power-law, correlates strongly with the model's ability to generalize.
 
 **Optimization Note**: This implementation uses optimized prefix-sum algorithms to fit power laws in $O(N)$ time, making it significantly faster than standard implementations on large layers (e.g., large transformers or convolutional layers).
 
-| Metric                     | Description                                                                                                       | Interpretation                                                                                                                                         |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Power-Law Exponent (α)** | The exponent of the power-law fit `P(λ) ~ λ^(-α)` to the tail of the eigenvalue distribution (ESD) of weight matrices.                              | This is the key indicator of training quality. `α < 2.0` suggests an extremely heavy-tailed spectrum, which can indicate over-training or memorization. `2.0 < α < 6.0` typically corresponds to a well-trained model that generalizes well. `α > 6.0` may indicate under-training. The value `α ≈ 2.0` represents a critical phase boundary for "Ideal Learning."             |
-| **Concentration Score**    | A composite metric measuring the inequality of the eigenvalue distribution. It combines the Gini Coefficient, Dominance Ratio, and Participation Ratio.             | High values suggest information is concentrated in a few dominant patterns, which can indicate model brittleness, highlight critical layers, or suggest that pruning/quantization may be risky.         |
-| **Matrix Entropy**         | A measure of the information distribution across eigenvalues, calculated from the Shannon entropy of the normalized singular values.     | Higher entropy indicates a more uniform spread of information across all learned features (eigenvectors), which is often a sign of better generalization and robustness.        |
-| **Stable Rank**            | The effective rank of a weight matrix, which simplifies to `(Σ λ_i) / max(λ_i)`. It indicates the dimensionality of the space spanned by its singular vectors. | A higher stable rank suggests the layer is utilizing its full capacity to learn diverse features. A low stable rank can indicate over-parameterization, redundant features, or an information bottleneck. |
-| **Participation Ratio** | Measures the effective number of non-zero elements in the principal components. | A sub-metric of the Concentration Score. Low values indicate that learned features are localized to very few neurons. |
+#### Theoretical Foundation
+
+For a weight matrix $\mathbf{W}$ of dimensions $M \times N$, the analyzer constructs the correlation matrix $\mathbf{X} = \mathbf{W}^\intercal\mathbf{W}$ and examines the distribution of its eigenvalues $\{\lambda_i\}$. This is computed efficiently via SVD: $\lambda_i = \sigma_i^2$ where $\{\sigma_i\}$ are the singular values of $\mathbf{W}$. The tail of this distribution is then fit to a truncated power-law: $P(\lambda) \sim \lambda^{-\alpha}$.
+
+The complete analysis pipeline:
+
+```
+Keras Layer
+  -> [type inference & weight extraction]
+  -> [tensor matricization to 2D]    (e.g., Conv2D: kh*kw*in_c x out_c)
+  -> [SVD]
+  -> eigenvalues {lambda_i}
+      |
+      |-- [tail fitting]       -> alpha, xmin, D, sigma, pl_pvalue
+      |-- [full spectrum]      -> stable_rank, entropy, gini, dominance
+      |-- [eigenvectors]       -> participation_ratio, critical_weights
+      |-- [SETOL diagnostics]  -> ERG condition, learning_phase, alpha_hat
+      '-- [randomization]      -> rand_distance, ww_softrank
+```
+
+#### Complete Metric Reference
+
+The analyzer produces 21 distinct spectral metrics per layer. These are organized below by reliability tier based on their mathematical robustness and sensitivity to assumptions.
+
+##### Tier 1 Metrics: Always Reliable
+
+These metrics require no fitting, have no distributional assumptions, and are always computable. Start here when interpreting results.
+
+| Metric | Formula | Range | Description | Interpretation |
+|--------|---------|-------|-------------|----------------|
+| **stable_rank** | $\sum\lambda_i / \max(\lambda_i)$ | $[1, \min(M,N)]$ | Effective dimensionality of the weight matrix. More robust than discrete rank. | Compare to layer dimension: `stable_rank / min(M,N)` gives capacity utilization. Near 1.0 = full utilization. Much less than 1.0 = many dormant dimensions, potential bottleneck. Scale-invariant and not sensitive to outliers. **Limitation**: Cannot distinguish between different spectral shapes with the same ratio. |
+| **entropy** | $-\sum p_i \ln(p_i) / \ln(\text{rank})$ where $p_i = \lambda_i / \sum\lambda_i$ | $[0, 1]$ | Normalized Shannon entropy of the eigenvalue distribution. Measures how uniformly information is spread. | Near 0 = rank collapse (one/few modes dominate everything) — problematic. In (0.3, 0.7) = healthy balance of dominant and distributed modes. Near 1.0 = nearly uniform spectrum — **ambiguous**: can mean well-distributed OR random/untrained. Cross-reference with alpha to disambiguate. |
+| **gini_coefficient** | Gini index of $\|\lambda_i\|$ | $[0, 1]$ | Inequality of the eigenvalue distribution (analogous to wealth inequality in economics). | Near 0 = all eigenvalues approximately equal. Above 0.5 = significant inequality, some modes dominate. Above 0.8 = extreme concentration, potential fragility. **Limitation**: Cannot distinguish between different *types* of inequality (gradual power-law decay vs. isolated rank-1 spike). |
+
+##### Tier 2 Metrics: Reliable with Verification
+
+These metrics are the primary diagnostics but depend on a power-law fitting step. Always verify their reliability conditions before interpreting.
+
+| Metric | Formula | Description | Interpretation |
+|--------|---------|-------------|----------------|
+| **alpha** ($\alpha$) | MLE: $\alpha = 1 + n \cdot [\sum \ln(x_i/x_{\min})]^{-1}$ | Power-law exponent of the ESD tail. **The primary training quality indicator.** | See the [Alpha Phase Diagram](#alpha-phase-diagram) below for detailed interpretation. |
+| **alpha_hat** ($\hat{\alpha}$) | $\alpha \times \log_{10}(\lambda_{\max}/N)$ | Scale-weighted quality metric combining tail shape with weight magnitude, normalized by layer dimension $N$. | Lower = better generalization. Use for **within-model layer ranking** only ("which layer is weakest?"). Can be negative for Conv2D with large receptive fields. Do NOT compare across architectures. Inherits all of alpha's failure modes plus adds dimension sensitivity. |
+| **alpha_weighted** | $\alpha \times \log_{10}(\lambda_{\max})$ | Legacy (unnormalized) combined metric. | Prefer `alpha_hat` (the SETOL-correct normalized version). Kept for backward compatibility. |
+| **learning_phase** | Categorical from $\alpha$ | SETOL learning phase classification. | One of: `over-regularized`, `ideal`, `good`, `fair`, `under-trained`, `failed`. Derived directly from alpha — inherits its limitations. |
+| **dominance_ratio** | $\lambda_{\max} / \sum(\lambda_{\text{rest}})$ | How much the single largest eigenvalue dominates the entire spectrum. | Below 0.1 = no single mode dominates (healthy). Between 0.1 and 1.0 = moderate dominance (typical for trained networks). Above 1.0 = top mode contains more variance than all others combined — red flag for rank-1 spikes. **Limitation**: Very sensitive to a single outlier eigenvalue. |
+| **xmin** | Optimal KS-distance threshold | The eigenvalue threshold above which the power-law fit applies. Defines the Effective Correlation Space (ECS). | Internal to alpha fitting, but also gates the ERG condition. If xmin captures very few eigenvalues, both alpha and ERG are unreliable. |
+| **D** | KS distance at optimal xmin | Kolmogorov-Smirnov goodness-of-fit distance. | Lower = better fit. No absolute threshold — use pl_pvalue instead for formal testing. |
+| **sigma** ($\sigma$) | $(\alpha - 1) / \sqrt{n_{\text{tail}}}$ | Standard error of the alpha estimate (asymptotic). | If $\sigma > \alpha/3$, the confidence interval spans multiple learning phases — treat alpha with caution. **Note**: Underestimates true uncertainty for small samples. |
+| **num_pl_spikes** | Count of eigenvalues $\geq x_{\min}$ | Number of eigenvalues in the power-law tail. | Below 50 = alpha estimate has high variance and should be treated as approximate. Above 200 = alpha is reliable. |
+
+**When to NOT trust Tier 2 metrics:**
+- `pl_pvalue < 0.1` — the ESD is probably not power-law; alpha is fitting the wrong model
+- `sigma > alpha / 3` — confidence interval spans multiple phases
+- Layer has < 50 eigenvalues (`num_pl_spikes < 50`) — MLE variance too high
+- Truncated SVD was used (layer dimension > 15,000) — incomplete tail
+
+##### Tier 3 Metrics: Contextual / Expensive
+
+These metrics provide deep diagnostics but are either computationally expensive, dependent on other metrics being reliable, or only meaningful in specific contexts.
+
+| Metric | Formula | Description | Interpretation |
+|--------|---------|-------------|----------------|
+| **pl_pvalue** | Bootstrap KS test (Clauset et al. 2009) | Goodness-of-fit p-value: "Is the power-law hypothesis plausible?" | Above 0.1 = power-law not rejected, alpha is meaningful. Below 0.1 = power-law is a poor fit, **downweight alpha**. Equals -1.0 when test was not run (fit failed). **Cost**: ~100x the cost of fitting alpha. Essential for important decisions, skip for quick surveys. **Resolution**: Default 100 bootstraps gives 0.01 granularity. |
+| **participation_ratio** | $(\\sum v_i^2)^2 / \\sum v_i^4$ for top-$k$ eigenvectors | Measures how many neurons contribute to the principal components (Anderson localization). | Near 1 = features localized to single neurons (fragile to pruning). Near $N$ = features spread across all neurons (robust but possibly diffuse). Reports mean PR over top-3 eigenvectors. **Cost**: Requires full SVD to extract eigenvectors — expensive for large layers. |
+| **concentration_score** | $\log(1 + \text{Gini} \times \text{dominance} / \text{PR})$ | Composite fragility index combining inequality, dominance, and localization. | Use ONLY for **relative ranking** within a model ("which layer is most fragile?"). No meaningful absolute thresholds. High = concentrated/fragile. The log-transform and three-way composition make raw values unintuitive. **Warning**: Compounds errors from its constituent metrics. |
+| **erg_log_det** | $\sum \ln(\tilde{\lambda}_i)$ for ECS eigenvalues | SETOL ERG condition: volume-preservation test from renormalization group theory. | Near 0 = layer at critical point (ideal). Much greater than 0 = ECS eigenvalues too large (overfitting). Much less than 0 = ECS eigenvalues too small (under-utilization). **Only meaningful when alpha is near 2.0.** |
+| **erg_delta_lambda_min** | Gap between xmin and ERG boundary | Measures how close the power-law boundary is to the theoretical ERG boundary. | Near 0 = boundaries coincide (ideal). Large gap = ECS definition is inconsistent. |
+| **erg_satisfied** | $\|\text{erg\_log\_det}\| < 1.0$ | Boolean: is the ERG condition approximately satisfied? | `True` + alpha near 2.0 = ideal learning (SETOL critical point). The threshold of 1.0 is a practical choice, not derived from theory. |
+| **rand_distance** | $\sqrt{\text{JSD}(\text{ESD}, \text{ESD}_{\text{random}})}$ | Jensen-Shannon distance between actual and randomly-permuted weight spectra. | Above 0.3 = significant learned structure (good). Below 0.1 = nearly indistinguishable from random (concerning). **Limitations**: Uses single permutation (no variance estimate) and 100-bin histograms (arbitrary binning). |
+| **ww_softrank** | $\max(\lambda_{\text{rand}}) / \max(\lambda_{\text{actual}})$ | Ratio of random spectral norm to actual spectral norm. | Below 1 = learned weights have larger spectral norm than random (normal). Above 1 = weights more regularized than random (unusual). |
+| **rank_loss** | Count of near-zero singular values | Number of singular values below machine-epsilon tolerance. | Indicates numerical rank deficiency. High rank_loss = many effectively zero dimensions. |
+| **weak_rank_loss** | Count of eigenvalues $< 10^{-6}$ | Similar to rank_loss but with a fixed (looser) threshold. | Captures dimensions that are near-zero but above machine epsilon. |
+| **lambda_max** | $\max(\lambda_i)$ | Largest eigenvalue (squared spectral norm). | Raw scale metric — NOT comparable across layers of different dimensions without normalization. The code computes $\mathbf{W}^\intercal\mathbf{W}$ without the $1/N$ normalization factor, so lambda_max scales with $N$. |
+| **sv_max / sv_min** | Largest / smallest singular values | Extremes of the singular value spectrum. | Large sv_max/sv_min ratio = ill-conditioned layer. |
+| **log_norm / log_spectral_norm** | $\log_{10}(\sum\lambda_i)$ / $\log_{10}(\max\lambda_i)$ | Log-scaled Frobenius and spectral norms. | Useful for comparing magnitude across layers on different scales. |
+| **log_alpha_norm** | $\log_{10}(\sum \lambda_i^\alpha)$ | Alpha-weighted log norm. | Emphasizes tail behavior — combines norm with alpha-based weighting. |
+| **critical_weight_count** | Count of high-contribution weights | Weights that contribute most to top eigenvectors. | High count = many individual weights are spectrally important — model is sensitive to weight perturbations. |
+
+#### Alpha Phase Diagram
+
+The power-law exponent $\alpha$ is the central metric of the spectral analysis. Its value places each layer into a learning phase based on SETOL theory:
+
+| $\alpha$ Range | Phase | Physical State | Characteristics | Recommended Action |
+|:---------------|:------|:---------------|:----------------|:-------------------|
+| $< 0$ | **Failed** | N/A | Power-law fit did not converge. | Ignore alpha for this layer. Diagnose using stable_rank and entropy only. |
+| $[1.0, 2.0)$ | **Over-regularized** | Glassy meta-stable state | Correlation traps (rank-1 spikes). May result from excessive learning rates, very small batch sizes, or over-training into loss crevices. Undefined or infinite weight variance. | Reduce learning rate. Increase batch size. Consider early stopping. Check for rank-1 spikes via dominance_ratio. |
+| $[2.0, 2.5)$ | **Ideal** | Critical phase boundary | ERG condition satisfied ($\Delta\lambda_{\min} \approx 0$). Maximal information compression. Optimal bias-variance tradeoff. This is the SETOL target. | Maintain current training configuration. This is the optimal state. |
+| $[2.5, 4.0)$ | **Good / Typical** | Heavy-tailed | Standard working regime for most SOTA models. Well-trained but not at the theoretical optimum. | Healthy. Could improve toward $\alpha = 2$ but not necessary for good performance. |
+| $(4.0, 6.0]$ | **Fair** | Moderately heavy-tailed | Working but with room for improvement. Features are being learned but not fully compressed. | Train longer. Reduce regularization. Consider increasing model capacity. |
+| $> 6.0$ | **Under-trained** | Random-like (Marchenko-Pastur) | Insufficient correlation learning. Layer behaves nearly as if randomly initialized. | Significantly more training needed. Check if layer is receiving gradients. |
+
+#### Practical Decision Framework
+
+Follow this step-by-step process when reading spectral analysis output:
+
+```
+Step 1: Check STATUS column
+   |-- "failed" -> skip this layer for alpha-based metrics
+   '-- "success" -> proceed
+
+Step 2: Check pl_pvalue (if computed)
+   |-- < 0.1 -> alpha is UNRELIABLE for this layer
+   |            rely on stable_rank, entropy, gini instead
+   |-- >= 0.1 -> alpha is meaningful, proceed
+   '-- -1.0 -> test was not run, proceed with caution
+
+Step 3: Read alpha and learning_phase
+   '-- This is your primary diagnostic
+
+Step 4: Cross-validate with Tier 1 metrics
+   |-- Low entropy + low stable_rank = rank collapse (regardless of alpha)
+   '-- High entropy + high stable_rank + high alpha = random/untrained
+
+Step 5: Check concentration metrics for anomalies
+   |-- dominance_ratio > 1.0 = rank-1 spike (investigate even if alpha looks OK)
+   '-- Low participation_ratio = localized features (fragile to pruning)
+
+Step 6: Use alpha_hat for within-model layer ranking
+   '-- Sort layers by alpha_hat to find the weakest links
+```
+
+#### Known Blind Spots and Limitations
+
+Understanding what the spectral analyzer **cannot** do is as important as understanding what it can:
+
+1. **Non-power-law spectra**: The analyzer only tests the power-law hypothesis. If the ESD is actually log-normal or stretched exponential (which is common in practice), alpha will still produce a number — but it's fitting the wrong model. The `pl_pvalue` test catches this when enabled, but there is no alternative distribution comparison.
+
+2. **Spatial structure loss**: Conv2D weight tensors are matricized by reshaping `(kh, kw, in_c, out_c)` into `(kh*kw*in_c, out_c)`. This destroys spatial correlations. The spectral analysis captures properties of the linear transformation but misses the spatial structure that makes convolutions effective. Expect ~10-15% mismatch for spatially structured architectures.
+
+3. **Batch normalization fusion**: If BatchNorm parameters are folded into convolutional weights (common in inference-optimized models), the spectral properties change but the analyzer has no way to detect or account for this.
+
+4. **Cross-architecture comparison**: `alpha_hat`, `lambda_max`, and all norm-based metrics have different scales for different layer types and architectures. Only `alpha` itself is somewhat comparable across architectures (it's scale-invariant). Even then, different architectures may have naturally different alpha distributions.
+
+5. **Small layers**: Below ~50 eigenvalues, all fitting-based metrics (alpha, ERG, pl_pvalue) are statistically unreliable. The sigma formula `(alpha-1)/sqrt(n)` is only asymptotically correct and underestimates true uncertainty for small samples.
+
+6. **Truncated SVD for large layers**: When a layer has more than 15,000 dimensions, the analyzer switches to truncated SVD for performance. This computes only the top-k singular values, potentially missing the tail of the distribution and biasing alpha upward.
+
+7. **xmin as causal bottleneck**: The `xmin` threshold (where the power-law fit begins) gates alpha quality, alpha_hat, learning_phase, ERG condition, and all downstream recommendations. If xmin is wrong, the entire diagnostic chain is compromised. The concentration metrics (Gini, dominance, PR) bypass this bottleneck because they use the full spectrum.
+
+8. **Extremely rectangular matrices**: When $M \ll N$ or $N \ll M$ (very high aspect ratio), the Q ratio is extreme and metrics may behave unexpectedly. This can occur with embedding layers or very wide/narrow bottleneck layers.
+
+#### Interpreting the Funnel Diagnostic
+
+When examining spectral metric evolution across layers (from input to output):
+
+- **Healthy training**: Early layers have higher alpha (more random), deep layers have alpha approaching 2.0. The `erg_delta_lambda_min` collapses as alpha approaches 2. This creates a characteristic "funnel" shape in the evolution plots.
+- **Problem indicator**: Irregular patterns, sudden jumps, or divergence in the alpha-across-layers plot.
+- **Layer-position context**: It is normal for the first and last layers to have somewhat different spectral properties than the middle layers.
 
 ### Calibration & Confidence Metrics
 
@@ -344,13 +486,28 @@ Use spectral analysis to quickly assess if a model is over-trained or under-trai
 # Scenario: Quickly validate a newly trained model's quality.
 model = keras.models.load_model('path/to/new_model.keras')
 
-config = AnalysisConfig(analyze_spectral=True) # Only run spectral analysis
+config = AnalysisConfig(
+    analyze_spectral=True,          # Enable spectral analysis
+    spectral_bootstraps=100,        # Enable pl_pvalue computation (set to 0 to skip)
+    spectral_concentration_analysis=True  # Enable Gini/PR/dominance
+)
 analyzer = ModelAnalyzer(models={'NewModel': model}, config=config)
 results = analyzer.analyze() # No data needed for this analysis
 
+# Access spectral results programmatically
+df = results.spectral_analysis
+print(df[['name', 'alpha', 'sigma', 'pl_pvalue', 'learning_phase',
+          'stable_rank', 'entropy', 'concentration_score']])
+
+# Check recommendations
+for rec in results.spectral_recommendations.get('NewModel', []):
+    print(f"  -> {rec}")
+
 # Next steps:
-# 1. Open `spectral_summary.png`. Check if the Mean Alpha (α) is in the 2.0-6.0 range.
-# 2. Read the recommendations in `analysis_results.json` under `spectral_recommendations`.
+# 1. Open `spectral_summary.png`. Check if the Mean Alpha is in the 2.0-6.0 range.
+# 2. Look at the learning_phase column for per-layer diagnostics.
+# 3. Check pl_pvalue: layers with p < 0.1 have unreliable alpha values.
+# 4. Cross-validate: low entropy + low stable_rank = rank collapse (bad regardless of alpha).
 ```
 
 ### Pattern 5: Improving Generalization with SVD Smoothing
@@ -369,6 +526,34 @@ smoothed_model = analyzer.create_smoothed_model(
 )
 
 # You can now save and evaluate the smoothed_model
+```
+
+### Pattern 6: Identifying Fragile Layers for Pruning/Quantization Safety
+
+Before pruning or quantizing, use concentration metrics to find layers where information is dangerously concentrated.
+
+```python
+config = AnalysisConfig(
+    analyze_spectral=True,
+    spectral_concentration_analysis=True  # Must be enabled for this use case
+)
+analyzer = ModelAnalyzer(models={'ProductionModel': model}, config=config)
+results = analyzer.analyze()
+
+df = results.spectral_analysis
+
+# Find layers that are fragile (concentrated information)
+fragile_layers = df.nlargest(5, 'concentration_score')[
+    ['name', 'concentration_score', 'dominance_ratio', 'participation_ratio', 'gini_coefficient']
+]
+print("Most fragile layers (handle with care during pruning/quantization):")
+print(fragile_layers)
+
+# Layers with dominance_ratio > 1.0 have rank-1 spikes — very sensitive to perturbation
+spike_layers = df[df['dominance_ratio'] > 1.0][['name', 'dominance_ratio', 'alpha']]
+if not spike_layers.empty:
+    print("\nLayers with rank-1 spikes (do NOT prune these aggressively):")
+    print(spike_layers)
 ```
 
 ## 6. Advanced Configuration
@@ -392,11 +577,14 @@ config = AnalysisConfig(
     analyze_biases=False,
     compute_weight_pca=True,
 
-    # === Spectral Analysis (WeightWatcher) ===
+    # === Spectral Analysis (WeightWatcher/SETOL) ===
     spectral_min_evals=10,                # Min eigenvalues for a layer to be analyzed
     spectral_max_evals=15000,             # Soft cap to switch to truncated SVD for speed
-    spectral_concentration_analysis=True, # Enable concentration metrics (Gini, PR)
+    spectral_concentration_analysis=True, # Enable concentration metrics (Gini, PR, dominance)
     spectral_randomize=False,             # Compare with randomized weights (slow)
+    spectral_bootstraps=100,              # Bootstrap iterations for pl_pvalue (0 to skip)
+    spectral_glorot_fix=False,            # Apply Glorot normalization before analysis
+    spectral_per_layer_diagnostics=True,  # Generate per-layer power-law fit plots
 
     # === Calibration Analysis ===
     calibration_bins=15,
@@ -455,9 +643,10 @@ A 2x2 grid providing a holistic view of all models.
 
 A dashboard for comparing models based on their weight matrix spectral properties.
 
--   **Alpha (α) Distribution**: Violin plots comparing the distribution of alpha values across all layers for each model.
--   **Concentration Score**: A comparison of information concentration. Higher scores suggest some layers are "brittle".
--   **Alpha Evolution**: Scatter plots showing how α values change as you move deeper into the network.
+-   **Alpha Distribution with Phase Backgrounds**: Histogram of alpha values overlaid with color-coded phase regions (pink = over-regularized, green = ideal, yellow = under-trained). A quick visual check of how many layers fall in each phase.
+-   **Concentration Score Distribution**: Comparison of information fragility across models.
+-   **Alpha per Layer**: Scatter plot showing how alpha evolves across the network depth, with reference lines at the phase boundaries (2.0, 6.0). Look for the "funnel" convergence pattern — healthy models show alpha decreasing toward 2.0 in deeper layers.
+-   **Stable Rank per Layer**: Log-scale scatter showing capacity utilization across layers.
 -   **Recommendations**: The `analysis_results.json` file contains specific, actionable recommendations based on the spectral analysis for each model (e.g., "Model may be over-trained. Consider early stopping...").
 
 #### 3. Training Dynamics (`training_dynamics.png`)
@@ -505,12 +694,12 @@ Diagnoses how information propagates through the network.
 
 These plots provide a layer-by-layer deep dive into the power-law fit that is summarized in the main spectral dashboard. Each plot visualizes the Empirical Spectral Density (ESD) of a single layer's weight matrix.
 
--   **What it shows**: A log-log plot of the eigenvalue (λ) distribution. A straight line in the tail of this plot is the signature of a power-law.
+-   **What it shows**: A log-log plot of the eigenvalue ($\lambda$) distribution. A straight line in the tail of this plot is the signature of a power-law.
 -   **How to read it**:
     -   The **blue dots** represent the actual binned histogram of the layer's eigenvalues.
-    -   The **red line** is the best-fit power-law model, `P(λ) ~ λ^(-α)`. The steepness of this line's slope is the exponent `α`.
-    -   The **vertical dashed line (`xmin`)** marks the beginning of the power-law tail, where the fit is applied.
-    -   **Interpretation**: A well-trained layer will show the blue dots in the tail (right side of the plot) aligning closely with the red line. A poor fit may indicate that the layer has not developed a clear heavy-tailed structure, which could be a sign of training issues.
+    -   The **red line** is the best-fit power-law model, $P(\lambda) \sim \lambda^{-\alpha}$. The steepness of this line's slope is the exponent $\alpha$.
+    -   The **vertical dashed line (`xmin`)** marks the beginning of the power-law tail, where the fit is applied. Eigenvalues to the left of xmin are considered "bulk" (noise/memorization). Eigenvalues to the right form the Effective Correlation Space (ECS).
+    -   **Interpretation**: A well-trained layer will show the blue dots in the tail (right side of the plot) aligning closely with the red line. A poor fit (dots systematically deviating from the line) suggests the ESD is not truly power-law — check `pl_pvalue` to confirm.
 
 ## 8. Troubleshooting
 
@@ -530,6 +719,9 @@ These plots provide a layer-by-layer deep dive into the power-law fit that is su
         max_layers_heatmap=8            # Limit heatmap size
     )
     ```
+-   **Spectral analysis shows alpha = -1 for many layers**: This means the power-law fit failed. Common causes: layers are too small (< 10 eigenvalues), weights are all near-zero (dead layers), or the layer type is not supported. Check the `status` column in the spectral DataFrame.
+-   **Alpha values seem unreliable**: Enable the bootstrap goodness-of-fit test (`spectral_bootstraps=100`) and check `pl_pvalue`. Values below 0.1 indicate the power-law is a poor model for that layer's ESD. Also check `sigma` — if `sigma > alpha/3`, the estimate has very wide confidence intervals.
+-   **Concentration score is very high for one layer**: This indicates a potential rank-1 spike. Check `dominance_ratio` — if above 1.0, the largest eigenvalue dominates the entire spectrum. This can happen with batch normalization artifacts or correlation traps from training.
 -   **Plots look wrong/empty**: Enable verbose logging (`config = AnalysisConfig(verbose=True)`) and check the console output. You can also inspect the `analysis_results.json` file to see what data was successfully computed.
 -   **Matplotlib Backend Issues**: If running in a Jupyter Notebook, use `%matplotlib inline` before importing the analyzer. The analyzer uses the non-interactive `Agg` backend by default to ensure saving plots works in headless environments, but `plt.show()` might not work immediately without configuration.
 
@@ -584,12 +776,27 @@ class MyCustomVisualizer(BaseVisualizer):
 
 ## 10. Theoretical Background & References
 
-The analyses performed by this toolkit are grounded in established research from machine learning, statistics, and statistical physics. Below are key references for the theoretical underpinnings of the main analysis modules.
+The analyses performed by this toolkit are grounded in established research from machine learning, statistics, and statistical physics.
+
+### SETOL: Semi-Empirical Theory of Learning
+
+The spectral analysis module is built on SETOL, which bridges theoretical understanding and practical deep learning. Unlike traditional statistical learning theory (too pessimistic) or classical statistical mechanics (doesn't capture learning dynamics), SETOL uses actual trained weights to predict layer quality.
+
+Key theoretical components:
+- **Heavy-Tailed Self-Regularization (HTSR)**: SGD implicitly regularizes neural networks, causing weight matrix spectra to develop heavy tails. SETOL explains *why* this happens.
+- **Effective Correlation Space (ECS)**: The essential subspace where learning actually happens — eigenvalues above xmin. The bulk below xmin represents noise/memorization.
+- **ERG Condition**: The Exact Renormalization Group condition ($\ln\det(\tilde{X}) \approx 0$) identifies layers at the critical point of ideal learning, analogous to phase transitions in statistical mechanics.
+- **Student-Teacher Framework**: SETOL extends the classical framework from vectors to matrices, using the Harish-Chandra-Itzykson-Zuber (HCIZ) integral to calculate expected generalization error.
+
+For comprehensive SETOL documentation, see `SETOL.md` in this directory.
 
 ### Key References
 
-1.  **Martin, C., & Mahoney, M. W. (2021). "Heavy-Tailed Universals in Deep Neural Networks." arXiv preprint arXiv:2106.07590.** (Foundational work on Heavy-Tailed Self-Regularization and its connection to generalization).
-2.  **Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). "On calibration of modern neural networks." ICML.** (A seminal paper on model calibration, introducing Expected Calibration Error (ECE) as a standard metric).
-3.  **Clauset, A., Shalizi, C. R., & Newman, M. E. J. (2009). "Power-law distributions in empirical data." SIAM review, 51(4), 661-703.** (Provides the statistical methodology for fitting power-law distributions, which is central to the spectral analysis).
-4.  **Roy, O., & Vetterli, M. (2007). "The effective rank: A measure of effective dimensionality." LATS.** (Introduces the concept of "effective rank" used in the information flow analysis to measure feature dimensionality).
-5.  **Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press.** (A comprehensive textbook covering many of the foundational concepts used in the analyzer, such as overfitting, norms, and training dynamics).
+1.  **Martin, C. H., & Hinrichs, C. (2025). "SETOL: A Semi-Empirical Theory of (Deep) Learning." arXiv:2507.17912.** (The theoretical foundation for alpha, alpha_hat, ERG condition, and learning phase classification).
+2.  **Martin, C., & Mahoney, M. W. (2021). "Heavy-Tailed Universals in Deep Neural Networks." arXiv preprint arXiv:2106.07590.** (Foundational work on Heavy-Tailed Self-Regularization and its connection to generalization).
+3.  **Clauset, A., Shalizi, C. R., & Newman, M. E. J. (2009). "Power-law distributions in empirical data." SIAM review, 51(4), 661-703.** (Provides the statistical methodology for fitting power-law distributions and the bootstrap goodness-of-fit test used for pl_pvalue).
+4.  **Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). "On calibration of modern neural networks." ICML.** (A seminal paper on model calibration, introducing Expected Calibration Error (ECE) as a standard metric).
+5.  **Roy, O., & Vetterli, M. (2007). "The effective rank: A measure of effective dimensionality." LATS.** (Introduces the concept of "effective rank" used in the information flow analysis to measure feature dimensionality).
+6.  **Marchenko, V. A., & Pastur, L. A. (1967). "Distribution of eigenvalues for some sets of random matrices." Mathematics of the USSR-Sbornik.** (The random matrix theory baseline — under-trained layers follow this distribution).
+7.  **Pennington, J., & Worah, P. (2017). "Nonlinear random matrix theory for deep learning." NeurIPS.** (Extends RMT to nonlinear neural network settings).
+8.  **Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press.** (A comprehensive textbook covering many of the foundational concepts used in the analyzer, such as overfitting, norms, and training dynamics).
