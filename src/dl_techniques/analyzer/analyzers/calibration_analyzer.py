@@ -106,6 +106,8 @@ class CalibrationAnalyzer(BaseAnalyzer):
         if cache is None:
             raise ValueError("Prediction cache is required for calibration analysis")
 
+        skipped_models = []
+
         for model_name in self.models:
             if model_name not in cache:
                 continue
@@ -136,7 +138,8 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 else:
                     y_true_idx = y_true.flatten().astype(int)
             except (ValueError, TypeError) as e:
-                logger.error(f"Cannot convert y_true to integer indices for {model_name}: {e}")
+                logger.warning(f"Skipping calibration for '{model_name}': cannot convert y_true to indices: {e}")
+                skipped_models.append(model_name)
                 continue
 
             # Compute calibration-specific metrics
@@ -182,6 +185,12 @@ class CalibrationAnalyzer(BaseAnalyzer):
             # Combine all confidence-related metrics into one place
             all_confidence_metrics = {**confidence_metrics, **entropy_stats}
             results.confidence_metrics[model_name] = all_confidence_metrics
+
+        if skipped_models:
+            logger.warning(
+                f"Calibration analysis skipped for {len(skipped_models)} model(s): "
+                f"{', '.join(skipped_models)}. Check y_true format."
+            )
 
     def _compute_confidence_metrics(self, probabilities: np.ndarray) -> Dict[str, np.ndarray]:
         """Compute various confidence metrics (excluding entropy which comes from entropy_stats)."""

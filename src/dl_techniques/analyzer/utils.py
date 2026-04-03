@@ -180,7 +180,13 @@ class DataSampler:
                 # We can't recover y if it's not in the dataset
 
         x_out = np.array(x_list)
-        y_out = np.array(y_list) if y_list else np.zeros(len(x_list)) # Fallback placeholder
+        if not y_list:
+            raise ValueError(
+                "TF Dataset yields only features (no labels). "
+                "Labels are required for calibration and confidence analysis. "
+                "Provide a dataset that yields (x, y) tuples."
+            )
+        y_out = np.array(y_list)
 
         return DataInput(x_data=x_out, y_data=y_out)
 

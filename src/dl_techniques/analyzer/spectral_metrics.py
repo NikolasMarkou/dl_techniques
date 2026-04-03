@@ -352,9 +352,10 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
         - erg_delta_lambda_min: gap between xmin and the ERG boundary (ideal: ≈ 0)
         - erg_satisfied: whether |erg_log_det| < 1.0 (approximate ERG condition)
     """
-    if evals is None or len(evals) == 0 or xmin <= 0:
-        return {'erg_log_det': float('nan'), 'erg_delta_lambda_min': float('nan'),
-                'erg_satisfied': False}
+    if evals is None or len(evals) == 0:
+        raise ValueError("evals must be a non-empty array for ERG condition computation.")
+    if xmin <= 0:
+        raise ValueError(f"xmin must be positive for ERG condition computation, got {xmin}.")
 
     # ECS: eigenvalues above xmin
     ecs_evals = evals[evals >= xmin]
@@ -641,7 +642,7 @@ def get_top_eigenvectors(
     n, m = weight_matrix.shape
     min_dim = min(n, m)
 
-    k = min(k, min_dim - 1)
+    k = min(k, min_dim)
     if k <= 0:
         return np.array([]), np.array([])
 

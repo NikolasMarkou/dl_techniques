@@ -269,12 +269,12 @@ class TestERGCondition:
 
     def test_erg_with_zero_xmin(self):
         evals = np.array([1.0, 0.5, 0.1])
-        result = compute_erg_condition(evals, 0.0)
-        assert np.isnan(result['erg_log_det'])
+        with pytest.raises(ValueError, match="xmin must be positive"):
+            compute_erg_condition(evals, 0.0)
 
     def test_erg_with_empty_evals(self):
-        result = compute_erg_condition(np.array([]), 1.0)
-        assert np.isnan(result['erg_log_det'])
+        with pytest.raises(ValueError, match="non-empty array"):
+            compute_erg_condition(np.array([]), 1.0)
 
 
 # =====================================================================

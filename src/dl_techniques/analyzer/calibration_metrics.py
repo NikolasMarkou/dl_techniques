@@ -164,16 +164,16 @@ def compute_adaptive_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 1
     sorted_confidences = confidences[sorted_indices]
     sorted_accuracies = accuracies[sorted_indices]
 
-    # Create equal-mass bins (last bin absorbs remainder samples)
-    bin_edges = np.linspace(0, n_samples, n_bins + 1, dtype=int)
+    # Create equal-mass bins using array_split for proper index distribution
+    bin_splits = np.array_split(np.arange(n_samples), n_bins)
     ece = 0.0
 
-    for i in range(n_bins):
-        start_idx = bin_edges[i]
-        end_idx = bin_edges[i + 1]
+    for bin_indices in bin_splits:
+        if len(bin_indices) == 0:
+            continue
 
-        bin_samples_conf = sorted_confidences[start_idx:end_idx]
-        bin_samples_acc = sorted_accuracies[start_idx:end_idx]
+        bin_samples_conf = sorted_confidences[bin_indices]
+        bin_samples_acc = sorted_accuracies[bin_indices]
 
         if len(bin_samples_conf) > 0:
             avg_conf = np.mean(bin_samples_conf)

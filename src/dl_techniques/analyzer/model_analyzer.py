@@ -453,6 +453,8 @@ class ModelAnalyzer:
         x_data = sampled_data.x_data
         y_data = sampled_data.y_data
 
+        if isinstance(x_data, dict) and not x_data:
+            raise ValueError("x_data is an empty dictionary — no input data available for analysis.")
         sample_size = len(x_data) if not isinstance(x_data, dict) else len(next(iter(x_data.values())))
         logger.info(f"Using {sample_size} samples for analysis.")
 
@@ -466,9 +468,15 @@ class ModelAnalyzer:
                 # Handle Logits vs Probabilities
                 # The output of a fine-tuned model might be logits.
                 # We need probabilities for calibration.
-                # Simple heuristic: if values are outside [0,1] or don't sum to 1, assume logits.
+                # Check if outputs are valid probability distributions (non-negative, sum to ~1).
                 is_logits = False
-                if np.min(predictions) < 0 or np.max(predictions) > 1.00001:
+                if predictions.ndim >= 2:
+                    row_sums = predictions.sum(axis=-1)
+                    is_logits = (
+                        np.any(predictions < 0) or
+                        not np.allclose(row_sums, 1.0, atol=1e-3)
+                    )
+                elif np.min(predictions) < 0 or np.max(predictions) > 1.00001:
                     is_logits = True
 
                 if is_logits:
@@ -512,7 +520,7 @@ class ModelAnalyzer:
             try:
                 try:
                     metrics = model.evaluate(x_data, y_data, verbose=0)
-                except (ValueError, TypeError) as eval_error:
+                except (ValueError, TypeError, RuntimeError) as eval_error:
                     logger.warning(f"Model evaluation failed for {model_name}: {eval_error}")
                     self.results.model_metrics[model_name] = {
                         'loss': DEFAULT_METRIC_VALUE,
