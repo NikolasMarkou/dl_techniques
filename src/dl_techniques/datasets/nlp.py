@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import datasets
-import numpy as np
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
@@ -25,22 +24,22 @@ def load_wikipedia_train_val(
     config_name: str = DEFAULT_WIKIPEDIA_CONFIG,
     min_article_length: int = 500,
     val_fraction: float = 0.02,
-    max_train_samples: Optional[int] = None,
     max_val_samples: int = 5000,
+    max_train_samples: Optional[int] = None,
     seed: int = 42,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
     """Load Wikipedia with a proper random holdout train/val split.
 
-    Downloads Wikipedia to ``cache_dir`` on first call (Arrow format).
-    Splits articles randomly by index so train and val are guaranteed
-    to have zero overlap regardless of iteration order.
+    Uses HuggingFace ``train_test_split()`` which keeps data on disk
+    in Arrow format (memory-mapped). No need to load all articles into
+    RAM. Generators stream text from disk on demand.
 
     :param cache_dir: Local directory for Arrow cache files.
     :param config_name: Wikipedia config (e.g. ``'20231101.en'``).
     :param min_article_length: Skip articles shorter than this (chars).
     :param val_fraction: Fraction of articles reserved for validation.
+    :param max_val_samples: Max validation articles.
     :param max_train_samples: Limit training articles. ``None`` for all.
-    :param max_val_samples: Limit validation articles.
     :param seed: Random seed for reproducible splits.
     :return: ``(train_dataset, val_dataset)`` — both yield raw text strings.
     """
@@ -66,47 +65,64 @@ def load_wikipedia_train_val(
         )
 
     total = len(hf_dataset)
-    logger.info(f"Wikipedia loaded: {total:,} articles")
+    logger.info(f"Wikipedia loaded: {total:,} articles (memory-mapped)")
 
-    # Random split by index
-    rng = np.random.RandomState(seed)
-    indices = rng.permutation(total)
-    val_size = min(int(total * val_fraction), max_val_samples)
-    val_indices = indices[:val_size]
-    train_indices = indices[val_size:]
+    # Filter short articles first (stays on disk via Arrow)
+    if min_article_length > 0:
+        hf_dataset = hf_dataset.filter(
+            lambda x: len(x["text"]) >= min_article_length,
+            num_proc=4,
+        )
+        logger.info(
+            f"Filtered to {len(hf_dataset):,} articles "
+            f"(min_length={min_article_length})"
+        )
+
+    # Random holdout split — stays on disk, zero RAM overhead
+    split = hf_dataset.train_test_split(
+        test_size=val_fraction, seed=seed,
+    )
+    train_hf = split["train"]
+    val_hf = split["test"]
 
     if max_train_samples is not None:
-        train_indices = train_indices[:max_train_samples]
+        train_hf = train_hf.select(range(min(max_train_samples, len(train_hf))))
+    if max_val_samples is not None and len(val_hf) > max_val_samples:
+        val_hf = val_hf.select(range(max_val_samples))
 
     logger.info(
-        f"Split: {len(train_indices):,} train, {len(val_indices):,} val "
+        f"Split: {len(train_hf):,} train, {len(val_hf):,} val "
         f"(zero overlap guaranteed)"
     )
 
-    # Build tf.data.Datasets with shuffled indices
-    text_field = "text"
-
-    def make_dataset(idxs, shuffle: bool) -> tf.data.Dataset:
-        subset = hf_dataset.select(idxs)
-        if min_article_length > 0:
-            subset = subset.filter(
-                lambda x: len(x[text_field]) >= min_article_length,
-                num_proc=4,
-            )
-        texts = list(subset[text_field])
-        ds = tf.data.Dataset.from_tensor_slices(texts)
-        if shuffle:
-            ds = ds.shuffle(buffer_size=min(len(texts), 100000))
-        logger.info(
-            f"  {'Train' if shuffle else 'Val'} dataset: "
-            f"{len(texts):,} articles after filtering"
-        )
-        return ds
-
-    train_ds = make_dataset(train_indices, shuffle=True)
-    val_ds = make_dataset(val_indices, shuffle=False)
+    # Build tf.data.Datasets using generators (reads from Arrow on disk)
+    train_ds = _hf_to_tf_dataset(train_hf, shuffle=True)
+    val_ds = _hf_to_tf_dataset(val_hf, shuffle=False)
 
     return train_ds, val_ds
+
+
+def _hf_to_tf_dataset(
+    hf_dataset: datasets.Dataset,
+    shuffle: bool = False,
+) -> tf.data.Dataset:
+    """Convert HF Arrow dataset to tf.data.Dataset via generator.
+
+    Reads text from memory-mapped Arrow files on demand — no need
+    to load all articles into RAM.
+    """
+    if shuffle:
+        hf_dataset = hf_dataset.shuffle()
+
+    def generator():
+        for item in hf_dataset:
+            yield item["text"]
+
+    ds = tf.data.Dataset.from_generator(
+        generator,
+        output_signature=tf.TensorSpec(shape=(), dtype=tf.string),
+    )
+    return ds
 
 
 def load_hf_text_dataset(
@@ -175,5 +191,4 @@ def load_hf_text_dataset(
             hf_dataset = hf_dataset.select(
                 range(min(max_samples, len(hf_dataset)))
             )
-        texts = hf_dataset[text_field]
-        return tf.data.Dataset.from_tensor_slices(texts)
+        return _hf_to_tf_dataset(hf_dataset)
