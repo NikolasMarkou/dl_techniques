@@ -28,7 +28,7 @@ from train.common.nlp import (
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
-from dl_techniques.losses import MaskedCausalLMLoss
+from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 
 
@@ -159,6 +159,11 @@ class TrainingConfig:
     learning_rate: float = 5e-4
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
+
+    # Loss: "focal" (default) or "ce" (standard masked cross-entropy)
+    loss_type: str = "focal"
+    focal_gamma: float = 2.0
+    label_smoothing: float = 0.0
 
     # Paths
     save_dir: str = "results/gpt2_pretrain"
@@ -316,14 +321,27 @@ def compile_model(
         weight_decay=config.weight_decay,
         clipnorm=1.0,
     )
+    # Select loss function
+    if config.loss_type == "focal":
+        loss_fn = FocalCausalLMLoss(
+            gamma=config.focal_gamma,
+            label_smoothing=config.label_smoothing,
+        )
+        loss_desc = f"FocalCausalLMLoss(γ={config.focal_gamma})"
+    else:
+        loss_fn = MaskedCausalLMLoss(
+            label_smoothing=config.label_smoothing,
+        )
+        loss_desc = "MaskedCausalLMLoss"
+
     model.compile(
         optimizer=optimizer,
-        loss={"logits": MaskedCausalLMLoss()},
+        loss={"logits": loss_fn},
         metrics={"logits": ["accuracy"]},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
-        f"wd={config.weight_decay}"
+        f"wd={config.weight_decay}, loss={loss_desc}"
     )
 
 
@@ -486,6 +504,27 @@ def main() -> None:
         help="Fraction of articles for validation holdout (default: 0.02)",
     )
 
+    # Loss function
+    parser.add_argument(
+        "--loss-type",
+        type=str,
+        default="focal",
+        choices=["focal", "ce"],
+        help="Loss: 'focal' (default) or 'ce' (standard masked CE)",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focal loss focusing parameter gamma (default: 2.0)",
+    )
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.0,
+        help="Label smoothing factor (default: 0.0)",
+    )
+
     # Checkpointing & Analysis
     parser.add_argument(
         "--checkpoint-every-steps",
@@ -514,6 +553,9 @@ def main() -> None:
     config.val_fraction = args.val_fraction
     config.checkpoint_every_steps = args.checkpoint_every_steps
     config.analyze_every_steps = args.analyze_every_steps
+    config.loss_type = args.loss_type
+    config.focal_gamma = args.focal_gamma
+    config.label_smoothing = args.label_smoothing
 
     if args.max_samples is not None:
         config.max_samples = args.max_samples

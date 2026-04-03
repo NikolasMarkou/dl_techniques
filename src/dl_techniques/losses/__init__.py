@@ -91,6 +91,7 @@ from .dino_loss import DINOLoss, iBOTPatchLoss, KoLeoLoss
 
 from .feature_alignment_loss import FeatureAlignmentLoss
 
+from .focal_causal_lm_loss import FocalCausalLMLoss
 from .focal_uncertainty_loss import (
     FocalUncertaintyLoss,
     analyze_focal_uncertainty_loss,
@@ -189,6 +190,9 @@ __all__ = [
     "KoLeoLoss",
     # feature_alignment_loss
     "FeatureAlignmentLoss",
+    # focal_uncertainty_loss
+    # focal_causal_lm_loss
+    "FocalCausalLMLoss",
     # focal_uncertainty_loss
     "FocalUncertaintyLoss",
     "analyze_focal_uncertainty_loss",
