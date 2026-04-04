@@ -570,13 +570,15 @@ class SpectralVisualizer(BaseVisualizer):
 
         plt.close(fig)
 
-    def _scan_ks_distances(self, evals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _scan_ks_distances(
+        self, evals: np.ndarray, max_scan_points: int = 500,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Calculate KS distance for a range of potential xmin values.
 
-        Replicates the logic of fit_powerlaw (with precomputed suffix sums)
-        and returns the full profile for plotting. No subsampling — the curve
-        must match the actual fit result exactly.
+        Uses precomputed suffix sums for O(1) tail-sum lookups. Subsamples
+        scan points to ``max_scan_points`` for plotting performance — the
+        full scan on large matrices (768×768 = 590K eigenvalues) causes OOM.
         """
         try:
             data = np.sort(evals)
@@ -585,6 +587,11 @@ class SpectralVisualizer(BaseVisualizer):
                 return np.array([]), np.array([])
 
             scan_indices = np.arange(0, N - 5)
+            # Subsample for plotting — full scan OOMs on large matrices
+            if len(scan_indices) > max_scan_points:
+                scan_indices = scan_indices[
+                    :: max(1, len(scan_indices) // max_scan_points)
+                ]
             xmins = data[scan_indices]
             ks_dists = np.ones(len(scan_indices), dtype=np.float64)
 
