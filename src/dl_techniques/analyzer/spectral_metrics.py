@@ -558,7 +558,7 @@ def calculate_gini_coefficient(evals: np.ndarray) -> float:
     if denominator < SPECTRAL_EPSILON:
         return 0.0
 
-    return ((n + 1) / n) - (2 * np.sum(cum_evals)) / denominator
+    return 1.0 - (2 * np.sum(cum_evals)) / denominator
 
 
 # ---------------------------------------------------------------------
@@ -901,10 +901,15 @@ def compute_detX_constraint(evals: np.ndarray) -> int:
     rescaled_evals, _ = rescale_eigenvalues(evals)
     sorted_evals = np.sort(rescaled_evals)
 
-    for idx in range(len(sorted_evals) - 1, 0, -1):
-        detX = np.prod(sorted_evals[idx:])
-        if detX < 1.0:
-            num_evals_in_tail = len(sorted_evals) - idx
+    # Use log-space to avoid float64 overflow/underflow with large eigenvalue sets
+    log_sorted = np.log(sorted_evals[sorted_evals > SPECTRAL_EPSILON])
+    if len(log_sorted) == 0:
+        return 0
+
+    for idx in range(len(log_sorted) - 1, 0, -1):
+        log_detX = np.sum(log_sorted[idx:])
+        if log_detX < 0.0:  # equivalent to detX < 1.0
+            num_evals_in_tail = len(log_sorted) - idx
             return num_evals_in_tail
 
     return len(sorted_evals)

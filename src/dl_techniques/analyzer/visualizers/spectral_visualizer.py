@@ -382,13 +382,7 @@ class SpectralVisualizer(BaseVisualizer):
 
             # --- Panel (d): KS Distance vs xmin (Optimization Landscape) ---
             ax_ks = axes[1, 1]
-            # We need to re-scan KS distances to plot the curve.
-            # Limit scan for performance if N is huge.
-            scan_evals = evals_clean
-            if len(scan_evals) > 5000:
-                scan_evals = np.random.choice(scan_evals, 5000, replace=False)
-
-            xmins, ks_dists = self._scan_ks_distances(scan_evals)
+            xmins, ks_dists = self._scan_ks_distances(evals_clean)
 
             if len(xmins) > 0:
                 ax_ks.plot(xmins, ks_dists, '-', linewidth=1, label='$D_{KS}$')
@@ -420,62 +414,46 @@ class SpectralVisualizer(BaseVisualizer):
     def _scan_ks_distances(self, evals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Calculate KS distance for a range of potential xmin values.
-        Replicates the logic of fit_powerlaw but returns the full profile for plotting.
+
+        Replicates the logic of fit_powerlaw (with precomputed suffix sums)
+        and returns the full profile for plotting. No subsampling — the curve
+        must match the actual fit result exactly.
         """
         try:
             data = np.sort(evals)
             N = len(data)
-            if N < 10: return np.array([]), np.array([])
+            if N < 10:
+                return np.array([]), np.array([])
 
-            # Only scan the tail half to avoid noise at small eigenvalues
-            # or simply scan everything except the very end
             scan_indices = np.arange(0, N - 5)
-            # Subsample indices for plotting performance if needed
-            if len(scan_indices) > 200:
-                scan_indices = scan_indices[::len(scan_indices)//200]
-
             xmins = data[scan_indices]
-            ks_dists = []
+            ks_dists = np.ones(len(scan_indices), dtype=np.float64)
 
-            # Precompute logs if using MLE, but here we just need KS for the plot
-            # Note: The actual fit logic uses MLE alpha for each xmin, then calcs KS.
-            # We must replicate that to get the correct D vs xmin curve.
             log_data = np.log(data)
+            # Precompute suffix sums for O(1) tail-sum lookups
+            tail_sums = np.cumsum(log_data[::-1])[::-1]
 
-            for i in scan_indices:
+            for j, i in enumerate(scan_indices):
                 curr_xmin = data[i]
                 if curr_xmin <= 0:
-                    ks_dists.append(1.0)
                     continue
 
-                # Subset of data >= curr_xmin
-                # Since data is sorted, this is just data[i:]
                 n_tail = N - i
-
-                # 1. Calc Alpha (MLE)
-                # sum(ln(x)) - n * ln(xmin)
-                sum_log_tail = np.sum(log_data[i:])
+                sum_log_tail = tail_sums[i]
                 denom = sum_log_tail - n_tail * log_data[i]
 
-                if denom <= 1e-9:
-                    alpha = 1.0
-                else:
-                    alpha = 1.0 + n_tail / denom
-
-                if alpha <= 1.0:
-                    ks_dists.append(1.0)
+                if denom <= SPECTRAL_EPSILON:
                     continue
 
-                # 2. Calc KS
-                # Empirical CDF: k/n
+                alpha = 1.0 + n_tail / denom
+                if alpha <= 1.0:
+                    continue
+
                 cdf_emp = np.arange(n_tail) / n_tail
-                # Theoretical CDF: 1 - (x/xmin)^(-alpha+1)
                 cdf_theo = 1 - (data[i:] / curr_xmin) ** (-alpha + 1.0)
+                ks_dists[j] = np.max(np.abs(cdf_emp - cdf_theo))
 
-                d = np.max(np.abs(cdf_emp - cdf_theo))
-                ks_dists.append(d)
-
-            return xmins, np.array(ks_dists)
+            return xmins, ks_dists
 
         except Exception:
             return np.array([]), np.array([])
