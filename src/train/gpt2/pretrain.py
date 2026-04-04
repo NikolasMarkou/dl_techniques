@@ -4,17 +4,28 @@ Pre-trains a GPT-2 decoder on a text dataset using next-token prediction
 (causal LM). Supports both TFDS datasets (IMDB) and HuggingFace datasets
 (Wikipedia, OpenWebText, etc.). Saves the trained model for downstream
 fine-tuning or text generation.
+
+Usage::
+
+    # Wikipedia (default) on GPU 0
+    python -m train.gpt2.pretrain --gpu 0 --variant small --epochs 3
+
+    # TFDS dataset
+    python -m train.gpt2.pretrain --dataset-source tfds --dataset-name imdb_reviews
+
+    # Focal loss with custom gamma
+    python -m train.gpt2.pretrain --loss-type focal --focal-gamma 1.0
 """
 
 import os
-import keras
+import glob
 import argparse
-import tensorflow as tf
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
+import keras
+import numpy as np
+import tensorflow as tf
 
 from train.common import setup_gpu
 from train.common.nlp import (
@@ -24,7 +35,6 @@ from train.common.nlp import (
     create_warmup_lr_schedule,
     create_nlp_callbacks,
 )
-
 from dl_techniques.models.gpt2 import GPT2
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
@@ -33,35 +43,100 @@ from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 
 
 # ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
+
+
+@dataclass
+class TrainingConfig:
+    """Configuration for GPT-2 CLM pre-training.
+
+    All fields have sensible defaults for Wikipedia pre-training
+    with a GPT-2 small model on a single GPU.
+    """
+
+    # Model
+    gpt2_variant: str = "small"
+    vocab_size: int = 50261
+    max_seq_length: int = 512
+    num_layers: Optional[int] = None
+    num_heads: Optional[int] = None
+    dropout_rate: float = 0.1
+    attention_dropout_rate: float = 0.1
+
+    # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
+    encoding_name: str = "gpt2"
+    cls_token_id: int = 50257
+    sep_token_id: int = 50258
+    pad_token_id: int = 50259
+    mask_token_id: int = 50260
+
+    # Training
+    batch_size: int = 8
+    num_epochs: int = 3
+    learning_rate: float = 3e-4
+    warmup_ratio: float = 0.1
+    weight_decay: float = 0.01
+
+    # Loss: "ce" (default) or "focal"
+    loss_type: str = "ce"
+    focal_gamma: float = 1.0
+    label_smoothing: float = 0.0
+
+    # Paths
+    save_dir: str = "results/gpt2_pretrain"
+
+    # Data source: "huggingface" or "tfds"
+    dataset_source: str = "huggingface"
+
+    # TFDS settings
+    dataset_name: str = "imdb_reviews"
+    max_samples: Optional[int] = 10000
+
+    # HuggingFace / Wikipedia settings
+    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
+    hf_wikipedia_config: str = "20231101.en"
+    min_article_length: int = 500
+    val_fraction: float = 0.02
+    max_val_samples: int = 5000
+    max_train_samples: Optional[int] = None
+
+    # Checkpointing & analysis (step-based for large datasets)
+    checkpoint_every_steps: int = 25000
+    analyze_every_steps: int = 50000
+    max_checkpoints: int = 3
+
+
+# ---------------------------------------------------------------------
 # Step-based Checkpoint & Analysis Callback
 # ---------------------------------------------------------------------
 
 
 class StepCheckpointCallback(keras.callbacks.Callback):
-    """Save model checkpoints and run analyzer at fixed step intervals.
+    """Save model checkpoints and run weight/spectral analysis at
+    fixed step intervals.
 
     For large datasets where one epoch = 300K+ steps, epoch-level
-    checkpoints are too infrequent. This callback saves the model and
-    optionally runs weight/spectral analysis every ``save_every_steps``
-    training steps.
+    checkpoints are too infrequent. Keeps only the N most recent
+    checkpoints to limit disk usage.
 
-    :param save_dir: Directory for checkpoint files.
-    :param save_every_steps: Save checkpoint every N steps.
-    :param analyze_every_steps: Run model analysis every N steps.
-        Set to 0 to disable analysis. Defaults to ``save_every_steps``.
-    :param model_name: Name used in analyzer output.
+    :param save_dir: Root directory (creates ``checkpoints/`` and
+        ``step_analysis/`` subdirectories).
+    :param save_every_steps: Checkpoint interval in training steps.
+    :param analyze_every_steps: Analysis interval. 0 to disable.
+    :param max_checkpoints: Keep only the N most recent checkpoints.
+    :param model_name: Label for analyzer output.
     """
 
     def __init__(
         self,
         save_dir: str,
         save_every_steps: int = 25000,
-        analyze_every_steps: int = 25000,
+        analyze_every_steps: int = 50000,
         max_checkpoints: int = 3,
         model_name: str = "gpt2",
     ):
         super().__init__()
-        self.save_dir = save_dir
         self.save_every_steps = save_every_steps
         self.analyze_every_steps = analyze_every_steps
         self.max_checkpoints = max_checkpoints
@@ -82,39 +157,40 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             analyze_training_dynamics=False,
             verbose=False,
         )
-
         logger.info(
             f"StepCheckpointCallback: save every {save_every_steps} steps, "
-            f"analyze every {analyze_every_steps} steps"
+            f"analyze every {analyze_every_steps} steps, "
+            f"keep max {max_checkpoints} checkpoints"
         )
 
     def on_train_batch_end(self, batch, logs=None):
         self._global_step += 1
-
         if self._global_step % self.save_every_steps == 0:
             self._save_checkpoint()
-
         if (
             self.analyze_every_steps > 0
             and self._global_step % self.analyze_every_steps == 0
         ):
             self._run_analysis()
 
+    def on_train_end(self, logs=None):
+        path = os.path.join(self._ckpt_dir, "final.keras")
+        self.model.save(path)
+        logger.info(f"Final checkpoint saved: {path}")
+
     def _save_checkpoint(self):
         path = os.path.join(
             self._ckpt_dir, f"step_{self._global_step:07d}.keras"
         )
         self.model.save(path)
-        logger.info(
-            f"Checkpoint saved: {path} (step {self._global_step:,})"
-        )
+        logger.info(f"Checkpoint saved: {path} (step {self._global_step:,})")
         self._cleanup_old_checkpoints()
 
     def _cleanup_old_checkpoints(self):
-        """Keep only the most recent ``max_checkpoints`` files."""
-        import glob
-        pattern = os.path.join(self._ckpt_dir, "step_*.keras")
-        ckpts = sorted(glob.glob(pattern))
+        """Remove oldest checkpoints beyond ``max_checkpoints``."""
+        ckpts = sorted(glob.glob(
+            os.path.join(self._ckpt_dir, "step_*.keras")
+        ))
         while len(ckpts) > self.max_checkpoints:
             old = ckpts.pop(0)
             os.remove(old)
@@ -130,75 +206,12 @@ class StepCheckpointCallback(keras.callbacks.Callback):
                 config=self._analysis_config,
                 output_dir=step_dir,
             )
-            _ = analyzer.analyze()
-            logger.info(
-                f"Step analysis complete: step {self._global_step:,}"
-            )
+            analyzer.analyze()
+            logger.info(f"Step analysis complete: step {self._global_step:,}")
         except Exception as e:
-            logger.error(f"Step analysis failed at step {self._global_step}: {e}")
-
-    def on_train_end(self, logs=None):
-        # Always save final checkpoint
-        path = os.path.join(self._ckpt_dir, "final.keras")
-        self.model.save(path)
-        logger.info(f"Final checkpoint saved: {path}")
-
-
-# ---------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------
-
-
-class TrainingConfig:
-    """Configuration for GPT-2 CLM pre-training."""
-
-    # Model
-    gpt2_variant: str = "tiny"
-    vocab_size: int = 50261  # Tiktoken gpt2 (50257) + 4 special tokens
-    max_seq_length: int = 128
-    num_layers: int = 8  # Override tiny default (4) for better capacity
-    num_heads: int = 8  # More heads for 8-layer model
-
-    # Tokenizer (Tiktoken gpt2 — 50K vocab, half the embedding cost)
-    encoding_name: str = "gpt2"
-    cls_token_id: int = 50257
-    sep_token_id: int = 50258
-    pad_token_id: int = 50259
-    mask_token_id: int = 50260
-
-    # Training
-    batch_size: int = 32
-    num_epochs: int = 3
-    learning_rate: float = 5e-4
-    warmup_ratio: float = 0.1
-    weight_decay: float = 0.01
-
-    # Loss: "ce" (default) or "focal" (focal cross-entropy)
-    loss_type: str = "ce"
-    focal_gamma: float = 1.0
-    label_smoothing: float = 0.0
-
-    # Paths
-    save_dir: str = "results/gpt2_pretrain"
-
-    # Data source: "huggingface" or "tfds"
-    dataset_source: str = "huggingface"
-
-    # TFDS settings (used when dataset_source="tfds")
-    dataset_name: str = "imdb_reviews"
-    max_samples: Optional[int] = 10000
-
-    # HuggingFace/Wikipedia settings (used when dataset_source="huggingface")
-    hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
-    hf_wikipedia_config: str = "20231101.en"
-    min_article_length: int = 500
-    val_fraction: float = 0.02
-    max_val_samples: int = 5000
-    max_train_samples: Optional[int] = None
-
-    # Checkpointing & Analysis (step-based for large datasets)
-    checkpoint_every_steps: int = 25000
-    analyze_every_steps: int = 25000
+            logger.error(
+                f"Step analysis failed at step {self._global_step}: {e}"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -207,28 +220,53 @@ class TrainingConfig:
 
 
 def create_gpt2_model(config: TrainingConfig) -> GPT2:
-    """Create GPT-2 model from variant configuration."""
+    """Create and build a GPT-2 model from the training configuration."""
     logger.info(f"Creating GPT-2-{config.gpt2_variant.upper()}...")
-    model = GPT2.from_variant(
-        variant=config.gpt2_variant,
+
+    # Build variant kwargs, only overriding if explicitly set
+    variant_kwargs = dict(
         vocab_size=config.vocab_size,
         max_seq_len=config.max_seq_length,
-        depth=config.num_layers,
-        num_heads=config.num_heads,
-        dropout_rate=0.1,
-        attention_dropout_rate=0.1,
+        dropout_rate=config.dropout_rate,
+        attention_dropout_rate=config.attention_dropout_rate,
     )
+    if config.num_layers is not None:
+        variant_kwargs["depth"] = config.num_layers
+    if config.num_heads is not None:
+        variant_kwargs["num_heads"] = config.num_heads
 
-    # Build to count parameters
-    import numpy as np
+    model = GPT2.from_variant(config.gpt2_variant, **variant_kwargs)
+
+    # Build with a dummy forward pass to initialize weights
     dummy = np.random.randint(
-        0, config.vocab_size, size=(1, config.max_seq_length - 1)
+        0, config.vocab_size,
+        size=(1, config.max_seq_length - 1),
     ).astype("int32")
-    _ = model(dummy, training=False)
+    model(dummy, training=False)
 
-    total_p = model.count_params()
-    logger.info(f"GPT-2 model: {total_p:,} parameters")
+    logger.info(f"GPT-2 model: {model.count_params():,} parameters")
     return model
+
+
+# ---------------------------------------------------------------------
+# Loss Construction
+# ---------------------------------------------------------------------
+
+
+def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
+    """Create the CLM loss function from configuration."""
+    if config.loss_type == "focal":
+        loss_fn = FocalCausalLMLoss(
+            gamma=config.focal_gamma,
+            label_smoothing=config.label_smoothing,
+        )
+        logger.info(f"Loss: FocalCausalLMLoss(γ={config.focal_gamma})")
+    else:
+        loss_fn = MaskedCausalLMLoss(
+            label_smoothing=config.label_smoothing,
+        )
+        logger.info("Loss: MaskedCausalLMLoss")
+    return loss_fn
 
 
 # ---------------------------------------------------------------------
@@ -236,25 +274,11 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
 # ---------------------------------------------------------------------
 
 
-def _wrap_labels_for_dict_output(
-    dataset: tf.data.Dataset,
-) -> tf.data.Dataset:
-    """Wrap (input_ids, labels) → (input_ids, {"logits": labels}).
-
-    GPT-2 model returns ``{"logits": ..., "last_hidden_state": ...}``,
-    so Keras expects labels in dict format matching the output keys.
-    """
-    return dataset.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-
-
 def load_train_val_datasets(
     config: TrainingConfig,
     preprocessor,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
-    """Load and preprocess train/val datasets based on config."""
+    """Load, preprocess, and wrap train/val datasets for the dict-output model."""
     if config.dataset_source == "tfds":
         train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
     elif config.dataset_source == "huggingface":
@@ -264,33 +288,29 @@ def load_train_val_datasets(
             f"Unknown dataset_source: {config.dataset_source!r}. "
             f"Use 'tfds' or 'huggingface'."
         )
-    return _wrap_labels_for_dict_output(train_ds), _wrap_labels_for_dict_output(val_ds)
+
+    # Wrap labels for dict-output model: (x, y) → (x, {"logits": y})
+    wrap = lambda ds: ds.map(
+        lambda x, y: (x, {"logits": y}),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    return wrap(train_ds), wrap(val_ds)
 
 
-def _load_tfds_datasets(
-    config: TrainingConfig,
-    preprocessor,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+def _load_tfds_datasets(config, preprocessor):
     """Load train/val from TFDS (e.g. IMDB)."""
-    train_dataset = preprocess_clm_dataset(
+    train = preprocess_clm_dataset(
         load_text_dataset(config.dataset_name, "train", config.max_samples),
-        preprocessor,
-        config.max_seq_length,
-        config.batch_size,
+        preprocessor, config.max_seq_length, config.batch_size,
     )
-    val_dataset = preprocess_clm_dataset(
+    val = preprocess_clm_dataset(
         load_text_dataset(config.dataset_name, "test", config.max_samples),
-        preprocessor,
-        config.max_seq_length,
-        config.batch_size,
+        preprocessor, config.max_seq_length, config.batch_size,
     )
-    return train_dataset, val_dataset
+    return train, val
 
 
-def _load_hf_datasets(
-    config: TrainingConfig,
-    preprocessor,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+def _load_hf_datasets(config, preprocessor):
     """Load train/val from Wikipedia with random holdout split."""
     train_raw, val_raw = load_wikipedia_train_val(
         cache_dir=config.hf_cache_dir,
@@ -300,16 +320,15 @@ def _load_hf_datasets(
         max_train_samples=config.max_train_samples,
         max_val_samples=config.max_val_samples,
     )
-
-    train_dataset = preprocess_clm_dataset(
+    train = preprocess_clm_dataset(
         train_raw, preprocessor,
         config.max_seq_length, config.batch_size,
     )
-    val_dataset = preprocess_clm_dataset(
+    val = preprocess_clm_dataset(
         val_raw, preprocessor,
         config.max_seq_length, config.batch_size,
     )
-    return train_dataset, val_dataset
+    return train, val
 
 
 # ---------------------------------------------------------------------
@@ -322,46 +341,44 @@ def compile_model(
     config: TrainingConfig,
     steps_per_epoch: int,
 ) -> None:
-    """Compile GPT-2 with AdamW and warmup schedule."""
+    """Compile GPT-2 with AdamW, warmup + cosine decay, and CLM loss."""
     lr_schedule = create_warmup_lr_schedule(
         config.learning_rate,
         config.num_epochs,
         steps_per_epoch,
         config.warmup_ratio,
     )
-    optimizer = keras.optimizers.AdamW(
-        learning_rate=lr_schedule,
-        weight_decay=config.weight_decay,
-        clipnorm=1.0,
-    )
-    # Select loss function
-    if config.loss_type == "focal":
-        loss_fn = FocalCausalLMLoss(
-            gamma=config.focal_gamma,
-            label_smoothing=config.label_smoothing,
-        )
-        loss_desc = f"FocalCausalLMLoss(γ={config.focal_gamma})"
-    else:
-        loss_fn = MaskedCausalLMLoss(
-            label_smoothing=config.label_smoothing,
-        )
-        loss_desc = "MaskedCausalLMLoss"
-
     model.compile(
-        optimizer=optimizer,
-        loss={"logits": loss_fn},
+        optimizer=keras.optimizers.AdamW(
+            learning_rate=lr_schedule,
+            weight_decay=config.weight_decay,
+            clipnorm=1.0,
+        ),
+        loss={"logits": create_loss_fn(config)},
         metrics={"logits": ["accuracy"]},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
-        f"wd={config.weight_decay}, loss={loss_desc}"
+        f"wd={config.weight_decay}"
     )
+
+
+def _estimate_steps_per_epoch(config: TrainingConfig) -> int:
+    """Estimate steps per epoch for the LR schedule."""
+    if config.max_train_samples:
+        return config.max_train_samples // config.batch_size
+    # Full Wikipedia (~4.85M articles after filtering) / batch_size
+    return 4_850_000 // config.batch_size
 
 
 def train_gpt2(
     config: TrainingConfig,
 ) -> Tuple[GPT2, keras.callbacks.History]:
-    """Run GPT-2 CLM pre-training."""
+    """Run GPT-2 CLM pre-training.
+
+    :param config: Training configuration.
+    :return: Trained model and training history.
+    """
     logger.info("=" * 60)
     logger.info("GPT-2 Causal LM Pre-training")
     logger.info("=" * 60)
@@ -381,37 +398,34 @@ def train_gpt2(
     )
 
     # Data
-    train_dataset, val_dataset = load_train_val_datasets(config, preprocessor)
-
-    # Steps per epoch (estimated for LR schedule)
-    if config.max_train_samples:
-        steps_per_epoch = config.max_train_samples // config.batch_size
-    else:
-        steps_per_epoch = 5000  # estimate for full Wikipedia
+    train_dataset, val_dataset = load_train_val_datasets(
+        config, preprocessor,
+    )
 
     # Model
+    steps_per_epoch = _estimate_steps_per_epoch(config)
     model = create_gpt2_model(config)
     compile_model(model, config, steps_per_epoch)
 
-    # Callbacks
+    # Callbacks: standard NLP callbacks + step-based checkpointing
     callbacks, results_dir = create_nlp_callbacks(
         model_name=f"GPT2-{config.gpt2_variant}",
         results_dir_prefix="gpt2_pretrain",
-        include_analyzer=False,  # Use step-based analysis instead
+        include_analyzer=False,
     )
-
-    # Step-based checkpointing + analysis (for large datasets)
     callbacks.append(StepCheckpointCallback(
         save_dir=results_dir,
         save_every_steps=config.checkpoint_every_steps,
         analyze_every_steps=config.analyze_every_steps,
+        max_checkpoints=config.max_checkpoints,
         model_name=f"GPT2-{config.gpt2_variant}",
     ))
 
     # Train
     logger.info(
         f"Starting training: source={config.dataset_source}, "
-        f"steps_per_epoch={steps_per_epoch}"
+        f"steps_per_epoch≈{steps_per_epoch:,}, "
+        f"batch_size={config.batch_size}"
     )
     history = model.fit(
         train_dataset,
@@ -422,172 +436,125 @@ def train_gpt2(
     )
     logger.info("Training completed!")
 
-    # Save
-    final_path = os.path.join(config.save_dir, "gpt2_final_best.keras")
-    model.save(final_path)
-    logger.info(f"Model saved to: {final_path}")
-
     # Summary
-    best_epoch = tf.argmin(history.history["val_loss"]).numpy()
-    logger.info(
-        f"Best epoch: {best_epoch + 1} "
-        f"(val_loss: {history.history['val_loss'][best_epoch]:.4f})"
-    )
+    if "val_loss" in history.history:
+        best_epoch = tf.argmin(history.history["val_loss"]).numpy()
+        logger.info(
+            f"Best epoch: {best_epoch + 1} "
+            f"(val_loss: {history.history['val_loss'][best_epoch]:.4f})"
+        )
+
     return model, history
 
 
 # ---------------------------------------------------------------------
-# Main
+# CLI
 # ---------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser with all training options."""
+    p = argparse.ArgumentParser(
+        description="GPT-2 Causal LM Pre-training",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # Hardware
+    p.add_argument("--gpu", type=int, default=None, help="GPU device index")
+
+    # Model
+    p.add_argument(
+        "--variant", type=str, default="small",
+        choices=list(GPT2.MODEL_VARIANTS.keys()),
+        help="GPT-2 model variant",
+    )
+    p.add_argument("--num-layers", type=int, default=None,
+                    help="Override number of transformer layers")
+    p.add_argument("--num-heads", type=int, default=None,
+                    help="Override number of attention heads")
+
+    # Training
+    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--max-seq-length", type=int, default=512)
+    p.add_argument("--learning-rate", type=float, default=3e-4)
+
+    # Loss
+    p.add_argument(
+        "--loss-type", type=str, default="ce",
+        choices=["ce", "focal"],
+        help="'ce' (MaskedCausalLMLoss) or 'focal' (FocalCausalLMLoss)",
+    )
+    p.add_argument("--focal-gamma", type=float, default=1.0,
+                    help="Focal loss gamma (only if --loss-type focal)")
+    p.add_argument("--label-smoothing", type=float, default=0.0)
+
+    # Data source
+    p.add_argument(
+        "--dataset-source", type=str, default="huggingface",
+        choices=["tfds", "huggingface"],
+    )
+    p.add_argument("--dataset-name", type=str, default="imdb_reviews",
+                    help="TFDS dataset name")
+    p.add_argument("--max-samples", type=int, default=None,
+                    help="TFDS max samples")
+    p.add_argument("--hf-cache-dir", type=str,
+                    default="/media/arxwn/data0_4tb/datasets/wikipedia")
+    p.add_argument("--max-train-samples", type=int, default=None)
+    p.add_argument("--val-fraction", type=float, default=0.02)
+
+    # Checkpointing
+    p.add_argument("--checkpoint-every-steps", type=int, default=25000)
+    p.add_argument("--analyze-every-steps", type=int, default=50000,
+                    help="0 to disable")
+    p.add_argument("--max-checkpoints", type=int, default=3)
+
+    # Output
+    p.add_argument("--save-dir", type=str, default="results/gpt2_pretrain")
+
+    return p
+
+
+def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
+    """Map parsed CLI args to a TrainingConfig."""
+    return TrainingConfig(
+        gpt2_variant=args.variant,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        num_epochs=args.epochs,
+        batch_size=args.batch_size,
+        max_seq_length=args.max_seq_length,
+        learning_rate=args.learning_rate,
+        loss_type=args.loss_type,
+        focal_gamma=args.focal_gamma,
+        label_smoothing=args.label_smoothing,
+        dataset_source=args.dataset_source,
+        dataset_name=args.dataset_name,
+        max_samples=args.max_samples,
+        hf_cache_dir=args.hf_cache_dir,
+        max_train_samples=args.max_train_samples,
+        val_fraction=args.val_fraction,
+        checkpoint_every_steps=args.checkpoint_every_steps,
+        analyze_every_steps=args.analyze_every_steps,
+        max_checkpoints=args.max_checkpoints,
+        save_dir=args.save_dir,
+    )
 
 
 def main() -> None:
     """Main entry point for GPT-2 CLM pre-training."""
-    parser = argparse.ArgumentParser(description="GPT-2 CLM Pre-training")
-    parser.add_argument(
-        "--gpu", type=int, default=None, help="GPU device index"
-    )
-    parser.add_argument(
-        "--variant",
-        type=str,
-        default="tiny",
-        choices=list(GPT2.MODEL_VARIANTS.keys()),
-        help="GPT-2 variant",
-    )
-    parser.add_argument(
-        "--epochs", type=int, default=3, help="Training epochs"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size"
-    )
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=None,
-        help="Max training samples (None=unlimited for streaming)",
-    )
-    parser.add_argument(
-        "--max-seq-length",
-        type=int,
-        default=128,
-        help="Maximum sequence length",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=5e-4,
-        help="Peak learning rate",
-    )
-
-    # Dataset source
-    parser.add_argument(
-        "--dataset-source",
-        type=str,
-        default="huggingface",
-        choices=["tfds", "huggingface"],
-        help="Dataset source: 'tfds' for TensorFlow Datasets, "
-             "'huggingface' for HuggingFace Hub",
-    )
-
-    # TFDS settings
-    parser.add_argument(
-        "--dataset-name",
-        type=str,
-        default="imdb_reviews",
-        help="TFDS dataset name (when --dataset-source=tfds)",
-    )
-
-    # HuggingFace/Wikipedia settings
-    parser.add_argument(
-        "--hf-cache-dir",
-        type=str,
-        default="/media/arxwn/data0_4tb/datasets/wikipedia",
-        help="Local cache directory for HuggingFace datasets",
-    )
-    parser.add_argument(
-        "--max-train-samples",
-        type=int,
-        default=None,
-        help="Limit training articles (None=all)",
-    )
-    parser.add_argument(
-        "--val-fraction",
-        type=float,
-        default=0.02,
-        help="Fraction of articles for validation holdout (default: 0.02)",
-    )
-
-    # Loss function
-    parser.add_argument(
-        "--loss-type",
-        type=str,
-        default="ce",
-        choices=["focal", "ce"],
-        help="Loss: 'ce' (default) or 'focal' (focal cross-entropy)",
-    )
-    parser.add_argument(
-        "--focal-gamma",
-        type=float,
-        default=1.0,
-        help="Focal loss focusing parameter gamma (default: 1.0)",
-    )
-    parser.add_argument(
-        "--label-smoothing",
-        type=float,
-        default=0.0,
-        help="Label smoothing factor (default: 0.0)",
-    )
-
-    # Checkpointing & Analysis
-    parser.add_argument(
-        "--checkpoint-every-steps",
-        type=int,
-        default=25000,
-        help="Save checkpoint every N steps (default: 25000)",
-    )
-    parser.add_argument(
-        "--analyze-every-steps",
-        type=int,
-        default=25000,
-        help="Run model analysis every N steps (default: 25000, 0=disable)",
-    )
-    args = parser.parse_args()
-
+    args = _build_parser().parse_args()
     setup_gpu(gpu_id=args.gpu)
 
-    config = TrainingConfig()
-    config.gpt2_variant = args.variant
-    config.num_epochs = args.epochs
-    config.batch_size = args.batch_size
-    config.max_seq_length = args.max_seq_length
-    config.learning_rate = args.learning_rate
-    config.dataset_source = args.dataset_source
-    config.hf_cache_dir = args.hf_cache_dir
-    config.val_fraction = args.val_fraction
-    config.checkpoint_every_steps = args.checkpoint_every_steps
-    config.analyze_every_steps = args.analyze_every_steps
-    config.loss_type = args.loss_type
-    config.focal_gamma = args.focal_gamma
-    config.label_smoothing = args.label_smoothing
-
-    if args.max_samples is not None:
-        config.max_samples = args.max_samples
-    if args.max_train_samples is not None:
-        config.max_train_samples = args.max_train_samples
-
-    # TFDS settings
-    config.dataset_name = args.dataset_name
-
+    config = _config_from_args(args)
     logger.info(
-        f"Config: variant={config.gpt2_variant}, epochs={config.num_epochs}, "
-        f"batch_size={config.batch_size}, lr={config.learning_rate}, "
+        f"Config: variant={config.gpt2_variant}, "
+        f"epochs={config.num_epochs}, batch={config.batch_size}, "
+        f"lr={config.learning_rate}, loss={config.loss_type}, "
         f"source={config.dataset_source}"
     )
 
-    model, history = train_gpt2(config)
-    logger.info(
-        f"Pre-training complete! Model: {config.save_dir}/gpt2_final_best.keras"
-    )
+    train_gpt2(config)
 
 
 if __name__ == "__main__":
