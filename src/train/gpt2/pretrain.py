@@ -15,6 +15,9 @@ Usage::
 
     # Focal loss with custom gamma
     python -m train.gpt2.pretrain --loss-type focal --focal-gamma 1.0
+
+    # Resume from checkpoint
+    python -m train.gpt2.pretrain --resume results/.../checkpoints/step_0450000.keras
 """
 
 import os
@@ -106,6 +109,9 @@ class TrainingConfig:
     analyze_every_steps: int = 50000
     max_checkpoints: int = 3
 
+    # Resume from checkpoint
+    resume_from: Optional[str] = None
+
 
 # ---------------------------------------------------------------------
 # Step-based Checkpoint & Analysis Callback
@@ -135,13 +141,14 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         analyze_every_steps: int = 50000,
         max_checkpoints: int = 3,
         model_name: str = "gpt2",
+        initial_step: int = 0,
     ):
         super().__init__()
         self.save_every_steps = save_every_steps
         self.analyze_every_steps = analyze_every_steps
         self.max_checkpoints = max_checkpoints
         self.model_name = model_name
-        self._global_step = 0
+        self._global_step = initial_step
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
         self._analysis_dir = os.path.join(save_dir, "step_analysis")
@@ -215,8 +222,47 @@ class StepCheckpointCallback(keras.callbacks.Callback):
 
 
 # ---------------------------------------------------------------------
-# Model Creation
+# Model Creation & Resume
 # ---------------------------------------------------------------------
+
+
+def _extract_step_from_checkpoint(path: str) -> int:
+    """Extract the training step from a checkpoint filename.
+
+    Handles ``step_0025000.keras`` and ``final.keras`` patterns.
+    Returns 0 if the step cannot be determined.
+    """
+    import re
+    basename = os.path.basename(path)
+    match = re.search(r"step_(\d+)", basename)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def load_model_from_checkpoint(
+    path: str,
+) -> Tuple[GPT2, int]:
+    """Load a GPT-2 model from a ``.keras`` checkpoint.
+
+    :param path: Path to the checkpoint file.
+    :return: ``(model, step)`` — the loaded model and the training step
+        extracted from the filename (0 if unknown).
+    """
+    logger.info(f"Resuming from checkpoint: {path}")
+    model = keras.models.load_model(
+        path,
+        custom_objects={
+            "MaskedCausalLMLoss": MaskedCausalLMLoss,
+            "FocalCausalLMLoss": FocalCausalLMLoss,
+        },
+    )
+    step = _extract_step_from_checkpoint(path)
+    logger.info(
+        f"Loaded model: {model.count_params():,} params, "
+        f"resumed at step {step:,}"
+    )
+    return model, step
 
 
 def create_gpt2_model(config: TrainingConfig) -> GPT2:
@@ -402,9 +448,15 @@ def train_gpt2(
         config, preprocessor,
     )
 
-    # Model
+    # Model — resume from checkpoint or create fresh
     steps_per_epoch = _estimate_steps_per_epoch(config)
-    model = create_gpt2_model(config)
+    initial_step = 0
+
+    if config.resume_from:
+        model, initial_step = load_model_from_checkpoint(config.resume_from)
+    else:
+        model = create_gpt2_model(config)
+
     compile_model(model, config, steps_per_epoch)
 
     # Callbacks: standard NLP callbacks + step-based checkpointing
@@ -419,6 +471,7 @@ def train_gpt2(
         analyze_every_steps=config.analyze_every_steps,
         max_checkpoints=config.max_checkpoints,
         model_name=f"GPT2-{config.gpt2_variant}",
+        initial_step=initial_step,
     ))
 
     # Train
@@ -509,6 +562,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="0 to disable")
     p.add_argument("--max-checkpoints", type=int, default=3)
 
+    # Resume
+    p.add_argument(
+        "--resume", type=str, default=None,
+        help="Path to .keras checkpoint to resume training from",
+    )
+
     # Output
     p.add_argument("--save-dir", type=str, default="results/gpt2_pretrain")
 
@@ -537,6 +596,7 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         checkpoint_every_steps=args.checkpoint_every_steps,
         analyze_every_steps=args.analyze_every_steps,
         max_checkpoints=args.max_checkpoints,
+        resume_from=args.resume,
         save_dir=args.save_dir,
     )
 
