@@ -54,6 +54,10 @@ class SpectralVisualizer(BaseVisualizer):
         if self.config.spectral_per_layer_diagnostics:
             self._create_per_layer_plots()
 
+        # 3. Create correlation trap overlay plots (original vs randomized ESD).
+        if self.config.spectral_randomize:
+            self._create_trap_overlay_plots()
+
     def _create_summary_dashboard(self) -> None:
         """
         Create an expanded summary dashboard focusing on the Phases of Learning.
@@ -410,6 +414,161 @@ class SpectralVisualizer(BaseVisualizer):
             logger.warning(f"Error creating diagnostic plots for {model_name} layer {layer_id}: {e}")
             if 'fig' in locals():
                 plt.close(fig)
+
+    def _create_trap_overlay_plots(self) -> None:
+        """
+        Create ESD overlay plots comparing original vs randomized weight spectra
+        with Marchenko-Pastur edge and Tracy-Widom threshold markers.
+
+        Only layers with randomization data (spectral_randomize=True) are plotted.
+        Layers with detected traps get prominent spike markers.
+        """
+        df = self.results.spectral_analysis
+        esds = self.results.spectral_esds
+        rand_esds = getattr(self.results, 'spectral_rand_esds', {})
+
+        if not rand_esds:
+            logger.info("No randomized ESD data available for trap overlay plots.")
+            return
+
+        plot_dir = self.output_dir / "trap_plots"
+        if self.config.save_plots:
+            plot_dir.mkdir(exist_ok=True)
+
+        for index, row in df.iterrows():
+            model_name = row['model_name']
+            layer_id = int(row['layer_id'])
+
+            # Need both original and randomized eigenvalues
+            if model_name not in esds or layer_id not in esds[model_name]:
+                continue
+            if model_name not in rand_esds or layer_id not in rand_esds[model_name]:
+                continue
+
+            evals = esds[model_name][layer_id]
+            rand_evals = rand_esds[model_name][layer_id]
+            if evals is None or rand_evals is None:
+                continue
+
+            # Extract trap metrics from the DataFrame row
+            has_trap = row.get(MetricNames.HAS_TRAP, False)
+            mp_lambda_plus = row.get(MetricNames.MP_LAMBDA_PLUS, 0)
+            trap_threshold = row.get(MetricNames.TRAP_THRESHOLD, 0)
+            severity_label = row.get(MetricNames.TRAP_SEVERITY_LABEL, 'none')
+            num_spikes = row.get(MetricNames.NUM_RAND_SPIKES, 0)
+            layer_name = row.get('name', f'layer_{layer_id}')
+
+            try:
+                self._plot_trap_overlay(
+                    evals, rand_evals, layer_name, model_name, layer_id,
+                    has_trap, mp_lambda_plus, trap_threshold,
+                    severity_label, num_spikes, plot_dir
+                )
+            except Exception as e:
+                logger.warning(f"Error creating trap overlay for {model_name} layer {layer_id}: {e}")
+
+    def _plot_trap_overlay(
+        self, evals: np.ndarray, rand_evals: np.ndarray,
+        layer_name: str, model_name: str, layer_id: int,
+        has_trap: bool, mp_lambda_plus: float, trap_threshold: float,
+        severity_label: str, num_spikes: int, savedir
+    ) -> None:
+        """
+        Create a 2-panel plot: Linear ESD overlay (left) and Log-Log ESD overlay (right).
+
+        Shows original vs randomized weight spectra with MP edge and TW threshold markers.
+        Trap spikes are prominently annotated when detected.
+        """
+        evals_clean = evals[evals > SPECTRAL_EPSILON]
+        rand_clean = rand_evals[rand_evals > SPECTRAL_EPSILON]
+        if len(evals_clean) == 0 or len(rand_clean) == 0:
+            return
+
+        fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(16, 6))
+
+        trap_status = f"TRAP ({severity_label})" if has_trap else "Clean"
+        fig.suptitle(
+            f'Correlation Trap Analysis: {model_name} / {layer_name} — [{trap_status}]',
+            fontsize=14, fontweight='bold',
+            color='#c62828' if has_trap else '#2e7d32'
+        )
+
+        # Shared bin range for both histograms
+        all_evals = np.concatenate([evals_clean, rand_clean])
+        bin_min, bin_max = np.min(all_evals), np.max(all_evals)
+
+        # --- Panel 1: Linear Scale ESD ---
+        bins_lin = np.linspace(bin_min, bin_max, 80)
+        ax_lin.hist(evals_clean, bins=bins_lin, alpha=0.6, density=True,
+                    color='#2e7d32', label='Original W', edgecolor='black', linewidth=0.3)
+        ax_lin.hist(rand_clean, bins=bins_lin, alpha=0.5, density=True,
+                    color='#c62828', label='Randomized W$^{rand}$', edgecolor='black', linewidth=0.3)
+
+        # MP edge and threshold markers
+        if mp_lambda_plus > 0:
+            ax_lin.axvline(mp_lambda_plus, color='#1565c0', linestyle='--', linewidth=2,
+                          label=f'$\\lambda_+$ (MP edge) = {mp_lambda_plus:.2f}')
+        if trap_threshold > 0:
+            ax_lin.axvline(trap_threshold, color='#ff6f00', linestyle='--', linewidth=2,
+                          label=f'Threshold ($\\lambda_+$ + $\\Delta_{{TW}}$) = {trap_threshold:.2f}')
+
+        # Mark trap spikes
+        if has_trap and trap_threshold > 0:
+            spike_evals = rand_clean[rand_clean > trap_threshold]
+            if len(spike_evals) > 0:
+                ylim = ax_lin.get_ylim()
+                for spike in spike_evals[:3]:  # Mark up to 3 spikes
+                    ax_lin.axvline(spike, color='#d50000', linestyle='-', linewidth=2.5, alpha=0.8)
+                ax_lin.text(np.max(spike_evals), ylim[1] * 0.85, f'TRAP!\n{num_spikes} spike(s)',
+                           color='#d50000', fontsize=11, fontweight='bold', ha='center',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='#ffcdd2', alpha=0.9))
+
+        ax_lin.set_xlabel('Eigenvalue $\\lambda$')
+        ax_lin.set_ylabel('Density')
+        ax_lin.set_title('(a) Linear Scale ESD Overlay')
+        ax_lin.legend(loc='upper right', fontsize='small')
+        ax_lin.grid(True, alpha=0.3)
+
+        # --- Panel 2: Log-Log Scale ESD ---
+        bins_log = np.logspace(np.log10(max(bin_min, SPECTRAL_EPSILON)),
+                               np.log10(bin_max), 60)
+
+        hist_orig, _ = np.histogram(evals_clean, bins=bins_log, density=True)
+        hist_rand, _ = np.histogram(rand_clean, bins=bins_log, density=True)
+        bin_centers = np.sqrt(bins_log[:-1] * bins_log[1:])
+
+        mask_orig = hist_orig > 0
+        mask_rand = hist_rand > 0
+
+        if np.any(mask_orig):
+            ax_log.loglog(bin_centers[mask_orig], hist_orig[mask_orig], 'o',
+                         color='#2e7d32', markersize=5, alpha=0.7, label='Original W')
+        if np.any(mask_rand):
+            ax_log.loglog(bin_centers[mask_rand], hist_rand[mask_rand], 's',
+                         color='#c62828', markersize=5, alpha=0.7, label='Randomized W$^{rand}$')
+
+        # MP edge and threshold on log scale
+        if mp_lambda_plus > 0:
+            ax_log.axvline(mp_lambda_plus, color='#1565c0', linestyle='--', linewidth=2,
+                          label=f'$\\lambda_+$ = {mp_lambda_plus:.2f}')
+        if trap_threshold > 0:
+            ax_log.axvline(trap_threshold, color='#ff6f00', linestyle='--', linewidth=2,
+                          label=f'Threshold = {trap_threshold:.2f}')
+
+        ax_log.set_xlabel('Eigenvalue $\\lambda$ (log scale)')
+        ax_log.set_ylabel('Density (log scale)')
+        ax_log.set_title('(b) Log-Log Scale ESD Overlay')
+        ax_log.legend(loc='upper right', fontsize='small')
+        ax_log.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if self.config.save_plots:
+            sane_name = layer_name.replace('/', '_').replace(':', '')
+            filepath = savedir / f"{model_name}_layer_{layer_id}_{sane_name}_trap_overlay.png"
+            fig.savefig(filepath, dpi=SPECTRAL_DEFAULT_DPI, bbox_inches='tight')
+
+        plt.close(fig)
 
     def _scan_ks_distances(self, evals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """

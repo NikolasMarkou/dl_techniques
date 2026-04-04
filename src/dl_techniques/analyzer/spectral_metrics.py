@@ -82,7 +82,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer.constants import (
     SPECTRAL_EPSILON, SPECTRAL_EVALS_THRESH, SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH,
     SPECTRAL_DEFAULT_MIN_EVALS, SPECTRAL_DEFAULT_MAX_EVALS, SPECTRAL_DEFAULT_BINS,
-    SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD
+    SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
+    SPECTRAL_TW_SAFETY_FACTOR,
+    SPECTRAL_TRAP_SEVERITY_MILD, SPECTRAL_TRAP_SEVERITY_MODERATE,
+    SPECTRAL_TRAP_SEVERITY_SEVERE, SPECTRAL_TRAP_SEVERITY_CRITICAL
 )
 
 # ---------------------------------------------------------------------
@@ -419,6 +422,108 @@ def classify_learning_phase(alpha: float) -> str:
         return "fair"
     else:
         return "under-trained"
+
+
+# ---------------------------------------------------------------------
+
+def detect_correlation_trap(
+        rand_evals: np.ndarray,
+        N: int,
+        M: int,
+        c_TW: float = SPECTRAL_TW_SAFETY_FACTOR
+) -> Dict[str, Union[bool, int, float, str]]:
+    """
+    Detect correlation traps in a randomized weight matrix via Marchenko-Pastur
+    edge + Tracy-Widom threshold.
+
+    A correlation trap is identified when eigenvalues of the element-wise
+    randomized weight matrix extend significantly beyond the theoretical
+    Marchenko-Pastur bulk plus Tracy-Widom fluctuations. This indicates
+    that large-magnitude weight elements create spurious spectral spikes
+    even after destroying spatial structure.
+
+    The detection protocol follows Martin & Mahoney (2021) and uses:
+    1. MP upper edge: λ+ = σ²(1 + √Q)²
+    2. TW threshold:  Δ_TW = c_TW · σ² · N^(-1/3)
+    3. Spike count:   eigenvalues above λ+ + Δ_TW
+    4. Severity:      (λ_max - threshold) / λ+
+
+    Args:
+        rand_evals: Eigenvalues of the randomized weight matrix (sorted descending).
+        N: Maximum dimension of the weight matrix.
+        M: Minimum dimension of the weight matrix.
+        c_TW: Tracy-Widom safety factor (default 2.5).
+
+    Returns:
+        Dictionary with trap detection results:
+        - has_trap: Whether a correlation trap was detected
+        - num_rand_spikes: Number of eigenvalues exceeding the TW threshold
+        - trap_severity: Normalized severity score (0 = no trap)
+        - trap_severity_label: Human-readable severity ('none'/'mild'/'moderate'/'severe'/'critical')
+        - mp_lambda_plus: Marchenko-Pastur upper edge
+        - mp_lambda_minus: Marchenko-Pastur lower edge
+        - trap_threshold: Detection threshold (λ+ + Δ_TW)
+    """
+    result = {
+        'has_trap': False,
+        'num_rand_spikes': 0,
+        'trap_severity': 0.0,
+        'trap_severity_label': 'none',
+        'mp_lambda_plus': 0.0,
+        'mp_lambda_minus': 0.0,
+        'trap_threshold': 0.0,
+    }
+
+    if rand_evals is None or len(rand_evals) < 2 or N < 1 or M < 1:
+        return result
+
+    # Variance estimate from randomized eigenvalues
+    sigma_sq = float(np.mean(rand_evals))
+    if sigma_sq < SPECTRAL_EPSILON:
+        return result
+
+    # Aspect ratio
+    Q = N / M
+
+    # Marchenko-Pastur edges
+    mp_lambda_plus = sigma_sq * (1.0 + np.sqrt(Q)) ** 2
+    mp_lambda_minus = sigma_sq * max(0.0, (1.0 - np.sqrt(Q)) ** 2)
+
+    # Tracy-Widom fluctuation threshold
+    delta_TW = c_TW * sigma_sq * (N ** (-1.0 / 3.0))
+    threshold = mp_lambda_plus + delta_TW
+
+    # Detect spikes above threshold
+    spikes = rand_evals[rand_evals > threshold]
+    num_spikes = len(spikes)
+    has_trap = num_spikes > 0
+
+    # Severity scoring
+    severity = 0.0
+    if has_trap and mp_lambda_plus > SPECTRAL_EPSILON:
+        severity = float((np.max(rand_evals) - threshold) / mp_lambda_plus)
+
+    # Severity label
+    if severity < SPECTRAL_TRAP_SEVERITY_MILD:
+        severity_label = 'none'
+    elif severity < SPECTRAL_TRAP_SEVERITY_MODERATE:
+        severity_label = 'mild'
+    elif severity < SPECTRAL_TRAP_SEVERITY_SEVERE:
+        severity_label = 'moderate'
+    elif severity < SPECTRAL_TRAP_SEVERITY_CRITICAL:
+        severity_label = 'severe'
+    else:
+        severity_label = 'critical'
+
+    result['has_trap'] = has_trap
+    result['num_rand_spikes'] = int(num_spikes)
+    result['trap_severity'] = severity
+    result['trap_severity_label'] = severity_label
+    result['mp_lambda_plus'] = float(mp_lambda_plus)
+    result['mp_lambda_minus'] = float(mp_lambda_minus)
+    result['trap_threshold'] = float(threshold)
+
+    return result
 
 
 # ---------------------------------------------------------------------

@@ -156,12 +156,9 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         if analyze_every_steps > 0:
             os.makedirs(self._analysis_dir, exist_ok=True)
 
-        # Spectral analysis (WeightWatcher SVD) OOMs on large models
-        # (124M+) due to cumulative memory pressure during long training
-        # runs. Only enable weight distribution analysis by default.
         self._analysis_config = AnalysisConfig(
             analyze_weights=True,
-            analyze_spectral=False,
+            analyze_spectral=True,
             analyze_calibration=False,
             analyze_information_flow=False,
             analyze_training_dynamics=False,
