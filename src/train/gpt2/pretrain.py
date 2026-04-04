@@ -57,12 +57,14 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         save_dir: str,
         save_every_steps: int = 25000,
         analyze_every_steps: int = 25000,
+        max_checkpoints: int = 3,
         model_name: str = "gpt2",
     ):
         super().__init__()
         self.save_dir = save_dir
         self.save_every_steps = save_every_steps
         self.analyze_every_steps = analyze_every_steps
+        self.max_checkpoints = max_checkpoints
         self.model_name = model_name
         self._global_step = 0
 
@@ -106,6 +108,17 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         logger.info(
             f"Checkpoint saved: {path} (step {self._global_step:,})"
         )
+        self._cleanup_old_checkpoints()
+
+    def _cleanup_old_checkpoints(self):
+        """Keep only the most recent ``max_checkpoints`` files."""
+        import glob
+        pattern = os.path.join(self._ckpt_dir, "step_*.keras")
+        ckpts = sorted(glob.glob(pattern))
+        while len(ckpts) > self.max_checkpoints:
+            old = ckpts.pop(0)
+            os.remove(old)
+            logger.info(f"Removed old checkpoint: {old}")
 
     def _run_analysis(self):
         step_dir = os.path.join(
