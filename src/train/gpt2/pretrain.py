@@ -160,9 +160,9 @@ class TrainingConfig:
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
 
-    # Loss: "focal" (default) or "ce" (standard masked cross-entropy)
-    loss_type: str = "focal"
-    focal_gamma: float = 2.0
+    # Loss: "ce" (default) or "focal" (focal cross-entropy)
+    loss_type: str = "ce"
+    focal_gamma: float = 1.0
     label_smoothing: float = 0.0
 
     # Paths
@@ -508,15 +508,15 @@ def main() -> None:
     parser.add_argument(
         "--loss-type",
         type=str,
-        default="focal",
+        default="ce",
         choices=["focal", "ce"],
-        help="Loss: 'focal' (default) or 'ce' (standard masked CE)",
+        help="Loss: 'ce' (default) or 'focal' (focal cross-entropy)",
     )
     parser.add_argument(
         "--focal-gamma",
         type=float,
-        default=2.0,
-        help="Focal loss focusing parameter gamma (default: 2.0)",
+        default=1.0,
+        help="Focal loss focusing parameter gamma (default: 1.0)",
     )
     parser.add_argument(
         "--label-smoothing",
