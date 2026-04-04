@@ -45,9 +45,14 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
-from dl_techniques.layers.transformers.text_decoder import TextDecoder
-from dl_techniques.utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.transformers.text_decoder import TextDecoder
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GPT2(keras.Model):
@@ -381,3 +386,5 @@ class GPT2(keras.Model):
                 )
 
         return model
+
+# ---------------------------------------------------------------------

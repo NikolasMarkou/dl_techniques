@@ -15,11 +15,11 @@ vocabulary distributions typical of natural language.
                      γ > 0  →  down-weights easy tokens (high p_t)
 
     ┌─────────────────────────────────────────────────────────────┐
-    │  Token:      "the"   "cat"   "sat"   "on"   "the"   "mat" │
-    │  p_t:         0.95    0.12    0.30    0.88    0.93    0.05 │
+    │  Token:      "the"   "cat"   "sat"   "on"   "the"   "mat"   │
+    │  p_t:         0.95    0.12    0.30    0.88    0.93    0.05  │
     │                                                             │
-    │  CE weight:   1.0     1.0     1.0     1.0     1.0     1.0  │
-    │  Focal(γ=2):  0.0025  0.774   0.490   0.014   0.005   0.90 │
+    │  CE weight:   1.0     1.0     1.0     1.0     1.0     1.0   │
+    │  Focal(γ=2):  0.0025  0.774   0.490   0.014   0.005   0.90  │
     │               ↑ easy, suppressed        ↑ hard, amplified   │
     └─────────────────────────────────────────────────────────────┘
 

@@ -22,7 +22,7 @@ from typing import Optional, Dict, Tuple, Any, Union, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn.mlp import MLPBlock
 from dl_techniques.layers.norms.rms_norm import RMSNorm
-from dl_techniques.layers.transformer import TransformerLayer
+from dl_techniques.layers.transformers import TransformerLayer
 
 # ---------------------------------------------------------------------
 
