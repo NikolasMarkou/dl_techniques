@@ -115,42 +115,44 @@ def collect_kernel_weights(
     return kernels
 
 
-class SoftOrthonormalCallback(keras.callbacks.Callback):
-    """Add soft orthonormal regularization loss during training.
+def wrap_model_with_so(
+    model: keras.Model,
+    config: SOTrainingConfig,
+) -> keras.Model:
+    """Wrap a GPT-2 model to add SO regularization in ``train_step``.
 
-    Computes ``||W^T·W - I||_F^2`` for all collected kernel weights
-    and adds the penalty to the model's loss via ``add_loss()``.
-    This approach works reliably with pre-built models where
-    post-hoc ``kernel_regularizer`` assignment doesn't register.
+    Keras 3 doesn't allow ``add_loss()`` from callbacks. Instead, we
+    override the model's ``train_step`` to compute the SO penalty on
+    each forward pass and add it to the compiled loss.
 
-    :param regularizer: The SO regularizer instance.
-    :param skip_embeddings: Skip embedding layers.
+    :param model: Built and compiled GPT-2 model.
+    :param config: SO training configuration.
+    :return: The same model with patched ``train_step``.
     """
+    regularizer = SoftOrthonormalConstraintRegularizer(
+        lambda_coefficient=config.so_lambda,
+        l1_coefficient=config.so_l1,
+        l2_coefficient=config.so_l2,
+        use_matrix_scaling=config.so_matrix_scaling,
+    )
+    kernels = collect_kernel_weights(model, config.so_skip_embeddings)
+    logger.info(
+        f"SO regularization: {len(kernels)} kernel weights, "
+        f"λ={config.so_lambda}"
+    )
 
-    def __init__(
-        self,
-        regularizer: SoftOrthonormalConstraintRegularizer,
-        skip_embeddings: bool = True,
-    ):
-        super().__init__()
-        self._regularizer = regularizer
-        self._skip_embeddings = skip_embeddings
-        self._kernels = []
+    original_train_step = model.train_step
 
-    def set_model(self, model):
-        super().set_model(model)
-        self._kernels = collect_kernel_weights(
-            model, self._skip_embeddings,
-        )
-        logger.info(
-            f"SoftOrthonormalCallback: tracking {len(self._kernels)} "
-            f"kernel weights"
-        )
+    def train_step_with_so(data):
+        result = original_train_step(data)
+        # Compute SO penalty and add to reported loss
+        so_loss = sum(regularizer(w) for w in kernels)
+        result["loss"] = result["loss"] + so_loss
+        result["so_loss"] = so_loss
+        return result
 
-    def on_train_batch_begin(self, batch, logs=None):
-        """Add SO penalty before each training step."""
-        for w in self._kernels:
-            self.model.add_loss(lambda w=w: self._regularizer(w))
+    model.train_step = train_step_with_so
+    return model
 
 
 # ---------------------------------------------------------------------
@@ -161,38 +163,30 @@ class SoftOrthonormalCallback(keras.callbacks.Callback):
 import train.gpt2.pretrain as _pretrain_module
 
 _original_train = _pretrain_module.train_gpt2
+_original_create = _pretrain_module.create_gpt2_model
+
+# Store config for the patched create function
+_so_config_ref: Optional[SOTrainingConfig] = None
+
+
+def _patched_create(config):
+    """Create model, then wrap with SO if config is SOTrainingConfig."""
+    model = _original_create(config)
+    if _so_config_ref is not None:
+        model = wrap_model_with_so(model, _so_config_ref)
+    return model
 
 
 def train_gpt2_so(config: SOTrainingConfig):
-    """Wrap train_gpt2 to inject the SO callback."""
-
-    # Monkey-patch create_nlp_callbacks to inject our callback
-    from train.common.nlp import create_nlp_callbacks as _orig_callbacks
-
-    regularizer = SoftOrthonormalConstraintRegularizer(
-        lambda_coefficient=config.so_lambda,
-        l1_coefficient=config.so_l1,
-        l2_coefficient=config.so_l2,
-        use_matrix_scaling=config.so_matrix_scaling,
-    )
-    so_callback = SoftOrthonormalCallback(
-        regularizer=regularizer,
-        skip_embeddings=config.so_skip_embeddings,
-    )
-
-    # Inject SO callback by patching the callback creation
-    _orig_create_callbacks = _pretrain_module.create_nlp_callbacks
-
-    def _patched_callbacks(*args, **kwargs):
-        callbacks, results_dir = _orig_create_callbacks(*args, **kwargs)
-        callbacks.append(so_callback)
-        return callbacks, results_dir
-
-    _pretrain_module.create_nlp_callbacks = _patched_callbacks
+    """Run train_gpt2 with SO regularization injected into train_step."""
+    global _so_config_ref
+    _so_config_ref = config
+    _pretrain_module.create_gpt2_model = _patched_create
     try:
         return _original_train(config)
     finally:
-        _pretrain_module.create_nlp_callbacks = _orig_create_callbacks
+        _pretrain_module.create_gpt2_model = _original_create
+        _so_config_ref = None
 
 
 # ---------------------------------------------------------------------
