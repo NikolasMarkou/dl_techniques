@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.metrics.psnr_metric import PsnrMetric
+from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.models.darkir.model import create_darkir_model
 from dl_techniques.losses.image_restoration_loss import DarkIRCompositeLoss
 from dl_techniques.visualization import (
@@ -136,54 +138,8 @@ def create_darkir_config(variant: str) -> Dict[str, Any]:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
-class PSNRMetric(keras.metrics.Metric):
-    """PSNR metric wrapper."""
 
-    def __init__(self, max_val=1.0, name='psnr', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.max_val = max_val
-        self.mean_psnr = keras.metrics.Mean(name='mean_psnr')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        self.mean_psnr.update_state(
-            tf.image.psnr(y_true, y_pred, max_val=self.max_val), sample_weight)
-
-    def result(self):
-        return self.mean_psnr.result()
-
-    def reset_state(self):
-        self.mean_psnr.reset_state()
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({'max_val': self.max_val})
-        return config
-
-
-@keras.saving.register_keras_serializable()
-class SSIMMetric(keras.metrics.Metric):
-    """SSIM metric wrapper."""
-
-    def __init__(self, max_val=1.0, name='ssim', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.max_val = max_val
-        self.mean_ssim = keras.metrics.Mean(name='mean_ssim')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        self.mean_ssim.update_state(
-            tf.image.ssim(y_true, y_pred, max_val=self.max_val), sample_weight)
-
-    def result(self):
-        return self.mean_ssim.result()
-
-    def reset_state(self):
-        self.mean_ssim.reset_state()
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({'max_val': self.max_val})
-        return config
+# PSNRMetric and SSIMMetric imported from dl_techniques.metrics
 
 
 # ---------------------------------------------------------------------
@@ -301,7 +257,7 @@ def train_model(args: argparse.Namespace):
     model.compile(
         optimizer=optimizer,
         loss=loss_fn,
-        metrics=[PSNRMetric(max_val=1.0), SSIMMetric(max_val=1.0)],
+        metrics=[PsnrMetric(max_val=1.0, name='psnr'), SsimMetric(max_val=1.0)],
     )
     model.build((None, args.img_size, args.img_size, 3))
     model.summary(print_fn=logger.info)

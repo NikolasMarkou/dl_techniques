@@ -19,6 +19,7 @@ from dl_techniques.models.bias_free_denoisers.bfcnn import (
 )
 from dl_techniques.analyzer import DataInput
 from train.common import setup_gpu
+from dl_techniques.metrics.psnr_metric import PsnrMetric
 
 
 @dataclass
@@ -219,10 +220,8 @@ class DenoisingDatasetBuilder(DatasetBuilder):
             return None
 
 
-@keras.saving.register_keras_serializable()
-def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-    """PSNR metric for denoising ([-1, 1] range)."""
-    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=2.0))
+
+# PsnrMetric imported from dl_techniques.metrics (max_val=2.0 for [-1, +1] range)
 
 
 class DenoisingVisualizationCallback(keras.callbacks.Callback):
@@ -313,7 +312,7 @@ class DenoisingTrainingPipeline(TrainingPipeline):
             metrics=[
                 keras.metrics.MeanAbsoluteError(name='mae'),
                 keras.metrics.RootMeanSquaredError(name='rmse'),
-                psnr_metric
+                PsnrMetric(max_val=2.0, name='psnr_metric')
             ]
         )
 

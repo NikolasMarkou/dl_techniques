@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
 
 from train.common import setup_gpu
+from dl_techniques.losses import MANNUtilizationLoss, GNNUtilizationLoss
 from dl_techniques.models.qwen.qwen3_mega import create_qwen3_mega
 from dl_techniques.utils.logger import logger
 
@@ -231,81 +232,8 @@ class GNNForcingTask:
         return inputs, adjacency, targets
 
 
-@keras.saving.register_keras_serializable()
-class MANNUtilizationLoss(keras.losses.Loss):
-    """Encourages MANN to use its memory (entropy, variance, magnitude)."""
 
-    def __init__(self, entropy_weight: float = 0.01, write_weight: float = 0.01,
-                 variance_weight: float = 0.01, name: str = "mann_utilization_loss", **kwargs: Any):
-        super().__init__(name=name, **kwargs)
-        self.entropy_weight = entropy_weight
-        self.write_weight = write_weight
-        self.variance_weight = variance_weight
-
-    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor,
-             memory_vectors: keras.KerasTensor) -> keras.KerasTensor:
-        memory_probs = keras.ops.softmax(memory_vectors, axis=-1)
-        entropy = -keras.ops.sum(memory_probs * keras.ops.log(memory_probs + 1e-10), axis=-1)
-        entropy_loss = -keras.ops.mean(entropy)
-
-        temporal_diff = memory_vectors[:, 1:, :] - memory_vectors[:, :-1, :]
-        variance = keras.ops.var(temporal_diff)
-        variance_loss = -keras.ops.log(variance + 1e-10)
-
-        memory_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(memory_vectors), axis=-1))
-        magnitude_loss = -keras.ops.mean(memory_norm)
-
-        return (self.entropy_weight * entropy_loss +
-                self.variance_weight * variance_loss +
-                self.write_weight * magnitude_loss)
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            'entropy_weight': self.entropy_weight,
-            'write_weight': self.write_weight,
-            'variance_weight': self.variance_weight,
-        })
-        return config
-
-
-@keras.saving.register_keras_serializable()
-class GNNUtilizationLoss(keras.losses.Loss):
-    """Encourages GNN to use entity representations (diversity, activation, variance)."""
-
-    def __init__(self, diversity_weight: float = 0.01, attention_weight: float = 0.01,
-                 activation_weight: float = 0.01, name: str = "gnn_utilization_loss", **kwargs: Any):
-        super().__init__(name=name, **kwargs)
-        self.diversity_weight = diversity_weight
-        self.attention_weight = attention_weight
-        self.activation_weight = activation_weight
-
-    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor,
-             entity_embeddings: keras.KerasTensor) -> keras.KerasTensor:
-        normalized = keras.ops.normalize(entity_embeddings, axis=-1)
-        similarity = keras.ops.einsum('bnd,bmd->bnm', normalized, normalized)
-        num_entities = keras.ops.shape(entity_embeddings)[1]
-        mask = 1.0 - keras.ops.eye(num_entities)
-        diversity_loss = keras.ops.mean(keras.ops.abs(similarity * mask))
-
-        entity_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(entity_embeddings), axis=-1))
-        activation_loss = -keras.ops.mean(entity_norm)
-
-        entity_var = keras.ops.var(entity_embeddings, axis=1)
-        variance_loss = -keras.ops.mean(entity_var)
-
-        return (self.diversity_weight * diversity_loss +
-                self.activation_weight * activation_loss +
-                self.attention_weight * variance_loss)
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            'diversity_weight': self.diversity_weight,
-            'attention_weight': self.attention_weight,
-            'activation_weight': self.activation_weight,
-        })
-        return config
+# MANNUtilizationLoss and GNNUtilizationLoss imported from dl_techniques.losses
 
 
 @dataclass
@@ -635,8 +563,8 @@ class Qwen3MEGATrainer:
             entity_embeddings = outputs['entity_embeddings']
 
             main_loss = self.main_loss(targets, logits)
-            mann_loss = self.mann_aux_loss.call(targets, logits, memory_vectors)
-            gnn_loss = self.gnn_aux_loss.call(targets, logits, entity_embeddings)
+            mann_loss = self.mann_aux_loss.call(targets, memory_vectors)
+            gnn_loss = self.gnn_aux_loss.call(targets, entity_embeddings)
             total_loss = main_loss + aux_loss_weight * mann_loss + aux_loss_weight * gnn_loss
 
         gradients = tape.gradient(total_loss, self.model.trainable_variables)

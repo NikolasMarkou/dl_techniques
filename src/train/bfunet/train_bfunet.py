@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from dl_techniques.losses import ScaledMseLoss
+from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import (
@@ -261,51 +263,8 @@ def create_dataset(
 # LOSS FUNCTIONS FOR DEEP SUPERVISION
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
-class ScaledMseLoss(keras.losses.Loss):
-    """MSE loss with automatic target resizing for multi-scale supervision."""
 
-    def __init__(self, name: str = "scaled_mse_loss", **kwargs) -> None:
-        super().__init__(name=name, **kwargs)
-
-    def call(self, y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-        pred_shape = tf.shape(y_pred)
-        y_true_resized = tf.image.resize(y_true, (pred_shape[1], pred_shape[2]))
-        return tf.reduce_mean(tf.square(y_pred - y_true_resized))
-
-
-# ---------------------------------------------------------------------
-# METRICS
-# ---------------------------------------------------------------------
-
-class PrimaryOutputPSNR(keras.metrics.Metric):
-    """PSNR metric evaluating only the primary output for multi-output models."""
-
-    def __init__(self, name: str = 'primary_psnr', **kwargs) -> None:
-        super().__init__(name=name, **kwargs)
-        self.psnr_sum = self.add_weight(name='psnr_sum', initializer='zeros')
-        self.count = self.add_weight(name='count', initializer='zeros')
-
-    def update_state(
-        self, y_true: Union[tf.Tensor, List[tf.Tensor]],
-        y_pred: Union[tf.Tensor, List[tf.Tensor]],
-        sample_weight: Optional[tf.Tensor] = None
-    ) -> None:
-        if isinstance(y_pred, list):
-            primary_pred, primary_true = y_pred[0], y_true[0]
-        else:
-            primary_pred, primary_true = y_pred, y_true
-
-        psnr_batch = tf.image.psnr(primary_pred, primary_true, max_val=1.0)
-        self.psnr_sum.assign_add(tf.reduce_sum(psnr_batch))
-        self.count.assign_add(tf.cast(tf.size(psnr_batch), tf.float32))
-
-    def result(self) -> tf.Tensor:
-        return tf.math.divide_no_nan(self.psnr_sum, self.count)
-
-    def reset_state(self) -> None:
-        self.psnr_sum.assign(0.0)
-        self.count.assign(0.0)
+# ScaledMseLoss and PsnrMetric imported from dl_techniques
 
 
 # ---------------------------------------------------------------------
@@ -841,12 +800,12 @@ def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
         loss_fns = ['mse'] * num_outputs
         initial_weights = [1.0 / num_outputs] * num_outputs
         metrics = {'final_output': [
-            'mae', keras.metrics.RootMeanSquaredError(name='rmse'), PrimaryOutputPSNR()
+            'mae', keras.metrics.RootMeanSquaredError(name='rmse'), PsnrMetric()
         ]}
     else:
         loss_fns = 'mse'
         initial_weights = None
-        metrics = ['mae', keras.metrics.RootMeanSquaredError(name='rmse'), PrimaryOutputPSNR()]
+        metrics = ['mae', keras.metrics.RootMeanSquaredError(name='rmse'), PsnrMetric()]
 
     model.compile(optimizer=optimizer, loss=loss_fns, loss_weights=initial_weights, metrics=metrics)
     logger.info("Model compiled successfully")

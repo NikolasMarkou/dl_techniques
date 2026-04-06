@@ -25,6 +25,9 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from dl_techniques.metrics.primary_output_metrics import (
+    PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -196,67 +199,8 @@ def create_imagenet_dataset(
 # CUSTOM METRICS
 # =============================================================================
 
-@keras.saving.register_keras_serializable()
-class PrimaryOutputAccuracy(keras.metrics.Metric):
-    """Accuracy for the primary output of multi-output models."""
 
-    def __init__(self, name: str = 'primary_accuracy', **kwargs) -> None:
-        super().__init__(name=name, **kwargs)
-        self.total = self.add_weight(name='total', initializer='zeros')
-        self.count = self.add_weight(name='count', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None) -> None:
-        if isinstance(y_pred, list):
-            primary_pred = y_pred[0]
-            primary_true = y_true[0] if isinstance(y_true, list) else y_true
-        else:
-            primary_pred, primary_true = y_pred, y_true
-
-        predicted_classes = tf.argmax(primary_pred, axis=-1)
-        true_classes = tf.argmax(primary_true, axis=-1) if len(tf.shape(primary_true)) > 1 else tf.cast(primary_true, tf.int64)
-        matches = tf.cast(tf.equal(predicted_classes, true_classes), tf.float32)
-        self.total.assign_add(tf.reduce_sum(matches))
-        self.count.assign_add(tf.cast(tf.size(matches), tf.float32))
-
-    def result(self) -> tf.Tensor:
-        return tf.math.divide_no_nan(self.total, self.count)
-
-    def reset_state(self) -> None:
-        self.total.assign(0.0)
-        self.count.assign(0.0)
-
-
-@keras.saving.register_keras_serializable()
-class PrimaryOutputTop5Accuracy(keras.metrics.Metric):
-    """Top-5 accuracy for the primary output."""
-
-    def __init__(self, name: str = 'primary_top5_accuracy', **kwargs) -> None:
-        super().__init__(name=name, **kwargs)
-        self.total = self.add_weight(name='total', initializer='zeros')
-        self.count = self.add_weight(name='count', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None) -> None:
-        if isinstance(y_pred, list):
-            primary_pred = y_pred[0]
-            primary_true = y_true[0] if isinstance(y_true, list) else y_true
-        else:
-            primary_pred, primary_true = y_pred, y_true
-
-        top5_pred = tf.nn.top_k(primary_pred, k=5).indices
-        true_classes = tf.argmax(primary_true, axis=-1) if len(tf.shape(primary_true)) > 1 else tf.cast(primary_true, tf.int64)
-        matches = tf.cast(
-            tf.reduce_any(tf.equal(top5_pred, tf.expand_dims(true_classes, axis=-1)), axis=-1),
-            tf.float32
-        )
-        self.total.assign_add(tf.reduce_sum(matches))
-        self.count.assign_add(tf.cast(tf.size(matches), tf.float32))
-
-    def result(self) -> tf.Tensor:
-        return tf.math.divide_no_nan(self.total, self.count)
-
-    def reset_state(self) -> None:
-        self.total.assign(0.0)
-        self.count.assign(0.0)
+# PrimaryOutputAccuracy and PrimaryOutputTopKAccuracy imported from dl_techniques.metrics
 
 
 # =============================================================================
@@ -509,7 +453,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
         loss_fns = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
         initial_weights = [1.0 / num_outputs] * num_outputs
         primary_output_name = model.output[0].name.split('/')[0]
-        metrics = {primary_output_name: [PrimaryOutputAccuracy(), PrimaryOutputTop5Accuracy()]}
+        metrics = {primary_output_name: [PrimaryOutputAccuracy(), PrimaryOutputTopKAccuracy(k=5, name='primary_top5_accuracy')]}
     else:
         loss_fns = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         initial_weights = None

@@ -15,6 +15,7 @@ from typing import Dict, List, Tuple, Any, Optional
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
+from dl_techniques.losses import MultiTaskLoss
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.anchored_branched_upt import AnchoredBranchedUPT, create_abupt_model
 
@@ -271,25 +272,7 @@ class CFDDataGenerator(keras.utils.PyDataset):
         return ops.array(data[indices], dtype="float32")
 
 
-# ---------------------------------------------------------------------
-# Multi-task loss
-# ---------------------------------------------------------------------
-
-class MultiTaskLoss(keras.losses.Loss):
-    """Multi-task loss for CFD predictions with per-task weighting."""
-
-    def __init__(self, loss_weights: Optional[Dict[str, float]] = None, **kwargs):
-        super().__init__(**kwargs)
-        self.loss_weights = loss_weights or {}
-        self.mse = keras.losses.MeanSquaredError()
-
-    def call(self, y_true, y_pred):
-        total_loss = 0.0
-        for key in y_true.keys():
-            if key in y_pred:
-                task_loss = self.mse(y_true[key], y_pred[key])
-                total_loss += task_loss * self.loss_weights.get(key, 1.0)
-        return total_loss
+# MultiTaskLoss imported from dl_techniques.losses
 
 
 # ---------------------------------------------------------------------

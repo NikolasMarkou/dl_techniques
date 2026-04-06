@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
+from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
 from dl_techniques.optimization import optimizer_builder, learning_rate_schedule_builder
@@ -233,10 +234,8 @@ def create_dataset(directories: List[str], config: TrainingConfig, is_training: 
 # METRICS
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
-def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-    """PSNR metric for [-1, +1] normalized images."""
-    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=2.0))
+
+# PsnrMetric imported from dl_techniques.metrics (max_val=2.0 for [-1, +1] range)
 
 
 # ---------------------------------------------------------------------
@@ -505,7 +504,7 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 
     model.compile(
         optimizer=optimizer, loss='mse',
-        metrics=['mae', keras.metrics.RootMeanSquaredError(name='rmse'), psnr_metric]
+        metrics=['mae', keras.metrics.RootMeanSquaredError(name='rmse'), PsnrMetric(max_val=2.0, name='psnr_metric')]
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 

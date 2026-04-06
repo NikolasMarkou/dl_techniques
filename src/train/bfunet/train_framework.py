@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu
+from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.optimization.train_vision import (
     TrainingConfig,
     DatasetBuilder,
@@ -267,37 +268,8 @@ class BFUNetDatasetBuilder(DatasetBuilder):
         return None
 
 
-@keras.saving.register_keras_serializable()
-def psnr_metric(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-    return tf.reduce_mean(tf.image.psnr(y_pred, y_true, max_val=1.0))
 
-
-class PrimaryOutputPSNR(keras.metrics.Metric):
-    """PSNR metric for primary output in multi-output models."""
-
-    def __init__(self, name: str = 'primary_psnr', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.psnr_sum = self.add_weight(name='psnr_sum', initializer='zeros')
-        self.count = self.add_weight(name='count', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        if isinstance(y_pred, list):
-            primary_pred = y_pred[0]
-            primary_true = y_true[0]
-        else:
-            primary_pred = y_pred
-            primary_true = y_true
-
-        psnr_batch = tf.image.psnr(primary_pred, primary_true, max_val=1.0)
-        self.psnr_sum.assign_add(tf.reduce_sum(psnr_batch))
-        self.count.assign_add(tf.cast(tf.size(psnr_batch), tf.float32))
-
-    def result(self):
-        return tf.math.divide_no_nan(self.psnr_sum, self.count)
-
-    def reset_state(self):
-        self.psnr_sum.assign(0.0)
-        self.count.assign(0.0)
+# PsnrMetric imported from dl_techniques.metrics
 
 
 def unconditional_sampling(
@@ -551,7 +523,7 @@ class BFUNetTrainingPipeline(TrainingPipeline):
             metrics = {'final_output': [
                 keras.metrics.MeanAbsoluteError(name='mae'),
                 keras.metrics.RootMeanSquaredError(name='rmse'),
-                PrimaryOutputPSNR()
+                PsnrMetric()
             ]}
         else:
             loss_fns = 'mse'
@@ -559,7 +531,7 @@ class BFUNetTrainingPipeline(TrainingPipeline):
             metrics = [
                 keras.metrics.MeanAbsoluteError(name='mae'),
                 keras.metrics.RootMeanSquaredError(name='rmse'),
-                PrimaryOutputPSNR()
+                PsnrMetric()
             ]
 
         model.compile(
