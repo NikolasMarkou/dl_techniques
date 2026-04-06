@@ -1,24 +1,36 @@
 import keras
 from keras import ops
-import tensorflow as tf
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------
 
+
+@keras.saving.register_keras_serializable()
 class CapsuleAccuracy(keras.metrics.Metric):
-    """Custom accuracy metric for capsule networks based on capsule lengths."""
+    """Custom accuracy metric for capsule networks based on capsule lengths.
+
+    Args:
+        name: Name of the metric.
+        **kwargs: Additional keyword arguments passed to parent Metric class.
+    """
 
     def __init__(self, name: str = "capsule_accuracy", **kwargs):
         super().__init__(name=name, **kwargs)
         self.total = self.add_weight(name="total", initializer="zeros")
         self.count = self.add_weight(name="count", initializer="zeros")
 
-    def update_state(self, y_true: tf.Tensor, y_pred: tf.Tensor, sample_weight: Optional[tf.Tensor] = None):
+    def update_state(
+        self,
+        y_true: keras.KerasTensor,
+        y_pred: keras.KerasTensor,
+        sample_weight: Optional[keras.KerasTensor] = None,
+    ):
         """Update accuracy state based on capsule lengths.
 
         Args:
             y_true: One-hot encoded true labels.
-            y_pred: Dictionary containing 'length' key with capsule lengths.
+            y_pred: Dictionary containing 'length' key with capsule lengths,
+                or a tensor of capsule lengths directly.
             sample_weight: Optional sample weights.
         """
         if isinstance(y_pred, dict) and "length" in y_pred:
@@ -44,5 +56,10 @@ class CapsuleAccuracy(keras.metrics.Metric):
     def reset_state(self):
         self.total.assign(0.0)
         self.count.assign(0.0)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration dictionary for serialization."""
+        return super().get_config()
+
 
 # ---------------------------------------------------------------------

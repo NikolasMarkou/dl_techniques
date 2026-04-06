@@ -1,6 +1,6 @@
 import keras
 import numpy as np
-from typing import Union, Optional
+from typing import Any, Dict, Union, Optional
 
 # ---------------------------------------------------------------------
 
@@ -87,23 +87,26 @@ class MultiLabelMetrics(keras.metrics.Metric):
         y_true_flat = keras.ops.reshape(y_true, (-1, self.num_classes))
         y_pred_flat = keras.ops.reshape(y_pred_binary, (-1, self.num_classes))
 
+        # Compute confusion matrix elements on unweighted binary labels
+        tp = y_true_flat * y_pred_flat
+        fp = (1.0 - y_true_flat) * y_pred_flat
+        fn = y_true_flat * (1.0 - y_pred_flat)
+        tn = (1.0 - y_true_flat) * (1.0 - y_pred_flat)
+
+        # Apply sample weights to the confusion matrix counts, not to labels
         if sample_weight is not None:
             sample_weight = keras.ops.cast(sample_weight, "float32")
             sample_weight = keras.ops.reshape(sample_weight, (-1,))
-            if keras.ops.ndim(sample_weight) == 1:
-                sample_weight = keras.ops.expand_dims(sample_weight, axis=-1)
-            y_true_flat = y_true_flat * sample_weight
-            y_pred_flat = y_pred_flat * sample_weight
+            sample_weight = keras.ops.expand_dims(sample_weight, axis=-1)
+            tp = tp * sample_weight
+            fp = fp * sample_weight
+            fn = fn * sample_weight
+            tn = tn * sample_weight
 
-        tp = keras.ops.sum(y_true_flat * y_pred_flat, axis=0)
-        fp = keras.ops.sum((1.0 - y_true_flat) * y_pred_flat, axis=0)
-        fn = keras.ops.sum(y_true_flat * (1.0 - y_pred_flat), axis=0)
-        tn = keras.ops.sum((1.0 - y_true_flat) * (1.0 - y_pred_flat), axis=0)
-
-        self.true_positives.assign_add(tp)
-        self.false_positives.assign_add(fp)
-        self.false_negatives.assign_add(fn)
-        self.true_negatives.assign_add(tn)
+        self.true_positives.assign_add(keras.ops.sum(tp, axis=0))
+        self.false_positives.assign_add(keras.ops.sum(fp, axis=0))
+        self.false_negatives.assign_add(keras.ops.sum(fn, axis=0))
+        self.true_negatives.assign_add(keras.ops.sum(tn, axis=0))
 
     def _get_class_slice(
         self,
