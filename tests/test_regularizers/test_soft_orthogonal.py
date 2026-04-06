@@ -497,3 +497,111 @@ def test_orthogonal_vs_orthonormal_scaling(conv_medium: tf.Tensor) -> None:
     # The difference in scaling effect should not be extreme
     max_ratio = max(orthogonal_scale_ratio.numpy(), orthonormal_scale_ratio.numpy())
     assert ratio_difference < max_ratio * 0.5, "Scaling effect should be reasonably similar for both regularizer types"
+
+
+# ---------------------------------------------------------------------
+# Additional coverage tests
+# ---------------------------------------------------------------------
+
+
+class TestNegativeCoefficientValidation:
+    """Test that negative coefficients raise ValueError."""
+
+    def test_negative_lambda(self) -> None:
+        with pytest.raises(ValueError, match="lambda_coefficient must be non-negative"):
+            SoftOrthogonalConstraintRegularizer(lambda_coefficient=-0.1)
+
+    def test_negative_l1(self) -> None:
+        with pytest.raises(ValueError, match="l1_coefficient must be non-negative"):
+            SoftOrthogonalConstraintRegularizer(l1_coefficient=-0.1)
+
+    def test_negative_l2(self) -> None:
+        with pytest.raises(ValueError, match="l2_coefficient must be non-negative"):
+            SoftOrthogonalConstraintRegularizer(l2_coefficient=-0.1)
+
+    def test_negative_lambda_orthonormal(self) -> None:
+        with pytest.raises(ValueError, match="lambda_coefficient must be non-negative"):
+            SoftOrthonormalConstraintRegularizer(lambda_coefficient=-0.1)
+
+    def test_negative_l1_orthonormal(self) -> None:
+        with pytest.raises(ValueError, match="l1_coefficient must be non-negative"):
+            SoftOrthonormalConstraintRegularizer(l1_coefficient=-0.1)
+
+    def test_negative_l2_orthonormal(self) -> None:
+        with pytest.raises(ValueError, match="l2_coefficient must be non-negative"):
+            SoftOrthonormalConstraintRegularizer(l2_coefficient=-0.1)
+
+
+class TestGradientFlow:
+    """Test that regularizers produce useful gradients."""
+
+    def test_orthogonal_gradient_nonzero(self) -> None:
+        """Verify gradients flow through the orthogonal regularizer."""
+        reg = SoftOrthogonalConstraintRegularizer(lambda_coefficient=1e-3, l2_coefficient=0.0)
+        weights = tf.Variable(tf.random.normal((8, 4), seed=42))
+        with tf.GradientTape() as tape:
+            loss = reg(weights)
+        grad = tape.gradient(loss, weights)
+        assert grad is not None, "Gradient must not be None"
+        assert tf.reduce_any(tf.not_equal(grad, 0.0)), "Gradient must be non-zero"
+
+    def test_orthonormal_gradient_nonzero(self) -> None:
+        """Verify gradients flow through the orthonormal regularizer."""
+        reg = SoftOrthonormalConstraintRegularizer(lambda_coefficient=1e-3, l2_coefficient=0.0)
+        weights = tf.Variable(tf.random.normal((8, 4), seed=42))
+        with tf.GradientTape() as tape:
+            loss = reg(weights)
+        grad = tape.gradient(loss, weights)
+        assert grad is not None, "Gradient must not be None"
+        assert tf.reduce_any(tf.not_equal(grad, 0.0)), "Gradient must be non-zero"
+
+    def test_orthogonal_gradient_zero_for_orthogonal_weights(self) -> None:
+        """Orthogonal regularizer gradient should be near-zero for orthogonal weights."""
+        reg = SoftOrthogonalConstraintRegularizer(
+            lambda_coefficient=1e-3, l1_coefficient=0.0, l2_coefficient=0.0
+        )
+        theta = np.pi / 4
+        weights = tf.Variable(tf.constant([
+            [np.cos(theta), -np.sin(theta)],
+            [np.sin(theta), np.cos(theta)]
+        ], dtype=tf.float32))
+        with tf.GradientTape() as tape:
+            loss = reg(weights)
+        grad = tape.gradient(loss, weights)
+        assert grad is not None
+        assert tf.reduce_all(tf.abs(grad) < 1e-5), \
+            f"Gradient should be near-zero for orthogonal weights, got max={tf.reduce_max(tf.abs(grad)):.6e}"
+
+
+class TestSerializationRoundTrip:
+    """Test full round-trip: create -> get_config -> from_config -> identical output."""
+
+    def test_orthogonal_roundtrip_identical_output(self) -> None:
+        original = SoftOrthogonalConstraintRegularizer(
+            lambda_coefficient=0.05, l1_coefficient=0.01, l2_coefficient=0.02
+        )
+        config = original.get_config()
+        restored = SoftOrthogonalConstraintRegularizer(**config)
+
+        weights = tf.random.normal((10, 5), seed=42)
+        original_loss = original(weights)
+        restored_loss = restored(weights)
+        np.testing.assert_allclose(
+            original_loss.numpy(), restored_loss.numpy(), atol=1e-7,
+            err_msg="Round-trip serialization must produce identical loss"
+        )
+
+    def test_orthonormal_roundtrip_identical_output(self) -> None:
+        original = SoftOrthonormalConstraintRegularizer(
+            lambda_coefficient=0.05, l1_coefficient=0.01, l2_coefficient=0.02
+        )
+        config = original.get_config()
+        restored = SoftOrthonormalConstraintRegularizer(**config)
+
+        weights = tf.random.normal((10, 5), seed=42)
+        original_loss = original(weights)
+        restored_loss = restored(weights)
+        np.testing.assert_allclose(
+            original_loss.numpy(), restored_loss.numpy(), atol=1e-7,
+            err_msg="Round-trip serialization must produce identical loss"
+        )
