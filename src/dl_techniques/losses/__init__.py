@@ -116,9 +116,13 @@ from .huber_loss import HuberLoss
 from .masked_causal_lm_loss import MaskedCausalLMLoss, PrefixMaskedCausalLMLoss
 from .mase_loss import MASELoss, mase_metric
 
+from .multi_task_loss import MultiTaskLoss
+
 from .quantile_loss import MQLoss, QuantileLoss
 
 from .nano_vlm_loss import NanoVLMLoss
+
+from .scaled_mse_loss import ScaledMseLoss
 
 from .segmentation_loss import (
     LossConfig as SegmentationLossConfig, # Renamed to avoid conflicts
@@ -141,6 +145,8 @@ from .smape_loss import SMAPELoss, smape_metric
 
 # from .tabm_loss
 from .tabm_loss import TabMLoss
+
+from .utilization_loss import MANNUtilizationLoss, GNNUtilizationLoss
 
 # from .wasserstein_loss
 from .wasserstein_loss import (
@@ -232,11 +238,15 @@ __all__ = [
     # mase_loss
     "MASELoss",
     "mase_metric",
+    # multi_task_loss
+    "MultiTaskLoss",
     # Quantile loss
     "MQLoss",
     "QuantileLoss",
     # nano_vlm_loss
     "NanoVLMLoss",
+    # scaled_mse_loss
+    "ScaledMseLoss",
     # segmentation_loss
     "SegmentationLossConfig",
     "SegmentationLosses",
@@ -253,6 +263,9 @@ __all__ = [
     "smape_metric",
     # tabm_loss
     "TabMLoss",
+    # utilization_loss
+    "MANNUtilizationLoss",
+    "GNNUtilizationLoss",
     # wasserstein_loss
     "WassersteinLoss",
     "WassersteinGradientPenaltyLoss",
