@@ -83,6 +83,7 @@ class AnalysisResults:
     spectral_summary: Dict[str, Any] = field(default_factory=dict)
     spectral_recommendations: Dict[str, List[str]] = field(default_factory=dict)
     spectral_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
+    spectral_rand_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
 
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())

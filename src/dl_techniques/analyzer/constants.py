@@ -42,6 +42,13 @@ SPECTRAL_HIGH_CONCENTRATION_PERCENTILE = 0.8
 SPECTRAL_CRITICAL_WEIGHT_THRESHOLD = 0.1
 SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED = 10
 
+# Correlation Trap Detection (Marchenko-Pastur + Tracy-Widom)
+SPECTRAL_TW_SAFETY_FACTOR = 2.5          # Tracy-Widom c_TW safety factor
+SPECTRAL_TRAP_SEVERITY_MILD = 0.1        # severity < 0.1 = no trap
+SPECTRAL_TRAP_SEVERITY_MODERATE = 0.3    # 0.1-0.3 = mild, 0.3-0.5 = moderate
+SPECTRAL_TRAP_SEVERITY_SEVERE = 0.5      # 0.5-1.0 = severe
+SPECTRAL_TRAP_SEVERITY_CRITICAL = 1.0    # > 1.0 = critical
+
 class LayerType(str, Enum):
     """Enum for supported layer types for spectral analysis"""
     UNKNOWN = 'unknown'
@@ -100,6 +107,17 @@ class MetricNames:
     ERG_LOG_DET = 'erg_log_det'
     ERG_DELTA_LAMBDA_MIN = 'erg_delta_lambda_min'
     ERG_SATISFIED = 'erg_satisfied'
+    # Correlation Trap Detection
+    HAS_TRAP = 'has_trap'
+    NUM_RAND_SPIKES = 'num_rand_spikes'
+    TRAP_SEVERITY = 'trap_severity'
+    TRAP_SEVERITY_LABEL = 'trap_severity_label'
+    MP_LAMBDA_PLUS = 'mp_lambda_plus'
+    MP_LAMBDA_MINUS = 'mp_lambda_minus'
+    TRAP_THRESHOLD = 'trap_threshold'
+    RAND_DISTANCE = 'rand_distance'
+    WW_SOFTRANK = 'ww_softrank'
+    RAND_SV_MAX = 'rand_sv_max'
 
 SPECTRAL_DEFAULT_SUMMARY_METRICS = [
     MetricNames.ALPHA, MetricNames.STABLE_RANK, MetricNames.ENTROPY,

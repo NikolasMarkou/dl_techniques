@@ -24,6 +24,7 @@ from dl_techniques.analyzer.spectral_metrics import (
     powerlaw_goodness_of_fit,
     compute_erg_condition,
     classify_learning_phase,
+    detect_correlation_trap,
 )
 
 
@@ -385,3 +386,102 @@ class TestUtilities:
         result = compute_detX_constraint(evals)
         assert result >= 0
         assert result <= len(evals)
+
+
+# =====================================================================
+# Correlation Trap Detection
+# =====================================================================
+
+class TestDetectCorrelationTrap:
+    """Tests for detect_correlation_trap MP+TW detection."""
+
+    def test_clean_random_matrix_no_trap(self):
+        """A purely random matrix should have no correlation traps."""
+        np.random.seed(42)
+        W = np.random.randn(256, 128)
+        # Randomize element-wise (for a random matrix, this is a no-op in distribution)
+        W_rand = np.random.permutation(W.flatten()).reshape(W.shape)
+        sv = np.linalg.svd(W_rand, compute_uv=False)
+        rand_evals = sv * sv
+
+        result = detect_correlation_trap(rand_evals, N=256, M=128)
+
+        assert 'has_trap' in result
+        assert 'num_rand_spikes' in result
+        assert 'trap_severity' in result
+        assert 'trap_severity_label' in result
+        assert 'mp_lambda_plus' in result
+        assert 'mp_lambda_minus' in result
+        assert 'trap_threshold' in result
+        # Random matrix should usually not trigger a trap
+        assert result['mp_lambda_plus'] > 0
+        assert result['trap_threshold'] > result['mp_lambda_plus']
+
+    def test_trap_detected_with_spike(self):
+        """Injecting a large outlier weight should create a detectable trap spike."""
+        np.random.seed(42)
+        W = np.random.randn(128, 64) * 0.1  # Small weights
+        # Inject a large outlier that will create a spike even after randomization
+        W[0, 0] = 50.0
+        W[1, 1] = 50.0
+
+        W_rand = np.random.permutation(W.flatten()).reshape(W.shape)
+        sv = np.linalg.svd(W_rand, compute_uv=False)
+        rand_evals = sv * sv
+
+        result = detect_correlation_trap(rand_evals, N=128, M=64)
+
+        assert result['has_trap'] is True
+        assert result['num_rand_spikes'] >= 1
+        assert result['trap_severity'] > 0
+        assert result['trap_severity_label'] != 'none'
+
+    def test_severity_labels_are_valid(self):
+        """Severity labels should be one of the defined categories."""
+        valid_labels = {'none', 'mild', 'moderate', 'severe', 'critical'}
+        np.random.seed(42)
+        rand_evals = np.sort(np.random.exponential(2, 100))[::-1]
+        result = detect_correlation_trap(rand_evals, N=100, M=50)
+        assert result['trap_severity_label'] in valid_labels
+
+    def test_empty_input_returns_safe_defaults(self):
+        """Empty or invalid inputs should return safe defaults."""
+        result = detect_correlation_trap(np.array([]), N=0, M=0)
+        assert result['has_trap'] is False
+        assert result['num_rand_spikes'] == 0
+        assert result['trap_severity'] == 0.0
+
+    def test_none_input_returns_safe_defaults(self):
+        result = detect_correlation_trap(None, N=10, M=5)
+        assert result['has_trap'] is False
+
+    def test_mp_edges_consistent(self):
+        """MP lambda_plus should always be >= lambda_minus."""
+        np.random.seed(42)
+        rand_evals = np.sort(np.random.exponential(1, 200))[::-1]
+        result = detect_correlation_trap(rand_evals, N=200, M=100)
+        assert result['mp_lambda_plus'] >= result['mp_lambda_minus']
+
+    def test_threshold_above_mp_edge(self):
+        """Trap threshold should always be above MP edge (lambda_plus + delta_TW)."""
+        np.random.seed(42)
+        rand_evals = np.sort(np.random.exponential(1, 200))[::-1]
+        result = detect_correlation_trap(rand_evals, N=200, M=100)
+        assert result['trap_threshold'] > result['mp_lambda_plus']
+
+    def test_custom_tw_factor(self):
+        """Higher c_TW should make detection more conservative (fewer spikes)."""
+        np.random.seed(42)
+        W = np.random.randn(64, 32) * 0.1
+        W[0, 0] = 20.0
+        W_rand = np.random.permutation(W.flatten()).reshape(W.shape)
+        sv = np.linalg.svd(W_rand, compute_uv=False)
+        rand_evals = sv * sv
+
+        result_strict = detect_correlation_trap(rand_evals, N=64, M=32, c_TW=5.0)
+        result_loose = detect_correlation_trap(rand_evals, N=64, M=32, c_TW=1.0)
+
+        # Strict threshold should be higher
+        assert result_strict['trap_threshold'] > result_loose['trap_threshold']
+        # Loose should detect at least as many spikes
+        assert result_loose['num_rand_spikes'] >= result_strict['num_rand_spikes']

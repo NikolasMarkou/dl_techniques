@@ -125,6 +125,7 @@ class SpectralAnalyzer(BaseAnalyzer):
         all_model_details = []
         # Initialize storage for ESDs and recommendations
         results.spectral_esds = {}
+        results.spectral_rand_esds = {}
         results.spectral_recommendations = {}
 
         for model_name, model in self.models.items():
@@ -138,6 +139,8 @@ class SpectralAnalyzer(BaseAnalyzer):
                 # Store ESDs and recommendations
                 if hasattr(self, '_esd_cache'):
                     results.spectral_esds[model_name] = self._esd_cache
+                if hasattr(self, '_rand_esd_cache') and self._rand_esd_cache:
+                    results.spectral_rand_esds[model_name] = self._rand_esd_cache
                 if hasattr(self, '_recommendations'):
                     results.spectral_recommendations[model_name] = self._recommendations
 
@@ -158,6 +161,7 @@ class SpectralAnalyzer(BaseAnalyzer):
         # This now returns both the details DataFrame and the flattened list of layers.
         details, all_layers = self._describe_model(model)
         self._esd_cache: Dict[int, np.ndarray] = {}
+        self._rand_esd_cache: Dict[int, np.ndarray] = {}
 
         if details.empty:
             logger.warning(f"No layers found in model '{model.name}' that meet the criteria for spectral analysis.")
@@ -228,8 +232,26 @@ class SpectralAnalyzer(BaseAnalyzer):
                 rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(rand_Wmats, N, M, n_comp)
                 rand_distance = spectral_metrics.jensen_shannon_distance(evals, rand_evals)
                 ww_softrank = np.max(rand_evals) / np.max(evals) if np.max(evals) > 0 else 0
-                randomization_metrics = {'rand_sv_max': rand_sv_max, 'rand_distance': rand_distance,
-                                         'ww_softrank': ww_softrank}
+                randomization_metrics = {
+                    MetricNames.RAND_SV_MAX: rand_sv_max,
+                    MetricNames.RAND_DISTANCE: rand_distance,
+                    MetricNames.WW_SOFTRANK: ww_softrank,
+                }
+
+                # Correlation trap detection via MP edge + Tracy-Widom threshold
+                trap_result = spectral_metrics.detect_correlation_trap(rand_evals, N, M)
+                randomization_metrics.update({
+                    MetricNames.HAS_TRAP: trap_result['has_trap'],
+                    MetricNames.NUM_RAND_SPIKES: trap_result['num_rand_spikes'],
+                    MetricNames.TRAP_SEVERITY: trap_result['trap_severity'],
+                    MetricNames.TRAP_SEVERITY_LABEL: trap_result['trap_severity_label'],
+                    MetricNames.MP_LAMBDA_PLUS: trap_result['mp_lambda_plus'],
+                    MetricNames.MP_LAMBDA_MINUS: trap_result['mp_lambda_minus'],
+                    MetricNames.TRAP_THRESHOLD: trap_result['trap_threshold'],
+                })
+
+                # Store randomized eigenvalues for visualization
+                self._rand_esd_cache[layer_id] = rand_evals
 
             metrics = {
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),
@@ -365,5 +387,31 @@ class SpectralAnalyzer(BaseAnalyzer):
             high_rank_loss = analysis_df[analysis_df['rank_loss'] > 0.1 * analysis_df['M']]
             if not high_rank_loss.empty:
                 recommendations.append("Some layers show significant rank loss. Consider SVD smoothing.")
+
+        # Correlation trap detection results
+        if MetricNames.HAS_TRAP in analysis_df.columns:
+            trap_layers = analysis_df[analysis_df[MetricNames.HAS_TRAP] == True]
+            if len(trap_layers) > 0:
+                total = len(analysis_df)
+                severity_counts = trap_layers[MetricNames.TRAP_SEVERITY_LABEL].value_counts()
+                severity_summary = ", ".join(
+                    f"{count} {label}" for label, count in severity_counts.items()
+                )
+                recommendations.append(
+                    f"Correlation traps detected in {len(trap_layers)}/{total} layers "
+                    f"({severity_summary}). "
+                    "Reduce learning rate, increase batch size, or add regularization."
+                )
+
+                # Flag critical/severe traps specifically
+                critical = trap_layers[
+                    trap_layers[MetricNames.TRAP_SEVERITY_LABEL].isin(['severe', 'critical'])
+                ]
+                if len(critical) > 0:
+                    layer_names = critical['name'].tolist()[:5]
+                    recommendations.append(
+                        f"Severe/critical traps in: {', '.join(layer_names)}. "
+                        "Consider rolling back to an earlier checkpoint."
+                    )
 
         return recommendations

@@ -58,7 +58,7 @@ class SOTrainingConfig(TrainingConfig):
     :param so_lambda: Strength of the orthonormality penalty
         ``||W^T·W - I||_F^2``. Default ``1e-3``.
     :param so_l1: Optional L1 penalty on weights. Default ``0.0``.
-    :param so_l2: Optional L2 penalty on weights. Default ``1e-4``.
+    :param so_l2: Optional L2 penalty on weights. Default ``0.0``.
     :param so_matrix_scaling: Scale penalty by matrix size for
         consistent effect across layers. Default ``True``.
     :param so_skip_embeddings: Skip embedding layers (large, sparse,
@@ -67,7 +67,7 @@ class SOTrainingConfig(TrainingConfig):
 
     so_lambda: float = 1e-3
     so_l1: float = 0.0
-    so_l2: float = 1e-4
+    so_l2: float = 0.0
     so_matrix_scaling: bool = True
     so_skip_embeddings: bool = True
 
@@ -209,7 +209,7 @@ def _build_so_parser() -> argparse.ArgumentParser:
         help="L1 weight penalty (on top of orthonormality)",
     )
     so_group.add_argument(
-        "--so-l2", type=float, default=1e-4,
+        "--so-l2", type=float, default=0.0,
         help="L2 weight penalty (on top of orthonormality)",
     )
     so_group.add_argument(
