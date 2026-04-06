@@ -34,6 +34,7 @@ import tensorflow as tf
 import tiktoken
 
 from train.common import setup_gpu
+from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -695,6 +696,9 @@ def train_gpt2(
         verbose=1,
     )
     logger.info("Training completed!")
+
+    # Plot training curves (loss + all metrics incl. so_loss when present)
+    generate_training_curves(history, results_dir)
 
     # Summary
     if "val_loss" in history.history:
