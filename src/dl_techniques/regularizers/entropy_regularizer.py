@@ -99,7 +99,7 @@ MODE_HIGH: str = "high"
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class EntropyRegularizer(keras.regularizers.Regularizer):
     """Custom regularizer that promotes entropy-based structure in neural network weights.
 
@@ -272,14 +272,12 @@ class EntropyRegularizer(keras.regularizers.Regularizer):
         This method is required for proper serialization and deserialization
         of models containing this regularizer.
         """
-        config = {}
-        config.update({
+        return {
             STR_STRENGTH: self.strength,
             STR_TARGET_ENTROPY: self.target_entropy,
             STR_AXIS: self.axis,
-            STR_EPSILON: self.epsilon
-        })
-        return config
+            STR_EPSILON: self.epsilon,
+        }
 
 
 # ---------------------------------------------------------------------

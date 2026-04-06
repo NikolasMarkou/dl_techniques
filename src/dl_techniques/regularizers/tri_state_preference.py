@@ -100,8 +100,8 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         Raises:
             ValueError: If multiplier or scale are not positive numbers.
         """
-        if multiplier <= 0:
-            raise ValueError(f"multiplier must be positive, got {multiplier}")
+        if multiplier < 0:
+            raise ValueError(f"multiplier must be non-negative, got {multiplier}")
         if scale <= 0:
             raise ValueError(f"scale must be positive, got {scale}")
 
@@ -109,7 +109,7 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         self.scale = float(scale)
         self.base_coefficient = 32.0 / 4.5  # Coefficient for exact maxima of 1
 
-        logger.info(
+        logger.debug(
             f"Initialized TriStatePreferenceRegularizer with "
             f"multiplier={self.multiplier}, scale={self.scale}"
         )
@@ -155,20 +155,8 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         """
         return {
             'multiplier': self.multiplier,
-            'scale': self.scale
+            'scale': self.scale,
         }
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'TriStatePreferenceRegularizer':
-        """Create a regularizer instance from configuration dictionary.
-
-        Args:
-            config: Configuration dictionary containing the regularizer parameters.
-
-        Returns:
-            A new instance of the TriStatePreferenceRegularizer.
-        """
-        return cls(**config)
 
     def __repr__(self) -> str:
         """Return string representation of the regularizer.

@@ -81,7 +81,7 @@ STR_SCALE: str = "scale"
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     """A regularizer that encourages weights to move towards binary values (0 or 1).
 
@@ -236,12 +236,10 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
         This method is required for proper serialization and deserialization
         of models containing this regularizer.
         """
-        config = {}
-        config.update({
+        return {
             STR_MULTIPLIER: self.multiplier,
-            STR_SCALE: self.scale
-        })
-        return config
+            STR_SCALE: self.scale,
+        }
 
 
 # ---------------------------------------------------------------------

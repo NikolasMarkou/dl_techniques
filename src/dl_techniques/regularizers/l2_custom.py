@@ -53,7 +53,7 @@ def validate_float_arg(value, name):
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class L2_custom(keras.regularizers.Regularizer):
     """A regularizer that applies a L2 regularization penalty but also allows negative l2 (forces the weights to increase)
 

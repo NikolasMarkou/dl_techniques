@@ -35,8 +35,10 @@ Regularization Formulations
 
 Implementation Details
 ---------------------
-Both regularizers compute the Gram matrix (W^T*W) and then penalize its deviation from
-the target structure:
+Both regularizers compute the Gram matrix via gram_matrix(x), which reshapes the weight
+tensor so that output channels are rows and computes G = W_reshaped * W_reshaped^T.
+The resulting matrix measures correlations between output channels, and penalizing its
+deviation from the target structure encourages orthogonality among output features:
 
 1. SoftOrthogonalConstraintRegularizer:
    - Calculates Gram matrix via gram_matrix(x)
@@ -46,7 +48,7 @@ the target structure:
 
 2. SoftOrthonormalConstraintRegularizer:
    - Calculates Gram matrix via gram_matrix(x)
-   - Computes squared Frobenius norm of (W^T*W - I)
+   - Computes squared Frobenius norm of (G - I)
    - Optionally scales by matrix size for consistent effect
 
 Additional Features
@@ -273,7 +275,7 @@ class _SoftOrthogonalBaseRegularizer(keras.regularizers.Regularizer):
 
 # ---------------------------------------------------------------------
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class SoftOrthogonalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
     """Implements soft orthogonality constraint regularization.
 
@@ -335,7 +337,7 @@ class SoftOrthogonalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
 # ---------------------------------------------------------------------
 
 
-@keras.utils.register_keras_serializable()
+@keras.saving.register_keras_serializable()
 class SoftOrthonormalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
     """Implements soft orthonormality constraint regularization.
 

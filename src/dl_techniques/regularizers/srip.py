@@ -130,7 +130,7 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
         # Current lambda value (will be updated via update_lambda method)
         self._current_lambda = self.lambda_init
 
-        logger.info(
+        logger.debug(
             f"Initialized SRIPRegularizer with lambda_init={self.lambda_init}, "
             f"power_iterations={self.power_iterations}, epsilon={self.epsilon}, "
             f"lambda_schedule={self.lambda_schedule}"
@@ -233,9 +233,10 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
 
         matrix_shape = ops.shape(matrix)
 
-        # Initialize random vector
-        # Use a deterministic initialization based on matrix shape for reproducibility
-        init_seed = ops.sum(matrix_shape) % 2147483647  # Large prime for seed
+        # Initialize random vector with a shape-dependent seed.
+        # Note: all matrices of the same shape will get the same initial vector,
+        # which is acceptable since power iteration converges regardless of init.
+        init_seed = ops.sum(matrix_shape) % 2147483647
         vector = keras.random.normal(
             shape=[matrix_shape[1], 1],
             seed=int(init_seed),
@@ -283,27 +284,18 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
         Raises:
             ValueError: If weights tensor has invalid shape.
         """
-        # Handle edge case of very small weights
-        weights_abs_max = ops.max(ops.abs(weights))
-        if weights_abs_max < self.epsilon:
-            return ops.cast(self.epsilon, dtype=weights.dtype)
-
-        # Numerical stability: normalize very large weights
-        weights_norm = ops.sqrt(ops.sum(ops.square(weights)))
-        if weights_norm > 1e8:  # Threshold for "large" weights
-            weights = weights / weights_norm
-            logger.debug(f"Normalized large weights with norm {weights_norm}")
+        # Numerical stability: normalize very large weights to prevent overflow
+        # in gram matrix computation. Uses ops.where for backend-agnostic control flow.
+        weights_norm = ops.sqrt(ops.sum(ops.square(weights)) + self.epsilon)
+        large_threshold = ops.cast(1e8, dtype=weights.dtype)
+        weights = ops.where(
+            weights_norm > large_threshold,
+            weights / weights_norm,
+            weights,
+        )
 
         # Reshape weights if needed (handles both Dense and Conv layers)
-        try:
-            weights_2d = self._reshape_kernel(weights)
-        except Exception as e:
-            logger.error(f"Failed to reshape weights with shape {weights.shape}: {e}")
-            raise ValueError(f"Cannot reshape weights with shape {weights.shape}")
-
-        # Ensure we have a valid 2D matrix
-        if len(weights_2d.shape) != 2:
-            raise ValueError(f"Expected 2D matrix after reshaping, got shape {weights_2d.shape}")
+        weights_2d = self._reshape_kernel(weights)
 
         # Compute gram matrix (W^T W - I)
         gram = ops.matmul(ops.transpose(weights_2d), weights_2d)
@@ -313,8 +305,18 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
         # Compute spectral norm of the centered gram matrix
         spec_norm = self._power_iteration(gram_centered)
 
+        # Handle near-zero weights: return epsilon instead of computing
+        # a potentially noisy spectral norm from near-zero gram matrix
+        weights_abs_max = ops.max(ops.abs(weights))
+        epsilon_tensor = ops.cast(self.epsilon, dtype=weights.dtype)
+        spec_norm = ops.where(
+            weights_abs_max < epsilon_tensor,
+            epsilon_tensor,
+            spec_norm,
+        )
+
         # Apply regularization strength
-        regularization_loss = self.current_lambda * spec_norm
+        regularization_loss = ops.cast(self.current_lambda, dtype=weights.dtype) * spec_norm
 
         return regularization_loss
 
@@ -346,7 +348,7 @@ class SRIPRegularizer(keras.regularizers.Regularizer):
             'lambda_init': self.lambda_init,
             'power_iterations': self.power_iterations,
             'epsilon': self.epsilon,
-            'lambda_schedule': {int(k): float(v) for k, v in self.lambda_schedule.items()}
+            'lambda_schedule': {int(k): float(v) for k, v in self.lambda_schedule.items()},
         }
 
     @classmethod
