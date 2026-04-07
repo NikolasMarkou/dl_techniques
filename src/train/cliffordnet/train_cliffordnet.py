@@ -434,7 +434,7 @@ def train_model(args) -> None:
 
     # Warm-up build
     _ = model(np.zeros((1,) + input_shape, dtype="float32"), training=False)
-    logger.info(f"Total parameters: {model.count_params():,}")
+    model.summary(print_fn=logger.info)
 
     # ---- Optimiser & schedule ----------------------------------------
     total_steps = args.epochs * steps_per_epoch

@@ -183,8 +183,35 @@ class TestGPT2WeightTying:
 class TestGPT2CausalMasking:
     """Test that causal masking prevents attending to future tokens."""
 
+    def test_causal_masking_future_does_not_affect_past(self, tiny_config):
+        """Changing a future token must not change any earlier position's logits."""
+        tiny_config = {**tiny_config, "dropout_rate": 0.0, "attention_dropout_rate": 0.0}
+        model = GPT2(**tiny_config)
+
+        # Only the last token differs between sequences
+        seq1 = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int32)
+        seq2 = np.array([[1, 2, 3, 4, 5, 6, 7, 99]], dtype=np.int32)
+
+        out1 = model(seq1, training=False)
+        out2 = model(seq2, training=False)
+
+        logits1 = keras.ops.convert_to_numpy(out1["logits"])
+        logits2 = keras.ops.convert_to_numpy(out2["logits"])
+
+        # Positions 0-6 must be identical (future cannot affect past)
+        for pos in range(7):
+            np.testing.assert_allclose(
+                logits1[0, pos], logits2[0, pos], atol=1e-6,
+                err_msg=f"Position {pos} logits changed when only position 7 changed "
+                        f"(causality violation: future leaking into past)",
+            )
+
+        # Position 7 should differ (it sees different input at its own position)
+        assert not np.allclose(logits1[0, 7], logits2[0, 7], atol=1e-3)
+
     def test_causal_masking_later_tokens_differ(self, tiny_config):
         """Later tokens should differ when context changes."""
+        tiny_config = {**tiny_config, "dropout_rate": 0.0, "attention_dropout_rate": 0.0}
         model = GPT2(**tiny_config)
 
         # Same prefix up to position 3, then diverge
@@ -197,14 +224,15 @@ class TestGPT2CausalMasking:
         logits1 = keras.ops.convert_to_numpy(out1["logits"])
         logits2 = keras.ops.convert_to_numpy(out2["logits"])
 
+        # Positions 0-2 must be identical (same prefix, causal masking)
+        for pos in range(3):
+            np.testing.assert_allclose(
+                logits1[0, pos], logits2[0, pos], atol=1e-6,
+                err_msg=f"Position {pos} logits differ despite identical prefix",
+            )
+
         # Tokens at position 4+ should differ (different preceding tokens)
         assert not np.allclose(logits1[0, 4], logits2[0, 4], atol=1e-3)
-
-        # Logits at positions 0-2 should be closer than at position 4+
-        # (positions 0-2 see identical context under causal masking)
-        diff_early = np.abs(logits1[0, 2] - logits2[0, 2]).max()
-        diff_late = np.abs(logits1[0, 5] - logits2[0, 5]).max()
-        assert diff_early < diff_late
 
 
 # ---------------------------------------------------------------------

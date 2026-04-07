@@ -9,6 +9,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     SparseRollingGeometricProduct,
     GatedGeometricResidual,
     CliffordNetBlock,
+    CausalCliffordNetBlock,
 )
 
 
@@ -646,6 +647,350 @@ class TestCliffordNetBlock:
         for block in blocks:
             x = block(x)
         assert x.shape == (2, 8, 8, channels)
+        assert not np.any(np.isnan(x.numpy()))
+
+
+# ===========================================================================
+# TestCausalCliffordNetBlock
+# ===========================================================================
+
+
+class TestCausalCliffordNetBlock:
+    """Test suite for CausalCliffordNetBlock (autoregressive NLP variant)."""
+
+    @pytest.fixture
+    def channels(self) -> int:
+        return 16
+
+    @pytest.fixture
+    def shifts(self) -> list:
+        return [1, 2]
+
+    @pytest.fixture
+    def seq_tensor(self) -> tf.Tensor:
+        """4-D sequence tensor (B, 1, seq_len, D)."""
+        return tf.random.normal([2, 1, 16, 16])
+
+    @pytest.fixture
+    def layer_instance(self, channels, shifts) -> CausalCliffordNetBlock:
+        return CausalCliffordNetBlock(channels=channels, shifts=shifts)
+
+    # ---- Initialization ---------------------------------------------------
+
+    def test_initialization_defaults(self, channels, shifts):
+        layer = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+        assert layer.channels == channels
+        assert layer.shifts == shifts
+        assert layer.cli_mode == "full"
+        assert layer.ctx_mode == "diff"
+
+    def test_initialization_custom(self, channels, shifts):
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts,
+            cli_mode="wedge", ctx_mode="abs",
+            use_global_context=True, layer_scale_init=1e-3,
+            drop_path_rate=0.1,
+        )
+        assert layer.cli_mode == "wedge"
+        assert layer.ctx_mode == "abs"
+        assert layer.use_global_context is True
+
+    def test_invalid_channels(self, shifts):
+        with pytest.raises(ValueError, match="channels"):
+            CausalCliffordNetBlock(channels=0, shifts=shifts)
+
+    def test_invalid_ctx_mode(self, channels, shifts):
+        with pytest.raises(ValueError, match="ctx_mode"):
+            CausalCliffordNetBlock(channels=channels, shifts=shifts, ctx_mode="bad")
+
+    # ---- Build & Shape ----------------------------------------------------
+
+    def test_build(self, layer_instance, seq_tensor):
+        layer_instance(seq_tensor)
+        assert layer_instance.built is True
+        assert layer_instance.input_norm.built is True
+        assert layer_instance.linear_det.built is True
+        assert layer_instance.dw_conv.built is True
+        assert layer_instance.dw_conv2.built is True
+        assert layer_instance.ctx_bn.built is True
+        assert layer_instance.local_geo_prod.built is True
+        assert layer_instance.ggr.built is True
+
+    def test_output_shape(self, layer_instance, seq_tensor):
+        out = layer_instance(seq_tensor)
+        assert out.shape == seq_tensor.shape
+
+    def test_output_shape_global_context(self, channels, shifts, seq_tensor):
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, use_global_context=True,
+        )
+        out = layer(seq_tensor)
+        assert out.shape == seq_tensor.shape
+
+    def test_compute_output_shape(self, layer_instance, seq_tensor):
+        layer_instance(seq_tensor)
+        computed = layer_instance.compute_output_shape(seq_tensor.shape)
+        assert computed == seq_tensor.shape
+
+    def test_different_sequence_lengths(self, channels, shifts):
+        layer = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+        for seq_len in [4, 16, 64, 128]:
+            x = tf.random.normal([2, 1, seq_len, channels])
+            out = layer(x)
+            assert out.shape == (2, 1, seq_len, channels)
+
+    def test_different_batch_sizes(self, channels, shifts):
+        layer = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+        for bs in [1, 4, 16]:
+            x = tf.random.normal([bs, 1, 16, channels])
+            out = layer(x)
+            assert out.shape[0] == bs
+
+    # ---- Causality (CRITICAL) ---------------------------------------------
+
+    def test_causality_future_does_not_affect_past(self, channels, shifts):
+        """Changing a future token must not alter any earlier position's output.
+
+        Uses layer_scale_init=1.0 to make block output significant (not
+        dominated by the residual skip connection).
+        """
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = tf.identity(x1).numpy()
+        # Change last position only
+        x2[0, 0, -1, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False)
+        out2 = layer(x2, training=False)
+
+        # All positions except the last must be identical
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out1[0, 0, :-1]),
+            keras.ops.convert_to_numpy(out2[0, 0, :-1]),
+            atol=1e-6,
+            err_msg="Future position change affected earlier positions (causality violation)",
+        )
+        # Last position should differ
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(out1[0, 0, -1]),
+            keras.ops.convert_to_numpy(out2[0, 0, -1]),
+            atol=1e-3,
+        )
+
+    def test_causality_middle_change_no_backward_leak(self, channels, shifts):
+        """Changing a middle position must not affect any earlier position."""
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = tf.identity(x1).numpy()
+        change_pos = 8
+        x2[0, 0, change_pos, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False)
+        out2 = layer(x2, training=False)
+
+        # Positions before change_pos must be identical
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out1[0, 0, :change_pos]),
+            keras.ops.convert_to_numpy(out2[0, 0, :change_pos]),
+            atol=1e-6,
+            err_msg="Backward leak: earlier positions affected by later change",
+        )
+        # Position at change_pos should differ
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(out1[0, 0, change_pos]),
+            keras.ops.convert_to_numpy(out2[0, 0, change_pos]),
+            atol=1e-3,
+        )
+
+    def test_causality_stacked_blocks(self, channels, shifts):
+        """Causality holds through multiple stacked blocks."""
+        blocks = [
+            CausalCliffordNetBlock(
+                channels=channels, shifts=shifts,
+                layer_scale_init=1.0, name=f"b{i}",
+            )
+            for i in range(4)
+        ]
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = tf.identity(x1).numpy()
+        x2[0, 0, -1, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        o1, o2 = x1, x2
+        for block in blocks:
+            o1 = block(o1, training=False)
+            o2 = block(o2, training=False)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(o1[0, 0, :-1]),
+            keras.ops.convert_to_numpy(o2[0, 0, :-1]),
+            atol=1e-5,
+            err_msg="Causality violation after stacking 4 blocks",
+        )
+
+    def test_causality_with_global_context(self, channels, shifts):
+        """Global context branch uses causal cumulative mean, not full mean."""
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts,
+            use_global_context=True,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = tf.identity(x1).numpy()
+        x2[0, 0, -1, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False)
+        out2 = layer(x2, training=False)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out1[0, 0, :-1]),
+            keras.ops.convert_to_numpy(out2[0, 0, :-1]),
+            atol=1e-5,
+            err_msg="Global context branch leaks future info (causality violation)",
+        )
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(out1[0, 0, -1]),
+            keras.ops.convert_to_numpy(out2[0, 0, -1]),
+            atol=1e-3,
+        )
+
+    # ---- Functional -------------------------------------------------------
+
+    def test_ctx_mode_diff_vs_abs_differ(self, channels, shifts):
+        x = tf.random.normal([2, 1, 16, channels], seed=42)
+        layer_diff = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, ctx_mode="diff", layer_scale_init=1.0,
+        )
+        layer_abs = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, ctx_mode="abs", layer_scale_init=1.0,
+        )
+        out_diff = layer_diff(x, training=False).numpy()
+        out_abs = layer_abs(x, training=False).numpy()
+        assert not np.allclose(out_diff, out_abs, atol=1e-3)
+
+    def test_residual_connection_identity_at_init(self, channels, shifts):
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, layer_scale_init=1e-10,
+        )
+        x = tf.random.normal([2, 1, 8, channels])
+        out = layer(x)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x),
+            rtol=1e-4, atol=1e-4,
+            err_msg="With gamma ~ 0, output should be close to input",
+        )
+
+    def test_all_cli_modes(self, channels, shifts, seq_tensor):
+        for mode in ("inner", "wedge", "full"):
+            layer = CausalCliffordNetBlock(
+                channels=channels, shifts=shifts, cli_mode=mode,
+            )
+            out = layer(seq_tensor)
+            assert out.shape == seq_tensor.shape
+            assert not np.any(np.isnan(out.numpy())), f"NaN in cli_mode={mode}"
+
+    def test_different_shift_sets(self, channels):
+        x = tf.random.normal([2, 1, 16, channels])
+        for shifts in [[1], [1, 2], [1, 2, 4, 8]]:
+            layer = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+            out = layer(x)
+            assert out.shape == x.shape
+
+    def test_numerical_stability(self, channels, shifts):
+        layer = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+        for scale in [1e-8, 1e8]:
+            x = tf.ones([2, 1, 8, channels]) * scale
+            out = layer(x)
+            assert not np.any(np.isnan(out.numpy())), f"NaN at scale {scale}"
+            assert not np.any(np.isinf(out.numpy())), f"Inf at scale {scale}"
+
+    # ---- Determinism & Training -------------------------------------------
+
+    def test_inference_deterministic(self, channels, shifts, seq_tensor):
+        layer = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, drop_path_rate=0.0,
+        )
+        out1 = layer(seq_tensor, training=False)
+        out2 = layer(seq_tensor, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out1),
+            keras.ops.convert_to_numpy(out2),
+            rtol=1e-6, atol=1e-6,
+        )
+
+    def test_gradient_flow(self, channels, shifts):
+        layer = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+        x = tf.Variable(tf.random.normal([2, 1, 8, channels]))
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out))
+        grads = tape.gradient(loss, x)
+        assert grads is not None
+        assert np.any(grads.numpy() != 0)
+
+    # ---- Serialization ----------------------------------------------------
+
+    def test_serialization(self, channels, shifts):
+        original = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts,
+            cli_mode="wedge", ctx_mode="abs",
+            use_global_context=True, layer_scale_init=1e-3,
+            drop_path_rate=0.1, name="causal_cb_s",
+        )
+        config = original.get_config()
+        restored = CausalCliffordNetBlock.from_config(config)
+
+        assert restored.channels == original.channels
+        assert restored.shifts == original.shifts
+        assert restored.cli_mode == original.cli_mode
+        assert restored.ctx_mode == original.ctx_mode
+        assert restored.use_global_context == original.use_global_context
+        assert restored.layer_scale_init == original.layer_scale_init
+        assert restored.drop_path_rate == original.drop_path_rate
+
+    def test_model_save_load(self, channels, shifts):
+        x = tf.random.normal([2, 1, 16, channels])
+
+        inp = keras.Input(shape=(1, 16, channels))
+        out = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, name="causal_cb",
+        )(inp)
+        model = keras.Model(inputs=inp, outputs=out)
+
+        original_pred = model.predict(x, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "model.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        loaded_pred = loaded.predict(x, verbose=0)
+        np.testing.assert_allclose(
+            original_pred, loaded_pred, rtol=1e-5, atol=1e-5,
+            err_msg="Predictions should match after save/load",
+        )
+
+    def test_stacking_multiple_blocks(self, channels, shifts):
+        x = tf.random.normal([2, 1, 16, channels])
+        blocks = [
+            CausalCliffordNetBlock(
+                channels=channels, shifts=shifts, name=f"cb{i}",
+            )
+            for i in range(4)
+        ]
+        for block in blocks:
+            x = block(x)
+        assert x.shape == (2, 1, 16, channels)
         assert not np.any(np.isnan(x.numpy()))
 
 

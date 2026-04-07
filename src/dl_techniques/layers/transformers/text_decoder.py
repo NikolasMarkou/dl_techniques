@@ -404,7 +404,12 @@ class TextDecoder(keras.layers.Layer):
         x = self.embed_dropout_layer(x, training=training)
 
         # 4. Create Attention Mask using the Masking Factory
-        # Create causal mask
+        # The masking factory uses True=block semantics (True means "mask out"),
+        # but the attention layer expects True=attend semantics (True means
+        # "allow attention"). We build the mask in block-semantics and invert
+        # at the end so the attention layer receives the correct convention.
+
+        # Create causal mask (True = future position to block)
         causal_mask = create_mask('causal', seq_len=seq_len, dtype='bool')
         # Add batch dimension and broadcast
         causal_mask = ops.expand_dims(causal_mask, axis=0)
@@ -412,11 +417,10 @@ class TextDecoder(keras.layers.Layer):
 
         if attention_mask is not None:
             # Convert attention_mask from 1/0 format to boolean padding mask
-            # True indicates padding (positions to mask)
+            # True indicates padding (positions to block)
             padding_mask_1d = ops.equal(attention_mask, 0)  # Shape: (batch, seq_len)
 
             # Create padding attention mask using the factory
-            # The factory expects the padding mask in extra_params
             padding_config = MaskConfig(
                 mask_type='padding',
                 dtype='bool',
@@ -424,16 +428,18 @@ class TextDecoder(keras.layers.Layer):
             )
             padding_mask_3d = create_mask(config=padding_config)  # Shape: (batch, seq_len, seq_len)
 
-            # Combine causal and padding masks using the factory's combine function
-            # Use 'or' to mask positions that are either future tokens OR padding
+            # Combine causal and padding masks (True = block in either case)
             combined_mask = combine_masks(causal_mask, padding_mask_3d, combination='or')
         else:
-            # Use only causal mask
             combined_mask = causal_mask
+
+        # Invert: convert from block-semantics (True=block) to
+        # attend-semantics (True=attend) expected by the attention layer
+        attend_mask = ops.logical_not(combined_mask)
 
         # 5. Apply Transformer Layers
         for layer in self.decoder_layers:
-            x = layer(x, attention_mask=combined_mask, training=training)
+            x = layer(x, attention_mask=attend_mask, training=training)
 
         # 6. Final Normalization
         x = self.final_norm(x)
