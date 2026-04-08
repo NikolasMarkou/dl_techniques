@@ -990,6 +990,98 @@ class TestIntegration:
 
 
 # ---------------------------------------------------------------------
+# Addressing Health Tests
+# ---------------------------------------------------------------------
+
+
+class TestAddressingHealth:
+    """Tests verifying the NTM addressing mechanism is functional."""
+
+    def test_memory_init_breaks_symmetry(self):
+        """Memory initialization must produce distinct rows."""
+        memory = NTMMemory(memory_size=32, memory_dim=16)
+        state = memory.initialize_state(batch_size=2)
+        mem_np = ops.convert_to_numpy(state.memory)
+
+        # Rows should NOT all be identical
+        row_std = np.std(mem_np[0], axis=0)  # std across 32 rows per dim
+        assert np.any(row_std > 1e-6), (
+            "Memory rows are identical — addressing gradients will be zero"
+        )
+
+    def test_ntm_cell_initial_memory_is_learnable(self):
+        """NTMCell should have a trainable initial memory weight."""
+        config = NTMConfig(
+            memory_size=32, memory_dim=16, controller_dim=64,
+            num_read_heads=1, num_write_heads=1, shift_range=3,
+            use_memory_init=True,
+        )
+        cell = NTMCell(config)
+        # Build the cell
+        cell.build((None, 8))
+
+        assert cell._initial_memory is not None, (
+            "use_memory_init=True but no learnable initial memory created"
+        )
+        assert cell._initial_memory.trainable
+
+    def test_addressing_gradients_nonzero(self):
+        """All addressing parameters must receive non-zero gradients."""
+        config = NTMConfig(
+            memory_size=32, memory_dim=16, controller_dim=64,
+            num_read_heads=1, num_write_heads=1, shift_range=3,
+        )
+        cell = NTMCell(config)
+        rnn = keras.layers.RNN(cell, return_sequences=True)
+
+        x = np.random.randn(2, 5, 8).astype("float32")
+        x_t = ops.convert_to_tensor(x)
+
+        with tf.GradientTape() as tape:
+            y = rnn(x_t, training=True)
+            loss = ops.mean(y)
+        grads = tape.gradient(loss, rnn.trainable_weights)
+
+        for w, g in zip(rnn.trainable_weights, grads):
+            assert g is not None, f"Gradient is None for {w.path}"
+            gnorm = float(ops.sqrt(ops.sum(ops.square(g))))
+            assert gnorm > 1e-10, (
+                f"Gradient is effectively zero for {w.path} (norm={gnorm:.2e})"
+            )
+
+    def test_initial_memory_gradient_flows(self):
+        """The learnable initial memory weight must receive gradients."""
+        config = NTMConfig(
+            memory_size=32, memory_dim=16, controller_dim=64,
+            num_read_heads=1, num_write_heads=1, shift_range=3,
+            use_memory_init=True,
+        )
+        cell = NTMCell(config)
+        rnn = keras.layers.RNN(cell, return_sequences=True)
+
+        x = np.random.randn(2, 5, 8).astype("float32")
+        x_t = ops.convert_to_tensor(x)
+
+        with tf.GradientTape() as tape:
+            y = rnn(x_t, training=True)
+            loss = ops.mean(y)
+        grads = tape.gradient(loss, rnn.trainable_weights)
+
+        # Find the initial_memory weight
+        mem_grad = None
+        for w, g in zip(rnn.trainable_weights, grads):
+            if "initial_memory" in w.path:
+                mem_grad = g
+                break
+
+        assert mem_grad is not None, "initial_memory weight not found"
+        gnorm = float(ops.sqrt(ops.sum(ops.square(mem_grad))))
+        assert gnorm > 1e-8, (
+            f"initial_memory gradient too small: {gnorm:.2e}"
+        )
+
+
+# ---------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------
 

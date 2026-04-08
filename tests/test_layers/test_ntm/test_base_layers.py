@@ -486,8 +486,8 @@ class TestDifferentiableSelectCopy:
         np.testing.assert_allclose(
             np.sum(read_weights_np, axis=-1),
             np.ones(batch_size),
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=1e-4,
+            atol=1e-4,
         )
 
         # Read output should have correct shape

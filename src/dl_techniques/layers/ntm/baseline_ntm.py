@@ -96,12 +96,21 @@ class NTMMemory(BaseMemory):
         """
         Initialize memory state for a new sequence.
 
+        Uses small random values to break symmetry across memory slots,
+        ensuring that content-based addressing produces differentiated
+        cosine similarities and non-zero gradients through the addressing
+        mechanism.
+
         :param batch_size: Number of sequences in the batch.
         :type batch_size: int
-        :return: Initial memory state with near-zero memory values.
+        :return: Initial memory state with small random values.
         :rtype: MemoryState
         """
-        memory = ops.ones((batch_size, self.memory_size, self.memory_dim)) * self.epsilon
+        memory = keras.random.normal(
+            (batch_size, self.memory_size, self.memory_dim),
+            mean=0.0,
+            stddev=1e-3,
+        )
         usage = ops.zeros((batch_size, self.memory_size))
         return MemoryState(memory=memory, usage=usage)
 
@@ -948,6 +957,9 @@ class NTMCell(keras.layers.Layer):
             for i in range(self.config.num_write_heads)
         ]
 
+        # Learnable initial memory (created in build)
+        self._initial_memory = None
+
         # Pre-calculate state sizes
         self._state_size = self._calculate_state_size()
         self._output_size = self.config.controller_dim + (
@@ -1011,6 +1023,15 @@ class NTMCell(keras.layers.Layer):
 
         for head in self.write_heads:
             head.build(controller_output_shape)
+
+        # Create learnable initial memory if configured
+        if self.config.use_memory_init:
+            self._initial_memory = self.add_weight(
+                name="initial_memory",
+                shape=(1, self.config.memory_size, self.config.memory_dim),
+                initializer=keras.initializers.RandomNormal(stddev=1e-3),
+                trainable=True,
+            )
 
         super().build(input_shape)
 
@@ -1159,11 +1180,19 @@ class NTMCell(keras.layers.Layer):
         elif self.config.controller_type == "gru":
             states.append(ops.zeros((batch_size, self.config.controller_dim)))
 
-        # Memory
-        states.append(
-            ops.ones((batch_size, self.config.memory_size, self.config.memory_dim))
-            * self.config.epsilon
-        )
+        # Memory — use learnable initial memory if available, else random
+        if self._initial_memory is not None:
+            memory = ops.broadcast_to(
+                self._initial_memory,
+                (batch_size, self.config.memory_size, self.config.memory_dim),
+            )
+        else:
+            memory = keras.random.normal(
+                (batch_size, self.config.memory_size, self.config.memory_dim),
+                mean=0.0,
+                stddev=1e-3,
+            )
+        states.append(memory)
 
         # Read Vectors
         for _ in range(self.config.num_read_heads):
