@@ -343,9 +343,9 @@ class GroupAttention(keras.layers.Layer):
 
         # Finalize group attention scores.
         g_attn = ops.where(
-            ops.logical_not(ops.logical_xor(triu_mask, b)), g_attn, 0.0
+            ops.logical_xor(triu_mask, b), g_attn, 0.0
         )
-        neibor_attn_diag_filled = ops.where(b, 1e-9, neibor_attn)
+        neibor_attn_diag_filled = ops.where(b, 1.0, neibor_attn)
         g_attn = (
             g_attn
             + ops.transpose(g_attn, axes=(0, 2, 1))
