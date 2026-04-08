@@ -34,6 +34,7 @@ Usage::
 """
 
 import os
+import csv
 import json
 import glob
 import time
@@ -172,6 +173,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         max_checkpoints: int = 3,
         model_name: str = "cliffordnet_nlp",
         initial_step: int = 0,
+        log_every_steps: int = 100,
     ):
         super().__init__()
         self.save_every_steps = save_every_steps
@@ -179,12 +181,18 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self.max_checkpoints = max_checkpoints
         self.model_name = model_name
         self._global_step = initial_step
+        self._log_every_steps = log_every_steps
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
         self._analysis_dir = os.path.join(save_dir, "step_analysis")
         os.makedirs(self._ckpt_dir, exist_ok=True)
         if analyze_every_steps > 0:
             os.makedirs(self._analysis_dir, exist_ok=True)
+
+        # Step-level CSV log (replaces epoch-level CSVLogger)
+        self._csv_path = os.path.join(save_dir, "training_log.csv")
+        self._csv_file = None
+        self._csv_writer = None
 
         self._analysis_config = AnalysisConfig(
             analyze_weights=True,
@@ -197,11 +205,17 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         logger.info(
             f"StepCheckpointCallback: save every {save_every_steps} steps, "
             f"analyze every {analyze_every_steps} steps, "
-            f"keep max {max_checkpoints} checkpoints"
+            f"keep max {max_checkpoints} checkpoints, "
+            f"log every {log_every_steps} steps"
         )
 
     def on_train_batch_end(self, batch, logs=None):
         self._global_step += 1
+
+        # Step-level CSV logging
+        if self._global_step % self._log_every_steps == 0:
+            self._log_metrics(logs)
+
         if self._global_step % self.save_every_steps == 0:
             self._save_checkpoint()
         if (
@@ -211,9 +225,26 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             self._run_analysis()
 
     def on_train_end(self, logs=None):
+        if self._csv_file is not None:
+            self._csv_file.close()
+            self._csv_file = None
         path = os.path.join(self._ckpt_dir, "final.keras")
         self.model.save(path)
         logger.info(f"Final checkpoint saved: {path}")
+
+    def _log_metrics(self, logs):
+        if logs is None:
+            return
+        row = {"step": self._global_step, **logs}
+        if self._csv_writer is None:
+            self._csv_file = open(self._csv_path, "a", newline="")
+            self._csv_writer = csv.DictWriter(
+                self._csv_file, fieldnames=list(row.keys()),
+            )
+            if self._csv_file.tell() == 0:
+                self._csv_writer.writeheader()
+        self._csv_writer.writerow(row)
+        self._csv_file.flush()
 
     def _save_checkpoint(self):
         path = os.path.join(
@@ -623,7 +654,6 @@ def train_cliffordnet_nlp(
 
     tf.random.set_seed(42)
     keras.utils.set_random_seed(42)
-    os.makedirs(config.save_dir, exist_ok=True)
 
     # Tokenizer
     preprocessor = create_tokenizer(
@@ -661,6 +691,12 @@ def train_cliffordnet_nlp(
         results_dir_prefix="cliffordnet_nlp",
         include_analyzer=False,
     )
+    # Remove epoch-level CSVLogger — StepCheckpointCallback handles
+    # step-level CSV logging instead (epochs are too long for Wikipedia).
+    callbacks = [
+        cb for cb in callbacks
+        if not isinstance(cb, keras.callbacks.CSVLogger)
+    ]
     callbacks.append(StepCheckpointCallback(
         save_dir=results_dir,
         save_every_steps=config.checkpoint_every_steps,
@@ -734,7 +770,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--variant", type=str, default="nano",
         choices=list(CliffordNetLM.MODEL_VARIANTS.keys()) + ["custom"],
-        help="Model variant (nano/lite/lite_g/custom)",
+        help="Model variant (nano/mini/medium/large/xl/custom)",
     )
     p.add_argument("--channels", type=int, default=128,
                     help="Feature dimension D (custom variant)")
