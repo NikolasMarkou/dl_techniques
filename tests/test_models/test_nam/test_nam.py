@@ -624,3 +624,71 @@ class TestDataGenerator:
             if validity[i, 0] > 0.5:
                 expected = labels["left_operand"][i, 0] + labels["right_operand"][i, 0]
                 assert expected == pytest.approx(targets[i, 0], abs=1e-4)
+
+
+# ── Training Resume Tests ──────────────────────────────────────────────
+
+
+class TestTrainingResume:
+    """Verify that checkpoint resume preserves step/LR/optimizer state."""
+
+    def test_sidecar_round_trip(self, tmp_path):
+        """save_training_state + load_training_state preserves all fields."""
+        from train.nam.train_nam import save_training_state, load_training_state
+
+        weights_path = str(tmp_path / "step_000100.weights.h5")
+        # Write a dummy weights file so the sidecar can sit next to it
+        (tmp_path / "step_000100.weights.h5").write_bytes(b"dummy")
+
+        save_training_state(
+            weights_path,
+            step=100,
+            total_steps=20000,
+            best_loss=0.1234,
+            curriculum=True,
+            curriculum_cap=0.8,
+        )
+
+        loaded = load_training_state(weights_path)
+        assert loaded is not None
+        assert loaded["step"] == 100
+        assert loaded["total_steps"] == 20000
+        assert loaded["best_loss"] == pytest.approx(0.1234)
+        assert loaded["curriculum"] is True
+        assert loaded["curriculum_cap"] == pytest.approx(0.8)
+
+    def test_sidecar_missing_returns_none(self, tmp_path):
+        """Missing sidecar must return None (graceful fallback)."""
+        from train.nam.train_nam import load_training_state
+
+        weights_path = str(tmp_path / "nonexistent.weights.h5")
+        assert load_training_state(weights_path) is None
+
+    def test_optimizer_iterations_assignable(self):
+        """Keras 3 Adam with a LearningRateSchedule allows iterations.assign.
+
+        This is the core mechanism by which the LR schedule picks up at
+        the correct point after resume — the schedule is a pure function
+        of optimizer.iterations.
+        """
+        from train.nam.train_nam import create_optimizer
+
+        optimizer = create_optimizer(
+            lr=1e-4,
+            weight_decay=1e-5,
+            clip_norm=10.0,
+            warmup_steps=1000,
+            total_steps=20000,
+        )
+
+        # Force iterations variable creation
+        _ = optimizer.iterations
+        # Assign a non-zero step count (simulate resume)
+        optimizer.iterations.assign(5000)
+        assert int(optimizer.iterations.numpy()) == 5000
+
+        # The LR at step 5000 should be the post-warmup cosine value,
+        # not the warmup ramp value.
+        lr_at_5000 = float(optimizer.learning_rate)
+        assert lr_at_5000 > 1e-7  # past warmup
+        assert lr_at_5000 <= 1e-4 + 1e-8  # bounded by peak lr

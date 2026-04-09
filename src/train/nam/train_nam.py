@@ -144,6 +144,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _sidecar_path(weights_path: str) -> str:
+    """Sidecar JSON path for a given weights file (`*.weights.h5` -> `*.state.json`)."""
+    return weights_path.replace(".weights.h5", ".state.json")
+
+
+def save_training_state(
+    weights_path: str,
+    step: int,
+    total_steps: int,
+    best_loss: float,
+    curriculum: bool,
+    curriculum_cap: float,
+) -> None:
+    """Write sidecar JSON next to a weights checkpoint.
+
+    DECISION D-006: checkpoint state is stored as a plain JSON sidecar
+    (not Keras optimizer serialization) so resume survives Keras format
+    drift and is backend-agnostic. Adam momentum is not preserved
+    (re-warms in ~100 steps).
+    """
+    state = {
+        "step": int(step),
+        "total_steps": int(total_steps),
+        "best_loss": float(best_loss),
+        "curriculum": bool(curriculum),
+        "curriculum_cap": float(curriculum_cap),
+    }
+    with open(_sidecar_path(weights_path), "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def load_training_state(weights_path: str) -> dict | None:
+    """Load sidecar JSON for a weights checkpoint. Returns None if missing."""
+    p = _sidecar_path(weights_path)
+    if not Path(p).exists():
+        return None
+    with open(p, "r") as f:
+        return json.load(f)
+
+
 def create_optimizer(
     lr: float,
     weight_decay: float,
@@ -671,9 +711,33 @@ def main():
     logger.info(f"Model parameters: {param_count:,}")
 
     # Load checkpoint if provided
+    start_step = 0
+    best_loss = float("inf")
     if args.checkpoint:
         logger.info(f"Loading checkpoint from {args.checkpoint}")
         model.load_weights(args.checkpoint)
+
+        # DECISION D-006: restore training state from sidecar JSON if present
+        saved_state = load_training_state(args.checkpoint)
+        if saved_state is not None:
+            start_step = saved_state["step"]
+            best_loss = saved_state["best_loss"]
+            logger.info(
+                f"Resume state loaded from sidecar: "
+                f"start_step={start_step} best_loss={best_loss:.4f} "
+                f"(saved curriculum={saved_state['curriculum']} "
+                f"cap={saved_state['curriculum_cap']})"
+            )
+            if start_step >= args.steps:
+                logger.warning(
+                    f"Resume start_step={start_step} >= --steps={args.steps}; "
+                    "nothing to do."
+                )
+        else:
+            logger.warning(
+                f"No sidecar state found at {_sidecar_path(args.checkpoint)}; "
+                "resuming from step 0 (LR warmup + curriculum progress reset)."
+            )
 
     # Create optimizer
     optimizer = create_optimizer(
@@ -683,6 +747,14 @@ def main():
         warmup_steps=args.warmup_steps,
         total_steps=args.steps,
     )
+
+    # Restore optimizer step counter so the LR schedule picks up at the
+    # correct point (the schedule is a pure function of optimizer.iterations).
+    if start_step > 0:
+        # Touch optimizer.iterations to force variable creation on first access.
+        _ = optimizer.iterations
+        optimizer.iterations.assign(start_step)
+        logger.info(f"Restored optimizer.iterations = {start_step}")
 
     # Get curriculum config
     use_curriculum = args.curriculum
@@ -760,10 +832,9 @@ def main():
 
     # Training loop
     metrics_log = []
-    best_loss = float("inf")
     start_time = time.time()
 
-    for step in range(1, args.steps + 1):
+    for step in range(start_step + 1, args.steps + 1):
         # Generate batch — curriculum mode shifts difficulty over training
         if use_curriculum:
             # DECISION D-002: cap progress at --curriculum-cap (default 0.8)
@@ -899,18 +970,39 @@ def main():
             logger.info(f"  ── Digit accuracy matrix (step {step}) ──")
             _eval_digit_matrix(model, tokenizer, act_steps=act_steps, max_digits=10, samples_per_cell=4)
 
+        # Track best loss on every step so the sidecar reflects the
+        # current best at save time (not a stale value from the prior save).
+        new_best = metrics["total_loss"] < best_loss
+        if new_best:
+            best_loss = metrics["total_loss"]
+
         # Save checkpoint
         if step % args.save_interval == 0:
             ckpt_dir = output_dir / "checkpoints"
             ckpt_dir.mkdir(exist_ok=True)
             ckpt_path = ckpt_dir / f"step_{step:06d}.weights.h5"
             model.save_weights(str(ckpt_path))
+            save_training_state(
+                str(ckpt_path),
+                step=step,
+                total_steps=args.steps,
+                best_loss=best_loss,
+                curriculum=args.curriculum,
+                curriculum_cap=args.curriculum_cap,
+            )
             logger.info(f"Saved checkpoint: {ckpt_path}")
 
-            if metrics["total_loss"] < best_loss:
-                best_loss = metrics["total_loss"]
+            if new_best:
                 best_path = ckpt_dir / "best.weights.h5"
                 model.save_weights(str(best_path))
+                save_training_state(
+                    str(best_path),
+                    step=step,
+                    total_steps=args.steps,
+                    best_loss=best_loss,
+                    curriculum=args.curriculum,
+                    curriculum_cap=args.curriculum_cap,
+                )
                 logger.info(f"New best model saved: {best_path}")
 
     # Save final model and metrics
@@ -918,6 +1010,14 @@ def main():
     ckpt_dir.mkdir(exist_ok=True)
     final_path = ckpt_dir / "final.weights.h5"
     model.save_weights(str(final_path))
+    save_training_state(
+        str(final_path),
+        step=args.steps,
+        total_steps=args.steps,
+        best_loss=best_loss,
+        curriculum=args.curriculum,
+        curriculum_cap=args.curriculum_cap,
+    )
 
     metrics_path = output_dir / "metrics.json"
     with open(metrics_path, "w") as f:
