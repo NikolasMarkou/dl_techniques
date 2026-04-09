@@ -124,6 +124,15 @@ def parse_args() -> argparse.Namespace:
         "always mixing in easier examples to prevent forgetting. "
         "Overrides --phase/--min-val/--max-val.",
     )
+    parser.add_argument(
+        "--curriculum-cap", type=float, default=0.8,
+        help="Cap curriculum progress at this value (default 0.8). "
+        "At progress=1.0 the curriculum Gaussian concentrates ~67%% on "
+        "the hardest 3 levels, which caused late-training operator "
+        "regression in the 100K baseline (README §Final Run obs #4). "
+        "Capping at 0.8 keeps the hardest levels at ~20%% and preserves "
+        "sub-skill stability.",
+    )
     return parser.parse_args()
 
 
@@ -641,7 +650,8 @@ def main():
         level_names = [l.name for l in DIFFICULTY_LEVELS]
         logger.info(
             f"Training with smooth curriculum ({len(DIFFICULTY_LEVELS)} levels): "
-            f"{level_names}, act_steps={act_steps}"
+            f"{level_names}, act_steps={act_steps}, "
+            f"curriculum_cap={args.curriculum_cap}"
         )
     else:
         logger.info(
@@ -701,7 +711,10 @@ def main():
     for step in range(1, args.steps + 1):
         # Generate batch — curriculum mode shifts difficulty over training
         if use_curriculum:
-            progress = step / args.steps  # 0 → 1
+            # DECISION D-002: cap progress at --curriculum-cap (default 0.8)
+            # to keep hardest levels mixed with easier data throughout
+            # training — prevents late op_acc regression.
+            progress = min(args.curriculum_cap, step / args.steps)
             input_ids, targets, validity, expressions, labels = \
                 generate_curriculum_batch(
                     args.batch_size, progress, tokenizer
@@ -768,7 +781,7 @@ def main():
 
             # Curriculum distribution (if active)
             if use_curriculum:
-                probs = _curriculum_probs(step / args.steps)
+                probs = _curriculum_probs(min(args.curriculum_cap, step / args.steps))
                 dist_str = " ".join(
                     f"{DIFFICULTY_LEVELS[i].name}={probs[i]:.0%}"
                     for i in range(len(DIFFICULTY_LEVELS))
@@ -865,6 +878,8 @@ def main():
                 "w_operator": args.w_operator,
                 "w_reduction": args.w_reduction,
                 "number_loss_delta": args.number_loss_delta,
+                "curriculum": args.curriculum,
+                "curriculum_cap": args.curriculum_cap,
                 "model_config": model.config.to_dict(),
             },
             f,
