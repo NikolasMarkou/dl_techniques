@@ -158,7 +158,13 @@ class NAMCell(keras.layers.Layer):
         # --- Operand extraction projections ---
         self.left_proj = keras.layers.Dense(h, name="left_proj")
         self.right_proj = keras.layers.Dense(h, name="right_proj")
-        self.number_head = keras.layers.Dense(1, name="number_head")
+        # DECISION D-001 (plan_2026-04-09_aa9cac24): number_head is split into
+        # two independent Dense(1) heads, one per operand. The shared head
+        # caused the "3d×3d=100% but 1d×3d=0%" cross-scale failure documented
+        # in src/train/nam/README.md — one Dense couldn't decode both operands
+        # at different scales through the same weights.
+        self.left_number_head = keras.layers.Dense(1, name="left_number_head")
+        self.right_number_head = keras.layers.Dense(1, name="right_number_head")
 
         # --- Operator classification (4 ops: +, -, *, /) ---
         self.op_classifier = keras.layers.Dense(4, name="op_classifier")
@@ -220,7 +226,9 @@ class NAMCell(keras.layers.Layer):
         self.reduction_scorer.build(seq_shape)
         self.left_proj.build(seq_shape)
         self.right_proj.build(seq_shape)
-        self.number_head.build(seq_shape)
+        # number heads receive (B, h) at call time (left_focused / right_focused)
+        self.left_number_head.build((None, h))
+        self.right_number_head.build((None, h))
         self.op_classifier.build(seq_shape)
 
         controller_input_dim = h + self.config.num_read_heads * h
@@ -336,8 +344,10 @@ class NAMCell(keras.layers.Layer):
         # operands are multiplied (1e10 * 1e10 = 1e20, within float32).
         # Unlike tanh, the clamp has unit gradient inside the range so
         # there's no vanishing gradient problem for normal values.
-        left_val = ops.clip(self.number_head(left_focused), -1e10, 1e10)   # (B, 1)
-        right_val = ops.clip(self.number_head(right_focused), -1e10, 1e10)  # (B, 1)
+        # DECISION D-001: independent Dense(1) heads for left and right
+        # operands (see __init__ comment).
+        left_val = ops.clip(self.left_number_head(left_focused), -1e10, 1e10)   # (B, 1)
+        right_val = ops.clip(self.right_number_head(right_focused), -1e10, 1e10)  # (B, 1)
 
         # --- 6. Pre-write read from NTM memory for context ---
         memory_state = MemoryState(
