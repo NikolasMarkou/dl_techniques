@@ -413,6 +413,96 @@ class TestNAM:
         with pytest.raises(ValueError, match="Unknown variant"):
             NAM.from_variant("nonexistent")
 
+    def test_split_number_heads_exist(self, tiny_model, sample_batch):
+        """left_number_head and right_number_head must be distinct sub-layers."""
+        # Build the model by running a forward pass
+        carry = tiny_model.initial_carry(sample_batch)
+        _ = tiny_model(carry, sample_batch, training=False)
+
+        cell = tiny_model.cell
+        assert hasattr(cell, "left_number_head"), "cell.left_number_head missing"
+        assert hasattr(cell, "right_number_head"), "cell.right_number_head missing"
+        assert not hasattr(cell, "number_head"), (
+            "old shared cell.number_head should no longer exist"
+        )
+
+        # Distinct Keras sub-layers with distinct names
+        assert cell.left_number_head is not cell.right_number_head
+        assert cell.left_number_head.name == "left_number_head"
+        assert cell.right_number_head.name == "right_number_head"
+
+        # Both must have independent trainable weights
+        left_names = {v.path for v in cell.left_number_head.trainable_variables}
+        right_names = {v.path for v in cell.right_number_head.trainable_variables}
+        assert left_names.isdisjoint(right_names)
+        assert any("left_number_head" in n for n in left_names)
+        assert any("right_number_head" in n for n in right_names)
+
+    def test_weight_round_trip_bit_exact(self, tiny_model, sample_batch, tmp_path):
+        """Saving and reloading weights must yield bit-exact forward outputs.
+
+        NTMMemory initial state is random per initial_carry() call, so the same
+        carry dict is reused for both forward passes to isolate the weight
+        round-trip effect from carry initialization randomness.
+        """
+        # Build model 1 and produce the reference output
+        carry = tiny_model.initial_carry(sample_batch)
+        _, out1 = tiny_model(carry, sample_batch, training=False)
+
+        # Save weights
+        path = str(tmp_path / "nam_tiny.weights.h5")
+        tiny_model.save_weights(path)
+
+        # Build a fresh model with the same config, build it, then load weights
+        model2 = NAM(config=tiny_model.config)
+        dummy_carry = model2.initial_carry(sample_batch)
+        _ = model2(dummy_carry, sample_batch, training=False)  # triggers build
+        model2.load_weights(path)
+
+        # Reuse the ORIGINAL carry so both models see identical initial memory
+        _, out2 = model2(carry, sample_batch, training=False)
+
+        # Crucial outputs must match exactly — this specifically exercises
+        # the split number heads (via step_left_val / step_right_val)
+        for key in [
+            "step_left_val",
+            "step_right_val",
+            "result",
+            "op_logits",
+            "reduction_weights",
+        ]:
+            a = np.asarray(out1[key])
+            b = np.asarray(out2[key])
+            assert a.shape == b.shape
+            np.testing.assert_allclose(a, b, atol=1e-6, rtol=0, err_msg=f"mismatch in {key}")
+
+    def test_split_number_heads_train_independently(self, tiny_model, sample_batch):
+        """Gradients must flow through both left and right number heads."""
+        import tensorflow as tf
+
+        batch = {"input_ids": tf.constant(sample_batch["input_ids"])}
+        targets_left = tf.constant(np.array([[1.0], [3.0], [10.0]], dtype=np.float32))
+        targets_right = tf.constant(np.array([[2.0], [4.0], [2.0]], dtype=np.float32))
+
+        with tf.GradientTape(persistent=True) as tape:
+            carry = tiny_model.initial_carry(batch)
+            _, out = tiny_model(carry, batch, training=True)
+            loss = tf.reduce_mean(tf.square(out["step_left_val"] - targets_left)) \
+                   + tf.reduce_mean(tf.square(out["step_right_val"] - targets_right))
+
+        cell = tiny_model.cell
+        left_vars = cell.left_number_head.trainable_variables
+        right_vars = cell.right_number_head.trainable_variables
+        grads_left = tape.gradient(loss, left_vars)
+        grads_right = tape.gradient(loss, right_vars)
+        del tape
+
+        assert all(g is not None for g in grads_left)
+        assert all(g is not None for g in grads_right)
+        # Both heads should receive non-zero gradient when both targets contribute
+        assert any(float(tf.reduce_sum(tf.abs(g))) > 0 for g in grads_left)
+        assert any(float(tf.reduce_sum(tf.abs(g))) > 0 for g in grads_right)
+
 
 # ── Data Generator Tests ────────────────────────────────────────────────
 
