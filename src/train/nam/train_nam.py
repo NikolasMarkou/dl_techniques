@@ -79,9 +79,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--valid-loss-weight", type=float, default=0.5)
     parser.add_argument(
         "--w-number", type=float, default=0.5,
-        help="Weight for number extraction MSE loss (S1). "
+        help="Weight for number extraction loss (S1). "
         "Keep low (0.5) — high values create large gradient norms that "
         "suppress operator and reduction learning via global clip.",
+    )
+    parser.add_argument(
+        "--number-loss-delta", type=float, default=0.1,
+        help="Huber delta for relative-error number loss (iteration 1). "
+        "rel_err = (pred - target) / (|target| + 1). "
+        "Below delta: quadratic. Above: linear. Smaller delta → more "
+        "aggressive gradient on small errors.",
     )
     parser.add_argument(
         "--w-operator", type=float, default=3.0,
@@ -171,18 +178,25 @@ def _make_compiled_train_fn(
     w_number: float = 5.0,
     w_operator: float = 3.0,
     w_reduction: float = 1.0,
+    number_loss_delta: float = 0.1,
 ):
     """
     Create a compiled (tf.function) multi-task training function.
 
     Computes a combined loss supervising all sub-skills:
-    - S1: Number extraction (MSE on left_val/right_val vs true operands)
+    - S1: Number extraction (Huber on relative error of left_val/right_val)
     - S2: Operator classification (CE on op_logits vs true operator)
     - S3: Reduction target (CE on reduction_weights vs true operator position)
-    - S5: Final result (Huber on result vs true result)
+    - S5: Final result (Huber on result vs true result, log-space)
     - Validity (BCE) and ponder cost (step penalty)
 
     All computed in ONE forward pass. ONE backward pass. ONE optimizer step.
+
+    DECISION D-003 (plan_2026-04-09_aa9cac24): L_number uses relative-error
+    Huber loss (per README §6), not log-compressed MSE. Rel-error directly
+    optimizes the step_1% / step_10% metrics we care about; log-MSE plateaued
+    around RMSE ~0.45-0.9 in the README 100K run, too coarse for the target.
+    Log-compressed MSE is kept as a diagnostic metric in train_step().
     """
     max_expression_len = model.config.max_expression_len
 
@@ -265,14 +279,26 @@ def _make_compiled_train_fn(
                     )
                 )
 
-                # S1: Number extraction — log-compressed MSE.
-                L_number += tf.reduce_mean(
-                    tf.square(
-                        _log_c(all_left_vals[i]) - _log_c(true_left)
+                # S1: Number extraction — Huber on relative error.
+                # rel_err = (pred - target) / (|target| + 1.0). The +1 floor
+                # prevents blow-up at target=0. Huber's quadratic region
+                # covers small errors; linear region bounds large errors.
+                # 0.5 coefficient on each operand normalizes to the
+                # per-operand mean (matches the logged number_mse metric).
+                zero_target = tf.zeros_like(all_left_vals[i])
+                left_rel = (all_left_vals[i] - true_left) / (
+                    tf.abs(true_left) + 1.0
+                )
+                right_rel = (all_right_vals[i] - true_right) / (
+                    tf.abs(true_right) + 1.0
+                )
+                L_number += 0.5 * tf.reduce_mean(
+                    keras.losses.huber(
+                        zero_target, left_rel, delta=number_loss_delta,
                     )
-                ) + tf.reduce_mean(
-                    tf.square(
-                        _log_c(all_right_vals[i]) - _log_c(true_right)
+                ) + 0.5 * tf.reduce_mean(
+                    keras.losses.huber(
+                        zero_target, right_rel, delta=number_loss_delta,
                     )
                 )
 
@@ -643,6 +669,7 @@ def main():
         w_number=args.w_number,
         w_operator=args.w_operator,
         w_reduction=args.w_reduction,
+        number_loss_delta=args.number_loss_delta,
     )
 
     # Warm up: run one step to trigger tracing
@@ -837,6 +864,7 @@ def main():
                 "w_number": args.w_number,
                 "w_operator": args.w_operator,
                 "w_reduction": args.w_reduction,
+                "number_loss_delta": args.number_loss_delta,
                 "model_config": model.config.to_dict(),
             },
             f,
