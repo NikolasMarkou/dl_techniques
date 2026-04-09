@@ -133,6 +133,14 @@ def parse_args() -> argparse.Namespace:
         "Capping at 0.8 keeps the hardest levels at ~20%% and preserves "
         "sub-skill stability.",
     )
+    parser.add_argument(
+        "--log-grad-norms", action="store_true",
+        help="Enable per-sub-skill gradient norm instrumentation. Uses a "
+        "persistent GradientTape with 4 extra tape.gradient() calls per "
+        "step (~5x backward cost). Adds grad_norm_number/operator/"
+        "reduction/result to logged metrics. Recommended for probe/debug "
+        "only — too expensive for 100K+ runs.",
+    )
     return parser.parse_args()
 
 
@@ -188,6 +196,7 @@ def _make_compiled_train_fn(
     w_operator: float = 3.0,
     w_reduction: float = 1.0,
     number_loss_delta: float = 0.1,
+    log_grad_norms: bool = False,
 ):
     """
     Create a compiled (tf.function) multi-task training function.
@@ -206,6 +215,10 @@ def _make_compiled_train_fn(
     optimizes the step_1% / step_10% metrics we care about; log-MSE plateaued
     around RMSE ~0.45-0.9 in the README 100K run, too coarse for the target.
     Log-compressed MSE is kept as a diagnostic metric in train_step().
+
+    DECISION D-005: if ``log_grad_norms`` is True, a persistent tape is used
+    with 4 extra ``tape.gradient()`` calls per step to compute per-sub-skill
+    gradient norms. Cost is ~5x backward pass; only enable for probe/debug.
     """
     max_expression_len = model.config.max_expression_len
 
@@ -221,7 +234,7 @@ def _make_compiled_train_fn(
     ):
         batch_data = {"input_ids": input_ids}
 
-        with tf.GradientTape() as tape:
+        with tf.GradientTape(persistent=log_grad_norms) as tape:
             carry = model.initial_carry(batch_data)
 
             # Pre-encode once (tree encoder), then reuse across ACT steps
@@ -357,6 +370,34 @@ def _make_compiled_train_fn(
             )
 
         grads = tape.gradient(total_loss, model.trainable_variables)
+
+        # Per-sub-skill gradient norms (DECISION D-005, opt-in via flag).
+        # The persistent tape lets us compute 4 extra gradient calls
+        # to measure each sub-skill's contribution separately.
+        # Cost: ~5x backward pass — only use for probe/debug.
+        if log_grad_norms:
+            num_grads = tape.gradient(L_number, model.trainable_variables)
+            op_grads = tape.gradient(L_operator, model.trainable_variables)
+            red_grads = tape.gradient(L_reduction, model.trainable_variables)
+            res_grads = tape.gradient(L_result, model.trainable_variables)
+            del tape
+
+            def _global_norm(g_list):
+                filtered = [g for g in g_list if g is not None]
+                if not filtered:
+                    return tf.constant(0.0)
+                return tf.linalg.global_norm(filtered)
+
+            grad_norm_number = _global_norm(num_grads)
+            grad_norm_operator = _global_norm(op_grads)
+            grad_norm_reduction = _global_norm(red_grads)
+            grad_norm_result = _global_norm(res_grads)
+        else:
+            grad_norm_number = tf.constant(0.0)
+            grad_norm_operator = tf.constant(0.0)
+            grad_norm_reduction = tf.constant(0.0)
+            grad_norm_result = tf.constant(0.0)
+
         optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
         # Return everything needed for metrics
@@ -388,6 +429,10 @@ def _make_compiled_train_fn(
             "avg_steps": avg_steps,
             "grad_norm_mean": tf.reduce_mean(grad_norms),
             "grad_norm_max": tf.reduce_max(grad_norms),
+            "grad_norm_number": grad_norm_number,
+            "grad_norm_operator": grad_norm_operator,
+            "grad_norm_reduction": grad_norm_reduction,
+            "grad_norm_result": grad_norm_result,
         }
 
     return _compiled_step
@@ -515,6 +560,10 @@ def train_step(
         "avg_steps": float(raw["avg_steps"].numpy()),
         "grad_norm_mean": float(raw["grad_norm_mean"].numpy()),
         "grad_norm_max": float(raw["grad_norm_max"].numpy()),
+        "grad_norm_number": float(raw["grad_norm_number"].numpy()),
+        "grad_norm_operator": float(raw["grad_norm_operator"].numpy()),
+        "grad_norm_reduction": float(raw["grad_norm_reduction"].numpy()),
+        "grad_norm_result": float(raw["grad_norm_result"].numpy()),
         "op_entropy": op_entropy,
         "op_entropy_normalized": op_entropy_normalized,
         "per_op_rel_error": per_op_rel_error,
@@ -680,7 +729,13 @@ def main():
         w_operator=args.w_operator,
         w_reduction=args.w_reduction,
         number_loss_delta=args.number_loss_delta,
+        log_grad_norms=args.log_grad_norms,
     )
+    if args.log_grad_norms:
+        logger.info(
+            "Per-sub-skill grad norm instrumentation ENABLED "
+            "(persistent tape, ~5x backward cost)."
+        )
 
     # Warm up: run one step to trigger tracing
     if use_curriculum:
@@ -798,6 +853,15 @@ def main():
                 f"op_entropy={metrics['op_entropy']:.3f} "
                 f"({metrics['op_entropy_normalized']:.1%} of max)"
             )
+
+            # Per-sub-skill gradient norms (only populated when --log-grad-norms)
+            if args.log_grad_norms:
+                logger.info(
+                    f"  grad per-skill: num={metrics['grad_norm_number']:.4f} "
+                    f"op={metrics['grad_norm_operator']:.4f} "
+                    f"red={metrics['grad_norm_reduction']:.4f} "
+                    f"res={metrics['grad_norm_result']:.4f}"
+                )
 
             # Per-operator breakdown
             op_parts = []
