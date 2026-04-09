@@ -617,14 +617,21 @@ def _eval_digit_matrix(
     act_steps: int = 2,
     max_digits: int = 10,
     samples_per_cell: int = 8,
+    csv_path: "Path | None" = None,
+    step: int = 0,
 ) -> None:
     """
     Evaluate model on a [1..max_digits] × [1..max_digits] × 4-ops grid.
 
     Prints a per-operator accuracy matrix showing where the model succeeds
     and fails across different operand sizes (10% relative tolerance).
+
+    If ``csv_path`` is provided, writes a combined CSV with columns
+    (op, d_left, d_right, step_acc_10pct) covering all 4 operators and all
+    (d_left, d_right) cells — for downstream quantitative analysis.
     """
     ops_list = ["+", "-", "*", "/"]
+    all_rows = []  # (op, d_left, d_right, acc)
 
     for op_sym in ops_list:
         # acc_matrix[d_left][d_right] = fraction correct
@@ -665,9 +672,9 @@ def _eval_digit_matrix(
                         correct += 1
                     total += 1
 
-                acc_matrix[d_left - 1, d_right - 1] = (
-                    correct / total if total > 0 else 0.0
-                )
+                acc_value = correct / total if total > 0 else 0.0
+                acc_matrix[d_left - 1, d_right - 1] = acc_value
+                all_rows.append((op_sym, d_left, d_right, acc_value))
 
         # Print matrix
         header = f"  {'':>4s}" + "".join(f"{d:>6d}d" for d in range(1, max_digits + 1))
@@ -679,6 +686,15 @@ def _eval_digit_matrix(
                 val = acc_matrix[d_left - 1, d_right - 1]
                 row += f"  {val:>4.0%} "
             logger.info(row)
+
+    # Write combined CSV if a path was provided
+    if csv_path is not None:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, "w") as f:
+            f.write("op,d_left,d_right,step_acc_10pct,step\n")
+            for op_sym, d_left, d_right, acc in all_rows:
+                f.write(f"{op_sym},{d_left},{d_right},{acc:.4f},{step}\n")
+        logger.info(f"  digit matrix CSV: {csv_path}")
 
 
 def main():
@@ -968,7 +984,12 @@ def main():
         # Digit accuracy matrix evaluation
         if step % args.eval_interval == 0:
             logger.info(f"  ── Digit accuracy matrix (step {step}) ──")
-            _eval_digit_matrix(model, tokenizer, act_steps=act_steps, max_digits=10, samples_per_cell=4)
+            digit_csv = output_dir / "digit_matrix" / f"digit_matrix_step_{step:06d}.csv"
+            _eval_digit_matrix(
+                model, tokenizer,
+                act_steps=act_steps, max_digits=10, samples_per_cell=4,
+                csv_path=digit_csv, step=step,
+            )
 
         # Track best loss on every step so the sidecar reflects the
         # current best at save time (not a stale value from the prior save).
