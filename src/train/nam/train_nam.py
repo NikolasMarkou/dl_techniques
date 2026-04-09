@@ -84,11 +84,19 @@ def parse_args() -> argparse.Namespace:
         "suppress operator and reduction learning via global clip.",
     )
     parser.add_argument(
+        "--number-loss-type", type=str, default="log_mse",
+        choices=["log_mse", "rel_err", "combined"],
+        help="Number extraction loss function (iter-1 post-probe): "
+        "'log_mse' = log-compressed MSE (README baseline, strong gradient "
+        "for large magnitudes, default). "
+        "'rel_err' = relative-error Huber (iter-1 Step 3 experiment, "
+        "weak gradient for large magnitudes — don't use alone). "
+        "'combined' = log_mse + 0.5*rel_err (belt-and-braces).",
+    )
+    parser.add_argument(
         "--number-loss-delta", type=float, default=0.1,
-        help="Huber delta for relative-error number loss (iteration 1). "
-        "rel_err = (pred - target) / (|target| + 1). "
-        "Below delta: quadratic. Above: linear. Smaller delta → more "
-        "aggressive gradient on small errors.",
+        help="Huber delta for rel-err number loss. Used only when "
+        "--number-loss-type is 'rel_err' or 'combined'.",
     )
     parser.add_argument(
         "--w-operator", type=float, default=3.0,
@@ -235,6 +243,7 @@ def _make_compiled_train_fn(
     w_number: float = 5.0,
     w_operator: float = 3.0,
     w_reduction: float = 1.0,
+    number_loss_type: str = "log_mse",
     number_loss_delta: float = 0.1,
     log_grad_norms: bool = False,
 ):
@@ -341,28 +350,64 @@ def _make_compiled_train_fn(
                     )
                 )
 
-                # S1: Number extraction — Huber on relative error.
-                # rel_err = (pred - target) / (|target| + 1.0). The +1 floor
-                # prevents blow-up at target=0. Huber's quadratic region
-                # covers small errors; linear region bounds large errors.
-                # 0.5 coefficient on each operand normalizes to the
-                # per-operand mean (matches the logged number_mse metric).
-                zero_target = tf.zeros_like(all_left_vals[i])
-                left_rel = (all_left_vals[i] - true_left) / (
-                    tf.abs(true_left) + 1.0
-                )
-                right_rel = (all_right_vals[i] - true_right) / (
-                    tf.abs(true_right) + 1.0
-                )
-                L_number += 0.5 * tf.reduce_mean(
-                    keras.losses.huber(
-                        zero_target, left_rel, delta=number_loss_delta,
+                # S1: Number extraction loss.
+                #
+                # Three options (DECISION D-008, post iter-1 probe):
+                # - 'log_mse': log-compressed MSE (README baseline). Gradient
+                #   magnitude is O(log(target)) — stays substantial for
+                #   10-digit numbers. The iter-1 rel_err variant had
+                #   O(1/target) gradient which vanished for target > 10^4.
+                # - 'rel_err': Huber on relative error (iter-1 Step 3).
+                #   Kept for experimentation; do not use alone.
+                # - 'combined': log_mse + 0.5 * rel_err (belt-and-braces).
+                #
+                # 0.5 per-operand coefficient normalizes to the per-operand
+                # mean (matches the logged number_mse metric).
+                if number_loss_type == "log_mse":
+                    left_err = _log_c(all_left_vals[i]) - _log_c(true_left)
+                    right_err = _log_c(all_right_vals[i]) - _log_c(true_right)
+                    L_number += 0.5 * tf.reduce_mean(tf.square(left_err)) \
+                              + 0.5 * tf.reduce_mean(tf.square(right_err))
+                elif number_loss_type == "rel_err":
+                    zero_target = tf.zeros_like(all_left_vals[i])
+                    left_rel = (all_left_vals[i] - true_left) / (
+                        tf.abs(true_left) + 1.0
                     )
-                ) + 0.5 * tf.reduce_mean(
-                    keras.losses.huber(
-                        zero_target, right_rel, delta=number_loss_delta,
+                    right_rel = (all_right_vals[i] - true_right) / (
+                        tf.abs(true_right) + 1.0
                     )
-                )
+                    L_number += 0.5 * tf.reduce_mean(
+                        keras.losses.huber(
+                            zero_target, left_rel, delta=number_loss_delta,
+                        )
+                    ) + 0.5 * tf.reduce_mean(
+                        keras.losses.huber(
+                            zero_target, right_rel, delta=number_loss_delta,
+                        )
+                    )
+                else:  # combined
+                    left_err = _log_c(all_left_vals[i]) - _log_c(true_left)
+                    right_err = _log_c(all_right_vals[i]) - _log_c(true_right)
+                    L_log = 0.5 * tf.reduce_mean(tf.square(left_err)) \
+                          + 0.5 * tf.reduce_mean(tf.square(right_err))
+
+                    zero_target = tf.zeros_like(all_left_vals[i])
+                    left_rel = (all_left_vals[i] - true_left) / (
+                        tf.abs(true_left) + 1.0
+                    )
+                    right_rel = (all_right_vals[i] - true_right) / (
+                        tf.abs(true_right) + 1.0
+                    )
+                    L_rel = 0.5 * tf.reduce_mean(
+                        keras.losses.huber(
+                            zero_target, left_rel, delta=number_loss_delta,
+                        )
+                    ) + 0.5 * tf.reduce_mean(
+                        keras.losses.huber(
+                            zero_target, right_rel, delta=number_loss_delta,
+                        )
+                    )
+                    L_number += L_log + 0.5 * L_rel
 
                 # S2: Operator classification CE — clamp logits to [-30, 30]
                 # to prevent extreme confidence that causes CE explosion
@@ -816,8 +861,14 @@ def main():
         w_number=args.w_number,
         w_operator=args.w_operator,
         w_reduction=args.w_reduction,
+        number_loss_type=args.number_loss_type,
         number_loss_delta=args.number_loss_delta,
         log_grad_norms=args.log_grad_norms,
+    )
+    logger.info(
+        f"Number loss type: {args.number_loss_type}"
+        + (f" (delta={args.number_loss_delta})"
+           if args.number_loss_type in ("rel_err", "combined") else "")
     )
     if args.log_grad_norms:
         logger.info(
@@ -1062,6 +1113,7 @@ def main():
                 "w_number": args.w_number,
                 "w_operator": args.w_operator,
                 "w_reduction": args.w_reduction,
+                "number_loss_type": args.number_loss_type,
                 "number_loss_delta": args.number_loss_delta,
                 "curriculum": args.curriculum,
                 "curriculum_cap": args.curriculum_cap,
