@@ -66,6 +66,12 @@ DIFFICULTY_LEVELS: List[DifficultyLevel] = [
     DifficultyLevel("6-8d", 6, 8, ["+", "-", "*", "/"]),
     # Level 7: 8-10 digits
     DifficultyLevel("8-10d", 8, 10, ["+", "-", "*", "/"]),
+    # Level 8: multi-op, 1-2 digits, 2 operators
+    DifficultyLevel("1-2d_2op", 1, 2, ["+", "-", "*", "/"], num_ops=2),
+    # Level 9: multi-op, 1-3 digits, 2-3 operators
+    DifficultyLevel("1-3d_3op", 1, 3, ["+", "-", "*", "/"], num_ops=3),
+    # Level 10: multi-op, 1-4 digits, 2-4 operators
+    DifficultyLevel("1-4d_4op", 1, 4, ["+", "-", "*", "/"], num_ops=4),
 ]
 
 NUM_LEVELS = len(DIFFICULTY_LEVELS)
@@ -344,6 +350,162 @@ def _parse_single_op(
     }
 
 
+def _parse_multi_op(
+    expression: str,
+) -> List[Dict[str, Any]]:
+    """
+    Parse a multi-op expression into a sequence of reduction steps.
+
+    Returns one dict per reduction step, in PEMDAS order:
+    1. First all ``*`` and ``/`` (left to right)
+    2. Then all ``+`` and ``-`` (left to right)
+
+    Each step dict contains:
+    - ``expression``: the expression string at this step (after prior reductions)
+    - ``left_operand``: float value of the left operand
+    - ``right_operand``: float value of the right operand
+    - ``operator``: str, one of +, -, *, /
+    - ``operator_index``: int, 0-3
+    - ``result``: float result of this sub-expression
+    - ``new_expression``: the expression after replacing the sub-expression with result
+
+    For single-op expressions, returns a list with one step.
+    For expressions with N operators, returns N steps.
+
+    :param expression: Arithmetic expression string (e.g. "3 + 5 * 2 - 1").
+    :return: List of per-step label dicts.
+    """
+    steps = []
+    current_expr = expression.strip()
+
+    # Simple tokenizer: split expression into number/operator tokens
+    # "3 + 5 * 2 - 1" → ['3', '+', '5', '*', '2', '-', '1']
+    def _tokenize_expr(expr_str):
+        """Split expression into (value, operator, value, operator, ...) tokens."""
+        tokens = []
+        i = 0
+        s = expr_str.strip()
+        while i < len(s):
+            if s[i] in ' ':
+                i += 1
+                continue
+            if s[i] in '+-' and (not tokens or isinstance(tokens[-1], str) and tokens[-1] in '+-*/'):
+                # Negative number sign
+                j = i + 1
+                while j < len(s) and (s[j].isdigit() or s[j] == '.'):
+                    j += 1
+                tokens.append(float(s[i:j]))
+                i = j
+            elif s[i].isdigit() or s[i] == '.':
+                j = i
+                while j < len(s) and (s[j].isdigit() or s[j] == '.'):
+                    j += 1
+                tokens.append(float(s[i:j]))
+                i = j
+            elif s[i] in '+-*/':
+                tokens.append(s[i])
+                i += 1
+            else:
+                i += 1  # skip unknown
+        return tokens
+
+    def _tokens_to_expr(tokens):
+        """Convert token list back to expression string (integer-formatted where possible)."""
+        parts = []
+        for t in tokens:
+            if isinstance(t, float):
+                if t == int(t) and abs(t) < 1e15:
+                    parts.append(str(int(t)))
+                else:
+                    parts.append(f"{t:.6g}")
+            else:
+                parts.append(str(t))
+        return " ".join(parts)
+
+    while True:
+        tokens = _tokenize_expr(current_expr)
+        if len(tokens) < 3:
+            break  # fully reduced
+
+        # Find the next operator to reduce (PEMDAS: * and / first, then + and -)
+        reduce_idx = None
+
+        # Pass 1: find leftmost * or /
+        for i in range(1, len(tokens), 2):
+            if isinstance(tokens[i], str) and tokens[i] in '*/':
+                reduce_idx = i
+                break
+
+        # Pass 2: if no * or /, find leftmost + or -
+        if reduce_idx is None:
+            for i in range(1, len(tokens), 2):
+                if isinstance(tokens[i], str) and tokens[i] in '+-':
+                    reduce_idx = i
+                    break
+
+        if reduce_idx is None:
+            break  # no operators left
+
+        left_val = tokens[reduce_idx - 1]
+        op_str = tokens[reduce_idx]
+        right_val = tokens[reduce_idx + 1]
+
+        # Compute result
+        if op_str == '+':
+            result = left_val + right_val
+        elif op_str == '-':
+            result = left_val - right_val
+        elif op_str == '*':
+            result = left_val * right_val
+        elif op_str == '/':
+            if abs(right_val) < 1e-10:
+                result = 0.0
+            else:
+                result = left_val / right_val
+        else:
+            break
+
+        # Record this step
+        steps.append({
+            "expression": current_expr,
+            "left_operand": float(left_val),
+            "right_operand": float(right_val),
+            "operator": op_str,
+            "operator_index": _OP_TO_INDEX[op_str],
+            "result": float(result),
+        })
+
+        # Replace the sub-expression with the result
+        new_tokens = tokens[:reduce_idx - 1] + [result] + tokens[reduce_idx + 2:]
+        current_expr = _tokens_to_expr(new_tokens)
+
+    return steps
+
+
+def _generate_multi_op_expr(
+    level: DifficultyLevel,
+    num_ops: int,
+) -> Tuple[str, float, bool]:
+    """
+    Generate a multi-op arithmetic expression.
+
+    :param level: Difficulty level for operand sizes.
+    :param num_ops: Number of operators (2-4).
+    :return: Tuple of (expression_str, result, is_valid).
+    """
+    operands = [level.sample_operand() for _ in range(num_ops + 1)]
+    operators = [random.choice(level.operators) for _ in range(num_ops)]
+
+    # Build expression string
+    parts = [str(operands[0])]
+    for i, op in enumerate(operators):
+        parts.append(f" {op} {operands[i + 1]}")
+    expr = "".join(parts)
+
+    result, valid = _safe_eval(expr)
+    return expr, result, valid
+
+
 def generate_curriculum_batch(
     batch_size: int,
     progress: float,
@@ -370,7 +532,10 @@ def generate_curriculum_batch(
 
     for lvl_idx in levels:
         level = DIFFICULTY_LEVELS[lvl_idx]
-        expr, result, valid = _generate_single_op_expr(level)
+        if level.num_ops == 1:
+            expr, result, valid = _generate_single_op_expr(level)
+        else:
+            expr, result, valid = _generate_multi_op_expr(level, level.num_ops)
         expressions.append(expr)
         targets.append(result)
         validity.append(float(valid))
@@ -379,24 +544,82 @@ def generate_curriculum_batch(
     targets_arr = np.array(targets, dtype=np.float32).reshape(-1, 1)
     validity_arr = np.array(validity, dtype=np.float32).reshape(-1, 1)
 
-    # Parse structured labels
+    # Parse structured labels — for multi-op, extract FIRST step's labels
+    # (the reduction step with highest precedence). Per-step labels for
+    # subsequent ACT steps are computed from the expression's _parse_multi_op
+    # reduction sequence; the training loop can call _parse_multi_op directly
+    # for multi-step supervision.
     left_operands = []
     right_operands = []
     operator_indices = []
     operator_positions = []
+    all_reduction_steps = []  # per-sample list of multi-op step dicts
 
     for i, expr in enumerate(expressions):
-        parsed = _parse_single_op(expr, input_ids[i].tolist())
-        left_operands.append(parsed["left_operand"])
-        right_operands.append(parsed["right_operand"])
-        operator_indices.append(parsed["operator_index"])
-        operator_positions.append(parsed["operator_position"])
+        steps = _parse_multi_op(expr)
+        all_reduction_steps.append(steps)
+
+        if steps:
+            first_step = steps[0]
+            # Find operator position in the token_ids for the first step
+            # Re-use _parse_single_op's token scan for finding position in tokens
+            parsed_pos = _parse_single_op(expr, input_ids[i].tolist())
+
+            # For multi-op, find the CORRECT operator position (the one
+            # matching the first step's operator in PEMDAS order)
+            if len(steps) > 1:
+                target_op_str = first_step["operator"]
+                target_left = first_step["left_operand"]
+                # Scan token_ids for all operators of this type and find
+                # the one whose left context matches
+                op_tid = {"+": 14, "-": 15, "*": 16, "/": 17}[target_op_str]
+                found_pos = -1
+                for pos, tid in enumerate(input_ids[i].tolist()):
+                    if tid == op_tid:
+                        # Check if left operand matches by assembling tokens
+                        # to the left of this position
+                        left_digits = []
+                        for j in range(pos - 1, -1, -1):
+                            t = input_ids[i, j]
+                            if 4 <= t <= 13:
+                                left_digits.insert(0, t - 4)
+                            elif t == 3:  # space
+                                continue
+                            else:
+                                break
+                        if left_digits:
+                            assembled = sum(
+                                d * 10 ** p
+                                for p, d in enumerate(reversed(left_digits))
+                            )
+                            if abs(assembled - target_left) < 0.5:
+                                found_pos = pos
+                                break
+                if found_pos >= 0:
+                    op_position = found_pos
+                else:
+                    op_position = parsed_pos["operator_position"]
+            else:
+                op_position = parsed_pos["operator_position"]
+
+            left_operands.append(first_step["left_operand"])
+            right_operands.append(first_step["right_operand"])
+            operator_indices.append(first_step["operator_index"])
+            operator_positions.append(op_position)
+        else:
+            # Fallback for unparseable expressions
+            parsed = _parse_single_op(expr, input_ids[i].tolist())
+            left_operands.append(parsed["left_operand"])
+            right_operands.append(parsed["right_operand"])
+            operator_indices.append(parsed["operator_index"])
+            operator_positions.append(parsed["operator_position"])
 
     labels = {
         "left_operand": np.array(left_operands, dtype=np.float32).reshape(-1, 1),
         "right_operand": np.array(right_operands, dtype=np.float32).reshape(-1, 1),
         "operator_index": np.array(operator_indices, dtype=np.int32),
         "operator_position": np.array(operator_positions, dtype=np.int32),
+        "reduction_steps": all_reduction_steps,  # per-sample list for multi-step training
     }
 
     return input_ids, targets_arr, validity_arr, expressions, labels
