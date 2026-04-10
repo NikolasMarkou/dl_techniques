@@ -606,11 +606,24 @@ def prepare_per_step_labels(
     for i in range(len(steps), max_steps):
         step_token_ids[i] = final_ids
 
+    # Step validity mask: 1.0 for real reduction steps, 0.0 for padding
+    step_valid_mask = np.zeros((max_steps,), dtype=np.float32)
+    num_real_steps = min(len(steps), max_steps)
+    step_valid_mask[:num_real_steps] = 1.0
+
+    # For padding steps, copy the LAST valid step's targets so the model
+    # gets consistent (not garbage) targets even on masked-out steps.
+    if num_real_steps > 0 and num_real_steps < max_steps:
+        for i in range(num_real_steps, max_steps):
+            step_op_positions[i] = step_op_positions[num_real_steps - 1]
+            step_op_indices[i] = step_op_indices[num_real_steps - 1]
+
     return {
         "per_step_token_ids": step_token_ids,
         "per_step_op_position": step_op_positions,
         "per_step_op_index": step_op_indices,
-        "num_reduction_steps": min(len(steps), max_steps),
+        "per_step_valid_mask": step_valid_mask,
+        "num_reduction_steps": num_real_steps,
     }
 
 

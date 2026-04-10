@@ -238,16 +238,20 @@ def _build_per_step_tensors(
     all_step_op_idx = np.zeros((B, act_steps), dtype=np.int32)
     all_step_op_pos = np.zeros((B, act_steps), dtype=np.int32)
 
+    all_step_valid = np.zeros((B, act_steps), dtype=np.float32)
+
     for i, expr in enumerate(expressions):
         labels = prepare_per_step_labels(expr, tokenizer, act_steps)
         all_step_ids[i] = labels["per_step_token_ids"]
         all_step_op_idx[i] = labels["per_step_op_index"]
         all_step_op_pos[i] = labels["per_step_op_position"]
+        all_step_valid[i] = labels["per_step_valid_mask"]
 
     return {
         "per_step_token_ids": all_step_ids,
         "per_step_op_index": all_step_op_idx,
         "per_step_op_position": all_step_op_pos,
+        "per_step_valid_mask": all_step_valid,
     }
 
 
@@ -316,6 +320,7 @@ def _make_compiled_train_fn(
         per_step_token_ids,    # (B, max_act_steps, L) per-step token_ids for multi-op
         per_step_op_index,     # (B, max_act_steps) per-step operator index
         per_step_op_position,  # (B, max_act_steps) per-step operator position
+        per_step_valid_mask,   # (B, max_act_steps) 1.0 for real steps, 0.0 for padding
     ):
         batch_data = {"input_ids": input_ids}
 
@@ -373,18 +378,19 @@ def _make_compiled_train_fn(
                 # Per-step targets (multi-op: each step has its own operator target)
                 step_op_idx = per_step_op_index[:, i]    # (B,)
                 step_op_pos = per_step_op_position[:, i]  # (B,)
+                step_valid = per_step_valid_mask[:, i]    # (B,) — 1.0 or 0.0
                 step_op_onehot = tf.one_hot(step_op_idx, 4)
                 step_pos_onehot = tf.one_hot(step_op_pos, max_expression_len)
 
-                # S5: Final result loss (Huber in log-space) — trains
-                # result_head only (stop_gradient prevents backprop).
+                # S5: Final result loss — only on the LAST valid step
+                # (intermediate steps don't predict the final result)
                 L_result += tf.reduce_mean(
                     keras.losses.huber(
                         _log_c(targets), _log_c(all_results[i]), delta=2.0,
                     )
                 )
 
-                # Validity BCE — clamp predictions to prevent log(0) explosion
+                # Validity BCE
                 clamped_valid = tf.clip_by_value(all_valids[i], 1e-7, 1.0 - 1e-7)
                 L_valid += tf.reduce_mean(
                     keras.losses.binary_crossentropy(
@@ -392,25 +398,24 @@ def _make_compiled_train_fn(
                     )
                 )
 
-                # S2: Operator classification CE (per-step target)
+                # S2: Operator classification CE (per-step target, masked)
+                # step_valid masks out padding steps so they don't corrupt the loss
                 clamped_op_logits = tf.clip_by_value(
                     all_op_logits[i], -30.0, 30.0
                 )
-                L_operator += tf.reduce_mean(
-                    keras.losses.categorical_crossentropy(
-                        step_op_onehot, clamped_op_logits, from_logits=True
-                    )
+                per_sample_op_loss = keras.losses.categorical_crossentropy(
+                    step_op_onehot, clamped_op_logits, from_logits=True
                 )
+                L_operator += tf.reduce_mean(per_sample_op_loss * step_valid)
 
-                # S3: Reduction target CE (per-step target) — clamp probs away from 0
+                # S3: Reduction target CE (per-step target, masked)
                 clamped_rw = tf.clip_by_value(
                     all_reduction_weights[i], 1e-7, 1.0
                 )
-                L_reduction += tf.reduce_mean(
-                    keras.losses.categorical_crossentropy(
-                        step_pos_onehot, clamped_rw
-                    )
+                per_sample_red_loss = keras.losses.categorical_crossentropy(
+                    step_pos_onehot, clamped_rw
                 )
+                L_reduction += tf.reduce_mean(per_sample_red_loss * step_valid)
 
             # Normalize by number of steps
             n_steps = tf.cast(max_act_steps, tf.float32)
@@ -528,6 +533,7 @@ def train_step(
         per_step["per_step_token_ids"],
         per_step["per_step_op_index"],
         per_step["per_step_op_position"],
+        per_step["per_step_valid_mask"],
     )
 
     # --- Compute metrics from raw tensors ---
@@ -876,6 +882,7 @@ def main():
         tf.constant(warmup_per_step["per_step_token_ids"]),
         tf.constant(warmup_per_step["per_step_op_index"]),
         tf.constant(warmup_per_step["per_step_op_position"]),
+        tf.constant(warmup_per_step["per_step_valid_mask"]),
     )
     compile_elapsed = time.time() - compile_start
     logger.info(f"Graph compiled in {compile_elapsed:.1f}s. Training starts now.")
@@ -918,6 +925,7 @@ def main():
             "per_step_token_ids": tf.constant(per_step["per_step_token_ids"]),
             "per_step_op_index": tf.constant(per_step["per_step_op_index"]),
             "per_step_op_position": tf.constant(per_step["per_step_op_position"]),
+            "per_step_valid_mask": tf.constant(per_step["per_step_valid_mask"]),
         }
 
         # Train step
