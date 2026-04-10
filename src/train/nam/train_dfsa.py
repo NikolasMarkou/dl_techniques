@@ -47,6 +47,7 @@ from dl_techniques.utils.logger import logger
 from train.common import setup_gpu
 from train.nam.data_generator import (
     generate_curriculum_batch,
+    prepare_per_step_labels,
     _safe_eval,
     DIFFICULTY_LEVELS,
     _curriculum_probs,
@@ -126,19 +127,20 @@ class DifferentiableFSA(keras.Model):
             hidden_size, name="result_encoder"
         )
 
-    def call(self, token_ids, training=None):
+    def reduce_step(self, token_ids, training=None):
         """
-        Evaluate arithmetic expression with full gradient flow.
+        Perform ONE reduction step on the given token sequence.
 
-        :param token_ids: (B, L) int — tokenized expression.
+        This is the core FSA step: find operator → extract operands →
+        classify operator → compute result. Fully differentiable.
+
+        :param token_ids: (B, L) int — tokenized expression at this step.
         :param training: Whether in training mode.
-        :return: Dict with 'result', 'result_embedding', 'valid',
-            'left_val', 'right_val', 'op_logits', 'reduction_weights'.
+        :return: Dict with 'result', 'valid', 'left_val', 'right_val',
+            'op_logits', 'reduction_weights'.
         """
-        B = ops.shape(token_ids)[0]
-        L = ops.shape(token_ids)[1]
+        import math
 
-        # --- 1. Token features ---
         # Padding mask
         mask = ops.cast(ops.not_equal(token_ids, 0), "float32")  # (B, L)
 
@@ -153,7 +155,6 @@ class DifferentiableFSA(keras.Model):
         )
         digit_values = (ids_float - 4.0) * is_digit  # 0-9
 
-        # Operator type features
         op_type = ops.zeros_like(ids_float)
         op_type = ops.where(ops.equal(token_ids, 14), 1.0 * ops.ones_like(op_type), op_type)
         op_type = ops.where(ops.equal(token_ids, 15), 2.0 * ops.ones_like(op_type), op_type)
@@ -168,50 +169,37 @@ class DifferentiableFSA(keras.Model):
             "float32",
         )
 
-        # Numeric feature channels: (B, L, 4)
         numeric_features = ops.stack(
             [digit_values, is_digit, op_type, is_operator], axis=-1
         )
 
-        # Learned features: embedding + numeric projection + MLP
-        import math
+        # Learned features
         x = self.token_embedding(token_ids) * math.sqrt(self.hidden_size)
         x = x + self.numeric_proj(numeric_features)
         x = self.feature_mlp(x)
         x = self.feature_norm(x)  # (B, L, D)
 
-        # --- 2. Reduction scorer → soft operator position ---
-        scores = ops.squeeze(self.reduction_scorer(x), axis=-1)  # (B, L)
-        scores = scores + (1.0 - mask) * (-1e9)  # mask padding
+        # Reduction scorer → soft operator position
+        scores = ops.squeeze(self.reduction_scorer(x), axis=-1)
+        scores = scores + (1.0 - mask) * (-1e9)
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
-        # --- 3. Soft left/right masks (DIFFERENTIABLE) ---
-        # cumsum of reduction_weights gives the cumulative probability
-        # that the operator is at or before each position.
-        # Before the operator: cum_prob ≈ 0 → left_mask ≈ is_digit
-        # After the operator: cum_prob ≈ 1 → left_mask ≈ 0
-        cum_op_prob = ops.cumsum(reduction_weights, axis=1)  # (B, L)
+        # Soft left/right masks
+        cum_op_prob = ops.cumsum(reduction_weights, axis=1)
+        cum_before = cum_op_prob - reduction_weights
+        left_mask = (1.0 - cum_op_prob) * is_digit
+        right_mask = cum_before * is_digit
 
-        # Shift by one: the operator position itself should NOT be in either mask.
-        # cum_op_prob at the operator pos = the operator's own probability (≈1 when peaked).
-        # We want: left_mask includes positions BEFORE the peak, right_mask AFTER.
-        # Using (cum_op_prob - reduction_weights) gives the cum prob EXCLUDING current.
-        cum_before = cum_op_prob - reduction_weights  # (B, L)
-
-        left_mask = (1.0 - cum_op_prob) * is_digit       # (B, L) — digits before operator
-        right_mask = cum_before * is_digit                 # (B, L) — digits after operator
-
-        # --- 4. Differentiable number assembly ---
+        # Differentiable number assembly
         left_val = self._soft_assemble(token_ids, left_mask, is_digit, digit_values)
         right_val = self._soft_assemble(token_ids, right_mask, is_digit, digit_values)
 
-        # --- 5. Operator classification ---
-        # Pool hidden features at the reduction position
-        pooled = ops.sum(x * ops.expand_dims(reduction_weights, -1), axis=1)  # (B, D)
-        op_logits = self.op_classifier(pooled)  # (B, 4)
-        op_probs = ops.softmax(op_logits, axis=-1)  # (B, 4)
+        # Operator classification
+        pooled = ops.sum(x * ops.expand_dims(reduction_weights, -1), axis=1)
+        op_logits = self.op_classifier(pooled)
+        op_probs = ops.softmax(op_logits, axis=-1)
 
-        # --- 6. Fixed arithmetic with soft-select ---
+        # Fixed arithmetic with soft/hard select
         add_result, add_valid = _fixed_add(left_val, right_val)
         sub_result, sub_valid = _fixed_subtract(left_val, right_val)
         mul_result, mul_valid = _fixed_multiply(left_val, right_val)
@@ -219,39 +207,51 @@ class DifferentiableFSA(keras.Model):
 
         all_results = ops.stack(
             [add_result, sub_result, mul_result, div_result], axis=1
-        )  # (B, 4, 1)
+        )
         all_valid = ops.stack(
             [add_valid, sub_valid, mul_valid, div_valid], axis=1
-        )  # (B, 4, 1)
+        )
 
         if training:
-            # Soft-select (differentiable)
-            op_weights = ops.expand_dims(op_probs, axis=-1)  # (B, 4, 1)
-            result = ops.sum(all_results * op_weights, axis=1)  # (B, 1)
-            valid = ops.sum(all_valid * op_weights, axis=1)  # (B, 1)
+            op_weights = ops.expand_dims(op_probs, axis=-1)
+            result = ops.sum(all_results * op_weights, axis=1)
+            valid = ops.sum(all_valid * op_weights, axis=1)
         else:
-            # Hard-select (exact)
             op_idx = ops.argmax(op_probs, axis=-1)
             op_one_hot = ops.one_hot(op_idx, 4)
             op_weights = ops.expand_dims(op_one_hot, axis=-1)
             result = ops.sum(all_results * op_weights, axis=1)
             valid = ops.sum(all_valid * op_weights, axis=1)
 
-        # --- 7. Result encoder (learned interface) ---
-        result_compressed = ops.sign(result) * ops.log1p(ops.abs(result))
-        result_embedding = self.result_encoder(
-            ops.concatenate([result_compressed, valid], axis=-1)
-        )
-
         return {
             "result": result,
             "valid": valid,
-            "result_embedding": result_embedding,
             "left_val": left_val,
             "right_val": right_val,
             "op_logits": op_logits,
             "reduction_weights": reduction_weights,
         }
+
+    def call(self, token_ids, training=None):
+        """
+        Single-step evaluation (backward compatible).
+
+        For multi-step evaluation, use ``reduce_step`` in a loop
+        with updated token_ids per step.
+
+        :param token_ids: (B, L) int — tokenized expression.
+        :param training: Whether in training mode.
+        :return: Dict with 'result', 'result_embedding', 'valid', etc.
+        """
+        out = self.reduce_step(token_ids, training=training)
+
+        # Result encoder (learned interface)
+        result_compressed = ops.sign(out["result"]) * ops.log1p(ops.abs(out["result"]))
+        result_embedding = self.result_encoder(
+            ops.concatenate([result_compressed, out["valid"]], axis=-1)
+        )
+        out["result_embedding"] = result_embedding
+        return out
 
     @staticmethod
     def _soft_assemble(token_ids, soft_mask, is_digit, digit_values):
@@ -299,6 +299,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train DFSA (Differentiable FSA)")
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--max-len", type=int, default=64)
+    parser.add_argument("--act-steps", type=int, default=1,
+                        help="Max ACT steps per expression (1=single-op, 4=multi-op)")
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -317,39 +319,78 @@ def parse_args():
     return parser.parse_args()
 
 
-def _make_compiled_train_fn(model, optimizer, w_operator, w_reduction, result_loss_weight):
-    """Compiled single-op training step."""
+def _make_compiled_train_fn(
+    model, optimizer, w_operator, w_reduction, result_loss_weight, max_act_steps
+):
+    """Compiled multi-step training function.
 
+    Supports both single-op (1 step) and multi-op (N steps) expressions.
+    Per-step token_ids and labels are provided via teacher forcing.
+    """
     max_expression_len = model.max_expression_len
 
     @tf.function(jit_compile=False)
-    def _step(input_ids, targets, target_validity, true_op_index, true_op_position):
+    def _step(
+        input_ids,            # (B, L) — original tokens (for result_encoder)
+        targets,              # (B, 1) — final result
+        target_validity,      # (B, 1) — validity
+        per_step_token_ids,   # (B, max_act_steps, L) — per-step tokens
+        per_step_op_index,    # (B, max_act_steps) — per-step operator type
+        per_step_op_position, # (B, max_act_steps) — per-step operator position
+        per_step_valid_mask,  # (B, max_act_steps) — 1.0 for real steps
+    ):
         with tf.GradientTape() as tape:
-            out = model(input_ids, training=True)
-
-            # Log-compress
             def _log_c(x):
                 return tf.sign(x) * tf.math.log1p(tf.abs(x))
 
-            # Reduction loss: CE on reduction_weights vs true operator position
-            true_pos_onehot = tf.one_hot(true_op_position, max_expression_len)
-            clamped_rw = tf.clip_by_value(out["reduction_weights"], 1e-7, 1.0)
-            L_reduction = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(true_pos_onehot, clamped_rw)
-            )
+            L_reduction = tf.constant(0.0)
+            L_operator = tf.constant(0.0)
 
-            # Operator loss: CE on op_logits vs true operator type
-            true_op_onehot = tf.one_hot(true_op_index, 4)
-            clamped_logits = tf.clip_by_value(out["op_logits"], -30.0, 30.0)
-            L_operator = tf.reduce_mean(
-                keras.losses.categorical_crossentropy(
-                    true_op_onehot, clamped_logits, from_logits=True
+            all_results = []
+            all_left_vals = []
+            all_right_vals = []
+            all_op_logits = []
+            all_rw = []
+
+            for step_idx in range(max_act_steps):
+                step_ids = per_step_token_ids[:, step_idx, :]  # (B, L)
+                step_valid = per_step_valid_mask[:, step_idx]   # (B,)
+                step_op_idx = per_step_op_index[:, step_idx]    # (B,)
+                step_op_pos = per_step_op_position[:, step_idx] # (B,)
+
+                out = model.reduce_step(step_ids, training=True)
+
+                all_results.append(out["result"])
+                all_left_vals.append(out["left_val"])
+                all_right_vals.append(out["right_val"])
+                all_op_logits.append(out["op_logits"])
+                all_rw.append(out["reduction_weights"])
+
+                # Per-step reduction loss (masked)
+                step_pos_onehot = tf.one_hot(step_op_pos, max_expression_len)
+                clamped_rw = tf.clip_by_value(out["reduction_weights"], 1e-7, 1.0)
+                per_sample_red = keras.losses.categorical_crossentropy(
+                    step_pos_onehot, clamped_rw
                 )
-            )
+                L_reduction += tf.reduce_mean(per_sample_red * step_valid)
 
-            # Result loss: Huber in log-space (trains result_encoder)
+                # Per-step operator loss (masked)
+                step_op_onehot = tf.one_hot(step_op_idx, 4)
+                clamped_logits = tf.clip_by_value(out["op_logits"], -30.0, 30.0)
+                per_sample_op = keras.losses.categorical_crossentropy(
+                    step_op_onehot, clamped_logits, from_logits=True
+                )
+                L_operator += tf.reduce_mean(per_sample_op * step_valid)
+
+            # Normalize by number of steps
+            n_steps = tf.cast(max_act_steps, tf.float32)
+            L_reduction = L_reduction / n_steps
+            L_operator = L_operator / n_steps
+
+            # Result loss on the LAST step's output
+            last_result = all_results[max_act_steps - 1]
             L_result = tf.reduce_mean(
-                keras.losses.huber(_log_c(targets), _log_c(out["result"]), delta=2.0)
+                keras.losses.huber(_log_c(targets), _log_c(last_result), delta=2.0)
             )
 
             total_loss = (
@@ -363,16 +404,21 @@ def _make_compiled_train_fn(model, optimizer, w_operator, w_reduction, result_lo
 
         grad_norms = tf.stack([tf.norm(g) for g in grads if g is not None])
 
+        last_rw = all_rw[max_act_steps - 1]
+        last_op = all_op_logits[max_act_steps - 1]
+        last_left = all_left_vals[max_act_steps - 1]
+        last_right = all_right_vals[max_act_steps - 1]
+
         return {
             "total_loss": total_loss,
             "L_reduction": L_reduction,
             "L_operator": L_operator,
             "L_result": L_result,
-            "result": out["result"],
-            "left_val": out["left_val"],
-            "right_val": out["right_val"],
-            "op_logits": out["op_logits"],
-            "reduction_weights": out["reduction_weights"],
+            "result": last_result,
+            "left_val": last_left,
+            "right_val": last_right,
+            "op_logits": last_op,
+            "reduction_weights": last_rw,
             "grad_mean": tf.reduce_mean(grad_norms),
             "grad_max": tf.reduce_max(grad_norms),
         }
@@ -442,8 +488,9 @@ def main():
     dummy = np.zeros((1, args.max_len), dtype=np.int32)
     _ = model(tf.constant(dummy), training=False)
 
+    act_steps = args.act_steps
     param_count = sum(np.prod(v.shape) for v in model.trainable_variables)
-    logger.info(f"DFSA model: hidden={args.hidden_size}, params={param_count:,}")
+    logger.info(f"DFSA model: hidden={args.hidden_size}, act_steps={act_steps}, params={param_count:,}")
 
     # Optimizer
     primary = keras.optimizers.schedules.CosineDecay(
@@ -465,19 +512,38 @@ def main():
     # Compile
     logger.info("Compiling training graph...")
     compiled_fn = _make_compiled_train_fn(
-        model, optimizer, args.w_operator, args.w_reduction, args.result_loss_weight
+        model, optimizer, args.w_operator, args.w_reduction,
+        args.result_loss_weight, act_steps,
     )
 
+    # Helper to build per-step tensors
+    def _build_per_step(expressions, input_ids):
+        B, L = input_ids.shape
+        all_ids = np.zeros((B, act_steps, L), dtype=np.int32)
+        all_op_idx = np.zeros((B, act_steps), dtype=np.int32)
+        all_op_pos = np.zeros((B, act_steps), dtype=np.int32)
+        all_valid = np.zeros((B, act_steps), dtype=np.float32)
+        for i, expr in enumerate(expressions):
+            ps = prepare_per_step_labels(expr, tokenizer, act_steps)
+            all_ids[i] = ps["per_step_token_ids"]
+            all_op_idx[i] = ps["per_step_op_index"]
+            all_op_pos[i] = ps["per_step_op_position"]
+            all_valid[i] = ps["per_step_valid_mask"]
+        return all_ids, all_op_idx, all_op_pos, all_valid
+
     # Warmup trace
-    warmup_ids, warmup_t, warmup_v, _, warmup_labels = generate_curriculum_batch(
+    warmup_ids, warmup_t, warmup_v, warmup_exprs, _ = generate_curriculum_batch(
         args.batch_size, 0.0, tokenizer
     )
+    w_ps_ids, w_ps_oi, w_ps_op, w_ps_vm = _build_per_step(warmup_exprs, warmup_ids)
     compiled_fn(
         tf.constant(warmup_ids),
         tf.constant(warmup_t),
         tf.constant(warmup_v),
-        tf.constant(warmup_labels["operator_index"]),
-        tf.constant(warmup_labels["operator_position"]),
+        tf.constant(w_ps_ids),
+        tf.constant(w_ps_oi),
+        tf.constant(w_ps_op),
+        tf.constant(w_ps_vm),
     )
     logger.info("Graph compiled. Training starts.")
 
@@ -491,12 +557,16 @@ def main():
             args.batch_size, progress, tokenizer
         )
 
+        ps_ids, ps_oi, ps_op, ps_vm = _build_per_step(expressions, input_ids)
+
         raw = compiled_fn(
             tf.constant(input_ids),
             tf.constant(targets),
             tf.constant(validity),
-            tf.constant(labels["operator_index"]),
-            tf.constant(labels["operator_position"]),
+            tf.constant(ps_ids),
+            tf.constant(ps_oi),
+            tf.constant(ps_op),
+            tf.constant(ps_vm),
         )
 
         # Numpy metrics
