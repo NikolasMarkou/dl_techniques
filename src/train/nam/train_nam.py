@@ -315,9 +315,11 @@ def _make_compiled_train_fn(
                 all_reduction_weights.append(outputs["reduction_weights"])
 
             # --- Compute multi-task losses ---
+            # L_number is REMOVED: number extraction is now deterministic
+            # (zero-parameter assembly from tokenizer digits + operator position).
+            # Only losses that train learned parameters remain.
             L_result = tf.constant(0.0)
             L_valid = tf.constant(0.0)
-            L_number = tf.constant(0.0)
             L_operator = tf.constant(0.0)
             L_reduction = tf.constant(0.0)
 
@@ -328,8 +330,7 @@ def _make_compiled_train_fn(
                 true_op_position, max_expression_len
             )
 
-            # Log-compress: sign(x) * log(1 + |x|) — scale-invariant for
-            # numbers spanning 1-digit to 10-digit. Defined once, reused.
+            # Log-compress for result loss
             def _log_c(x):
                 return tf.sign(x) * tf.math.log1p(tf.abs(x))
 
@@ -350,69 +351,7 @@ def _make_compiled_train_fn(
                     )
                 )
 
-                # S1: Number extraction loss.
-                #
-                # Three options (DECISION D-008, post iter-1 probe):
-                # - 'log_mse': log-compressed MSE (README baseline). Gradient
-                #   magnitude is O(log(target)) — stays substantial for
-                #   10-digit numbers. The iter-1 rel_err variant had
-                #   O(1/target) gradient which vanished for target > 10^4.
-                # - 'rel_err': Huber on relative error (iter-1 Step 3).
-                #   Kept for experimentation; do not use alone.
-                # - 'combined': log_mse + 0.5 * rel_err (belt-and-braces).
-                #
-                # 0.5 per-operand coefficient normalizes to the per-operand
-                # mean (matches the logged number_mse metric).
-                if number_loss_type == "log_mse":
-                    left_err = _log_c(all_left_vals[i]) - _log_c(true_left)
-                    right_err = _log_c(all_right_vals[i]) - _log_c(true_right)
-                    L_number += 0.5 * tf.reduce_mean(tf.square(left_err)) \
-                              + 0.5 * tf.reduce_mean(tf.square(right_err))
-                elif number_loss_type == "rel_err":
-                    zero_target = tf.zeros_like(all_left_vals[i])
-                    left_rel = (all_left_vals[i] - true_left) / (
-                        tf.abs(true_left) + 1.0
-                    )
-                    right_rel = (all_right_vals[i] - true_right) / (
-                        tf.abs(true_right) + 1.0
-                    )
-                    L_number += 0.5 * tf.reduce_mean(
-                        keras.losses.huber(
-                            zero_target, left_rel, delta=number_loss_delta,
-                        )
-                    ) + 0.5 * tf.reduce_mean(
-                        keras.losses.huber(
-                            zero_target, right_rel, delta=number_loss_delta,
-                        )
-                    )
-                else:  # combined
-                    left_err = _log_c(all_left_vals[i]) - _log_c(true_left)
-                    right_err = _log_c(all_right_vals[i]) - _log_c(true_right)
-                    L_log = 0.5 * tf.reduce_mean(tf.square(left_err)) \
-                          + 0.5 * tf.reduce_mean(tf.square(right_err))
-
-                    zero_target = tf.zeros_like(all_left_vals[i])
-                    left_rel = (all_left_vals[i] - true_left) / (
-                        tf.abs(true_left) + 1.0
-                    )
-                    right_rel = (all_right_vals[i] - true_right) / (
-                        tf.abs(true_right) + 1.0
-                    )
-                    L_rel = 0.5 * tf.reduce_mean(
-                        keras.losses.huber(
-                            zero_target, left_rel, delta=number_loss_delta,
-                        )
-                    ) + 0.5 * tf.reduce_mean(
-                        keras.losses.huber(
-                            zero_target, right_rel, delta=number_loss_delta,
-                        )
-                    )
-                    L_number += L_log + 0.5 * L_rel
-
-                # S2: Operator classification CE — clamp logits to [-30, 30]
-                # to prevent extreme confidence that causes CE explosion
-                # when the prediction is wrong (CE of a 99.999% wrong
-                # prediction = ~11.5, but unclamped can reach thousands).
+                # S2: Operator classification CE
                 clamped_op_logits = tf.clip_by_value(
                     all_op_logits[i], -30.0, 30.0
                 )
@@ -436,7 +375,6 @@ def _make_compiled_train_fn(
             n_steps = tf.cast(max_act_steps, tf.float32)
             L_result = L_result / n_steps
             L_valid = L_valid / n_steps
-            L_number = L_number / n_steps
             L_operator = L_operator / n_steps
             L_reduction = L_reduction / n_steps
 
@@ -444,10 +382,9 @@ def _make_compiled_train_fn(
             avg_steps = tf.reduce_mean(tf.cast(carry["steps"], tf.float32))
             L_ponder = ponder_cost * avg_steps
 
-            # Combined loss
+            # Combined loss (L_number removed — number extraction is deterministic)
             total_loss = (
-                w_number * L_number
-                + w_operator * L_operator
+                w_operator * L_operator
                 + w_reduction * L_reduction
                 + result_loss_weight * L_result
                 + valid_loss_weight * L_valid
@@ -461,7 +398,6 @@ def _make_compiled_train_fn(
         # to measure each sub-skill's contribution separately.
         # Cost: ~5x backward pass — only use for probe/debug.
         if log_grad_norms:
-            num_grads = tape.gradient(L_number, model.trainable_variables)
             op_grads = tape.gradient(L_operator, model.trainable_variables)
             red_grads = tape.gradient(L_reduction, model.trainable_variables)
             res_grads = tape.gradient(L_result, model.trainable_variables)
@@ -473,12 +409,10 @@ def _make_compiled_train_fn(
                     return tf.constant(0.0)
                 return tf.linalg.global_norm(filtered)
 
-            grad_norm_number = _global_norm(num_grads)
             grad_norm_operator = _global_norm(op_grads)
             grad_norm_reduction = _global_norm(red_grads)
             grad_norm_result = _global_norm(res_grads)
         else:
-            grad_norm_number = tf.constant(0.0)
             grad_norm_operator = tf.constant(0.0)
             grad_norm_reduction = tf.constant(0.0)
             grad_norm_result = tf.constant(0.0)
@@ -499,7 +433,6 @@ def _make_compiled_train_fn(
 
         return {
             "total_loss": total_loss,
-            "L_number": L_number,
             "L_operator": L_operator,
             "L_reduction": L_reduction,
             "L_result": L_result,
@@ -514,7 +447,6 @@ def _make_compiled_train_fn(
             "avg_steps": avg_steps,
             "grad_norm_mean": tf.reduce_mean(grad_norms),
             "grad_norm_max": tf.reduce_max(grad_norms),
-            "grad_norm_number": grad_norm_number,
             "grad_norm_operator": grad_norm_operator,
             "grad_norm_reduction": grad_norm_reduction,
             "grad_norm_result": grad_norm_result,
@@ -625,7 +557,7 @@ def train_step(
 
     return {
         "total_loss": float(raw["total_loss"].numpy()),
-        "L_number": float(raw["L_number"].numpy()),
+        # L_number removed — number extraction is deterministic
         "L_operator": float(raw["L_operator"].numpy()),
         "L_reduction": float(raw["L_reduction"].numpy()),
         "L_result": float(raw["L_result"].numpy()),
@@ -645,7 +577,7 @@ def train_step(
         "avg_steps": float(raw["avg_steps"].numpy()),
         "grad_norm_mean": float(raw["grad_norm_mean"].numpy()),
         "grad_norm_max": float(raw["grad_norm_max"].numpy()),
-        "grad_norm_number": float(raw["grad_norm_number"].numpy()),
+        # grad_norm_number removed — no number loss to measure
         "grad_norm_operator": float(raw["grad_norm_operator"].numpy()),
         "grad_norm_reduction": float(raw["grad_norm_reduction"].numpy()),
         "grad_norm_result": float(raw["grad_norm_result"].numpy()),
@@ -959,7 +891,7 @@ def main():
 
             # Per-loss breakdown
             logger.info(
-                f"  losses: L_num={metrics['L_number']:.4f} "
+                f"  losses: "
                 f"L_op={metrics['L_operator']:.4f} "
                 f"L_red={metrics['L_reduction']:.4f} "
                 f"L_res={metrics['L_result']:.4f} "
@@ -995,7 +927,7 @@ def main():
             # Per-sub-skill gradient norms (only populated when --log-grad-norms)
             if args.log_grad_norms:
                 logger.info(
-                    f"  grad per-skill: num={metrics['grad_norm_number']:.4f} "
+                    f"  grad per-skill: "
                     f"op={metrics['grad_norm_operator']:.4f} "
                     f"red={metrics['grad_norm_reduction']:.4f} "
                     f"res={metrics['grad_norm_result']:.4f}"
