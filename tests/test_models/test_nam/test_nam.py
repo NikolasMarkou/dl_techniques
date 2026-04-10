@@ -263,8 +263,17 @@ class TestNAMCell:
         carry = cell.initialize_carry(batch_size)
         hidden = ops.ones((batch_size, L, D))
         mask = ops.ones((batch_size, 1, L), dtype="int32")
+        # Dummy token_ids with a simple expression pattern
+        token_ids = np.zeros((batch_size, L), dtype=np.int32)
+        token_ids[:, 0] = 1   # BOS
+        token_ids[:, 1] = 5   # digit '1'
+        token_ids[:, 2] = 3   # space
+        token_ids[:, 3] = 14  # '+'
+        token_ids[:, 4] = 3   # space
+        token_ids[:, 5] = 6   # digit '2'
+        token_ids[:, 6] = 2   # EOS
 
-        new_carry, outputs = cell((carry, hidden, mask), training=False)
+        new_carry, outputs = cell((carry, hidden, mask, token_ids), training=False)
 
         assert outputs["result"].shape == (batch_size, 1)
         assert outputs["valid"].shape == (batch_size, 1)
@@ -283,8 +292,9 @@ class TestNAMCell:
         carry = cell.initialize_carry(4)
         hidden = keras.random.normal((4, tiny_config.max_expression_len, 32))
         mask = ops.ones((4, 1, tiny_config.max_expression_len), dtype="int32")
+        token_ids = np.zeros((4, tiny_config.max_expression_len), dtype=np.int32)
 
-        _, outputs = cell((carry, hidden, mask), training=False)
+        _, outputs = cell((carry, hidden, mask, token_ids), training=False)
         valid = outputs["valid"].numpy()
         # valid is a soft value from weighted arithmetic ops
         assert valid.shape == (4, 1)
@@ -413,30 +423,33 @@ class TestNAM:
         with pytest.raises(ValueError, match="Unknown variant"):
             NAM.from_variant("nonexistent")
 
-    def test_split_number_heads_exist(self, tiny_model, sample_batch):
-        """left_number_head and right_number_head must be distinct sub-layers."""
-        # Build the model by running a forward pass
-        carry = tiny_model.initial_carry(sample_batch)
-        _ = tiny_model(carry, sample_batch, training=False)
+    def test_deterministic_number_assembly(self, tiny_model, sample_batch):
+        """Number extraction must be exact when reduction points to operator."""
+        from dl_techniques.models.nam.tokenizer import ArithmeticTokenizer
+        tokenizer = ArithmeticTokenizer(max_len=tiny_model.config.max_expression_len)
 
+        # Test expressions with known answers
+        exprs = ["3 + 5", "12 * 4", "999 - 1"]
+        ids = tokenizer.encode_batch(exprs)
+        batch = {"input_ids": ids}
+        carry = tiny_model.initial_carry(batch)
+        _, out = tiny_model(carry, batch, training=False)
+
+        # We can't guarantee reduction points to the right place (untrained),
+        # but we CAN verify the assembly function itself works by checking
+        # that left_val and right_val are valid numbers (not NaN/Inf).
+        left = out["step_left_val"].numpy()
+        right = out["step_right_val"].numpy()
+        assert not np.any(np.isnan(left)), "left_val contains NaN"
+        assert not np.any(np.isnan(right)), "right_val contains NaN"
+        assert not np.any(np.isinf(left)), "left_val contains Inf"
+        assert not np.any(np.isinf(right)), "right_val contains Inf"
+
+        # Verify no learned number_head layers exist
         cell = tiny_model.cell
-        assert hasattr(cell, "left_number_head"), "cell.left_number_head missing"
-        assert hasattr(cell, "right_number_head"), "cell.right_number_head missing"
-        assert not hasattr(cell, "number_head"), (
-            "old shared cell.number_head should no longer exist"
-        )
-
-        # Distinct Keras sub-layers with distinct names
-        assert cell.left_number_head is not cell.right_number_head
-        assert cell.left_number_head.name == "left_number_head"
-        assert cell.right_number_head.name == "right_number_head"
-
-        # Both must have independent trainable weights
-        left_names = {v.path for v in cell.left_number_head.trainable_variables}
-        right_names = {v.path for v in cell.right_number_head.trainable_variables}
-        assert left_names.isdisjoint(right_names)
-        assert any("left_number_head" in n for n in left_names)
-        assert any("right_number_head" in n for n in right_names)
+        assert not hasattr(cell, "number_head"), "old number_head should not exist"
+        assert not hasattr(cell, "left_number_head"), "learned left_number_head removed"
+        assert not hasattr(cell, "right_number_head"), "learned right_number_head removed"
 
     def test_weight_round_trip_bit_exact(self, tiny_model, sample_batch, tmp_path):
         """Saving and reloading weights must yield bit-exact forward outputs.
@@ -476,32 +489,44 @@ class TestNAM:
             assert a.shape == b.shape
             np.testing.assert_allclose(a, b, atol=1e-6, rtol=0, err_msg=f"mismatch in {key}")
 
-    def test_split_number_heads_train_independently(self, tiny_model, sample_batch):
-        """Gradients must flow through both left and right number heads."""
-        import tensorflow as tf
+    def test_deterministic_assembly_exact(self):
+        """Verify _assemble_number_from_tokens gives exact values."""
+        from dl_techniques.models.nam.cell import _assemble_number_from_tokens
 
-        batch = {"input_ids": tf.constant(sample_batch["input_ids"])}
-        targets_left = tf.constant(np.array([[1.0], [3.0], [10.0]], dtype=np.float32))
-        targets_right = tf.constant(np.array([[2.0], [4.0], [2.0]], dtype=np.float32))
+        # Simulate "123 + 45": digits 1,2,3 on left, 4,5 on right
+        # token_ids where digit '1'=5, '2'=6, '3'=7, '4'=8, '5'=9
+        token_ids = np.array([[1, 5, 6, 7, 3, 14, 3, 8, 9, 2, 0, 0]], dtype=np.int32)
+        #                     BOS 1  2  3  SP  +  SP 4  5  EOS PAD PAD
 
-        with tf.GradientTape(persistent=True) as tape:
-            carry = tiny_model.initial_carry(batch)
-            _, out = tiny_model(carry, batch, training=True)
-            loss = tf.reduce_mean(tf.square(out["step_left_val"] - targets_left)) \
-                   + tf.reduce_mean(tf.square(out["step_right_val"] - targets_right))
+        # Left mask: digits before operator (pos 5)
+        left_mask = np.array([[0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]], dtype=np.float32)
+        right_mask = np.array([[0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0]], dtype=np.float32)
 
-        cell = tiny_model.cell
-        left_vars = cell.left_number_head.trainable_variables
-        right_vars = cell.right_number_head.trainable_variables
-        grads_left = tape.gradient(loss, left_vars)
-        grads_right = tape.gradient(loss, right_vars)
-        del tape
+        left_val = _assemble_number_from_tokens(token_ids, left_mask)
+        right_val = _assemble_number_from_tokens(token_ids, right_mask)
 
-        assert all(g is not None for g in grads_left)
-        assert all(g is not None for g in grads_right)
-        # Both heads should receive non-zero gradient when both targets contribute
-        assert any(float(tf.reduce_sum(tf.abs(g))) > 0 for g in grads_left)
-        assert any(float(tf.reduce_sum(tf.abs(g))) > 0 for g in grads_right)
+        assert float(left_val[0, 0]) == pytest.approx(123.0, abs=1e-3)
+        assert float(right_val[0, 0]) == pytest.approx(45.0, abs=1e-3)
+
+    def test_deterministic_assembly_large_numbers(self):
+        """Verify assembly works up to 10-digit numbers."""
+        from dl_techniques.models.nam.cell import _assemble_number_from_tokens
+
+        # "1234567890 + 1"
+        digits = [5, 6, 7, 8, 9, 10, 11, 12, 13, 4]  # 1,2,3,4,5,6,7,8,9,0
+        token_ids = np.array([[1] + digits + [3, 14, 3, 5, 2] + [0]*4], dtype=np.int32)
+        L = token_ids.shape[1]
+
+        left_mask = np.zeros((1, L), dtype=np.float32)
+        left_mask[0, 1:11] = 1.0  # positions 1-10 are the 10 digits
+        right_mask = np.zeros((1, L), dtype=np.float32)
+        right_mask[0, 14] = 1.0  # position 14 is digit '1'
+
+        left_val = _assemble_number_from_tokens(token_ids, left_mask)
+        right_val = _assemble_number_from_tokens(token_ids, right_mask)
+
+        assert float(left_val[0, 0]) == pytest.approx(1234567890.0, rel=1e-6)
+        assert float(right_val[0, 0]) == pytest.approx(1.0, abs=1e-3)
 
 
 # ── Data Generator Tests ────────────────────────────────────────────────

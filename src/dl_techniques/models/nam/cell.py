@@ -70,6 +70,56 @@ def _fixed_divide(a: Any, b: Any, epsilon: float = 1e-7) -> Tuple[Any, Any]:
     return result, valid
 
 
+# ── Deterministic number assembly (ZERO learned parameters) ──────────
+
+
+def _assemble_number_from_tokens(
+    token_ids: Any,
+    digit_mask: Any,
+) -> Any:
+    """Assemble a multi-digit number from token digit values.
+
+    This is a DETERMINISTIC function — no learned parameters. The tokenizer
+    encodes digits 0-9 as token IDs 4-13. Given a mask indicating which
+    tokens belong to this number, we compute:
+
+        value = sum(digit_value_i * 10^position_i)
+
+    where position_i is the digit's place value (0=units, 1=tens, etc.),
+    derived from the count of digits to its right within the number.
+
+    :param token_ids: (B, L) int — raw token IDs from the tokenizer.
+    :param digit_mask: (B, L) float — 1.0 for each digit belonging to
+        this number, 0.0 elsewhere. Computed from is_digit AND side-of-operator.
+    :return: (B, 1) float — the assembled scalar number value.
+    """
+    # Extract digit values: token 4='0', 5='1', ..., 13='9'
+    is_digit = ops.cast(
+        ops.logical_and(
+            ops.greater_equal(token_ids, 4),
+            ops.less_equal(token_ids, 13),
+        ),
+        "float32",
+    )
+    digit_values = ops.cast(token_ids - 4, "float32") * is_digit  # 0-9
+
+    # Count digits to the right of each position (within this number).
+    # cumsum_left[i] = number of this-number digits at positions <= i.
+    # power_of_10[i] = total_digits - cumsum_left[i] (0 for rightmost = units).
+    cumsum_left = ops.cumsum(digit_mask, axis=1)
+    total_digits = ops.sum(digit_mask, axis=1, keepdims=True)  # (B, 1)
+    power_of_10 = (total_digits - cumsum_left) * digit_mask  # (B, L)
+
+    # Positional weights: 10^0=1, 10^1=10, 10^2=100, ...
+    positional_weight = ops.power(
+        ops.cast(10.0, "float32"), power_of_10
+    ) * digit_mask
+
+    # Assemble: sum(digit_value * positional_weight)
+    value = ops.sum(digit_values * positional_weight, axis=1, keepdims=True)
+    return value  # (B, 1)
+
+
 # ── NAMCell ─────────────────────────────────────────────────────────────
 
 
@@ -155,16 +205,12 @@ class NAMCell(keras.layers.Layer):
         # --- Sub-expression scoring ---
         self.reduction_scorer = keras.layers.Dense(1, name="reduction_scorer")
 
-        # --- Operand extraction projections ---
-        self.left_proj = keras.layers.Dense(h, name="left_proj")
-        self.right_proj = keras.layers.Dense(h, name="right_proj")
-        # DECISION D-001 (plan_2026-04-09_aa9cac24): number_head is split into
-        # two independent Dense(1) heads, one per operand. The shared head
-        # caused the "3d×3d=100% but 1d×3d=0%" cross-scale failure documented
-        # in src/train/nam/README.md — one Dense couldn't decode both operands
-        # at different scales through the same weights.
-        self.left_number_head = keras.layers.Dense(1, name="left_number_head")
-        self.right_number_head = keras.layers.Dense(1, name="right_number_head")
+        # Operand extraction is DETERMINISTIC — no learned projections needed.
+        # See _assemble_number_from_tokens(): numbers are assembled from
+        # tokenizer digit values + predicted operator position.
+        # Previous Dense(1) heads (left_number_head, right_number_head) were
+        # removed because Dense(D→1) cannot perform the nonlinear positional
+        # multiplication (digit × 10^position) required for multi-digit assembly.
 
         # --- Operator classification (4 ops: +, -, *, /) ---
         self.op_classifier = keras.layers.Dense(4, name="op_classifier")
@@ -224,11 +270,7 @@ class NAMCell(keras.layers.Layer):
         self.ffn_norm.build(seq_shape)
 
         self.reduction_scorer.build(seq_shape)
-        self.left_proj.build(seq_shape)
-        self.right_proj.build(seq_shape)
-        # number heads receive (B, h) at call time (left_focused / right_focused)
-        self.left_number_head.build((None, h))
-        self.right_number_head.build((None, h))
+        # No left_proj/right_proj/number_head builds — number extraction is deterministic
         self.op_classifier.build(seq_shape)
 
         controller_input_dim = h + self.config.num_read_heads * h
@@ -281,25 +323,27 @@ class NAMCell(keras.layers.Layer):
 
     def call(
         self,
-        inputs: Tuple[Dict[str, Any], Any, Any],
+        inputs: Tuple[Dict[str, Any], Any, Any, Any],
         training: Optional[bool] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Execute one reduction step.
 
-        :param inputs: Tuple of (carry, hidden_state, mask).
+        :param inputs: Tuple of (carry, hidden_state, mask, token_ids).
             - carry: Dictionary from previous step or initialize_carry().
             - hidden_state: (B, L, D) current expression representation.
             - mask: (B, 1, L) padding mask.
+            - token_ids: (B, L) int — raw token IDs for deterministic
+              number assembly.
         :param training: Whether in training mode.
         :type training: Optional[bool]
         :return: Tuple of (new_carry, outputs).
             - new_carry: Updated carry state (with stop_gradient).
             - outputs: Dict with 'result', 'valid', 'op_logits',
-              'q_halt', 'q_continue', 'hidden'.
+              'q_halt', 'q_continue', 'hidden', 'left_val', 'right_val'.
         :rtype: Tuple[Dict[str, Any], Dict[str, Any]]
         """
-        carry, hidden, mask = inputs
+        carry, hidden, mask, token_ids = inputs
         h = self.config.hidden_size
 
         # --- 1. Tree induction ---
@@ -330,24 +374,37 @@ class NAMCell(keras.layers.Layer):
         scores = scores + (1.0 - token_mask_float) * (-1e9)
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
-        # --- 5. Extract operand representations ---
-        left_repr = self.left_proj(hidden)  # (B, L, D)
-        right_repr = self.right_proj(hidden)  # (B, L, D)
+        # --- 5. Deterministic number assembly from tokens ---
+        # The operator position is the argmax of reduction_weights (already
+        # trained to 100% accuracy). Given the position, we split the tokens
+        # into left-of-operator and right-of-operator digit masks, then
+        # assemble each number as sum(digit_value * 10^position_in_number).
+        # This is EXACT — no learned parameters, no Dense(1) bottleneck.
+        op_pos = ops.argmax(reduction_weights, axis=-1)  # (B,)
+        seq_len = ops.shape(token_ids)[1]
+        positions = ops.cast(ops.arange(seq_len), "int32")  # (L,)
+        op_pos_expanded = ops.expand_dims(ops.cast(op_pos, "int32"), axis=-1)  # (B, 1)
 
-        # Weighted sum using reduction focus
+        is_digit = ops.cast(
+            ops.logical_and(
+                ops.greater_equal(token_ids, 4),
+                ops.less_equal(token_ids, 13),
+            ),
+            "float32",
+        )
+        left_digit_mask = is_digit * ops.cast(
+            ops.less(positions, op_pos_expanded), "float32"
+        )  # (B, L)
+        right_digit_mask = is_digit * ops.cast(
+            ops.greater(positions, op_pos_expanded), "float32"
+        )  # (B, L)
+
+        left_val = _assemble_number_from_tokens(token_ids, left_digit_mask)   # (B, 1)
+        right_val = _assemble_number_from_tokens(token_ids, right_digit_mask)  # (B, 1)
+
+        # reduction_weights are still used for pooling hidden state for
+        # the operator classifier and NTM addressing.
         rw = ops.expand_dims(reduction_weights, axis=-1)  # (B, L, 1)
-        left_focused = ops.sum(left_repr * rw, axis=1)  # (B, D)
-        right_focused = ops.sum(right_repr * rw, axis=1)  # (B, D)
-
-        # Extract scalar values from operand representations.
-        # Hard clamp to [-1e10, 1e10] prevents float32 overflow when two
-        # operands are multiplied (1e10 * 1e10 = 1e20, within float32).
-        # Unlike tanh, the clamp has unit gradient inside the range so
-        # there's no vanishing gradient problem for normal values.
-        # DECISION D-001: independent Dense(1) heads for left and right
-        # operands (see __init__ comment).
-        left_val = ops.clip(self.left_number_head(left_focused), -1e10, 1e10)   # (B, 1)
-        right_val = ops.clip(self.right_number_head(right_focused), -1e10, 1e10)  # (B, 1)
 
         # --- 6. Pre-write read from NTM memory for context ---
         memory_state = MemoryState(

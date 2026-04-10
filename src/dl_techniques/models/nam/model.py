@@ -303,8 +303,10 @@ class NAM(keras.Model):
         mask = batch["mask"]
 
         # --- Run NAMCell ---
+        # Pass token_ids for deterministic number assembly inside the cell.
+        token_ids = batch["input_ids"]
         new_cell_carry, cell_outputs = self.cell(
-            (carry["cell_carry"], hidden, mask),
+            (carry["cell_carry"], hidden, mask, token_ids),
             training=training,
         )
 
