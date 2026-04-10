@@ -83,41 +83,55 @@ class DifferentiableFSA(keras.Model):
         hidden_size: int = 64,
         max_expression_len: int = 64,
         vocab_size: int = 21,
+        num_encoder_layers: int = 2,
+        num_heads: int = 4,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.max_expression_len = max_expression_len
         self.vocab_size = vocab_size
+        self.num_encoder_layers = num_encoder_layers
 
-        # --- Token feature extractor (small, learned) ---
-        # Embeds token IDs + numeric features into a compact representation.
-        # This is the "interface" that a host transformer would replace
-        # with its own hidden states.
+        # --- Token feature extractor ---
         self.token_embedding = keras.layers.Embedding(
             vocab_size, hidden_size, name="token_embedding"
         )
         self.numeric_proj = keras.layers.Dense(
             hidden_size, name="numeric_proj"
         )
-        # Small 2-layer MLP to create per-token features
-        self.feature_mlp = keras.layers.Dense(
-            hidden_size, activation="gelu", name="feature_mlp"
-        )
-        self.feature_norm = keras.layers.LayerNormalization(
-            epsilon=1e-6, name="feature_norm"
-        )
+
+        # --- Small attention encoder (1-2 layers) ---
+        # This is the MINIMAL cross-position mechanism that lets the
+        # reduction scorer compare operators across the sequence.
+        # Without it, the scorer sees each position independently and
+        # CANNOT learn PEMDAS ("reduce * before +").
+        # 2 layers with 4 heads is enough to learn precedence structure.
+        self.encoder_layers = []
+        for i in range(num_encoder_layers):
+            self.encoder_layers.append({
+                "attn": keras.layers.MultiHeadAttention(
+                    num_heads=num_heads,
+                    key_dim=hidden_size // num_heads,
+                    name=f"encoder_attn_{i}",
+                ),
+                "norm1": keras.layers.LayerNormalization(
+                    epsilon=1e-6, name=f"encoder_norm1_{i}"
+                ),
+                "ffn": keras.layers.Dense(
+                    hidden_size, activation="gelu", name=f"encoder_ffn_{i}"
+                ),
+                "norm2": keras.layers.LayerNormalization(
+                    epsilon=1e-6, name=f"encoder_norm2_{i}"
+                ),
+            })
 
         # --- Reduction scorer (learned) ---
-        # Predicts which token position is the operator to reduce.
-        # Output: softmax over positions → soft operator position.
         self.reduction_scorer = keras.layers.Dense(
             1, name="reduction_scorer"
         )
 
         # --- Operator classifier (learned) ---
-        # Predicts which of the 4 operators (+, -, *, /) is at the
-        # reduction position.
         self.op_classifier = keras.layers.Dense(
             4, name="op_classifier"
         )
@@ -173,11 +187,26 @@ class DifferentiableFSA(keras.Model):
             [digit_values, is_digit, op_type, is_operator], axis=-1
         )
 
-        # Learned features
+        # Token features: embedding + numeric injection
         x = self.token_embedding(token_ids) * math.sqrt(self.hidden_size)
         x = x + self.numeric_proj(numeric_features)
-        x = self.feature_mlp(x)
-        x = self.feature_norm(x)  # (B, L, D)
+
+        # Small attention encoder: cross-position interaction for PEMDAS
+        # Each position can see all other positions — the scorer can then
+        # learn "this * should be reduced before that +" by comparing.
+        attn_mask = ops.expand_dims(mask, axis=1)  # (B, 1, L) for broadcasting
+        for layer in self.encoder_layers:
+            # Pre-norm attention + residual
+            x_norm = layer["norm1"](x)
+            attn_out = layer["attn"](
+                query=x_norm, value=x_norm, key=x_norm,
+                attention_mask=attn_mask,
+            )
+            x = x + attn_out
+            # Pre-norm FFN + residual
+            x_norm = layer["norm2"](x)
+            x = x + layer["ffn"](x_norm)
+        # (B, L, D) — each position now has context from ALL other positions
 
         # Reduction scorer → soft operator position
         scores = ops.squeeze(self.reduction_scorer(x), axis=-1)
@@ -288,6 +317,7 @@ class DifferentiableFSA(keras.Model):
             "hidden_size": self.hidden_size,
             "max_expression_len": self.max_expression_len,
             "vocab_size": self.vocab_size,
+            "num_encoder_layers": self.num_encoder_layers,
         })
         return config
 
@@ -298,6 +328,9 @@ class DifferentiableFSA(keras.Model):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train DFSA (Differentiable FSA)")
     parser.add_argument("--hidden-size", type=int, default=64)
+    parser.add_argument("--num-encoder-layers", type=int, default=2,
+                        help="Attention encoder layers (cross-position for PEMDAS)")
+    parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--max-len", type=int, default=64)
     parser.add_argument("--act-steps", type=int, default=1,
                         help="Max ACT steps per expression (1=single-op, 4=multi-op)")
@@ -481,6 +514,8 @@ def main():
     model = DifferentiableFSA(
         hidden_size=args.hidden_size,
         max_expression_len=args.max_len,
+        num_encoder_layers=args.num_encoder_layers,
+        num_heads=args.num_heads,
     )
     tokenizer = ArithmeticTokenizer(max_len=args.max_len)
 
