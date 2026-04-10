@@ -506,6 +506,114 @@ def _generate_multi_op_expr(
     return expr, result, valid
 
 
+def prepare_per_step_labels(
+    expression: str,
+    tokenizer: "ArithmeticTokenizer",
+    max_steps: int,
+) -> Dict[str, np.ndarray]:
+    """
+    Prepare per-ACT-step labels for a single expression.
+
+    For each reduction step, produces the updated token_ids (after prior
+    reductions), the operator position in those tokens, and the operator type.
+
+    For single-op expressions this produces 1 meaningful step. For multi-op
+    with N operators, produces N steps. Remaining steps (up to max_steps) are
+    padded with the final reduced expression and zeroed labels.
+
+    :param expression: Expression string (e.g. "3 + 5 * 2").
+    :param tokenizer: ArithmeticTokenizer instance.
+    :param max_steps: Maximum ACT steps (padding target).
+    :return: Dict with:
+        - per_step_token_ids: (max_steps, L) int32
+        - per_step_op_position: (max_steps,) int32
+        - per_step_op_index: (max_steps,) int32
+        - num_reduction_steps: int — how many real steps
+    """
+    steps = _parse_multi_op(expression)
+    L = tokenizer.max_len
+
+    step_token_ids = np.zeros((max_steps, L), dtype=np.int32)
+    step_op_positions = np.zeros((max_steps,), dtype=np.int32)
+    step_op_indices = np.zeros((max_steps,), dtype=np.int32)
+
+    # For each reduction step, tokenize the current expression and find
+    # the operator position in the token stream
+    current_expr = expression.strip()
+    op_tid_map = {"+": 14, "-": 15, "*": 16, "/": 17}
+
+    for i, step in enumerate(steps):
+        if i >= max_steps:
+            break
+
+        ids = tokenizer.encode(current_expr)
+        step_token_ids[i] = ids
+
+        # Find the operator position for THIS step's operator in the tokens
+        target_op = step["operator"]
+        target_left = step["left_operand"]
+        target_op_tid = op_tid_map[target_op]
+
+        # Scan for the correct operator (match by type and left-context value)
+        found_pos = 0
+        for pos, tid in enumerate(ids):
+            if tid == target_op_tid:
+                # Verify left operand by assembling digits to the left
+                left_digits = []
+                for j in range(pos - 1, -1, -1):
+                    if 4 <= ids[j] <= 13:
+                        left_digits.insert(0, ids[j] - 4)
+                    elif ids[j] == 3:  # space
+                        continue
+                    else:
+                        break
+                if left_digits:
+                    assembled = sum(
+                        d * 10 ** p for p, d in enumerate(reversed(left_digits))
+                    )
+                    if abs(assembled - abs(target_left)) < 0.5:
+                        found_pos = pos
+                        break
+
+        step_op_positions[i] = found_pos
+        step_op_indices[i] = _OP_TO_INDEX[target_op]
+
+        # Simplify expression for the next step: replace the sub-expression
+        # with its integer result (re-parse from the step's result)
+        tokens = _parse_multi_op.__code__.co_consts  # just use the helper
+        # Rebuild: we already have the new expression from _parse_multi_op
+        # but need to reconstruct it. Simplest: re-run the tokenizer math.
+        left = step["left_operand"]
+        right = step["right_operand"]
+        result = step["result"]
+
+        # Build the new expression by replacing "left op right" with result
+        # in the current expression string
+        result_str = str(int(result)) if result == int(result) and abs(result) < 1e15 else f"{result:.6g}"
+        left_str = str(int(left)) if left == int(left) and abs(left) < 1e15 else f"{left:.6g}"
+        right_str = str(int(right)) if right == int(right) and abs(right) < 1e15 else f"{right:.6g}"
+        sub_expr = f"{left_str} {target_op} {right_str}"
+
+        # Replace first occurrence of the sub-expression
+        new_expr = current_expr.replace(sub_expr, result_str, 1)
+        if new_expr == current_expr:
+            # Fallback: try with the original expression tokens
+            new_expr = result_str
+        current_expr = new_expr.strip()
+
+    # Pad remaining steps with the final expression
+    final_ids = tokenizer.encode(current_expr)
+    for i in range(len(steps), max_steps):
+        step_token_ids[i] = final_ids
+
+    return {
+        "per_step_token_ids": step_token_ids,
+        "per_step_op_position": step_op_positions,
+        "per_step_op_index": step_op_indices,
+        "num_reduction_steps": min(len(steps), max_steps),
+    }
+
+
 def generate_curriculum_batch(
     batch_size: int,
     progress: float,

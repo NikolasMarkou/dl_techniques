@@ -38,6 +38,7 @@ from train.common import setup_gpu
 from train.nam.data_generator import (
     generate_batch,
     generate_curriculum_batch,
+    prepare_per_step_labels,
     _safe_eval,
     ExpressionConfig,
     CURRICULUM,
@@ -218,6 +219,38 @@ def create_optimizer(
     return optimizer
 
 
+def _build_per_step_tensors(
+    expressions: list[str],
+    tokenizer: "ArithmeticTokenizer",
+    act_steps: int,
+    input_ids: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Build per-step token_ids and labels for multi-op training.
+
+    For single-op expressions, all steps have identical token_ids. For multi-op,
+    each step gets the token stream after prior reductions (teacher forcing).
+
+    :return: Dict with per_step_token_ids (B, act_steps, L),
+        per_step_op_index (B, act_steps), per_step_op_position (B, act_steps).
+    """
+    B, L = input_ids.shape
+    all_step_ids = np.zeros((B, act_steps, L), dtype=np.int32)
+    all_step_op_idx = np.zeros((B, act_steps), dtype=np.int32)
+    all_step_op_pos = np.zeros((B, act_steps), dtype=np.int32)
+
+    for i, expr in enumerate(expressions):
+        labels = prepare_per_step_labels(expr, tokenizer, act_steps)
+        all_step_ids[i] = labels["per_step_token_ids"]
+        all_step_op_idx[i] = labels["per_step_op_index"]
+        all_step_op_pos[i] = labels["per_step_op_position"]
+
+    return {
+        "per_step_token_ids": all_step_ids,
+        "per_step_op_index": all_step_op_idx,
+        "per_step_op_position": all_step_op_pos,
+    }
+
+
 def _classify_expressions(expressions: list[str]) -> dict[str, list[int]]:
     """
     Classify which operators appear in each expression.
@@ -280,6 +313,9 @@ def _make_compiled_train_fn(
         true_right,
         true_op_index,
         true_op_position,
+        per_step_token_ids,    # (B, max_act_steps, L) per-step token_ids for multi-op
+        per_step_op_index,     # (B, max_act_steps) per-step operator index
+        per_step_op_position,  # (B, max_act_steps) per-step operator position
     ):
         batch_data = {"input_ids": input_ids}
 
@@ -302,6 +338,12 @@ def _make_compiled_train_fn(
             all_reduction_weights = []
 
             for step_idx in range(max_act_steps):
+                # Update token_ids for this step (deterministic assembly
+                # reads the current expression's tokens, which change after
+                # each reduction in multi-op expressions)
+                step_ids = per_step_token_ids[:, step_idx, :]
+                batch_data = {**batch_data, "input_ids": step_ids}
+
                 carry, outputs = model(carry, batch_data, training=True)
                 batch_data = outputs["batch"]
                 all_results.append(outputs["result"])
@@ -323,18 +365,17 @@ def _make_compiled_train_fn(
             L_operator = tf.constant(0.0)
             L_reduction = tf.constant(0.0)
 
-            # One-hot encode operator targets for CE
-            true_op_onehot = tf.one_hot(true_op_index, 4)
-            # One-hot encode operator position for reduction CE
-            true_pos_onehot = tf.one_hot(
-                true_op_position, max_expression_len
-            )
-
             # Log-compress for result loss
             def _log_c(x):
                 return tf.sign(x) * tf.math.log1p(tf.abs(x))
 
             for i in range(max_act_steps):
+                # Per-step targets (multi-op: each step has its own operator target)
+                step_op_idx = per_step_op_index[:, i]    # (B,)
+                step_op_pos = per_step_op_position[:, i]  # (B,)
+                step_op_onehot = tf.one_hot(step_op_idx, 4)
+                step_pos_onehot = tf.one_hot(step_op_pos, max_expression_len)
+
                 # S5: Final result loss (Huber in log-space) — trains
                 # result_head only (stop_gradient prevents backprop).
                 L_result += tf.reduce_mean(
@@ -351,23 +392,23 @@ def _make_compiled_train_fn(
                     )
                 )
 
-                # S2: Operator classification CE
+                # S2: Operator classification CE (per-step target)
                 clamped_op_logits = tf.clip_by_value(
                     all_op_logits[i], -30.0, 30.0
                 )
                 L_operator += tf.reduce_mean(
                     keras.losses.categorical_crossentropy(
-                        true_op_onehot, clamped_op_logits, from_logits=True
+                        step_op_onehot, clamped_op_logits, from_logits=True
                     )
                 )
 
-                # S3: Reduction target CE — clamp probs away from 0
+                # S3: Reduction target CE (per-step target) — clamp probs away from 0
                 clamped_rw = tf.clip_by_value(
                     all_reduction_weights[i], 1e-7, 1.0
                 )
                 L_reduction += tf.reduce_mean(
                     keras.losses.categorical_crossentropy(
-                        true_pos_onehot, clamped_rw
+                        step_pos_onehot, clamped_rw
                     )
                 )
 
@@ -462,6 +503,7 @@ def train_step(
     target_validity: tf.Tensor,
     labels: dict,
     expressions: list[str],
+    per_step: dict = None,
 ) -> dict:
     """
     Execute one training step using the compiled function, then compute metrics.
@@ -483,6 +525,9 @@ def train_step(
         labels["right_operand"],
         labels["operator_index"],
         labels["operator_position"],
+        per_step["per_step_token_ids"],
+        per_step["per_step_op_index"],
+        per_step["per_step_op_position"],
     )
 
     # --- Compute metrics from raw tensors ---
@@ -810,13 +855,16 @@ def main():
 
     # Warm up: run one step to trigger tracing
     if use_curriculum:
-        warmup_ids, warmup_t, warmup_v, _, warmup_labels = generate_curriculum_batch(
+        warmup_ids, warmup_t, warmup_v, warmup_exprs, warmup_labels = generate_curriculum_batch(
             args.batch_size, 0.0, tokenizer
         )
     else:
-        warmup_ids, warmup_t, warmup_v, _, warmup_labels = generate_batch(
+        warmup_ids, warmup_t, warmup_v, warmup_exprs, warmup_labels = generate_batch(
             args.batch_size, expr_config, tokenizer
         )
+    warmup_per_step = _build_per_step_tensors(
+        warmup_exprs, tokenizer, act_steps, warmup_ids
+    )
     compiled_fn(
         tf.constant(warmup_ids),
         tf.constant(warmup_t),
@@ -825,6 +873,9 @@ def main():
         tf.constant(warmup_labels["right_operand"]),
         tf.constant(warmup_labels["operator_index"]),
         tf.constant(warmup_labels["operator_position"]),
+        tf.constant(warmup_per_step["per_step_token_ids"]),
+        tf.constant(warmup_per_step["per_step_op_index"]),
+        tf.constant(warmup_per_step["per_step_op_position"]),
     )
     compile_elapsed = time.time() - compile_start
     logger.info(f"Graph compiled in {compile_elapsed:.1f}s. Training starts now.")
@@ -859,6 +910,16 @@ def main():
             "operator_position": tf.constant(labels["operator_position"]),
         }
 
+        # Build per-step labels for multi-op training
+        per_step = _build_per_step_tensors(
+            expressions, tokenizer, act_steps, input_ids
+        )
+        per_step_tf = {
+            "per_step_token_ids": tf.constant(per_step["per_step_token_ids"]),
+            "per_step_op_index": tf.constant(per_step["per_step_op_index"]),
+            "per_step_op_position": tf.constant(per_step["per_step_op_position"]),
+        }
+
         # Train step
         metrics = train_step(
             compiled_fn=compiled_fn,
@@ -867,6 +928,7 @@ def main():
             target_validity=validity_tf,
             labels=labels_tf,
             expressions=expressions,
+            per_step=per_step_tf,
         )
         metrics["step"] = step
         metrics_log.append(metrics)
