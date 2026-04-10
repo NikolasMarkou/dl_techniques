@@ -349,9 +349,14 @@ def parse_args():
     parser.add_argument("--clip-norm", type=float, default=10.0)
     parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--w-operator", type=float, default=3.0)
-    parser.add_argument("--w-reduction", type=float, default=5.0)
+    parser.add_argument("--w-reduction", type=float, default=20.0)
     parser.add_argument("--result-loss-weight", type=float, default=1.0)
     parser.add_argument("--curriculum-cap", type=float, default=0.8)
+    parser.add_argument("--multiop-start-step", type=int, default=0,
+                        help="Step at which multi-op levels are introduced. "
+                        "Before this step, only single-op levels (0-7) are used. "
+                        "Set to e.g. 20000 for staged training: single-op first "
+                        "until reduction converges, then multi-op.")
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--eval-interval", type=int, default=1000)
     parser.add_argument("--save-interval", type=int, default=2000)
@@ -596,6 +601,16 @@ def main():
 
     for step in range(1, args.steps + 1):
         progress = min(args.curriculum_cap, step / args.steps)
+
+        # Staged training: single-op only until multiop_start_step.
+        # Levels 0-7 are single-op, levels 8-10 are multi-op.
+        # Cap progress so the curriculum never reaches multi-op levels
+        # until the model has learned reduction on single-op.
+        if args.multiop_start_step > 0 and step < args.multiop_start_step:
+            # 8 single-op levels out of 11 total → cap progress at ~0.6
+            # to keep sampling within levels 0-7 only
+            progress = min(progress, 0.55)
+
         input_ids, targets, validity, expressions, labels = generate_curriculum_batch(
             args.batch_size, progress, tokenizer
         )
