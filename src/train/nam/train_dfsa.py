@@ -42,6 +42,10 @@ from dl_techniques.models.nam.cell import (
     _fixed_multiply,
     _fixed_divide,
 )
+from dl_techniques.models.tree_transformer.model import (
+    TreeTransformerBlock,
+    PositionalEncoding,
+)
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.utils.logger import logger
 from train.common import setup_gpu
@@ -83,60 +87,67 @@ class DifferentiableFSA(keras.Model):
         hidden_size: int = 64,
         max_expression_len: int = 64,
         vocab_size: int = 21,
-        num_encoder_layers: int = 2,
+        num_tree_layers: int = 2,
         num_heads: int = 4,
+        intermediate_size: int = None,
+        dropout_rate: float = 0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.max_expression_len = max_expression_len
         self.vocab_size = vocab_size
-        self.num_encoder_layers = num_encoder_layers
+        self.num_tree_layers = num_tree_layers
 
-        # --- Token feature extractor ---
+        if intermediate_size is None:
+            intermediate_size = hidden_size * 2
+
+        # --- Token features ---
         self.token_embedding = keras.layers.Embedding(
             vocab_size, hidden_size, name="token_embedding"
         )
         self.numeric_proj = keras.layers.Dense(
             hidden_size, name="numeric_proj"
         )
+        self.pos_encoding = PositionalEncoding(
+            hidden_size=hidden_size,
+            dropout_rate=dropout_rate,
+            max_len=max_expression_len,
+            name="pos_encoding",
+        )
 
-        # --- Small attention encoder (1-2 layers) ---
-        # This is the MINIMAL cross-position mechanism that lets the
-        # reduction scorer compare operators across the sequence.
-        # Without it, the scorer sees each position independently and
-        # CANNOT learn PEMDAS ("reduce * before +").
-        # 2 layers with 4 heads is enough to learn precedence structure.
-        self.encoder_layers = []
-        for i in range(num_encoder_layers):
-            self.encoder_layers.append({
-                "attn": keras.layers.MultiHeadAttention(
-                    num_heads=num_heads,
-                    key_dim=hidden_size // num_heads,
-                    name=f"encoder_attn_{i}",
-                ),
-                "norm1": keras.layers.LayerNormalization(
-                    epsilon=1e-6, name=f"encoder_norm1_{i}"
-                ),
-                "ffn": keras.layers.Dense(
-                    hidden_size, activation="gelu", name=f"encoder_ffn_{i}"
-                ),
-                "norm2": keras.layers.LayerNormalization(
-                    epsilon=1e-6, name=f"encoder_norm2_{i}"
-                ),
-            })
+        # --- Shared tree transformer (CKY constituency parsing) ---
+        # GroupAttention learns which adjacent tokens form sub-expressions
+        # (e.g., "5 * 2" groups before "3 + ..."). This is the PEMDAS
+        # inductive bias — tree structure = operator precedence.
+        # Shared across ACT steps: same weights parse the expression at
+        # each reduction level.
+        self.tree_blocks = [
+            TreeTransformerBlock(
+                num_heads=num_heads,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                attention_dropout_rate=dropout_rate,
+                hidden_dropout_rate=dropout_rate,
+                name=f"tree_block_{i}",
+            )
+            for i in range(num_tree_layers)
+        ]
+        self.encoder_norm = keras.layers.LayerNormalization(
+            epsilon=1e-6, name="encoder_norm"
+        )
 
-        # --- Reduction scorer (learned) ---
+        # --- Reduction scorer ---
         self.reduction_scorer = keras.layers.Dense(
             1, name="reduction_scorer"
         )
 
-        # --- Operator classifier (learned) ---
+        # --- Operator classifier ---
         self.op_classifier = keras.layers.Dense(
             4, name="op_classifier"
         )
 
-        # --- Result encoder (learned interface to host transformer) ---
+        # --- Result encoder (interface to host transformer) ---
         self.result_encoder = keras.layers.Dense(
             hidden_size, name="result_encoder"
         )
@@ -187,26 +198,23 @@ class DifferentiableFSA(keras.Model):
             [digit_values, is_digit, op_type, is_operator], axis=-1
         )
 
-        # Token features: embedding + numeric injection
+        # Token features: embedding + numeric injection + positional encoding
         x = self.token_embedding(token_ids) * math.sqrt(self.hidden_size)
         x = x + self.numeric_proj(numeric_features)
+        x = self.pos_encoding(x, training=training)
 
-        # Small attention encoder: cross-position interaction for PEMDAS
-        # Each position can see all other positions — the scorer can then
-        # learn "this * should be reduced before that +" by comparing.
-        attn_mask = ops.expand_dims(mask, axis=1)  # (B, 1, L) for broadcasting
-        for layer in self.encoder_layers:
-            # Pre-norm attention + residual
-            x_norm = layer["norm1"](x)
-            attn_out = layer["attn"](
-                query=x_norm, value=x_norm, key=x_norm,
-                attention_mask=attn_mask,
+        # Tree transformer: CKY constituency parsing for PEMDAS
+        # GroupAttention learns tree structure over adjacent tokens.
+        # "5 * 2" groups into a sub-expression before "3 + ..." because
+        # the tree induction learns operator precedence as constituency.
+        mask_3d = ops.expand_dims(mask, axis=1)  # (B, 1, L)
+        group_prob = ops.convert_to_tensor(0.0, dtype=x.dtype)
+        for block in self.tree_blocks:
+            x, group_prob, _ = block(
+                (x, mask_3d, group_prob), training=training
             )
-            x = x + attn_out
-            # Pre-norm FFN + residual
-            x_norm = layer["norm2"](x)
-            x = x + layer["ffn"](x_norm)
-        # (B, L, D) — each position now has context from ALL other positions
+        x = self.encoder_norm(x)
+        # (B, L, D) — each position has tree-structured context
 
         # Reduction scorer → soft operator position
         scores = ops.squeeze(self.reduction_scorer(x), axis=-1)
@@ -317,7 +325,7 @@ class DifferentiableFSA(keras.Model):
             "hidden_size": self.hidden_size,
             "max_expression_len": self.max_expression_len,
             "vocab_size": self.vocab_size,
-            "num_encoder_layers": self.num_encoder_layers,
+            "num_tree_layers": self.num_tree_layers,
         })
         return config
 
@@ -328,8 +336,8 @@ class DifferentiableFSA(keras.Model):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train DFSA (Differentiable FSA)")
     parser.add_argument("--hidden-size", type=int, default=64)
-    parser.add_argument("--num-encoder-layers", type=int, default=2,
-                        help="Attention encoder layers (cross-position for PEMDAS)")
+    parser.add_argument("--num-tree-layers", type=int, default=2,
+                        help="Tree transformer blocks (CKY constituency for PEMDAS)")
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--max-len", type=int, default=64)
     parser.add_argument("--act-steps", type=int, default=1,
@@ -514,7 +522,7 @@ def main():
     model = DifferentiableFSA(
         hidden_size=args.hidden_size,
         max_expression_len=args.max_len,
-        num_encoder_layers=args.num_encoder_layers,
+        num_tree_layers=args.num_tree_layers,
         num_heads=args.num_heads,
     )
     tokenizer = ArithmeticTokenizer(max_len=args.max_len)
