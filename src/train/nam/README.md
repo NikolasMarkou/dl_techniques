@@ -710,7 +710,7 @@ scores = high_prec * 10.0 + low_prec * 5.0 - 0.01 * position
 
 The training metric compared the LAST ACT step's reduction_weights against the FIRST step's target. The last step sees a fully-reduced expression (e.g., "13") with NO operators → reduction_weights is garbage → metric shows 0% even when step 0 is 100% correct. Fixed by returning step 0 outputs for metrics.
 
-## Iteration 3: Final DFSA Architecture (Current)
+## Iteration 3: DFSA with Teacher-Forced Multi-Step
 
 ### Architecture
 
@@ -742,138 +742,187 @@ token_ids (B, L)
             → result_embedding (B, D)
 ```
 
-### Multi-op support
+### Multi-op support (teacher-forced)
 
 - **ACT loop**: `reduce_step()` called `act_steps` times (default 4)
 - **Per-step teacher forcing**: each step receives updated token_ids (expression after prior reductions, from `prepare_per_step_labels()`)
 - **Per-step loss**: L_reduction and L_operator supervised per step with validity mask
 - **PEMDAS data generator**: `_parse_multi_op()` produces correct reduction order via AST walk
 
-### Properties
+### Limitations discovered
 
-| Property | Value |
-|---|---|
-| Parameters | ~2M (vs 5.6M original NAM, 3× smaller) |
-| Reduction accuracy | 100% (hardcoded PEMDAS, verified) |
-| Number assembly | Deterministic (zero error when reduction correct) |
-| Gradient flow | End-to-end (host loss → result → assembly → soft masks → tree encoder) |
-| Freezable | Yes — once op_classifier converges, entire module freezes |
-| Max digits | 10 (limited by float32 precision) |
-| Max operators | act_steps (configurable, default 4) |
-| Operators | +, -, *, / with standard PEMDAS precedence |
+This architecture had two critical flaws that made multi-op arithmetic fail:
 
-### Training
+1. **Cumsum masking grabs wrong operands**: for `"3 + 5 * 2"` with `*` selected, `left_mask = (1 - cumsum(reduction_weights)) * is_digit` grabbed ALL digits left of `*` → `left_val = 35` (should be 5). Teacher forcing masked this during training by providing pre-simplified tokens, but the forward pass was fundamentally wrong for multi-op.
 
-```bash
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
-    --hidden-size 256 --num-tree-layers 3 --num-heads 8 \
-    --max-len 128 --act-steps 4 \
-    --steps 200000 --batch-size 64 --lr 1e-4 \
-    --clip-norm 10.0 --curriculum-cap 0.8 \
-    --gpu 1 --save-dir results/nam/dfsa_full
-```
+2. **Softmax sharpness asymmetry**: PEMDAS scores `10.0` for `*/` and `5.0` for `+-` created operator probability 0.9997 vs 0.955. The 4.5% leakage for `+-` corrupted the power-of-10 number assembly, causing 33% error on 5-digit addition.
 
-### What is learned vs what is hardcoded
+3. **No cross-step gradient flow**: teacher forcing meant each step was independent. The final result loss couldn't propagate back to improve earlier steps' operator classification.
 
-| Component | Learned/Hardcoded | Parameters |
-|---|---|---|
-| Token embedding | Learned | vocab_size × D |
-| Numeric projection | Learned | 4 × D |
-| Positional encoding | Fixed (sinusoidal) | 0 |
-| Tree transformer (3 blocks) | Learned | ~1.5M |
-| PEMDAS reduction | **Hardcoded** | 0 |
-| Number assembly | **Hardcoded** (deterministic) | 0 |
-| Fixed arithmetic | **Hardcoded** | 0 |
-| Operator classifier | Learned | D × 4 |
-| Result encoder | Learned | 2 × D |
+4. **Inference required oracle**: at inference, there were no pre-computed intermediate tokens, so multi-op didn't work without teacher forcing.
 
-### Open directions
+## Iteration 4: Recursive Re-tokenization (Current)
 
-1. **Learn precedence**: replace hardcoded PEMDAS with a learned precedence predictor. Requires solving the credit assignment problem — the soft assembly must NOT work around bad reduction. Possible approaches: Gumbel-softmax, straight-through estimator, or auxiliary precedence-prediction loss decoupled from the result.
+### Methodology: Epistemic Deconstruction
 
-2. **Parentheses**: extend the grammar to handle `(3 + 5) * 2`. The PEMDAS hardcoding would need adjustment for parenthesized sub-expressions (reduce innermost parentheses first).
+The root cause analysis used a Bayesian hypothesis tracking protocol. Four hypotheses were seeded with priors, then updated with evidence from numerical simulations, code tracing, and controlled experiments.
 
-3. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add an input projection from host D_model → DFSA D and an output projection from DFSA D → host D_model.
+#### Hypothesis tracking
 
-## Iteration 4: Recursive Re-tokenization — 400/400 Accuracy
+| ID | Hypothesis | Prior | Final Posterior | Status |
+|----|-----------|-------|----------------|--------|
+| H1 | Softmax sharpness asymmetry in PEMDAS scores | 0.55 | **0.93** | CONFIRMED |
+| H2 | Power-of-10 gradient instability | 0.20 | 0.13 | WEAKENED (downstream of H1) |
+| H3 | Int32 overflow in label generation | 0.10 | 0.18 | CONFIRMED (secondary, 10-digit only) |
+| H4 | Insufficient training (needs more steps) | 0.15 | **0.03** | REFUTED |
 
-### Root Cause Analysis (Epistemic Deconstruction)
+#### Key evidence that confirmed H1
 
-Two bugs were identified via epistemic deconstruction (Bayesian hypothesis tracking):
-
-#### Bug 1: Softmax Sharpness Asymmetry (H1, posterior=0.93)
-
-The hardcoded PEMDAS scores (`* → 10.0`, `+ → 5.0`) created a 2:1 ratio in softmax sharpness:
-
-| Operator | Score | Softmax P(op) | Mask leakage | 5-digit assembly error |
-|----------|-------|---------------|--------------|----------------------|
-| `*` / `/` | 10.0 | 0.9997 | 0.03% | 0.31% |
-| `+` / `-` | 5.0 | 0.955 | **4.5%** | **33.2%** |
-
-The leakage corrupted `_soft_assemble()` through cumsum-based masks: fractional `total_digits` → fractional `power_of_10` → `10^0.97 ≈ 9.33` vs `10^1.0 = 10.0` → per-digit error compounding.
-
-**Fix**: Raise both scores to 20/15. Both operator types now get >0.9999 probability, <0.003% assembly error, while maintaining 99.3% correct PEMDAS ordering for multi-op.
-
-#### Bug 2: Cumsum Masking Grabs Wrong Operands for Multi-Op
-
-For `"3 + 5 * 2"` with `*` selected, the old cumsum-based masking did:
-```
-left_mask = (1 - cumsum(reduction_weights)) * is_digit
-```
-This grabbed ALL digits left of `*` → `left_val = 35` (WRONG, should be 5).
-
-Teacher forcing worked around this by providing pre-simplified tokens, but:
-- No gradient flow across reduction steps
-- Didn't work at inference without an oracle
-- num_mse diagnostic was broken (step 0 left/right wrong for multi-op)
-
-### Solution: Recursive Single-Op Reduction with Value Buffer
-
-Replaced teacher-forced multi-step with a recursive approach:
+Numerical simulation traced the exact error chain for `"15 + 3"`:
 
 ```
-Step 1: "3 + 5 * 2"
-  ├── PEMDAS → selects * at position 7
-  ├── op_cumsum segmentation → left_mask isolates digit 5 ONLY
-  │                          → right_mask isolates digit 2 ONLY
-  ├── _soft_assemble → left=5, right=2 (EXACT)
-  ├── op_classifier → * → 5*2=10
-  └── RETOKENIZE: "3 + PAD PAD PAD RES PAD PAD PAD"
-      └── value_buffer[7] = 10.0 (WITH gradients)
-
-Step 2: "3 + PAD PAD PAD RES PAD PAD PAD"
-  ├── PEMDAS → selects + at position 3
-  ├── left=3 (from digits), right=10.0 (from value_buffer, WITH gradients)
-  ├── op_classifier → + → 3+10=13
-  └── Final result: 13 ✓
-
-Step 3: No operators remain → pass-through prior result (13)
+Score 5.0 (addition):
+  operator probability = 0.955 (not 1.0)
+  left_mask leakage to right-side digits = 4.5%
+  cumsum gives total_digits = 1.973 (not 2.0)
+  power_of_10 at tens digit = 0.973 (not 1.0)
+  10^0.973 = 9.33 (not 10.0)
+  assembled "15" = 14.27 (4.9% error)
+  
+Score 10.0 (multiplication):
+  operator probability = 0.9997
+  assembled "15" = 14.995 (0.04% error)
 ```
 
-#### Key Components
+This explained the eval pattern exactly: `*/` at 100%, `+-` at 0% for 3+ digits.
 
-1. **Adjacent masking via `op_cumsum`**: `cumsum(is_operator)` partitions the sequence into segments between operators. Left operand = digits in segment `(selected_cum - 1)`, right operand = digits in segment `(selected_cum)` after the operator. Deterministic from token IDs, zero assembly error.
+Parametric sweep across digit sizes and scores:
 
-2. **Value buffer gradient bypass**: `value_buffer: (B, L) float` stores prior step results at `RESULT_PLACEHOLDER` (token ID 21) positions. Gradient flows: `result2 → value_buffer → result1 → op_probs1 → tree_encoder`.
+| Digits | Score=5 error | Score=10 error | Score=15 error | Score=20 error |
+|--------|--------------|----------------|----------------|----------------|
+| 1 | 0.3% | 0.002% | 0.000% | 0.000% |
+| 3 | 14.2% | 0.11% | 0.001% | 0.000% |
+| 5 | 33.2% | 0.31% | 0.002% | 0.000% |
+| 10 | 70.8% | 1.15% | 0.008% | 0.000% |
 
-3. **Re-tokenization**: Clears consumed positions (`<left> <op> <right>` + adjacent spaces) to PAD, places `RESULT_PLACEHOLDER` at the operator position. Non-differentiable for token_ids (integers), differentiable for value_buffer (floats).
+H4 (insufficient training) was refuted because the error is deterministic from hardcoded constants — no amount of training can fix a score of 5.0.
 
-4. **Pass-through**: When no operators remain, propagates prior result unchanged. Prevents garbage outputs from reduce_step on fully-reduced expressions.
+#### Discovery of the cumsum multi-op bug
 
-#### Gradient Flow Verification
+Separate from the sharpness issue, tracing `reduce_step` on `"3 + 5 * 2"` revealed:
 
 ```python
-# TF gradient tape confirms end-to-end flow:
-# Step 1 op_logits get grad=-12.4 for * (correct direction) from step 2 loss
-# 29/29 model variables have nonzero gradients
+cum_op_prob = cumsum(reduction_weights)  # ramps 0→1 across sequence
+left_mask = (1 - cum_op_prob) * is_digit  # everything LEFT of selected op
 ```
 
-#### Additional Fixes
+For `*` at position 7: `left_mask` includes digit `3` at position 1 AND digit `5` at position 5. The assembled left operand is `35`, not `5`. This is architecturally unfixable with cumsum-based masking — it's the wrong primitive for multi-op.
 
-- **Int32 overflow** (`data_generator.py`): `int(d)` cast prevents numpy int32 overflow for 10-digit operands in label preparation.
-- **Softmax NaN safety**: When no operators exist, uniform scores prevent `softmax(all -inf) = NaN`.
+### Solution: Recursive Single-Op Reduction
 
-### Training Results
+Each reduction step now operates on a single `<number> <op> <number>` sub-expression extracted via segment-based adjacent masking, computes the result, then re-tokenizes the sequence by replacing the consumed sub-expression with a placeholder that carries the result value (with gradients) into the next step.
+
+#### Architecture
+
+```
+multi_reduce(token_ids, max_steps=3):
+
+  Step 1: "3 + 5 * 2"
+    ├── PEMDAS scoring → selects * (score 20 > + score 15)
+    ├── op_cumsum = [0,0,0,1,1,1,1,2,2,2,2]
+    │   selected_cum = 2
+    ├── Adjacent masking:
+    │   left_mask  = (op_cumsum == 1) & is_digit → digit 5 ONLY
+    │   right_mask = (op_cumsum == 2) & (pos > op) & is_digit → digit 2 ONLY
+    ├── _soft_assemble → left=5, right=2 (EXACT, zero error)
+    ├── op_classifier → softmax → soft-select → result=10
+    └── _retokenize:
+        ├── Clear "5 * 2" + adjacent spaces → PAD
+        ├── Place RESULT_PLACEHOLDER (token 21) at operator position
+        └── value_buffer[op_pos] = 10.0 (carries gradient from result)
+
+  Step 2: "3 + [PAD] [PAD] [PAD] [RES] [PAD] [PAD] [PAD]"
+    ├── PEMDAS scoring → selects + (only operator remaining)
+    ├── Adjacent masking:
+    │   left  = digit 3 (from tokens)
+    │   right = RESULT_PLACEHOLDER (buffer_active=1)
+    ├── _assemble_with_bypass:
+    │   left  = _soft_assemble(digits) = 3
+    │   right = value_buffer[op_pos] = 10.0 (WITH gradients from step 1)
+    ├── op_classifier → + → 3+10 = 13
+    └── _retokenize: replace remaining sub-expression
+
+  Step 3: No operators remain → pass-through result (13)
+  
+  Final result: 13 ✓
+  Gradient chain: Loss → result_step2 → right_val_step2 (=result_step1)
+                  → op_probs_step1 → tree_encoder ✓
+```
+
+#### Component details
+
+**1. Adjacent masking via `op_cumsum`**
+
+Replaces cumsum-of-softmax. The cumulative count of operators in the token sequence defines segments:
+
+```python
+op_cumsum = cumsum(cast(is_operator, int32))  # [0,0,0,1,1,1,1,2,2,2,2]
+selected_cum = op_cumsum[op_pos]               # e.g. 2 for *
+
+left_mask  = (op_cumsum == selected_cum - 1) & is_value  # segment before op
+right_mask = (op_cumsum == selected_cum) & (pos > op_pos) & is_value  # segment after op
+```
+
+Verified on 6 test cases: single-op, 2-op, 3-op, multi-digit, cross-scale. All give exact adjacent operands.
+
+**2. Value buffer gradient bypass**
+
+```python
+value_buffer: (B, L) float  — stores computed results at RESULT_PLACEHOLDER positions
+buffer_active: (B, L) float — marks which positions have buffer values
+```
+
+When `_assemble_with_bypass` encounters a masked position with `buffer_active=1`, it reads `value_buffer` directly instead of assembling from digit tokens:
+
+```python
+has_buffer = sum(mask * buffer_active)  # >0.5 if buffer value present
+val = where(has_buffer > 0.5, buffer_val, digit_assembled_val)
+```
+
+Gradient flows: `d(val)/d(value_buffer) = mask * buffer_active`, and `value_buffer` was written as `result * one_hot(op_pos)`, so `d(value_buffer)/d(result) = one_hot(op_pos)`. End-to-end chain is intact.
+
+Verified with TF GradientTape: step 1 op_logits receive gradient magnitude 12.4 from step 2's result loss. 29/29 trainable variables get nonzero gradients.
+
+**3. Re-tokenization (`_retokenize`)**
+
+After each reduction:
+- Clears consumed positions (left operand digits + operator + right operand digits + adjacent spaces) to PAD (token 0)
+- Places `RESULT_PLACEHOLDER` (token 21) at the operator position
+- Stores result float in `value_buffer` at that position
+- Updates `buffer_active` mask
+
+Token modifications are non-differentiable (integer ops on token_ids). Value buffer update IS differentiable (float assignment via `result * one_hot`).
+
+**4. Pass-through for fully-reduced expressions**
+
+When no operators remain in the token sequence, the step's result is replaced with the prior step's result:
+
+```python
+has_ops = cast(sum(is_operator) > 0.5, float32)  # (B, 1)
+out["result"] = has_ops * out["result"] + (1 - has_ops) * last_valid_result
+```
+
+Without this, `reduce_step` on a fully-reduced expression produces garbage (no operator to select, softmax over empty set). The pass-through ensures the final output is always the last meaningful reduction.
+
+A NaN safety fallback also adds uniform scores when no operators exist, preventing `softmax(all -inf)`.
+
+#### Additional fixes
+
+- **PEMDAS scores 20/15** (was 10/5): both operator types get >0.9999 softmax probability, <0.003% assembly error at any digit size, 99.3% correct PEMDAS ordering for multi-op
+- **Int32 overflow**: `int(d) * 10 ** p` in `data_generator.py` prevents numpy int32 overflow for 10-digit operands in label preparation
+- **num_mse diagnostic**: now compares step-0 values to step-0 labels (was comparing last step to first step)
+
+### Training
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
@@ -895,45 +944,93 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
 | 10K | 2.23 | 0.0000 | 1.000 | 1.000 | 0.969 | 1.000 |
 | 20K | 14.48 | 0.0000 | 1.000 | 1.000 | 0.969 | 0.969 |
 
-**Final digit accuracy matrix (20K) — ALL four operations:**
+Note: `num_mse=0.0000` throughout — adjacent masking gives exact operand extraction with zero assembly error. Loss increases at later steps due to curriculum progression introducing larger numbers where even correct results have larger Huber residuals in log-space.
+
+### Evaluation Results
+
+**Single-op digit accuracy matrix (20K) — all four operations, 1-10 digits:**
+
+400/400 cells at 100% (10% tolerance). Every operator × digit-size combination evaluates correctly.
+
+**Multi-op comprehensive eval (post-training, 1% tolerance):**
+
+| Test | Samples | Accuracy |
+|------|---------|----------|
+| 2-op, all 16 operator combos (×25 each) | 400 | **400/400 (100%)** |
+| 3-op, random (1-50 operands) | 200 | **200/200 (100%)** |
+| PEMDAS ordering (handpicked where order matters) | 14 | **14/14 (exact)** |
+| Edge cases (0, fractions, result=0, large) | 12 | **12/12** |
+| Large multi-op (results up to 100K) | 6 | **6/6 (exact)** |
+| Single-op, all ops × 8 digit sizes (×20 each) | 640 | **640/640 (100%)** |
+| **Total** | **1272** | **1272/1272 (100%)** |
+
+**PEMDAS correctness (selected cases):**
 
 ```
-       1d    2d    3d    4d    5d    6d    7d    8d    9d   10d
- 1d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 2d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 3d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 4d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 5d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 6d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 7d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 8d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
- 9d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
-10d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+3 + 5 * 2          = 13.00    pred=13.00    OK
+10 - 2 * 3         = 4.00     pred=4.00     OK
+2 + 3 * 4 - 1      = 13.00    pred=13.00    OK
+10 * 2 + 3 * 4     = 32.00    pred=32.00    OK
+99 - 11 * 9         = 0.00     pred=0.00     OK
+1 + 0 * 99          = 1.00     pred=1.00     OK
+100 / 10 / 2        = 5.00     pred=5.00     OK
 ```
 
-**400/400 cells at 100%** for +, -, *, / — all digit sizes 1-10.
+### Properties
+
+| Property | Value |
+|---|---|
+| Parameters | ~2M (vs 5.6M original NAM) |
+| Reduction accuracy | 100% (hardcoded PEMDAS) |
+| Number assembly | Exact (op_cumsum adjacent masking, zero error) |
+| Operator classification | 100% (learned, from tree encoder features) |
+| Gradient flow | End-to-end across all reduction steps via value buffer |
+| Inference | Self-contained (no teacher forcing / oracle needed) |
+| Max digits per operand | 10 (float32 precision limit) |
+| Max operators | `act_steps` (default 3, configurable) |
+| Operators | +, -, *, / with standard PEMDAS precedence |
+| Speed | 6.3 steps/sec on RTX 4070 (batch=64, act_steps=3) |
+
+### What is learned vs what is hardcoded
+
+| Component | Learned/Hardcoded | Parameters |
+|---|---|---|
+| Token embedding | Learned | vocab_size × D |
+| Numeric projection | Learned | 4 × D |
+| Positional encoding | Fixed (sinusoidal) | 0 |
+| Tree transformer (3 blocks) | Learned | ~1.5M |
+| PEMDAS reduction | **Hardcoded** (scores 20/15) | 0 |
+| Adjacent operand masking | **Hardcoded** (op_cumsum segments) | 0 |
+| Number assembly | **Hardcoded** (deterministic power-of-10) | 0 |
+| Value buffer bypass | **Hardcoded** (read/write at placeholder positions) | 0 |
+| Re-tokenization | **Hardcoded** (clear + placeholder insertion) | 0 |
+| Fixed arithmetic | **Hardcoded** | 0 |
+| Operator classifier | Learned | D × 4 |
+| Result encoder | Learned | 2 × D |
 
 ### What changed vs iteration 3
 
 | Aspect | Iteration 3 (teacher-forced) | Iteration 4 (recursive) |
 |--------|------------------------------|-------------------------|
-| Multi-op approach | Teacher-forced per-step tokens | Recursive re-tokenization |
-| Number assembly | cumsum-of-softmax masks | op_cumsum segment masks |
+| Multi-op approach | Teacher-forced per-step tokens | Recursive re-tokenization with value buffer |
+| Operand masking | cumsum-of-softmax (broken for multi-op) | op_cumsum segments (exact) |
 | Gradient flow | Per-step only (no cross-step) | End-to-end via value buffer |
-| num_mse | 6-18 (broken for multi-op) | 0.0000 (exact) |
-| + eval (3d+) | 0% | **100%** |
+| num_mse | 6-18 (wrong operands for multi-op) | 0.0000 (exact assembly) |
+| Multi-op eval | Not tested | **1272/1272 (100% at 1% tol)** |
 | Inference | Requires oracle tokens | Self-contained |
-| PEMDAS scores | 10/5 (add/sub broken) | 20/15 (all exact) |
+| PEMDAS scores | 10/5 (add/sub broken at 3+ digits) | 20/15 (all exact) |
 
 ### Open directions
 
-1. **Multi-op eval matrix**: current eval only tests single-op. Add a multi-op eval that tests 2-3 operator expressions.
+1. **Parentheses**: extend PEMDAS to handle `(3 + 5) * 2`. Would need a precedence boost for operators inside parentheses (e.g., add `paren_depth * 100` to scores).
 
-2. **Parentheses**: extend PEMDAS to handle `(3 + 5) * 2`. Would need a precedence boost for operators inside parentheses (e.g., add `paren_depth * 100` to scores).
+2. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add input/output projections.
 
-3. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add input/output projections.
+3. **Learn precedence**: with the gradient-flowing recursive architecture, it may now be possible to learn precedence since credit assignment flows end-to-end.
 
-4. **Learn precedence**: with the gradient-flowing recursive architecture, it may now be possible to learn precedence since credit assignment flows end-to-end.
+4. **Longer expressions**: increase `act_steps` beyond 3 for expressions with 4+ operators. The architecture supports it; only needs training data and evaluation.
+
+5. **Negative intermediate results**: expressions like `3 - 10 * 2 = -17` produce negative intermediates. The sign handling in `_soft_assemble` and value buffer should be verified for these cases.
 
 ## File Changes Summary
 
