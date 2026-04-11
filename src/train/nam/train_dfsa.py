@@ -491,6 +491,11 @@ def _make_compiled_train_fn(
 
         grad_norms = tf.stack([tf.norm(g) for g in grads if g is not None])
 
+        # Step 0 outputs for metrics (reduction/operator accuracy should
+        # be measured on the FIRST reduction decision, not the last step
+        # which may see a fully-reduced expression with no operators).
+        first_rw = all_rw[0]
+        first_op = all_op_logits[0]
         last_rw = all_rw[max_act_steps - 1]
         last_op = all_op_logits[max_act_steps - 1]
         last_left = all_left_vals[max_act_steps - 1]
@@ -505,7 +510,8 @@ def _make_compiled_train_fn(
             "left_val": last_left,
             "right_val": last_right,
             "op_logits": last_op,
-            "reduction_weights": last_rw,
+            "reduction_weights": first_rw,  # step 0 for metric accuracy
+            "first_op_logits": first_op,
             "grad_mean": tf.reduce_mean(grad_norms),
             "grad_max": tf.reduce_max(grad_norms),
         }
@@ -674,12 +680,13 @@ def main():
         abs_true = np.abs(true_result) + 1e-8
         per_sample_rel = np.abs(pred_result - true_result) / abs_true
 
-        pred_op = np.argmax(raw["op_logits"].numpy(), axis=-1)
-        true_op = labels["operator_index"]
+        # Op and reduction accuracy on STEP 0 (first reduction decision)
+        pred_op = np.argmax(raw["first_op_logits"].numpy(), axis=-1)
+        true_op = ps_oi[:, 0]  # step 0 operator target
         op_acc = float(np.mean(pred_op == true_op))
 
         pred_red = np.argmax(raw["reduction_weights"].numpy(), axis=-1)
-        true_red = labels["operator_position"]
+        true_red = ps_op[:, 0]  # step 0 position target
         red_acc = float(np.mean(pred_red == true_red))
 
         # Number MSE (diagnostic)
