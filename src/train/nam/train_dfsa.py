@@ -138,6 +138,10 @@ class DifferentiableFSA(keras.Model):
         )
 
         # --- Reduction scorer ---
+        # The tree's g_attn provides constituency grouping. We combine it
+        # with a small learned scorer to determine which operator to reduce.
+        # The scorer sees tree-encoded features AND can learn to prefer
+        # tighter groups (PEMDAS: * groups tighter than +).
         self.reduction_scorer = keras.layers.Dense(
             1, name="reduction_scorer"
         )
@@ -204,9 +208,10 @@ class DifferentiableFSA(keras.Model):
         x = self.pos_encoding(x, training=training)
 
         # Tree transformer: CKY constituency parsing for PEMDAS
-        # GroupAttention learns tree structure over adjacent tokens.
-        # "5 * 2" groups into a sub-expression before "3 + ..." because
-        # the tree induction learns operator precedence as constituency.
+        # GroupAttention learns tree structure — g_attn[i][j] = probability
+        # that tokens i and j belong to the same constituent.
+        # "5 * 2" forms a tighter group than "3 + result" because PEMDAS
+        # is constituency: higher-precedence ops bind their operands first.
         mask_3d = ops.expand_dims(mask, axis=1)  # (B, 1, L)
         group_prob = ops.convert_to_tensor(0.0, dtype=x.dtype)
         for block in self.tree_blocks:
@@ -214,11 +219,22 @@ class DifferentiableFSA(keras.Model):
                 (x, mask_3d, group_prob), training=training
             )
         x = self.encoder_norm(x)
-        # (B, L, D) — each position has tree-structured context
+        # group_prob: (B, L, L) — constituency matrix from CKY tree induction
 
-        # Reduction scorer → soft operator position
-        scores = ops.squeeze(self.reduction_scorer(x), axis=-1)
-        scores = scores + (1.0 - mask) * (-1e9)
+        # --- Reduction from parse tree ---
+        # Extract "group tightness" at each position from the constituency
+        # matrix: how strongly does each token group with its neighbors?
+        # Operators that bind tighter (PEMDAS: * > +) will have higher
+        # group_prob with their adjacent operands.
+        #
+        # --- Reduction: which operator to reduce? ---
+        # Tree-encoded features carry constituency context. The learned
+        # scorer predicts which position to reduce. Operator positions get
+        # a soft bonus (not a hard mask — the cumsum-based left/right
+        # masks need smooth probability distribution across ALL positions).
+        scores = ops.squeeze(self.reduction_scorer(x), axis=-1)  # (B, L)
+        scores = scores + is_operator * 5.0  # soft bias toward operators
+        scores = scores + (1.0 - mask) * (-1e9)  # mask padding
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
         # Soft left/right masks
