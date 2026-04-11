@@ -671,18 +671,139 @@ token_ids → token_embedding + numeric_proj + pos_encoding
 
 5. **w_reduction must be high (≥20)**: the soft assembly produces good results even with imprecise reduction, masking the credit assignment signal. High w_reduction forces position accuracy.
 
-### Open Problem: Learning Operator Precedence
+### PEMDAS Precedence: The Hardest Problem
 
-The tree transformer's GroupAttention does CKY constituency parsing — the RIGHT inductive bias for precedence. But the reduction scorer (a Dense(1) on the tree-encoded features) operates pointwise and cannot express relative precedence between two operator positions.
+#### What was tried and failed
 
-**Next direction**: have the tree transformer directly produce the parse tree (predict which sub-expression to reduce via tree structure), rather than relying on a separate pointwise scorer. The GroupAttention's `group_prob` matrix already encodes constituency — it should directly drive reduction order.
+**8 separate approaches** to learn operator precedence via gradient descent:
+
+| # | Approach | red_acc | Why it failed |
+|---|----------|---------|---------------|
+| 1 | Dense(1) on pointwise MLP features | 25% | Can't compare operators across positions |
+| 2 | Dense(1) on generic 2-layer attention features | 25% | Attention helps assembly but not precedence |
+| 3 | Dense(1) on tree transformer features | 30% | Tree learns constituency but scorer can't read it |
+| 4 | g_attn neighbor tightness signal added to scores | 0% | CKY backprop gradient explosion (mean grad 7-14) |
+| 5 | Hard operator-only mask on reduction_weights | 0% | Breaks cumsum-based soft left/right masks |
+| 6 | Soft operator bias (+5.0) on reduction scores | 30% | Credit assignment: soft assembly works around bad reduction |
+| 7 | Skip connection (raw numeric features to scorer) | 13% | Feature dilution not the bottleneck |
+| 8 | w_reduction=20 + staged curriculum (single-op first) | 30% stable | Prevents collapse but doesn't improve |
+
+**Root cause**: the differentiable assembly (cumsum → soft masks → power(10) → weighted sum) produces good arithmetic results EVEN WHEN reduction_weights point to the wrong position. The loss goes down without the model learning correct precedence — a classic **credit assignment failure**.
+
+#### The solution: hardcoded PEMDAS
+
+PEMDAS is a DETERMINISTIC rule, not a learning target. The reduction scores are computed directly from token IDs:
+
+```python
+# * (tid=16) and / (tid=17) → score 10.0 (high precedence)
+# + (tid=14) and - (tid=15) → score 5.0 (low precedence)
+# All other tokens → score 0.0
+# Leftmost tie-breaking: -0.01 × position
+scores = high_prec * 10.0 + low_prec * 5.0 - 0.01 * position
+```
+
+**Result**: 100% reduction accuracy from step 0. No training needed. The softmax with scores 10.0 vs 5.0 vs 0.0 correctly peaks at the highest-precedence leftmost operator with 99%+ probability mass.
+
+**Verified** on complex multi-op expressions including "2906 + 6 / 82 * 75 - 3" (4 operators, correctly selects / at position 10).
+
+#### Key metric bug found and fixed
+
+The training metric compared the LAST ACT step's reduction_weights against the FIRST step's target. The last step sees a fully-reduced expression (e.g., "13") with NO operators → reduction_weights is garbage → metric shows 0% even when step 0 is 100% correct. Fixed by returning step 0 outputs for metrics.
+
+## Iteration 3: Final DFSA Architecture (Current)
+
+### Architecture
+
+```
+token_ids (B, L)
+    │
+    ├── token_embedding × √D + numeric_proj([digit_val, is_digit, op_type, is_op])
+    │       + positional_encoding
+    │
+    ├── TreeTransformerBlock × 3 (CKY constituency parsing)
+    │       → tree-encoded features (B, L, D) + g_attn constituency matrix
+    │
+    ├── PEMDAS reduction (DETERMINISTIC from token IDs)
+    │       → reduction_weights peaked on correct operator (99%+ mass)
+    │
+    ├── Soft left/right masks (cumsum of reduction_weights, DIFFERENTIABLE)
+    │       → left_mask, right_mask for digit grouping
+    │
+    ├── Differentiable number assembly (power(10, soft_position), DIFFERENTIABLE)
+    │       → left_val, right_val — exact when reduction is correct
+    │
+    ├── Operator classification (softmax, LEARNED via tree features)
+    │       → op_probs → soft-select over 4 fixed arithmetic ops
+    │
+    ├── Fixed arithmetic (add, sub, mul, div — NOT learned)
+    │       → result (B, 1)
+    │
+    └── Result encoder (Dense(D) — LEARNED interface to host transformer)
+            → result_embedding (B, D)
+```
+
+### Multi-op support
+
+- **ACT loop**: `reduce_step()` called `act_steps` times (default 4)
+- **Per-step teacher forcing**: each step receives updated token_ids (expression after prior reductions, from `prepare_per_step_labels()`)
+- **Per-step loss**: L_reduction and L_operator supervised per step with validity mask
+- **PEMDAS data generator**: `_parse_multi_op()` produces correct reduction order via AST walk
+
+### Properties
+
+| Property | Value |
+|---|---|
+| Parameters | ~2M (vs 5.6M original NAM, 3× smaller) |
+| Reduction accuracy | 100% (hardcoded PEMDAS, verified) |
+| Number assembly | Deterministic (zero error when reduction correct) |
+| Gradient flow | End-to-end (host loss → result → assembly → soft masks → tree encoder) |
+| Freezable | Yes — once op_classifier converges, entire module freezes |
+| Max digits | 10 (limited by float32 precision) |
+| Max operators | act_steps (configurable, default 4) |
+| Operators | +, -, *, / with standard PEMDAS precedence |
+
+### Training
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
+    --hidden-size 256 --num-tree-layers 3 --num-heads 8 \
+    --max-len 128 --act-steps 4 \
+    --steps 200000 --batch-size 64 --lr 1e-4 \
+    --clip-norm 10.0 --curriculum-cap 0.8 \
+    --gpu 1 --save-dir results/nam/dfsa_full
+```
+
+### What is learned vs what is hardcoded
+
+| Component | Learned/Hardcoded | Parameters |
+|---|---|---|
+| Token embedding | Learned | vocab_size × D |
+| Numeric projection | Learned | 4 × D |
+| Positional encoding | Fixed (sinusoidal) | 0 |
+| Tree transformer (3 blocks) | Learned | ~1.5M |
+| PEMDAS reduction | **Hardcoded** | 0 |
+| Number assembly | **Hardcoded** (deterministic) | 0 |
+| Fixed arithmetic | **Hardcoded** | 0 |
+| Operator classifier | Learned | D × 4 |
+| Result encoder | Learned | 2 × D |
+
+### Open directions
+
+1. **Learn precedence**: replace hardcoded PEMDAS with a learned precedence predictor. Requires solving the credit assignment problem — the soft assembly must NOT work around bad reduction. Possible approaches: Gumbel-softmax, straight-through estimator, or auxiliary precedence-prediction loss decoupled from the result.
+
+2. **Parentheses**: extend the grammar to handle `(3 + 5) * 2`. The PEMDAS hardcoding would need adjustment for parenthesized sub-expressions (reduce innermost parentheses first).
+
+3. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add an input projection from host D_model → DFSA D and an output projection from DFSA D → host D_model.
+
+4. **Inference without teacher forcing**: at inference, after each reduction step, re-tokenize the result and update the token stream. Currently only teacher-forced (training) token replacement is implemented.
 
 ## File Changes Summary
 
 | File | Changes |
 |------|---------|
-| `src/dl_techniques/models/nam/cell.py` | Expose `left_val`, `right_val`, `reduction_weights`; replace `tanh*100` with `clip(-1e10, 1e10)`; log-compress arithmetic result before internal pipeline (`result_encoder`) |
-| `src/dl_techniques/models/nam/model.py` | Forward cell intermediates; `stop_gradient` on result_head and validity_head inputs |
-| `src/train/nam/data_generator.py` | `_parse_single_op()`; enriched `generate_batch()` returning labels; `generate_curriculum_batch()` with 8 difficulty levels and smooth probability shifting |
-| `src/train/nam/train_nam.py` | Multi-task compiled loss (6 terms); log-compressed number/result losses; clamped op_logits/reduction_weights/validity losses; warmup+cosine LR; step_result metrics; digit accuracy matrix eval; `--curriculum` mode; `--min-val`/`--max-val` overrides |
-| `tests/test_models/test_nam/test_nam.py` | 10 new tests for cell outputs, model outputs, parser, enriched labels |
+| `src/dl_techniques/models/nam/cell.py` | Deterministic `_assemble_number_from_tokens()`; removed learned number heads; cell accepts `token_ids` for assembly |
+| `src/dl_techniques/models/nam/model.py` | Passes `token_ids` through to cell for deterministic assembly |
+| `src/train/nam/data_generator.py` | `_parse_multi_op()` PEMDAS parser; `_generate_multi_op_expr()`; `prepare_per_step_labels()` for multi-step teacher forcing; 11 difficulty levels (8 single-op + 3 multi-op) |
+| `src/train/nam/train_dfsa.py` | `DifferentiableFSA` model with tree transformer + deterministic assembly + hardcoded PEMDAS; multi-step compiled training with per-step teacher forcing; digit accuracy matrix eval |
+| `src/train/nam/train_nam.py` | Updated with `--number-loss-type` toggle, per-step labels, validity mask; legacy training script for original NAM |
+| `tests/test_models/test_nam/test_nam.py` | Tests for deterministic assembly (exact values), split heads, round-trip serialization, resume |
