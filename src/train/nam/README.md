@@ -475,6 +475,208 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
 | `--eval-interval` | 1000 | Digit accuracy matrix eval frequency |
 | `--min-val` / `--max-val` | from phase | Override operand value range |
 
+## Next Steps for Better Performance
+
+The 100K run achieved stable training with strong performance on same-size 2-4 digit arithmetic but revealed clear bottlenecks. Here are concrete directions to close the gap, ordered by expected impact.
+
+### 1. Fix the scalar number representation (highest impact)
+
+**Problem observed:** Cross-scale operations fail (e.g., `1d × 3d` is 0% while `3d × 3d` is 100%). A single scalar from `number_head` is a poor fit for arithmetic — the network has to simultaneously support values from 1 to 10^10 through one Dense layer.
+
+**Direction:** Replace `number_head` with a **digit-level decoder** that predicts each digit position independently:
+
+```python
+# Instead of: number_head: Dense(D, 1) -> scalar
+# Use:        digit_heads: Dense(D, 10 * num_positions)
+#             + sign_head: Dense(D, 2)
+#             + magnitude_head: Dense(D, num_positions)
+```
+
+Each digit position gets its own 10-way softmax. Losses become cross-entropy per position. The scalar value is reconstructed as `sign * sum(digit_i * 10^i)` for metric computation. This is how LLMs handle numbers and it matches the tokenizer's structure.
+
+**Expected gain:** Exact 1% accuracy at all digit sizes if sub-skills converge.
+
+### 2. Curriculum re-tuning
+
+**Problem observed:** Operator accuracy degrades from 100% (step 5K) to 75% (step 100K) as curriculum advances. Reduction accuracy also wobbles (94-100%).
+
+**Direction:**
+- **Slower curriculum progression:** extend training to 200-300K steps, or cap progress at 0.8 so the hardest level still gets mixed with significant easier data.
+- **Level-aware pacing:** advance only when current-level step_10% accuracy exceeds a threshold (e.g., 80%), instead of linear time-based advancement.
+- **Flatten the final distribution:** at progress=1.0, the current Gaussian still puts ~67% on hard levels. A flatter distribution (e.g., 40% hard / 30% mid / 30% easy) should preserve more sub-skills.
+
+### 3. Extended training + more capacity
+
+**Problem observed:** Number MSE plateaus around 0.2-0.8 (RMSE ~0.45-0.9). For 1% exact accuracy, we need RMSE well below 0.1.
+
+**Direction:**
+- **Longer training:** 250-500K steps. The number extraction task never fully converged.
+- **Larger model:** base variant has hidden=256, 6 tree layers. A larger variant (hidden=512, 12 layers) would have more capacity for simultaneous scale ranges.
+- **More read heads:** currently 2 NTM read heads. 4 heads might let the model separate left/right/context/carry information.
+
+### 4. Multi-op expressions (phase 2+)
+
+Currently only single-op expressions are trained. The data generator and parser need extension to multi-op:
+
+```python
+# Expression: "3 + 5 * 2"
+# Step 0: reduce "5 * 2" -> left=5, right=2, op=*, result=10, pos=6
+# Step 1: reduce "3 + 10" -> left=3, right=10, op=+, result=13, pos=2
+```
+
+Use Python's `ast` module for precedence-correct parsing. Each ACT step gets per-step labels. `act_steps` must increase from 2 to 4-8 for multi-op. The cell already supports this via the ACT loop; only the data generator and label parsing need changes.
+
+### 5. Separate left/right number heads
+
+**Problem observed:** `number_head` is shared between left and right operand extraction. This forces one Dense layer to read two semantically different positions.
+
+**Direction:** Use two independent `Dense(D, 1)` heads. Minimal parameter cost, likely improves asymmetric cases (e.g., `3 + 15`).
+
+### 6. Relative-error loss for numbers
+
+Currently `L_number` uses log-compressed MSE. A relative-error loss would weight small and large errors proportionally to target magnitude:
+
+```python
+rel_err = (pred - target) / (abs(target) + 1.0)
+L_number = huber(rel_err, delta=0.1)
+```
+
+This directly optimizes the metric we care about (step_1%) instead of a scale-compressed proxy.
+
+### 7. Instrument gradient health per sub-skill
+
+The training log shows combined gradient norms. Per-loss gradient norms (`grad_num`, `grad_op`, `grad_red`, `grad_res`) would reveal which sub-skill is dominating at each step and let us adjust weights dynamically.
+
+### 8. Auxiliary digit-position supervision
+
+As an alternative to (1), add a cheap auxiliary loss: for each digit token in the expression, predict its numerical value through a per-token head. This gives a token-level signal that bootstraps the number extraction without changing the main architecture.
+
+### 9. Longer context for the tree encoder
+
+Currently 4-6 tree blocks. For 10-digit numbers, the encoder needs to aggregate information across 10+ digit tokens into a single focused representation. More tree layers (8-12) or a dedicated "number assembly" layer might help.
+
+### 10. Use `step_result` as the primary output
+
+The `result_head` (with `stop_gradient`) never learns to match the cell's direct arithmetic output. It's a redundant linear layer that hurts evaluation metrics. Either:
+- Drop it entirely and use `step_result` as `outputs["result"]`, or
+- Keep it but evaluate exact_acc on `step_result` (we already track `step_exact_acc` — consider making it the primary metric).
+
+### Quick-win combination
+
+For a practical next experiment that doesn't require architectural changes:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
+    --variant base --curriculum \
+    --steps 300000 --batch-size 64 \
+    --lr 1e-4 --clip-norm 10.0 --act-steps 2 \
+    --w-number 0.5 --w-operator 3.0 --w-reduction 5.0 \
+    --result-loss-weight 1.0 \
+    --log-interval 5000 --eval-interval 25000
+```
+
+Just 3x the training time with the existing recipe. Based on the 100K trajectory, this should push step_10% accuracy well above 50% on the diagonal band.
+
+For a bigger win, implement (1) — digit-level number decoder — first.
+
+## Iteration 2: Differentiable FSA (DFSA) — Epistemic Deconstruction
+
+### Root Cause Discovery
+
+An epistemic deconstruction analysis identified the fundamental bottleneck in the original NAM architecture: **Dense(D→1) cannot perform multi-digit number assembly.**
+
+The reduction_weights peak on the OPERATOR position (as trained), so `left_focused ≈ left_proj(hidden[op_pos])` — the operator token's embedding, NOT the number digits. A Dense(1) then tries to decode a multi-digit number from this single vector, which requires nonlinear positional multiplication (`digit × 10^position`) that a linear layer cannot express.
+
+**Key insight**: if you place the correct tokens in the correct place for the correct operator, the result MSE MUST be zero. Number extraction from tokens is a DETERMINISTIC operation, not a learning target.
+
+### Deterministic Number Assembly
+
+Replaced the learned number extraction (4 Dense layers: left_proj, right_proj, left_number_head, right_number_head) with `_assemble_number_from_tokens()` — a zero-parameter function:
+
+```python
+value = sum(digit_value_i × 10^position_in_number_i)
+```
+
+where `digit_value` comes from the tokenizer (token_id - 4 for ids 4-13) and `position_in_number` is derived from cumulative digit count.
+
+**Result on single-op**: 100% accuracy across ALL 400 cells of the digit matrix (all 4 operators × 10×10 digit sizes) within 2,500 training steps on the `small` variant. Zero MSE when reduction and operator are correct.
+
+### Differentiable FSA Architecture (`train_dfsa.py`)
+
+Built a minimal, fully-differentiable module designed to be frozen and embedded into larger transformer models:
+
+```
+token_ids → token_embedding + numeric_proj + pos_encoding
+  → TreeTransformerBlock × N (shared across ACT steps)
+  → reduction_scorer (softmax) → soft operator position
+  → cumsum(softmax) → soft left/right digit masks (differentiable)
+  → power(10, soft_position) → positional assembly (differentiable)
+  → op_classifier (softmax) → soft-select over 4 fixed arithmetic ops
+  → result → result_encoder → embedding for host transformer
+```
+
+**Gradient flows end-to-end**: from host loss back through result → arithmetic → number assembly → soft masks → reduction scorer → token features → host transformer.
+
+**Key design properties**:
+- Fully differentiable (no argmax, no integer indexing during training)
+- Converges to exact FSA behavior as softmax temperatures sharpen
+- Freezable once trained
+- ~2M parameters (vs 5.6M in original NAM)
+
+### Experiments Run
+
+#### Experiment 1: Dense(1) number heads (original approach)
+- **Architecture**: tree encoder → weighted sum → Dense(1) → scalar per operand
+- **Result**: 100K step_10% peaked at 22% on diagonal, 0% cross-scale
+- **Diagnosis**: Dense(1) is linear; multi-digit assembly requires nonlinear 10^i
+
+#### Experiment 2: Split left/right Dense(1) heads
+- **Architecture**: same but independent Dense(1) per operand
+- **Result**: 160K step_10% = 80% diagonal, 30% cross-scale on addition. Better but still approximate.
+- **Diagnosis**: two Dense(1) heads help cross-scale but can't achieve zero error
+
+#### Experiment 3: Relative-error Huber loss
+- **Result**: gradient vanishes for large numbers (O(1/target) scaling)
+- **Diagnosis**: log-MSE has O(log) gradient, rel-err has O(1/target). 500,000× weaker for 10-digit numbers.
+
+#### Experiment 4: Deterministic assembly (the fix)
+- **Architecture**: zero-parameter `_assemble_number_from_tokens()`
+- **Result**: **100% on all 400 cells** in 2,500 steps
+- **Diagnosis**: confirmed — number extraction is deterministic, not a learning target
+
+#### Experiment 5: DFSA without cross-position mechanism
+- **Architecture**: pointwise MLP + deterministic assembly, 6.5K params
+- **Result**: single-op step_1% = 88% in 600 steps. Multi-op red_acc stuck at 25%.
+- **Diagnosis**: pointwise MLP can't learn PEMDAS (can't compare operators across positions)
+
+#### Experiment 6: DFSA with generic attention encoder
+- **Architecture**: 2-layer MultiHeadAttention + deterministic assembly, 668K params
+- **Result**: step_1% = 88% but red_acc stuck at 25%, op_acc stuck at 47%
+- **Diagnosis**: generic attention helps number assembly but doesn't crack PEMDAS
+
+#### Experiment 7: DFSA with tree transformer
+- **Architecture**: 3 TreeTransformerBlock + deterministic assembly, 2M params
+- **Result at 200K steps**: single-op red_acc ~30% (stable with w_reduction=20). Multi-op red_acc collapses from 30% → 8% over training.
+- **Diagnosis**: tree transformer CAN parse structure but the reduction scorer (Dense(1) on per-token features) scores positions independently — it can't express "this * is higher precedence than that +"
+
+### Key Findings
+
+1. **Number extraction is solved**: deterministic assembly from tokenizer gives 100% accuracy, zero parameters needed.
+
+2. **PEMDAS precedence is the remaining bottleneck**: all architectures tried (MLP, generic attention, tree transformer) fail to learn operator precedence for multi-op. The reduction scorer is a pointwise function that can't compare operators across positions.
+
+3. **The scaling laws hold**: for ~2M params, the Chinchilla-optimal budget is ~40M tokens (40K steps). Our 200K steps at 96:1 ratio was adequate. The issue is architectural, not data/compute.
+
+4. **Differentiable assembly works**: `cumsum(softmax)` → soft masks → `power(10, x)` → weighted sum gives fully differentiable number assembly with gradient flow end-to-end.
+
+5. **w_reduction must be high (≥20)**: the soft assembly produces good results even with imprecise reduction, masking the credit assignment signal. High w_reduction forces position accuracy.
+
+### Open Problem: Learning Operator Precedence
+
+The tree transformer's GroupAttention does CKY constituency parsing — the RIGHT inductive bias for precedence. But the reduction scorer (a Dense(1) on the tree-encoded features) operates pointwise and cannot express relative precedence between two operator positions.
+
+**Next direction**: have the tree transformer directly produce the parse tree (predict which sub-expression to reduce via tree structure), rather than relying on a separate pointwise scorer. The GroupAttention's `group_prob` matrix already encodes constituency — it should directly drive reduction order.
+
 ## File Changes Summary
 
 | File | Changes |
