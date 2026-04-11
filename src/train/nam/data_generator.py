@@ -569,7 +569,7 @@ def prepare_per_step_labels(
                         break
                 if left_digits:
                     assembled = sum(
-                        d * 10 ** p for p, d in enumerate(reversed(left_digits))
+                        int(d) * 10 ** p for p, d in enumerate(reversed(left_digits))
                     )
                     if abs(assembled - abs(target_left)) < 0.5:
                         found_pos = pos
@@ -710,7 +710,7 @@ def generate_curriculum_batch(
                                 break
                         if left_digits:
                             assembled = sum(
-                                d * 10 ** p
+                                int(d) * 10 ** p
                                 for p, d in enumerate(reversed(left_digits))
                             )
                             if abs(assembled - target_left) < 0.5:

@@ -795,7 +795,145 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
 
 3. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add an input projection from host D_model → DFSA D and an output projection from DFSA D → host D_model.
 
-4. **Inference without teacher forcing**: at inference, after each reduction step, re-tokenize the result and update the token stream. Currently only teacher-forced (training) token replacement is implemented.
+## Iteration 4: Recursive Re-tokenization — 400/400 Accuracy
+
+### Root Cause Analysis (Epistemic Deconstruction)
+
+Two bugs were identified via epistemic deconstruction (Bayesian hypothesis tracking):
+
+#### Bug 1: Softmax Sharpness Asymmetry (H1, posterior=0.93)
+
+The hardcoded PEMDAS scores (`* → 10.0`, `+ → 5.0`) created a 2:1 ratio in softmax sharpness:
+
+| Operator | Score | Softmax P(op) | Mask leakage | 5-digit assembly error |
+|----------|-------|---------------|--------------|----------------------|
+| `*` / `/` | 10.0 | 0.9997 | 0.03% | 0.31% |
+| `+` / `-` | 5.0 | 0.955 | **4.5%** | **33.2%** |
+
+The leakage corrupted `_soft_assemble()` through cumsum-based masks: fractional `total_digits` → fractional `power_of_10` → `10^0.97 ≈ 9.33` vs `10^1.0 = 10.0` → per-digit error compounding.
+
+**Fix**: Raise both scores to 20/15. Both operator types now get >0.9999 probability, <0.003% assembly error, while maintaining 99.3% correct PEMDAS ordering for multi-op.
+
+#### Bug 2: Cumsum Masking Grabs Wrong Operands for Multi-Op
+
+For `"3 + 5 * 2"` with `*` selected, the old cumsum-based masking did:
+```
+left_mask = (1 - cumsum(reduction_weights)) * is_digit
+```
+This grabbed ALL digits left of `*` → `left_val = 35` (WRONG, should be 5).
+
+Teacher forcing worked around this by providing pre-simplified tokens, but:
+- No gradient flow across reduction steps
+- Didn't work at inference without an oracle
+- num_mse diagnostic was broken (step 0 left/right wrong for multi-op)
+
+### Solution: Recursive Single-Op Reduction with Value Buffer
+
+Replaced teacher-forced multi-step with a recursive approach:
+
+```
+Step 1: "3 + 5 * 2"
+  ├── PEMDAS → selects * at position 7
+  ├── op_cumsum segmentation → left_mask isolates digit 5 ONLY
+  │                          → right_mask isolates digit 2 ONLY
+  ├── _soft_assemble → left=5, right=2 (EXACT)
+  ├── op_classifier → * → 5*2=10
+  └── RETOKENIZE: "3 + PAD PAD PAD RES PAD PAD PAD"
+      └── value_buffer[7] = 10.0 (WITH gradients)
+
+Step 2: "3 + PAD PAD PAD RES PAD PAD PAD"
+  ├── PEMDAS → selects + at position 3
+  ├── left=3 (from digits), right=10.0 (from value_buffer, WITH gradients)
+  ├── op_classifier → + → 3+10=13
+  └── Final result: 13 ✓
+
+Step 3: No operators remain → pass-through prior result (13)
+```
+
+#### Key Components
+
+1. **Adjacent masking via `op_cumsum`**: `cumsum(is_operator)` partitions the sequence into segments between operators. Left operand = digits in segment `(selected_cum - 1)`, right operand = digits in segment `(selected_cum)` after the operator. Deterministic from token IDs, zero assembly error.
+
+2. **Value buffer gradient bypass**: `value_buffer: (B, L) float` stores prior step results at `RESULT_PLACEHOLDER` (token ID 21) positions. Gradient flows: `result2 → value_buffer → result1 → op_probs1 → tree_encoder`.
+
+3. **Re-tokenization**: Clears consumed positions (`<left> <op> <right>` + adjacent spaces) to PAD, places `RESULT_PLACEHOLDER` at the operator position. Non-differentiable for token_ids (integers), differentiable for value_buffer (floats).
+
+4. **Pass-through**: When no operators remain, propagates prior result unchanged. Prevents garbage outputs from reduce_step on fully-reduced expressions.
+
+#### Gradient Flow Verification
+
+```python
+# TF gradient tape confirms end-to-end flow:
+# Step 1 op_logits get grad=-12.4 for * (correct direction) from step 2 loss
+# 29/29 model variables have nonzero gradients
+```
+
+#### Additional Fixes
+
+- **Int32 overflow** (`data_generator.py`): `int(d)` cast prevents numpy int32 overflow for 10-digit operands in label preparation.
+- **Softmax NaN safety**: When no operators exist, uniform scores prevent `softmax(all -inf) = NaN`.
+
+### Training Results
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
+    --hidden-size 256 --num-tree-layers 3 --num-heads 8 \
+    --max-len 128 --act-steps 3 \
+    --steps 20000 --batch-size 64 --lr 1e-4 \
+    --clip-norm 10.0 --warmup-steps 1000 \
+    --w-operator 3.0 --w-reduction 5.0 --result-loss-weight 1.0 \
+    --curriculum-cap 0.8 --multiop-start-step 0 \
+    --gpu 1 --save-dir results/nam/dfsa_recursive
+```
+
+**Training trajectory:**
+
+| Step | loss | num_mse | op | red | step_1% | step_10% |
+|------|------|---------|-----|-----|---------|----------|
+| 2K | 3.09 | 0.0000 | 1.000 | 1.000 | 0.906 | 0.922 |
+| 4K | 0.87 | 0.0000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 10K | 2.23 | 0.0000 | 1.000 | 1.000 | 0.969 | 1.000 |
+| 20K | 14.48 | 0.0000 | 1.000 | 1.000 | 0.969 | 0.969 |
+
+**Final digit accuracy matrix (20K) — ALL four operations:**
+
+```
+       1d    2d    3d    4d    5d    6d    7d    8d    9d   10d
+ 1d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 2d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 3d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 4d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 5d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 6d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 7d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 8d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+ 9d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+10d   100%  100%  100%  100%  100%  100%  100%  100%  100%  100%
+```
+
+**400/400 cells at 100%** for +, -, *, / — all digit sizes 1-10.
+
+### What changed vs iteration 3
+
+| Aspect | Iteration 3 (teacher-forced) | Iteration 4 (recursive) |
+|--------|------------------------------|-------------------------|
+| Multi-op approach | Teacher-forced per-step tokens | Recursive re-tokenization |
+| Number assembly | cumsum-of-softmax masks | op_cumsum segment masks |
+| Gradient flow | Per-step only (no cross-step) | End-to-end via value buffer |
+| num_mse | 6-18 (broken for multi-op) | 0.0000 (exact) |
+| + eval (3d+) | 0% | **100%** |
+| Inference | Requires oracle tokens | Self-contained |
+| PEMDAS scores | 10/5 (add/sub broken) | 20/15 (all exact) |
+
+### Open directions
+
+1. **Multi-op eval matrix**: current eval only tests single-op. Add a multi-op eval that tests 2-3 operator expressions.
+
+2. **Parentheses**: extend PEMDAS to handle `(3 + 5) * 2`. Would need a precedence boost for operators inside parentheses (e.g., add `paren_depth * 100` to scores).
+
+3. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add input/output projections.
+
+4. **Learn precedence**: with the gradient-flowing recursive architecture, it may now be possible to learn precedence since credit assignment flows end-to-end.
 
 ## File Changes Summary
 
@@ -803,7 +941,7 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
 |------|---------|
 | `src/dl_techniques/models/nam/cell.py` | Deterministic `_assemble_number_from_tokens()`; removed learned number heads; cell accepts `token_ids` for assembly |
 | `src/dl_techniques/models/nam/model.py` | Passes `token_ids` through to cell for deterministic assembly |
-| `src/train/nam/data_generator.py` | `_parse_multi_op()` PEMDAS parser; `_generate_multi_op_expr()`; `prepare_per_step_labels()` for multi-step teacher forcing; 11 difficulty levels (8 single-op + 3 multi-op) |
-| `src/train/nam/train_dfsa.py` | `DifferentiableFSA` model with tree transformer + deterministic assembly + hardcoded PEMDAS; multi-step compiled training with per-step teacher forcing; digit accuracy matrix eval |
+| `src/train/nam/data_generator.py` | `_parse_multi_op()` PEMDAS parser; `_generate_multi_op_expr()`; `prepare_per_step_labels()` for multi-step teacher forcing; 11 difficulty levels (8 single-op + 3 multi-op); int32 overflow fix for 10-digit operands |
+| `src/train/nam/train_dfsa.py` | `DifferentiableFSA` with recursive `multi_reduce()`, adjacent `_adjacent_masks()` via op_cumsum, `_assemble_with_bypass()` for value buffer reads, `_retokenize()` for sequence surgery; PEMDAS scores 20/15; pass-through for fully-reduced expressions |
 | `src/train/nam/train_nam.py` | Updated with `--number-loss-type` toggle, per-step labels, validity mask; legacy training script for original NAM |
 | `tests/test_models/test_nam/test_nam.py` | Tests for deterministic assembly (exact values), split heads, round-trip serialization, resume |

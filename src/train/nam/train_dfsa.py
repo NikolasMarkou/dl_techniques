@@ -61,6 +61,9 @@ from train.nam.data_generator import (
 # ── Differentiable Finite-State Arithmetic Module ─────────────────────
 
 
+RESULT_PLACEHOLDER_ID = 21  # Token ID for re-tokenized computed values
+
+
 @keras.saving.register_keras_serializable()
 class DifferentiableFSA(keras.Model):
     """
@@ -86,7 +89,7 @@ class DifferentiableFSA(keras.Model):
         self,
         hidden_size: int = 64,
         max_expression_len: int = 64,
-        vocab_size: int = 21,
+        vocab_size: int = 22,  # 21 base + RESULT_PLACEHOLDER
         num_tree_layers: int = 2,
         num_heads: int = 4,
         intermediate_size: int = None,
@@ -248,8 +251,12 @@ class DifferentiableFSA(keras.Model):
             ops.logical_or(ops.equal(token_ids, 14), ops.equal(token_ids, 15)),
             "float32",
         )
-        # Precedence scores: * and / get 10.0, + and - get 5.0
-        pemdas_scores = high_prec * 10.0 + low_prec * 5.0
+        # Precedence scores: * and / get 20.0, + and - get 15.0
+        # Both must be high enough for sharp softmax (>0.999 operator
+        # probability) so that cumsum-based soft masks produce accurate
+        # number assembly. Score=5 only gives ~0.955 → 4.5% mask leakage
+        # → 33% assembly error at 5 digits.  Score=15+ gives >0.9999.
+        pemdas_scores = high_prec * 20.0 + low_prec * 15.0
 
         # Leftmost tie-breaking: subtract small position-dependent value
         seq_positions = ops.cast(ops.arange(ops.shape(token_ids)[1]), "float32")
@@ -360,6 +367,452 @@ class DifferentiableFSA(keras.Model):
         )
         return value  # (B, 1)
 
+    def multi_reduce(self, token_ids, max_steps=3, training=None):
+        """
+        Recursive reduction: reduce one op per step, re-tokenize, repeat.
+
+        Each step selects the highest-precedence operator, extracts its
+        ADJACENT operands via op_cumsum segmentation, computes the result,
+        then replaces ``<left> <op> <right>`` with a RESULT_PLACEHOLDER
+        token whose float value is stored in a gradient-carrying buffer.
+
+        :param token_ids: (B, L) int — tokenized expression.
+        :param max_steps: Maximum reduction steps (= max operators).
+        :param training: Whether in training mode.
+        :return: List of per-step output dicts.
+        """
+        B = ops.shape(token_ids)[0]
+        L = self.max_expression_len
+
+        current_ids = token_ids
+        value_buffer = ops.zeros((B, L))
+        buffer_active = ops.zeros((B, L))
+
+        all_outputs = []
+        # Track the last valid result for pass-through when no ops remain
+        last_valid_result = ops.zeros((B, 1))
+
+        for step in range(max_steps):
+            # Check if operators remain in the current token sequence
+            is_op_check = ops.cast(
+                ops.logical_and(
+                    ops.greater_equal(current_ids, 14),
+                    ops.less_equal(current_ids, 17),
+                ),
+                "float32",
+            )
+            has_ops = ops.cast(
+                ops.greater(
+                    ops.sum(is_op_check, axis=-1, keepdims=True), 0.5
+                ),
+                "float32",
+            )  # (B, 1) — 1.0 if operators remain
+
+            out = self.reduce_step(
+                current_ids, training=training,
+                value_buffer=value_buffer,
+                buffer_active=buffer_active,
+            )
+
+            # If no operators remain, pass through the prior result
+            # This makes reduce_step idempotent on fully-reduced expressions
+            out["result"] = has_ops * out["result"] + (
+                1.0 - has_ops
+            ) * last_valid_result
+            last_valid_result = out["result"]
+
+            all_outputs.append(out)
+
+            # Re-tokenize for next step (only meaningful when ops remain)
+            current_ids, value_buffer, buffer_active = self._retokenize(
+                current_ids, value_buffer, buffer_active,
+                out["op_pos_hard"],
+                out["left_mask"], out["right_mask"],
+                out["result"],
+            )
+
+        return all_outputs
+
+    def reduce_step(self, token_ids, training=None,
+                    value_buffer=None, buffer_active=None):
+        """
+        Perform ONE reduction step on the given token sequence.
+
+        Uses op_cumsum segmentation for adjacent operand masking (exact
+        for multi-op) and value_buffer for gradient-carrying result
+        injection from prior steps.
+
+        :param token_ids: (B, L) int — tokenized expression at this step.
+        :param training: Whether in training mode.
+        :param value_buffer: (B, L) float — prior step results at
+            RESULT_PLACEHOLDER positions. None for first step.
+        :param buffer_active: (B, L) float — 1.0 where value_buffer
+            is valid. None for first step.
+        :return: Dict with 'result', 'valid', 'left_val', 'right_val',
+            'op_logits', 'reduction_weights', 'op_pos_hard',
+            'left_mask', 'right_mask'.
+        """
+        import math
+
+        B = ops.shape(token_ids)[0]
+        L = self.max_expression_len
+
+        if value_buffer is None:
+            value_buffer = ops.zeros((B, L))
+        if buffer_active is None:
+            buffer_active = ops.zeros((B, L))
+
+        # Padding mask
+        mask = ops.cast(ops.not_equal(token_ids, 0), "float32")  # (B, L)
+
+        # Digit and operator features (deterministic from token IDs)
+        ids_float = ops.cast(token_ids, "float32")
+        is_digit = ops.cast(
+            ops.logical_and(
+                ops.greater_equal(token_ids, 4),
+                ops.less_equal(token_ids, 13),
+            ),
+            "float32",
+        )
+        digit_values = (ids_float - 4.0) * is_digit  # 0-9
+
+        is_operator = ops.cast(
+            ops.logical_and(
+                ops.greater_equal(token_ids, 14),
+                ops.less_equal(token_ids, 17),
+            ),
+            "float32",
+        )
+
+        op_type = ops.zeros_like(ids_float)
+        op_type = ops.where(ops.equal(token_ids, 14), 1.0 * ops.ones_like(op_type), op_type)
+        op_type = ops.where(ops.equal(token_ids, 15), 2.0 * ops.ones_like(op_type), op_type)
+        op_type = ops.where(ops.equal(token_ids, 16), 3.0 * ops.ones_like(op_type), op_type)
+        op_type = ops.where(ops.equal(token_ids, 17), 4.0 * ops.ones_like(op_type), op_type)
+
+        numeric_features = ops.stack(
+            [digit_values, is_digit, op_type, is_operator], axis=-1
+        )
+
+        # Token features: embedding + numeric injection + positional encoding
+        x = self.token_embedding(token_ids) * math.sqrt(self.hidden_size)
+        x = x + self.numeric_proj(numeric_features)
+        x = self.pos_encoding(x, training=training)
+
+        # Tree transformer
+        mask_3d = ops.expand_dims(mask, axis=1)  # (B, 1, L)
+        group_prob = ops.convert_to_tensor(0.0, dtype=x.dtype)
+        for block in self.tree_blocks:
+            x, group_prob, _ = block(
+                (x, mask_3d, group_prob), training=training
+            )
+        x = self.encoder_norm(x)
+
+        # --- PEMDAS reduction scoring (hardcoded) ---
+        high_prec = ops.cast(
+            ops.logical_or(ops.equal(token_ids, 16), ops.equal(token_ids, 17)),
+            "float32",
+        )
+        low_prec = ops.cast(
+            ops.logical_or(ops.equal(token_ids, 14), ops.equal(token_ids, 15)),
+            "float32",
+        )
+        pemdas_scores = high_prec * 20.0 + low_prec * 15.0
+
+        seq_positions = ops.cast(ops.arange(L), "float32")
+        position_tiebreak = -0.01 * seq_positions
+
+        scores = pemdas_scores + position_tiebreak
+        scores = scores + (1.0 - mask) * (-1e9)
+        # Mask non-operator positions to -inf
+        scores = scores + (1.0 - is_operator) * (-1e9)
+        # Safety: if no operators exist, add small uniform score to avoid
+        # softmax(all -inf) = NaN. The has_ops check in multi_reduce
+        # handles the result pass-through.
+        any_op = ops.cast(
+            ops.greater(
+                ops.sum(is_operator, axis=-1, keepdims=True), 0.5
+            ),
+            "float32",
+        )  # (B, 1)
+        scores = scores + (1.0 - any_op) * mask * (-100.0)  # uniform when no ops
+        reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
+
+        # Hard operator position (for masking and re-tokenization)
+        op_pos_hard = ops.argmax(reduction_weights, axis=-1)  # (B,)
+
+        # --- Adjacent operand masking via op_cumsum ---
+        is_value = ops.clip(is_digit + buffer_active, 0.0, 1.0)
+        left_mask, right_mask = self._adjacent_masks(
+            token_ids, is_digit, is_operator, buffer_active,
+            op_pos_hard, L,
+        )
+
+        # --- Number assembly with value bypass ---
+        left_val = self._assemble_with_bypass(
+            token_ids, left_mask, is_digit, digit_values,
+            value_buffer, buffer_active,
+        )
+        right_val = self._assemble_with_bypass(
+            token_ids, right_mask, is_digit, digit_values,
+            value_buffer, buffer_active,
+        )
+
+        # Operator classification
+        pooled = ops.sum(x * ops.expand_dims(reduction_weights, -1), axis=1)
+        op_logits = self.op_classifier(pooled)
+        op_probs = ops.softmax(op_logits, axis=-1)
+
+        # Fixed arithmetic with soft/hard select
+        add_result, add_valid = _fixed_add(left_val, right_val)
+        sub_result, sub_valid = _fixed_subtract(left_val, right_val)
+        mul_result, mul_valid = _fixed_multiply(left_val, right_val)
+        div_result, div_valid = _fixed_divide(left_val, right_val)
+
+        all_results = ops.stack(
+            [add_result, sub_result, mul_result, div_result], axis=1
+        )
+        all_valid = ops.stack(
+            [add_valid, sub_valid, mul_valid, div_valid], axis=1
+        )
+
+        if training:
+            op_weights = ops.expand_dims(op_probs, axis=-1)
+            result = ops.sum(all_results * op_weights, axis=1)
+            valid = ops.sum(all_valid * op_weights, axis=1)
+        else:
+            op_idx = ops.argmax(op_probs, axis=-1)
+            op_one_hot = ops.one_hot(op_idx, 4)
+            op_weights = ops.expand_dims(op_one_hot, axis=-1)
+            result = ops.sum(all_results * op_weights, axis=1)
+            valid = ops.sum(all_valid * op_weights, axis=1)
+
+        return {
+            "result": result,
+            "valid": valid,
+            "left_val": left_val,
+            "right_val": right_val,
+            "op_logits": op_logits,
+            "reduction_weights": reduction_weights,
+            "op_pos_hard": op_pos_hard,
+            "left_mask": left_mask,
+            "right_mask": right_mask,
+        }
+
+    @staticmethod
+    def _adjacent_masks(token_ids, is_digit, is_operator, buffer_active,
+                        op_pos, L):
+        """
+        Compute masks for digits immediately adjacent to the selected operator.
+
+        Uses ``op_cumsum`` segmentation: the cumulative count of operators
+        partitions the token sequence into segments. The left operand is
+        the segment just before the selected operator; the right operand
+        is the segment just after.
+
+        :param token_ids: (B, L) int
+        :param is_digit: (B, L) float
+        :param is_operator: (B, L) float
+        :param buffer_active: (B, L) float — 1 at RESULT_PLACEHOLDER positions
+        :param op_pos: (B,) int — hard operator position
+        :param L: int — sequence length
+        :return: (left_mask, right_mask) each (B, L) float
+        """
+        # Segment boundaries from operator cumulative count
+        op_cumsum = ops.cumsum(
+            ops.cast(is_operator, "int32"), axis=1
+        )  # (B, L)
+
+        # Selected operator's cumsum value
+        op_pos_expanded = ops.expand_dims(
+            ops.cast(op_pos, "int32"), axis=-1
+        )  # (B, 1)
+        selected_cum = ops.take_along_axis(
+            op_cumsum, op_pos_expanded, axis=1
+        )  # (B, 1)
+
+        # Positions that hold a value (digit or result placeholder)
+        is_value = ops.clip(is_digit + buffer_active, 0.0, 1.0)
+
+        # Left operand: value positions in segment (selected_cum - 1)
+        in_left_segment = ops.cast(
+            ops.equal(op_cumsum, selected_cum - 1), "float32"
+        )
+        left_mask = in_left_segment * is_value
+
+        # Right operand: value positions in segment (selected_cum)
+        # that are AFTER the operator position
+        positions = ops.cast(ops.arange(L), "int32")  # (L,)
+        after_op = ops.cast(
+            ops.greater(positions, op_pos_expanded), "float32"
+        )  # (B, L)
+        in_right_segment = ops.cast(
+            ops.equal(op_cumsum, selected_cum), "float32"
+        )
+        right_mask = in_right_segment * after_op * is_value
+
+        return left_mask, right_mask
+
+    @staticmethod
+    def _assemble_with_bypass(token_ids, mask, is_digit, digit_values,
+                              value_buffer, buffer_active):
+        """
+        Assemble a number from digit tokens, using value_buffer for
+        RESULT_PLACEHOLDER positions (gradient bypass).
+
+        If the masked region contains a buffer value (prior step result),
+        use it directly. Otherwise, assemble from digit tokens via
+        power-of-10 positional weighting.
+
+        :param token_ids: (B, L) int
+        :param mask: (B, L) float — which positions belong to this operand
+        :param is_digit: (B, L) float
+        :param digit_values: (B, L) float — 0-9 per digit
+        :param value_buffer: (B, L) float — stored results from prior steps
+        :param buffer_active: (B, L) float — 1 where buffer is valid
+        :return: (B, 1) float — assembled value
+        """
+        # Check if this operand contains a result placeholder
+        has_buffer = ops.sum(
+            mask * buffer_active, axis=1, keepdims=True
+        )  # (B, 1) — >0 if buffer present
+
+        # Digit-only assembly (standard power-of-10)
+        digit_mask = mask * is_digit * (1.0 - buffer_active)
+        cumsum_d = ops.cumsum(digit_mask, axis=1)
+        total_d = ops.sum(digit_mask, axis=1, keepdims=True)
+        power_of_10 = (total_d - cumsum_d) * digit_mask
+        positional_weight = ops.power(10.0, power_of_10) * digit_mask
+        digit_val = ops.sum(
+            digit_values * positional_weight, axis=1, keepdims=True
+        )
+
+        # Buffer value: read directly (carries gradients from prior step)
+        buffer_val = ops.sum(
+            mask * buffer_active * value_buffer, axis=1, keepdims=True
+        )
+
+        # Select: buffer if present, otherwise digits
+        val = ops.where(has_buffer > 0.5, buffer_val, digit_val)
+        return val
+
+    def _retokenize(self, token_ids, value_buffer, buffer_active,
+                    op_pos, left_mask, right_mask, result):
+        """
+        Replace ``<left> <op> <right>`` with a RESULT_PLACEHOLDER token.
+
+        Clears consumed positions (left operand + operator + right operand
+        + adjacent spaces) to PAD, places RESULT_PLACEHOLDER at the
+        operator position, and stores the result float in value_buffer.
+
+        Token modifications are non-differentiable (integer ops).
+        Value buffer update IS differentiable (float assignment).
+
+        :param token_ids: (B, L) int
+        :param value_buffer: (B, L) float
+        :param buffer_active: (B, L) float
+        :param op_pos: (B,) int — operator position
+        :param left_mask: (B, L) float — left operand positions
+        :param right_mask: (B, L) float — right operand positions
+        :param result: (B, 1) float — computed result (with gradients)
+        :return: (new_token_ids, new_value_buffer, new_buffer_active)
+        """
+        L = self.max_expression_len
+        op_pos_expanded = ops.expand_dims(
+            ops.cast(op_pos, "int32"), axis=-1
+        )  # (B, 1)
+
+        # Operator one-hot
+        op_one_hot = ops.cast(
+            ops.one_hot(ops.cast(op_pos, "int32"), L), "float32"
+        )  # (B, L)
+
+        # Clear mask: left operand + operator + right operand
+        clear_mask = ops.clip(left_mask + right_mask + op_one_hot, 0.0, 1.0)
+
+        # Also clear spaces adjacent to cleared positions:
+        # Shift clear_mask left/right by 1 and include space tokens
+        is_space = ops.cast(ops.equal(token_ids, 3), "float32")
+        # Positions adjacent to cleared region that are spaces
+        clear_shifted_r = ops.concatenate(
+            [ops.zeros_like(clear_mask[:, :1]), clear_mask[:, :-1]], axis=1
+        )
+        clear_shifted_l = ops.concatenate(
+            [clear_mask[:, 1:], ops.zeros_like(clear_mask[:, :1])], axis=1
+        )
+        space_clear = is_space * ops.clip(
+            clear_shifted_r + clear_shifted_l, 0.0, 1.0
+        )
+        clear_mask = ops.clip(clear_mask + space_clear, 0.0, 1.0)
+
+        # New token_ids: clear to PAD, place RESULT_PLACEHOLDER at op_pos
+        clear_int = ops.cast(clear_mask > 0.5, "int32")
+        new_ids = token_ids * (1 - clear_int)  # zero out cleared positions
+        # Place RESULT_PLACEHOLDER (ID=21) at op_pos
+        placeholder_ids = ops.cast(op_one_hot, "int32") * RESULT_PLACEHOLDER_ID
+        new_ids = new_ids + placeholder_ids
+
+        # Update value buffer: store result at op_pos (gradient-carrying)
+        result_broadcast = ops.squeeze(result, axis=-1)  # (B,) or (B,1)→(B,)
+        if len(ops.shape(result_broadcast)) == 2:
+            result_broadcast = result_broadcast[:, 0]
+        new_buffer = value_buffer * (1.0 - clear_mask) + (
+            ops.expand_dims(result_broadcast, -1) * op_one_hot
+        )
+        new_active = buffer_active * (1.0 - clear_mask) + op_one_hot
+
+        return new_ids, new_buffer, new_active
+
+    def call(self, token_ids, training=None, max_steps=1):
+        """
+        Forward pass: recursive multi-step reduction.
+
+        :param token_ids: (B, L) int — tokenized expression.
+        :param training: Whether in training mode.
+        :param max_steps: Number of reduction steps.
+        :return: Dict with final result and per-step outputs.
+        """
+        outputs = self.multi_reduce(token_ids, max_steps=max_steps,
+                                    training=training)
+        last = outputs[-1]
+
+        # Result encoder (learned interface to host transformer)
+        result_compressed = ops.sign(last["result"]) * ops.log1p(
+            ops.abs(last["result"])
+        )
+        result_embedding = self.result_encoder(
+            ops.concatenate([result_compressed, last["valid"]], axis=-1)
+        )
+
+        return {
+            "result": last["result"],
+            "result_embedding": result_embedding,
+            "valid": last["valid"],
+            "per_step": outputs,
+        }
+
+    @staticmethod
+    def _soft_assemble(token_ids, soft_mask, is_digit, digit_values):
+        """
+        Differentiable number assembly from soft digit mask.
+
+        :param token_ids: (B, L) int
+        :param soft_mask: (B, L) float
+        :param is_digit: (B, L) float
+        :param digit_values: (B, L) float — 0-9
+        :return: (B, 1) float
+        """
+        cumsum_left = ops.cumsum(soft_mask, axis=1)
+        total_digits = ops.sum(soft_mask, axis=1, keepdims=True)
+        power_of_10 = (total_digits - cumsum_left) * soft_mask
+
+        positional_weight = ops.power(10.0, power_of_10) * soft_mask
+
+        value = ops.sum(
+            digit_values * positional_weight, axis=1, keepdims=True
+        )
+        return value
+
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -411,17 +864,18 @@ def _make_compiled_train_fn(
 ):
     """Compiled multi-step training function.
 
-    Supports both single-op (1 step) and multi-op (N steps) expressions.
-    Per-step token_ids and labels are provided via teacher forcing.
+    Uses recursive reduction with re-tokenization (no teacher forcing).
+    Each step: PEMDAS select → adjacent mask → assemble → arithmetic →
+    re-tokenize → next step. Gradients flow through value_buffer.
     """
     max_expression_len = model.max_expression_len
 
     @tf.function(jit_compile=False)
     def _step(
-        input_ids,            # (B, L) — original tokens (for result_encoder)
+        input_ids,            # (B, L) — original tokens
         targets,              # (B, 1) — final result
         target_validity,      # (B, 1) — validity
-        per_step_token_ids,   # (B, max_act_steps, L) — per-step tokens
+        per_step_token_ids,   # (B, max_act_steps, L) — NOT USED (kept for compat)
         per_step_op_index,    # (B, max_act_steps) — per-step operator type
         per_step_op_position, # (B, max_act_steps) — per-step operator position
         per_step_valid_mask,  # (B, max_act_steps) — 1.0 for real steps
@@ -430,54 +884,51 @@ def _make_compiled_train_fn(
             def _log_c(x):
                 return tf.sign(x) * tf.math.log1p(tf.abs(x))
 
+            # Recursive reduction (no teacher forcing)
+            step_outputs = model.multi_reduce(
+                input_ids, max_steps=max_act_steps, training=True
+            )
+
             L_reduction = tf.constant(0.0)
             L_operator = tf.constant(0.0)
 
-            all_results = []
-            all_left_vals = []
-            all_right_vals = []
-            all_op_logits = []
-            all_rw = []
-
             for step_idx in range(max_act_steps):
-                step_ids = per_step_token_ids[:, step_idx, :]  # (B, L)
-                step_valid = per_step_valid_mask[:, step_idx]   # (B,)
-                step_op_idx = per_step_op_index[:, step_idx]    # (B,)
-                step_op_pos = per_step_op_position[:, step_idx] # (B,)
+                out = step_outputs[step_idx]
+                step_valid = per_step_valid_mask[:, step_idx]
+                step_op_idx = per_step_op_index[:, step_idx]
+                step_op_pos = per_step_op_position[:, step_idx]
 
-                out = model.reduce_step(step_ids, training=True)
-
-                all_results.append(out["result"])
-                all_left_vals.append(out["left_val"])
-                all_right_vals.append(out["right_val"])
-                all_op_logits.append(out["op_logits"])
-                all_rw.append(out["reduction_weights"])
-
-                # Per-step reduction loss (masked)
+                # Per-step reduction loss
                 step_pos_onehot = tf.one_hot(step_op_pos, max_expression_len)
-                clamped_rw = tf.clip_by_value(out["reduction_weights"], 1e-7, 1.0)
+                clamped_rw = tf.clip_by_value(
+                    out["reduction_weights"], 1e-7, 1.0
+                )
                 per_sample_red = keras.losses.categorical_crossentropy(
                     step_pos_onehot, clamped_rw
                 )
                 L_reduction += tf.reduce_mean(per_sample_red * step_valid)
 
-                # Per-step operator loss (masked)
+                # Per-step operator loss
                 step_op_onehot = tf.one_hot(step_op_idx, 4)
-                clamped_logits = tf.clip_by_value(out["op_logits"], -30.0, 30.0)
+                clamped_logits = tf.clip_by_value(
+                    out["op_logits"], -30.0, 30.0
+                )
                 per_sample_op = keras.losses.categorical_crossentropy(
                     step_op_onehot, clamped_logits, from_logits=True
                 )
                 L_operator += tf.reduce_mean(per_sample_op * step_valid)
 
-            # Normalize by number of steps
             n_steps = tf.cast(max_act_steps, tf.float32)
             L_reduction = L_reduction / n_steps
             L_operator = L_operator / n_steps
 
             # Result loss on the LAST step's output
-            last_result = all_results[max_act_steps - 1]
+            last_out = step_outputs[max_act_steps - 1]
+            last_result = last_out["result"]
             L_result = tf.reduce_mean(
-                keras.losses.huber(_log_c(targets), _log_c(last_result), delta=2.0)
+                keras.losses.huber(
+                    _log_c(targets), _log_c(last_result), delta=2.0
+                )
             )
 
             total_loss = (
@@ -491,15 +942,7 @@ def _make_compiled_train_fn(
 
         grad_norms = tf.stack([tf.norm(g) for g in grads if g is not None])
 
-        # Step 0 outputs for metrics (reduction/operator accuracy should
-        # be measured on the FIRST reduction decision, not the last step
-        # which may see a fully-reduced expression with no operators).
-        first_rw = all_rw[0]
-        first_op = all_op_logits[0]
-        last_rw = all_rw[max_act_steps - 1]
-        last_op = all_op_logits[max_act_steps - 1]
-        last_left = all_left_vals[max_act_steps - 1]
-        last_right = all_right_vals[max_act_steps - 1]
+        first_out = step_outputs[0]
 
         return {
             "total_loss": total_loss,
@@ -507,11 +950,11 @@ def _make_compiled_train_fn(
             "L_operator": L_operator,
             "L_result": L_result,
             "result": last_result,
-            "left_val": last_left,
-            "right_val": last_right,
-            "op_logits": last_op,
-            "reduction_weights": first_rw,  # step 0 for metric accuracy
-            "first_op_logits": first_op,
+            "left_val": first_out["left_val"],
+            "right_val": first_out["right_val"],
+            "op_logits": first_out["op_logits"],
+            "reduction_weights": first_out["reduction_weights"],
+            "first_op_logits": first_out["op_logits"],
             "grad_mean": tf.reduce_mean(grad_norms),
             "grad_max": tf.reduce_max(grad_norms),
         }
