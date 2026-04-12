@@ -37,6 +37,7 @@ class DifficultyLevel:
     num_digits_max: int      # max digits per operand
     operators: List[str]     # allowed operators
     num_ops: int = 1         # number of operators in expression
+    has_parens: bool = False  # whether to wrap sub-expressions in parens
 
     def sample_operand(self) -> int:
         """Sample a random integer with the configured digit count."""
@@ -72,6 +73,12 @@ DIFFICULTY_LEVELS: List[DifficultyLevel] = [
     DifficultyLevel("1-3d_3op", 1, 3, ["+", "-", "*", "/"], num_ops=3),
     # Level 10: multi-op, 1-4 digits, 2-4 operators
     DifficultyLevel("1-4d_4op", 1, 4, ["+", "-", "*", "/"], num_ops=4),
+    # Level 11: parenthesized, 1-2 digits, 2 operators
+    DifficultyLevel("1-2d_2op_paren", 1, 2, ["+", "-", "*", "/"],
+                    num_ops=2, has_parens=True),
+    # Level 12: parenthesized, 1-3 digits, 3 operators
+    DifficultyLevel("1-3d_3op_paren", 1, 3, ["+", "-", "*", "/"],
+                    num_ops=3, has_parens=True),
 ]
 
 NUM_LEVELS = len(DIFFICULTY_LEVELS)
@@ -356,40 +363,42 @@ def _parse_multi_op(
     """
     Parse a multi-op expression into a sequence of reduction steps.
 
-    Returns one dict per reduction step, in PEMDAS order:
-    1. First all ``*`` and ``/`` (left to right)
-    2. Then all ``+`` and ``-`` (left to right)
+    Supports parenthesized expressions. Reduction order matches the
+    model's hardcoded PEMDAS with paren_depth:
+    1. Innermost parens first (highest paren_depth)
+    2. Within same depth: ``*`` and ``/`` before ``+`` and ``-``
+    3. Same depth and precedence: leftmost first
 
     Each step dict contains:
-    - ``expression``: the expression string at this step (after prior reductions)
+    - ``expression``: the expression string at this step
     - ``left_operand``: float value of the left operand
     - ``right_operand``: float value of the right operand
     - ``operator``: str, one of +, -, *, /
     - ``operator_index``: int, 0-3
     - ``result``: float result of this sub-expression
-    - ``new_expression``: the expression after replacing the sub-expression with result
 
-    For single-op expressions, returns a list with one step.
-    For expressions with N operators, returns N steps.
-
-    :param expression: Arithmetic expression string (e.g. "3 + 5 * 2 - 1").
+    :param expression: Arithmetic expression string, may include parens.
     :return: List of per-step label dicts.
     """
     steps = []
     current_expr = expression.strip()
 
-    # Simple tokenizer: split expression into number/operator tokens
-    # "3 + 5 * 2 - 1" → ['3', '+', '5', '*', '2', '-', '1']
     def _tokenize_expr(expr_str):
-        """Split expression into (value, operator, value, operator, ...) tokens."""
+        """Split expression into tokens preserving parens."""
         tokens = []
         i = 0
         s = expr_str.strip()
         while i < len(s):
-            if s[i] in ' ':
+            if s[i] == ' ':
                 i += 1
                 continue
-            if s[i] in '+-' and (not tokens or isinstance(tokens[-1], str) and tokens[-1] in '+-*/'):
+            if s[i] in '()':
+                tokens.append(s[i])
+                i += 1
+            elif s[i] in '+-' and (
+                not tokens
+                or (isinstance(tokens[-1], str) and tokens[-1] in '+-*/(')
+            ):
                 # Negative number sign
                 j = i + 1
                 while j < len(s) and (s[j].isdigit() or s[j] == '.'):
@@ -410,7 +419,7 @@ def _parse_multi_op(
         return tokens
 
     def _tokens_to_expr(tokens):
-        """Convert token list back to expression string (integer-formatted where possible)."""
+        """Convert token list back to expression string."""
         parts = []
         for t in tokens:
             if isinstance(t, float):
@@ -422,33 +431,50 @@ def _parse_multi_op(
                 parts.append(str(t))
         return " ".join(parts)
 
+    def _strip_redundant_parens(tokens):
+        """Remove parens wrapping a single value: ( value ) → value."""
+        changed = True
+        while changed:
+            changed = False
+            i = 0
+            while i < len(tokens) - 2:
+                if (tokens[i] == '(' and isinstance(tokens[i + 1], float)
+                        and i + 2 < len(tokens) and tokens[i + 2] == ')'):
+                    tokens = tokens[:i] + [tokens[i + 1]] + tokens[i + 3:]
+                    changed = True
+                else:
+                    i += 1
+        return tokens
+
     while True:
         tokens = _tokenize_expr(current_expr)
-        if len(tokens) < 3:
-            break  # fully reduced
+        tokens = _strip_redundant_parens(tokens)
 
-        # Find the next operator to reduce (PEMDAS: * and / first, then + and -)
-        reduce_idx = None
+        # Find all operators with their paren depth
+        depth = 0
+        best_idx = None
+        best_score = (-1, -1, 0)  # (depth, prec, -position)
+        for i, tok in enumerate(tokens):
+            if tok == '(':
+                depth += 1
+            elif tok == ')':
+                depth -= 1
+            elif isinstance(tok, str) and tok in '+-*/':
+                prec = 2 if tok in '*/' else 1
+                score = (depth, prec, -i)  # higher depth, higher prec first
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
 
-        # Pass 1: find leftmost * or /
-        for i in range(1, len(tokens), 2):
-            if isinstance(tokens[i], str) and tokens[i] in '*/':
-                reduce_idx = i
-                break
-
-        # Pass 2: if no * or /, find leftmost + or -
-        if reduce_idx is None:
-            for i in range(1, len(tokens), 2):
-                if isinstance(tokens[i], str) and tokens[i] in '+-':
-                    reduce_idx = i
-                    break
-
-        if reduce_idx is None:
+        if best_idx is None:
             break  # no operators left
 
-        left_val = tokens[reduce_idx - 1]
-        op_str = tokens[reduce_idx]
-        right_val = tokens[reduce_idx + 1]
+        left_val = tokens[best_idx - 1]
+        op_str = tokens[best_idx]
+        right_val = tokens[best_idx + 1]
+
+        if not isinstance(left_val, float) or not isinstance(right_val, float):
+            break  # adjacent tokens aren't values — shouldn't happen
 
         # Compute result
         if op_str == '+':
@@ -458,14 +484,11 @@ def _parse_multi_op(
         elif op_str == '*':
             result = left_val * right_val
         elif op_str == '/':
-            if abs(right_val) < 1e-10:
-                result = 0.0
-            else:
-                result = left_val / right_val
+            result = left_val / right_val if abs(right_val) > 1e-10 else 0.0
         else:
             break
 
-        # Record this step
+        # Record this step (use expression without parens for token matching)
         steps.append({
             "expression": current_expr,
             "left_operand": float(left_val),
@@ -475,8 +498,9 @@ def _parse_multi_op(
             "result": float(result),
         })
 
-        # Replace the sub-expression with the result
-        new_tokens = tokens[:reduce_idx - 1] + [result] + tokens[reduce_idx + 2:]
+        # Replace the sub-expression with the result, then clean up parens
+        new_tokens = tokens[:best_idx - 1] + [result] + tokens[best_idx + 2:]
+        new_tokens = _strip_redundant_parens(new_tokens)
         current_expr = _tokens_to_expr(new_tokens)
 
     return steps
@@ -500,6 +524,42 @@ def _generate_multi_op_expr(
     parts = [str(operands[0])]
     for i, op in enumerate(operators):
         parts.append(f" {op} {operands[i + 1]}")
+    expr = "".join(parts)
+
+    result, valid = _safe_eval(expr)
+    return expr, result, valid
+
+
+def _generate_paren_expr(
+    level: DifficultyLevel,
+    num_ops: int,
+) -> Tuple[str, float, bool]:
+    """
+    Generate a parenthesized multi-op expression.
+
+    Wraps one random adjacent operand pair in parens. For 3-op, may also
+    wrap a second pair (nested or non-overlapping).
+
+    :param level: Difficulty level for operand sizes.
+    :param num_ops: Number of operators (2-4).
+    :return: Tuple of (expression_str, result, is_valid).
+    """
+    operands = [level.sample_operand() for _ in range(num_ops + 1)]
+    operators = [random.choice(level.operators) for _ in range(num_ops)]
+
+    # Pick a random adjacent pair to parenthesize (index of the operator)
+    paren_idx = random.randint(0, num_ops - 1)
+
+    # Build expression with parens
+    parts = []
+    for i in range(num_ops + 1):
+        if i == paren_idx:
+            parts.append("(")
+        parts.append(str(operands[i]))
+        if i == paren_idx + 1:
+            parts.append(")")
+        if i < num_ops:
+            parts.append(f" {operators[i]} ")
     expr = "".join(parts)
 
     result, valid = _safe_eval(expr)
@@ -559,11 +619,12 @@ def prepare_per_step_labels(
         for pos, tid in enumerate(ids):
             if tid == target_op_tid:
                 # Verify left operand by assembling digits to the left
+                # Skip spaces (3) and parens (18, 19) when scanning
                 left_digits = []
                 for j in range(pos - 1, -1, -1):
                     if 4 <= ids[j] <= 13:
                         left_digits.insert(0, ids[j] - 4)
-                    elif ids[j] == 3:  # space
+                    elif ids[j] in (3, 18, 19):  # space or paren
                         continue
                     else:
                         break
@@ -578,17 +639,11 @@ def prepare_per_step_labels(
         step_op_positions[i] = found_pos
         step_op_indices[i] = _OP_TO_INDEX[target_op]
 
-        # Simplify expression for the next step: replace the sub-expression
-        # with its integer result (re-parse from the step's result)
-        tokens = _parse_multi_op.__code__.co_consts  # just use the helper
-        # Rebuild: we already have the new expression from _parse_multi_op
-        # but need to reconstruct it. Simplest: re-run the tokenizer math.
+        # Simplify expression for the next step
         left = step["left_operand"]
         right = step["right_operand"]
         result = step["result"]
 
-        # Build the new expression by replacing "left op right" with result
-        # in the current expression string
         result_str = str(int(result)) if result == int(result) and abs(result) < 1e15 else f"{result:.6g}"
         left_str = str(int(left)) if left == int(left) and abs(left) < 1e15 else f"{left:.6g}"
         right_str = str(int(right)) if right == int(right) and abs(right) < 1e15 else f"{right:.6g}"
@@ -597,8 +652,15 @@ def prepare_per_step_labels(
         # Replace first occurrence of the sub-expression
         new_expr = current_expr.replace(sub_expr, result_str, 1)
         if new_expr == current_expr:
-            # Fallback: try with the original expression tokens
             new_expr = result_str
+
+        # Strip redundant parens wrapping a single value: (8) → 8
+        import re
+        while True:
+            cleaned = re.sub(r'\(\s*(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*\)', r'\1', new_expr)
+            if cleaned == new_expr:
+                break
+            new_expr = cleaned
         current_expr = new_expr.strip()
 
     # Pad remaining steps with the final expression
@@ -655,6 +717,8 @@ def generate_curriculum_batch(
         level = DIFFICULTY_LEVELS[lvl_idx]
         if level.num_ops == 1:
             expr, result, valid = _generate_single_op_expr(level)
+        elif level.has_parens:
+            expr, result, valid = _generate_paren_expr(level, level.num_ops)
         else:
             expr, result, valid = _generate_multi_op_expr(level, level.num_ops)
         expressions.append(expr)

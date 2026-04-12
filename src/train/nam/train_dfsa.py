@@ -251,20 +251,25 @@ class DifferentiableFSA(keras.Model):
             ops.logical_or(ops.equal(token_ids, 14), ops.equal(token_ids, 15)),
             "float32",
         )
-        # Precedence scores: * and / get 20.0, + and - get 15.0
-        # Both must be high enough for sharp softmax (>0.999 operator
-        # probability) so that cumsum-based soft masks produce accurate
-        # number assembly. Score=5 only gives ~0.955 → 4.5% mask leakage
-        # → 33% assembly error at 5 digits.  Score=15+ gives >0.9999.
-        pemdas_scores = high_prec * 20.0 + low_prec * 15.0
+        # Parenthesis depth: operators inside parens get priority boost
+        is_open_paren = ops.cast(ops.equal(token_ids, 18), "float32")
+        is_close_paren = ops.cast(ops.equal(token_ids, 19), "float32")
+        paren_depth = ops.cumsum(is_open_paren, axis=1) - ops.cumsum(
+            is_close_paren, axis=1
+        )
+
+        # Precedence scores: paren_depth * 100 ensures inner ops reduce
+        # first. * and / get 20.0, + and - get 15.0. Both high enough
+        # for sharp softmax (>0.9999 operator probability).
+        pemdas_scores = (
+            paren_depth * 100.0 + high_prec * 20.0 + low_prec * 15.0
+        )
 
         # Leftmost tie-breaking: subtract small position-dependent value
         seq_positions = ops.cast(ops.arange(ops.shape(token_ids)[1]), "float32")
         position_tiebreak = -0.01 * seq_positions  # prefer leftmost
 
         # Pure PEMDAS reduction — no learned component.
-        # The tree encoder provides context for op_classifier and soft masks
-        # but reduction order is deterministic from token types.
         scores = pemdas_scores + position_tiebreak
         scores = scores + (1.0 - mask) * (-1e9)  # mask padding
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
@@ -279,12 +284,21 @@ class DifferentiableFSA(keras.Model):
         left_val = self._soft_assemble(token_ids, left_mask, is_digit, digit_values)
         right_val = self._soft_assemble(token_ids, right_mask, is_digit, digit_values)
 
-        # Operator classification
-        pooled = ops.sum(x * ops.expand_dims(reduction_weights, -1), axis=1)
-        op_logits = self.op_classifier(pooled)
-        op_probs = ops.softmax(op_logits, axis=-1)
+        # Operator classification — HARDCODED from token_id
+        op_pos_hard = ops.argmax(reduction_weights, axis=-1)  # (B,)
+        op_token_id = ops.take_along_axis(
+            token_ids,
+            ops.expand_dims(ops.cast(op_pos_hard, "int32"), -1),
+            axis=1,
+        )  # (B, 1)
+        op_idx = ops.squeeze(
+            ops.cast(op_token_id, "int32") - 14, axis=-1
+        )  # (B,)
+        op_idx = ops.clip(op_idx, 0, 3)
+        op_one_hot = ops.cast(ops.one_hot(op_idx, 4), "float32")
+        op_logits = op_one_hot * 30.0 - (1.0 - op_one_hot) * 30.0
 
-        # Fixed arithmetic with soft/hard select
+        # Fixed arithmetic with hard operator select
         add_result, add_valid = _fixed_add(left_val, right_val)
         sub_result, sub_valid = _fixed_subtract(left_val, right_val)
         mul_result, mul_valid = _fixed_multiply(left_val, right_val)
@@ -297,16 +311,9 @@ class DifferentiableFSA(keras.Model):
             [add_valid, sub_valid, mul_valid, div_valid], axis=1
         )
 
-        if training:
-            op_weights = ops.expand_dims(op_probs, axis=-1)
-            result = ops.sum(all_results * op_weights, axis=1)
-            valid = ops.sum(all_valid * op_weights, axis=1)
-        else:
-            op_idx = ops.argmax(op_probs, axis=-1)
-            op_one_hot = ops.one_hot(op_idx, 4)
-            op_weights = ops.expand_dims(op_one_hot, axis=-1)
-            result = ops.sum(all_results * op_weights, axis=1)
-            valid = ops.sum(all_valid * op_weights, axis=1)
+        op_weights = ops.expand_dims(op_one_hot, axis=-1)
+        result = ops.sum(all_results * op_weights, axis=1)
+        valid = ops.sum(all_valid * op_weights, axis=1)
 
         return {
             "result": result,
@@ -508,7 +515,7 @@ class DifferentiableFSA(keras.Model):
             )
         x = self.encoder_norm(x)
 
-        # --- PEMDAS reduction scoring (hardcoded) ---
+        # --- PEMDAS reduction scoring (hardcoded, paren-aware) ---
         high_prec = ops.cast(
             ops.logical_or(ops.equal(token_ids, 16), ops.equal(token_ids, 17)),
             "float32",
@@ -517,7 +524,15 @@ class DifferentiableFSA(keras.Model):
             ops.logical_or(ops.equal(token_ids, 14), ops.equal(token_ids, 15)),
             "float32",
         )
-        pemdas_scores = high_prec * 20.0 + low_prec * 15.0
+        # Parenthesis depth: operators inside parens get priority boost
+        is_open_paren = ops.cast(ops.equal(token_ids, 18), "float32")
+        is_close_paren = ops.cast(ops.equal(token_ids, 19), "float32")
+        paren_depth = ops.cumsum(is_open_paren, axis=1) - ops.cumsum(
+            is_close_paren, axis=1
+        )
+        pemdas_scores = (
+            paren_depth * 100.0 + high_prec * 20.0 + low_prec * 15.0
+        )
 
         seq_positions = ops.cast(ops.arange(L), "float32")
         position_tiebreak = -0.01 * seq_positions
@@ -558,12 +573,24 @@ class DifferentiableFSA(keras.Model):
             value_buffer, buffer_active,
         )
 
-        # Operator classification
-        pooled = ops.sum(x * ops.expand_dims(reduction_weights, -1), axis=1)
-        op_logits = self.op_classifier(pooled)
-        op_probs = ops.softmax(op_logits, axis=-1)
+        # Operator classification — HARDCODED from token_id at selected
+        # position. Token 14=+ (idx 0), 15=- (idx 1), 16=* (idx 2),
+        # 17=/ (idx 3). PEMDAS scoring guarantees op_pos_hard always
+        # points to an operator token (non-operators masked to -inf).
+        op_token_id = ops.take_along_axis(
+            token_ids,
+            ops.expand_dims(ops.cast(op_pos_hard, "int32"), -1),
+            axis=1,
+        )  # (B, 1)
+        op_idx = ops.squeeze(
+            ops.cast(op_token_id, "int32") - 14, axis=-1
+        )  # (B,)
+        op_idx = ops.clip(op_idx, 0, 3)  # safety clamp
+        op_one_hot = ops.cast(ops.one_hot(op_idx, 4), "float32")
+        # Synthetic logits for training loss compatibility
+        op_logits = op_one_hot * 30.0 - (1.0 - op_one_hot) * 30.0
 
-        # Fixed arithmetic with soft/hard select
+        # Fixed arithmetic with hard operator select
         add_result, add_valid = _fixed_add(left_val, right_val)
         sub_result, sub_valid = _fixed_subtract(left_val, right_val)
         mul_result, mul_valid = _fixed_multiply(left_val, right_val)
@@ -576,16 +603,9 @@ class DifferentiableFSA(keras.Model):
             [add_valid, sub_valid, mul_valid, div_valid], axis=1
         )
 
-        if training:
-            op_weights = ops.expand_dims(op_probs, axis=-1)
-            result = ops.sum(all_results * op_weights, axis=1)
-            valid = ops.sum(all_valid * op_weights, axis=1)
-        else:
-            op_idx = ops.argmax(op_probs, axis=-1)
-            op_one_hot = ops.one_hot(op_idx, 4)
-            op_weights = ops.expand_dims(op_one_hot, axis=-1)
-            result = ops.sum(all_results * op_weights, axis=1)
-            valid = ops.sum(all_valid * op_weights, axis=1)
+        op_weights = ops.expand_dims(op_one_hot, axis=-1)
+        result = ops.sum(all_results * op_weights, axis=1)
+        valid = ops.sum(all_valid * op_weights, axis=1)
 
         return {
             "result": result,
@@ -730,20 +750,29 @@ class DifferentiableFSA(keras.Model):
         # Clear mask: left operand + operator + right operand
         clear_mask = ops.clip(left_mask + right_mask + op_one_hot, 0.0, 1.0)
 
-        # Also clear spaces adjacent to cleared positions:
-        # Shift clear_mask left/right by 1 and include space tokens
+        # Also clear spaces and parentheses adjacent to cleared positions.
+        # 2 expansion rounds handle up to 2 nesting levels (e.g. ((a+b))).
         is_space = ops.cast(ops.equal(token_ids, 3), "float32")
-        # Positions adjacent to cleared region that are spaces
-        clear_shifted_r = ops.concatenate(
-            [ops.zeros_like(clear_mask[:, :1]), clear_mask[:, :-1]], axis=1
+        is_paren = ops.cast(
+            ops.logical_or(
+                ops.equal(token_ids, 18), ops.equal(token_ids, 19)
+            ),
+            "float32",
         )
-        clear_shifted_l = ops.concatenate(
-            [clear_mask[:, 1:], ops.zeros_like(clear_mask[:, :1])], axis=1
-        )
-        space_clear = is_space * ops.clip(
-            clear_shifted_r + clear_shifted_l, 0.0, 1.0
-        )
-        clear_mask = ops.clip(clear_mask + space_clear, 0.0, 1.0)
+        is_clearable = ops.clip(is_space + is_paren, 0.0, 1.0)
+        for _ in range(2):
+            clear_shifted_r = ops.concatenate(
+                [ops.zeros_like(clear_mask[:, :1]), clear_mask[:, :-1]],
+                axis=1,
+            )
+            clear_shifted_l = ops.concatenate(
+                [clear_mask[:, 1:], ops.zeros_like(clear_mask[:, :1])],
+                axis=1,
+            )
+            adjacent_clear = is_clearable * ops.clip(
+                clear_shifted_r + clear_shifted_l, 0.0, 1.0
+            )
+            clear_mask = ops.clip(clear_mask + adjacent_clear, 0.0, 1.0)
 
         # New token_ids: clear to PAD, place RESULT_PLACEHOLDER at op_pos
         clear_int = ops.cast(clear_mask > 0.5, "int32")

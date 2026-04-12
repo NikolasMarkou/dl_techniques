@@ -1022,15 +1022,113 @@ Note: `num_mse=0.0000` throughout — adjacent masking gives exact operand extra
 
 ### Open directions
 
-1. **Parentheses**: extend PEMDAS to handle `(3 + 5) * 2`. Would need a precedence boost for operators inside parentheses (e.g., add `paren_depth * 100` to scores).
+1. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add input/output projections.
 
-2. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add input/output projections.
+2. **Longer expressions**: increase `act_steps` beyond 4 for expressions with 5+ operators. The architecture supports it; only needs training data and evaluation.
 
-3. **Learn precedence**: with the gradient-flowing recursive architecture, it may now be possible to learn precedence since credit assignment flows end-to-end.
+3. **Negative intermediate results**: expressions like `3 - 10 * 2 = -17` produce negative intermediates. The sign handling in `_soft_assemble` and value buffer should be verified for these cases.
 
-4. **Longer expressions**: increase `act_steps` beyond 3 for expressions with 4+ operators. The architecture supports it; only needs training data and evaluation.
+4. **Straight-through estimator**: to restore gradient flow to the tree encoder (for host transformer fine-tuning), use hard op selection in the forward pass but soft approximation in the backward pass. Not needed for arithmetic correctness, only for learned embedding quality.
 
-5. **Negative intermediate results**: expressions like `3 - 10 * 2 = -17` produce negative intermediates. The sign handling in `_soft_assemble` and value buffer should be verified for these cases.
+5. **Remove dead parameters**: the tree encoder (~1.5M params) now has zero effect on arithmetic results. Could be removed to save compute, or kept for future embedding integration.
+
+## Iteration 5: Parenthesis Support — Fully Deterministic Pipeline
+
+### Root Cause (from Epistemic Deconstruction)
+
+Three prior attempts to add parenthesis support failed at 57-62% accuracy (see `PARENTHESIS.md`). A Bayesian hypothesis tracking analysis (H1 posterior 0.91) confirmed the **single root cause**: the `op_classifier` (Dense(D, 4)) was the only learned component in the arithmetic path. It failed when processing post-reduction sequences where `RESULT_PLACEHOLDER` tokens sat in PAD-heavy context — features the tree encoder had never seen during training.
+
+The operator identity is **deterministic** — token 14 is always `+`, 15 is always `-`, etc. Teaching a neural network to rediscover this mapping was both unnecessary and fragile.
+
+### Solution: Hardcode the Op Classifier
+
+Replaced the learned `op_classifier` with a direct token-id lookup:
+
+```python
+# Before (learned, failed on paren step 2+):
+pooled = ops.sum(x * expand_dims(reduction_weights, -1), axis=1)
+op_logits = self.op_classifier(pooled)  # Dense(D, 4)
+op_probs = softmax(op_logits)
+
+# After (deterministic, always correct):
+op_token_id = take_along_axis(token_ids, expand_dims(op_pos_hard, -1), axis=1)
+op_idx = clip(cast(op_token_id, "int32") - 14, 0, 3)
+op_one_hot = one_hot(op_idx, 4)
+```
+
+This completes the pattern from iterations 2-4:
+
+| Iteration | Component hardcoded | What it replaced |
+|-----------|-------------------|------------------|
+| 2 | Number assembly (`digit × 10^pos`) | Learned Dense(D, 1) |
+| 2-3 | PEMDAS scoring (scores 20/15) | Learned Dense(1) reduction scorer |
+| 4 | Adjacent masking (op_cumsum) | Learned cumsum(softmax) |
+| 4 | Value buffer (float read/write) | Teacher-forced tokens |
+| **5** | **Op classifier (`token_id - 14`)** | **Learned Dense(D, 4)** |
+
+### Additional Changes
+
+**Paren-aware PEMDAS** (`train_dfsa.py`):
+```python
+paren_depth = cumsum(is_open_paren) - cumsum(is_close_paren)
+pemdas_scores = paren_depth * 100.0 + high_prec * 20.0 + low_prec * 15.0
+```
+Operators inside parens at depth 1 score 115+ vs 20 for operators outside.
+
+**Paren clearing in retokenize** (`train_dfsa.py`):
+After reducing an inner sub-expression, the clear mask expands to absorb adjacent `(` and `)` tokens (2 rounds for up to 2 nesting levels).
+
+**Data generator** (`data_generator.py`):
+- Added difficulty levels 11-12 for parenthesized 2-op and 3-op expressions
+- `_generate_paren_expr()`: wraps one random adjacent operand pair in parens
+- `_parse_multi_op()` rewritten to respect paren depth when determining reduction order
+- `prepare_per_step_labels()` strips redundant parens after sub-expression replacement
+
+### Evaluation Results
+
+**308/308 (100%) — zero training, random model weights:**
+
+| Test | Samples | Accuracy |
+|------|---------|----------|
+| single-op (4 ops × 3 digit sizes × 5) | 60 | **60/60 (100%)** |
+| 2-op flat (16 combos × 3) | 48 | **48/48 (100%)** |
+| 3-op flat (random) | 50 | **50/50 (100%)** |
+| 2-op paren (16 combos × 5) | 80 | **80/80 (100%)** |
+| 3-op paren (random) | 50 | **50/50 (100%)** |
+| PEMDAS vs paren (handpicked) | 12 | **12/12 (100%)** |
+| Edge cases (double parens, both-sides, etc.) | 8 | **8/8 (100%)** |
+| **Total** | **308** | **308/308 (100%)** |
+
+Previously failing cases now exact:
+```
+(3 + 5) * 2          = 16.00    pred=16.00    err=0.00%  (was pred=30.00)
+(10 - 2) * 3         = 24.00    pred=24.00    err=0.00%  (was pred=2.00)
+8 / (4 + 1)          = 1.60     pred=1.60     err=0.00%  (was pred=4.00)
+((3 + 5)) * 2        = 16.00    pred=16.00    err=0.00%  (was pred=0.43)
+(7 - 3) * (8 - 6)    = 8.00     pred=8.00     err=0.00%  (was pred=6.64)
+```
+
+### Architecture: Fully Deterministic
+
+With the op_classifier hardcoded, the entire arithmetic pipeline is deterministic:
+
+| Component | Status | Parameters |
+|-----------|--------|-----------|
+| Token embedding | Learned (not in arithmetic path) | vocab × D |
+| Numeric projection | Learned (not in arithmetic path) | 4 × D |
+| Tree transformer | Learned (not in arithmetic path) | ~1.5M |
+| **PEMDAS + paren_depth** | **Hardcoded** | 0 |
+| **Adjacent masking (op_cumsum)** | **Hardcoded** | 0 |
+| **Number assembly (power-of-10)** | **Hardcoded** | 0 |
+| **Value buffer bypass** | **Hardcoded** | 0 |
+| **Op classifier (token_id - 14)** | **Hardcoded** | 0 |
+| **Fixed arithmetic** | **Hardcoded** | 0 |
+| **Re-tokenization + paren clearing** | **Hardcoded** | 0 |
+| Result encoder | Learned (host interface) | 2 × D |
+
+**No training needed.** The model achieves 100% accuracy with random weights because zero learned parameters are in the arithmetic computation path. The tree encoder still runs but its output is unused — it can be removed to save ~1.5M parameters or kept for future embedding integration.
+
+**No gradient flows** through the arithmetic path. All losses (L_operator, L_reduction, L_result) either have hardcoded outputs or are stop-gradiented. For future host transformer integration, a straight-through estimator could restore gradient flow without affecting arithmetic correctness.
 
 ## File Changes Summary
 
@@ -1038,7 +1136,7 @@ Note: `num_mse=0.0000` throughout — adjacent masking gives exact operand extra
 |------|---------|
 | `src/dl_techniques/models/nam/cell.py` | Deterministic `_assemble_number_from_tokens()`; removed learned number heads; cell accepts `token_ids` for assembly |
 | `src/dl_techniques/models/nam/model.py` | Passes `token_ids` through to cell for deterministic assembly |
-| `src/train/nam/data_generator.py` | `_parse_multi_op()` PEMDAS parser; `_generate_multi_op_expr()`; `prepare_per_step_labels()` for multi-step teacher forcing; 11 difficulty levels (8 single-op + 3 multi-op); int32 overflow fix for 10-digit operands |
-| `src/train/nam/train_dfsa.py` | `DifferentiableFSA` with recursive `multi_reduce()`, adjacent `_adjacent_masks()` via op_cumsum, `_assemble_with_bypass()` for value buffer reads, `_retokenize()` for sequence surgery; PEMDAS scores 20/15; pass-through for fully-reduced expressions |
+| `src/train/nam/data_generator.py` | `_parse_multi_op()` paren-aware PEMDAS parser; `_generate_multi_op_expr()`; `_generate_paren_expr()`; `prepare_per_step_labels()` with paren support; 13 difficulty levels (8 single-op + 3 multi-op + 2 paren); int32 overflow fix for 10-digit operands |
+| `src/train/nam/train_dfsa.py` | `DifferentiableFSA` with hardcoded op_classifier (`token_id - 14`), paren-aware PEMDAS (`paren_depth * 100`), paren clearing in `_retokenize`, recursive `multi_reduce()`, adjacent `_adjacent_masks()` via op_cumsum, `_assemble_with_bypass()` for value buffer reads; pass-through for fully-reduced expressions |
 | `src/train/nam/train_nam.py` | Updated with `--number-loss-type` toggle, per-step labels, validity mask; legacy training script for original NAM |
 | `tests/test_models/test_nam/test_nam.py` | Tests for deterministic assembly (exact values), split heads, round-trip serialization, resume |
