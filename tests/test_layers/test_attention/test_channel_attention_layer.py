@@ -688,8 +688,9 @@ class TestChannelAttention:
         # Final layer should have linear activation (sigmoid applied after in call method)
         assert layer.dense2.activation.__name__ == 'linear', "Final layer should have linear activation"
 
-        # Test with ImageNet-like input dimensions
-        inputs = tf.random.normal((8, 224, 224, channels))  # ImageNet-like
+        # Test with ImageNet-like input dimensions (reduced spatial size for speed)
+        tf.random.set_seed(42)
+        inputs = tf.random.normal((8, 32, 32, channels), seed=42)
         attention_weights = layer(inputs)
 
         # Should output channel attention weights
