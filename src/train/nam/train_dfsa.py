@@ -94,6 +94,7 @@ class DifferentiableFSA(keras.Model):
         num_heads: int = 4,
         intermediate_size: int = None,
         dropout_rate: float = 0.1,
+        use_ste: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -101,6 +102,7 @@ class DifferentiableFSA(keras.Model):
         self.max_expression_len = max_expression_len
         self.vocab_size = vocab_size
         self.num_tree_layers = num_tree_layers
+        self.use_ste = use_ste
 
         if intermediate_size is None:
             intermediate_size = hidden_size * 2
@@ -586,9 +588,20 @@ class DifferentiableFSA(keras.Model):
             ops.cast(op_token_id, "int32") - 14, axis=-1
         )  # (B,)
         op_idx = ops.clip(op_idx, 0, 3)  # safety clamp
-        op_one_hot = ops.cast(ops.one_hot(op_idx, 4), "float32")
-        # Synthetic logits for training loss compatibility
-        op_logits = op_one_hot * 30.0 - (1.0 - op_one_hot) * 30.0
+        op_hard = ops.cast(ops.one_hot(op_idx, 4), "float32")
+
+        if self.use_ste and training:
+            # Straight-through estimator: forward uses hard (100% correct),
+            # backward uses soft (gradients flow to tree encoder).
+            pooled = ops.sum(
+                x * ops.expand_dims(reduction_weights, -1), axis=1
+            )
+            op_logits = self.op_classifier(pooled)
+            op_soft = ops.softmax(op_logits, axis=-1)
+            op_one_hot = op_soft + ops.stop_gradient(op_hard - op_soft)
+        else:
+            op_one_hot = op_hard
+            op_logits = op_hard * 30.0 - (1.0 - op_hard) * 30.0
 
         # Fixed arithmetic with hard operator select
         add_result, add_valid = _fixed_add(left_val, right_val)
@@ -849,6 +862,7 @@ class DifferentiableFSA(keras.Model):
             "max_expression_len": self.max_expression_len,
             "vocab_size": self.vocab_size,
             "num_tree_layers": self.num_tree_layers,
+            "use_ste": self.use_ste,
         })
         return config
 
