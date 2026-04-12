@@ -106,7 +106,10 @@ class CliffordNetLM(keras.Model):
 
     LAYERNORM_EPSILON: float = 1e-6
 
-    # Pre-defined variant configurations for NLP
+    # Pre-defined variant configurations for NLP.
+    # Scaling ladder: channels x depth grows roughly 1.5x per step.
+    # Shifts widen as capacity grows so deeper blocks can exploit
+    # multi-scale Clifford products. Stochastic depth scales with depth.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "nano": dict(
             channels=128,
@@ -116,13 +119,13 @@ class CliffordNetLM(keras.Model):
             ctx_mode="diff",
             use_global_context=False,
             layer_scale_init=1e-5,
-            stochastic_depth_rate=0.1,
+            stochastic_depth_rate=0.05,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
-        "lite": dict(
-            channels=128,
+        "mini": dict(
+            channels=192,
             depth=12,
-            shifts=[1, 2, 4, 8, 16],
+            shifts=[1, 2, 4],
             cli_mode="full",
             ctx_mode="diff",
             use_global_context=False,
@@ -130,15 +133,37 @@ class CliffordNetLM(keras.Model):
             stochastic_depth_rate=0.1,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
-        "lite_g": dict(
-            channels=128,
-            depth=12,
+        "base": dict(
+            channels=384,
+            depth=18,
             shifts=[1, 2, 4, 8, 16],
             cli_mode="full",
             ctx_mode="diff",
-            use_global_context=True,
+            use_global_context=False,
             layer_scale_init=1e-5,
-            stochastic_depth_rate=0.1,
+            stochastic_depth_rate=0.15,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "large": dict(
+            channels=512,
+            depth=20,
+            shifts=[1, 2, 4, 8, 16],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            stochastic_depth_rate=0.2,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
+        "xl": dict(
+            channels=768,
+            depth=28,
+            shifts=[1, 2, 4, 8, 16],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=False,
+            layer_scale_init=1e-5,
+            stochastic_depth_rate=0.25,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
     }
@@ -327,7 +352,7 @@ class CliffordNetLM(keras.Model):
     ) -> "CliffordNetLM":
         """Create a CliffordNetLM from a predefined variant.
 
-        :param variant: One of ``"nano"``, ``"lite"``, ``"lite_g"``.
+        :param variant: One of ``"nano"``, ``"mini"``, ``"base"``, ``"large"``, ``"xl"``.
         :param vocab_size: Vocabulary size.
         :param max_seq_length: Maximum sequence length.
         :param kwargs: Override any default hyperparameter.

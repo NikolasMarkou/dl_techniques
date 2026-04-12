@@ -238,14 +238,27 @@ class TestCliffordNetLMVariants:
         assert model.depth == 12
         assert model.shifts == [1, 2]
 
-    def test_from_variant_lite(self):
-        model = CliffordNetLM.from_variant("lite", vocab_size=256)
-        assert model.channels == 128
+    def test_from_variant_mini(self):
+        model = CliffordNetLM.from_variant("mini", vocab_size=256)
+        assert model.channels == 192
+        assert model.depth == 12
+        assert model.shifts == [1, 2, 4]
+
+    def test_from_variant_base(self):
+        model = CliffordNetLM.from_variant("base", vocab_size=256)
+        assert model.channels == 384
+        assert model.depth == 18
         assert model.shifts == [1, 2, 4, 8, 16]
 
-    def test_from_variant_lite_g(self):
-        model = CliffordNetLM.from_variant("lite_g", vocab_size=256)
-        assert model.use_global_context is True
+    def test_from_variant_large(self):
+        model = CliffordNetLM.from_variant("large", vocab_size=256)
+        assert model.channels == 512
+        assert model.depth == 20
+
+    def test_from_variant_xl(self):
+        model = CliffordNetLM.from_variant("xl", vocab_size=256)
+        assert model.channels == 768
+        assert model.depth == 28
 
     def test_from_variant_with_overrides(self):
         model = CliffordNetLM.from_variant("nano", vocab_size=256, dropout_rate=0.2)

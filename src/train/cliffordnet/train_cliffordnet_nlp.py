@@ -17,8 +17,8 @@ checkpointing, generation probes, and warmup + cosine decay LR scheduling.
 
 Usage::
 
-    # Wikipedia (default) on GPU 1
-    python -m train.cliffordnet.train_cliffordnet_nlp --gpu 1 --variant nano --epochs 3
+    # Wikipedia (default) on GPU 0
+    python -m train.cliffordnet.train_cliffordnet_nlp --gpu 0 --variant nano --epochs 3
 
     # TFDS dataset with focal loss
     python -m train.cliffordnet.train_cliffordnet_nlp \\
@@ -35,6 +35,7 @@ Usage::
 
 import os
 import csv
+import gc
 import json
 import glob
 import time
@@ -251,6 +252,11 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             self._ckpt_dir, f"step_{self._global_step:07d}.keras"
         )
         self.model.save(path)
+        # Release the transient NumPy copies Keras allocates during native
+        # .keras serialization (weights + AdamW m/v slots ≈ model size).
+        # Without this they linger until a GC cycle runs, stacking on top
+        # of the next training step's allocations.
+        gc.collect()
         logger.info(f"Checkpoint saved: {path} (step {self._global_step:,})")
         self._cleanup_old_checkpoints()
 
@@ -333,6 +339,11 @@ class GenerationProbeCallback(keras.callbacks.Callback):
 
         self._enc = tiktoken.get_encoding(encoding_name)
         self._cls_id = min(self.special_token_ids)
+        # Pad token used to right-pad every generation call to a fixed shape.
+        # Using a single shape collapses ~100 per-length traces into one
+        # compiled graph and cuts probe wall-time by roughly 10x.
+        self._pad_id = max(self.special_token_ids)
+        self._ctx_len = 511
 
         self._log_path = None
         if save_dir:
@@ -400,15 +411,26 @@ class GenerationProbeCallback(keras.callbacks.Callback):
                 f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
 
     def _generate(self, prompt: str) -> str:
-        """Autoregressive generation with nucleus sampling."""
+        """Autoregressive generation with nucleus sampling.
+
+        Every forward pass uses a fixed-length right-padded context so the
+        Keras function cache only ever sees one input shape. Reading the
+        next-token logits from the last real position (not the last array
+        position) keeps the output semantics identical to a variable-length
+        call while avoiding shape-driven retraces.
+        """
         ids = [self._cls_id] + self._enc.encode(prompt)
+        ctx_len = self._ctx_len
+        pad_id = self._pad_id
 
         for _ in range(self.max_tokens):
-            ctx = ids[-511:]
+            ctx = ids[-ctx_len:]
+            real = len(ctx)
+            padded = ctx + [pad_id] * (ctx_len - real)
             out = self.model(
-                np.array([ctx], dtype="int32"), training=False,
+                np.array([padded], dtype="int32"), training=False,
             )
-            logits = out["logits"][0, -1, :].numpy()
+            logits = out["logits"][0, real - 1, :].numpy()
 
             # Mask special tokens
             for sid in self.special_token_ids:
@@ -589,13 +611,18 @@ def _load_hf_datasets(config, preprocessor):
         max_train_samples=config.max_train_samples,
         max_val_samples=config.max_val_samples,
     )
+    # streaming=True is REQUIRED for Wikipedia: without it, preprocess_clm_dataset
+    # inserts a tf.data.cache() that accumulates ~20 GB of tokenized articles in RAM
+    # during the first epoch and triggers the OOM killer mid-training.
     train = preprocess_clm_dataset(
         train_raw, preprocessor,
         config.max_seq_length, config.batch_size,
+        streaming=True,
     )
     val = preprocess_clm_dataset(
         val_raw, preprocessor,
         config.max_seq_length, config.batch_size,
+        streaming=True,
     )
     return train, val
 
@@ -770,7 +797,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--variant", type=str, default="nano",
         choices=list(CliffordNetLM.MODEL_VARIANTS.keys()) + ["custom"],
-        help="Model variant (nano/mini/medium/large/xl/custom)",
+        help="Model variant (nano/mini/base/large/xl/custom)",
     )
     p.add_argument("--channels", type=int, default=128,
                     help="Feature dimension D (custom variant)")
