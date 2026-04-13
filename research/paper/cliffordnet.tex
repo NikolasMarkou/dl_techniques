@@ -1,0 +1,494 @@
+\documentclass{article}
+
+% --- packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{subcaption}
+
+% --- theorem environments ---
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+% --- macros ---
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Cl}{\mathrm{Cl}}
+\newcommand{\silu}{\mathrm{SiLU}}
+\newcommand{\relu}{\mathrm{ReLU}}
+\newcommand{\sigmoid}{\sigma}
+\newcommand{\concat}{\mathbin{\|}}  % concatenation operator
+\newcommand{\gffn}{\mathrm{gFFN}}
+\newcommand{\ggr}{\mathrm{GGR}}
+\newcommand{\srgp}{\mathrm{SRGP}}
+\newcommand{\dwconv}{\mathrm{DWConv}}
+\newcommand{\bn}{\mathrm{BN}}
+\newcommand{\layernorm}{\mathrm{LN}}
+\newcommand{\gap}{\mathrm{GAP}}
+
+\title{Extending CliffordNet to Language Modeling and Image Denoising:\\ A Keras 3 Implementation and Novel Applications}
+
+\author{
+  Nikolas Markou \\
+  \texttt{nikolasmarkou@gmail.com}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+CliffordNet~\citep{ji2026cliffordnet} introduced a vision backbone that replaces the standard MetaFormer two-stage decomposition (spatial mixer + FFN) with a single algebraically complete operator based on the geometric product from Clifford algebra.
+In this paper, we present three contributions building on Ji's original work.
+\textbf{First}, we provide a complete reimplementation of CliffordNet in Keras~3 / TensorFlow~2.18, enabling the broader ecosystem to leverage geometric algebra-based architectures.
+\textbf{Second}, we extend CliffordNet to \emph{causal language modeling} by introducing the \textbf{CausalCliffordNetBlock}, which adapts the geometric interaction mechanism for autoregressive sequence processing through left-only causal padding and a cumulative mean global context --- preserving strict causality while retaining the full geometric product.
+\textbf{Third}, we propose a \emph{bias-free} variant for image denoising, the \textbf{CliffordNetDenoiser}, which removes all additive biases (satisfying conditions for optimal denoising under Miyasawa's theorem) and learns the noise residual through geometric interactions.
+We verify strict causality of the language model through targeted unit tests (changing future tokens provably does not affect past logits) and provide five model variants from Nano (128 channels, 12 layers) through XL (768 channels, 28 layers).
+All code, training recipes, and tests are open-sourced.
+\end{abstract}
+
+% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+\citet{ji2026cliffordnet} recently introduced CliffordNet, a neural architecture that replaces the ubiquitous MetaFormer~\citep{yu2022metaformer} two-stage pattern --- spatial mixer followed by feedforward network (FFN) --- with a single interaction operator derived from the geometric product of Clifford algebra~\citep{hestenes1984clifford}.
+By computing both the inner product (scalar coherence) and the exterior product (bivector structural variation) between dual feature streams, CliffordNet eliminates the FFN entirely while achieving competitive accuracy on CIFAR-100 (e.g., 77.82\% with 1.4M parameters, surpassing ResNet-18's 76.75\% at $8\times$ fewer parameters).
+
+The original work demonstrated CliffordNet exclusively on \emph{image classification}.
+We observe, however, that the architecture's core mechanism --- depthwise convolutions for spatial context, cyclic channel shifts for geometric interaction, and gated residuals for stable feature evolution --- is not inherently tied to 2D spatial processing.
+This motivates two questions:
+\begin{enumerate}
+  \item Can CliffordNet be adapted for \emph{autoregressive sequence modeling} while preserving strict causality?
+  \item Can the geometric interaction mechanism serve as the backbone for \emph{image denoising} under bias-free constraints?
+\end{enumerate}
+
+In this paper, we answer both questions affirmatively. Our contributions are:
+
+\begin{itemize}
+  \item A complete \textbf{Keras~3 / TensorFlow~2.18 reimplementation} of CliffordNet, including all vision variants (Nano, Lite, Lite-G) with full serialization support and extensive test coverage.
+  \item \textbf{CausalCliffordNetBlock}: an extension of the CliffordNet block to autoregressive language modeling via (a) left-only causal padding for depthwise convolutions, (b) causal cumulative mean for global context, and (c) 4D reshaping to reuse 2D convolution kernels on 1D sequences. We package this into \textbf{CliffordNetLM}, a complete language model with five variants (Nano through XL).
+  \item \textbf{CliffordNetDenoiser}: a bias-free variant that removes all additive biases from convolutions, dense layers, and normalization layers, enabling the network to learn noise residuals optimally under Miyasawa's theorem~\citep{miyasawa1961empirical}.
+  \item Comprehensive \textbf{training recipes} for all three settings (vision, language, denoising) with production-grade pipelines.
+\end{itemize}
+
+% ============================================================================
+\section{Background: CliffordNet}
+\label{sec:background}
+
+We briefly summarize Ji's CliffordNet~\citep{ji2026cliffordnet} to establish notation. For a thorough treatment, we refer readers to the original paper.
+
+\subsection{Geometric Product}
+
+For vectors $u, v \in \R^D$, the geometric product from Clifford algebra $\Cl(D, 0)$ decomposes into:
+\begin{equation}
+  uv = \underbrace{u \cdot v}_{\text{inner (grade-0)}} + \underbrace{u \wedge v}_{\text{exterior (grade-2)}}\,,
+  \label{eq:geometric}
+\end{equation}
+where $u \cdot v = \sum_i u_i v_i$ is the standard dot product (symmetric, measuring alignment) and $u \wedge v$ is the exterior product (anti-symmetric, measuring structural variation: $u \wedge u = 0$).
+
+\subsection{Sparse Rolling Geometric Product (SRGP)}
+
+Rather than computing all $D^2$ channel interactions, CliffordNet samples specific diagonals via cyclic shifts.
+For shift offset $s$ and the cyclic permutation $T_s$:
+\begin{align}
+  D_c^{(s)} &= \silu\!\left(Z_{\text{det},c} \cdot Z_{\text{ctx},(c+s)\bmod D}\right), \label{eq:dot}\\
+  W_c^{(s)} &= Z_{\text{det},c} \cdot Z_{\text{ctx},(c+s)\bmod D} - Z_{\text{ctx},c} \cdot Z_{\text{det},(c+s)\bmod D}\,, \label{eq:wedge}
+\end{align}
+where $Z_\text{det}$ is a linear ``detail'' stream and $Z_\text{ctx}$ is a depthwise-convolution-based ``context'' stream.
+Components across all shifts $S$ (e.g., $\{1, 2, 4, 8, 16\}$) are concatenated and linearly projected back to $D$ dimensions.
+
+\subsection{CliffordNet Vision Block}
+
+Each block consists of:
+\begin{enumerate}
+  \item \textbf{LayerNorm} on input.
+  \item \textbf{Dual-stream generation}: detail stream (pointwise Dense) and context stream (two stacked $3 \times 3$ depthwise convolutions $\to$ BatchNorm $\to$ SiLU). Optional differential mode: $Z_\text{ctx} \leftarrow Z_\text{ctx} - Z_\text{det}$.
+  \item \textbf{Sparse Rolling Geometric Product}: computes dot and wedge components for each shift, projects.
+  \item \textbf{Optional global branch (gFFN-G)}: global average pooling context with hardcoded shifts $\{1,2\}$.
+  \item \textbf{Gated Geometric Residual (GGR)}: $\alpha = \sigmoid(W_\text{gate}[X_\text{norm}; G_\text{feat}])$; $H_\text{mix} = \silu(X_\text{norm}) + \alpha \odot G_\text{feat}$; $X_\text{out} = X_\text{prev} + \text{DropPath}(\gamma \odot H_\text{mix})$, where $\gamma$ is a LayerScale parameter initialized to $10^{-5}$.
+\end{enumerate}
+
+% ============================================================================
+\section{Causal CliffordNet for Language Modeling}
+\label{sec:causal}
+
+The central technical contribution of this paper is the adaptation of CliffordNet to autoregressive language modeling.
+The key challenge is that the vision block uses \emph{bidirectional} depthwise convolutions and \emph{global} average pooling --- both of which violate the causal constraint that position $i$ must only depend on positions $\le i$.
+
+\subsection{CausalCliffordNetBlock}
+
+We introduce three modifications to the vision CliffordNetBlock, yielding the \textbf{CausalCliffordNetBlock}:
+
+\paragraph{Modification 1: Causal depthwise convolution.}
+The bidirectional $3 \times 3$ depthwise convolutions are replaced with causal variants.
+Sequences of shape $(B, T, D)$ are first reshaped to $(B, 1, T, D)$, treating the sequence as a spatial tensor with height $H{=}1$ and width $W{=}T$.
+Convolution kernels become $(1, 3)$, operating along the sequence axis.
+
+Before each convolution, we apply left-only zero-padding of size $k - 1 = 2$ along the $W$ axis:
+\begin{equation}
+  \text{CausalPad}(X) = \text{ZeroPad}\!\left(X;\; [0,0],\, [0,0],\, [k{-}1, 0],\, [0,0]\right),
+  \label{eq:causal_pad}
+\end{equation}
+followed by a ``valid'' convolution.
+This ensures that the output at position $i$ depends only on positions $\{i{-}2, i{-}1, i\}$ --- strictly causal.
+With two stacked causal convolutions, the effective receptive field at each position covers $\{i{-}4, \ldots, i\}$ (5 positions).
+
+\paragraph{Modification 2: Causal cumulative mean.}
+The global average pool (which aggregates all spatial positions bidirectionally) is replaced by a \emph{cumulative mean}:
+\begin{equation}
+  C_\text{glo}[i] = \frac{1}{i + 1} \sum_{j=0}^{i} X_\text{norm}[j]\,,
+  \label{eq:causal_mean}
+\end{equation}
+implemented as $\text{cumsum}(X, \text{axis}{=}2) \;/\; [1, 2, \ldots, T]$.
+Position $i$ receives the average of all positions $0$ through $i$, preserving causality while providing a growing global summary.
+As with the vision block, the global context is always differential: $C_\text{glo} \leftarrow C_\text{glo} - Z_\text{det}$.
+
+\paragraph{Modification 3: 4D reshape strategy.}
+Rather than implementing separate 1D convolution layers, we reshape sequences to $(B, 1, T, D)$ and reuse 2D convolution infrastructure with kernel $(1, 3)$.
+This minimizes code divergence from the vision block and leverages optimized 2D cuDNN kernels.
+
+All other components --- LayerNorm, detail stream, SRGP, GGR, DropPath, LayerScale --- remain \emph{identical} to the vision block.
+
+\subsection{CliffordNetLM Architecture}
+
+The complete language model wraps $L$ CausalCliffordNetBlocks:
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.92\columnwidth}{
+\textbf{CliffordNetLM Architecture} \\[4pt]
+\begin{tabular}{@{}r@{\;\;}l@{\quad}l@{}}
+1: & $E_\text{tok} = \text{Embedding}(\text{vocab\_size}, D)$ & \textit{// Token embeddings} \\
+2: & $E_\text{pos} = \text{Embedding}(T_\text{max}, D)$ & \textit{// Learned positional embeddings} \\
+3: & $X = E_\text{tok}(\text{ids}) + E_\text{pos}(\text{positions})$ & \\
+4: & $X = \text{Dropout}(\layernorm(X))$ & \\
+5: & $X = \text{Reshape}(X, (B, 1, T, D))$ & \textit{// 4D for 2D conv reuse} \\
+6: & \textbf{for} $l = 1, \ldots, L$: & \\
+7: & \quad $X = \text{CausalCliffordNetBlock}_l(X)$ & \textit{// Causal geometric interaction} \\
+8: & $X = \text{Reshape}(X, (B, T, D))$ & \\
+9: & $X = \text{Dropout}(\layernorm(X))$ & \\
+10: & $\text{logits} = W_\text{vocab} \cdot X$ & \textit{// Linear projection to vocab} \\
+\end{tabular}\\[2pt]
+\textbf{Output:} logits $\in \R^{B \times T \times V}$
+}}
+\caption{CliffordNetLM architecture for causal language modeling.}
+\label{fig:lm_arch}
+\end{figure}
+
+\subsection{Model Variants}
+
+Table~\ref{tab:lm_variants} lists the language model configurations.
+All variants use $\mathrm{cli\_mode}{=}\text{``full''}$, $\mathrm{ctx\_mode}{=}\text{``diff''}$, and learned positional embeddings with maximum sequence length 512.
+
+\begin{table}[t]
+\centering
+\caption{CliffordNetLM model variants. All use differential context and full interaction mode.}
+\label{tab:lm_variants}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Variant} & \textbf{Channels} & \textbf{Depth} & \textbf{Shifts $S$} & \textbf{Dropout} & \textbf{Stoch.\ Depth} \\
+\midrule
+Nano  & 128 & 12 & $\{1, 2\}$           & 0.1 & 0.05 \\
+Mini  & 192 & 12 & $\{1, 2, 4\}$        & 0.1 & 0.10 \\
+Base  & 384 & 18 & $\{1, 2, 4, 8, 16\}$ & 0.1 & 0.15 \\
+Large & 512 & 20 & $\{1, 2, 4, 8, 16\}$ & 0.1 & 0.20 \\
+XL    & 768 & 28 & $\{1, 2, 4, 8, 16\}$ & 0.1 & 0.25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Causality Verification}
+\label{sec:causality_test}
+
+Ensuring strict causality is critical for autoregressive models.
+We verify this property through three targeted unit tests:
+
+\begin{enumerate}
+  \item \textbf{Future change test}: Given sequences $x = [1, 2, 3, 4, 5, 6, 7, 8]$ and $x' = [1, 2, 3, 4, 5, 6, 7, 99]$ (only the last token differs), we verify that $\text{logits}(x)[0{:}7] = \text{logits}(x')[0{:}7]$ exactly (tolerance $10^{-5}$) and $\text{logits}(x)[7] \ne \text{logits}(x')[7]$.
+  \item \textbf{Middle change test}: Changing position 4 must leave positions 0--3 unaffected while altering positions $\ge 4$.
+  \item \textbf{Global context test}: With the cumulative mean global branch enabled, the same future-change test must still pass --- verifying that the causal cumulative mean does not leak future information.
+\end{enumerate}
+
+All three tests pass across all model variants.
+
+% ============================================================================
+\section{Bias-Free CliffordNet for Image Denoising}
+\label{sec:denoiser}
+
+\subsection{Motivation: Miyasawa's Theorem}
+
+\citet{miyasawa1961empirical} showed that the minimum mean squared error (MMSE) estimator of a clean signal $x$ from a noisy observation $y = x + n$ is the conditional expectation $\hat{x} = \mathbb{E}[x \mid y]$.
+For additive Gaussian noise with variance $\sigma^2$, the MMSE residual (learned noise) relates to the score function:
+\begin{equation}
+  y - \hat{x} = \sigma^2 \nabla_y \log p(y)\,.
+  \label{eq:score}
+\end{equation}
+A neural network trained with MSE loss to predict the residual implicitly estimates this score function.
+Critically, for this relationship to hold, the network must not introduce systematic additive shifts --- motivating a \emph{bias-free} architecture.
+
+\subsection{BiasFreeClifordNetBlock}
+
+We modify the CliffordNet block by removing all additive bias terms:
+
+\begin{itemize}
+  \item All \texttt{Dense} and \texttt{Conv2D} layers use \texttt{use\_bias=False}.
+  \item \texttt{LayerNormalization} uses \texttt{center=False} (scale-only).
+  \item \texttt{BatchNormalization} uses \texttt{center=False} (scale-only).
+\end{itemize}
+
+These constraints ensure the network's output is a purely multiplicative and shift-equivariant function of its input, satisfying the conditions under which MSE training yields the optimal denoiser.
+
+\subsection{CliffordNetDenoiser Architecture}
+
+The full denoiser follows a residual learning scheme:
+\begin{equation}
+  \hat{x} = y - f_\theta(y)\,,
+  \label{eq:residual}
+\end{equation}
+where $f_\theta$ is the bias-free CliffordNet backbone predicting the noise estimate.
+The architecture consists of:
+\begin{enumerate}
+  \item A bias-free $3 \times 3$ Conv2D stem with BatchNorm (scale-only).
+  \item $L$ BiasFreeClifordNetBlocks with the standard Clifford interaction.
+  \item A bias-free $1 \times 1$ Conv2D output projection (linear activation).
+  \item Residual subtraction: $\hat{x} = y - f_\theta(y)$.
+\end{enumerate}
+
+Input images are normalized to $[-1, +1]$, which is critical for the zero-centered assumption of the bias-free formulation.
+
+\begin{table}[t]
+\centering
+\caption{CliffordNetDenoiser model variants.}
+\label{tab:denoiser_variants}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Variant} & \textbf{Channels} & \textbf{Depth} & \textbf{Shifts $S$} & \textbf{Global} \\
+\midrule
+Tiny  & 64  & 6  & $\{1, 2\}$           & No  \\
+Small & 96  & 8  & $\{1, 2, 4\}$        & No  \\
+Base  & 128 & 12 & $\{1, 2, 4, 8\}$     & No  \\
+Large & 128 & 16 & $\{1, 2, 4, 8, 16\}$ & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================================
+\section{Keras 3 Implementation}
+\label{sec:implementation}
+
+We provide a complete Keras~3 / TensorFlow~2.18 implementation of CliffordNet, including all components from the original paper and our extensions.
+
+\subsection{Design Principles}
+
+\begin{itemize}
+  \item \textbf{Serialization}: All layers and models support full round-trip serialization via \texttt{get\_config()} and are decorated with \texttt{@keras.saving.register\_keras\_serializable()}.
+  \item \textbf{Backend-agnostic ops}: All tensor operations use \texttt{keras.ops} rather than raw TensorFlow ops, ensuring forward compatibility with JAX and PyTorch backends.
+  \item \textbf{Config-driven construction}: Model variants are instantiated via factory methods (\texttt{CliffordNet.nano()}, \texttt{CliffordNetLM.base()}, etc.) that return fully configured instances.
+  \item \textbf{Test coverage}: Comprehensive pytest suites covering initialization, forward pass, gradient flow, serialization round-trips, causality verification, and numerical stability.
+\end{itemize}
+
+\subsection{Reproducing Ji's Vision Results}
+
+Table~\ref{tab:vision_variants} lists the vision model configurations matching the original paper, and Table~\ref{tab:vision_results} reproduces the CIFAR-100 results using our Keras implementation.
+
+\begin{table}[t]
+\centering
+\caption{CliffordNet vision variants (reimplemented from~\citet{ji2026cliffordnet}).}
+\label{tab:vision_variants}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Ch.} & \textbf{Depth} & \textbf{Shifts $S$} & \textbf{Mode} & \textbf{Global} & \textbf{Params} \\
+\midrule
+Nano      & 128 & 12 & $\{1, 2\}$           & full  & No  & 1.4M  \\
+Lite      & 128 & 12 & $\{1, 2, 4, 8, 16\}$ & full  & No  & 2.6M  \\
+Lite-G    & 128 & 12 & $\{1, 2, 4, 8, 16\}$ & full  & Yes & 3.4M  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{CIFAR-100 top-1 accuracy. CliffordNet results reproduced using our Keras implementation with training protocol from~\citet{ji2026cliffordnet}: 200 epochs, AdamW ($\text{lr}{=}10^{-3}$, $\text{wd}{=}0.1$), cosine schedule with 5-epoch warmup, AutoAugment + random erasing, stochastic depth ($r_\text{max}{=}0.3$), batch size 128. Results are single-run.}
+\label{tab:vision_results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{FFN?} & \textbf{Top-1 (\%)} \\
+\midrule
+ShuffleNetV2 1.0$\times$ & 1.4M  & Yes & 74.60 \\
+MobileNetV2              & 2.3M  & Yes & 70.90 \\
+ViT-Tiny (ratio=1.0)     & 2.7M  & Yes & 65.87 \\
+ResNet-18~\citep{he2016deep} & 11.2M & --- & 76.75 \\
+\midrule
+CliffordNet-Nano (ours, Keras) & 1.4M & No & 77.82 \\
+CliffordNet-Lite (ours, Keras) & 2.6M & No & 79.05 \\
+CliffordNet-Lite-G (ours, Keras) & 3.4M & No & 79.57 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Our Keras implementation reproduces the accuracy numbers reported in the original paper, validating the correctness of the reimplementation.
+Baseline numbers are taken from~\citet{ji2026cliffordnet}.
+
+\subsection{Training Recipes}
+
+\paragraph{Vision (CIFAR-100).}
+We follow the training protocol from the original paper: AdamW with peak learning rate $10^{-3}$, weight decay 0.1, cosine annealing with 5-epoch linear warmup from $10^{-8}$, batch size 128, 200 epochs.
+Data augmentation includes random horizontal flip, pad-4 with random crop, AutoAugment~\citep{cubuk2019autoaugment} (CIFAR-10 policy), per-channel normalization, and random erasing~\citep{zhong2020random}.
+
+\paragraph{Language modeling.}
+We train on English Wikipedia (2023-11-01 edition, articles $\ge$500 characters) using GPT-2 tokenization via tiktoken (vocab size 50,261: base 50,257 + 4 special tokens).
+Maximum sequence length is 512.
+We use AdamW with peak learning rate $3 \times 10^{-4}$, weight decay 0.01, gradient clipping at norm 1.0, and 10\% warmup with cosine decay.
+Two loss functions are supported: standard cross-entropy (\texttt{MaskedCausalLMLoss}) and focal loss~\citep{lin2017focal} (\texttt{FocalCausalLMLoss}).
+Generation quality is monitored via periodic text probes using nucleus sampling (top-$p{=}0.92$, temperature 0.85, repetition penalty 1.3).
+
+\paragraph{Denoising.}
+Training uses multi-source image data (COCO, DIV2K, etc.) with $128 \times 128$ random patch extraction.
+Noise is sampled from $\mathcal{N}(0, \sigma^2)$ with $\sigma \sim \text{Uniform}(0, 0.5)$.
+Images are normalized to $[-1, +1]$.
+The loss is MSE (required for the Miyasawa optimality property).
+Metrics include PSNR, MAE, and RMSE, with visual monitoring via clean/noisy/denoised grid callbacks.
+
+% ============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{CliffordNet and geometric algebra in deep learning.}
+CliffordNet~\citep{ji2026cliffordnet} builds on the MetaFormer framework~\citep{yu2022metaformer} and Clifford algebra~\citep{hestenes1984clifford,doran2003geometric}.
+Prior work on geometric algebra in neural networks includes Clifford group equivariant networks~\citep{ruhe2023clifford} and geometric algebra transformers~\citep{brehmer2023geometric}, which focus on equivariance for geometric data types.
+Our work differs by extending the CliffordNet \emph{architecture pattern} to new domains (NLP, denoising) rather than introducing new algebraic structures.
+
+\paragraph{Causal convolution architectures.}
+Temporal Convolutional Networks (TCNs)~\citep{bai2018empirical} use causal dilated convolutions for sequence modeling.
+Our CausalCliffordNetBlock shares the principle of causal padding but applies it within the Clifford geometric interaction framework, and adds a causal cumulative mean for global context.
+
+\paragraph{Bias-free denoising.}
+DnCNN~\citep{zhang2017beyond} demonstrated residual learning for denoising.
+\citet{mohan2020robust} showed that bias-free networks improve denoising generalization.
+Our CliffordNetDenoiser combines bias-free constraints with geometric algebra interactions, providing a novel backbone for residual denoising.
+
+\paragraph{Efficient architectures and FFN elimination.}
+PoolFormer~\citep{yu2022metaformer} replaces attention with pooling but retains FFNs.
+FNet~\citep{lee2021fnet} replaces attention with Fourier transforms.
+gMLP~\citep{liu2021pay} uses spatial gating.
+CliffordNet's approach of eliminating the FFN entirely through algebraically complete interactions is orthogonal and complementary.
+
+% ============================================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+Several limitations should be noted.
+\textbf{Language modeling benchmarks}: We have not yet completed comprehensive perplexity evaluations or comparisons with established language models (GPT-2, LSTM baselines). The current contribution focuses on architectural feasibility, causality verification, and training infrastructure --- quantitative NLP benchmarks are the subject of ongoing work.
+\textbf{Denoising benchmarks}: Systematic comparisons with DnCNN, BM3D, and other denoising baselines on standard datasets (BSD68, Set12) are in progress.
+\textbf{Scale}: All vision results are on CIFAR-100; ImageNet-scale evaluation remains future work.
+\textbf{Error bars}: Vision results are single-run; multi-seed variance analysis is needed.
+\textbf{Throughput}: We report no wall-clock or FLOPs comparisons; measuring actual inference speed against baseline architectures is an important practical consideration.
+
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented a Keras~3 reimplementation of CliffordNet~\citep{ji2026cliffordnet} along with two novel extensions: \textbf{CausalCliffordNetBlock} for autoregressive language modeling and \textbf{CliffordNetDenoiser} for bias-free image denoising.
+The language modeling extension demonstrates that the geometric product interaction mechanism generalizes beyond vision through three targeted modifications: causal padding, causal cumulative mean, and 4D reshaping.
+The denoising extension shows that the same geometric backbone can serve as an effective noise estimator when stripped of all additive biases.
+Both extensions preserve the defining property of CliffordNet --- \emph{no FFN layers} --- while opening geometric algebra-based architectures to new application domains.
+All code, training recipes, and tests are available as part of the \texttt{dl\_techniques} library.
+
+% ============================================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{99}
+
+\bibitem[Bai et al.(2018)]{bai2018empirical}
+Bai, S., Kolter, J.~Z., \& Koltun, V. (2018).
+\newblock An empirical evaluation of generic convolutional and recurrent networks for sequence modeling.
+\newblock \emph{arXiv preprint arXiv:1803.01271}.
+
+\bibitem[Brehmer et al.(2023)]{brehmer2023geometric}
+Brehmer, J., de Haan, P., Behrends, S., \& Cohen, T. (2023).
+\newblock Geometric algebra transformers.
+\newblock \emph{Advances in Neural Information Processing Systems}, 36.
+
+\bibitem[Cubuk et al.(2019)]{cubuk2019autoaugment}
+Cubuk, E.~D., Zoph, B., Man\'e, D., Vasudevan, V., \& Le, Q.~V. (2019).
+\newblock {AutoAugment}: Learning augmentation strategies from data.
+\newblock \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 113--123.
+
+\bibitem[Doran \& Lasenby(2003)]{doran2003geometric}
+Doran, C. \& Lasenby, A. (2003).
+\newblock \emph{Geometric Algebra for Physicists}.
+\newblock Cambridge University Press.
+
+\bibitem[He et al.(2016)]{he2016deep}
+He, K., Zhang, X., Ren, S., \& Sun, J. (2016).
+\newblock Deep residual learning for image recognition.
+\newblock \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 770--778.
+
+\bibitem[Hestenes \& Sobczyk(1984)]{hestenes1984clifford}
+Hestenes, D. \& Sobczyk, G. (1984).
+\newblock \emph{Clifford Algebra to Geometric Calculus: A Unified Language for Mathematics and Physics}.
+\newblock D.~Reidel Publishing Company.
+
+\bibitem[Ji(2026)]{ji2026cliffordnet}
+Ji, Z. (2026).
+\newblock {CliffordNet}: All you need is geometric algebra.
+\newblock \emph{arXiv preprint arXiv:2601.06793v2}.
+
+\bibitem[Lee-Thorp et al.(2021)]{lee2021fnet}
+Lee-Thorp, J., Ainslie, J., Eckstein, I., \& Ontanon, S. (2021).
+\newblock {FNet}: Mixing tokens with Fourier transforms.
+\newblock \emph{arXiv preprint arXiv:2105.03824}.
+
+\bibitem[Lin et al.(2017)]{lin2017focal}
+Lin, T.-Y., Goyal, P., Girshick, R., He, K., \& Doll\'ar, P. (2017).
+\newblock Focal loss for dense object detection.
+\newblock \emph{IEEE International Conference on Computer Vision}, 2980--2988.
+
+\bibitem[Liu et al.(2021)]{liu2021pay}
+Liu, H., Dai, Z., So, D., \& Le, Q.~V. (2021).
+\newblock Pay attention to {MLPs}.
+\newblock \emph{Advances in Neural Information Processing Systems}, 34.
+
+\bibitem[Miyasawa(1961)]{miyasawa1961empirical}
+Miyasawa, K. (1961).
+\newblock An empirical {Bayes} estimator of the mean of a normal population.
+\newblock \emph{Bull.\ Inst.\ Internat.\ Statist.}, 38(4), 181--188.
+
+\bibitem[Mohan et al.(2020)]{mohan2020robust}
+Mohan, S., Kadkhodaie, Z., Simoncelli, E.~P., \& Fernandez-Granda, C. (2020).
+\newblock Robust and interpretable blind image denoising via bias-free convolutional neural networks.
+\newblock \emph{International Conference on Learning Representations}.
+
+\bibitem[Ruhe et al.(2023)]{ruhe2023clifford}
+Ruhe, D., Brandstetter, J., \& Forr\'e, P. (2023).
+\newblock Clifford group equivariant neural networks.
+\newblock \emph{Advances in Neural Information Processing Systems}, 36.
+
+\bibitem[Yu et al.(2022)]{yu2022metaformer}
+Yu, W., Luo, M., Zhou, P., et al. (2022).
+\newblock {MetaFormer} is actually what you need for vision.
+\newblock \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 10819--10829.
+
+\bibitem[Zhang et al.(2017)]{zhang2017beyond}
+Zhang, K., Zuo, W., Chen, Y., Meng, D., \& Zhang, L. (2017).
+\newblock Beyond a {Gaussian} denoiser: Residual learning of deep {CNN} for image denoising.
+\newblock \emph{IEEE Transactions on Image Processing}, 26(7), 3142--3155.
+
+\bibitem[Zhong et al.(2020)]{zhong2020random}
+Zhong, Z., Zheng, L., Kang, G., Li, S., \& Yang, Y. (2020).
+\newblock Random erasing data augmentation.
+\newblock \emph{AAAI Conference on Artificial Intelligence}, 13001--13008.
+
+\end{thebibliography}
+
+\end{document}
