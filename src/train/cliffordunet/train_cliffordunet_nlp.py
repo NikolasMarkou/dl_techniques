@@ -689,6 +689,7 @@ def _load_tfds_datasets(
         chunk_length=config.max_seq_length,
         batch_size=config.batch_size,
         eot_token_id=config.eot_token_id,
+        repeat=False,
     )
     val = preprocess_clm_packed_dataset(
         val_raw,
@@ -696,6 +697,7 @@ def _load_tfds_datasets(
         chunk_length=config.max_seq_length,
         batch_size=config.batch_size,
         eot_token_id=config.eot_token_id,
+        repeat=False,
     )
     return train, val
 
@@ -718,6 +720,7 @@ def _load_hf_datasets(
         chunk_length=config.max_seq_length,
         batch_size=config.batch_size,
         eot_token_id=config.eot_token_id,
+        repeat=False,
     )
     val = preprocess_clm_packed_dataset(
         val_raw,
@@ -725,6 +728,7 @@ def _load_hf_datasets(
         chunk_length=config.max_seq_length,
         batch_size=config.batch_size,
         eot_token_id=config.eot_token_id,
+        repeat=False,
     )
     return train, val, n_train, n_val
 
@@ -764,24 +768,31 @@ def compile_model(
 def _estimate_steps_per_epoch(
     config: TrainingConfig,
     n_train_articles: Optional[int] = None,
-    avg_tokens_per_article: int = 450,
+    avg_tokens_per_article: float = 700.0,
 ) -> int:
-    """Estimate steps per epoch for the LR schedule.
+    """Estimate steps per epoch for the LR schedule under packed CLM.
 
-    With packed preprocessing, one step consumes ``batch_size`` chunks
-    of ``max_seq_length`` tokens each, and we emit roughly
-    ``avg_tokens_per_article / max_seq_length`` chunks per article.
-    The default ``avg_tokens_per_article=450`` is a conservative
-    estimate for Wikipedia filtered at ``min_article_length=500`` chars
-    — use ``--max-train-samples`` or the real article count (returned
-    by :func:`load_train_val_datasets`) for exact numbers.
+    With concat-and-chunk packing, every source token is emitted into
+    exactly one chunk (modulo a bounded per-epoch tail of at most
+    ``max_seq_length - 1`` tokens). So the real chunk count is
+
+        total_chunks ~= n_articles * avg_tokens_per_article / chunk_length
+
+    and ``steps_per_epoch = total_chunks / batch_size``.
+
+    The default ``avg_tokens_per_article=700`` tracks English Wikipedia
+    filtered at ``min_article_length=500`` chars; pass a different
+    value (or ``--max-train-samples`` for a tiny smoke run) to override.
+    A ±50 % error here shows up as a ±50 % shift in the cosine decay
+    horizon — much tighter than the old hardcoded 4.85M estimate,
+    which was decoupled from the real step count entirely.
 
     :param config: Training configuration.
     :param n_train_articles: Exact post-filter article count. When
-        provided, the estimate uses this instead of the hardcoded
-        Wikipedia default.
-    :param avg_tokens_per_article: Mean token count per retained
-        article. Only used for the Wikipedia fallback.
+        provided, the estimate uses this instead of the Wikipedia
+        fallback constant.
+    :param avg_tokens_per_article: Mean post-filter tokens per
+        retained article. Only used for the Wikipedia fallback.
     """
     if config.max_train_samples:
         articles = config.max_train_samples
@@ -789,9 +800,13 @@ def _estimate_steps_per_epoch(
         articles = n_train_articles
     else:
         articles = 4_000_000
-    chunks_per_article = max(1, avg_tokens_per_article // config.max_seq_length)
+    # Use float division so short (<max_seq_length) and long
+    # (>max_seq_length) articles both contribute proportionally.
+    chunks_per_article = max(
+        1.0, avg_tokens_per_article / float(config.max_seq_length)
+    )
     total_chunks = articles * chunks_per_article
-    return max(1, total_chunks // config.batch_size)
+    return max(1, int(total_chunks // config.batch_size))
 
 
 def train_cliffordunet_nlp(
@@ -826,24 +841,22 @@ def train_cliffordunet_nlp(
         )
 
     # Data (must come after model so we know the pool factor). The
-    # HuggingFace path returns the exact post-filter article count, so
-    # the LR schedule can be sized against the real step count instead
-    # of a hardcoded estimate.
-    train_dataset, val_dataset, n_train_articles, n_val_articles = (
+    # HuggingFace path returns the exact post-filter article count,
+    # which anchors the LR schedule estimator below.
+    train_dataset, val_dataset, n_train_articles, _ = (
         load_train_val_datasets(
             config, total_pool_factor=total_pool_factor,
         )
     )
 
+    # Size the LR schedule horizon against the real article count.
+    # The epoch length is NOT fixed to this number — the packed
+    # dataset exhausts naturally, so every chunk is still trained on
+    # exactly once per epoch. A ±30% error here only shifts the
+    # cosine phase; it does not drop data.
     steps_per_epoch = _estimate_steps_per_epoch(
         config, n_train_articles=n_train_articles,
     )
-    validation_steps: Optional[int] = None
-    if n_val_articles is not None:
-        val_chunks_per_article = max(1, 450 // config.max_seq_length)
-        validation_steps = max(
-            1, (n_val_articles * val_chunks_per_article) // config.batch_size,
-        )
 
     compile_model(model, config, steps_per_epoch)
 
@@ -884,22 +897,23 @@ def train_cliffordunet_nlp(
         initial_step=initial_step,
     ))
 
-    # Train — pass the real steps_per_epoch / validation_steps so the
-    # warmup+cosine LR schedule horizon and the fit epoch boundary are
-    # driven by the same quantity.
+    # Train — let the packed dataset drive the epoch boundary (no
+    # steps_per_epoch / validation_steps passed), so every chunk the
+    # generator produces is trained on exactly once per epoch with no
+    # fit-loop truncation. The LR schedule horizon is still sized from
+    # `steps_per_epoch` (computed above from the real article count);
+    # a ±30% error there only shifts the cosine phase, it does not
+    # drop any data.
     logger.info(
         f"Starting training: source={config.dataset_source}, "
-        f"steps_per_epoch={steps_per_epoch:,}, "
-        f"validation_steps={validation_steps}, "
-        f"batch_size={config.batch_size}"
+        f"lr_schedule_steps_per_epoch~={steps_per_epoch:,}, "
+        f"batch_size={config.batch_size} (epoch length driven by dataset exhaustion)"
     )
     history = model.fit(
         train_dataset,
         epochs=config.num_epochs,
-        steps_per_epoch=steps_per_epoch,
         callbacks=callbacks,
         validation_data=val_dataset,
-        validation_steps=validation_steps,
         verbose=1,
     )
     logger.info("Training completed!")

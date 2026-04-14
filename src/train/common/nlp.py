@@ -211,6 +211,7 @@ def preprocess_clm_packed_dataset(
     batch_size: int,
     eot_token_id: int,
     shuffle_buffer: int = 4096,
+    repeat: bool = False,
 ) -> tf.data.Dataset:
     """Tokenize, pack, and batch a text dataset for CLM pretraining.
 
@@ -245,6 +246,11 @@ def preprocess_clm_packed_dataset(
         GPT-2 / ``"gpt2"`` this is ``50256`` (``<|endoftext|>``).
     :param shuffle_buffer: Size of the tf.data shuffle buffer applied
         to the packed chunks.
+    :param repeat: If ``True``, apply ``.repeat()`` to the packed
+        dataset so a fixed ``steps_per_epoch`` passed to ``model.fit``
+        never hits ``StopIteration`` mid-epoch. Callers that do not
+        pass ``steps_per_epoch`` to ``fit`` must leave this at
+        ``False`` — otherwise training runs forever.
     :return: Batched dataset of ``(input_ids, labels)`` tuples with
         shape ``(batch, chunk_length - 1)``.
     """
@@ -280,12 +286,14 @@ def preprocess_clm_packed_dataset(
     packed = (
         packed.shuffle(buffer_size=shuffle_buffer)
         .batch(batch_size, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
     )
+    if repeat:
+        packed = packed.repeat()
+    packed = packed.prefetch(tf.data.AUTOTUNE)
     logger.info(
         f"Packed CLM dataset: encoding={encoding_name}, "
         f"chunk_length={chunk_length}, input_len={input_len}, "
-        f"batch_size={batch_size}, eot_id={eot_token_id}"
+        f"batch_size={batch_size}, eot_id={eot_token_id}, repeat={repeat}"
     )
     return packed
 
