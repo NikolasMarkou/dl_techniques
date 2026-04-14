@@ -151,67 +151,57 @@ def preprocess_clm_dataset(
     batch_size: int,
     streaming: bool = False,
 ) -> tf.data.Dataset:
-    """Tokenize and batch a text dataset for CLM (causal language modeling) training.
+    """Tokenize, pack, and batch a text dataset for CLM pretraining.
 
-    Expects a dataset of raw text strings (not supervised).
-    Returns batched dataset of ``(input_ids, labels)`` tuples. PAD positions
-    in labels are set to ``-1`` so they can be ignored by the loss function
-    (use :class:`MaskedCLMLoss`).
+    Implements the standard GPT-style *concat-and-chunk* packing
+    pipeline:
 
-    :param dataset: A tf.data.Dataset yielding raw text strings.
-    :param preprocessor: TiktokenPreprocessor for tokenization.
-    :param max_seq_length: Maximum sequence length for tokenization.
-    :param batch_size: Batch size for the output dataset.
-    :param streaming: If ``True``, skip ``.cache()`` to avoid OOM on
-        large streaming datasets (e.g. Wikipedia). Default ``False``.
-    :return: Batched tf.data.Dataset of ``(input_ids, labels)`` tuples.
-        Both shapes: ``(batch, max_seq_length - 1)``. Labels use ``-1``
-        for PAD positions.
+    1. Each document is encoded with the raw Tiktoken encoder taken
+       from ``preprocessor.tokenizer`` — no ``[CLS]``/``[SEP]``/``[PAD]``
+       wrapping is applied. The BERT-shaped fields on the preprocessor
+       (``cls_token_id``, ``sep_token_id``, ``pad_token_id``,
+       ``mask_token_id``) are **ignored** in the CLM path; they exist
+       on the shared ``TiktokenPreprocessor`` only to keep the
+       MLM/classification preprocessors working.
+    2. The encoder's ``<|endoftext|>`` token (``encoder.eot_token``) is
+       appended after every document so document boundaries are
+       signalled inside the token stream.
+    3. The resulting stream is sliced into consecutive
+       ``max_seq_length``-long windows. Every source token is trained
+       on exactly once per epoch — there is no article truncation and
+       no window-to-document alignment.
+    4. Each window is turned into an ``(input_ids, labels)`` pair via
+       the standard shift: ``input_ids = chunk[:-1]``,
+       ``labels = chunk[1:]``. The EOT token is a legitimate training
+       target, so no label masking is applied.
+
+    :param dataset: A ``tf.data.Dataset`` yielding raw text strings.
+    :param preprocessor: :class:`TiktokenPreprocessor` whose underlying
+        ``tokenizer`` is a ``tiktoken.Encoding``. Only the encoder and
+        its ``eot_token`` are used.
+    :param max_seq_length: Window size **including** the +1 token
+        needed for the causal shift. After the shift, the model input
+        and label tensors both have length ``max_seq_length - 1``.
+    :param batch_size: Output batch size.
+    :param streaming: Retained for signature compatibility. The packed
+        generator never caches, so this flag has no effect — it is
+        accepted to avoid breaking callers that pass
+        ``streaming=True``. A future release may drop the parameter.
+    :return: Batched ``tf.data.Dataset`` of ``(input_ids, labels)``
+        tuples with shape ``(batch, max_seq_length - 1)``.
     """
+    del streaming  # packed pipeline never caches, parameter kept for API stability.
 
-    def tokenize_fn(text):
-        encoded = preprocessor(decode_text(text), return_tensors='np')
-        ids = encoded['input_ids'][0]
-        mask = encoded['attention_mask'][0]
-        return ids, mask
-
-    dataset = dataset.map(
-        lambda x: tf.py_function(tokenize_fn, [x], [tf.int32, tf.int32]),
-        num_parallel_calls=tf.data.AUTOTUNE,
+    encoder = preprocessor.tokenizer
+    encoding_name = getattr(encoder, "name", None) or "gpt2"
+    eot_token_id = int(encoder.eot_token)
+    return preprocess_clm_packed_dataset(
+        dataset,
+        encoding_name=encoding_name,
+        chunk_length=max_seq_length,
+        batch_size=batch_size,
+        eot_token_id=eot_token_id,
     )
-
-    seq_len = max_seq_length
-
-    def make_clm_pair(ids, mask):
-        ids = tf.ensure_shape(ids, [seq_len])
-        mask = tf.ensure_shape(mask, [seq_len])
-        # Input: tokens [0..n-2], Labels: tokens [1..n-1]
-        input_ids = ids[:-1]
-        labels = ids[1:]
-        # Set PAD label positions to -1 so MaskedCLMLoss ignores them
-        label_mask = mask[1:]
-        labels = tf.where(label_mask == 1, labels, -1)
-        return input_ids, labels
-
-    dataset = dataset.map(make_clm_pair, num_parallel_calls=tf.data.AUTOTUNE)
-    if streaming:
-        dataset = (
-            dataset.shuffle(buffer_size=10000)
-            .batch(batch_size, drop_remainder=True)
-            .prefetch(tf.data.AUTOTUNE)
-        )
-    else:
-        dataset = (
-            dataset.cache()
-            .shuffle(buffer_size=10000)
-            .batch(batch_size, drop_remainder=True)
-            .prefetch(tf.data.AUTOTUNE)
-        )
-    logger.info(
-        f"CLM dataset preprocessed: batch_size={batch_size}, "
-        f"seq_len={seq_len - 1}, streaming={streaming}"
-    )
-    return dataset
 
 
 def preprocess_clm_packed_dataset(

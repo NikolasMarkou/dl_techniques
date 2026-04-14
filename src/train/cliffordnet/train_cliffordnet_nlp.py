@@ -305,7 +305,12 @@ class GenerationProbeCallback(keras.callbacks.Callback):
     :param temperature: Sampling temperature.
     :param top_p: Nucleus sampling threshold.
     :param repetition_penalty: Penalty for recently generated tokens.
-    :param special_token_ids: Token IDs to never generate.
+    :param eot_token_id: End-of-text token used to right-pad context
+        windows and blocked from generation so probes produce
+        continuous text. Defaults to ``tiktoken.get_encoding(
+        encoding_name).eot_token``.
+    :param ctx_length: Context window length used for generation
+        (typically ``max_seq_length - 1``).
     :param save_dir: Directory to save probe results.
     :param initial_step: Starting step count (for resume).
     """
@@ -319,7 +324,8 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         temperature: float = 0.85,
         top_p: float = 0.92,
         repetition_penalty: float = 1.3,
-        special_token_ids: Optional[set] = None,
+        eot_token_id: Optional[int] = None,
+        ctx_length: int = 511,
         save_dir: Optional[str] = None,
         initial_step: int = 0,
     ):
@@ -334,16 +340,14 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         self.temperature = temperature
         self.top_p = top_p
         self.repetition_penalty = repetition_penalty
-        self.special_token_ids = special_token_ids or {50257, 50258, 50259, 50260}
         self._global_step = initial_step
 
         self._enc = tiktoken.get_encoding(encoding_name)
-        self._cls_id = min(self.special_token_ids)
-        # Pad token used to right-pad every generation call to a fixed shape.
-        # Using a single shape collapses ~100 per-length traces into one
-        # compiled graph and cuts probe wall-time by roughly 10x.
-        self._pad_id = max(self.special_token_ids)
-        self._ctx_len = 511
+        # Right-pad every generation call to a fixed shape with the same
+        # EOT token used by the packed CLM preprocessor. Fixed shape
+        # collapses ~100 per-length traces into one compiled graph.
+        self._eot_id = int(eot_token_id if eot_token_id is not None else self._enc.eot_token)
+        self._ctx_len = ctx_length
 
         self._log_path = None
         if save_dir:
@@ -419,9 +423,9 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         position) keeps the output semantics identical to a variable-length
         call while avoiding shape-driven retraces.
         """
-        ids = [self._cls_id] + self._enc.encode(prompt)
+        ids = self._enc.encode(prompt)
         ctx_len = self._ctx_len
-        pad_id = self._pad_id
+        pad_id = self._eot_id
 
         for _ in range(self.max_tokens):
             ctx = ids[-ctx_len:]
@@ -432,18 +436,18 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             )
             logits = out["logits"][0, real - 1, :].numpy()
 
-            # Mask special tokens
-            for sid in self.special_token_ids:
-                logits[sid] = -1e9
+            # Block EOT so probes produce continuous text.
+            logits[self._eot_id] = -1e9
 
             # Repetition penalty on recent context (sign-aware:
             # divide positive logits, multiply negative ones)
             for t in set(ids[-50:]):
-                if t not in self.special_token_ids:
-                    if logits[t] >= 0:
-                        logits[t] /= self.repetition_penalty
-                    else:
-                        logits[t] *= self.repetition_penalty
+                if t == self._eot_id:
+                    continue
+                if logits[t] >= 0:
+                    logits[t] /= self.repetition_penalty
+                else:
+                    logits[t] *= self.repetition_penalty
 
             # Temperature scaling
             logits /= self.temperature
@@ -461,7 +465,7 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             next_token = top_idx[np.random.choice(len(top_idx), p=top_probs)]
             ids.append(int(next_token))
 
-        return self._enc.decode(ids[1:])  # skip CLS
+        return self._enc.decode(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -742,10 +746,7 @@ def train_cliffordnet_nlp(
         temperature=config.probe_temperature,
         top_p=config.probe_top_p,
         repetition_penalty=config.probe_repetition_penalty,
-        special_token_ids={
-            config.cls_token_id, config.sep_token_id,
-            config.pad_token_id, config.mask_token_id,
-        },
+        ctx_length=config.max_seq_length - 1,
         save_dir=results_dir,
         initial_step=initial_step,
     ))

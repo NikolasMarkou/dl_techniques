@@ -258,7 +258,8 @@ class GenerationProbeCallback(keras.callbacks.Callback):
     :param temperature: Sampling temperature.
     :param top_p: Nucleus sampling threshold.
     :param repetition_penalty: Penalty for recently generated tokens.
-    :param special_token_ids: Set of token IDs to never generate.
+    :param eot_token_id: End-of-text token used to block EOT from the
+        generated stream. Defaults to the encoder's ``eot_token``.
     :param save_dir: Directory to save probe results.
     :param initial_step: Starting step count (for resume).
     """
@@ -272,7 +273,7 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         temperature: float = 0.85,
         top_p: float = 0.92,
         repetition_penalty: float = 1.3,
-        special_token_ids: Optional[set] = None,
+        eot_token_id: Optional[int] = None,
         save_dir: Optional[str] = None,
         initial_step: int = 0,
     ):
@@ -287,11 +288,10 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         self.temperature = temperature
         self.top_p = top_p
         self.repetition_penalty = repetition_penalty
-        self.special_token_ids = special_token_ids or {50257, 50258, 50259, 50260}
         self._global_step = initial_step
 
         self._enc = tiktoken.get_encoding(encoding_name)
-        self._cls_id = min(self.special_token_ids)
+        self._eot_id = int(eot_token_id if eot_token_id is not None else self._enc.eot_token)
 
         self._probe_log = []
         self._log_path = None
@@ -362,7 +362,7 @@ class GenerationProbeCallback(keras.callbacks.Callback):
 
     def _generate(self, prompt: str) -> str:
         """Autoregressive generation with nucleus sampling."""
-        ids = [self._cls_id] + self._enc.encode(prompt)
+        ids = self._enc.encode(prompt)
 
         for _ in range(self.max_tokens):
             ctx = ids[-511:]
@@ -371,14 +371,14 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             )
             logits = out["logits"][0, -1, :].numpy()
 
-            # Mask special tokens
-            for sid in self.special_token_ids:
-                logits[sid] = -1e9
+            # Block EOT so probes produce continuous text.
+            logits[self._eot_id] = -1e9
 
             # Repetition penalty on recent context
             for t in set(ids[-50:]):
-                if t not in self.special_token_ids:
-                    logits[t] /= self.repetition_penalty
+                if t == self._eot_id:
+                    continue
+                logits[t] /= self.repetition_penalty
 
             # Temperature scaling
             logits /= self.temperature
@@ -396,7 +396,7 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             next_token = top_idx[np.random.choice(len(top_idx), p=top_probs)]
             ids.append(int(next_token))
 
-        return self._enc.decode(ids[1:])  # skip CLS
+        return self._enc.decode(ids)
 
     def _post_generate_hook(self, results: dict) -> None:
         """Override this method in subclasses for custom analysis.
@@ -674,10 +674,6 @@ def train_gpt2(
         temperature=config.probe_temperature,
         top_p=config.probe_top_p,
         repetition_penalty=config.probe_repetition_penalty,
-        special_token_ids={
-            config.cls_token_id, config.sep_token_id,
-            config.pad_token_id, config.mask_token_id,
-        },
         save_dir=results_dir,
         initial_step=initial_step,
     ))
