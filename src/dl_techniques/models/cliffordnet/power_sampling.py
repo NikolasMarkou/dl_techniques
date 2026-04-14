@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import tensorflow as tf
 import tiktoken
 
 from dl_techniques.utils.logger import logger
@@ -97,8 +98,9 @@ class PowerSamplingConfig:
 class PowerSampler:
     """Wraps a :class:`CliffordNetLM` for power-distribution sampling.
 
-    All sampling logic uses NumPy (not TF ops) to avoid graph retraces.
-    The model forward pass is the only TF operation.
+    Forward passes run on GPU; post-logit sampling uses NumPy on CPU.
+    MCMC proposals within each block are generated in parallel via
+    batched forward passes for high GPU utilization.
 
     :param model: A built :class:`CliffordNetLM` instance.
     :param encoding: A ``tiktoken.Encoding`` for tokenization/decoding.
@@ -126,11 +128,11 @@ class PowerSampler:
     def _forward(self, token_ids: List[int]) -> np.ndarray:
         """Run a single fixed-shape forward pass.
 
-        Pads ``token_ids`` to ``config.ctx_len`` and returns the full
-        logits array for every position.
+        Pads ``token_ids`` to ``config.ctx_len`` and returns logits at
+        the last real token position only.
 
         :param token_ids: Token IDs (at most ``config.ctx_len``).
-        :return: Logits array of shape ``(ctx_len, vocab_size)``.
+        :return: Logits array of shape ``(vocab_size,)``.
         """
         cfg = self.config
         ctx = token_ids[-cfg.ctx_len:]
@@ -139,7 +141,40 @@ class PowerSampler:
         out = self.model(
             np.array([padded], dtype="int32"), training=False,
         )
-        return out["logits"][0].numpy(), real
+        # Only transfer the single row we need: (V,) instead of (ctx_len, V)
+        return out["logits"][0, real - 1].numpy()
+
+    def _forward_batch(
+        self, batch_token_ids: List[List[int]],
+    ) -> np.ndarray:
+        """Batched forward pass for multiple sequences.
+
+        Runs all sequences through the model in a single call for high
+        GPU utilization.  Returns logits at each sequence's last real
+        token position.
+
+        :param batch_token_ids: List of B token ID sequences.
+        :return: Logits array of shape ``(B, vocab_size)``.
+        """
+        cfg = self.config
+        B = len(batch_token_ids)
+        batch_ctx = []
+        real_lens = []
+
+        for ids in batch_token_ids:
+            ctx = ids[-cfg.ctx_len:]
+            real = len(ctx)
+            padded = ctx + [cfg.pad_token_id] * (cfg.ctx_len - real)
+            batch_ctx.append(padded)
+            real_lens.append(real)
+
+        batch_input = np.array(batch_ctx, dtype="int32")
+        out = self.model(batch_input, training=False)
+
+        # Gather logits at each sequence's last real position (single
+        # GPU op + single device-to-host transfer).
+        indices = [[i, real_lens[i] - 1] for i in range(B)]
+        return tf.gather_nd(out["logits"], indices).numpy()  # (B, V)
 
     def _sample_token(
         self,
@@ -197,7 +232,7 @@ class PowerSampler:
         return int(token_id), float(log_prob_norm), float(log_prob_unnorm)
 
     # -----------------------------------------------------------------
-    # Proposal distribution: low-temperature autoregressive generation
+    # Single-sequence autoregressive generation
     # -----------------------------------------------------------------
 
     def naive_temp_generate(
@@ -216,14 +251,12 @@ class PowerSampler:
         :return: ``(ids, log_probs_norm, log_probs_unnorm)`` where
             ``ids`` is the full sequence (context + generated tokens).
         """
-        cfg = self.config
         ids = list(context)
         log_probs_norm: List[float] = []
         log_probs_unnorm: List[float] = []
 
         for _ in range(num_tokens):
-            logits_full, real = self._forward(ids)
-            logits = logits_full[real - 1]
+            logits = self._forward(ids)
 
             token_id, lp_norm, lp_unnorm = self._sample_token(
                 logits, temperature, recent_tokens=ids,
@@ -233,6 +266,69 @@ class PowerSampler:
             log_probs_unnorm.append(lp_unnorm)
 
         return ids, log_probs_norm, log_probs_unnorm
+
+    # -----------------------------------------------------------------
+    # Batched autoregressive generation (for parallel MCMC proposals)
+    # -----------------------------------------------------------------
+
+    def _batched_generate(
+        self,
+        prefixes: List[List[int]],
+        num_tokens_list: List[int],
+        temperature: float,
+    ) -> Tuple[List[List[int]], List[List[float]], List[List[float]]]:
+        """Generate tokens for multiple sequences in parallel.
+
+        Uses batched forward passes so all sequences share a single GPU
+        call per generation step.  Sequences that finish early are
+        removed from the batch to save compute.
+
+        :param prefixes: List of B prefix token ID sequences.
+        :param num_tokens_list: Number of tokens to generate per sequence.
+        :param temperature: Sampling temperature.
+        :return: ``(seqs, log_probs_norm, log_probs_unnorm)`` where each
+            is a list of B items (one per sequence).
+        """
+        B = len(prefixes)
+        if B == 0:
+            return [], [], []
+
+        max_gen = max(num_tokens_list)
+
+        seqs = [list(p) for p in prefixes]
+        log_probs_norm: List[List[float]] = [[] for _ in range(B)]
+        log_probs_unnorm: List[List[float]] = [[] for _ in range(B)]
+
+        for step in range(max_gen):
+            # Find sequences that still need tokens
+            active = [i for i in range(B) if step < num_tokens_list[i]]
+            if not active:
+                break
+
+            # Batched forward pass for all active sequences
+            if len(active) == 1:
+                # Single sequence: use unbatched path to avoid overhead
+                i = active[0]
+                logits = self._forward(seqs[i])
+                token_id, lp_n, lp_u = self._sample_token(
+                    logits, temperature, recent_tokens=seqs[i],
+                )
+                seqs[i].append(token_id)
+                log_probs_norm[i].append(lp_n)
+                log_probs_unnorm[i].append(lp_u)
+            else:
+                batch_ids = [seqs[i] for i in active]
+                logits_batch = self._forward_batch(batch_ids)
+
+                for j, i in enumerate(active):
+                    token_id, lp_n, lp_u = self._sample_token(
+                        logits_batch[j], temperature, recent_tokens=seqs[i],
+                    )
+                    seqs[i].append(token_id)
+                    log_probs_norm[i].append(lp_n)
+                    log_probs_unnorm[i].append(lp_u)
+
+        return seqs, log_probs_norm, log_probs_unnorm
 
     # -----------------------------------------------------------------
     # MCMC Power Sampling
@@ -250,7 +346,8 @@ class PowerSampler:
 
         Samples from *p^alpha* where ``alpha = 1 / temperature``.  The
         generation is split into ``block_num`` blocks; after each block,
-        ``mcmc_steps`` Metropolis-Hastings refinement steps are applied.
+        ``mcmc_steps`` proposals are generated **in parallel** via batched
+        forward passes and evaluated with Metropolis-Hastings acceptance.
 
         :param prompt: Text prompt to continue.
         :param temperature: Override config temperature.
@@ -291,39 +388,44 @@ class PowerSampler:
 
         for block_idx in range(blocks):
             # Generate one block of tokens with naive temperature sampling
-            target_len = len(gen) + jump_size
             gen, lp_norm, lp_unnorm = self.naive_temp_generate(
                 gen, temp, num_tokens=jump_size,
             )
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            # MCMC refinement
-            for _ in range(steps):
+            # Generate all MCMC proposals in parallel (batched)
+            t = len(gen)
+            indices = [random.randint(c, t - 1) for _ in range(steps)]
+            prefixes = [list(gen[:idx]) for idx in indices]
+            num_tokens = [t - idx for idx in indices]
+
+            props, lp_props_list, target_lp_props_list = (
+                self._batched_generate(prefixes, num_tokens, temp)
+            )
+
+            # Evaluate acceptance for each proposal
+            for i in range(steps):
                 attempts += 1
-                t = len(gen)
-                idx = random.randint(c, t - 1)
+                idx = indices[i]
+                s = len(props[i])
 
-                # Propose: re-generate from idx to end
-                prop, lp_prop, target_lp_prop = self.naive_temp_generate(
-                    gen[:idx], temp, num_tokens=t - idx,
-                )
-
-                s = len(prop)
                 lp_cur = log_probs_norm[idx - c: s - c]
                 target_lp_cur = log_probs_unnorm[idx - c: s - c]
 
                 # Metropolis-Hastings acceptance criterion
                 log_r = (
-                    sum(target_lp_prop) + sum(lp_cur)
-                    - sum(target_lp_cur) - sum(lp_prop)
+                    sum(target_lp_props_list[i]) + sum(lp_cur)
+                    - sum(target_lp_cur) - sum(lp_props_list[i])
                 )
 
                 if np.random.rand() < np.exp(min(log_r, 0.0)):
                     acceptances += 1
-                    gen = list(prop)
-                    log_probs_norm[idx - c:] = list(lp_prop)
-                    log_probs_unnorm[idx - c:] = list(target_lp_prop)
+                    gen = list(props[i])
+                    log_probs_norm[idx - c:] = list(lp_props_list[i])
+                    log_probs_unnorm[idx - c:] = list(
+                        target_lp_props_list[i],
+                    )
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)
@@ -355,7 +457,8 @@ class PowerSampler:
 
         Like :meth:`mcmc_power_sample` but always accepts proposals that
         improve the trajectory probability (greedy at the trajectory
-        level).  Approximates sampling from *p^infinity*.
+        level).  Approximates sampling from *p^infinity*.  Proposals are
+        generated in parallel via batched forward passes.
 
         :param prompt: Text prompt to continue.
         :param temperature: Override config temperature.
@@ -396,26 +499,34 @@ class PowerSampler:
             log_probs_norm.extend(lp_norm)
             log_probs_unnorm.extend(lp_unnorm)
 
-            for _ in range(steps):
+            # Generate all proposals in parallel (batched)
+            t = len(gen)
+            indices = [random.randint(c, t - 1) for _ in range(steps)]
+            prefixes = [list(gen[:idx]) for idx in indices]
+            num_tokens = [t - idx for idx in indices]
+
+            props, lp_props_list, target_lp_props_list = (
+                self._batched_generate(prefixes, num_tokens, temp)
+            )
+
+            # Evaluate acceptance for each proposal
+            for i in range(steps):
                 attempts += 1
-                t = len(gen)
-                idx = random.randint(c, t - 1)
+                idx = indices[i]
+                s = len(props[i])
 
-                prop, lp_prop, target_lp_prop = self.naive_temp_generate(
-                    gen[:idx], temp, num_tokens=t - idx,
-                )
-
-                s = len(prop)
                 target_lp_cur = log_probs_unnorm[idx - c: s - c]
 
                 # Deterministic: accept if trajectory probability improves
-                log_r = sum(target_lp_prop) - sum(target_lp_cur)
+                log_r = sum(target_lp_props_list[i]) - sum(target_lp_cur)
 
                 if log_r > 0:
                     acceptances += 1
-                    gen = list(prop)
-                    log_probs_norm[idx - c:] = list(lp_prop)
-                    log_probs_unnorm[idx - c:] = list(target_lp_prop)
+                    gen = list(props[i])
+                    log_probs_norm[idx - c:] = list(lp_props_list[i])
+                    log_probs_unnorm[idx - c:] = list(
+                        target_lp_props_list[i],
+                    )
 
         elapsed = time.time() - t0
         acceptance_ratio = acceptances / max(attempts, 1)
@@ -465,8 +576,7 @@ class PowerSampler:
         cfg.top_p = top_p
 
         for _ in range(max_tokens):
-            logits_full, real = self._forward(ids)
-            logits = logits_full[real - 1]
+            logits = self._forward(ids)
             token_id, _, _ = self._sample_token(
                 logits, temperature, recent_tokens=ids,
             )
@@ -482,7 +592,7 @@ class PowerSampler:
             "tokens_generated": max_tokens,
             "tok_per_s": max_tokens / max(elapsed, 0.01),
         }
-        return ids[1:], info  # strip CLS
+        return ids[1:], info  # skip CLS
 
     # -----------------------------------------------------------------
     # Convenience: string-in / string-out
