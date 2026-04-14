@@ -27,7 +27,8 @@ def load_wikipedia_train_val(
     max_val_samples: int = 5000,
     max_train_samples: Optional[int] = None,
     seed: int = 42,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    return_counts: bool = False,
+):
     """Load Wikipedia with a proper random holdout train/val split.
 
     Uses HuggingFace ``train_test_split()`` which keeps data on disk
@@ -36,12 +37,25 @@ def load_wikipedia_train_val(
 
     :param cache_dir: Local directory for Arrow cache files.
     :param config_name: Wikipedia config (e.g. ``'20231101.en'``).
-    :param min_article_length: Skip articles shorter than this (chars).
+    :param min_article_length: Skip articles whose raw text is shorter
+        than this many **characters** (not tokens). With the default
+        500-char threshold, articles of roughly 80-120 BPE tokens are
+        retained. Use a larger value to filter out stubs.
     :param val_fraction: Fraction of articles reserved for validation.
     :param max_val_samples: Max validation articles.
     :param max_train_samples: Limit training articles. ``None`` for all.
-    :param seed: Random seed for reproducible splits.
-    :return: ``(train_dataset, val_dataset)`` — both yield raw text strings.
+    :param seed: Random seed for reproducible splits, shuffles, and
+        (when ``shuffle=True``) the per-shard order of articles emitted
+        by the tf.data generator.
+    :param return_counts: If ``True``, return the 4-tuple
+        ``(train_ds, val_ds, n_train, n_val)`` where the counts are the
+        exact post-filter article counts. Callers that need to compute
+        ``steps_per_epoch`` from the real data volume should pass
+        ``return_counts=True`` — the default ``False`` preserves the
+        historical 2-tuple return.
+    :return: ``(train_dataset, val_dataset)``, or
+        ``(train_dataset, val_dataset, n_train, n_val)`` if
+        ``return_counts=True``. Datasets yield raw text strings.
     """
     logger.info(
         f"Loading Wikipedia ({config_name}) with holdout split "
@@ -90,29 +104,42 @@ def load_wikipedia_train_val(
     if max_val_samples is not None and len(val_hf) > max_val_samples:
         val_hf = val_hf.select(range(max_val_samples))
 
+    n_train = len(train_hf)
+    n_val = len(val_hf)
     logger.info(
-        f"Split: {len(train_hf):,} train, {len(val_hf):,} val "
+        f"Split: {n_train:,} train, {n_val:,} val "
         f"(zero overlap guaranteed)"
     )
 
     # Build tf.data.Datasets using generators (reads from Arrow on disk)
-    train_ds = _hf_to_tf_dataset(train_hf, shuffle=True)
+    train_ds = _hf_to_tf_dataset(train_hf, shuffle=True, seed=seed)
     val_ds = _hf_to_tf_dataset(val_hf, shuffle=False)
 
+    if return_counts:
+        return train_ds, val_ds, n_train, n_val
     return train_ds, val_ds
 
 
 def _hf_to_tf_dataset(
     hf_dataset: datasets.Dataset,
     shuffle: bool = False,
+    seed: Optional[int] = None,
 ) -> tf.data.Dataset:
     """Convert HF Arrow dataset to tf.data.Dataset via generator.
 
     Reads text from memory-mapped Arrow files on demand — no need
     to load all articles into RAM.
+
+    :param hf_dataset: HuggingFace arrow-backed dataset.
+    :param shuffle: If True, apply a seeded row-level shuffle via
+        ``Dataset.shuffle(seed=seed)``. The shuffle is done once at
+        pipeline construction time — it is deterministic when ``seed``
+        is provided and non-deterministic otherwise.
+    :param seed: Random seed for the shuffle. Only used when
+        ``shuffle=True``.
     """
     if shuffle:
-        hf_dataset = hf_dataset.shuffle()
+        hf_dataset = hf_dataset.shuffle(seed=seed)
 
     def generator():
         for item in hf_dataset:
