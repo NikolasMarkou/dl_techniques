@@ -14,15 +14,19 @@ are built from isotropic CliffordNet blocks (arXiv:2601.06793v2):
 
 The Clifford-aware projection head -- the core distinction from standard
 CLIP -- avoids collapsing the tower output to a single mean-pooled vector.
-Instead it computes **two** pooling views per tower (mean+max for vision;
-masked-mean+last-non-pad-token for text) and combines them with a
-:class:`SparseRollingGeometricProduct`. The bivector (wedge) part of that
-product captures how the two views disagree structurally -- information
-that mean pooling alone throws away. The combined representation is then
-LayerNormed, projected to ``embed_dim``, and L2-normalized. Contrastive
-gradients therefore flow through **both** the symmetric (inner) and
-antisymmetric (wedge) components of the algebra, rather than only the
-scalar similarity term that plain cosine would capture.
+The default variant (``head_kind="learned_query_residual"``) uses the
+canonical CLIP anchor (GAP for vision, last-non-pad token for text) and
+adds a LayerScale-gated residual: the geometric product of ``z_det`` (the
+anchor) and ``z_ctx`` (a learnable single-query attention pool over the
+feature sequence) is computed via :class:`SparseRollingGeometricProduct`
+and scaled by a per-channel gamma initialised near zero. Contrastive
+gradients therefore flow through both the symmetric (inner) and the
+antisymmetric (wedge) parts of the algebra, but only where they
+demonstrably reduce the contrastive loss — elsewhere the LayerScale
+keeps the Clifford content small and the head behaves like plain CLIP.
+Other head variants (``plain``, ``mean_max``, ``learned_query``) are
+kept for A/B comparisons; see the :class:`CliffordCLIP` ``head_kind``
+docstring.
 
 A learnable temperature (``logit_scale``) scales the cosine-similarity
 matrix before the symmetric contrastive cross-entropy loss; the loss
@@ -40,7 +44,7 @@ itself is unchanged from CLIP.
     (amplitude/direction/relation) require a frozen teacher encoder and
     are intentionally left for the training script to plug in.
 
-Architecture:
+Architecture (default head_kind="learned_query_residual"):
 
 .. code-block:: text
 
@@ -50,41 +54,40 @@ Architecture:
     Conv2D stem + BN                        Token + Position Embedding
         │                                         │
         ▼                                         ▼
-    CliffordNetBlock × L_vis                LayerNorm + Dropout
-    (bidirectional)                               │
-        │                                         ▼
-        ▼                                  Reshape (B,1,L,D)
-    Two pooling views:                            │
-      z_mean = GAP(x)    (B,D)                    ▼
-      z_max  = GMP(x)    (B,D)            CausalCliffordNetBlock × L_txt
+    CliffordNetBlock × L_vis                CausalCliffordNetBlock × L_txt
+    (bidirectional)                         (causal, B,1,L,D layout)
         │                                         │
         ▼                                         ▼
-    SparseRollingGeometricProduct           Squeeze (B,L,D) + LayerNorm
-      (z_det=z_mean, z_ctx=z_max)                 │
-        │                                         ▼
-        ▼                                  Two pooling views:
-    LayerNorm                                z_mean = masked-mean(x) (B,D)
-        │                                    z_last = last-non-pad   (B,D)
+    z_det = GAP(x)  (B,D)                   z_det = masked-mean(x)
+    z_ctx = LearnedQueryPool(x) (B,D)       z_ctx = LearnedQueryPool(x,mask)
+                                            z_anchor = last-non-pad-token(x)
+        │                                         │
+        ▼                                         ▼
+    geo = SparseRollingGeometricProduct(z_det, z_ctx)      [wedge+inner]
+        │                                         │
+        ▼                                         ▼
+    mixed = z_det    + γ_v ⊙ geo           mixed = z_anchor + γ_t ⊙ geo
+    (γ init 1e-5: starts ≈ plain, learns to inject Clifford content)
+        │                                         │
+        ▼                                         ▼
+    LayerNorm                               (text_head_norm applied earlier
+        │                                    to the full (B,L,D) sequence)
         ▼                                         │
     Dense(embed_dim)                              ▼
-        │                                  SparseRollingGeometricProduct
-        ▼                                    (z_det=z_mean, z_ctx=z_last)
-    L2 Normalize                                  │
-        │                                         ▼
-    image_features (B,D)                    LayerNorm -> Dense(embed_dim)
-                                                  │
-                                                  ▼
-                                            L2 Normalize
-                                                  │
-                                                  ▼
+        │                                   Dense(embed_dim)
+        ▼                                         │
+    L2 Normalize                                  ▼
+        │                                   L2 Normalize
+        ▼                                         │
+    image_features (B,D)                          ▼
                                             text_features (B,D)
 
     Similarity = image_features @ text_features^T * exp(logit_scale)
 
-    The SparseRollingGeometricProduct in each head is what makes the
-    contrastive embedding Clifford-aware: its wedge output encodes the
-    antisymmetric (structural) interaction between the two pooling views,
-    which pure cosine similarity on a single mean-pooled vector cannot see.
+    The LayerScale-gated residual means the Clifford geometric product
+    only contributes where it demonstrably reduces the contrastive loss.
+    Where it doesn't help, γ stays near zero and the head behaves like
+    plain CLIP — this is the empirical winner in the A/B sweep.
 
 References:
     Brandstetter, J., et al. (2025). CliffordNet: All You Need is
@@ -148,6 +151,109 @@ def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
     return [round(i * step, 6) for i in range(num_blocks)]
 
 
+@keras.saving.register_keras_serializable()
+class _LayerScale1D(keras.layers.Layer):
+    """Per-channel learnable scale, init near zero.
+
+    Multiplies an input ``(B, D)`` tensor elementwise by a learnable
+    ``(D,)`` gamma. Used by the ``learned_query_residual`` head to gate
+    the Clifford geometric product output on top of a plain residual
+    path. Gamma starts at ``init_value`` (default 1e-5), so the head
+    initially behaves like plain CLIP and gradually injects wedge/inner
+    content as training progresses — the same LayerScale pattern GGR
+    uses inside the Clifford backbone.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        init_value: float = 1e-5,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.channels = channels
+        self.init_value = init_value
+
+    def build(self, input_shape: Tuple) -> None:
+        self.gamma = self.add_weight(
+            name="gamma",
+            shape=(self.channels,),
+            initializer=initializers.Constant(self.init_value),
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
+        return x * self.gamma
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({"channels": self.channels, "init_value": self.init_value})
+        return config
+
+
+@keras.saving.register_keras_serializable()
+class _LearnedQueryPool1D(keras.layers.Layer):
+    """Single-query attention pool over a ``(B, N, D)`` sequence.
+
+    A learnable ``(1, D)`` query computes attention scores against each
+    position in the sequence and returns the value-weighted mean — the
+    canonical "class-token-free" attention pool. An optional
+    ``(B, N)`` ``mask`` zeroes out padded positions before softmax so
+    the pool ignores pad tokens.
+
+    This is the second pooling view used by the CliffordCLIP
+    ``learned_query`` head: the geometric product of (mean, attn-pool)
+    gives wedge content that (max, mean) could not capture because the
+    attention pool is *content-dependent* — it adapts to where the
+    salient features are instead of taking the global maximum.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        kernel_initializer: Any = "glorot_uniform",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.channels = channels
+        self.kernel_initializer = initializers.get(kernel_initializer)
+
+    def build(self, input_shape: Tuple) -> None:
+        self.query = self.add_weight(
+            name="query",
+            shape=(self.channels,),
+            initializer=self.kernel_initializer,
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(
+        self,
+        features: keras.KerasTensor,
+        mask: Optional[keras.KerasTensor] = None,
+    ) -> keras.KerasTensor:
+        scores = ops.einsum("bnd,d->bn", features, self.query)
+        scores = scores / (float(self.channels) ** 0.5)
+        if mask is not None:
+            mask = ops.cast(mask, scores.dtype)
+            scores = scores + (1.0 - mask) * (-1e9)
+        weights = keras.activations.softmax(scores, axis=-1)
+        return ops.einsum("bn,bnd->bd", weights, features)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "channels": self.channels,
+                "kernel_initializer": initializers.serialize(
+                    self.kernel_initializer
+                ),
+            }
+        )
+        return config
+
+
 # ===========================================================================
 # CliffordCLIP
 # ===========================================================================
@@ -206,6 +312,30 @@ class CliffordCLIP(keras.Model):
     :param head_cli_mode: Clifford components used in the projection head
         (``"inner"``, ``"wedge"``, or ``"full"``). Defaults to ``"full"``
         so both scalar and bivector terms enter the embedding.
+    :param head_kind: Which projection head to use. One of:
+
+        - ``"plain"`` — Standard CLIP head: single pooled view
+          (GAP for vision, last-token for text) → LayerNorm → Dense
+          (embed_dim). Baseline; Clifford blocks are only in the
+          backbone.
+        - ``"mean_max"`` — Clifford-aware head with two pooling views
+          combined via :class:`SparseRollingGeometricProduct`. Vision
+          uses (GAP, GMP); text uses (masked-mean, last-token).
+        - ``"learned_query"`` — Clifford-aware head where the second
+          pooling view is a single learned attention query over the
+          sequence of features. Vision ``z_det=GAP``; text
+          ``z_det=masked-mean``; both pair with an attention-pooled
+          ``z_ctx`` from a learnable ``(1, D)`` query.
+        - ``"learned_query_residual"`` *(default)* — Same two pooling
+          views as ``learned_query``, but the geometric product output
+          is injected as a LayerScale-gated residual on top of the
+          canonical CLIP anchor (``z_det`` for vision, ``last_feat``
+          for text). LayerScale gamma initialises near zero so the
+          head starts behaving like ``plain`` and gradually introduces
+          wedge/inner content where it helps. This mirrors the
+          :class:`GatedGeometricResidual` pattern used inside the
+          Clifford backbone itself and is the empirical winner on
+          CC3M-smoke at 12.5 k steps.
     :param use_bias: Whether Dense layers use bias.
     :param kernel_initializer: Kernel initializer for all Dense/projection.
     :param bias_initializer: Bias initializer.
@@ -308,6 +438,7 @@ class CliffordCLIP(keras.Model):
         # Clifford-aware projection head
         head_shifts: Optional[List[int]] = None,
         head_cli_mode: CliMode = "full",
+        head_kind: str = "learned_query_residual",
         use_bias: bool = True,
         kernel_initializer: Any = _DEFAULT_KERNEL_INIT,
         bias_initializer: Any = "zeros",
@@ -380,6 +511,14 @@ class CliffordCLIP(keras.Model):
                 f"{head_cli_mode!r}"
             )
         self.head_cli_mode = head_cli_mode
+        valid_kinds = (
+            "plain", "mean_max", "learned_query", "learned_query_residual",
+        )
+        if head_kind not in valid_kinds:
+            raise ValueError(
+                f"head_kind must be one of {valid_kinds}, got {head_kind!r}"
+            )
+        self.head_kind = head_kind
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -527,8 +666,10 @@ class CliffordCLIP(keras.Model):
         self.vision_global_pool = keras.layers.GlobalAveragePooling2D(
             name="vision_global_pool"
         )
-        self.vision_global_max_pool = keras.layers.GlobalMaxPooling2D(
-            name="vision_global_max_pool"
+        self.vision_global_max_pool = (
+            keras.layers.GlobalMaxPooling2D(name="vision_global_max_pool")
+            if self.head_kind == "mean_max"
+            else None
         )
         self.vision_head_norm = keras.layers.LayerNormalization(
             epsilon=_LN_EPS, name="vision_head_norm"
@@ -585,41 +726,81 @@ class CliffordCLIP(keras.Model):
         )
 
     def _build_projections(self) -> None:
-        """Clifford-aware projection heads, one per tower.
+        """Projection heads, one per tower. Shape depends on ``head_kind``.
 
-        Each head combines two pooled views (z_det, z_ctx) through a
-        :class:`SparseRollingGeometricProduct` so the projected embedding
-        carries explicit bivector (wedge) content from the interaction of
-        the two views. The resulting tower-channels vector is then
-        LayerNormed and linearly projected to ``embed_dim``.
+        - ``plain``: LayerNorm → Dense(embed_dim) on a single pooled view.
+        - ``mean_max`` / ``learned_query``: two pooled views are combined
+          through a :class:`SparseRollingGeometricProduct` so the projected
+          embedding carries explicit bivector (wedge) content. The
+          difference between the two Clifford variants is only how the
+          second pooled view (``z_ctx``) is produced.
         """
         _dk = self._dense_kwargs()
 
-        v_head_shifts = _head_shifts_for(self.vision_channels, self.head_shifts)
-        t_head_shifts = _head_shifts_for(self.text_channels, self.head_shifts)
+        # Clifford sub-layers: only materialised when the head uses them.
+        self.vision_head_geo = None
+        self.text_head_geo = None
+        self.vision_query_pool = None
+        self.text_query_pool = None
 
-        self.vision_head_geo = SparseRollingGeometricProduct(
-            channels=self.vision_channels,
-            shifts=v_head_shifts,
-            cli_mode=self.head_cli_mode,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="vision_head_geo",
-        )
-        self.text_head_geo = SparseRollingGeometricProduct(
-            channels=self.text_channels,
-            shifts=t_head_shifts,
-            cli_mode=self.head_cli_mode,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name="text_head_geo",
-        )
+        if self.head_kind != "plain":
+            v_head_shifts = _head_shifts_for(
+                self.vision_channels, self.head_shifts
+            )
+            t_head_shifts = _head_shifts_for(
+                self.text_channels, self.head_shifts
+            )
+            self.vision_head_geo = SparseRollingGeometricProduct(
+                channels=self.vision_channels,
+                shifts=v_head_shifts,
+                cli_mode=self.head_cli_mode,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name="vision_head_geo",
+            )
+            self.text_head_geo = SparseRollingGeometricProduct(
+                channels=self.text_channels,
+                shifts=t_head_shifts,
+                cli_mode=self.head_cli_mode,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                name="text_head_geo",
+            )
+
+        if self.head_kind in ("learned_query", "learned_query_residual"):
+            # One learnable (1, D) query per tower attending to the
+            # (B, N, D) feature sequence. Output: (B, D).
+            self.vision_query_pool = _LearnedQueryPool1D(
+                channels=self.vision_channels,
+                kernel_initializer=self.kernel_initializer,
+                name="vision_query_pool",
+            )
+            self.text_query_pool = _LearnedQueryPool1D(
+                channels=self.text_channels,
+                kernel_initializer=self.kernel_initializer,
+                name="text_query_pool",
+            )
+
+        # LayerScale gate for the residual Clifford head.
+        self.vision_head_scale = None
+        self.text_head_scale = None
+        if self.head_kind == "learned_query_residual":
+            self.vision_head_scale = _LayerScale1D(
+                channels=self.vision_channels,
+                init_value=1e-5,
+                name="vision_head_scale",
+            )
+            self.text_head_scale = _LayerScale1D(
+                channels=self.text_channels,
+                init_value=1e-5,
+                name="text_head_scale",
+            )
 
         self.vision_projection = keras.layers.Dense(
             self.embed_dim, name="vision_projection", **_dk
@@ -655,6 +836,7 @@ class CliffordCLIP(keras.Model):
             initializer=initializers.Constant(self.logit_scale_init),
             trainable=True,
         )
+
 
         # Trigger sub-layer builds via symbolic forward passes so every
         # nested weight is materialised before super().build() marks us
@@ -717,13 +899,23 @@ class CliffordCLIP(keras.Model):
         for block in self.vision_blocks:
             x = block(x, training=training)
 
-        # Two pooling views: mean (context/coherence) and max (detail/saliency).
-        z_det = self.vision_global_pool(x)      # (B, D_v)
-        z_ctx = self.vision_global_max_pool(x)  # (B, D_v)
+        # x: (B, H, W, D_v)
+        z_det = self.vision_global_pool(x)  # (B, D_v) — canonical CLIP anchor
 
-        # Clifford-aware head: the geometric product of the two pooled views
-        # contributes explicit bivector content to the embedding.
-        mixed = self.vision_head_geo(z_det, z_ctx)  # (B, D_v)
+        if self.head_kind == "plain":
+            mixed = z_det
+        else:
+            if self.head_kind == "mean_max":
+                z_ctx = self.vision_global_max_pool(x)  # (B, D_v)
+            else:  # learned_query or learned_query_residual
+                b, h, w, d = ops.shape(x)[0], ops.shape(x)[1], ops.shape(x)[2], ops.shape(x)[3]
+                seq = ops.reshape(x, (b, h * w, d))    # (B, H*W, D_v)
+                z_ctx = self.vision_query_pool(seq)    # (B, D_v)
+            geo = self.vision_head_geo(z_det, z_ctx)   # (B, D_v)
+            if self.head_kind == "learned_query_residual":
+                mixed = z_det + self.vision_head_scale(geo)
+            else:
+                mixed = geo
 
         mixed = self.vision_head_norm(mixed)
         mixed = self.vision_projection(mixed)
@@ -761,35 +953,47 @@ class CliffordCLIP(keras.Model):
         x = ops.squeeze(x, axis=1)             # (B, L, D_t)
         x = self.text_head_norm(x)
 
-        # Build a valid-token mask from the padding ids, then derive two
-        # pooled views:
-        #   z_det (mean): summary over all valid tokens (bidirectional-ish
-        #                 content summary for contrastive matching).
-        #   z_ctx (last): last non-pad token, the canonical CLIP text anchor.
-        # The geometric product of these two views gives the head explicit
-        # bivector content that neither pooled view carries on its own.
+        # Pad mask (1 = real token, 0 = pad).
         non_pad = ops.cast(
             ops.not_equal(input_ids, self.pad_token_id), x.dtype
         )                                       # (B, L)
-        lengths_f = ops.sum(non_pad, axis=1, keepdims=True)  # (B, 1)
-        lengths_f = ops.maximum(lengths_f, 1.0)
-        mask_exp = ops.expand_dims(non_pad, axis=-1)         # (B, L, 1)
-        z_det = ops.sum(x * mask_exp, axis=1) / lengths_f    # (B, D_t)
 
+        # Last-non-pad-token index (the canonical CLIP text anchor).
         non_pad_i = ops.cast(
             ops.not_equal(input_ids, self.pad_token_id), "int32"
         )
         lengths_i = ops.sum(non_pad_i, axis=1)
         last_idx = ops.clip(lengths_i - 1, 0, seq_len - 1)
         one_hot = ops.one_hot(last_idx, num_classes=seq_len, dtype=x.dtype)
-        z_ctx = ops.squeeze(
+        last_feat = ops.squeeze(
             ops.matmul(ops.expand_dims(one_hot, axis=1), x), axis=1
         )                                       # (B, D_t)
 
-        # Clifford-aware head: SparseRollingGeometricProduct on (z_det, z_ctx)
-        # produces a vector that contains both the inner-product coherence
-        # of the two views and their wedge-based structural disagreement.
-        mixed = self.text_head_geo(z_det, z_ctx)  # (B, D_t)
+        if self.head_kind == "plain":
+            mixed = last_feat  # canonical CLIP text anchor
+        else:
+            # For Clifford variants, z_det is the masked mean and the
+            # plain-equivalent anchor is last_feat (canonical CLIP). When
+            # residual, the anchor is last_feat and the Clifford product
+            # is layered on top.
+            lengths_f = ops.sum(non_pad, axis=1, keepdims=True)  # (B, 1)
+            lengths_f = ops.maximum(lengths_f, 1.0)
+            mask_exp = ops.expand_dims(non_pad, axis=-1)         # (B, L, 1)
+            z_det = ops.sum(x * mask_exp, axis=1) / lengths_f    # (B, D_t)
+
+            if self.head_kind == "mean_max":
+                # z_ctx = last non-pad token.
+                z_ctx = last_feat
+            else:  # learned_query or learned_query_residual
+                z_ctx = self.text_query_pool(x, mask=non_pad)    # (B, D_t)
+
+            geo = self.text_head_geo(z_det, z_ctx)               # (B, D_t)
+            if self.head_kind == "learned_query_residual":
+                # Start from canonical CLIP anchor and inject Clifford
+                # content as a LayerScale-gated residual.
+                mixed = last_feat + self.text_head_scale(geo)
+            else:
+                mixed = geo
 
         mixed = self.text_projection(mixed)
         if normalize:
@@ -908,6 +1112,7 @@ class CliffordCLIP(keras.Model):
                 "logit_scale_max": self.logit_scale_max,
                 "head_shifts": self.head_shifts,
                 "head_cli_mode": self.head_cli_mode,
+                "head_kind": self.head_kind,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(
                     self.kernel_initializer

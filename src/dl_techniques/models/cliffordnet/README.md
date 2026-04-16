@@ -123,7 +123,7 @@ Input (B, H, W, C) in [-1, 1]
 
 Dual-encoder CLIP-style contrastive model. Both towers are built from Clifford blocks, and the projection head itself is Clifford-aware so the contrastive loss sees explicit bivector (structural) content -- not just the scalar coherence term.
 
-### Architecture
+### Architecture (default `head_kind="learned_query_residual"`)
 
 ```
 Image (B, H, W, 3)                      Tokens (B, seq_len)
@@ -132,18 +132,22 @@ Image (B, H, W, 3)                      Tokens (B, seq_len)
 Conv2D patch stem + BN                  Token + Position Embedding
   |                                           |
   v                                           v
-L x CliffordNetBlock                    LayerNorm + Dropout
+L x CliffordNetBlock                    L x CausalCliffordNetBlock
   |                                           |
   v                                           v
-Two pooling views:                      Two pooling views:
-  z_mean = GAP(x)                         z_mean = masked-mean(x)
-  z_max  = GMP(x)                         z_last = last-non-pad-token(x)
+z_det   = GAP(x)               (B,D)    z_anchor = last-non-pad(x)   (B,D)
+z_ctx   = LearnedQueryPool(x)  (B,D)    z_det    = masked-mean(x)    (B,D)
+                                        z_ctx    = LearnedQueryPool(x,mask)
   |                                           |
   v                                           v
-SparseRollingGeometricProduct(z_det=mean, z_ctx=max/last)
+geo = SparseRollingGeometricProduct(z_det, z_ctx)       # wedge + inner
   |                                           |
   v                                           v
-LayerNorm --> Dense(embed_dim)          LayerNorm --> Dense(embed_dim)
+mixed = z_det   + gamma_v * geo         mixed = z_anchor + gamma_t * geo
+                   (init 1e-5)                             (init 1e-5)
+  |                                           |
+  v                                           v
+LayerNorm --> Dense(embed_dim)          Dense(embed_dim)
   |                                           |
   v                                           v
 L2 Normalize                            L2 Normalize
@@ -158,12 +162,15 @@ L2 Normalize                            L2 Normalize
 
 Plain CLIP pools the backbone output to a single vector and uses cosine similarity. Cosine captures only the *scalar* (coherence) term of the geometric product. The *bivector* (structural) term, which is half of the algebraic signal the Clifford blocks compute, is thrown away.
 
-The Clifford projection head computes **two distinct pooled views** per tower (mean vs. max for vision; masked-mean vs. last-non-pad-token for text) and runs them through a `SparseRollingGeometricProduct`. The wedge components of that product encode *how the two views disagree structurally* -- exactly the information that two different pooling operators would throw away individually. Those components are mixed into the final projected embedding, so contrastive gradients now flow through both the inner and the wedge paths of the algebra.
+The default Clifford projection head (`head_kind="learned_query_residual"`) runs the canonical CLIP anchor (GAP for vision, last-non-pad-token for text) through a LayerScale-gated residual path that adds a Clifford geometric product of (anchor, learned-query-pool) on top. LayerScale γ initialises to 1e-5, so the head starts out behaving like plain CLIP and only introduces wedge/inner content where it measurably helps — mirroring the GGR pattern used inside the Clifford backbone itself.
 
-This preserves:
-- O(|S| * D) parameter cost (no O(D^2) full bivector tensor),
+Three other head variants are kept for A/B comparisons (`plain`, `mean_max`, `learned_query`, plus `learned_query_residual` with `cli_mode=wedge`). See `src/train/cliffordnet/README.md` for the full sweep table on CC3M-smoke at 12,500 steps; the residual variant is the empirical winner.
+
+This design preserves:
+- O(|S| · D) parameter cost (no O(D²) full bivector tensor),
 - The existing `SparseRollingGeometricProduct` primitive (no new math),
-- Standard cosine-similarity contrastive loss (no loss changes).
+- Standard cosine-similarity contrastive loss (no loss changes),
+- Backwards compatibility with plain-CLIP behaviour at initialisation.
 
 ### Variants
 

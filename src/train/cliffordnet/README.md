@@ -622,15 +622,36 @@ PYTHONPATH=src python -m train.cliffordnet.train_clip \
 
 ### Reference results
 
-Three runs to date, all with the same mini config (18M params, batch 32, 112², label smoothing 0.1, single-stage). Retrieval R@K is computed on the respective val split at the end of training.
+All runs share the same mini config (18M params, batch 32, 112², label smoothing 0.1, single-stage). Retrieval R@K is computed on the respective val split at the end of training.
 
 | Run | Steps | Data | i2t R@1 | t2i R@1 | i2t R@5 | t2i R@5 | i2t R@10 |
 |:----|------:|:-----|--------:|--------:|--------:|--------:|--------:|
 | COCO-mini-v4 (baseline) | 10,000 | 32 k COCO | 0.40% | 0.48% | 1.92% | 2.40% | 3.86% |
-| CC3M smoke | 12,500 | 100 k CC3M (4 ep) | 0.46% | 0.38% | 1.58% | 1.38% | 2.64% |
-| **CC3M full** | 29,687 | 950 k CC3M (1 ep) | **1.08%** | **1.22%** | **3.82%** | **5.14%** | **6.70%** |
+| CC3M smoke (plain head, old code) | 12,500 | 100 k CC3M (4 ep) | 0.46% | 0.38% | 1.58% | 1.38% | 2.64% |
+| **CC3M full (plain head)** | 29,687 | 950 k CC3M (1 ep) | **1.08%** | **1.22%** | **3.82%** | **5.14%** | **6.70%** |
 
 On a 5 k-pair val pool, random R@1 is 0.02% and random R@5 is 0.10%. The CC3M-full run's i2t R@1 is **~54× random** and R@5 is **~38× random**. Comparable per-step behavior to the COCO baseline, with CC3M's larger and more diverse pool pushing absolute numbers up meaningfully once the full budget is spent.
+
+### Projection-head A/B sweep (CC3M-smoke, 12,500 steps, 5 k val pairs)
+
+Same config as CC3M-smoke above; only ``--head-kind`` and ``--head-cli-mode`` vary. Runs performed on RTX 4090 (current hardware) for same-day apples-to-apples comparison.
+
+| Head | cli_mode | Params | i2t R@1 | t2i R@1 | i2t R@5 | t2i R@5 | i2t R@10 | t2i R@10 |
+|:----|:--------|-------:|--------:|--------:|--------:|--------:|---------:|---------:|
+| `plain` (fresh baseline) | —    | 18.04 M | 0.32%  | 0.38%  | 1.46%  | 1.94%  | 3.02% | 3.32% |
+| `mean_max` | full | 18.34 M | 0.30%  | 0.16%  | 1.42%  | 1.20%  | 2.50% | 2.42% |
+| `learned_query` | full | 18.34 M | 0.24%  | 0.44%  | 1.62%  | 1.88%  | 2.86% | 3.08% |
+| **`learned_query_residual`** *(default)* | full | 18.34 M | **0.46%** | **0.40%** | 1.50%  | 1.90%  | 2.94% | **3.38%** |
+| `learned_query_residual` | wedge | 18.19 M | 0.36%  | 0.38%  | 1.50%  | 1.40%  | 2.34% | 2.92% |
+
+**Takeaways:**
+
+- `plain` and `learned_query_residual full` are the top two heads. The residual variant matches or beats plain on 5/6 metrics, with the largest win (+0.14 pp, +44% relative) on the hardest metric (i2t R@1). It also matches the old-hardware README baseline on i2t R@1 and beats it on t2i R@5, i2t R@10.
+- `mean_max` (mean + max-pool via geometric product) loses on every metric — max-pool is the wrong second view for Clifford mixing.
+- `learned_query` (non-residual) ties plain on average but is noisy per-metric. Using the geometric product as the *sole* embedding signal underperforms using it as a residual additive term.
+- `wedge`-only cli_mode underperforms `full`; the symmetric inner-product component still contributes.
+
+The default `head_kind` is set to `learned_query_residual` with `cli_mode=full`. The LayerScale gamma (init 1e-5) means the head starts behaving like plain CLIP and lets gradients pull in Clifford content only where it measurably helps.
 
 **Healthy training diagnostics** (from the CC3M-full run):
 

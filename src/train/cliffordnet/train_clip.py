@@ -824,6 +824,8 @@ def train(args: argparse.Namespace) -> None:
         vision_patch_size=args.vision_patch_size,
         dropout_rate=args.dropout_rate,
         pad_token_id=eot_token_id,
+        head_kind=args.head_kind,
+        head_cli_mode=args.head_cli_mode,
     )
     # Build at the final resolution so shape checks pass at stage 2 even
     # when we pass stage 1 data through first. Clifford blocks are
@@ -1067,6 +1069,36 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vision-patch-size", type=int, default=4)
     parser.add_argument("--context-length", type=int, default=64)
     parser.add_argument("--dropout-rate", type=float, default=0.1)
+    parser.add_argument(
+        "--head-kind",
+        type=str,
+        default="learned_query_residual",
+        choices=[
+            "plain", "mean_max", "learned_query", "learned_query_residual",
+        ],
+        help=(
+            "Projection head variant. 'plain' = single-view GAP/last-token "
+            "+ Dense (baseline). 'mean_max' = Clifford-aware head combining "
+            "GAP/GMP (vision) and masked-mean/last-token (text) through "
+            "SparseRollingGeometricProduct. 'learned_query' = Clifford-aware "
+            "head where the second pooling view is a learnable attention "
+            "pool. 'learned_query_residual' = plain-CLIP anchor plus a "
+            "LayerScale-gated Clifford geometric product of (mean, "
+            "attn-pool) as a residual. Defaults to 'learned_query_residual'."
+        ),
+    )
+    parser.add_argument(
+        "--head-cli-mode",
+        type=str,
+        default="full",
+        choices=["inner", "wedge", "full"],
+        help=(
+            "Clifford components used in the Clifford-aware projection head. "
+            "'full' uses both the symmetric (inner) and antisymmetric (wedge) "
+            "terms; 'wedge' uses only the bivector (structural) term; 'inner' "
+            "uses only the scalar (coherence) term. Defaults to 'full'."
+        ),
+    )
     parser.add_argument(
         "--tokenizer-encoding", type=str, default="gpt2",
         help=(
