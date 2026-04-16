@@ -1,5 +1,9 @@
 from .model import CliffordNet
 from .lm import CliffordNetLM
-from .field_net import CliffordFieldNet
+from .clip import CliffordCLIP
 
-__all__ = ["CliffordNet", "CliffordNetLM", "CliffordFieldNet"]
+__all__ = [
+    "CliffordNet",
+    "CliffordNetLM",
+    "CliffordCLIP",
+]

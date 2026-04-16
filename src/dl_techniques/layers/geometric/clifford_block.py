@@ -33,6 +33,7 @@ import keras
 from keras import initializers, regularizers
 
 from ..stochastic_depth import StochasticDepth
+from ...utils.logger import logger
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -138,6 +139,13 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
             raise ValueError(
                 f"All provided shifts {shifts} are >= channels ({channels}). "
                 "No valid shifts remain after filtering."
+            )
+        _dropped = [s for s in shifts if s >= channels]
+        if _dropped:
+            logger.warning(
+                "SparseRollingGeometricProduct dropping shifts %s "
+                "(>= channels=%d); kept shifts=%s",
+                _dropped, channels, self.shifts,
             )
         self.cli_mode = cli_mode
         self.use_bias = use_bias
@@ -450,6 +458,14 @@ class CliffordNetBlock(keras.layers.Layer):
     a sparse rolling geometric product, are combined through a Gated Geometric
     Residual (GGR) update, and added back as a residual. An optional global
     branch uses GAP-based context with hardcoded shifts=[1,2] and cli_mode='full'.
+
+    .. note::
+
+        When ``use_global_context=True``, the global branch uses fixed
+        ``shifts=[1, 2]``, ``cli_mode='full'``, and differential context
+        regardless of the caller's ``shifts`` / ``cli_mode`` / ``ctx_mode``
+        settings. The global branch is a compact whole-image summary and
+        deliberately decouples its hyperparameters from the local branch.
 
     **Architecture Overview:**
 

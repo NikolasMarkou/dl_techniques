@@ -15,6 +15,7 @@ All models share the same algebraic core (`SparseRollingGeometricProduct` + `Gat
 3. [NLP Pre-training](#3-nlp-pre-training)
 4. [Image Denoising](#4-image-denoising)
 5. [Power Sampling Inference](#5-power-sampling-inference)
+6. [CLIP Contrastive Pretraining](#6-clip-contrastive-pretraining)
 
 ---
 
@@ -26,6 +27,8 @@ All models share the same algebraic core (`SparseRollingGeometricProduct` + `Gat
 | `train_cliffordnet_nlp.py` | `CliffordNetLM` | NLP | Causal language model pre-training on Wikipedia |
 | `train_denoiser.py` | `CliffordNetDenoiser` | Vision | Bias-free image denoiser (Miyasawa's theorem) |
 | `infer_cliffordnet_nlp.py` | `CliffordNetLM` | NLP | Inference with standard and power sampling |
+| `train_clip.py` | `CliffordCLIP` | Vision-Language | CLIP-style dual encoder (both towers Clifford) |
+| `prepare_cc3m.py` | -- | Data prep | Resumable CC3M extractor from HF Hub tar shards |
 
 ### Shared design
 
@@ -457,3 +460,215 @@ for method in ["standard", "power", "max_swap"]:
 1. Karan, A. & Du, Y. (2025). **Reasoning with Sampling: Your Base Model is Smarter Than You Think**. arXiv:2510.14901. [Paper](https://arxiv.org/abs/2510.14901) | [Code](https://github.com/aakaran/reasoning-with-sampling)
 2. Bou Ammar, H. et al. (2026). **Scalable Power Sampling for LLM Reasoning**. arXiv:2601.21590. [Paper](https://arxiv.org/abs/2601.21590)
 3. Brandstetter, J. et al. (2025). **CliffordNet: All You Need is Geometric Algebra**. arXiv:2601.06793v2.
+
+---
+
+## 6. CLIP Contrastive Pretraining
+
+**Script**: `train_clip.py`
+**Model**: `CliffordCLIP` (`dl_techniques/models/cliffordnet/clip.py`)
+**Data prep**: `prepare_cc3m.py`
+**Reference**: Radford, A. et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision* (CLIP). arXiv:2103.00020.
+
+A CLIP-style dual encoder where **both towers are built from Clifford blocks** -- no attention anywhere in either the vision or the text path. The vision tower uses bidirectional `CliffordNetBlock`s over 2-D feature maps; the text tower uses `CausalCliffordNetBlock`s over a `(B, 1, seq_len, D)` layout so left-only depthwise context enforces autoregressive compatibility at the feature-extraction stage.
+
+### Architecture
+
+```
+Image (B, H, W, 3)                           Tokens (B, L)
+     |                                            |
+  Conv2D patch stem + BN                    Token emb + positional emb + LN
+     |                                            |
+  L x CliffordNetBlock                      expand to (B, 1, L, D)
+  (bidirectional 2-D DWConv context)              |
+     |                                      L x CausalCliffordNetBlock
+  GlobalAvgPool                             (left-padded DWConv context)
+     |                                            |
+  LayerNorm                                 squeeze to (B, L, D)
+     |                                            |
+  Dense(embed_dim)                          gather last token --> Dense(embed_dim)
+     |                                            |
+  L2-normalize                              L2-normalize
+            \                            /
+             cosine similarity @ exp(logit_scale)
+                        |
+             Symmetric InfoNCE loss
+             (label-smoothed, both directions)
+```
+
+### Variants
+
+| Variant | Vision channels | Vision depth | Text channels | Text depth | Embed dim | Params |
+|:--------|:---------------:|:------------:|:-------------:|:----------:|:---------:|:------:|
+| `nano` | 96 | 8 | 128 | 6 | 256 | ~8.5M |
+| `mini` | 128 | 10 | 192 | 8 | 384 | ~18M |
+| `base` | 192 | 12 | 256 | 10 | 512 | ~45M |
+| `large` | 256 | 16 | 384 | 12 | 768 | ~120M |
+
+### Tokenizer
+
+Uses `tiktoken` with the GPT-2 BPE encoding (50,257 tokens, English-trained). The encoder's native `eot_token` (ID 50256) doubles as both end-of-sequence and the pad sentinel. This avoids collisions with real caption tokens and matches the CLIP convention -- no extra special tokens are added.
+
+### Datasets
+
+| Dataset | Pairs | Loader | Layout |
+|:--------|:------|:-------|:-------|
+| Synthetic | any | `build_synthetic_image_text_dataset` | in-memory random tensors (smoke tests) |
+| MS-COCO 2017 | ~118 k | `load_coco2017_local_split` | `train2017/*.jpg`, `annotations/captions_*.json` |
+| CC3M | ~2.9 M | `load_cc3m_local_split` | extracted by `prepare_cc3m.py` (see below) |
+
+All loaders return a `(list[str], np.ndarray int32[N, L])` tuple -- image paths plus right-padded token IDs -- so the training script dispatches between datasets via a single `--dataset` flag. See `train.common.image_text` for the shared surface.
+
+### CC3M extractor: `prepare_cc3m.py`
+
+Streams `pixparse/cc3m-wds` tar shards from the Hugging Face Hub directly via `huggingface_hub` + stdlib `tarfile`. The `datasets.load_dataset` path is deliberately avoided because `pixparse/cc3m-wds`'s JSON sidecar column fails HF's feature-schema cast.
+
+Usage:
+
+```bash
+PYTHONPATH=src python -m train.cliffordnet.prepare_cc3m \
+    --dst /path/to/cc3m \
+    --splits validation train \
+    --progress-every 10000
+```
+
+Output layout (matching `load_cc3m_local_split`):
+
+```
+<dst>/
+  train/XX/cc3m_train_NNNNNNNN.jpg          # 256-way hash-shard
+  validation/XX/cc3m_validation_NNNNNNNN.jpg
+  train_captions.jsonl                       # one {id, caption, split} per line
+  validation_captions.jsonl
+  _prepare_cc3m_state.json                   # completed tar shard list
+```
+
+**Resumable**: two layers of safety. The state file records completed tar shards so re-running skips them. Individual JPEGs are additionally skipped if the target path already exists, so even a re-processed tar produces no duplicates. Network errors are caught per-shard and reported in the log (`errors=N`) without aborting the run -- re-run the same command to pick up any partially-failed shards.
+
+**Observed throughput**: ~120 pairs/sec on a typical home uplink. Full 2.9M extraction takes ~7 hours end-to-end, yielding ~230 GiB on disk.
+
+### Training script: `train_clip.py`
+
+Usage:
+
+```bash
+# Smoke run: 100k CC3M subset, ~12.5k steps, ~1h on RTX 4070
+PYTHONPATH=src python -m train.cliffordnet.train_clip \
+    --variant mini --dataset cc3m \
+    --batch-size 32 --context-length 64 \
+    --stage1-image-size 112 --stage1-epochs 4 --stage1-lr 5e-4 \
+    --stage2-epochs 0 \
+    --warmup-ratio 0.03 --weight-decay 0.1 --dropout-rate 0.1 \
+    --label-smoothing 0.1 \
+    --max-train-samples 100000 --max-val-samples 5000 \
+    --save-every-steps 500 --log-every-steps 50 \
+    --probe-every-steps 500 --probe-num-pairs 512 \
+    --max-checkpoints 3 --gpu 1
+
+# Full run: 950k CC3M, ~30k steps, ~5h on RTX 4090
+PYTHONPATH=src python -m train.cliffordnet.train_clip \
+    --variant mini --dataset cc3m \
+    --batch-size 32 --context-length 64 \
+    --stage1-image-size 112 --stage1-epochs 1 --stage1-lr 5e-4 \
+    --stage2-epochs 0 \
+    --warmup-ratio 0.03 --weight-decay 0.1 --dropout-rate 0.1 \
+    --label-smoothing 0.1 \
+    --max-train-samples 950000 --max-val-samples 5000 \
+    --save-every-steps 2000 --log-every-steps 100 \
+    --probe-every-steps 2000 --probe-num-pairs 512 \
+    --max-checkpoints 3 --gpu 0
+```
+
+### Training protocol
+
+| Setting | Value |
+|:--------|:------|
+| Optimizer | AdamW, `logit_scale` **excluded** from weight decay |
+| LR schedule | Cosine decay with linear warmup (3% of steps) |
+| Default LR | 5e-4 |
+| Weight decay | 0.1 |
+| Label smoothing | 0.1 |
+| Loss | `CLIPContrastiveLoss` (symmetric InfoNCE), `apply_temperature=False` |
+| Temperature | Learnable `logit_scale`, init 2.6592 (=> `exp(...) = 14.3`), capped at 100 |
+| Augmentation | Random crop + horizontal flip + OpenAI/CLIP normalization |
+| Image normalization | `[0.4814, 0.4578, 0.4082]` mean / `[0.2686, 0.2613, 0.2758]` std |
+
+### Key parameters
+
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| `--variant` | `mini` | Model variant (`nano`, `mini`, `base`, `large`) |
+| `--dataset` | `synthetic` | `synthetic`, `coco`, `cc3m` |
+| `--batch-size` | 32 | Proven to fit mini on 12 GB VRAM at 112² |
+| `--context-length` | 64 | Text sequence length |
+| `--stage1-image-size` | 112 | Training resolution (single-stage proven) |
+| `--stage1-epochs` | 10 | Stage-1 epochs |
+| `--stage2-epochs` | 0 | Stage-2 (higher resolution) -- set 0 for single-stage |
+| `--stage1-lr` | 5e-4 | Peak LR |
+| `--warmup-ratio` | 0.03 | Linear warmup fraction |
+| `--label-smoothing` | 0.1 | Contrastive loss label smoothing |
+| `--save-every-steps` | 2000 | Checkpoint cadence |
+| `--probe-every-steps` | 2000 | Retrieval probe cadence |
+| `--probe-num-pairs` | 512 | Probe-set size (quick signal, not full val) |
+| `--max-checkpoints` | 3 | Rolling checkpoint window |
+| `--max-train-samples` | `None` | Optional cap for budget-constrained runs |
+
+### Features
+
+- **Step-based checkpointing** (not per-epoch) -- CC3M epochs are long, a rolling `step_NNNNNNN.keras` window + `final.keras` gives fine-grained recovery
+- **Retrieval probes every N steps**: R@1/R@5/R@10 on a small held-out slice (512 pairs by default), appended to `retrieval_probes/probes.jsonl` -- curve diagnostics without burning minutes on full 5k-pair eval
+- **Early GPU binding**: parses `--gpu` from `sys.argv` **before** `import tensorflow` so `CUDA_VISIBLE_DEVICES` is set before TF claims all visible devices -- the "GPU setup error" logged late is benign and does not indicate a real failure
+- **`logit_scale` excluded from weight decay** via `optimizer.exclude_from_weight_decay(var_names=["logit_scale"])` -- without this AdamW decays the learnable temperature toward zero and kills the contrastive signal. Verify the startup log line `Excluded 'logit_scale' from AdamW weight decay.` on every run
+
+### Reference results
+
+Three runs to date, all with the same mini config (18M params, batch 32, 112², label smoothing 0.1, single-stage). Retrieval R@K is computed on the respective val split at the end of training.
+
+| Run | Steps | Data | i2t R@1 | t2i R@1 | i2t R@5 | t2i R@5 | i2t R@10 |
+|:----|------:|:-----|--------:|--------:|--------:|--------:|--------:|
+| COCO-mini-v4 (baseline) | 10,000 | 32 k COCO | 0.40% | 0.48% | 1.92% | 2.40% | 3.86% |
+| CC3M smoke | 12,500 | 100 k CC3M (4 ep) | 0.46% | 0.38% | 1.58% | 1.38% | 2.64% |
+| **CC3M full** | 29,687 | 950 k CC3M (1 ep) | **1.08%** | **1.22%** | **3.82%** | **5.14%** | **6.70%** |
+
+On a 5 k-pair val pool, random R@1 is 0.02% and random R@5 is 0.10%. The CC3M-full run's i2t R@1 is **~54× random** and R@5 is **~38× random**. Comparable per-step behavior to the COCO baseline, with CC3M's larger and more diverse pool pushing absolute numbers up meaningfully once the full budget is spent.
+
+**Healthy training diagnostics** (from the CC3M-full run):
+
+- Loss crossed `log(batch_size) = log(32) ≈ 3.47` by step 1,000 (3.4% of budget)
+- Loss descended monotonically from 3.48 to ~2.0 by step 12,000, then plateaued
+- `logit_scale` (= `exp(variable)`) bottomed at ~9.62 around step 18-20 k, then climbed back to ~9.77 by the end -- the canonical CLIP **bottom-and-climb-back** signal indicating the model has crossed from "random discrimination" to "better-than-random discrimination" (see note below)
+- Probe R@5 monotonically increased from 1.0% to 17% over the run
+
+**Note on `logit_scale` dynamics**: the gradient of the symmetric InfoNCE loss w.r.t. `logit_scale` is proportional to `(positive-pair similarity) - (mean similarity over all pairs)`. Early in training, random embeddings put this near zero or negative -- the optimizer softens the temperature to minimize loss without learning discriminative features. Once embeddings actually separate positives from negatives, the gradient flips sign and the optimizer sharpens the temperature to exploit the newfound discrimination. A `logit_scale` that falls monotonically forever is a smoking gun that the model is not learning useful structure -- it's just going maximally uncertain. The bottom-and-climb-back pattern is therefore a training-time diagnostic, not an outcome.
+
+### Operational lessons
+
+Paid for these in real training incidents -- documented here so future runs avoid them:
+
+1. **XLA fragmentation at stage transitions**. When a curriculum increases resolution (e.g. 112² -> 128²), stage-1's compiled kernels stay resident while stage-2 compiles its own, spiking VRAM during the transition window. This OOM'd three times on a 12 GB card between 160² / 128² / 112². **Fix**: set `--stage2-epochs 0` for single-stage training on 12 GB cards. The curriculum is nice-to-have, not load-bearing. The save-model -> `clear_session()` -> load-model trick would work for a true curriculum but is a non-trivial refactor.
+
+2. **`logit_scale` in weight decay is a silent killer**. AdamW's decoupled weight decay will quietly drive the learnable temperature to zero, flattening the softmax and killing the contrastive signal regardless of how good the embeddings are. Verify the startup log line on every run.
+
+3. **`.cache()` on the dataset is a RAM bomb at scale**. The default `cache_decoded=False` streams from disk. Enable `--cache-decoded` only for subsets under ~200 k samples (roughly 10-40 GB post-decode cache).
+
+4. **I/O, not compute, bounds CC3M training**. At 32 random JPEG reads per step from a SATA-class disk with a dataset that doesn't fit in page cache, both RTX 4070 (12 GB) and RTX 4090 (24 GB) bottom out at ~540 ms/step with 30-40% GPU utilization. The 4090's extra FLOPs are unreachable through this pipeline. For repeat training runs on the same dataset, the high-throughput path is to convert JPEGs to TFRecord shards (see `train.common.tfrecord`) -- sequential reads from ~256 MiB shards typically recover 3-5× speedup. One-shot runs can live with the I/O cost.
+
+### Serialization
+
+`CliffordCLIP` has full `get_config` / `from_config` / `from_variant` round-trip serialization and is exported from `dl_techniques.models.cliffordnet`. The training script additionally writes:
+
+```
+results/cliffordclip_<variant>_<timestamp>/
+  checkpoints/step_NNNNNNN.keras      # rolling window + final.keras
+  retrieval_probes/probes.jsonl        # one line per probe
+  tensorboard/<stage>/{train,validation}/
+  training_log.csv                     # step-level loss, lr, logit_scale
+  cliffordclip_<variant>.keras         # final model at run root
+  training_summary.txt                 # final val R@K + hyperparameters
+```
+
+### Related utility: `train.common.tfrecord`
+
+Generic TFRecord I/O for converting path-addressable datasets (per-sample JPEGs + metadata) to sharded TFRecord files. Not specific to CLIP -- any image-text or image-label dataset can use it. Pre-baked schemas (`IMAGE_TEXT_SCHEMA`, `IMAGE_LABEL_SCHEMA`), example builders, auto-sharded writer with sidecar manifest, and a companion `make_image_text_tf_dataset_from_tfrecord` that returns the same `{"image", "text"}` batches as the path-streaming loader so training code does not need to change to consume the faster format.
+
+Use case: once a dataset exceeds page-cache size (roughly, raw bytes > available RAM), the random-access JPEG streaming pipeline becomes I/O bound and GPU utilization collapses. TFRecord shards convert that scatter-read into a small number of sequential reads per step.

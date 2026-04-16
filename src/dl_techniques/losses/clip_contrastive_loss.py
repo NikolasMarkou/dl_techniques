@@ -600,9 +600,14 @@ class CLIPContrastiveLoss(keras.losses.Loss):
             1. Both tensors must be 2D (rank 2)
             2. Both tensors must have identical shapes
             3. Warning if not square (batch_size × batch_size)
+
+        The checks use ``.shape`` (a static ``TensorShape``) rather than
+        ``ops.shape`` (a dynamic tensor) so this validation is safe to run
+        inside ``@tf.function``-traced contexts such as ``train_step``.
+        Dimensions that are unknown at trace time are treated as a pass.
         """
-        img_shape = ops.shape(logits_per_image)
-        txt_shape = ops.shape(logits_per_text)
+        img_shape = logits_per_image.shape
+        txt_shape = logits_per_text.shape
 
         # Check tensor rank (must be 2D matrices)
         if len(img_shape) != 2 or len(txt_shape) != 2:
@@ -612,8 +617,14 @@ class CLIPContrastiveLoss(keras.losses.Loss):
                 "Expected shape: [batch_size, batch_size] for both."
             )
 
-        # Check shape compatibility (must be identical)
-        if img_shape != txt_shape:
+        # Check shape compatibility (must be identical on known dims). Any
+        # dimension that is None at trace time is treated as compatible;
+        # the actual runtime match is enforced implicitly by matmul inside
+        # the contrastive loss computation.
+        def _dims_compatible(a, b) -> bool:
+            return a is None or b is None or int(a) == int(b)
+
+        if not all(_dims_compatible(a, b) for a, b in zip(img_shape, txt_shape)):
             raise ValueError(
                 f"Logit matrix shapes must be identical. "
                 f"Got logits_per_image.shape={img_shape} and "
@@ -621,8 +632,16 @@ class CLIPContrastiveLoss(keras.losses.Loss):
                 "Both should be [batch_size, batch_size]."
             )
 
-        # Check if matrices are square (expected for standard CLIP)
-        if img_shape[0] != img_shape[1] or txt_shape[0] != txt_shape[1]:
+        # Check if matrices are square (expected for standard CLIP). Skip
+        # the warning when any dimension is unknown.
+        def _known_non_square(shape) -> bool:
+            return (
+                shape[0] is not None
+                and shape[1] is not None
+                and int(shape[0]) != int(shape[1])
+            )
+
+        if _known_non_square(img_shape) or _known_non_square(txt_shape):
             logger.warning(
                 f"Logit matrices are not square. This is unusual for standard CLIP "
                 f"contrastive loss. Shapes: logits_per_image={img_shape}, "
