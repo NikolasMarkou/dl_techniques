@@ -1064,7 +1064,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # Model
     parser.add_argument(
         "--variant", type=str, default="nano",
-        choices=["nano", "mini", "base", "large"],
+        choices=["nano", "mini", "small", "base", "large"],
     )
     parser.add_argument("--vision-patch-size", type=int, default=4)
     parser.add_argument("--context-length", type=int, default=64)

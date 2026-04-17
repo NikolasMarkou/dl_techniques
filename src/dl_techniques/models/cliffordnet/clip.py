@@ -382,6 +382,17 @@ class CliffordCLIP(keras.Model):
             vision_stochastic_depth_rate=0.1,
             text_stochastic_depth_rate=0.1,
         ),
+        "small": dict(
+            vision_channels=192,
+            vision_depth=15,
+            vision_shifts=[1, 2, 4],
+            text_channels=192,
+            text_depth=15,
+            text_shifts=[1, 2, 4],
+            embed_dim=384,
+            vision_stochastic_depth_rate=0.1,
+            text_stochastic_depth_rate=0.1,
+        ),
         "base": dict(
             vision_channels=256,
             vision_depth=16,
@@ -1152,7 +1163,7 @@ class CliffordCLIP(keras.Model):
     ) -> "CliffordCLIP":
         """Construct a CliffordCLIP from a predefined variant.
 
-        :param variant: One of ``"nano"``, ``"mini"``, ``"base"``, ``"large"``.
+        :param variant: One of ``"nano"``, ``"mini"``, ``"small"``, ``"base"``, ``"large"``.
         :param vocab_size: Vocabulary size (use the tokenizer's
             ``vocab_size``).
         :param image_size: Image resolution.
