@@ -88,7 +88,7 @@ class TrainingConfig:
     cli_mode: str = "full"
     ctx_mode: str = "diff"
     use_global_context: bool = False
-    dropout_rate: float = 0.0
+    dropout_rate: float = 0.1
     stochastic_depth_rate: float = 0.1
 
     # Tokenizer (Tiktoken gpt2 encoding -- 50,257 base + 4 special)

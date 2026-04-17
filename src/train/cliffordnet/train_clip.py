@@ -1014,7 +1014,7 @@ def train(args: argparse.Namespace) -> None:
     # --- Retrieval eval on val split at final resolution ---
     logger.info("Computing retrieval recall@K on val split...")
     val_ds_final = make_image_text_tf_dataset(
-        val_images if not args.synthetic else val_images,
+        val_images,
         val_tokens,
         image_size=args.stage2_image_size,
         batch_size=args.batch_size,

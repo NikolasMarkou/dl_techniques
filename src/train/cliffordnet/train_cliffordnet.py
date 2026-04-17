@@ -8,6 +8,7 @@ and random erasing.
 """
 
 import os
+import json
 import math
 import numpy as np
 import tensorflow as tf
@@ -502,6 +503,37 @@ def train_model(args) -> None:
         callbacks=callbacks,
         verbose=1,
     )
+
+    # ---- Save config and training history -----------------------------
+    try:
+        config_dict = {
+            "dataset": args.dataset, "variant": args.variant,
+            "epochs": args.epochs, "batch_size": args.batch_size,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "stochastic_depth_rate": args.stochastic_depth_rate,
+            "dropout_rate": args.dropout_rate,
+            "cli_mode": args.cli_mode, "ctx_mode": args.ctx_mode,
+            "use_global_context": args.use_global_context,
+            "warmup_epochs": args.warmup_epochs,
+            "random_erasing_prob": args.random_erasing_prob,
+            "input_shape": list(input_shape),
+            "num_classes": num_classes,
+        }
+        with open(os.path.join(results_dir, "config.json"), "w") as f:
+            json.dump(config_dict, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save config: {e}")
+
+    try:
+        history_dict = {
+            k: [float(v) for v in vals]
+            for k, vals in history.history.items()
+        }
+        with open(os.path.join(results_dir, "training_history.json"), "w") as f:
+            json.dump(history_dict, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save training history: {e}")
 
     # ---- Save final model & validate ---------------------------------
     test_sample = x_test[:4]

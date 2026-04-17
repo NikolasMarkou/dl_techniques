@@ -175,8 +175,18 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         :param input_shape: Shape of a *single* input tensor ``(B, H, W, D)``.
         :type input_shape: Tuple
         """
+        self._input_shape_for_build = input_shape
         self.proj.build((*input_shape[:-1], self._proj_input_dim))
         super().build(input_shape)
+
+    def get_build_config(self) -> Dict[str, Any]:
+        if hasattr(self, "_input_shape_for_build"):
+            return {"input_shape": self._input_shape_for_build}
+        return {}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        if "input_shape" in config:
+            self.build(config["input_shape"])
 
     # ------------------------------------------------------------------
     def call(

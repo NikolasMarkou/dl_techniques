@@ -55,6 +55,7 @@ from typing import Tuple, List, Optional, Dict, Any
 
 from train.common import (
     setup_gpu,
+    create_callbacks as create_common_callbacks,
     generate_training_curves,
     load_dataset,
 )
@@ -640,51 +641,22 @@ class StreamingResultMonitor(keras.callbacks.Callback):
 
 def create_callbacks(
     config: ConditionalTrainingConfig,
-    results_dir: str,
 ) -> List[keras.callbacks.Callback]:
-    """Create training callbacks.
-
-    Uses a single ``results_dir`` for all callbacks so that checkpoints,
-    metrics, and visualization plots land in the same directory.
-    """
-    results_path = Path(results_dir)
-    results_path.mkdir(parents=True, exist_ok=True)
-
-    mode = "max" if "accuracy" in "val_loss" else "min"
-    callbacks: List[keras.callbacks.Callback] = []
-
-    # Early stopping
-    callbacks.append(keras.callbacks.EarlyStopping(
+    """Create training callbacks: common utilities + domain-specific."""
+    common_callbacks, _ = create_common_callbacks(
+        model_name=config.experiment_name,
+        results_dir_prefix="cliffordnet_cond_denoiser",
         monitor="val_loss",
         patience=config.early_stopping_patience,
-        restore_best_weights=True,
-        verbose=1,
-    ))
+        use_lr_schedule=True,
+        include_tensorboard=True,
+        include_analyzer=False,
+    )
 
-    # Model checkpoint
-    callbacks.append(keras.callbacks.ModelCheckpoint(
-        filepath=str(results_path / "best_model.keras"),
-        monitor="val_loss",
-        save_best_only=True,
-        verbose=1,
-    ))
+    common_callbacks.append(ConditionalMetricsVisualizationCallback(config))
+    common_callbacks.append(StreamingResultMonitor(config))
 
-    # CSV logger
-    callbacks.append(keras.callbacks.CSVLogger(
-        str(results_path / "training_log.csv"),
-    ))
-
-    # TensorBoard
-    callbacks.append(keras.callbacks.TensorBoard(
-        log_dir=str(results_path / "tensorboard"),
-        histogram_freq=0,
-    ))
-
-    # Domain-specific callbacks
-    callbacks.append(ConditionalMetricsVisualizationCallback(config))
-    callbacks.append(StreamingResultMonitor(config))
-
-    return callbacks
+    return common_callbacks
 
 
 # ---------------------------------------------------------------------
@@ -890,7 +862,7 @@ def train_conditional_denoiser(
     _verify_bias_free(model)
 
     # Train
-    callbacks = create_callbacks(config, str(output_dir))
+    callbacks = create_callbacks(config)
     start_time = time.time()
     validation_steps = config.validation_steps or max(
         50, steps_per_epoch // 20
@@ -919,6 +891,29 @@ def train_conditional_denoiser(
             json.dump(history_dict, f, indent=2)
     except Exception as e:
         logger.warning(f"Failed to save training history: {e}")
+
+    # Write training summary
+    try:
+        trained_epochs = len(history.history.get("loss", []))
+        best_loss = min(history.history.get("val_loss", [float("nan")]))
+        best_psnr = max(history.history.get("val_psnr_metric", [float("nan")]))
+        summary_path = output_dir / "training_summary.txt"
+        with open(summary_path, "w") as f:
+            f.write("CliffordNet Conditional Denoiser Training Summary\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Conditioning mode : {config.conditioning_mode}\n")
+            f.write(f"Model variant     : {config.model_variant}\n")
+            f.write(f"Parameters        : {model.count_params():,}\n")
+            f.write(f"Epochs trained    : {trained_epochs}\n")
+            f.write(f"Best val_loss     : {best_loss:.6f}\n")
+            f.write(f"Best val_psnr     : {best_psnr:.2f} dB\n")
+            f.write(f"Noise range       : [{config.noise_sigma_min}, {config.noise_sigma_max}]\n")
+            f.write(f"Batch size        : {config.batch_size}\n")
+            f.write(f"Learning rate     : {config.learning_rate}\n")
+            f.write(f"Duration          : {time.time() - start_time:.1f}s\n")
+        logger.info(f"Summary written to: {summary_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write training summary: {e}")
 
     gc.collect()
     return model

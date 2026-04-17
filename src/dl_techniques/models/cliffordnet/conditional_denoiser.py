@@ -130,6 +130,7 @@ class BiasFreeConditionedGGR(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple) -> None:
+        self._input_shape_for_build = input_shape
         self.gamma = self.add_weight(
             name="gamma",
             shape=(self.channels,),
@@ -139,6 +140,15 @@ class BiasFreeConditionedGGR(keras.layers.Layer):
         gate_input_shape = (*input_shape[:-1], 2 * self.channels)
         self.gate_dense.build(gate_input_shape)
         super().build(input_shape)
+
+    def get_build_config(self) -> Dict[str, Any]:
+        if hasattr(self, "_input_shape_for_build"):
+            return {"input_shape": self._input_shape_for_build}
+        return {}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        if "input_shape" in config:
+            self.build(config["input_shape"])
 
     def call(
         self,
@@ -326,6 +336,7 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple) -> None:
+        self._input_shape_for_build = input_shape
         spatial_shape = input_shape
         self.input_norm.build(spatial_shape)
         self.linear_det.build(spatial_shape)
@@ -347,6 +358,15 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
             self.global_geo_prod.build(stream_shape)
         self.ggr.build(stream_shape)
         super().build(input_shape)
+
+    def get_build_config(self) -> Dict[str, Any]:
+        if hasattr(self, "_input_shape_for_build"):
+            return {"input_shape": self._input_shape_for_build}
+        return {}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        if "input_shape" in config:
+            self.build(config["input_shape"])
 
     def call(
         self,
@@ -831,7 +851,7 @@ class CliffordNetConditionalDenoiser(keras.Model):
 
         :param input_shape: Shape(s) of the input tensor(s).
         """
-        super().build(input_shape)
+        self._build_input_shape = input_shape
 
         if isinstance(input_shape, list):
             target_shape = input_shape[0]
@@ -858,6 +878,25 @@ class CliffordNetConditionalDenoiser(keras.Model):
             inputs.append(keras.KerasTensor((target_shape[0], 1)))
 
         _ = self.call(inputs)
+        super().build(input_shape)
+
+    def get_build_config(self) -> Dict[str, Any]:
+        if hasattr(self, "_build_input_shape"):
+            shape = self._build_input_shape
+            # Serialize: convert list of tuples for JSON compatibility
+            if isinstance(shape, list):
+                return {"input_shape": [list(s) for s in shape]}
+            return {"input_shape": list(shape)}
+        return {}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        if "input_shape" in config:
+            shape = config["input_shape"]
+            if isinstance(shape, list) and shape and isinstance(shape[0], list):
+                shape = [tuple(s) for s in shape]
+            else:
+                shape = tuple(shape)
+            self.build(shape)
 
     # ------------------------------------------------------------------
     # Conditioning helpers
