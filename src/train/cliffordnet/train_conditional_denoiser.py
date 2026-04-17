@@ -226,8 +226,8 @@ def create_discrete_dataset(
     else:
         images, labels = x_test, y_test
 
-    # Normalize to [-1, +1]
-    images = (images.astype(np.float32) / 127.5) - 1.0
+    # Normalize to [-1, +1] (load_dataset already maps to [0, 1])
+    images = images.astype(np.float32) * 2.0 - 1.0
 
     def gen():
         indices = np.arange(len(images))
@@ -497,12 +497,82 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         self.results_dir = self.output_dir / "visualization_plots"
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.test_batch = None
+        self.test_labels = None
+        self.test_cond = None
 
     def on_train_begin(self, logs=None):
         """Grab a small batch from the validation set for monitoring."""
         try:
-            if self.config.conditioning_mode == "none":
-                # Grab a few images from val dirs
+            mode = self.config.conditioning_mode
+            if mode == "discrete":
+                # Grab samples from the standard dataset
+                (_, _), (x_test, y_test), _, _ = load_dataset(
+                    self.config.dataset_name
+                )
+                x_test = x_test.astype(np.float32) * 2.0 - 1.0
+                indices = np.random.choice(len(x_test), 8, replace=False)
+                self.test_batch = tf.constant(x_test[indices])
+                self.test_labels = tf.constant(
+                    y_test[indices].reshape(-1, 1).astype(np.int32)
+                )
+                logger.info(
+                    f"Monitor: created discrete test batch "
+                    f"{self.test_batch.shape}, labels {self.test_labels.shape}"
+                )
+
+            elif mode == "dense":
+                # Grab paired samples from val dirs
+                extensions = {
+                    ext.lower() for ext in self.config.image_extensions
+                }
+                extensions.update(
+                    ext.upper() for ext in self.config.image_extensions
+                )
+                target_files, cond_files = [], []
+                for d in self.config.val_target_dirs:
+                    dp = Path(d)
+                    if not dp.exists():
+                        continue
+                    for fp in sorted(dp.rglob("*")):
+                        if fp.is_file() and fp.suffix in extensions:
+                            target_files.append(str(fp))
+                            if len(target_files) >= 8:
+                                break
+                    if len(target_files) >= 8:
+                        break
+                for d in self.config.val_cond_dirs:
+                    dp = Path(d)
+                    if not dp.exists():
+                        continue
+                    for fp in sorted(dp.rglob("*")):
+                        if fp.is_file() and fp.suffix in extensions:
+                            cond_files.append(str(fp))
+                            if len(cond_files) >= 8:
+                                break
+                    if len(cond_files) >= 8:
+                        break
+                n = min(len(target_files), len(cond_files))
+                if n > 0:
+                    t_patches, c_patches = [], []
+                    for i in range(n):
+                        t_patches.append(_load_and_crop_image(
+                            tf.constant(target_files[i]),
+                            self.config.target_channels,
+                            self.config.patch_size,
+                        ))
+                        c_patches.append(_load_and_crop_image(
+                            tf.constant(cond_files[i]),
+                            self.config.cond_channels,
+                            self.config.patch_size,
+                        ))
+                    self.test_batch = tf.stack(t_patches)
+                    self.test_cond = tf.stack(c_patches)
+                    logger.info(
+                        f"Monitor: created dense test batch "
+                        f"{self.test_batch.shape}, cond {self.test_cond.shape}"
+                    )
+
+            else:  # unconditional
                 extensions = {
                     ext.lower() for ext in self.config.image_extensions
                 }
@@ -553,7 +623,16 @@ class StreamingResultMonitor(keras.callbacks.Callback):
             noise = tf.random.normal(tf.shape(clean)) * sigma
             noisy = tf.clip_by_value(clean + noise, -1.0, 1.0)
 
-            denoised = self.model(noisy, training=False)
+            # Build model input based on conditioning mode
+            mode = self.config.conditioning_mode
+            if mode == "discrete" and self.test_labels is not None:
+                model_input = (noisy, self.test_labels)
+            elif mode == "dense" and self.test_cond is not None:
+                model_input = (noisy, self.test_cond)
+            else:
+                model_input = noisy
+
+            denoised = self.model(model_input, training=False)
 
             # Compute metrics
             mse = tf.reduce_mean(tf.square(denoised - clean)).numpy()
@@ -641,9 +720,13 @@ class StreamingResultMonitor(keras.callbacks.Callback):
 
 def create_callbacks(
     config: ConditionalTrainingConfig,
-) -> List[keras.callbacks.Callback]:
-    """Create training callbacks: common utilities + domain-specific."""
-    common_callbacks, _ = create_common_callbacks(
+) -> Tuple[List[keras.callbacks.Callback], str]:
+    """Create training callbacks: common utilities + domain-specific.
+
+    Returns (callbacks, results_dir) so the training function uses the
+    same single output directory for everything.
+    """
+    common_callbacks, results_dir = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="cliffordnet_cond_denoiser",
         monitor="val_loss",
@@ -653,10 +736,15 @@ def create_callbacks(
         include_analyzer=False,
     )
 
+    # Point config.output_dir / experiment_name at the common dir so
+    # domain-specific callbacks write into the same place.
+    config.output_dir = str(Path(results_dir).parent)
+    config.experiment_name = Path(results_dir).name
+
     common_callbacks.append(ConditionalMetricsVisualizationCallback(config))
     common_callbacks.append(StreamingResultMonitor(config))
 
-    return common_callbacks
+    return common_callbacks, results_dir
 
 
 # ---------------------------------------------------------------------
@@ -733,11 +821,6 @@ def train_conditional_denoiser(
         f"{config.experiment_name}"
     )
     logger.info(f"Conditioning mode: {config.conditioning_mode}")
-
-    output_dir = Path(config.output_dir) / config.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
 
     # Create datasets
     input_shape = None
@@ -861,8 +944,15 @@ def train_conditional_denoiser(
     # Verify bias-free compliance
     _verify_bias_free(model)
 
-    # Train
-    callbacks = create_callbacks(config)
+    # Train — create_callbacks returns a single results dir and redirects
+    # config.output_dir / experiment_name to it so everything lands in one place.
+    callbacks, results_dir = create_callbacks(config)
+    output_dir = Path(results_dir)
+
+    # Save config into the unified output directory
+    with open(output_dir / "config.json", "w") as f:
+        json.dump(config.__dict__, f, indent=2, default=str)
+
     start_time = time.time()
     validation_steps = config.validation_steps or max(
         50, steps_per_epoch // 20

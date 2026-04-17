@@ -2,7 +2,7 @@
 
 Training pipelines and inference tools for the CliffordNet model family -- geometric-algebra neural networks that replace both attention and FFN with Clifford geometric products.
 
-All models share the same algebraic core (`SparseRollingGeometricProduct` + `GatedGeometricResidual`) from `dl_techniques/layers/geometric/clifford_block.py`. The family spans three domains: vision classification, causal language modeling, and image denoising.
+All models share the same algebraic core (`SparseRollingGeometricProduct` + `GatedGeometricResidual`) from `dl_techniques/layers/geometric/clifford_block.py`. The family spans four domains: vision classification, causal language modeling, image denoising (point-estimate, conditional, and confidence-interval), and vision-language contrastive learning.
 
 **Reference**: Brandstetter, J. et al. (2025). *CliffordNet: All You Need is Geometric Algebra*. arXiv:2601.06793v2.
 
@@ -14,8 +14,10 @@ All models share the same algebraic core (`SparseRollingGeometricProduct` + `Gat
 2. [Vision Classification](#2-vision-classification)
 3. [NLP Pre-training](#3-nlp-pre-training)
 4. [Image Denoising](#4-image-denoising)
-5. [Power Sampling Inference](#5-power-sampling-inference)
-6. [CLIP Contrastive Pretraining](#6-clip-contrastive-pretraining)
+5. [Conditional Denoising](#5-conditional-denoising)
+6. [Confidence-Interval Denoising](#6-confidence-interval-denoising)
+7. [Power Sampling Inference](#7-power-sampling-inference)
+8. [CLIP Contrastive Pretraining](#8-clip-contrastive-pretraining)
 
 ---
 
@@ -26,6 +28,8 @@ All models share the same algebraic core (`SparseRollingGeometricProduct` + `Gat
 | `train_cliffordnet.py` | `CliffordNet` | Vision | CIFAR-10/100 classification with AutoAugment |
 | `train_cliffordnet_nlp.py` | `CliffordNetLM` | NLP | Causal language model pre-training on Wikipedia |
 | `train_denoiser.py` | `CliffordNetDenoiser` | Vision | Bias-free image denoiser (Miyasawa's theorem) |
+| `train_conditional_denoiser.py` | `CliffordNetConditionalDenoiser` | Vision | Conditional denoiser with dense/discrete/unconditional modes |
+| `train_confidence_denoiser.py` | `CliffordNetConfidenceDenoiser` | Vision | Confidence-interval denoiser with Gaussian/quantile uncertainty |
 | `infer_cliffordnet_nlp.py` | `CliffordNetLM` | NLP | Inference with standard and power sampling |
 | `train_clip.py` | `CliffordCLIP` | Vision-Language | CLIP-style dual encoder (both towers Clifford) |
 | `prepare_cc3m.py` | -- | Data prep | Resumable CC3M extractor from HF Hub tar shards |
@@ -316,7 +320,271 @@ python -m train.cliffordnet.train_denoiser \
 
 ---
 
-## 5. Power Sampling Inference
+## 5. Conditional Denoising
+
+**Script**: `train_conditional_denoiser.py`
+**Model**: `CliffordNetConditionalDenoiser` (`dl_techniques/models/cliffordnet/conditional_denoiser.py`)
+
+Trains a **bias-free** conditional CliffordNet denoiser following Miyasawa's theorem for conditional denoising. Extends the base denoiser with three conditioning modes that allow the network to leverage side information during denoising.
+
+The learned residual is proportional to the conditional score: `sigma^2 * grad_y log p(y|c)`, making the denoiser suitable as a conditional score function estimator for diffusion models.
+
+### Conditioning modes
+
+| Mode | Input | Use case |
+|:-----|:------|:---------|
+| `none` | Noisy image only | Standard unconditional denoising |
+| `dense` | Noisy target + spatial conditioning image | RGB image -> depth map denoising |
+| `discrete` | Noisy image + class label | Class-conditional image denoising |
+
+### Architecture
+
+```
+Inputs: noisy_target (B,H,W,C_target)
+      + dense_condition (B,H,W,C_cond) [optional]
+      + class_label (B,1) [optional]
+    |
+Bias-free stem -> (B, H/2, W/2, ch[0])
+    |
+Encoder levels 0..N-1:
+    [BiasFreeConditionedCliffordBlock x blocks_per_level] + downsample
+    |
+Bottleneck:
+    [BiasFreeConditionedCliffordBlock x blocks_per_level]
+    |
+Decoder levels N-1..0:
+    upsample + skip concat + [BiasFreeConditionedCliffordBlock x blocks_per_level]
+    |
+Bias-free head: LayerNorm(center=False) -> Conv2D 1x1 (linear, no bias)
+    |
+Output = noisy_target + residual
+```
+
+Dense conditioning uses bias-free FiLM (multiplicative modulation only). Discrete conditioning uses class embeddings with spatial broadcast addition.
+
+### Variants
+
+| Variant | Levels | Channels | Blocks/level | Shifts | Global Context |
+|:--------|:------:|:---------|:-------------|:-------|:--------------:|
+| `tiny` | 3 | [64, 96, 128] | [2, 2, 2] | [[1,2], [1,2,4], [1,2,4]] | No |
+| `small` | 3 | [64, 128, 192] | [2, 3, 3] | [[1,2], [1,2,4], [1,2,4,8]] | No |
+| `base` | 4 | [96, 192, 256, 256] | [2, 3, 4, 2] | [[1,2], [1,2,4], [1,2,4,8], [1,2,4]] | Yes |
+
+### Usage
+
+```bash
+# Dense conditioning (RGB -> depth)
+PYTHONPATH=src python -m train.cliffordnet.train_conditional_denoiser \
+    --conditioning-mode dense \
+    --model-variant small \
+    --target-channels 1 \
+    --cond-channels 3 \
+    --epochs 100 \
+    --gpu 1
+
+# Discrete conditioning (class -> image, CIFAR-100)
+PYTHONPATH=src python -m train.cliffordnet.train_conditional_denoiser \
+    --conditioning-mode discrete \
+    --model-variant tiny \
+    --target-channels 3 \
+    --num-classes 100 \
+    --dataset cifar100 \
+    --epochs 100 \
+    --gpu 0
+
+# Unconditional denoising
+PYTHONPATH=src python -m train.cliffordnet.train_conditional_denoiser \
+    --conditioning-mode none \
+    --model-variant tiny \
+    --target-channels 1 \
+    --epochs 100 \
+    --gpu 1
+```
+
+### Training protocol
+
+| Setting | Value |
+|:--------|:------|
+| Optimizer | AdamW |
+| LR schedule | Cosine decay with linear warmup |
+| Default LR | 1e-3 |
+| Warmup | 5 epochs |
+| Weight decay | 1e-5 |
+| Gradient clipping | 1.0 |
+| Loss | MSE (critical for Miyasawa's theorem) |
+| Metrics | MAE, RMSE, PSNR |
+| Noise | Gaussian, uniform sigma in [sigma_min, sigma_max] |
+
+### Key parameters
+
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| `--conditioning-mode` | `none` | Conditioning mode (`none`, `dense`, `discrete`) |
+| `--model-variant` | `tiny` | Model variant (`tiny`, `small`, `base`) |
+| `--target-channels` | 1 | Target image channels (1=grayscale, 3=RGB) |
+| `--cond-channels` | 3 | Dense conditioning channels |
+| `--num-classes` | 100 | Number of classes (discrete mode) |
+| `--class-embedding-dim` | 128 | Class embedding dimension |
+| `--dataset` | `cifar100` | Standard dataset for discrete mode |
+| `--epochs` | 100 | Training epochs |
+| `--batch-size` | 32 | Batch size |
+| `--patch-size` | 128 | Random crop patch size |
+| `--learning-rate` | 1e-3 | Peak learning rate |
+| `--noise-min` | 0.0 | Minimum noise std |
+| `--noise-max` | 0.5 | Maximum noise std |
+| `--stochastic-depth-rate` | 0.1 | Max stochastic depth rate |
+| `--monitor-every` | 5 | Visual monitoring frequency (epochs) |
+
+### Data loading
+
+- **Discrete mode**: Uses `load_dataset()` for standard datasets (CIFAR-10/100). Adds noise on-the-fly and formats as `(noisy_image, class_label), clean_image`.
+- **Dense mode**: File-based paired datasets. Target and conditioning directories must contain matching files (paired by sorted index). Extracts random patches and applies synchronized augmentations.
+- **Unconditional mode**: File-based single image directories. Extracts random patches with flips and 90-degree rotations.
+
+All modes normalize images to `[-1, +1]` and sample Gaussian noise levels from a uniform distribution.
+
+### Callbacks
+
+- Standard: EarlyStopping, ModelCheckpoint, CSVLogger, TensorBoard
+- `ConditionalMetricsVisualizationCallback`: training/validation metric curves (loss, MAE, RMSE, PSNR)
+- `StreamingResultMonitor`: noisy/clean/denoised comparison grids every N epochs
+
+---
+
+## 6. Confidence-Interval Denoising
+
+**Script**: `train_confidence_denoiser.py`
+**Model**: `CliffordNetConfidenceDenoiser` (`dl_techniques/models/cliffordnet/confidence_denoiser.py`)
+
+Extends the conditional denoiser to output **confidence intervals** instead of point estimates. Supports two uncertainty quantification modes on top of the same three conditioning modes.
+
+### Uncertainty modes
+
+| Mode | Output | Loss | Description |
+|:-----|:-------|:-----|:------------|
+| `gaussian` | Mean + log-variance `(B,H,W,2C)` | Gaussian NLL | Heteroscedastic aleatoric uncertainty |
+| `quantile` | Per-quantile predictions `(B,H,W,Q*C)` | Pinball loss | Distribution-free quantile regression |
+
+### Architecture
+
+```
+Inputs: noisy_target (B,H,W,C_target)
+      + dense_condition (B,H,W,C_cond) [optional]
+      + class_label (B,1) [optional]
+    |
+Shared bias-free encoder/bottleneck/decoder backbone
+(identical to CliffordNetConditionalDenoiser)
+    |
+    +-- Mean head: LN(center=False) -> Conv2D 1x1 (bias-free)
+    |       output = noisy_target + residual
+    |
+    +-- Variance head (gaussian mode):
+    |       LN -> Conv2D 1x1 -> softplus clamp
+    |       output = log_variance (B,H,W,C_target)
+    |
+    +-- Quantile heads (quantile mode):
+            LN -> Conv2D 1x1 per quantile
+            output = list of quantile maps
+```
+
+### Variants
+
+| Variant | Levels | Channels | Blocks/level | Shifts | Global Context |
+|:--------|:------:|:---------|:-------------|:-------|:--------------:|
+| `tiny` | 3 | [64, 96, 128] | [2, 2, 2] | [[1,2], [1,2,4], [1,2,4]] | No |
+| `small` | 3 | [64, 128, 192] | [2, 3, 3] | [[1,2], [1,2,4], [1,2,4,8]] | No |
+| `base` | 4 | [96, 192, 256, 256] | [2, 3, 4, 2] | [[1,2], [1,2,4], [1,2,4,8], [1,2,4]] | Yes |
+
+### Usage
+
+```bash
+# Gaussian uncertainty (unconditional)
+PYTHONPATH=src python -m train.cliffordnet.train_confidence_denoiser \
+    --conditioning-mode none \
+    --uncertainty-mode gaussian \
+    --model-variant tiny \
+    --target-channels 1 \
+    --epochs 100 \
+    --gpu 1
+
+# Quantile regression (discrete conditioning, CIFAR-100)
+PYTHONPATH=src python -m train.cliffordnet.train_confidence_denoiser \
+    --conditioning-mode discrete \
+    --uncertainty-mode quantile \
+    --model-variant small \
+    --target-channels 3 \
+    --num-classes 100 \
+    --dataset cifar100 \
+    --epochs 100 \
+    --gpu 1
+
+# Dense conditioning with Gaussian uncertainty
+PYTHONPATH=src python -m train.cliffordnet.train_confidence_denoiser \
+    --conditioning-mode dense \
+    --uncertainty-mode gaussian \
+    --model-variant small \
+    --target-channels 1 \
+    --cond-channels 3 \
+    --epochs 100 \
+    --gpu 1
+```
+
+### Training protocol
+
+| Setting | Value |
+|:--------|:------|
+| Optimizer | AdamW |
+| LR schedule | Cosine decay with linear warmup |
+| Default LR | 1e-3 |
+| Warmup | 5 epochs |
+| Weight decay | 1e-5 |
+| Gradient clipping | 1.0 |
+| Loss (gaussian) | Gaussian NLL with variance regularization |
+| Loss (quantile) | Pinball loss (averaged over quantiles) |
+| Metrics | Coverage, Interval Width, PSNR |
+| Noise | Gaussian, uniform sigma in [sigma_min, sigma_max] |
+
+### Key parameters
+
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| `--conditioning-mode` | `none` | Conditioning mode (`none`, `dense`, `discrete`) |
+| `--uncertainty-mode` | `gaussian` | Uncertainty mode (`gaussian`, `quantile`) |
+| `--quantiles` | `[0.05, 0.50, 0.95]` | Quantile levels for quantile mode |
+| `--confidence-level` | 0.90 | Target confidence interval level |
+| `--variance-regularization` | 0.01 | Variance regularization weight (gaussian) |
+| `--model-variant` | `tiny` | Model variant (`tiny`, `small`, `base`) |
+| `--target-channels` | 1 | Target image channels |
+| `--cond-channels` | 3 | Dense conditioning channels |
+| `--num-classes` | 100 | Number of classes (discrete mode) |
+| `--dataset` | `cifar100` | Standard dataset for discrete mode |
+| `--epochs` | 100 | Training epochs |
+| `--batch-size` | 32 | Batch size |
+| `--patch-size` | 128 | Random crop patch size |
+| `--learning-rate` | 1e-3 | Peak learning rate |
+| `--noise-min` | 0.0 | Minimum noise std |
+| `--noise-max` | 0.5 | Maximum noise std |
+| `--noise-regimes` | `[0.05, 0.15, 0.30, 0.50]` | Noise levels for regime visualization |
+
+### Custom metrics
+
+- **`CoverageMetric`**: Empirical coverage -- fraction of true values inside the predicted confidence interval. Target: match `--confidence-level` (default 90%).
+- **`IntervalWidthMetric`**: Mean width of predicted confidence intervals. Narrower is better, but only if coverage is maintained.
+
+### Callbacks
+
+- Standard: EarlyStopping, ModelCheckpoint, CSVLogger, TensorBoard
+- `ConfidenceMetricsVisualizationCallback`: training/validation curves every 5 epochs
+- `ConfidenceIntervalMonitor`: comprehensive CI visualization including:
+  - Noise-regime grids (clean, noisy, denoised, error, uncertainty, CI width)
+  - Cross-section CI band plots
+  - Error-vs-uncertainty scatter plots
+  - Per-regime coverage and interval width bars
+  - Calibration curves (gaussian mode only)
+
+---
+
+## 7. Power Sampling Inference
 
 **Script**: `infer_cliffordnet_nlp.py`
 **Module**: `dl_techniques/models/cliffordnet/power_sampling.py`
@@ -463,7 +731,7 @@ for method in ["standard", "power", "max_swap"]:
 
 ---
 
-## 6. CLIP Contrastive Pretraining
+## 8. CLIP Contrastive Pretraining
 
 **Script**: `train_clip.py`
 **Model**: `CliffordCLIP` (`dl_techniques/models/cliffordnet/clip.py`)

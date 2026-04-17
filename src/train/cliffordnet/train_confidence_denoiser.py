@@ -246,7 +246,8 @@ def create_discrete_dataset(
     else:
         images, labels = x_test, y_test
 
-    images = (images.astype(np.float32) / 127.5) - 1.0
+    # load_dataset already maps to [0, 1]; rescale to [-1, +1]
+    images = images.astype(np.float32) * 2.0 - 1.0
 
     def gen():
         indices = np.arange(len(images))
@@ -627,7 +628,7 @@ class ConfidenceIntervalMonitor(keras.callbacks.Callback):
                 (_, _), (x_test, y_test), _, _ = load_dataset(
                     self.config.dataset_name
                 )
-                images = (x_test[:n].astype(np.float32) / 127.5) - 1.0
+                images = x_test[:n].astype(np.float32) * 2.0 - 1.0
                 self.test_batch = tf.constant(images)
                 self.test_labels = tf.constant(
                     y_test[:n].reshape(-1, 1).astype(np.int32)

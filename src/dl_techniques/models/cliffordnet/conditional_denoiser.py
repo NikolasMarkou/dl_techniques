@@ -649,11 +649,11 @@ class CliffordNetConditionalDenoiser(keras.Model):
             )
 
     def _build_stem(self) -> None:
-        """Bias-free stem: Conv2D stride-2 + BN(center=False)."""
+        """Bias-free stem: Conv2D stride-1 + BN(center=False)."""
         self.stem_conv = keras.layers.Conv2D(
             filters=self.level_channels[0],
             kernel_size=3,
-            strides=2,
+            strides=1,
             padding="same",
             name="stem_conv",
             **self._common_conv_kwargs(),
@@ -837,10 +837,6 @@ class CliffordNetConditionalDenoiser(keras.Model):
             name="output_proj",
             **self._common_conv_kwargs(),
         )
-        # Upsample from stem's stride-2 back to input resolution
-        self.final_upsample = keras.layers.UpSampling2D(
-            size=2, interpolation="bilinear", name="final_upsample"
-        )
 
     # ------------------------------------------------------------------
     # Build
@@ -909,10 +905,12 @@ class CliffordNetConditionalDenoiser(keras.Model):
         is_bottleneck: bool = False,
     ) -> keras.KerasTensor:
         """Downsample and project dense conditioning to match level."""
-        # Downsample conditioning to match spatial resolution
+        # Downsample conditioning to match spatial resolution.
+        # Stem is stride-1, so level 0 is at full res. Each encoder
+        # level applies one stride-2 downsample, so we need `level`
+        # pooling operations to match.
         cond = dense_cond
-        # Stem applies stride-2, so level 0 is already at half-res
-        for _ in range(level + 1):
+        for _ in range(level):
             cond = keras.layers.AveragePooling2D(
                 pool_size=2, padding="same"
             )(cond)
@@ -1058,9 +1056,6 @@ class CliffordNetConditionalDenoiser(keras.Model):
         # Head: LayerNorm + linear 1x1 projection
         x = self.head_norm(x)
         residual = self.output_proj(x)
-
-        # Upsample residual back to input resolution (undo stem stride-2)
-        residual = self.final_upsample(residual)
 
         # Residual learning: denoised = noisy + learned_residual
         return noisy_target + residual
