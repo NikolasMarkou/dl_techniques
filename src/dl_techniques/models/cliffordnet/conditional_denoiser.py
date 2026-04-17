@@ -459,6 +459,174 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
 
 
 # ===========================================================================
+# BiasFreeGeometricDownsample
+# ===========================================================================
+
+
+@keras.saving.register_keras_serializable()
+class BiasFreeGeometricDownsample(keras.layers.Layer):
+    """Bias-free spatial downsampling via Clifford geometric product.
+
+    Replaces plain ``Conv2D(stride=2)`` with a geometric-algebra-aware
+    downsample: a strided depthwise conv extracts the context stream at
+    reduced resolution, a pooled pointwise projection produces the detail
+    stream, and a ``SparseRollingGeometricProduct`` fuses them.  A final
+    1x1 projection maps to ``out_channels``.
+
+    All operations are bias-free for Miyasawa-theorem compliance.
+
+    :param in_channels: Input channel count.
+    :param out_channels: Output channel count (may differ from input for
+        level transitions).
+    :param shifts: Cyclic shift offsets for the geometric product.
+    :param cli_mode: Geometric product components
+        (``"inner"``, ``"wedge"``, ``"full"``).
+    :param kernel_initializer: Weight initializer.
+    :param kernel_regularizer: Weight regularizer.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        shifts: Optional[List[int]] = None,
+        cli_mode: CliMode = "full",
+        kernel_initializer: Any = _DEFAULT_KERNEL_INIT,
+        kernel_regularizer: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if shifts is None:
+            shifts = [1, 2]
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.shifts = list(shifts)
+        self.cli_mode = cli_mode
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+
+        conv_kwargs = dict(
+            use_bias=False,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+        )
+
+        # Context stream: strided DWConv pair → half resolution
+        self.ctx_dw1 = keras.layers.DepthwiseConv2D(
+            kernel_size=3,
+            strides=1,
+            padding="same",
+            use_bias=False,
+            depthwise_initializer=kernel_initializer,
+            depthwise_regularizer=kernel_regularizer,
+            name="ctx_dw1",
+        )
+        self.ctx_dw2 = keras.layers.DepthwiseConv2D(
+            kernel_size=3,
+            strides=2,
+            padding="same",
+            use_bias=False,
+            depthwise_initializer=kernel_initializer,
+            depthwise_regularizer=kernel_regularizer,
+            name="ctx_dw2_strided",
+        )
+        self.ctx_norm = keras.layers.BatchNormalization(
+            center=False, name="ctx_norm"
+        )
+
+        # Detail stream: 1x1 pointwise → average pool to match context
+        self.detail_proj = keras.layers.Dense(
+            in_channels,
+            use_bias=False,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name="detail_proj",
+        )
+        self.detail_pool = keras.layers.AveragePooling2D(
+            pool_size=2, padding="same", name="detail_pool"
+        )
+
+        # Geometric product at reduced resolution
+        self.geo_prod = SparseRollingGeometricProduct(
+            channels=in_channels,
+            shifts=self.shifts,
+            cli_mode=cli_mode,
+            use_bias=False,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name="geo_prod",
+        )
+
+        # Output projection to target channels
+        self.out_proj = keras.layers.Conv2D(
+            filters=out_channels,
+            kernel_size=1,
+            padding="same",
+            name="out_proj",
+            **conv_kwargs,
+        )
+        self.out_norm = keras.layers.BatchNormalization(
+            center=False, name="out_norm"
+        )
+
+    def call(
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Downsample via geometric product.
+
+        :param x: Input ``(B, H, W, C_in)``.
+        :param training: Training mode flag.
+        :return: Output ``(B, H/2, W/2, C_out)``.
+        """
+        # Context: strided DWConv → half resolution
+        z_ctx = self.ctx_dw1(x)
+        z_ctx = self.ctx_dw2(z_ctx)
+        z_ctx = keras.activations.silu(
+            self.ctx_norm(z_ctx, training=training)
+        )
+
+        # Detail: pointwise proj → pool to match spatial dims
+        z_det = self.detail_proj(x)
+        z_det = self.detail_pool(z_det)
+
+        # Geometric fusion at half resolution
+        g = self.geo_prod(z_det, z_ctx)
+
+        # Project to output channels
+        out = self.out_proj(g)
+        out = self.out_norm(out, training=training)
+        return out
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        b, h, w, _ = input_shape
+        h_out = h // 2 if h is not None else None
+        w_out = w // 2 if w is not None else None
+        return (b, h_out, w_out, self.out_channels)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "in_channels": self.in_channels,
+            "out_channels": self.out_channels,
+            "shifts": self.shifts,
+            "cli_mode": self.cli_mode,
+            "kernel_initializer": initializers.serialize(
+                self.kernel_initializer
+            ),
+            "kernel_regularizer": regularizers.serialize(
+                self.kernel_regularizer
+            ),
+        })
+        return config
+
+
+# ===========================================================================
 # CliffordNetConditionalDenoiser
 # ===========================================================================
 
@@ -520,6 +688,7 @@ class CliffordNetConditionalDenoiser(keras.Model):
         enable_discrete_conditioning: bool = False,
         num_classes: int = 0,
         class_embedding_dim: int = 128,
+        use_geometric_downsample: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
         **kwargs: Any,
@@ -564,6 +733,7 @@ class CliffordNetConditionalDenoiser(keras.Model):
         self.enable_discrete_conditioning = enable_discrete_conditioning
         self.num_classes = num_classes
         self.class_embedding_dim = class_embedding_dim
+        self.use_geometric_downsample = use_geometric_downsample
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
@@ -714,14 +884,25 @@ class CliffordNetConditionalDenoiser(keras.Model):
 
             # Downsample (except at last level — bottleneck handles it)
             if level < self.num_levels - 1:
-                downsample = keras.layers.Conv2D(
-                    filters=ch,
-                    kernel_size=3,
-                    strides=2,
-                    padding="same",
-                    name=f"enc_downsample_{level}",
-                    **self._common_conv_kwargs(),
-                )
+                if self.use_geometric_downsample:
+                    downsample = BiasFreeGeometricDownsample(
+                        in_channels=ch,
+                        out_channels=ch,
+                        shifts=shifts,
+                        cli_mode=self.cli_mode,
+                        kernel_initializer=self.kernel_initializer,
+                        kernel_regularizer=self.kernel_regularizer,
+                        name=f"enc_downsample_{level}",
+                    )
+                else:
+                    downsample = keras.layers.Conv2D(
+                        filters=ch,
+                        kernel_size=3,
+                        strides=2,
+                        padding="same",
+                        name=f"enc_downsample_{level}",
+                        **self._common_conv_kwargs(),
+                    )
             else:
                 downsample = None
 
@@ -1094,6 +1275,7 @@ class CliffordNetConditionalDenoiser(keras.Model):
             ),
             "num_classes": self.num_classes,
             "class_embedding_dim": self.class_embedding_dim,
+            "use_geometric_downsample": self.use_geometric_downsample,
             "kernel_initializer": initializers.serialize(
                 self.kernel_initializer
             ),

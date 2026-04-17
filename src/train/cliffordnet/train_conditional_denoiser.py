@@ -116,6 +116,7 @@ class ConditionalTrainingConfig:
     # Model
     model_variant: str = "tiny"
     stochastic_depth_rate: float = 0.1
+    use_geometric_downsample: bool = True
 
     # Training
     batch_size: int = 32
@@ -777,6 +778,7 @@ def create_model_instance(
         num_classes=nc,
         class_embedding_dim=config.class_embedding_dim,
         stochastic_depth_rate=config.stochastic_depth_rate,
+        use_geometric_downsample=config.use_geometric_downsample,
     )
 
 
@@ -1039,6 +1041,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--num-classes", type=int, default=100)
     parser.add_argument("--class-embedding-dim", type=int, default=128)
     parser.add_argument("--stochastic-depth-rate", type=float, default=0.1)
+    parser.add_argument(
+        "--downsample-mode",
+        choices=["clifford", "conv"],
+        default="clifford",
+        help="Downsample method: clifford (geometric product) or conv (plain stride-2)",
+    )
 
     # Dataset
     parser.add_argument(
@@ -1106,6 +1114,7 @@ def main():
         dataset_shuffle_buffer=1013,
         model_variant=args.model_variant,
         stochastic_depth_rate=args.stochastic_depth_rate,
+        use_geometric_downsample=(args.downsample_mode == "clifford"),
         noise_sigma_min=args.noise_min,
         noise_sigma_max=args.noise_max,
         noise_distribution="uniform",
@@ -1131,6 +1140,7 @@ def main():
         f"batch={config.batch_size}, "
         f"lr={config.learning_rate}, "
         f"target_ch={config.target_channels}, "
+        f"downsample={'clifford' if config.use_geometric_downsample else 'conv'}, "
         f"noise=[{config.noise_sigma_min}, {config.noise_sigma_max}]"
     )
 
