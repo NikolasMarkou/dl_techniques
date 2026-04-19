@@ -48,7 +48,6 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     generate_training_curves,
 )
-from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -371,27 +370,218 @@ class MegaDepthDataset(keras.utils.PyDataset):
 
 
 # ---------------------------------------------------------------------
-# MASKED LOSS
+# DEPTH ESTIMATION LOSS (SSI + multi-scale gradient matching)
 # ---------------------------------------------------------------------
 
 
-class MaskedMSELoss(keras.losses.Loss):
-    """MSE loss that ignores invalid depth pixels via a validity mask."""
+class DepthEstimationLoss(keras.losses.Loss):
+    """Combined scale-shift invariant + gradient matching loss.
 
-    def __init__(self, name: str = "masked_mse", **kwargs):
+    Follows the MiDaS / Depth Anything V2 recipe:
+      ``L = L_ssi + gradient_weight * L_grad``
+
+    Both components respect a validity mask so invalid depth pixels
+    (value == 0 in MegaDepth) are excluded from the loss computation.
+
+    The SSI term normalizes prediction and target per-sample (median,
+    MAD) before computing L1, making the loss invariant to global scale
+    and shift.  The gradient term compares finite-difference depth
+    gradients at multiple scales to preserve edges.
+    """
+
+    def __init__(
+        self,
+        gradient_weight: float = 0.5,
+        n_scales: int = 4,
+        name: str = "depth_loss",
+        **kwargs,
+    ):
         super().__init__(name=name, **kwargs)
+        self.gradient_weight = gradient_weight
+        self.n_scales = n_scales
+
+    # -- helpers --
+
+    @staticmethod
+    def _masked_median(x, mask):
+        """Approximate masked median via sorting valid values."""
+        # x: (B, N), mask: (B, N)
+        large_val = keras.ops.cast(1e6, x.dtype)
+        # Push invalid values to the end of the sort
+        x_masked = keras.ops.where(mask > 0.5, x, large_val)
+        x_sorted = keras.ops.sort(x_masked, axis=-1)
+        valid_count = keras.ops.maximum(
+            keras.ops.sum(mask, axis=-1, keepdims=True),
+            keras.ops.cast(1.0, mask.dtype),
+        )  # (B, 1)
+        mid = keras.ops.cast(valid_count / 2.0, "int32")
+        mid = keras.ops.clip(mid, 0, keras.ops.shape(x)[-1] - 1)
+        # Gather median per sample using take_along_axis
+        median_val = keras.ops.take_along_axis(
+            x_sorted, mid, axis=-1
+        )  # (B, 1)
+        return median_val
+
+    def _ssi_normalize(self, d, mask):
+        """Scale-shift normalize a depth map using valid-pixel statistics."""
+        # d: (B, H, W, 1), mask: (B, H, W, 1)
+        b = keras.ops.shape(d)[0]
+        d_flat = keras.ops.reshape(d, (b, -1))       # (B, N)
+        m_flat = keras.ops.reshape(mask, (b, -1))     # (B, N)
+
+        t = self._masked_median(d_flat, m_flat)       # (B, 1) — shift
+        s = keras.ops.sum(
+            keras.ops.abs(d_flat - t) * m_flat, axis=-1, keepdims=True
+        ) / keras.ops.maximum(
+            keras.ops.sum(m_flat, axis=-1, keepdims=True),
+            keras.ops.cast(1.0, d.dtype),
+        )  # (B, 1) — scale (MAD)
+        s = keras.ops.maximum(s, keras.ops.cast(1e-6, s.dtype))
+
+        d_norm = (d_flat - t) / s  # (B, N)
+        return keras.ops.reshape(d_norm, keras.ops.shape(d))
+
+    @staticmethod
+    def _gradient_xy(d):
+        """Compute finite-difference depth gradients in x and y."""
+        # d: (B, H, W, 1)
+        dx = d[:, :, 1:, :] - d[:, :, :-1, :]   # (B, H, W-1, 1)
+        dy = d[:, 1:, :, :] - d[:, :-1, :, :]   # (B, H-1, W, 1)
+        return dx, dy
+
+    @staticmethod
+    def _downsample_2x(d):
+        """Average-pool 2x downsample."""
+        return keras.ops.average_pool(d, pool_size=2, strides=2, padding="valid")
+
+    # -- main --
 
     def call(self, y_true_and_mask, y_pred):
-        # y_true_and_mask is (depth, mask) concatenated along last axis
         depth_true = y_true_and_mask[..., :1]
         mask = y_true_and_mask[..., 1:]
 
-        sq_error = keras.ops.square(y_pred - depth_true) * mask
-        # Mean over valid pixels only
+        # --- SSI loss (masked) ---
+        pred_norm = self._ssi_normalize(y_pred, mask)
+        true_norm = self._ssi_normalize(depth_true, mask)
+
+        ssi_error = keras.ops.abs(pred_norm - true_norm) * mask
         valid_count = keras.ops.maximum(
             keras.ops.sum(mask), keras.ops.cast(1.0, mask.dtype)
         )
-        return keras.ops.sum(sq_error) / valid_count
+        l_ssi = keras.ops.sum(ssi_error) / valid_count
+
+        # --- Multi-scale gradient matching loss (masked) ---
+        l_grad = keras.ops.cast(0.0, y_pred.dtype)
+        d_pred = pred_norm
+        d_true = true_norm
+        m = mask
+
+        for _ in range(self.n_scales):
+            dx_pred, dy_pred = self._gradient_xy(d_pred)
+            dx_true, dy_true = self._gradient_xy(d_true)
+
+            # Erode mask for gradients (both neighbors must be valid)
+            mx = keras.ops.minimum(m[:, :, 1:, :], m[:, :, :-1, :])
+            my = keras.ops.minimum(m[:, 1:, :, :], m[:, :-1, :, :])
+
+            mx_count = keras.ops.maximum(
+                keras.ops.sum(mx), keras.ops.cast(1.0, mx.dtype)
+            )
+            my_count = keras.ops.maximum(
+                keras.ops.sum(my), keras.ops.cast(1.0, my.dtype)
+            )
+
+            l_grad = l_grad + (
+                keras.ops.sum(keras.ops.abs(dx_pred - dx_true) * mx) / mx_count
+                + keras.ops.sum(keras.ops.abs(dy_pred - dy_true) * my) / my_count
+            )
+
+            # Downsample for next scale
+            d_pred = self._downsample_2x(d_pred)
+            d_true = self._downsample_2x(d_true)
+            m = self._downsample_2x(m)
+            m = keras.ops.cast(m > 0.5, m.dtype)  # re-binarize after pooling
+
+        return l_ssi + self.gradient_weight * l_grad
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "gradient_weight": self.gradient_weight,
+            "n_scales": self.n_scales,
+        })
+        return config
+
+
+# ---------------------------------------------------------------------
+# DEPTH METRICS
+# ---------------------------------------------------------------------
+
+
+class AbsRelMetric(keras.metrics.Metric):
+    """Absolute Relative Error: mean(|pred - true| / true) on valid pixels."""
+
+    def __init__(self, name="abs_rel", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.total = self.add_weight(name="total", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true_and_mask, y_pred, sample_weight=None):
+        depth_true = y_true_and_mask[..., :1]
+        mask = y_true_and_mask[..., 1:]
+        # Shift to [0,1] for ratio computation
+        dt = (depth_true + 1.0) / 2.0  # [0, 1]
+        dp = (y_pred + 1.0) / 2.0      # [0, 1]
+        # Only count pixels with depth > 0.05 to avoid division by near-zero
+        depth_valid = keras.ops.cast(dt > 0.05, mask.dtype) * mask
+        dt_safe = keras.ops.maximum(dt, keras.ops.cast(0.05, dt.dtype))
+        rel_err = keras.ops.abs(dp - dt) / dt_safe * depth_valid
+        self.total.assign_add(keras.ops.sum(rel_err))
+        self.count.assign_add(keras.ops.sum(depth_valid))
+
+    def result(self):
+        return self.total / keras.ops.maximum(self.count, 1.0)
+
+    def reset_state(self):
+        self.total.assign(0.0)
+        self.count.assign(0.0)
+
+
+class DeltaThresholdMetric(keras.metrics.Metric):
+    """δ < threshold accuracy: fraction of valid pixels where
+    max(pred/true, true/pred) < threshold."""
+
+    def __init__(self, threshold: float = 1.25, name=None, **kwargs):
+        name = name or f"delta_{threshold:.2f}"
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.correct = self.add_weight(name="correct", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true_and_mask, y_pred, sample_weight=None):
+        depth_true = y_true_and_mask[..., :1]
+        mask = y_true_and_mask[..., 1:]
+        # Shift to positive range [0, 1]
+        dt = (depth_true + 1.0) / 2.0
+        dp = (y_pred + 1.0) / 2.0
+        dt_safe = keras.ops.maximum(dt, keras.ops.cast(1e-6, dt.dtype))
+        dp_safe = keras.ops.maximum(dp, keras.ops.cast(1e-6, dp.dtype))
+        ratio = keras.ops.maximum(dp_safe / dt_safe, dt_safe / dp_safe)
+        within = keras.ops.cast(ratio < self.threshold, mask.dtype) * mask
+        self.correct.assign_add(keras.ops.sum(within))
+        self.count.assign_add(keras.ops.sum(mask))
+
+    def result(self):
+        return self.correct / keras.ops.maximum(self.count, 1.0)
+
+    def reset_state(self):
+        self.correct.assign(0.0)
+        self.count.assign(0.0)
+
+    def get_config(self):
+        config = super().get_config()
+        config["threshold"] = self.threshold
+        return config
 
 
 # ---------------------------------------------------------------------
@@ -408,8 +598,8 @@ class DepthMetricsVisualizationCallback(keras.callbacks.Callback):
         self.output_dir = Path(config.output_dir) / config.experiment_name
         self.visualization_dir = self.output_dir / "visualization_plots"
         self.visualization_dir.mkdir(parents=True, exist_ok=True)
-        self.train_metrics = {"loss": [], "mae": []}
-        self.val_metrics = {"val_loss": [], "val_mae": []}
+        self.train_metrics = {"loss": [], "abs_rel": [], "delta_1.25": []}
+        self.val_metrics = {"val_loss": [], "val_abs_rel": [], "val_delta_1.25": []}
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
         if logs is None:
@@ -758,11 +948,14 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         lr_schedule,
     )
 
-    # Compile with masked MSE loss
+    # Compile with SSI + gradient matching loss (MiDaS/Depth Anything V2 recipe)
     model.compile(
         optimizer=optimizer,
-        loss=MaskedMSELoss(),
-        metrics=["mae"],
+        loss=DepthEstimationLoss(gradient_weight=0.5, n_scales=4),
+        metrics=[
+            AbsRelMetric(name="abs_rel"),
+            DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
+        ],
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
