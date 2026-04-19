@@ -1,15 +1,15 @@
 """CliffordNet monocular depth estimation training script.
 
 Trains a bias-free CliffordNet conditional denoiser for monocular depth
-estimation on MegaDepth paired RGB+depth data.  The model uses the
-denoising formulation:
+estimation on MegaDepth paired RGB+depth data.  The model predicts
+depth purely from a single RGB image:
 
-    model([noisy_depth, rgb]) → clean_depth
+    model([zeros, rgb]) → depth
 
-At inference, passing zeros as ``noisy_depth`` yields direct depth
-prediction.  Depth maps are loaded from HDF5 files, normalized
-per-sample to [-1, +1], and invalid pixels (depth == 0) are masked
-in the loss.
+The depth input is always zeros — the model must learn to predict depth
+entirely from RGB conditioning.  Depth maps are loaded from HDF5 files,
+normalized per-sample to [-1, +1], and invalid pixels (depth == 0) are
+masked in the loss.
 
 Usage::
 
@@ -77,10 +77,6 @@ class DepthTrainingConfig:
     max_val_files: Optional[int] = 1000
     dataset_shuffle_buffer: int = 5000
 
-    # Noise
-    noise_sigma_min: float = 0.0
-    noise_sigma_max: float = 0.5
-
     # Model
     model_variant: str = "small"
     stochastic_depth_rate: float = 0.1
@@ -118,8 +114,6 @@ class DepthTrainingConfig:
             self.experiment_name = (
                 f"cliffordnet_depth_{self.model_variant}_{timestamp}"
             )
-        if self.noise_sigma_min < 0 or self.noise_sigma_max <= self.noise_sigma_min:
-            raise ValueError("Invalid noise sigma range")
         if not 0.0 < self.min_valid_ratio <= 1.0:
             raise ValueError("min_valid_ratio must be in (0, 1]")
 
@@ -185,15 +179,15 @@ def _load_and_process_pair(
     depth_path: str,
     patch_size: int,
     min_valid_ratio: float,
-    noise_sigma_min: float,
-    noise_sigma_max: float,
     augment: bool,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Load one RGB+depth pair, crop, normalize, augment, add noise.
+    """Load one RGB+depth pair, crop, normalize, augment.
 
-    Returns ``(noisy_depth, rgb, y_true)`` ready for the model, where
-    ``y_true = concat([depth, mask], axis=-1)``.  Returns ``None`` when
-    the patch has too few valid pixels after all crop attempts.
+    Returns ``(zeros_input, rgb, y_true)`` ready for the model, where
+    ``y_true = concat([depth, mask], axis=-1)``.  The zeros input forces
+    the model to predict depth purely from RGB conditioning (monocular
+    depth estimation).  Returns ``None`` when the patch has too few
+    valid pixels after all crop attempts.
     """
     from PIL import Image
 
@@ -281,18 +275,14 @@ def _load_and_process_pair(
         depth_patch = combined[..., 3:4].copy()
         valid_mask = combined[..., 4:5].copy()
 
-    # Add noise to depth
-    sigma = np.random.uniform(noise_sigma_min, noise_sigma_max)
-    noise = np.random.randn(*depth_patch.shape).astype(np.float32) * sigma
-    noisy_depth = depth_patch + noise
-    noisy_depth = noisy_depth * valid_mask  # zero out invalid
-    noisy_depth = np.clip(noisy_depth, -1.0, 1.0)
+    # Monocular depth: input is zeros — model must predict depth from RGB alone
+    zeros_input = np.zeros_like(depth_patch)
 
     # y_true = concat([depth, mask], axis=-1)
     y_true = np.concatenate([depth_patch, valid_mask], axis=-1)
 
     return (
-        noisy_depth.astype(np.float32),
+        zeros_input.astype(np.float32),
         rgb_patch.astype(np.float32),
         y_true.astype(np.float32),
     )
@@ -344,14 +334,12 @@ class MegaDepthDataset(keras.utils.PyDataset):
                 self.depth_paths[i],
                 self.config.patch_size,
                 self.config.min_valid_ratio,
-                self.config.noise_sigma_min,
-                self.config.noise_sigma_max,
                 augment=self.is_training and self.config.augment_data,
             )
             if result is None:
                 continue
-            noisy_depth, rgb, y_true = result
-            batch_noisy.append(noisy_depth)
+            zeros_input, rgb, y_true = result
+            batch_noisy.append(zeros_input)
             batch_rgb.append(rgb)
             batch_ytrue.append(y_true)
 
@@ -466,8 +454,6 @@ class DepthVisualizationCallback(keras.callbacks.Callback):
                     rp, dp,
                     self.config.patch_size,
                     self.config.min_valid_ratio,
-                    noise_sigma_min=0.0,
-                    noise_sigma_max=0.0,
                     augment=False,
                 )
                 if result is None:
@@ -886,8 +872,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--patch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--noise-min", type=float, default=0.0)
-    parser.add_argument("--noise-max", type=float, default=0.5)
     parser.add_argument("--patches-per-image", type=int, default=4)
     parser.add_argument("--monitor-every", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=20)
@@ -924,8 +908,6 @@ def main():
         upsample_interpolation=(
             "nearest" if args.upsample_mode == "nearest" else "bilinear"
         ),
-        noise_sigma_min=args.noise_min,
-        noise_sigma_max=args.noise_max,
         batch_size=args.batch_size,
         epochs=args.epochs,
         patches_per_image=args.patches_per_image,
@@ -940,8 +922,7 @@ def main():
         f"Config: model={config.model_variant}, "
         f"epochs={config.epochs}, batch={config.batch_size}, "
         f"lr={config.learning_rate}, patch={config.patch_size}, "
-        f"downsample={'clifford' if config.use_geometric_downsample else 'conv'}, "
-        f"noise=[{config.noise_sigma_min}, {config.noise_sigma_max}]"
+        f"downsample={'clifford' if config.use_geometric_downsample else 'conv'}"
     )
 
     train_depth_estimation(config)
