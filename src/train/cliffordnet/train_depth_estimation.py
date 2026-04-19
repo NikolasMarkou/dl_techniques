@@ -53,9 +53,7 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.cliffordnet.conditional_denoiser import (
-    CliffordNetConditionalDenoiser,
-)
+from dl_techniques.models.convunext.model import ConvUNextModel
 
 
 # ---------------------------------------------------------------------
@@ -70,7 +68,7 @@ class DepthTrainingConfig:
     # Data
     megadepth_root: str = "/media/arxwn/data0_4tb/datasets/Megadepth"
     train_split: float = 0.9
-    patch_size: int = 128
+    patch_size: int = 256
     min_valid_ratio: float = 0.1
 
     # Memory
@@ -78,12 +76,8 @@ class DepthTrainingConfig:
     max_val_files: Optional[int] = 1000
     dataset_shuffle_buffer: int = 5000
 
-    # Model
-    model_variant: str = "small"
-    stochastic_depth_rate: float = 0.1
-    use_geometric_downsample: bool = True
-    use_geometric_upsample: bool = False
-    upsample_interpolation: str = "nearest"
+    # Model (ConvUNeXt variants: tiny, small, base, large, xlarge)
+    model_variant: str = "base"
 
     # Training
     batch_size: int = 16
@@ -737,59 +731,21 @@ def create_callbacks(
 
 
 def create_model(config: DepthTrainingConfig) -> keras.Model:
-    """Create a CliffordNet U-Net for monocular depth estimation.
+    """Create a ConvUNeXt U-Net for monocular depth estimation.
 
-    Uses the CliffordNet encoder-decoder backbone with RGB as direct
-    input (3 channels, no conditioning).  A 1×1 Conv projects the
-    3-channel output to single-channel depth.
+    Uses ConvUNeXt encoder-decoder with RGB input, 1-channel depth
+    output.  Has biases (not bias-free) for better depth prediction.
     """
-    backbone = CliffordNetConditionalDenoiser.from_variant(
+    ps = config.patch_size
+    return ConvUNextModel.from_variant(
         variant=config.model_variant,
-        in_channels=3,
-        enable_dense_conditioning=False,
-        enable_discrete_conditioning=False,
-        num_classes=0,
-        stochastic_depth_rate=config.stochastic_depth_rate,
-        use_geometric_downsample=config.use_geometric_downsample,
-        use_geometric_upsample=config.use_geometric_upsample,
-        upsample_interpolation=config.upsample_interpolation,
+        input_shape=(ps, ps, 3),
+        output_channels=1,
+        include_top=True,
+        use_bias=True,
     )
-    # Backbone output: (B, H, W, 3) = RGB + residual.
-    # Project to 1-channel depth.
-    inp = keras.Input(shape=(None, None, 3), name="rgb_input")
-    x = backbone(inp)  # (B, H, W, 3)
-    depth = keras.layers.Conv2D(
-        1, 1, use_bias=False, name="depth_proj",
-        kernel_initializer="glorot_uniform",
-    )(x)
-    return keras.Model(inputs=inp, outputs=depth, name="cliffordnet_depth")
 
 
-# ---------------------------------------------------------------------
-# BIAS-FREE VERIFICATION
-# ---------------------------------------------------------------------
-
-
-def _verify_bias_free(model: keras.Model) -> None:
-    """Log bias-free compliance check for the model."""
-    bias_layers = []
-    for layer in model._flatten_layers():
-        if hasattr(layer, "use_bias") and layer.use_bias:
-            bias_layers.append(layer.name)
-        if isinstance(layer, keras.layers.BatchNormalization):
-            if hasattr(layer, "center") and layer.center:
-                bias_layers.append(f"{layer.name} (BN center=True)")
-        if isinstance(layer, keras.layers.LayerNormalization):
-            if hasattr(layer, "center") and layer.center:
-                bias_layers.append(f"{layer.name} (LN center=True)")
-
-    if bias_layers:
-        logger.warning(
-            f"Bias-free check: {len(bias_layers)} layer(s) have "
-            f"bias/centering: {bias_layers[:10]}"
-        )
-    else:
-        logger.info("Bias-free check: PASSED — all layers are bias-free")
 
 
 # ---------------------------------------------------------------------
@@ -891,9 +847,6 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
-    # Verify bias-free compliance
-    _verify_bias_free(model)
-
     # Callbacks
     callbacks, results_dir = create_callbacks(config, val_rgb, val_depth)
     output_dir = Path(results_dir)
@@ -932,7 +885,7 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         best_loss = min(history.history.get("val_loss", [float("nan")]))
         summary_path = output_dir / "training_summary.txt"
         with open(summary_path, "w") as f:
-            f.write("CliffordNet Depth Estimation Training Summary\n")
+            f.write("Monocular Depth Estimation Training Summary\n")
             f.write("=" * 50 + "\n\n")
             f.write(f"Model variant     : {config.model_variant}\n")
             f.write(f"Parameters        : {model.count_params():,}\n")
@@ -985,25 +938,14 @@ def parse_arguments() -> argparse.Namespace:
     # Model
     parser.add_argument(
         "--model-variant",
-        choices=["tiny", "small", "base"],
-        default="small",
-    )
-    parser.add_argument("--stochastic-depth-rate", type=float, default=0.1)
-    parser.add_argument(
-        "--downsample-mode",
-        choices=["clifford", "conv"],
-        default="clifford",
-    )
-    parser.add_argument(
-        "--upsample-mode",
-        choices=["clifford", "bilinear", "nearest"],
-        default="nearest",
+        choices=["tiny", "small", "base", "large", "xlarge"],
+        default="base",
     )
 
     # Training
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--patch-size", type=int, default=128)
+    parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--patches-per-image", type=int, default=4)
     parser.add_argument("--monitor-every", type=int, default=5)
@@ -1035,12 +977,6 @@ def main():
         max_train_files=args.max_train_files,
         max_val_files=args.max_val_files,
         model_variant=args.model_variant,
-        stochastic_depth_rate=args.stochastic_depth_rate,
-        use_geometric_downsample=(args.downsample_mode == "clifford"),
-        use_geometric_upsample=(args.upsample_mode == "clifford"),
-        upsample_interpolation=(
-            "nearest" if args.upsample_mode == "nearest" else "bilinear"
-        ),
         batch_size=args.batch_size,
         epochs=args.epochs,
         patches_per_image=args.patches_per_image,
@@ -1052,10 +988,9 @@ def main():
     )
 
     logger.info(
-        f"Config: model={config.model_variant}, "
+        f"Config: model=ConvUNeXt-{config.model_variant}, "
         f"epochs={config.epochs}, batch={config.batch_size}, "
-        f"lr={config.learning_rate}, patch={config.patch_size}, "
-        f"downsample={'clifford' if config.use_geometric_downsample else 'conv'}"
+        f"lr={config.learning_rate}, patch={config.patch_size}"
     )
 
     train_depth_estimation(config)
