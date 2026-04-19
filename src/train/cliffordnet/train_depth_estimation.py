@@ -75,8 +75,7 @@ class DepthTrainingConfig:
     # Memory
     max_train_files: Optional[int] = 10000
     max_val_files: Optional[int] = 1000
-    parallel_reads: int = 8
-    dataset_shuffle_buffer: int = 1000
+    dataset_shuffle_buffer: int = 5000
 
     # Noise
     noise_sigma_min: float = 0.0
@@ -136,11 +135,12 @@ def discover_megadepth_pairs(
 ) -> Tuple[List[str], List[str]]:
     """Scan MegaDepth scenes for matched RGB+depth file pairs.
 
-    MegaDepth structure:
-        {root}/{scene}/dense{0,1}/imgs/*.jpg
-        {root}/{scene}/dense{0,1}/depths/*.h5
+    MegaDepth structure::
 
-    Returns matched lists (rgb_paths, depth_paths) paired by stem name.
+        {root}/{scene}/dense{0,1}/imgs/*.jpg
+        {root}/{scene}/dense{0,1}/depths/*.{h5,npy}
+
+    Returns matched lists ``(rgb_paths, depth_paths)`` paired by stem.
     """
     root_path = Path(root)
     rgb_paths = []
@@ -180,31 +180,31 @@ def discover_megadepth_pairs(
     return rgb_paths, depth_paths
 
 
-def _load_depth_h5(depth_path_bytes: np.ndarray) -> np.ndarray:
-    """Load a depth map from HDF5 file (for tf.numpy_function)."""
-    path = depth_path_bytes.decode("utf-8")
-    with h5py.File(path, "r") as f:
-        depth = f["depth"][:].astype(np.float32)
-    return depth[..., np.newaxis]  # (H, W, 1)
-
-
-def _load_pair_numpy(
-    rgb_path_bytes: np.ndarray,
-    depth_path_bytes: np.ndarray,
+def _load_and_process_pair(
+    rgb_path: str,
+    depth_path: str,
     patch_size: int,
     min_valid_ratio: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load RGB+depth pair, extract a patch, normalize. For tf.numpy_function."""
+    noise_sigma_min: float,
+    noise_sigma_max: float,
+    augment: bool,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Load one RGB+depth pair, crop, normalize, augment, add noise.
+
+    Returns ``(noisy_depth, rgb, y_true)`` ready for the model, where
+    ``y_true = concat([depth, mask], axis=-1)``.  Returns ``None`` when
+    the patch has too few valid pixels after all crop attempts.
+    """
+    from PIL import Image
+
     # Load RGB
-    rgb_path = rgb_path_bytes.decode("utf-8")
     rgb = plt.imread(rgb_path)
     if rgb.dtype == np.uint8:
         rgb = rgb.astype(np.float32) / 127.5 - 1.0
     else:
         rgb = rgb.astype(np.float32) * 2.0 - 1.0
 
-    # Load depth
-    depth_path = depth_path_bytes.decode("utf-8")
+    # Load depth from HDF5
     with h5py.File(depth_path, "r") as f:
         depth = f["depth"][:].astype(np.float32)
 
@@ -213,7 +213,6 @@ def _load_pair_numpy(
 
     # Resize RGB to match depth if needed
     if rgb_h != h or rgb_w != w:
-        from PIL import Image
         rgb_pil = Image.fromarray(
             ((rgb + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
         )
@@ -224,27 +223,27 @@ def _load_pair_numpy(
     if h < patch_size or w < patch_size:
         scale = max(patch_size / h, patch_size / w) + 0.01
         new_h, new_w = int(h * scale), int(w * scale)
-        from PIL import Image
         rgb_pil = Image.fromarray(
             ((rgb + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
         )
         rgb_pil = rgb_pil.resize((new_w, new_h), Image.BILINEAR)
         rgb = np.array(rgb_pil, dtype=np.float32) / 127.5 - 1.0
-        # Resize depth with nearest-neighbor to avoid interpolating invalid values
         depth_pil = Image.fromarray(depth)
         depth_pil = depth_pil.resize((new_w, new_h), Image.NEAREST)
         depth = np.array(depth_pil, dtype=np.float32)
         h, w = new_h, new_w
 
-    # Random crop — try up to 10 times to get a patch with enough valid pixels
+    # Random crop — try up to 10 times for enough valid pixels
     for _ in range(10):
         y = np.random.randint(0, h - patch_size + 1)
         x = np.random.randint(0, w - patch_size + 1)
         depth_patch = depth[y:y + patch_size, x:x + patch_size]
         valid_mask = (depth_patch > 0).astype(np.float32)
-        valid_ratio = valid_mask.mean()
-        if valid_ratio >= min_valid_ratio:
+        if valid_mask.mean() >= min_valid_ratio:
             break
+    else:
+        if valid_mask.mean() < min_valid_ratio:
+            return None
 
     rgb_patch = rgb[y:y + patch_size, x:x + patch_size, :3]
     depth_patch = depth_patch[..., np.newaxis]  # (ps, ps, 1)
@@ -267,92 +266,109 @@ def _load_pair_numpy(
     else:
         depth_patch = np.zeros_like(depth_patch)
 
+    # Augmentation (numpy — runs in worker process)
+    if augment:
+        combined = np.concatenate(
+            [rgb_patch, depth_patch, valid_mask], axis=-1
+        )
+        if np.random.random() > 0.5:
+            combined = combined[:, ::-1, :]
+        if np.random.random() > 0.5:
+            combined = combined[::-1, :, :]
+        k = np.random.randint(0, 4)
+        combined = np.rot90(combined, k, axes=(0, 1))
+        rgb_patch = combined[..., :3].copy()
+        depth_patch = combined[..., 3:4].copy()
+        valid_mask = combined[..., 4:5].copy()
+
+    # Add noise to depth
+    sigma = np.random.uniform(noise_sigma_min, noise_sigma_max)
+    noise = np.random.randn(*depth_patch.shape).astype(np.float32) * sigma
+    noisy_depth = depth_patch + noise
+    noisy_depth = noisy_depth * valid_mask  # zero out invalid
+    noisy_depth = np.clip(noisy_depth, -1.0, 1.0)
+
+    # y_true = concat([depth, mask], axis=-1)
+    y_true = np.concatenate([depth_patch, valid_mask], axis=-1)
+
     return (
+        noisy_depth.astype(np.float32),
         rgb_patch.astype(np.float32),
-        depth_patch.astype(np.float32),
-        valid_mask.astype(np.float32),
+        y_true.astype(np.float32),
     )
 
 
-def _augment_depth_pair(
-    rgb: tf.Tensor,
-    depth: tf.Tensor,
-    mask: tf.Tensor,
-) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-    """Apply synchronized augmentations to RGB, depth, and mask."""
-    combined = tf.concat([rgb, depth, mask], axis=-1)
-    combined = tf.image.random_flip_left_right(combined)
-    combined = tf.image.random_flip_up_down(combined)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    combined = tf.image.rot90(combined, k)
-    # Split back: 3 RGB + 1 depth + 1 mask
-    rgb_out = combined[..., :3]
-    depth_out = combined[..., 3:4]
-    mask_out = combined[..., 4:5]
-    return rgb_out, depth_out, mask_out
+class MegaDepthDataset(keras.utils.PyDataset):
+    """Multiprocessing-capable dataset for MegaDepth RGB→depth pairs.
 
-
-def create_megadepth_dataset(
-    config: DepthTrainingConfig,
-    rgb_paths: List[str],
-    depth_paths: List[str],
-    is_training: bool = True,
-) -> tf.data.Dataset:
-    """Create a tf.data pipeline for MegaDepth RGB→depth pairs.
-
-    Returns batches of ``((noisy_depth, rgb), (clean_depth, valid_mask))``.
-    The model predicts clean_depth; the loss uses valid_mask to ignore
-    invalid pixels.
+    Each worker process independently loads, crops, augments, and
+    normalizes samples — bypassing the GIL for true parallel I/O.
     """
-    ds = tf.data.Dataset.from_tensor_slices((rgb_paths, depth_paths))
-    if is_training:
-        ds = ds.shuffle(min(config.dataset_shuffle_buffer, len(rgb_paths)))
-    ds = ds.repeat()
 
-    def load_pair(rgb_path, depth_path):
-        rgb, depth, mask = tf.numpy_function(
-            func=lambda r, d: _load_pair_numpy(
-                r, d, config.patch_size, config.min_valid_ratio
-            ),
-            inp=[rgb_path, depth_path],
-            Tout=[tf.float32, tf.float32, tf.float32],
-        )
-        ps = config.patch_size
-        rgb.set_shape([ps, ps, 3])
-        depth.set_shape([ps, ps, 1])
-        mask.set_shape([ps, ps, 1])
-        return rgb, depth, mask
+    def __init__(
+        self,
+        rgb_paths: List[str],
+        depth_paths: List[str],
+        config: DepthTrainingConfig,
+        is_training: bool = True,
+        workers: int = 8,
+        **kwargs,
+    ):
+        super().__init__(workers=workers, use_multiprocessing=True, **kwargs)
+        self.rgb_paths = rgb_paths
+        self.depth_paths = depth_paths
+        self.config = config
+        self.is_training = is_training
+        self.n_pairs = len(rgb_paths)
+        self.indices = np.arange(self.n_pairs)
+        if is_training:
+            np.random.shuffle(self.indices)
 
-    ds = ds.map(load_pair, num_parallel_calls=config.parallel_reads)
+    def __len__(self) -> int:
+        return max(1, self.n_pairs // self.config.batch_size)
 
-    # Filter out patches with too few valid pixels
-    ds = ds.filter(
-        lambda rgb, depth, mask: tf.reduce_mean(mask) >= config.min_valid_ratio
-    )
+    def __getitem__(self, idx: int):
+        batch_noisy, batch_rgb, batch_ytrue = [], [], []
 
-    if is_training and config.augment_data:
-        ds = ds.map(
-            lambda r, d, m: _augment_depth_pair(r, d, m),
-            num_parallel_calls=tf.data.AUTOTUNE,
-        )
+        attempts = 0
+        while len(batch_noisy) < self.config.batch_size and attempts < self.config.batch_size * 3:
+            # Wrap around for infinite-style iteration
+            sample_idx = (
+                idx * self.config.batch_size + len(batch_noisy) + attempts
+            ) % self.n_pairs
+            i = self.indices[sample_idx]
+            attempts += 1
 
-    def add_noise_and_format(rgb, depth, mask):
-        sigma = tf.random.uniform(
-            [], config.noise_sigma_min, config.noise_sigma_max
-        )
-        noise = tf.random.normal(tf.shape(depth)) * sigma
-        noisy_depth = depth + noise
-        # Mask noisy depth for invalid pixels (keep as 0)
-        noisy_depth = noisy_depth * mask
-        noisy_depth = tf.clip_by_value(noisy_depth, -1.0, 1.0)
-        # Concatenate depth + mask so y_true is a single tensor
-        y_true = tf.concat([depth, mask], axis=-1)  # (ps, ps, 2)
-        return (noisy_depth, rgb), y_true
+            result = _load_and_process_pair(
+                self.rgb_paths[i],
+                self.depth_paths[i],
+                self.config.patch_size,
+                self.config.min_valid_ratio,
+                self.config.noise_sigma_min,
+                self.config.noise_sigma_max,
+                augment=self.is_training and self.config.augment_data,
+            )
+            if result is None:
+                continue
+            noisy_depth, rgb, y_true = result
+            batch_noisy.append(noisy_depth)
+            batch_rgb.append(rgb)
+            batch_ytrue.append(y_true)
 
-    ds = ds.map(add_noise_and_format, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(config.batch_size, drop_remainder=is_training)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return ds
+        # Pad if we couldn't fill the batch (rare)
+        if not batch_noisy:
+            ps = self.config.patch_size
+            batch_noisy = [np.zeros((ps, ps, 1), dtype=np.float32)]
+            batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
+            batch_ytrue = [np.zeros((ps, ps, 2), dtype=np.float32)]
+
+        x = (np.stack(batch_noisy), np.stack(batch_rgb))
+        y = np.stack(batch_ytrue)
+        return x, y
+
+    def on_epoch_end(self):
+        if self.is_training:
+            np.random.shuffle(self.indices)
 
 
 # ---------------------------------------------------------------------
@@ -446,15 +462,20 @@ class DepthVisualizationCallback(keras.callbacks.Callback):
         try:
             rgb_list, depth_list, mask_list = [], [], []
             for rp, dp in zip(self.val_rgb_paths, self.val_depth_paths):
-                rgb, depth, mask = _load_pair_numpy(
-                    rp.encode("utf-8"),
-                    dp.encode("utf-8"),
+                result = _load_and_process_pair(
+                    rp, dp,
                     self.config.patch_size,
                     self.config.min_valid_ratio,
+                    noise_sigma_min=0.0,
+                    noise_sigma_max=0.0,
+                    augment=False,
                 )
+                if result is None:
+                    continue
+                _, rgb, y_true = result
                 rgb_list.append(rgb)
-                depth_list.append(depth)
-                mask_list.append(mask)
+                depth_list.append(y_true[..., :1])
+                mask_list.append(y_true[..., 1:])
 
             if rgb_list:
                 self.test_data = {
@@ -689,18 +710,26 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         f"{len(val_rgb)} validation pairs"
     )
 
-    # Create datasets
-    train_ds = create_megadepth_dataset(config, train_rgb, train_depth, True)
-    val_ds = create_megadepth_dataset(config, val_rgb, val_depth, False)
+    # Determine worker count: leave 2 cores free for GPU/TF
+    import os
+    num_workers = max(1, min(os.cpu_count() or 4, 10) - 2)
+    logger.info(f"Using {num_workers} data-loading worker processes")
 
-    # Steps per epoch
+    # Create datasets (multiprocessing PyDataset)
+    train_ds = MegaDepthDataset(
+        train_rgb, train_depth, config,
+        is_training=True, workers=num_workers,
+    )
+    val_ds = MegaDepthDataset(
+        val_rgb, val_depth, config,
+        is_training=False, workers=max(1, num_workers // 2),
+    )
+
+    # Steps per epoch — len(train_ds) is n_pairs // batch_size
     if config.steps_per_epoch is not None:
         steps_per_epoch = config.steps_per_epoch
     else:
-        steps_per_epoch = max(
-            100,
-            (len(train_rgb) * config.patches_per_image) // config.batch_size,
-        )
+        steps_per_epoch = len(train_ds)
     logger.info(f"Using {steps_per_epoch} steps per epoch")
 
     # Create model
@@ -749,16 +778,11 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
 
     # Train
     start_time = time.time()
-    validation_steps = config.validation_steps or max(
-        50, steps_per_epoch // 20
-    )
 
     history = model.fit(
         train_ds,
         epochs=config.epochs,
-        steps_per_epoch=steps_per_epoch,
         validation_data=val_ds,
-        validation_steps=validation_steps,
         callbacks=callbacks,
         verbose=1,
     )
@@ -883,6 +907,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def main():
     args = parse_arguments()
+
     setup_gpu(gpu_id=args.gpu)
 
     config = DepthTrainingConfig(
