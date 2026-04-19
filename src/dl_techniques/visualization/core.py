@@ -205,10 +205,13 @@ class VisualizationContext:
 
     def get_save_path(self, filename: str, subdir: Optional[str] = None) -> Path:
         """Get full save path for a file."""
+        save_dir = self.output_dir
+        if self.experiment_name:
+            save_dir = save_dir / self.experiment_name
+        if self.timestamp:
+            save_dir = save_dir / self.timestamp
         if subdir:
-            save_dir = self.output_dir / self.experiment_name / self.timestamp / subdir
-        else:
-            save_dir = self.output_dir / self.experiment_name / self.timestamp
+            save_dir = save_dir / subdir
 
         save_dir.mkdir(parents=True, exist_ok=True)
         return save_dir / filename
@@ -393,7 +396,8 @@ class VisualizationManager:
             experiment_name: str,
             output_dir: Union[str, Path] = "visualizations",
             config: Optional[PlotConfig] = None,
-            auto_discover: bool = True
+            auto_discover: bool = True,
+            timestamp: Optional[str] = None,
     ):
         """
         Initialize the visualization manager.
@@ -403,12 +407,18 @@ class VisualizationManager:
             output_dir: Base directory for saving visualizations
             config: Plot configuration (uses defaults if None)
             auto_discover: Whether to auto-discover plugins
+            timestamp: Override timestamp for output path. Pass ``""``
+                to save directly into ``output_dir`` without a
+                timestamp subdirectory.
         """
         self.config = config or PlotConfig()
-        self.context = VisualizationContext(
+        ctx_kwargs: Dict[str, Any] = dict(
             experiment_name=experiment_name,
-            output_dir=Path(output_dir)
+            output_dir=Path(output_dir),
         )
+        if timestamp is not None:
+            ctx_kwargs["timestamp"] = timestamp
+        self.context = VisualizationContext(**ctx_kwargs)
 
         self.plugins: Dict[str, VisualizationPlugin] = {}
         self.templates: Dict[str, Type[VisualizationPlugin]] = {}

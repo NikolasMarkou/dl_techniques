@@ -167,9 +167,10 @@ def generate_training_curves(
 
     plot_config = PlotConfig(fig_size=(14, 10), save_dpi=150)
     viz_manager = VisualizationManager(
-        experiment_name="training",
+        experiment_name="",
         output_dir=results_dir,
         config=plot_config,
+        timestamp="",
     )
     viz_manager.register_plugin(TrainingCurvesVisualization(
         config=plot_config,
