@@ -627,6 +627,147 @@ class BiasFreeGeometricDownsample(keras.layers.Layer):
 
 
 # ===========================================================================
+# BiasFreeGeometricUpsample
+# ===========================================================================
+
+
+@keras.saving.register_keras_serializable()
+class BiasFreeGeometricUpsample(keras.layers.Layer):
+    """Bias-free spatial upsampling via nearest-neighbor + Clifford block.
+
+    Follows the Odena et al. (2016) "deconvolution checkerboard" fix:
+    nearest-neighbor 2x upsample followed by a learned refinement.
+    Here the refinement is a full Clifford geometric-algebra block
+    (dual-stream DWConv context + pointwise detail + geometric product
+    + gated residual), so the upsampled features are refined through
+    the same algebraic machinery as the rest of the network.
+
+    All operations are bias-free for Miyasawa-theorem compliance.
+
+    :param in_channels: Input channel count.
+    :param out_channels: Output channel count.
+    :param shifts: Cyclic shift offsets for the geometric product.
+    :param cli_mode: Geometric product components.
+    :param ctx_mode: Context mode for the Clifford block.
+    :param use_global_context: Enable global context branch.
+    :param layer_scale_init: Initial LayerScale gamma.
+    :param kernel_initializer: Weight initializer.
+    :param kernel_regularizer: Weight regularizer.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        shifts: Optional[List[int]] = None,
+        cli_mode: CliMode = "full",
+        ctx_mode: CtxMode = "diff",
+        use_global_context: bool = False,
+        layer_scale_init: float = 1e-5,
+        kernel_initializer: Any = _DEFAULT_KERNEL_INIT,
+        kernel_regularizer: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if shifts is None:
+            shifts = [1, 2]
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.shifts = list(shifts)
+        self.cli_mode = cli_mode
+        self.ctx_mode = ctx_mode
+        self.use_global_context = use_global_context
+        self.layer_scale_init = layer_scale_init
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+
+        # Nearest-neighbor 2x upsample (no learnable params, no artifacts)
+        self.upsample = keras.layers.UpSampling2D(
+            size=2, interpolation="nearest", name="nn_upsample"
+        )
+
+        # Channel transition if needed (before Clifford block)
+        self._needs_transition = (in_channels != out_channels)
+        if self._needs_transition:
+            self.channel_proj = keras.layers.Conv2D(
+                filters=out_channels,
+                kernel_size=1,
+                padding="same",
+                use_bias=False,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                name="channel_proj",
+            )
+
+        # Clifford block refines at upsampled resolution
+        self.refine_block = BiasFreeConditionedCliffordBlock(
+            channels=out_channels,
+            shifts=shifts,
+            cli_mode=cli_mode,
+            ctx_mode=ctx_mode,
+            use_global_context=use_global_context,
+            layer_scale_init=layer_scale_init,
+            drop_path_rate=0.0,
+            enable_dense_conditioning=False,
+            enable_discrete_conditioning=False,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name="refine_block",
+        )
+
+    def call(
+        self,
+        x: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Upsample via nearest-neighbor + Clifford refinement.
+
+        :param x: Input ``(B, H, W, C_in)``.
+        :param training: Training mode flag.
+        :return: Output ``(B, 2H, 2W, C_out)``.
+        """
+        # Nearest-neighbor 2x
+        x_up = self.upsample(x)
+
+        # Channel transition if needed
+        if self._needs_transition:
+            x_up = self.channel_proj(x_up)
+
+        # Clifford block refinement (residual: output = x_up + learned)
+        out = self.refine_block(x_up, training=training)
+        return out
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        b, h, w, _ = input_shape
+        h_out = h * 2 if h is not None else None
+        w_out = w * 2 if w is not None else None
+        return (b, h_out, w_out, self.out_channels)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "in_channels": self.in_channels,
+            "out_channels": self.out_channels,
+            "shifts": self.shifts,
+            "cli_mode": self.cli_mode,
+            "ctx_mode": self.ctx_mode,
+            "use_global_context": self.use_global_context,
+            "layer_scale_init": self.layer_scale_init,
+            "kernel_initializer": initializers.serialize(
+                self.kernel_initializer
+            ),
+            "kernel_regularizer": regularizers.serialize(
+                self.kernel_regularizer
+            ),
+        })
+        return config
+
+
+# ===========================================================================
 # CliffordNetConditionalDenoiser
 # ===========================================================================
 
@@ -689,6 +830,8 @@ class CliffordNetConditionalDenoiser(keras.Model):
         num_classes: int = 0,
         class_embedding_dim: int = 128,
         use_geometric_downsample: bool = True,
+        use_geometric_upsample: bool = False,
+        upsample_interpolation: str = "nearest",
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
         **kwargs: Any,
@@ -734,6 +877,8 @@ class CliffordNetConditionalDenoiser(keras.Model):
         self.num_classes = num_classes
         self.class_embedding_dim = class_embedding_dim
         self.use_geometric_downsample = use_geometric_downsample
+        self.use_geometric_upsample = use_geometric_upsample
+        self.upsample_interpolation = upsample_interpolation
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
@@ -954,9 +1099,26 @@ class CliffordNetConditionalDenoiser(keras.Model):
 
             # Upsample
             if level < self.num_levels - 1:
-                upsample = keras.layers.UpSampling2D(
-                    size=2, interpolation="bilinear", name=f"dec_upsample_{level}"
-                )
+                upper_ch = self.level_channels[level + 1]
+                if self.use_geometric_upsample:
+                    upsample = BiasFreeGeometricUpsample(
+                        in_channels=upper_ch,
+                        out_channels=upper_ch,
+                        shifts=self.level_shifts[level + 1],
+                        cli_mode=self.cli_mode,
+                        ctx_mode=self.ctx_mode,
+                        use_global_context=self.use_global_context,
+                        layer_scale_init=self.layer_scale_init,
+                        kernel_initializer=self.kernel_initializer,
+                        kernel_regularizer=self.kernel_regularizer,
+                        name=f"dec_upsample_{level}",
+                    )
+                else:
+                    upsample = keras.layers.UpSampling2D(
+                        size=2,
+                        interpolation=self.upsample_interpolation,
+                        name=f"dec_upsample_{level}",
+                    )
             else:
                 upsample = None
 
@@ -1276,6 +1438,8 @@ class CliffordNetConditionalDenoiser(keras.Model):
             "num_classes": self.num_classes,
             "class_embedding_dim": self.class_embedding_dim,
             "use_geometric_downsample": self.use_geometric_downsample,
+            "use_geometric_upsample": self.use_geometric_upsample,
+            "upsample_interpolation": self.upsample_interpolation,
             "kernel_initializer": initializers.serialize(
                 self.kernel_initializer
             ),

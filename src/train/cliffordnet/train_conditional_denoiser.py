@@ -117,6 +117,8 @@ class ConditionalTrainingConfig:
     model_variant: str = "tiny"
     stochastic_depth_rate: float = 0.1
     use_geometric_downsample: bool = True
+    use_geometric_upsample: bool = False
+    upsample_interpolation: str = "nearest"
 
     # Training
     batch_size: int = 32
@@ -779,6 +781,8 @@ def create_model_instance(
         class_embedding_dim=config.class_embedding_dim,
         stochastic_depth_rate=config.stochastic_depth_rate,
         use_geometric_downsample=config.use_geometric_downsample,
+        use_geometric_upsample=config.use_geometric_upsample,
+        upsample_interpolation=config.upsample_interpolation,
     )
 
 
@@ -1047,6 +1051,12 @@ def parse_arguments() -> argparse.Namespace:
         default="clifford",
         help="Downsample method: clifford (geometric product) or conv (plain stride-2)",
     )
+    parser.add_argument(
+        "--upsample-mode",
+        choices=["clifford", "bilinear", "nearest"],
+        default="nearest",
+        help="Upsample method: nearest (nn only), clifford (nn + Clifford block), or bilinear",
+    )
 
     # Dataset
     parser.add_argument(
@@ -1115,6 +1125,8 @@ def main():
         model_variant=args.model_variant,
         stochastic_depth_rate=args.stochastic_depth_rate,
         use_geometric_downsample=(args.downsample_mode == "clifford"),
+        use_geometric_upsample=(args.upsample_mode == "clifford"),
+        upsample_interpolation=("nearest" if args.upsample_mode == "nearest" else "bilinear"),
         noise_sigma_min=args.noise_min,
         noise_sigma_max=args.noise_max,
         noise_distribution="uniform",
@@ -1141,6 +1153,7 @@ def main():
         f"lr={config.learning_rate}, "
         f"target_ch={config.target_channels}, "
         f"downsample={'clifford' if config.use_geometric_downsample else 'conv'}, "
+        f"upsample={'clifford' if config.use_geometric_upsample else 'bilinear'}, "
         f"noise=[{config.noise_sigma_min}, {config.noise_sigma_max}]"
     )
 
