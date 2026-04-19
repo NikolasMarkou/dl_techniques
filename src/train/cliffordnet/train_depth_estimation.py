@@ -375,18 +375,15 @@ class MegaDepthDataset(keras.utils.PyDataset):
 
 
 class DepthEstimationLoss(keras.losses.Loss):
-    """Combined scale-shift invariant + gradient matching loss.
+    """Masked L1 + multi-scale gradient matching loss for depth estimation.
 
-    Follows the MiDaS / Depth Anything V2 recipe:
-      ``L = L_ssi + gradient_weight * L_grad``
+    ``L = L1_masked + gradient_weight * L_grad``
 
-    Both components respect a validity mask so invalid depth pixels
-    (value == 0 in MegaDepth) are excluded from the loss computation.
-
-    The SSI term normalizes prediction and target per-sample (median,
-    MAD) before computing L1, making the loss invariant to global scale
-    and shift.  The gradient term compares finite-difference depth
-    gradients at multiple scales to preserve edges.
+    Since depth is already per-sample normalized to [-1, +1] in the data
+    pipeline, we use plain masked L1 (not SSI) for the primary term.
+    The gradient matching term compares finite-difference depth gradients
+    at multiple scales to preserve edges (MiDaS recipe).  Both terms
+    respect the validity mask.
     """
 
     def __init__(
@@ -400,87 +397,40 @@ class DepthEstimationLoss(keras.losses.Loss):
         self.gradient_weight = gradient_weight
         self.n_scales = n_scales
 
-    # -- helpers --
-
-    @staticmethod
-    def _masked_median(x, mask):
-        """Approximate masked median via sorting valid values."""
-        # x: (B, N), mask: (B, N)
-        large_val = keras.ops.cast(1e6, x.dtype)
-        # Push invalid values to the end of the sort
-        x_masked = keras.ops.where(mask > 0.5, x, large_val)
-        x_sorted = keras.ops.sort(x_masked, axis=-1)
-        valid_count = keras.ops.maximum(
-            keras.ops.sum(mask, axis=-1, keepdims=True),
-            keras.ops.cast(1.0, mask.dtype),
-        )  # (B, 1)
-        mid = keras.ops.cast(valid_count / 2.0, "int32")
-        mid = keras.ops.clip(mid, 0, keras.ops.shape(x)[-1] - 1)
-        # Gather median per sample using take_along_axis
-        median_val = keras.ops.take_along_axis(
-            x_sorted, mid, axis=-1
-        )  # (B, 1)
-        return median_val
-
-    def _ssi_normalize(self, d, mask):
-        """Scale-shift normalize a depth map using valid-pixel statistics."""
-        # d: (B, H, W, 1), mask: (B, H, W, 1)
-        b = keras.ops.shape(d)[0]
-        d_flat = keras.ops.reshape(d, (b, -1))       # (B, N)
-        m_flat = keras.ops.reshape(mask, (b, -1))     # (B, N)
-
-        t = self._masked_median(d_flat, m_flat)       # (B, 1) — shift
-        s = keras.ops.sum(
-            keras.ops.abs(d_flat - t) * m_flat, axis=-1, keepdims=True
-        ) / keras.ops.maximum(
-            keras.ops.sum(m_flat, axis=-1, keepdims=True),
-            keras.ops.cast(1.0, d.dtype),
-        )  # (B, 1) — scale (MAD)
-        s = keras.ops.maximum(s, keras.ops.cast(1e-6, s.dtype))
-
-        d_norm = (d_flat - t) / s  # (B, N)
-        return keras.ops.reshape(d_norm, keras.ops.shape(d))
-
     @staticmethod
     def _gradient_xy(d):
         """Compute finite-difference depth gradients in x and y."""
-        # d: (B, H, W, 1)
-        dx = d[:, :, 1:, :] - d[:, :, :-1, :]   # (B, H, W-1, 1)
-        dy = d[:, 1:, :, :] - d[:, :-1, :, :]   # (B, H-1, W, 1)
+        dx = d[:, :, 1:, :] - d[:, :, :-1, :]
+        dy = d[:, 1:, :, :] - d[:, :-1, :, :]
         return dx, dy
 
     @staticmethod
     def _downsample_2x(d):
-        """Average-pool 2x downsample."""
+        """Average-pool 2× downsample."""
         return keras.ops.average_pool(d, pool_size=2, strides=2, padding="valid")
-
-    # -- main --
 
     def call(self, y_true_and_mask, y_pred):
         depth_true = y_true_and_mask[..., :1]
         mask = y_true_and_mask[..., 1:]
 
-        # --- SSI loss (masked) ---
-        pred_norm = self._ssi_normalize(y_pred, mask)
-        true_norm = self._ssi_normalize(depth_true, mask)
-
-        ssi_error = keras.ops.abs(pred_norm - true_norm) * mask
+        # --- Masked L1 loss ---
+        l1_error = keras.ops.abs(y_pred - depth_true) * mask
         valid_count = keras.ops.maximum(
             keras.ops.sum(mask), keras.ops.cast(1.0, mask.dtype)
         )
-        l_ssi = keras.ops.sum(ssi_error) / valid_count
+        l_l1 = keras.ops.sum(l1_error) / valid_count
 
         # --- Multi-scale gradient matching loss (masked) ---
         l_grad = keras.ops.cast(0.0, y_pred.dtype)
-        d_pred = pred_norm
-        d_true = true_norm
+        d_pred = y_pred
+        d_true = depth_true
         m = mask
 
         for _ in range(self.n_scales):
             dx_pred, dy_pred = self._gradient_xy(d_pred)
             dx_true, dy_true = self._gradient_xy(d_true)
 
-            # Erode mask for gradients (both neighbors must be valid)
+            # Erode mask: both neighbors must be valid for a gradient
             mx = keras.ops.minimum(m[:, :, 1:, :], m[:, :, :-1, :])
             my = keras.ops.minimum(m[:, 1:, :, :], m[:, :-1, :, :])
 
@@ -496,13 +446,12 @@ class DepthEstimationLoss(keras.losses.Loss):
                 + keras.ops.sum(keras.ops.abs(dy_pred - dy_true) * my) / my_count
             )
 
-            # Downsample for next scale
             d_pred = self._downsample_2x(d_pred)
             d_true = self._downsample_2x(d_true)
             m = self._downsample_2x(m)
-            m = keras.ops.cast(m > 0.5, m.dtype)  # re-binarize after pooling
+            m = keras.ops.cast(m > 0.5, m.dtype)
 
-        return l_ssi + self.gradient_weight * l_grad
+        return l_l1 + self.gradient_weight * l_grad
 
     def get_config(self):
         config = super().get_config()
