@@ -4,12 +4,12 @@ Trains a bias-free CliffordNet conditional denoiser for monocular depth
 estimation on MegaDepth paired RGB+depth data.  The model predicts
 depth purely from a single RGB image:
 
-    model([grayscale(rgb), rgb]) → depth
+    model(rgb) → depth
 
-The primary input is the grayscale luminance of the RGB image (bias-free
-networks cannot produce non-zero output from zero input).  The model
-learns ``depth = grayscale + residual`` via RGB conditioning.  Depth
-maps are loaded from HDF5 files,
+RGB is the direct input to a CliffordNet U-Net encoder-decoder backbone
+with a 1×1 Conv depth projection head.  No conditioning — the model
+learns to predict depth purely from the image.  Depth maps are loaded
+from HDF5 files,
 normalized per-sample to [-1, +1], and invalid pixels (depth == 0) are
 masked in the loss.
 
@@ -181,14 +181,12 @@ def _load_and_process_pair(
     patch_size: int,
     min_valid_ratio: float,
     augment: bool,
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Load one RGB+depth pair, crop, normalize, augment.
 
-    Returns ``(zeros_input, rgb, y_true)`` ready for the model, where
-    ``y_true = concat([depth, mask], axis=-1)``.  The zeros input forces
-    the model to predict depth purely from RGB conditioning (monocular
-    depth estimation).  Returns ``None`` when the patch has too few
-    valid pixels after all crop attempts.
+    Returns ``(rgb, y_true)`` where ``y_true = concat([depth, mask],
+    axis=-1)``.  Returns ``None`` when the patch has too few valid
+    pixels after all crop attempts.
     """
     from PIL import Image
 
@@ -276,23 +274,10 @@ def _load_and_process_pair(
         depth_patch = combined[..., 3:4].copy()
         valid_mask = combined[..., 4:5].copy()
 
-    # Monocular depth: pass grayscale(RGB) as primary input.
-    # Bias-free networks produce zero output from zero input (no bias
-    # terms to create activation), so we need a non-zero signal.
-    # Grayscale provides initial activation; RGB conditioning adds
-    # color detail.  Model learns residual: depth - grayscale(RGB).
-    gray = (
-        0.2989 * rgb_patch[..., 0:1]
-        + 0.5870 * rgb_patch[..., 1:2]
-        + 0.1140 * rgb_patch[..., 2:3]
-    )  # (ps, ps, 1), luminance in [-1, +1]
-    gray_input = gray.copy()
-
     # y_true = concat([depth, mask], axis=-1)
     y_true = np.concatenate([depth_patch, valid_mask], axis=-1)
 
     return (
-        gray_input.astype(np.float32),
         rgb_patch.astype(np.float32),
         y_true.astype(np.float32),
     )
@@ -328,13 +313,12 @@ class MegaDepthDataset(keras.utils.PyDataset):
         return max(1, self.n_pairs // self.config.batch_size)
 
     def __getitem__(self, idx: int):
-        batch_noisy, batch_rgb, batch_ytrue = [], [], []
+        batch_rgb, batch_ytrue = [], []
 
         attempts = 0
-        while len(batch_noisy) < self.config.batch_size and attempts < self.config.batch_size * 3:
-            # Wrap around for infinite-style iteration
+        while len(batch_rgb) < self.config.batch_size and attempts < self.config.batch_size * 3:
             sample_idx = (
-                idx * self.config.batch_size + len(batch_noisy) + attempts
+                idx * self.config.batch_size + len(batch_rgb) + attempts
             ) % self.n_pairs
             i = self.indices[sample_idx]
             attempts += 1
@@ -348,21 +332,17 @@ class MegaDepthDataset(keras.utils.PyDataset):
             )
             if result is None:
                 continue
-            zeros_input, rgb, y_true = result
-            batch_noisy.append(zeros_input)
+            rgb, y_true = result
             batch_rgb.append(rgb)
             batch_ytrue.append(y_true)
 
         # Pad if we couldn't fill the batch (rare)
-        if not batch_noisy:
+        if not batch_rgb:
             ps = self.config.patch_size
-            batch_noisy = [np.zeros((ps, ps, 1), dtype=np.float32)]
             batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
             batch_ytrue = [np.zeros((ps, ps, 2), dtype=np.float32)]
 
-        x = (np.stack(batch_noisy), np.stack(batch_rgb))
-        y = np.stack(batch_ytrue)
-        return x, y
+        return np.stack(batch_rgb), np.stack(batch_ytrue)
 
     def on_epoch_end(self):
         if self.is_training:
@@ -608,7 +588,7 @@ class DepthVisualizationCallback(keras.callbacks.Callback):
                 )
                 if result is None:
                     continue
-                _, rgb, y_true = result
+                rgb, y_true = result
                 rgb_list.append(rgb)
                 depth_list.append(y_true[..., :1])
                 mask_list.append(y_true[..., 1:])
@@ -638,13 +618,8 @@ class DepthVisualizationCallback(keras.callbacks.Callback):
             gt_depth = self.test_data["depth"]
             mask = self.test_data["mask"]
 
-            # Predict depth from grayscale(RGB) + RGB (inference mode)
-            gray_input = (
-                0.2989 * rgb[..., 0:1]
-                + 0.5870 * rgb[..., 1:2]
-                + 0.1140 * rgb[..., 2:3]
-            )
-            pred_depth = self.model((gray_input, rgb), training=False)
+            # Predict depth directly from RGB
+            pred_depth = self.model(rgb, training=False)
 
             # Compute masked metrics
             valid_pixels = tf.reduce_sum(mask)
@@ -761,13 +736,17 @@ def create_callbacks(
 # ---------------------------------------------------------------------
 
 
-def create_model(config: DepthTrainingConfig) -> CliffordNetConditionalDenoiser:
-    """Create a CliffordNet conditional denoiser configured for depth."""
-    return CliffordNetConditionalDenoiser.from_variant(
+def create_model(config: DepthTrainingConfig) -> keras.Model:
+    """Create a CliffordNet U-Net for monocular depth estimation.
+
+    Uses the CliffordNet encoder-decoder backbone with RGB as direct
+    input (3 channels, no conditioning).  A 1×1 Conv projects the
+    3-channel output to single-channel depth.
+    """
+    backbone = CliffordNetConditionalDenoiser.from_variant(
         variant=config.model_variant,
-        in_channels=1,
-        enable_dense_conditioning=True,
-        dense_cond_channels=3,
+        in_channels=3,
+        enable_dense_conditioning=False,
         enable_discrete_conditioning=False,
         num_classes=0,
         stochastic_depth_rate=config.stochastic_depth_rate,
@@ -775,6 +754,15 @@ def create_model(config: DepthTrainingConfig) -> CliffordNetConditionalDenoiser:
         use_geometric_upsample=config.use_geometric_upsample,
         upsample_interpolation=config.upsample_interpolation,
     )
+    # Backbone output: (B, H, W, 3) = RGB + residual.
+    # Project to 1-channel depth.
+    inp = keras.Input(shape=(None, None, 3), name="rgb_input")
+    x = backbone(inp)  # (B, H, W, 3)
+    depth = keras.layers.Conv2D(
+        1, 1, use_bias=False, name="depth_proj",
+        kernel_initializer="glorot_uniform",
+    )(x)
+    return keras.Model(inputs=inp, outputs=depth, name="cliffordnet_depth")
 
 
 # ---------------------------------------------------------------------
@@ -872,13 +860,8 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         steps_per_epoch = len(train_ds)
     logger.info(f"Using {steps_per_epoch} steps per epoch")
 
-    # Create model
+    # Create model — RGB input, 1-channel depth output
     model = create_model(config)
-    ps = config.patch_size
-    model.build([
-        (None, ps, ps, 1),   # noisy_depth
-        (None, ps, ps, 3),   # rgb conditioning
-    ])
     model.summary()
 
     # Optimizer with LR schedule
@@ -955,7 +938,6 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
             f.write(f"Parameters        : {model.count_params():,}\n")
             f.write(f"Epochs trained    : {trained_epochs}\n")
             f.write(f"Best val_loss     : {best_loss:.6f}\n")
-            f.write(f"Noise range       : [{config.noise_sigma_min}, {config.noise_sigma_max}]\n")
             f.write(f"Batch size        : {config.batch_size}\n")
             f.write(f"Patch size        : {config.patch_size}\n")
             f.write(f"Learning rate     : {config.learning_rate}\n")
@@ -966,16 +948,10 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     except Exception as e:
         logger.warning(f"Failed to write training summary: {e}")
 
-    # Save inference model with flexible spatial dims
+    # Save inference model (already supports flexible spatial dims via Input(None,None,3))
     try:
-        inference_model = create_model(config)
-        inference_model.build([
-            (None, None, None, 1),
-            (None, None, None, 3),
-        ])
-        inference_model.set_weights(model.get_weights())
         inference_path = output_dir / "model_inference.keras"
-        inference_model.save(str(inference_path))
+        model.save(str(inference_path))
         logger.info(f"Inference model saved to: {inference_path}")
     except Exception as e:
         logger.warning(f"Failed to save inference model: {e}")
