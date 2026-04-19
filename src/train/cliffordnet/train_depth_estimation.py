@@ -818,6 +818,8 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
 
     # Create model — RGB input, 1-channel depth output
     model = create_model(config)
+    ps = config.patch_size
+    model.build((None, ps, ps, 3))
     model.summary()
 
     # Optimizer with LR schedule
