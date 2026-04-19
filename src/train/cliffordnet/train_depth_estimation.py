@@ -4,10 +4,12 @@ Trains a bias-free CliffordNet conditional denoiser for monocular depth
 estimation on MegaDepth paired RGB+depth data.  The model predicts
 depth purely from a single RGB image:
 
-    model([zeros, rgb]) → depth
+    model([grayscale(rgb), rgb]) → depth
 
-The depth input is always zeros — the model must learn to predict depth
-entirely from RGB conditioning.  Depth maps are loaded from HDF5 files,
+The primary input is the grayscale luminance of the RGB image (bias-free
+networks cannot produce non-zero output from zero input).  The model
+learns ``depth = grayscale + residual`` via RGB conditioning.  Depth
+maps are loaded from HDF5 files,
 normalized per-sample to [-1, +1], and invalid pixels (depth == 0) are
 masked in the loss.
 
@@ -275,14 +277,23 @@ def _load_and_process_pair(
         depth_patch = combined[..., 3:4].copy()
         valid_mask = combined[..., 4:5].copy()
 
-    # Monocular depth: input is zeros — model must predict depth from RGB alone
-    zeros_input = np.zeros_like(depth_patch)
+    # Monocular depth: pass grayscale(RGB) as primary input.
+    # Bias-free networks produce zero output from zero input (no bias
+    # terms to create activation), so we need a non-zero signal.
+    # Grayscale provides initial activation; RGB conditioning adds
+    # color detail.  Model learns residual: depth - grayscale(RGB).
+    gray = (
+        0.2989 * rgb_patch[..., 0:1]
+        + 0.5870 * rgb_patch[..., 1:2]
+        + 0.1140 * rgb_patch[..., 2:3]
+    )  # (ps, ps, 1), luminance in [-1, +1]
+    gray_input = gray.copy()
 
     # y_true = concat([depth, mask], axis=-1)
     y_true = np.concatenate([depth_patch, valid_mask], axis=-1)
 
     return (
-        zeros_input.astype(np.float32),
+        gray_input.astype(np.float32),
         rgb_patch.astype(np.float32),
         y_true.astype(np.float32),
     )
@@ -488,9 +499,13 @@ class DepthVisualizationCallback(keras.callbacks.Callback):
             gt_depth = self.test_data["depth"]
             mask = self.test_data["mask"]
 
-            # Predict depth from zeros + RGB (inference mode)
-            zeros_input = tf.zeros_like(gt_depth)
-            pred_depth = self.model((zeros_input, rgb), training=False)
+            # Predict depth from grayscale(RGB) + RGB (inference mode)
+            gray_input = (
+                0.2989 * rgb[..., 0:1]
+                + 0.5870 * rgb[..., 1:2]
+                + 0.1140 * rgb[..., 2:3]
+            )
+            pred_depth = self.model((gray_input, rgb), training=False)
 
             # Compute masked metrics
             valid_pixels = tf.reduce_sum(mask)
