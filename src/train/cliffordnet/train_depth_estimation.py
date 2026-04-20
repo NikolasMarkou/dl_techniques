@@ -53,6 +53,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
+    deep_supervision_schedule_builder,
 )
 from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
 from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
@@ -99,6 +100,13 @@ class DepthTrainingConfig:
     warmup_epochs: int = 5
     weight_decay: float = 1e-5
     gradient_clipping: float = 1.0
+
+    # Deep supervision
+    enable_deep_supervision: bool = False
+    deep_supervision_schedule_type: str = "linear_low_to_high"
+    deep_supervision_schedule_config: Dict[str, Any] = field(
+        default_factory=dict,
+    )
 
     # Monitoring
     monitor_every_n_epochs: int = 5
@@ -213,6 +221,45 @@ class DepthEstimationLoss(keras.losses.Loss):
 
 
 
+class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
+    """Dynamically adjusts deep supervision loss weights during training.
+
+    Uses ``deep_supervision_schedule_builder`` to compute per-output
+    weights as a function of training progress (0 → 1).
+    """
+
+    def __init__(
+        self,
+        config: DepthTrainingConfig,
+        num_outputs: int,
+    ) -> None:
+        super().__init__()
+        self.total_epochs = config.epochs
+        self.num_outputs = num_outputs
+
+        ds_config = {
+            "type": config.deep_supervision_schedule_type,
+            "config": config.deep_supervision_schedule_config,
+        }
+        self.scheduler = deep_supervision_schedule_builder(
+            ds_config, self.num_outputs, invert_order=False,
+        )
+        logger.info(
+            f"DS weight scheduler ({config.deep_supervision_schedule_type}) "
+            f"for {num_outputs} outputs"
+        )
+
+    def on_epoch_begin(
+        self, epoch: int, logs: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        progress = min(1.0, epoch / max(1, self.total_epochs - 1))
+        new_weights = self.scheduler(progress)
+        self.model.loss_weights = new_weights
+        weights_str = ", ".join(f"{w:.4f}" for w in new_weights)
+        logger.info(
+            f"Epoch {epoch + 1}/{self.total_epochs} — "
+            f"DS weights: [{weights_str}]"
+        )
 
 
 # ---------------------------------------------------------------------
@@ -317,9 +364,65 @@ def create_model(config: DepthTrainingConfig) -> keras.Model:
         variant=config.model_variant,
         in_channels=3,
         out_channels=1,
+        enable_deep_supervision=config.enable_deep_supervision,
     )
 
 
+
+
+# ---------------------------------------------------------------------
+# MULTI-SCALE DATASET WRAPPER
+# ---------------------------------------------------------------------
+
+
+class _MultiScaleDataset(keras.utils.PyDataset):
+    """Wraps a MegaDepthDataset to produce multi-scale ``y_true`` labels.
+
+    For each output dimension, resizes both the depth channel (bilinear)
+    and the mask channel (nearest-neighbor) and re-concatenates them.
+    """
+
+    def __init__(
+        self,
+        base_dataset: "MegaDepthDataset",
+        output_dims: List[Tuple[Optional[int], Optional[int]]],
+    ) -> None:
+        # PyDataset requires workers/use_multiprocessing — delegate to base
+        super().__init__(
+            workers=base_dataset.workers,
+            use_multiprocessing=base_dataset.use_multiprocessing,
+        )
+        self.base = base_dataset
+        self.output_dims = output_dims
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, idx: int):
+        rgb, y_true = self.base[idx]
+        # y_true: (B, H, W, 2) — channel 0=depth, channel 1=mask
+        labels = []
+        for dim in self.output_dims:
+            if dim[0] is None or dim == (y_true.shape[1], y_true.shape[2]):
+                labels.append(y_true)
+            else:
+                h, w = dim
+                depth = y_true[..., :1]
+                mask = y_true[..., 1:]
+                # Resize depth (bilinear) and mask (nearest)
+                depth_resized = tf.image.resize(
+                    depth, (h, w), method="bilinear",
+                ).numpy()
+                mask_resized = tf.image.resize(
+                    mask, (h, w), method="nearest",
+                ).numpy()
+                labels.append(
+                    np.concatenate([depth_resized, mask_resized], axis=-1)
+                )
+        return rgb, tuple(labels)
+
+    def on_epoch_end(self):
+        self.base.on_epoch_end()
 
 
 # ---------------------------------------------------------------------
@@ -420,19 +523,58 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         lr_schedule,
     )
 
+    # Detect multi-output (deep supervision)
+    has_multiple_outputs = isinstance(model.output, (list, tuple))
+    num_outputs = len(model.output) if has_multiple_outputs else 1
+    logger.info(
+        f"Model has {num_outputs} output(s)"
+        + (" (deep supervision)" if has_multiple_outputs else "")
+    )
+
+    # Wrap datasets for multi-scale labels if needed
+    if has_multiple_outputs:
+        output_dims = [
+            (out.shape[1], out.shape[2]) for out in model.output
+        ]
+        logger.info(f"Multi-scale output dims: {output_dims}")
+        train_ds = _MultiScaleDataset(train_ds, output_dims)
+        val_ds = _MultiScaleDataset(val_ds, output_dims)
+
     # Compile with SSI + gradient matching loss (MiDaS/Depth Anything V2 recipe)
-    model.compile(
-        optimizer=optimizer,
-        loss=DepthEstimationLoss(gradient_weight=0.5, n_scales=4),
-        metrics=[
+    if has_multiple_outputs:
+        loss_fns = [
+            DepthEstimationLoss(gradient_weight=0.5, n_scales=4)
+            for _ in range(num_outputs)
+        ]
+        initial_weights = [1.0 / num_outputs] * num_outputs
+        metrics = {
+            model.output_names[0]: [
+                AbsRelMetric(name="abs_rel"),
+                DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
+            ],
+        }
+    else:
+        loss_fns = DepthEstimationLoss(gradient_weight=0.5, n_scales=4)
+        initial_weights = None
+        metrics = [
             AbsRelMetric(name="abs_rel"),
             DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
-        ],
+        ]
+
+    model.compile(
+        optimizer=optimizer,
+        loss=loss_fns,
+        loss_weights=initial_weights,
+        metrics=metrics,
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
     # Callbacks
     callbacks, results_dir = create_callbacks(config, val_rgb, val_depth)
+    if has_multiple_outputs:
+        callbacks.append(
+            DeepSupervisionWeightScheduler(config, num_outputs)
+        )
     output_dir = Path(results_dir)
 
     # Save config
@@ -536,6 +678,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--early-stopping-patience", type=int, default=20)
     parser.add_argument("--max-steps-per-epoch", type=int, default=None)
 
+    # Deep supervision
+    parser.add_argument(
+        "--enable-deep-supervision", action="store_true",
+        help="Enable deep supervision with auxiliary decoder outputs",
+    )
+    parser.add_argument(
+        "--ds-schedule", type=str, default="linear_low_to_high",
+        help="Deep supervision weight schedule type",
+    )
+
     # Output
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
@@ -569,6 +721,8 @@ def main():
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         steps_per_epoch=args.max_steps_per_epoch,
+        enable_deep_supervision=args.enable_deep_supervision,
+        deep_supervision_schedule_type=args.ds_schedule,
     )
 
     logger.info(
