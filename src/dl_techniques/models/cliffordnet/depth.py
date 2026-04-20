@@ -657,6 +657,17 @@ class CliffordNetDepthEstimator(keras.Model):
             layer_scale_init=1e-5,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
+        "medium": dict(
+            level_channels=[64, 128, 256, 256],
+            level_blocks=[2, 3, 3, 2],
+            level_shifts=[[1, 2], [1, 2, 4], [1, 2, 4, 8], [1, 2, 4, 8]],
+            cli_mode="full",
+            ctx_mode="diff",
+            use_global_context=True,
+            layer_scale_init=1e-5,
+            stochastic_depth_rate=0.05,
+            kernel_initializer=_DEFAULT_KERNEL_INIT,
+        ),
         "large": dict(
             level_channels=[96, 192, 320, 384],
             level_blocks=[3, 4, 5, 3],
