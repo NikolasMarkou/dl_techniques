@@ -378,14 +378,14 @@ class CliffordNetDepthEstimator(keras.Model):
         """
         # decoder_levels is ordered deep-to-shallow: level N-1, N-2, ..., 0
         # We add aux heads for all levels except the last (level 0)
+        aux_ch = self.level_channels[0]  # use top-level channel count
         for i, dec_info in enumerate(self.decoder_levels[:-1]):
             level = dec_info["level"]
-            ch = self.level_channels[level]
             aux_norm = keras.layers.BatchNormalization(
                 name=f"aux_norm_{level}",
             )
             aux_conv = keras.layers.Conv2D(
-                filters=ch,
+                filters=aux_ch,
                 kernel_size=1,
                 padding="same",
                 activation="gelu",
