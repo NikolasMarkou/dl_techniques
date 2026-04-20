@@ -91,6 +91,10 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
         try:
             pred_depth = self.model(self.val_rgb, training=False)
 
+            # Deep supervision: use primary (full-res) output only
+            if isinstance(pred_depth, (list, tuple)):
+                pred_depth = pred_depth[0]
+
             # Log masked MSE for quick monitoring
             import keras.ops as ops
             valid_count = ops.sum(self.val_mask)
