@@ -302,7 +302,7 @@ def create_callbacks(
 ) -> Tuple[List[keras.callbacks.Callback], str]:
     """Create training callbacks: common utilities + depth-specific."""
     common_callbacks, results_dir = create_common_callbacks(
-        model_name=config.experiment_name,
+        model_name=config.model_variant,
         results_dir_prefix="cliffordnet_depth",
         monitor="val_loss",
         patience=config.early_stopping_patience,
