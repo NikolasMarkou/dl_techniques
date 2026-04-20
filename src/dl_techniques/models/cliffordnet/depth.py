@@ -200,7 +200,7 @@ class CliffordNetDepthEstimator(keras.Model):
         """Stem: Conv2D stride-1 + BatchNorm."""
         self.stem_conv = keras.layers.Conv2D(
             filters=self.level_channels[0],
-            kernel_size=3,
+            kernel_size=7,
             strides=1,
             padding="same",
             name="stem_conv",
@@ -381,11 +381,14 @@ class CliffordNetDepthEstimator(keras.Model):
         for i, dec_info in enumerate(self.decoder_levels[:-1]):
             level = dec_info["level"]
             ch = self.level_channels[level]
+            aux_norm = keras.layers.BatchNormalization(
+                name=f"aux_norm_{level}",
+            )
             aux_conv = keras.layers.Conv2D(
                 filters=ch,
-                kernel_size=3,
+                kernel_size=1,
                 padding="same",
-                activation="relu",
+                activation="gelu",
                 name=f"aux_conv_{level}",
                 **self._common_conv_kwargs(),
             )
@@ -396,6 +399,7 @@ class CliffordNetDepthEstimator(keras.Model):
                 name=f"aux_proj_{level}",
                 **self._common_conv_kwargs(),
             )
+            setattr(self, f"aux_norm_{level}", aux_norm)
             setattr(self, f"aux_conv_{level}", aux_conv)
             setattr(self, f"aux_proj_{level}", aux_proj)
 
@@ -520,9 +524,10 @@ class CliffordNetDepthEstimator(keras.Model):
                 and hasattr(self, "_aux_levels")
                 and level in self._aux_levels
             ):
+                aux_norm = getattr(self, f"aux_norm_{level}")
                 aux_conv = getattr(self, f"aux_conv_{level}")
                 aux_proj = getattr(self, f"aux_proj_{level}")
-                aux = aux_proj(aux_conv(x))
+                aux = aux_proj(aux_conv(aux_norm(x, training=training)))
                 aux_outputs.append(aux)
 
         # Head: LayerNorm + linear 1x1 projection → depth
