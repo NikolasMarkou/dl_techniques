@@ -1,17 +1,16 @@
 """CliffordNet monocular depth estimation training script.
 
-Trains a bias-free CliffordNet conditional denoiser for monocular depth
+Trains a CliffordNet U-Net depth estimator for monocular depth
 estimation on MegaDepth paired RGB+depth data.  The model predicts
 depth purely from a single RGB image:
 
     model(rgb) → depth
 
 RGB is the direct input to a CliffordNet U-Net encoder-decoder backbone
-with a 1×1 Conv depth projection head.  No conditioning — the model
-learns to predict depth purely from the image.  Depth maps are loaded
-from HDF5 files,
-normalized per-sample to [-1, +1], and invalid pixels (depth == 0) are
-masked in the loss.
+(with bias) with a 1×1 Conv depth projection head.  No conditioning —
+the model learns to predict depth purely from the image.  Depth maps are
+loaded from HDF5 files, normalized per-sample to [-1, +1], and invalid
+pixels (depth == 0) are masked in the loss.
 
 Usage::
 
@@ -53,7 +52,7 @@ from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
 )
-from dl_techniques.models.convunext.model import ConvUNextModel
+from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
 
 
 # ---------------------------------------------------------------------
@@ -76,7 +75,7 @@ class DepthTrainingConfig:
     max_val_files: Optional[int] = 1000
     dataset_shuffle_buffer: int = 5000
 
-    # Model (ConvUNeXt variants: tiny, small, base, large, xlarge)
+    # Model (CliffordNet variants: tiny, small, base, large, xlarge)
     model_variant: str = "base"
 
     # Training
@@ -731,18 +730,15 @@ def create_callbacks(
 
 
 def create_model(config: DepthTrainingConfig) -> keras.Model:
-    """Create a ConvUNeXt U-Net for monocular depth estimation.
+    """Create a CliffordNet U-Net for monocular depth estimation.
 
-    Uses ConvUNeXt encoder-decoder with RGB input, 1-channel depth
-    output.  Has biases (not bias-free) for better depth prediction.
+    Uses CliffordNet encoder-decoder with standard (with-bias)
+    CliffordNet blocks, RGB input, and 1-channel depth output.
     """
-    ps = config.patch_size
-    return ConvUNextModel.from_variant(
+    return CliffordNetDepthEstimator.from_variant(
         variant=config.model_variant,
-        input_shape=(ps, ps, 3),
-        output_channels=1,
-        include_top=True,
-        use_bias=True,
+        in_channels=3,
+        out_channels=1,
     )
 
 
@@ -940,7 +936,7 @@ def parse_arguments() -> argparse.Namespace:
     # Model
     parser.add_argument(
         "--model-variant",
-        choices=["tiny", "small", "base", "large", "xlarge"],
+        choices=list(CliffordNetDepthEstimator.MODEL_VARIANTS.keys()),
         default="base",
     )
 
@@ -990,7 +986,7 @@ def main():
     )
 
     logger.info(
-        f"Config: model=ConvUNeXt-{config.model_variant}, "
+        f"Config: model=CliffordNet-{config.model_variant}, "
         f"epochs={config.epochs}, batch={config.batch_size}, "
         f"lr={config.learning_rate}, patch={config.patch_size}"
     )
