@@ -535,9 +535,10 @@ class CliffordNetDepthEstimator(keras.Model):
         depth = self.output_proj(x)
 
         if self.enable_deep_supervision and aux_outputs:
-            # [full_res, deepest_aux, ..., shallowest_aux]
-            # aux_outputs is ordered deep-to-shallow (matching decoder order)
-            return [depth] + aux_outputs
+            # [full_res, shallowest_aux, ..., deepest_aux]
+            # Reversed so index N-1 = deepest (lowest resolution),
+            # matching the deep supervision scheduler convention.
+            return [depth] + list(reversed(aux_outputs))
 
         return depth
 
@@ -555,9 +556,9 @@ class CliffordNetDepthEstimator(keras.Model):
         if not self.enable_deep_supervision or not hasattr(self, "_aux_levels"):
             return primary_shape
 
-        # Auxiliary shapes at each decoder level (deep to shallow)
+        # Auxiliary shapes shallow-to-deep (matching reversed output order)
         shapes = [primary_shape]
-        for level in self._aux_levels:
+        for level in reversed(self._aux_levels):
             # Level 0 = full res, level k = H/2^k, W/2^k
             h = s[1] // (2 ** level) if s[1] is not None else None
             w = s[2] // (2 ** level) if s[2] is not None else None
