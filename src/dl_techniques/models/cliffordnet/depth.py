@@ -627,7 +627,7 @@ class CliffordNetDepthEstimator(keras.Model):
 
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "tiny": dict(
-            level_channels=[64, 96, 128],
+            level_channels=[32, 64, 128],
             level_blocks=[2, 2, 2],
             level_shifts=[[1, 2], [1, 2, 4], [1, 2, 4]],
             cli_mode="full",
@@ -637,7 +637,7 @@ class CliffordNetDepthEstimator(keras.Model):
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "small": dict(
-            level_channels=[64, 128, 192],
+            level_channels=[32, 64, 128],
             level_blocks=[2, 3, 3],
             level_shifts=[[1, 2], [1, 2, 4], [1, 2, 4, 8]],
             cli_mode="full",
@@ -647,7 +647,7 @@ class CliffordNetDepthEstimator(keras.Model):
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "base": dict(
-            level_channels=[64, 128, 256, 256],
+            level_channels=[32, 64, 128, 256],
             level_blocks=[2, 2, 2, 2],
             level_shifts=[[1, 2], [1, 2, 4], [1, 2, 4, 8], [1, 2, 4]],
             cli_mode="full",
