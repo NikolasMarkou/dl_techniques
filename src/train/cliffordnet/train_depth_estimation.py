@@ -53,6 +53,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
 )
 from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
+from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
 
 
 # ---------------------------------------------------------------------
@@ -434,76 +435,6 @@ class DepthEstimationLoss(keras.losses.Loss):
         })
         return config
 
-
-# ---------------------------------------------------------------------
-# DEPTH METRICS
-# ---------------------------------------------------------------------
-
-
-class AbsRelMetric(keras.metrics.Metric):
-    """Absolute Relative Error: mean(|pred - true| / true) on valid pixels."""
-
-    def __init__(self, name="abs_rel", **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.total = self.add_weight(name="total", initializer="zeros")
-        self.count = self.add_weight(name="count", initializer="zeros")
-
-    def update_state(self, y_true_and_mask, y_pred, sample_weight=None):
-        depth_true = y_true_and_mask[..., :1]
-        mask = y_true_and_mask[..., 1:]
-        # Shift to [0,1] for ratio computation
-        dt = (depth_true + 1.0) / 2.0  # [0, 1]
-        dp = (y_pred + 1.0) / 2.0      # [0, 1]
-        # Only count pixels with depth > 0.05 to avoid division by near-zero
-        depth_valid = keras.ops.cast(dt > 0.05, mask.dtype) * mask
-        dt_safe = keras.ops.maximum(dt, keras.ops.cast(0.05, dt.dtype))
-        rel_err = keras.ops.abs(dp - dt) / dt_safe * depth_valid
-        self.total.assign_add(keras.ops.sum(rel_err))
-        self.count.assign_add(keras.ops.sum(depth_valid))
-
-    def result(self):
-        return self.total / keras.ops.maximum(self.count, 1.0)
-
-    def reset_state(self):
-        self.total.assign(0.0)
-        self.count.assign(0.0)
-
-
-class DeltaThresholdMetric(keras.metrics.Metric):
-    """δ < threshold accuracy: fraction of valid pixels where
-    max(pred/true, true/pred) < threshold."""
-
-    def __init__(self, threshold: float = 1.25, name=None, **kwargs):
-        name = name or f"delta_{threshold:.2f}"
-        super().__init__(name=name, **kwargs)
-        self.threshold = threshold
-        self.correct = self.add_weight(name="correct", initializer="zeros")
-        self.count = self.add_weight(name="count", initializer="zeros")
-
-    def update_state(self, y_true_and_mask, y_pred, sample_weight=None):
-        depth_true = y_true_and_mask[..., :1]
-        mask = y_true_and_mask[..., 1:]
-        # Shift to positive range [0, 1]
-        dt = (depth_true + 1.0) / 2.0
-        dp = (y_pred + 1.0) / 2.0
-        dt_safe = keras.ops.maximum(dt, keras.ops.cast(1e-6, dt.dtype))
-        dp_safe = keras.ops.maximum(dp, keras.ops.cast(1e-6, dp.dtype))
-        ratio = keras.ops.maximum(dp_safe / dt_safe, dt_safe / dp_safe)
-        within = keras.ops.cast(ratio < self.threshold, mask.dtype) * mask
-        self.correct.assign_add(keras.ops.sum(within))
-        self.count.assign_add(keras.ops.sum(mask))
-
-    def result(self):
-        return self.correct / keras.ops.maximum(self.count, 1.0)
-
-    def reset_state(self):
-        self.correct.assign(0.0)
-        self.count.assign(0.0)
-
-    def get_config(self):
-        config = super().get_config()
-        config["threshold"] = self.threshold
-        return config
 
 
 # ---------------------------------------------------------------------
