@@ -521,6 +521,7 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         {
             "type": config.optimizer_type,
             "gradient_clipping_by_norm": config.gradient_clipping,
+            "weight_decay": config.weight_decay,
         },
         lr_schedule,
     )

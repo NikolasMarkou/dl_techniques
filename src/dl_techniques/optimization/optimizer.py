@@ -366,6 +366,7 @@ def _build_adamw_optimizer(
     """
     optimizer_params = {
         "name": "AdamW",
+        "weight_decay": config.get("weight_decay", 0.004),
         "beta_1": config.get("beta_1", DEFAULT_ADAMW_BETA_1),
         "beta_2": config.get("beta_2", DEFAULT_ADAMW_BETA_2),
         "epsilon": config.get("epsilon", DEFAULT_ADAMW_EPSILON),
