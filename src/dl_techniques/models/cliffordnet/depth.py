@@ -93,6 +93,10 @@ class CliffordNetDepthEstimator(keras.Model):
     :param upsample_interpolation: Interpolation for UpSampling2D.
     :param kernel_initializer: Kernel initializer.
     :param kernel_regularizer: Kernel regularizer.
+    :param enable_deep_supervision: If ``True``, return auxiliary depth
+        predictions at intermediate decoder resolutions during training.
+        Output is ``[full_res, level_N-2, ..., level_1]``.  When
+        ``False`` (default), returns a single depth tensor.
     """
 
     LAYERNORM_EPSILON: float = 1e-6
@@ -112,6 +116,7 @@ class CliffordNetDepthEstimator(keras.Model):
         upsample_interpolation: str = "nearest",
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
+        enable_deep_supervision: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -158,6 +163,8 @@ class CliffordNetDepthEstimator(keras.Model):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
+        self.enable_deep_supervision = enable_deep_supervision
+
         self.num_levels = len(level_channels)
         self.bottleneck_channels = level_channels[-1]
 
@@ -166,13 +173,16 @@ class CliffordNetDepthEstimator(keras.Model):
         self._build_bottleneck()
         self._build_decoder()
         self._build_head()
+        if self.enable_deep_supervision:
+            self._build_deep_supervision()
 
+        ds_str = ", deep_supervision=ON" if self.enable_deep_supervision else ""
         logger.info(
             f"Created CliffordNetDepthEstimator "
             f"(levels={self.num_levels}, "
             f"channels={level_channels}, "
             f"blocks={level_blocks}, "
-            f"shifts={level_shifts})"
+            f"shifts={level_shifts}{ds_str})"
         )
 
     # ------------------------------------------------------------------
@@ -359,6 +369,46 @@ class CliffordNetDepthEstimator(keras.Model):
             **self._common_conv_kwargs(),
         )
 
+    def _build_deep_supervision(self) -> None:
+        """Build auxiliary heads for deep supervision.
+
+        One auxiliary head per decoder level except the final (level 0).
+        Each head is Conv2D 3x3 + Conv2D 1x1 (linear) producing
+        ``out_channels`` at that level's spatial resolution.
+        """
+        # decoder_levels is ordered deep-to-shallow: level N-1, N-2, ..., 0
+        # We add aux heads for all levels except the last (level 0)
+        for i, dec_info in enumerate(self.decoder_levels[:-1]):
+            level = dec_info["level"]
+            ch = self.level_channels[level]
+            aux_conv = keras.layers.Conv2D(
+                filters=ch,
+                kernel_size=3,
+                padding="same",
+                activation="relu",
+                name=f"aux_conv_{level}",
+                **self._common_conv_kwargs(),
+            )
+            aux_proj = keras.layers.Conv2D(
+                filters=self.out_channels,
+                kernel_size=1,
+                padding="same",
+                name=f"aux_proj_{level}",
+                **self._common_conv_kwargs(),
+            )
+            setattr(self, f"aux_conv_{level}", aux_conv)
+            setattr(self, f"aux_proj_{level}", aux_proj)
+
+        # Track which levels have aux heads for call()
+        self._aux_levels = [
+            self.decoder_levels[i]["level"]
+            for i in range(len(self.decoder_levels) - 1)
+        ]
+        logger.info(
+            f"Built deep supervision heads at decoder levels: "
+            f"{self._aux_levels}"
+        )
+
     # ------------------------------------------------------------------
     # Build
     # ------------------------------------------------------------------
@@ -447,6 +497,7 @@ class CliffordNetDepthEstimator(keras.Model):
             x = block(x, training=training)
 
         # Decoder
+        aux_outputs = []
         for dec_info in self.decoder_levels:
             level = dec_info["level"]
 
@@ -463,9 +514,25 @@ class CliffordNetDepthEstimator(keras.Model):
             for block in dec_info["blocks"]:
                 x = block(x, training=training)
 
+            # Deep supervision: auxiliary output at this level
+            if (
+                self.enable_deep_supervision
+                and hasattr(self, "_aux_levels")
+                and level in self._aux_levels
+            ):
+                aux_conv = getattr(self, f"aux_conv_{level}")
+                aux_proj = getattr(self, f"aux_proj_{level}")
+                aux = aux_proj(aux_conv(x))
+                aux_outputs.append(aux)
+
         # Head: LayerNorm + linear 1x1 projection → depth
         x = self.head_norm(x)
         depth = self.output_proj(x)
+
+        if self.enable_deep_supervision and aux_outputs:
+            # [full_res, deepest_aux, ..., shallowest_aux]
+            # aux_outputs is ordered deep-to-shallow (matching decoder order)
+            return [depth] + aux_outputs
 
         return depth
 
@@ -473,14 +540,24 @@ class CliffordNetDepthEstimator(keras.Model):
     # Shape inference
     # ------------------------------------------------------------------
 
-    def compute_output_shape(
-        self, input_shape
-    ) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(self, input_shape):
         if isinstance(input_shape, list):
             s = input_shape[0]
         else:
             s = input_shape
-        return s[:-1] + (self.out_channels,)
+        primary_shape = s[:-1] + (self.out_channels,)
+
+        if not self.enable_deep_supervision or not hasattr(self, "_aux_levels"):
+            return primary_shape
+
+        # Auxiliary shapes at each decoder level (deep to shallow)
+        shapes = [primary_shape]
+        for level in self._aux_levels:
+            # Level 0 = full res, level k = H/2^k, W/2^k
+            h = s[1] // (2 ** level) if s[1] is not None else None
+            w = s[2] // (2 ** level) if s[2] is not None else None
+            shapes.append((s[0], h, w, self.out_channels))
+        return shapes
 
     # ------------------------------------------------------------------
     # Serialization
@@ -506,6 +583,7 @@ class CliffordNetDepthEstimator(keras.Model):
             "kernel_regularizer": regularizers.serialize(
                 self.kernel_regularizer
             ),
+            "enable_deep_supervision": self.enable_deep_supervision,
         })
         return config
 
