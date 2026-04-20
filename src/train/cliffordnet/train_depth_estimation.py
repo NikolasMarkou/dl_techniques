@@ -637,6 +637,17 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
             f"=== PHASE 2: Random patch training "
             f"({config.phase2_epochs} epochs) ==="
         )
+
+        # Reset EarlyStopping state — phase 2 is a different data
+        # distribution so the phase 1 best val_loss is not comparable.
+        for cb in callbacks:
+            if isinstance(cb, keras.callbacks.EarlyStopping):
+                cb.best = float("inf")
+                cb.wait = 0
+                cb.stopped_epoch = 0
+                logger.info("Reset EarlyStopping for phase 2")
+                break
+
         phase2_train, phase2_val = _make_datasets(use_resize=False)
         if has_multiple_outputs:
             phase2_train = _MultiScaleDataset(phase2_train, output_dims)
