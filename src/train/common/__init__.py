@@ -32,6 +32,11 @@ from train.common.image_text import (
     load_cc3m_local_split,
     make_image_text_tf_dataset,
 )
+from train.common.megadepth import (
+    discover_megadepth_pairs,
+    load_and_process_pair as load_megadepth_pair,
+    MegaDepthDataset,
+)
 from train.common.tfrecord import (
     SchemaSpec,
     IMAGE_TEXT_SCHEMA,

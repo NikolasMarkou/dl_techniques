@@ -31,20 +31,23 @@ Usage::
 import gc
 import json
 import time
-import h5py
 import keras
 import argparse
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
-import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
+)
+from train.common.megadepth import (
+    discover_megadepth_pairs,
+    load_and_process_pair as _load_and_process_pair,
+    MegaDepthDataset,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -114,236 +117,6 @@ class DepthTrainingConfig:
             )
         if not 0.0 < self.min_valid_ratio <= 1.0:
             raise ValueError("min_valid_ratio must be in (0, 1]")
-
-
-# ---------------------------------------------------------------------
-# MEGADEPTH DATA PIPELINE
-# ---------------------------------------------------------------------
-
-
-def discover_megadepth_pairs(
-    root: str,
-    max_files: Optional[int] = None,
-) -> Tuple[List[str], List[str]]:
-    """Scan MegaDepth scenes for matched RGB+depth file pairs.
-
-    MegaDepth structure::
-
-        {root}/{scene}/dense{0,1}/imgs/*.jpg
-        {root}/{scene}/dense{0,1}/depths/*.{h5,npy}
-
-    Returns matched lists ``(rgb_paths, depth_paths)`` paired by stem.
-    """
-    root_path = Path(root)
-    rgb_paths = []
-    depth_paths = []
-
-    for scene_dir in sorted(root_path.iterdir()):
-        if not scene_dir.is_dir():
-            continue
-        for dense_dir in sorted(scene_dir.iterdir()):
-            if not dense_dir.is_dir() or not dense_dir.name.startswith("dense"):
-                continue
-
-            imgs_dir = dense_dir / "imgs"
-            depths_dir = dense_dir / "depths"
-            if not imgs_dir.exists() or not depths_dir.exists():
-                continue
-
-            # Build stem → path maps
-            img_stems = {}
-            for fp in imgs_dir.iterdir():
-                if fp.suffix.lower() in (".jpg", ".jpeg", ".png"):
-                    img_stems[fp.stem] = str(fp)
-
-            for fp in depths_dir.iterdir():
-                if fp.suffix.lower() == ".h5":
-                    stem = fp.stem
-                    if stem in img_stems:
-                        rgb_paths.append(img_stems[stem])
-                        depth_paths.append(str(fp))
-
-            if max_files and len(rgb_paths) >= max_files:
-                rgb_paths = rgb_paths[:max_files]
-                depth_paths = depth_paths[:max_files]
-                return rgb_paths, depth_paths
-
-    logger.info(f"Discovered {len(rgb_paths)} MegaDepth RGB+depth pairs")
-    return rgb_paths, depth_paths
-
-
-def _load_and_process_pair(
-    rgb_path: str,
-    depth_path: str,
-    patch_size: int,
-    min_valid_ratio: float,
-    augment: bool,
-) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Load one RGB+depth pair, crop, normalize, augment.
-
-    Returns ``(rgb, y_true)`` where ``y_true = concat([depth, mask],
-    axis=-1)``.  Returns ``None`` when the patch has too few valid
-    pixels after all crop attempts.
-    """
-    from PIL import Image
-
-    # Load RGB
-    rgb = plt.imread(rgb_path)
-    if rgb.dtype == np.uint8:
-        rgb = rgb.astype(np.float32) / 127.5 - 1.0
-    else:
-        rgb = rgb.astype(np.float32) * 2.0 - 1.0
-
-    # Load depth from HDF5
-    with h5py.File(depth_path, "r") as f:
-        depth = f["depth"][:].astype(np.float32)
-
-    h, w = depth.shape
-    rgb_h, rgb_w = rgb.shape[:2]
-
-    # Resize RGB to match depth if needed
-    if rgb_h != h or rgb_w != w:
-        rgb_pil = Image.fromarray(
-            ((rgb + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-        )
-        rgb_pil = rgb_pil.resize((w, h), Image.BILINEAR)
-        rgb = np.array(rgb_pil, dtype=np.float32) / 127.5 - 1.0
-
-    # Ensure minimum size for patching
-    if h < patch_size or w < patch_size:
-        scale = max(patch_size / h, patch_size / w) + 0.01
-        new_h, new_w = int(h * scale), int(w * scale)
-        rgb_pil = Image.fromarray(
-            ((rgb + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
-        )
-        rgb_pil = rgb_pil.resize((new_w, new_h), Image.BILINEAR)
-        rgb = np.array(rgb_pil, dtype=np.float32) / 127.5 - 1.0
-        depth_pil = Image.fromarray(depth)
-        depth_pil = depth_pil.resize((new_w, new_h), Image.NEAREST)
-        depth = np.array(depth_pil, dtype=np.float32)
-        h, w = new_h, new_w
-
-    # Random crop — try up to 10 times for enough valid pixels
-    for _ in range(10):
-        y = np.random.randint(0, h - patch_size + 1)
-        x = np.random.randint(0, w - patch_size + 1)
-        depth_patch = depth[y:y + patch_size, x:x + patch_size]
-        valid_mask = (depth_patch > 0).astype(np.float32)
-        if valid_mask.mean() >= min_valid_ratio:
-            break
-    else:
-        if valid_mask.mean() < min_valid_ratio:
-            return None
-
-    rgb_patch = rgb[y:y + patch_size, x:x + patch_size, :3]
-    depth_patch = depth_patch[..., np.newaxis]  # (ps, ps, 1)
-    valid_mask = valid_mask[..., np.newaxis]  # (ps, ps, 1)
-
-    # Normalize depth per-sample to [-1, +1] using valid pixel range
-    valid_depths = depth_patch[valid_mask > 0]
-    if len(valid_depths) > 0:
-        d_min = valid_depths.min()
-        d_max = valid_depths.max()
-        d_range = d_max - d_min
-        if d_range > 1e-6:
-            depth_patch = np.where(
-                valid_mask > 0,
-                (depth_patch - d_min) / d_range * 2.0 - 1.0,
-                0.0,
-            )
-        else:
-            depth_patch = np.zeros_like(depth_patch)
-    else:
-        depth_patch = np.zeros_like(depth_patch)
-
-    # Augmentation (numpy — runs in worker process)
-    if augment:
-        combined = np.concatenate(
-            [rgb_patch, depth_patch, valid_mask], axis=-1
-        )
-        if np.random.random() > 0.5:
-            combined = combined[:, ::-1, :]
-        if np.random.random() > 0.5:
-            combined = combined[::-1, :, :]
-        k = np.random.randint(0, 4)
-        combined = np.rot90(combined, k, axes=(0, 1))
-        rgb_patch = combined[..., :3].copy()
-        depth_patch = combined[..., 3:4].copy()
-        valid_mask = combined[..., 4:5].copy()
-
-    # y_true = concat([depth, mask], axis=-1)
-    y_true = np.concatenate([depth_patch, valid_mask], axis=-1)
-
-    return (
-        rgb_patch.astype(np.float32),
-        y_true.astype(np.float32),
-    )
-
-
-class MegaDepthDataset(keras.utils.PyDataset):
-    """Multiprocessing-capable dataset for MegaDepth RGB→depth pairs.
-
-    Each worker process independently loads, crops, augments, and
-    normalizes samples — bypassing the GIL for true parallel I/O.
-    """
-
-    def __init__(
-        self,
-        rgb_paths: List[str],
-        depth_paths: List[str],
-        config: DepthTrainingConfig,
-        is_training: bool = True,
-        workers: int = 8,
-        **kwargs,
-    ):
-        super().__init__(workers=workers, use_multiprocessing=True, **kwargs)
-        self.rgb_paths = rgb_paths
-        self.depth_paths = depth_paths
-        self.config = config
-        self.is_training = is_training
-        self.n_pairs = len(rgb_paths)
-        self.indices = np.arange(self.n_pairs)
-        if is_training:
-            np.random.shuffle(self.indices)
-
-    def __len__(self) -> int:
-        return max(1, self.n_pairs // self.config.batch_size)
-
-    def __getitem__(self, idx: int):
-        batch_rgb, batch_ytrue = [], []
-
-        attempts = 0
-        while len(batch_rgb) < self.config.batch_size and attempts < self.config.batch_size * 3:
-            sample_idx = (
-                idx * self.config.batch_size + len(batch_rgb) + attempts
-            ) % self.n_pairs
-            i = self.indices[sample_idx]
-            attempts += 1
-
-            result = _load_and_process_pair(
-                self.rgb_paths[i],
-                self.depth_paths[i],
-                self.config.patch_size,
-                self.config.min_valid_ratio,
-                augment=self.is_training and self.config.augment_data,
-            )
-            if result is None:
-                continue
-            rgb, y_true = result
-            batch_rgb.append(rgb)
-            batch_ytrue.append(y_true)
-
-        # Pad if we couldn't fill the batch (rare)
-        if not batch_rgb:
-            ps = self.config.patch_size
-            batch_rgb = [np.zeros((ps, ps, 3), dtype=np.float32)]
-            batch_ytrue = [np.zeros((ps, ps, 2), dtype=np.float32)]
-
-        return np.stack(batch_rgb), np.stack(batch_ytrue)
-
-    def on_epoch_end(self):
-        if self.is_training:
-            np.random.shuffle(self.indices)
 
 
 # ---------------------------------------------------------------------
@@ -602,11 +375,19 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
 
     # Create datasets (multiprocessing PyDataset)
     train_ds = MegaDepthDataset(
-        train_rgb, train_depth, config,
+        train_rgb, train_depth,
+        batch_size=config.batch_size,
+        patch_size=config.patch_size,
+        min_valid_ratio=config.min_valid_ratio,
+        augment=config.augment_data,
         is_training=True, workers=num_workers,
     )
     val_ds = MegaDepthDataset(
-        val_rgb, val_depth, config,
+        val_rgb, val_depth,
+        batch_size=config.batch_size,
+        patch_size=config.patch_size,
+        min_valid_ratio=config.min_valid_ratio,
+        augment=False,
         is_training=False, workers=max(1, num_workers // 2),
     )
 
