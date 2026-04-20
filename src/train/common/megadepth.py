@@ -238,6 +238,123 @@ def load_and_process_pair(
     )
 
 
+def load_and_resize_pair(
+    rgb_path: str,
+    depth_path: str,
+    target_size: int,
+    min_valid_ratio: float = 0.1,
+    augment: bool = False,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Load one RGB+depth pair, resize the full image, normalize, augment.
+
+    Unlike :func:`load_and_process_pair` which extracts random crops,
+    this resizes the **entire** image to ``(target_size, target_size)``.
+    This gives the model global scene context at the cost of resolution.
+
+    Args:
+        rgb_path: Path to the RGB image file.
+        depth_path: Path to the HDF5 depth file (key ``"depth"``).
+        target_size: Output spatial size (both height and width).
+        min_valid_ratio: Minimum fraction of valid depth pixels.
+        augment: Whether to apply random geometric augmentations.
+
+    Returns:
+        Tuple of ``(rgb, y_true)`` or ``None`` if below valid ratio.
+    """
+    from PIL import Image
+
+    # Load RGB
+    import matplotlib.pyplot as plt
+    rgb = plt.imread(rgb_path)
+    if rgb.dtype == np.uint8:
+        rgb = rgb.astype(np.float32) / 127.5 - 1.0
+    else:
+        rgb = rgb.astype(np.float32) * 2.0 - 1.0
+
+    # Load depth from HDF5
+    with h5py.File(depth_path, "r") as f:
+        depth = f["depth"][:].astype(np.float32)
+
+    h, w = depth.shape
+    rgb_h, rgb_w = rgb.shape[:2]
+
+    # Resize RGB to match depth if needed
+    if rgb_h != h or rgb_w != w:
+        rgb_pil = Image.fromarray(
+            ((rgb + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+        )
+        rgb_pil = rgb_pil.resize((w, h), Image.BILINEAR)
+        rgb = np.array(rgb_pil, dtype=np.float32) / 127.5 - 1.0
+
+    # Build validity mask before resizing
+    valid_mask = (depth > 0).astype(np.float32)
+
+    # Check valid ratio on original image
+    if valid_mask.mean() < min_valid_ratio:
+        return None
+
+    # Resize everything to target_size
+    rgb_pil = Image.fromarray(
+        ((rgb + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+    )
+    rgb_pil = rgb_pil.resize(
+        (target_size, target_size), Image.BILINEAR,
+    )
+    rgb = np.array(rgb_pil, dtype=np.float32) / 127.5 - 1.0
+
+    depth_pil = Image.fromarray(depth)
+    depth_pil = depth_pil.resize(
+        (target_size, target_size), Image.BILINEAR,
+    )
+    depth = np.array(depth_pil, dtype=np.float32)
+
+    mask_pil = Image.fromarray(valid_mask)
+    mask_pil = mask_pil.resize(
+        (target_size, target_size), Image.NEAREST,
+    )
+    valid_mask = np.array(mask_pil, dtype=np.float32)
+
+    rgb = rgb[..., :3]
+    depth = depth[..., np.newaxis]
+    valid_mask = valid_mask[..., np.newaxis]
+
+    # Normalize depth per-sample to [-1, +1] using valid pixel range
+    valid_depths = depth[valid_mask > 0]
+    if len(valid_depths) > 0:
+        d_min = valid_depths.min()
+        d_max = valid_depths.max()
+        d_range = d_max - d_min
+        if d_range > 1e-6:
+            depth = np.where(
+                valid_mask > 0,
+                (depth - d_min) / d_range * 2.0 - 1.0,
+                0.0,
+            )
+        else:
+            depth = np.zeros_like(depth)
+    else:
+        depth = np.zeros_like(depth)
+
+    # Augmentation
+    if augment:
+        combined = np.concatenate([rgb, depth, valid_mask], axis=-1)
+        if np.random.random() > 0.5:
+            combined = combined[:, ::-1, :]
+        if np.random.random() > 0.5:
+            combined = combined[::-1, :, :]
+        k = np.random.randint(0, 4)
+        combined = np.rot90(combined, k, axes=(0, 1))
+        rgb = combined[..., :3].copy()
+        depth = combined[..., 3:4].copy()
+        valid_mask = combined[..., 4:5].copy()
+
+    y_true = np.concatenate([depth, valid_mask], axis=-1)
+    return (
+        rgb.astype(np.float32),
+        y_true.astype(np.float32),
+    )
+
+
 # =====================================================================
 # PyDataset
 # =====================================================================
@@ -279,6 +396,7 @@ class MegaDepthDataset(keras.utils.PyDataset):
         augment: bool = True,
         is_training: bool = True,
         workers: int = 8,
+        use_resize: bool = False,
         **kwargs,
     ):
         super().__init__(workers=workers, use_multiprocessing=True, **kwargs)
@@ -289,6 +407,7 @@ class MegaDepthDataset(keras.utils.PyDataset):
         self.min_valid_ratio = min_valid_ratio
         self.augment = augment
         self.is_training = is_training
+        self.use_resize = use_resize
         self.n_pairs = len(rgb_paths)
         self.indices = np.arange(self.n_pairs)
         if is_training:
@@ -308,7 +427,11 @@ class MegaDepthDataset(keras.utils.PyDataset):
             i = self.indices[sample_idx]
             attempts += 1
 
-            result = load_and_process_pair(
+            loader_fn = (
+                load_and_resize_pair if self.use_resize
+                else load_and_process_pair
+            )
+            result = loader_fn(
                 self.rgb_paths[i],
                 self.depth_paths[i],
                 self.patch_size,

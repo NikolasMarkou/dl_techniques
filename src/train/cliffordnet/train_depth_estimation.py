@@ -93,6 +93,11 @@ class DepthTrainingConfig:
     augment_data: bool = True
     steps_per_epoch: Optional[int] = None
 
+    # Two-phase training: phase 1 = resize full image, phase 2 = random patches
+    two_phase: bool = False
+    phase1_epochs: int = 50
+    phase2_epochs: int = 50
+
     # Optimization
     learning_rate: float = 1e-3
     optimizer_type: str = "adamw"
@@ -118,6 +123,8 @@ class DepthTrainingConfig:
     experiment_name: Optional[str] = None
 
     def __post_init__(self):
+        if self.two_phase:
+            self.epochs = self.phase1_epochs + self.phase2_epochs
         if self.experiment_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.experiment_name = (
@@ -479,22 +486,29 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     logger.info(f"Using {num_workers} data-loading worker processes")
 
     # Create datasets (multiprocessing PyDataset)
-    train_ds = MegaDepthDataset(
-        train_rgb, train_depth,
-        batch_size=config.batch_size,
-        patch_size=config.patch_size,
-        min_valid_ratio=config.min_valid_ratio,
-        augment=config.augment_data,
-        is_training=True, workers=num_workers,
-    )
-    val_ds = MegaDepthDataset(
-        val_rgb, val_depth,
-        batch_size=config.batch_size,
-        patch_size=config.patch_size,
-        min_valid_ratio=config.min_valid_ratio,
-        augment=False,
-        is_training=False, workers=max(1, num_workers // 2),
-    )
+    def _make_datasets(use_resize: bool = False):
+        """Create train/val datasets with optional resize mode."""
+        _train = MegaDepthDataset(
+            train_rgb, train_depth,
+            batch_size=config.batch_size,
+            patch_size=config.patch_size,
+            min_valid_ratio=config.min_valid_ratio,
+            augment=config.augment_data,
+            is_training=True, workers=num_workers,
+            use_resize=use_resize,
+        )
+        _val = MegaDepthDataset(
+            val_rgb, val_depth,
+            batch_size=config.batch_size,
+            patch_size=config.patch_size,
+            min_valid_ratio=config.min_valid_ratio,
+            augment=False,
+            is_training=False, workers=max(1, num_workers // 2),
+            use_resize=use_resize,
+        )
+        return _train, _val
+
+    train_ds, val_ds = _make_datasets(use_resize=False)
 
     # Steps per epoch — len(train_ds) is n_pairs // batch_size
     if config.steps_per_epoch is not None:
@@ -599,13 +613,52 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     # Train
     start_time = time.time()
 
-    history = model.fit(
-        train_ds,
-        epochs=config.epochs,
-        validation_data=val_ds,
-        callbacks=callbacks,
-        verbose=1,
-    )
+    if config.two_phase:
+        # Phase 1: full image resized to patch_size (global context)
+        logger.info(
+            f"=== PHASE 1: Full-image resize training "
+            f"({config.phase1_epochs} epochs) ==="
+        )
+        phase1_train, phase1_val = _make_datasets(use_resize=True)
+        if has_multiple_outputs:
+            phase1_train = _MultiScaleDataset(phase1_train, output_dims)
+            phase1_val = _MultiScaleDataset(phase1_val, output_dims)
+
+        history = model.fit(
+            phase1_train,
+            epochs=config.phase1_epochs,
+            validation_data=phase1_val,
+            callbacks=callbacks,
+            verbose=1,
+        )
+
+        # Phase 2: random patch training (local detail)
+        logger.info(
+            f"=== PHASE 2: Random patch training "
+            f"({config.phase2_epochs} epochs) ==="
+        )
+        phase2_train, phase2_val = _make_datasets(use_resize=False)
+        if has_multiple_outputs:
+            phase2_train = _MultiScaleDataset(phase2_train, output_dims)
+            phase2_val = _MultiScaleDataset(phase2_val, output_dims)
+
+        history = model.fit(
+            phase2_train,
+            initial_epoch=config.phase1_epochs,
+            epochs=config.phase1_epochs + config.phase2_epochs,
+            validation_data=phase2_val,
+            callbacks=callbacks,
+            verbose=1,
+        )
+    else:
+        history = model.fit(
+            train_ds,
+            epochs=config.epochs,
+            validation_data=val_ds,
+            callbacks=callbacks,
+            verbose=1,
+        )
+
     elapsed = time.time() - start_time
     logger.info(f"Training completed in {elapsed:.2f} seconds")
 
@@ -703,6 +756,20 @@ def parse_arguments() -> argparse.Namespace:
         help="Deep supervision weight schedule type",
     )
 
+    # Two-phase training
+    parser.add_argument(
+        "--two-phase", action="store_true",
+        help="Phase 1: full-image resize (global), Phase 2: patches (local)",
+    )
+    parser.add_argument(
+        "--phase1-epochs", type=int, default=50,
+        help="Number of epochs for phase 1 (resize)",
+    )
+    parser.add_argument(
+        "--phase2-epochs", type=int, default=50,
+        help="Number of epochs for phase 2 (patches)",
+    )
+
     # Output
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
@@ -738,6 +805,9 @@ def main():
         steps_per_epoch=args.max_steps_per_epoch,
         enable_deep_supervision=args.enable_deep_supervision,
         deep_supervision_schedule_type=args.ds_schedule,
+        two_phase=args.two_phase,
+        phase1_epochs=args.phase1_epochs,
+        phase2_epochs=args.phase2_epochs,
     )
 
     logger.info(
