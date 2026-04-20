@@ -45,7 +45,6 @@ from typing import Tuple, List, Optional, Dict, Any
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
-    generate_training_curves,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -54,6 +53,10 @@ from dl_techniques.optimization import (
 )
 from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
 from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
+from dl_techniques.callbacks.depth_visualization import (
+    DepthPredictionGridCallback,
+    DepthMetricsCurveCallback,
+)
 
 
 # ---------------------------------------------------------------------
@@ -437,194 +440,39 @@ class DepthEstimationLoss(keras.losses.Loss):
 
 
 
-# ---------------------------------------------------------------------
-# MONITORING CALLBACKS
-# ---------------------------------------------------------------------
-
-
-class DepthMetricsVisualizationCallback(keras.callbacks.Callback):
-    """Visualizes training/validation loss curves during training."""
-
-    def __init__(self, config: DepthTrainingConfig):
-        super().__init__()
-        self.config = config
-        self.output_dir = Path(config.output_dir) / config.experiment_name
-        self.visualization_dir = self.output_dir / "visualization_plots"
-        self.visualization_dir.mkdir(parents=True, exist_ok=True)
-        self.train_metrics = {"loss": [], "abs_rel": [], "delta_1.25": []}
-        self.val_metrics = {"val_loss": [], "val_abs_rel": [], "val_delta_1.25": []}
-
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None):
-        if logs is None:
-            logs = {}
-        for key in self.train_metrics:
-            if key in logs:
-                self.train_metrics[key].append(logs[key])
-        for key in self.val_metrics:
-            if key in logs:
-                self.val_metrics[key].append(logs[key])
-
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            self._create_metrics_plots(epoch + 1)
-
-    def _create_metrics_plots(self, epoch: int):
-        try:
-            history_dict = {**self.train_metrics, **self.val_metrics}
-            generate_training_curves(
-                history=history_dict,
-                results_dir=str(self.visualization_dir),
-                filename=f"epoch_{epoch:03d}_metrics",
-            )
-            gc.collect()
-        except Exception as e:
-            logger.warning(f"Failed to create metrics plots: {e}")
-
-
-class DepthVisualizationCallback(keras.callbacks.Callback):
-    """Saves RGB → predicted depth vs GT depth comparison grids."""
-
-    def __init__(
-        self,
-        config: DepthTrainingConfig,
-        val_rgb_paths: List[str],
-        val_depth_paths: List[str],
-    ):
-        super().__init__()
-        self.config = config
-        self.monitor_freq = config.monitor_every_n_epochs
-        self.output_dir = Path(config.output_dir) / config.experiment_name
-        self.results_dir = self.output_dir / "visualization_plots"
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        self.val_rgb_paths = val_rgb_paths[:8]
-        self.val_depth_paths = val_depth_paths[:8]
-        self.test_data = None
-
-    def on_train_begin(self, logs=None):
-        """Load a small set of validation samples for monitoring."""
-        try:
-            rgb_list, depth_list, mask_list = [], [], []
-            for rp, dp in zip(self.val_rgb_paths, self.val_depth_paths):
-                result = _load_and_process_pair(
-                    rp, dp,
-                    self.config.patch_size,
-                    self.config.min_valid_ratio,
-                    augment=False,
-                )
-                if result is None:
-                    continue
-                rgb, y_true = result
-                rgb_list.append(rgb)
-                depth_list.append(y_true[..., :1])
-                mask_list.append(y_true[..., 1:])
-
-            if rgb_list:
-                self.test_data = {
-                    "rgb": tf.constant(np.stack(rgb_list)),
-                    "depth": tf.constant(np.stack(depth_list)),
-                    "mask": tf.constant(np.stack(mask_list)),
-                }
-                logger.info(
-                    f"Depth monitor: loaded {len(rgb_list)} validation "
-                    f"patches, shape {self.test_data['rgb'].shape}"
-                )
-        except Exception as e:
-            logger.warning(f"Depth monitor: failed to load test data: {e}")
-            self.test_data = None
-
-    def on_epoch_end(self, epoch: int, logs=None):
-        if (epoch + 1) % self.monitor_freq != 0:
-            return
-        if self.test_data is None:
-            return
-
-        try:
-            rgb = self.test_data["rgb"]
-            gt_depth = self.test_data["depth"]
-            mask = self.test_data["mask"]
-
-            # Predict depth directly from RGB
-            pred_depth = self.model(rgb, training=False)
-
-            # Compute masked metrics
-            valid_pixels = tf.reduce_sum(mask)
-            if valid_pixels > 0:
-                masked_mse = tf.reduce_sum(
-                    tf.square(pred_depth - gt_depth) * mask
-                ) / valid_pixels
-                logger.info(
-                    f"Epoch {epoch + 1} depth monitor — "
-                    f"masked MSE: {masked_mse.numpy():.6f}"
-                )
-
-            self._save_grid(epoch + 1, rgb, gt_depth, pred_depth, mask)
-
-            del pred_depth
-            gc.collect()
-        except Exception as e:
-            logger.warning(
-                f"Depth monitor error at epoch {epoch + 1}: {e}"
-            )
-
-    def _save_grid(
-        self,
-        epoch: int,
-        rgb: tf.Tensor,
-        gt_depth: tf.Tensor,
-        pred_depth: tf.Tensor,
-        mask: tf.Tensor,
-    ):
-        """Save RGB | GT depth | predicted depth comparison grid."""
-        try:
-            n = min(8, rgb.shape[0])
-            fig, axes = plt.subplots(3, n, figsize=(2.5 * n, 7.5))
-            fig.suptitle(
-                f"CliffordNet Depth Estimation — Epoch {epoch}",
-                fontsize=16, y=0.98,
-            )
-
-            for i in range(n):
-                # RGB: [-1, 1] → [0, 1]
-                rgb_img = np.clip((rgb[i].numpy() + 1.0) / 2.0, 0, 1)
-
-                # GT depth: [-1, 1] → [0, 1], mask invalid regions
-                gt = gt_depth[i].numpy().squeeze(-1)
-                gt_vis = np.clip((gt + 1.0) / 2.0, 0, 1)
-                m = mask[i].numpy().squeeze(-1)
-                gt_vis = np.where(m > 0, gt_vis, 0.5)  # gray for invalid
-
-                # Predicted depth
-                pred = pred_depth[i].numpy().squeeze(-1)
-                pred_vis = np.clip((pred + 1.0) / 2.0, 0, 1)
-
-                labels = ["RGB", "GT Depth", "Predicted"]
-                images = [rgb_img, gt_vis, pred_vis]
-                cmaps = [None, "viridis", "viridis"]
-
-                for row, (img, cmap) in enumerate(zip(images, cmaps)):
-                    axes[row, i].imshow(img, cmap=cmap, vmin=0, vmax=1)
-                    if i == 0:
-                        axes[row, i].set_ylabel(
-                            labels[row], fontsize=12, rotation=0,
-                            ha="right", va="center",
-                        )
-                    axes[row, i].axis("off")
-
-            plt.tight_layout()
-            plt.subplots_adjust(top=0.92, left=0.10)
-            plt.savefig(
-                self.results_dir / f"epoch_{epoch:03d}_depth.png",
-                dpi=150, bbox_inches="tight",
-            )
-            plt.close(fig)
-            plt.clf()
-            gc.collect()
-        except Exception as e:
-            logger.warning(f"Failed to save depth grid: {e}")
 
 
 # ---------------------------------------------------------------------
 # CALLBACKS
 # ---------------------------------------------------------------------
+
+
+def _load_validation_samples(
+    val_rgb_paths: List[str],
+    val_depth_paths: List[str],
+    patch_size: int,
+    min_valid_ratio: float,
+    max_samples: int = 8,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Load a fixed set of validation samples for visualization.
+
+    Returns ``(rgb, depth, mask)`` numpy arrays or ``None`` on failure.
+    """
+    rgb_list, depth_list, mask_list = [], [], []
+    for rp, dp in zip(val_rgb_paths[:max_samples], val_depth_paths[:max_samples]):
+        result = _load_and_process_pair(
+            rp, dp, patch_size, min_valid_ratio, augment=False,
+        )
+        if result is None:
+            continue
+        rgb, y_true = result
+        rgb_list.append(rgb)
+        depth_list.append(y_true[..., :1])
+        mask_list.append(y_true[..., 1:])
+
+    if not rgb_list:
+        return None
+    return np.stack(rgb_list), np.stack(depth_list), np.stack(mask_list)
 
 
 def create_callbacks(
@@ -647,10 +495,36 @@ def create_callbacks(
     config.output_dir = str(Path(results_dir).parent)
     config.experiment_name = Path(results_dir).name
 
-    common_callbacks.append(DepthMetricsVisualizationCallback(config))
-    common_callbacks.append(
-        DepthVisualizationCallback(config, val_rgb_paths, val_depth_paths)
+    viz_dir = str(Path(results_dir) / "visualization_plots")
+
+    # Metric curve plots
+    common_callbacks.append(DepthMetricsCurveCallback(
+        output_dir=viz_dir,
+        train_metrics=["loss", "abs_rel", "delta_1.25"],
+        frequency=5,
+    ))
+
+    # Depth prediction grids
+    val_data = _load_validation_samples(
+        val_rgb_paths, val_depth_paths,
+        config.patch_size, config.min_valid_ratio,
     )
+    if val_data is not None:
+        val_rgb, val_depth, val_mask = val_data
+        common_callbacks.append(DepthPredictionGridCallback(
+            val_rgb=tf.constant(val_rgb),
+            val_depth=tf.constant(val_depth),
+            val_mask=tf.constant(val_mask),
+            output_dir=viz_dir,
+            frequency=config.monitor_every_n_epochs,
+            title="CliffordNet Depth Estimation",
+        ))
+        logger.info(
+            f"Depth monitor: loaded {val_rgb.shape[0]} validation "
+            f"patches, shape {val_rgb.shape}"
+        )
+    else:
+        logger.warning("Depth monitor: failed to load validation samples")
 
     return common_callbacks, results_dir
 
