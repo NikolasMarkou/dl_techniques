@@ -523,9 +523,25 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         lr_schedule,
     )
 
-    # Detect multi-output (deep supervision)
-    has_multiple_outputs = isinstance(model.output, (list, tuple))
-    num_outputs = len(model.output) if has_multiple_outputs else 1
+    # Detect multi-output (deep supervision) via probe forward pass
+    has_multiple_outputs = config.enable_deep_supervision
+    if has_multiple_outputs:
+        probe = tf.zeros((1, ps, ps, 3))
+        probe_out = model(probe, training=False)
+        if isinstance(probe_out, (list, tuple)):
+            num_outputs = len(probe_out)
+            output_dims = [
+                (o.shape[1], o.shape[2]) for o in probe_out
+            ]
+        else:
+            has_multiple_outputs = False
+            num_outputs = 1
+            output_dims = None
+        del probe, probe_out
+    else:
+        num_outputs = 1
+        output_dims = None
+
     logger.info(
         f"Model has {num_outputs} output(s)"
         + (" (deep supervision)" if has_multiple_outputs else "")
@@ -533,9 +549,6 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
 
     # Wrap datasets for multi-scale labels if needed
     if has_multiple_outputs:
-        output_dims = [
-            (out.shape[1], out.shape[2]) for out in model.output
-        ]
         logger.info(f"Multi-scale output dims: {output_dims}")
         train_ds = _MultiScaleDataset(train_ds, output_dims)
         val_ds = _MultiScaleDataset(val_ds, output_dims)
@@ -547,12 +560,11 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
             for _ in range(num_outputs)
         ]
         initial_weights = [1.0 / num_outputs] * num_outputs
-        metrics = {
-            model.output_names[0]: [
-                AbsRelMetric(name="abs_rel"),
-                DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
-            ],
-        }
+        # Metrics only on primary (full-res) output, empty for auxiliaries
+        metrics = [
+            [AbsRelMetric(name="abs_rel"),
+             DeltaThresholdMetric(threshold=1.25, name="delta_1.25")],
+        ] + [[] for _ in range(num_outputs - 1)]
     else:
         loss_fns = DepthEstimationLoss(gradient_weight=0.5, n_scales=4)
         initial_weights = None
