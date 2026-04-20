@@ -12,8 +12,13 @@ src/train/
 │   ├── datasets.py      # load_dataset(), load_imagenet_dataset(), get_class_names()
 │   ├── callbacks.py     # create_callbacks(), create_learning_rate_schedule()
 │   ├── evaluation.py    # validate_model_loading(), run_model_analysis(), visualizations
+│   ├── nlp.py           # NLP tokenization, text datasets, warmup LR, NLP callbacks
+│   ├── image_text.py    # Image-text dataset loading (COCO, CC3M)
+│   ├── megadepth.py     # MegaDepth RGB+depth dataset pipeline
+│   ├── tfrecord.py      # TFRecord read/write utilities
 │   └── __init__.py      # Re-exports all public functions
 ├── convnext/            # ConvNeXt V1, V2, V2+MAE
+├── cliffordnet/         # CliffordNet classification, depth estimation, denoising, CLIP
 ├── nbeats/              # N-BEATS time-series
 ├── bert/                # BERT pretrain/finetune
 ├── ...
@@ -239,6 +244,66 @@ def create_callbacks(config, val_directories, num_outputs):
 
 ---
 
+### Pattern 5: Depth Estimation (CliffordNet Depth)
+
+**Used by:** CliffordNet depth estimation
+
+These scripts use `train.common.megadepth` for the MegaDepth RGB+depth dataset pipeline, depth-specific metrics from `dl_techniques.metrics.depth_metrics`, and visualization callbacks from `dl_techniques.callbacks.depth_visualization`. They monitor `val_loss` and use `optimizer_builder` / `learning_rate_schedule_builder` from `dl_techniques.optimization`.
+
+```python
+from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common.megadepth import (
+    discover_megadepth_pairs,
+    load_and_process_pair,
+    MegaDepthDataset,
+)
+from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
+from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
+from dl_techniques.callbacks.depth_visualization import (
+    DepthPredictionGridCallback,
+    DepthMetricsCurveCallback,
+)
+
+def train_model(config):
+    setup_gpu(args.gpu)
+
+    # Data via common
+    rgb_paths, depth_paths = discover_megadepth_pairs(config.megadepth_root)
+    train_ds = MegaDepthDataset(
+        train_rgb, train_depth,
+        batch_size=config.batch_size,
+        patch_size=config.patch_size,
+    )
+
+    # Model
+    model = CliffordNetDepthEstimator.from_variant(config.model_variant)
+
+    # Compile with depth-specific loss + metrics from dl_techniques
+    model.compile(
+        optimizer=optimizer,
+        loss=DepthEstimationLoss(...),       # local — domain-specific
+        metrics=[AbsRelMetric(), DeltaThresholdMetric(1.25)],
+    )
+
+    # Callbacks: common + depth visualization from dl_techniques
+    callbacks, results_dir = create_common_callbacks(monitor="val_loss", ...)
+    callbacks.append(DepthMetricsCurveCallback(output_dir=viz_dir))
+    callbacks.append(DepthPredictionGridCallback(
+        val_rgb=..., val_depth=..., val_mask=..., output_dir=viz_dir,
+    ))
+
+    model.fit(train_ds, callbacks=callbacks, ...)
+```
+
+**`train.common.megadepth` API:**
+| Function/Class | Purpose |
+|----------------|---------|
+| `discover_megadepth_pairs(root, max_files)` | Scan MegaDepth directory for matched RGB+HDF5 depth pairs |
+| `load_and_process_pair(rgb_path, depth_path, patch_size, ...)` | Load, crop, normalize, augment one RGB+depth pair |
+| `MegaDepthDataset(rgb_paths, depth_paths, batch_size, patch_size, ...)` | `keras.utils.PyDataset` with multiprocessing for batched loading |
+
+---
+
 ## `create_callbacks()` Full API Reference
 
 ```python
@@ -287,12 +352,17 @@ create_callbacks(
 - `get_class_names(dataset, num_classes)` — human-readable labels.
 - `validate_model_loading(path, sample, expected, custom_objects)` — round-trip serialization check.
 - `run_model_analysis(model, test_data, history, name, results_dir, config)` — full ModelAnalyzer pipeline.
+- `discover_megadepth_pairs(root)`, `MegaDepthDataset(...)` — MegaDepth RGB+depth dataset pipeline.
+
+**Use from `dl_techniques` (library-level components):**
+- `dl_techniques.metrics.depth_metrics` — AbsRelMetric, DeltaThresholdMetric, SqRelMetric, RMSEMetric, RMSELogMetric.
+- `dl_techniques.callbacks.depth_visualization` — DepthPredictionGridCallback, DepthMetricsCurveCallback.
+- `dl_techniques.optimization` — `optimizer_builder()`, `learning_rate_schedule_builder()`.
 
 **Keep local to each script:**
 - Model creation and compilation — architecture-specific.
-- Domain-specific callbacks (visualization, deep supervision scheduling, performance monitoring).
-- Custom data loading/generation (NLP tokenization, time-series generators, file-based image loading).
-- Custom argparse when `create_base_argument_parser()` doesn't fit (NLP, time-series, detection).
+- Domain-specific losses (e.g. `DepthEstimationLoss` with masked L1 + gradient matching).
+- Custom argparse when `create_base_argument_parser()` doesn't fit (NLP, time-series, detection, depth).
 - Training summary writing — model-specific fields.
 
 ## Data Loading
@@ -302,6 +372,8 @@ create_callbacks(
 - ImageNet (tf.data): `train_ds, val_ds, input_shape, num_classes`
 
 For NLP text datasets, use `train.common.nlp`: `load_text_dataset()`, `preprocess_mlm_dataset()`, `preprocess_classification_dataset()`.
+
+For MegaDepth RGB+depth pairs, use `train.common.megadepth`: `discover_megadepth_pairs()`, `MegaDepthDataset()`. Produces `(rgb, y_true)` where `y_true = [depth, mask]` concatenated on the last axis.
 
 For time-series, file-based images, or other non-standard data, write local data loading. Do NOT try to force it through `load_dataset()`.
 
