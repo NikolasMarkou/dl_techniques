@@ -407,18 +407,20 @@ class _MultiScaleDataset(keras.utils.PyDataset):
                 labels.append(y_true)
             else:
                 h, w = dim
-                depth = y_true[..., :1]
-                mask = y_true[..., 1:]
-                # Resize depth (bilinear) and mask (nearest)
-                depth_resized = tf.image.resize(
-                    depth, (h, w), method="bilinear",
-                ).numpy()
-                mask_resized = tf.image.resize(
-                    mask, (h, w), method="nearest",
-                ).numpy()
-                labels.append(
-                    np.concatenate([depth_resized, mask_resized], axis=-1)
+                # Use scipy for resizing — runs in worker processes
+                # where CUDA context is not available
+                from scipy.ndimage import zoom
+                scale_h = h / y_true.shape[1]
+                scale_w = w / y_true.shape[2]
+                # zoom each sample: (B, H, W, 2) → (B, h, w, 2)
+                resized = zoom(
+                    y_true, (1, scale_h, scale_w, 1), order=1,
                 )
+                # Re-binarize mask after interpolation
+                resized[..., 1:] = (resized[..., 1:] > 0.5).astype(
+                    resized.dtype,
+                )
+                labels.append(resized)
         return rgb, tuple(labels)
 
     def on_epoch_end(self):
