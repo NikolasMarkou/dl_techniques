@@ -24,6 +24,7 @@ import keras
 
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
 from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
+from dl_techniques.models.video_jepa.telemetry_embedder import TelemetryEmbedder
 
 
 class TestConfig:
@@ -143,4 +144,46 @@ class TestEncoder:
         y_after = np.asarray(reloaded(x, training=False))
 
         # Round-trip must be numerically equal within atol 1e-5.
+        np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
+
+
+# ============================================================================
+# TestTelemetryEmbedder — continuous sin/cos + LN + Dense
+# ============================================================================
+
+
+class TestTelemetryEmbedder:
+    def test_forward_shape(self) -> None:
+        emb = TelemetryEmbedder(cond_dim=32, telemetry_dim=7)
+        t = np.random.randn(2, 4, 7).astype("float32")
+        y = emb(t, training=False)
+        assert tuple(y.shape) == (2, 4, 32), y.shape
+
+    def test_forward_finite(self) -> None:
+        emb = TelemetryEmbedder(cond_dim=32, telemetry_dim=7)
+        t = np.random.randn(2, 4, 7).astype("float32")
+        y = np.asarray(emb(t, training=False))
+        assert np.all(np.isfinite(y))
+
+    def test_rejects_bad_ndim(self) -> None:
+        emb = TelemetryEmbedder(cond_dim=32, telemetry_dim=7)
+        with pytest.raises(ValueError, match="3D input"):
+            emb.build((2, 7))
+        emb2 = TelemetryEmbedder(cond_dim=32, telemetry_dim=7)
+        with pytest.raises(ValueError, match="must equal telemetry_dim"):
+            emb2.build((2, 4, 5))
+
+    def test_serialization_round_trip(self, tmp_path) -> None:
+        inputs = keras.Input(shape=(4, 7))
+        emb = TelemetryEmbedder(cond_dim=32, telemetry_dim=7, name="tel_emb")
+        out = emb(inputs)
+        model = keras.Model(inputs, out, name="tel_wrap")
+        t = np.random.randn(2, 4, 7).astype("float32")
+        y_before = np.asarray(model(t, training=False))
+        path = str(tmp_path / "tel.keras")
+        model.save(path)
+        del model, emb
+        keras.backend.clear_session()
+        reloaded = keras.models.load_model(path)
+        y_after = np.asarray(reloaded(t, training=False))
         np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
