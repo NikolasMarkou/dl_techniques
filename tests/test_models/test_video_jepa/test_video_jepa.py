@@ -1,16 +1,25 @@
 """Video-JEPA-Clifford test suite.
 
-Hardest-first order per decisions.md:
+Hardest-first order per ``plans/plan_2026-04-21_421088a1/decisions.md``:
 
-1. Causality (C1)
-2. SIGReg stability (C2)
-3. AdaLN-zero identity-at-init (C3)
-4. Serialization round-trip (C4)
-5. Shapes (C5)
-6. Streaming O(1) (C6)
+1. Causality (C1) — ``TestPredictor::test_causality``
+2. SIGReg stability (C2) — ``TestPredictor::test_sigreg_finite``
+3. AdaLN-zero identity-at-init (C3) — ``TestPredictor::test_adaln_identity_init``
+4. Serialization round-trip (C4) — ``test_serialization_round_trip`` on
+   encoder, telemetry embedder, predictor, and top-level VideoJEPA.
+5. Shapes (C5) — ``test_forward_shape`` on encoder, telemetry, predictor, model.
+6. Streaming O(1) (C6) — ``TestVideoJEPA::test_stream_step_timing``.
 
-At step-1 only :class:`TestConfig` is implemented; subsequent steps append
-the remaining test classes.
+Full inventory (29 tests):
+- ``TestConfig``: 6 tests (invariants + to/from_dict).
+- ``TestEncoder``: 5 tests (shape, finite, rank-guard, even-dim, round-trip).
+- ``TestTelemetryEmbedder``: 4 tests (shape, finite, ndim-guard, round-trip).
+- ``TestPredictor``: 6 tests (causality, AdaLN-id, shape, input-struct,
+  SIGReg finite, round-trip).
+- ``TestVideoJEPA``: 6 tests (forward+losses, T=1 edge, one-step fit,
+  save/load, streaming shape, streaming timing).
+- ``TestSyntheticDataset``: 2 tests (batch shapes+finite, batch_size=1
+  guard).
 """
 
 from __future__ import annotations
