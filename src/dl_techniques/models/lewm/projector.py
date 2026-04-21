@@ -8,11 +8,14 @@ Upstream PyTorch (`/tmp/lewm_source/module.py:MLP`):
     Linear(input_dim, hidden_dim) -> LayerNorm(hidden_dim) -> GELU
     -> Linear(hidden_dim, output_dim)
 
+DECISION D-002: MLPProjector uses LayerNormalization, not BatchNormalization.
 In upstream JEPA the `norm_fn` defaults to `nn.LayerNorm`. We expose the
 same default here. (The description in plan.md said "BatchNorm1d" following
 a reading of upstream `JEPA`, but the actual `MLP` class defaults to
 `LayerNorm` and that's what upstream LeWM wires in. We follow the
-upstream-code truth, not the plan note.)
+upstream-code truth, not the plan note.) This also sidesteps the
+BN-batch-of-1 failure mode flagged in plan.md Pre-Mortem Scenario 2.
+See plans/plan_2026-04-21_8416bc0b/decisions.md (D-002) for full rationale.
 """
 
 import keras
