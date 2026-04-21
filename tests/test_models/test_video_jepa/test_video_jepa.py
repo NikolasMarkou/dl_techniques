@@ -562,3 +562,35 @@ class TestVideoJEPA:
             f"stream_step not O(1)-ish: fill={fill*1e3:.2f}ms, "
             f"roll={roll*1e3:.2f}ms, ratio={ratio:.2f}"
         )
+
+
+# ============================================================================
+# TestSyntheticDataset — shape + finiteness of synthetic_drone_video_dataset
+# ============================================================================
+
+
+class TestSyntheticDataset:
+    def test_one_batch_shapes_and_finite(self) -> None:
+        from dl_techniques.datasets.synthetic_drone_video import (
+            synthetic_drone_video_dataset,
+        )
+        ds = synthetic_drone_video_dataset(
+            batch_size=2, num_batches=2, T=4, img_size=32, img_channels=3,
+            telemetry_dim=5, seed=0,
+        )
+        for inputs, y in ds.take(1):
+            pixels = inputs["pixels"].numpy()
+            tel = inputs["telemetry"].numpy()
+            assert pixels.shape == (2, 4, 32, 32, 3), pixels.shape
+            assert tel.shape == (2, 4, 5), tel.shape
+            assert np.all(np.isfinite(pixels))
+            assert np.all(np.isfinite(tel))
+            assert np.all((pixels >= 0.0) & (pixels <= 1.0))
+            assert np.all(y.numpy() == 0.0)
+
+    def test_rejects_batch_size_1(self) -> None:
+        from dl_techniques.datasets.synthetic_drone_video import (
+            synthetic_drone_video_dataset,
+        )
+        with pytest.raises(ValueError, match="batch_size must be >= 2"):
+            synthetic_drone_video_dataset(batch_size=1)
