@@ -123,8 +123,36 @@ class VideoJEPA(keras.Model):
             trainable=True,
         )
 
+        # --- Iter-2: per-loss Mean trackers for logging (Step 5) ---
+        # These surface next_frame_loss and mask_loss as separate columns
+        # in CSVLogger / history. They are running means over the epoch.
+        self.next_frame_loss_tracker = keras.metrics.Mean(
+            name="next_frame_loss"
+        )
+        self.mask_loss_tracker = keras.metrics.Mean(name="mask_loss")
+        self.sigreg_loss_tracker = keras.metrics.Mean(name="sigreg_loss")
+
         # --- Streaming buffer (not a weight; reset per sequence) ---
         self._stream_buf: Optional[Any] = None
+
+    @property
+    def metrics(self) -> list:
+        """Per-loss trackers so fit() logs ``next_frame_loss`` + ``mask_loss``
+        (+ ``sigreg_loss``) alongside the aggregated ``loss`` column."""
+        base = list(super().metrics)
+        extras = [
+            self.next_frame_loss_tracker,
+            self.mask_loss_tracker,
+            self.sigreg_loss_tracker,
+        ]
+        # Dedupe while preserving order.
+        seen = set()
+        out = []
+        for m in base + extras:
+            if id(m) not in seen:
+                out.append(m)
+                seen.add(id(m))
+        return out
 
     # ------------------------------------------------------------------
     # Core helpers
@@ -223,6 +251,7 @@ class VideoJEPA(keras.Model):
             else:
                 next_frame_loss = ops.mean(sq)
             self.add_loss(cfg.lambda_next_frame * next_frame_loss)
+            self.next_frame_loss_tracker.update_state(next_frame_loss)
 
         # --- L2: mask-prediction loss (iter-2, D-008..D-012) ---
         # MSE between predictor output and *same-encoder* target at masked
@@ -238,6 +267,7 @@ class VideoJEPA(keras.Model):
                 float(ops.shape(pred)[0]) * denom
             )
             self.add_loss(cfg.lambda_mask * mask_loss)
+            self.mask_loss_tracker.update_state(mask_loss)
 
         # --- L3: SIGReg on (B*T, N, D) (D-005, unchanged) ---
         Hp = cfg.patches_per_side
@@ -247,6 +277,7 @@ class VideoJEPA(keras.Model):
         )
         sigreg_loss = self.sigreg(pred_reshaped)
         self.add_loss(self._sigreg_weight * sigreg_loss)
+        self.sigreg_loss_tracker.update_state(sigreg_loss)
 
         return pred
 

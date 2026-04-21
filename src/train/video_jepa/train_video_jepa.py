@@ -7,11 +7,17 @@ Usage:
     MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 .venv/bin/python \
         -m train.video_jepa.train_video_jepa \
         --epochs 2 --batch-size 2 --T 4 --img-size 64 \
-        --output-dir results/video_jepa_smoke_iter1 --seed 0
+        --output-dir results/video_jepa_smoke_iter2 --seed 0
 
 Loss is added via ``self.add_loss`` inside :meth:`VideoJEPA.call` so we
 compile with ``loss=None``. ``jit_compile=False`` avoids XLA tracing
 issues with the add_loss / reshape-heavy forward.
+
+Iter-2 logging (D-012): the model exposes per-loss ``keras.metrics.Mean``
+trackers (``next_frame_loss``, ``mask_loss``, ``sigreg_loss``) via its
+``metrics`` property, so the :class:`CSVLogger` automatically writes each
+component as a named column alongside the aggregated ``loss``. With
+``mask_prediction_enabled=False`` the ``mask_loss`` column stays at 0.
 """
 
 from __future__ import annotations
@@ -67,6 +73,11 @@ def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
         sigreg_num_proj=args.sigreg_num_proj,
         sigreg_weight=args.sigreg_weight,
         dropout=args.dropout,
+        # --- iter-2: V-JEPA tube-masked latent prediction ---
+        mask_prediction_enabled=args.mask_prediction_enabled,
+        mask_ratio=args.mask_ratio,
+        lambda_next_frame=args.lambda_next_frame,
+        lambda_mask=args.lambda_mask,
     )
 
 
@@ -128,6 +139,22 @@ def parse_args() -> argparse.Namespace:
 
     # Dropout
     p.add_argument("--dropout", type=float, default=0.0)
+
+    # Iter-2: V-JEPA tube-masked latent prediction (D-008..D-012)
+    p.add_argument(
+        "--mask-prediction-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If True, add V-JEPA-style masked-latent prediction loss "
+             "(alongside next-frame). Use --no-mask-prediction-enabled "
+             "to fall back to iter-1 two-loss training.",
+    )
+    p.add_argument("--mask-ratio", type=float, default=0.6,
+                   help="Fraction of spatial patch positions masked.")
+    p.add_argument("--lambda-next-frame", type=float, default=1.0,
+                   help="Weight on the next-frame prediction loss.")
+    p.add_argument("--lambda-mask", type=float, default=1.0,
+                   help="Weight on the mask-prediction loss.")
 
     args = p.parse_args()
     return args
