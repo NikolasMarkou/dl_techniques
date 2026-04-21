@@ -155,5 +155,9 @@ def synthetic_drone_video_dataset(
     )
     ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
     ds = ds.batch(batch_size, drop_remainder=True)
+    # Repeat infinitely so model.fit(epochs=N, steps_per_epoch=M) works
+    # regardless of num_batches. `steps_per_epoch` is the caller's contract
+    # for per-epoch iteration length.
+    ds = ds.repeat()
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
