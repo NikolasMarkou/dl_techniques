@@ -45,6 +45,7 @@ from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 from .config import VideoJEPAConfig
 from .encoder import VideoJEPACliffordEncoder
+from .masking import TubeMaskGenerator
 from .predictor import VideoJEPAPredictor
 from .telemetry_embedder import TelemetryEmbedder
 
@@ -103,6 +104,25 @@ class VideoJEPA(keras.Model):
         )
         self._sigreg_weight = cfg.sigreg_weight
 
+        # --- Iter-2: V-JEPA tube-masked latent prediction (D-008..D-012) ---
+        # Mask generator is stateless — always instantiated so that
+        # save/load round-trips the layer regardless of the enabled flag.
+        self.mask_gen = TubeMaskGenerator(
+            mask_ratio=cfg.mask_ratio,
+            patches_per_side=cfg.patches_per_side,
+            name="tube_mask_gen",
+        )
+        # Learned mask token. Allocated unconditionally so save/load
+        # round-trips the same weight topology whether or not masking is
+        # enabled. Zero-init per MAE convention — no effect on the
+        # `mask_prediction_enabled=False` fallback path (never consumed).
+        self.mask_token = self.add_weight(
+            name="mask_token",
+            shape=(cfg.embed_dim,),
+            initializer="zeros",
+            trainable=True,
+        )
+
         # --- Streaming buffer (not a weight; reset per sequence) ---
         self._stream_buf: Optional[Any] = None
 
@@ -147,30 +167,83 @@ class VideoJEPA(keras.Model):
         pixels = inputs["pixels"]
         telemetry = inputs["telemetry"]
 
+        cfg = self.config
         z = self.encode_frames(pixels)                      # (B, T, H_p, W_p, D)
         c = self.telemetry_embedder(telemetry, training=training)  # (B, T, D)
-        pred = self.predictor([z, c], training=training)    # (B, T, H_p, W_p, D)
 
-        # --- MSE next-frame patch loss (D-003) ---
-        # Skip if T < 2 (edge case: single-frame window).
-        T = ops.shape(pixels)[1]
-        # We cannot cleanly branch on a dynamic T inside tf.function; rely on
-        # the fact that slicing pred[:, :-1] on T=1 yields an empty tensor —
-        # ops.mean on empty is NaN, which we must avoid. Use a static Python
-        # check on the config's num_frames, and only add the loss if T >= 2.
-        if self.config.num_frames >= 2:
+        # --- Iter-2: optionally substitute mask_token at masked positions ---
+        # The tube mask is spatial (B, H_p, W_p); broadcasting over T keeps
+        # it time-invariant ⇒ causality preserved (I9).
+        #
+        # When mask_prediction_enabled is False, we fall back *exactly* to
+        # iter-1 semantics: no mask generation, no L2, no token substitution.
+        B = ops.shape(pixels)[0]
+        T_dyn = ops.shape(pixels)[1]
+        masking_on = cfg.mask_prediction_enabled and self.mask_gen.num_masked > 0
+        if masking_on:
+            mask_spatial = self.mask_gen(B, training=training)  # (B, H_p, W_p)
+            # Broadcast to 5D: (B, 1, H_p, W_p, 1). Stays T-invariant.
+            M = ops.reshape(
+                mask_spatial,
+                (B, 1, cfg.patches_per_side, cfg.patches_per_side, 1),
+            )
+            M = ops.cast(M, z.dtype)
+            # mask_token broadcast: (D,) -> (1, 1, 1, 1, D).
+            token = ops.reshape(self.mask_token, (1, 1, 1, 1, cfg.embed_dim))
+            token = ops.cast(token, z.dtype)
+            z_masked = (1.0 - M) * z + M * token
+        else:
+            M = None
+            z_masked = z
+
+        pred = self.predictor([z_masked, c], training=training)  # (B,T,H_p,W_p,D)
+
+        # --- L1: MSE next-frame patch loss (D-003, iter-1) ---
+        # Evaluated on **unmasked** positions only (iter-2 accounting rule:
+        # the two tasks should not double-count the same tokens).
+        # Skip entirely if T < 2 (edge case: single-frame window).
+        if cfg.num_frames >= 2:
             pred_ctx = pred[:, :-1]           # (B, T-1, H_p, W_p, D)
             target_ctx = z[:, 1:]             # (B, T-1, H_p, W_p, D)
-            pred_loss = ops.mean(ops.square(pred_ctx - target_ctx))
-            self.add_loss(pred_loss)
+            sq = ops.square(pred_ctx - target_ctx)
+            if masking_on:
+                # (1 - M) broadcasts over T; slice to T-1 via broadcasting.
+                w = (1.0 - M)  # (B, 1, H_p, W_p, 1) broadcasts to (B, T-1, ...)
+                # Per-element count across a slab of (T-1) frames:
+                # unmasked_spatial * (T-1) * D.
+                unmasked_per_row = (
+                    cfg.num_patches - self.mask_gen.num_masked
+                )
+                denom = float(
+                    max(1, unmasked_per_row * (cfg.num_frames - 1) * cfg.embed_dim)
+                )
+                next_frame_loss = ops.sum(sq * w) / (
+                    float(ops.shape(pred_ctx)[0]) * denom
+                )
+            else:
+                next_frame_loss = ops.mean(sq)
+            self.add_loss(cfg.lambda_next_frame * next_frame_loss)
 
-        # --- SIGReg on (B*T, N, D) (D-005) ---
-        cfg = self.config
+        # --- L2: mask-prediction loss (iter-2, D-008..D-012) ---
+        # MSE between predictor output and *same-encoder* target at masked
+        # positions, across ALL T frames (no causal slice — the tube is
+        # time-invariant so masked slots across T are symmetric targets).
+        if masking_on:
+            sq_full = ops.square(pred - z)  # (B, T, H_p, W_p, D)
+            num_masked_per_clip = (
+                self.mask_gen.num_masked * cfg.num_frames * cfg.embed_dim
+            )
+            denom = float(max(1, num_masked_per_clip))
+            mask_loss = ops.sum(sq_full * M) / (
+                float(ops.shape(pred)[0]) * denom
+            )
+            self.add_loss(cfg.lambda_mask * mask_loss)
+
+        # --- L3: SIGReg on (B*T, N, D) (D-005, unchanged) ---
         Hp = cfg.patches_per_side
         N = Hp * Hp
-        B = ops.shape(pred)[0]
         pred_reshaped = ops.reshape(
-            pred, (B * T, N, cfg.embed_dim)
+            pred, (B * T_dyn, N, cfg.embed_dim)
         )
         sigreg_loss = self.sigreg(pred_reshaped)
         self.add_loss(self._sigreg_weight * sigreg_loss)

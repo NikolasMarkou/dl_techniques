@@ -558,8 +558,16 @@ class TestVideoJEPA:
             assert np.isfinite(float(np.asarray(loss)))
 
     def test_forward_t1_edge(self) -> None:
-        """T=1: MSE next-frame loss term must be skipped (no division-by-zero)."""
-        cfg = _small_config(num_frames=1, history_size_k=1)
+        """T=1 (iter-1 semantics, masking off): MSE next-frame loss skipped.
+
+        Iter-2 note: with ``mask_prediction_enabled=False`` the model
+        collapses to the iter-1 two-loss path. This test anchors that
+        fallback. T=1 with masking *on* adds an L2 term and is covered
+        separately in Step 4 (``test_mask_loss_finite``).
+        """
+        cfg = _small_config(
+            num_frames=1, history_size_k=1, mask_prediction_enabled=False,
+        )
         model = VideoJEPA(config=cfg)
         pixels = np.random.rand(2, 1, cfg.img_size, cfg.img_size,
                                 cfg.img_channels).astype("float32")
@@ -568,7 +576,8 @@ class TestVideoJEPA:
         assert tuple(pred.shape) == (
             2, 1, cfg.patches_per_side, cfg.patches_per_side, cfg.embed_dim,
         )
-        # Only SIGReg loss should be present (MSE skipped when num_frames < 2).
+        # Only SIGReg loss should be present (MSE skipped when num_frames < 2,
+        # L2 skipped because mask_prediction_enabled=False).
         assert len(model.losses) == 1
         assert np.isfinite(float(np.asarray(model.losses[0])))
 
@@ -617,7 +626,15 @@ class TestVideoJEPA:
         assert np.isfinite(loss_val), f"Training loss non-finite: {loss_val}"
 
     def test_save_load_round_trip(self, tmp_path) -> None:
-        cfg = _small_config()
+        """Iter-1 deterministic round-trip (masking off).
+
+        Iter-2 note: masking injects per-call random sampling, so
+        two consecutive forwards produce different outputs by design.
+        Bit-equivalent round-trip with masking on is tested separately
+        in Step 4 (``test_serialization_roundtrip_with_masking``) by
+        seeding before each forward.
+        """
+        cfg = _small_config(mask_prediction_enabled=False)
         model = VideoJEPA(config=cfg)
         B, T = 2, cfg.num_frames
         pixels = np.random.rand(
