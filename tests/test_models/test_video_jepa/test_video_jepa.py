@@ -730,6 +730,163 @@ class TestVideoJEPA:
 
 
 # ============================================================================
+# TestVideoJEPAIter2 — iter-2 mask-prediction branch (C10/C11/C12)
+# ============================================================================
+
+
+class TestVideoJEPAIter2:
+    """Iter-2 additions: mask-loss finiteness, disabled-flag regression,
+    serialization round-trip with masking on."""
+
+    def test_mask_loss_finite(self) -> None:
+        """C10 — with masking on, 3 finite losses appear via add_loss.
+
+        Also checks falsification P6: L2 at init must be > 1e-5 (the
+        mask_token is zero so substituting at masked positions produces
+        a non-trivial residual against ``z`` wherever M=1)."""
+        cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6)
+        model = VideoJEPA(config=cfg)
+        B, T = 2, cfg.num_frames
+        pixels = np.random.rand(B, T, cfg.img_size, cfg.img_size,
+                                cfg.img_channels).astype("float32")
+        tel = np.random.randn(B, T, cfg.telemetry_dim).astype("float32")
+        _ = model({"pixels": pixels, "telemetry": tel}, training=False)
+
+        # 3 loss terms: L1 (next-frame), L2 (mask), L3 (SIGReg).
+        assert len(model.losses) == 3, (
+            f"expected 3 losses (next-frame + mask + sigreg), "
+            f"got {len(model.losses)}"
+        )
+        values = [float(np.asarray(x)) for x in model.losses]
+        for v in values:
+            assert np.isfinite(v), f"non-finite loss: {values}"
+        # The middle term is L2 (registered second). P6 guard:
+        assert values[1] > 1e-5, (
+            f"mask loss should be > 1e-5 at init (mask_token zero-init "
+            f"replaces z values at masked positions), got {values[1]}"
+        )
+
+    def test_mask_disabled_matches_iter1_behavior(self) -> None:
+        """C11 — with masking off, len(losses)==2 (iter-1 shape). Outputs
+        deterministic across two forwards (no random sampling)."""
+        cfg = _small_config(mask_prediction_enabled=False)
+        model = VideoJEPA(config=cfg)
+        B, T = 2, cfg.num_frames
+        pixels = np.random.rand(B, T, cfg.img_size, cfg.img_size,
+                                cfg.img_channels).astype("float32")
+        tel = np.random.randn(B, T, cfg.telemetry_dim).astype("float32")
+        y1 = np.asarray(
+            model({"pixels": pixels, "telemetry": tel}, training=False)
+        )
+        # Iter-1 loss shape: MSE + SIGReg == 2.
+        assert len(model.losses) == 2, len(model.losses)
+        # Determinism: no random mask sampling in this path.
+        y2 = np.asarray(
+            model({"pixels": pixels, "telemetry": tel}, training=False)
+        )
+        np.testing.assert_allclose(y2, y1, atol=1e-6, rtol=1e-6)
+
+    def test_serialization_roundtrip_with_masking(self, tmp_path) -> None:
+        """C12 — save/load with masking enabled. Mask sampling is random
+        per-call, so bit-identical outputs are not guaranteed; instead we
+        verify:
+          (1) the config round-trips with ``mask_prediction_enabled=True``,
+          (2) every learned weight (including ``mask_token``) is byte-
+              identical across save→load,
+          (3) a post-load forward produces a finite output of correct shape.
+        """
+        cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6)
+        model = VideoJEPA(config=cfg)
+        B, T = 2, cfg.num_frames
+        pixels = np.random.rand(B, T, cfg.img_size, cfg.img_size,
+                                cfg.img_channels).astype("float32")
+        tel = np.random.randn(B, T, cfg.telemetry_dim).astype("float32")
+        # Warm-up forward so all sub-layers are built.
+        _ = model({"pixels": pixels, "telemetry": tel}, training=False)
+
+        # Snapshot every learnable weight pre-save.
+        before_weights = {
+            w.name: np.asarray(w).copy() for w in model.weights
+        }
+
+        path = str(tmp_path / "vj_iter2.keras")
+        model.save(path)
+        del model
+        keras.backend.clear_session()
+        reloaded = keras.models.load_model(path)
+
+        # (1) config round-trip
+        assert reloaded.config.mask_prediction_enabled is True
+        assert reloaded.config.mask_ratio == 0.6
+
+        # (2) weight-level bit-equivalence (matching by name).
+        after_weights = {w.name: np.asarray(w) for w in reloaded.weights}
+        assert set(after_weights.keys()) == set(before_weights.keys()), (
+            set(before_weights) ^ set(after_weights)
+        )
+        for name, v0 in before_weights.items():
+            v1 = after_weights[name]
+            np.testing.assert_allclose(
+                v1, v0, atol=1e-7, rtol=1e-7,
+                err_msg=f"weight mismatch after load: {name}",
+            )
+
+        # (3) post-load forward is finite and correct-shape.
+        y = np.asarray(
+            reloaded({"pixels": pixels, "telemetry": tel}, training=False)
+        )
+        Hp = cfg.patches_per_side
+        assert y.shape == (B, T, Hp, Hp, cfg.embed_dim), y.shape
+        assert np.all(np.isfinite(y))
+
+    def test_fit_one_step_with_masking(self) -> None:
+        """Smoke: one fit step with masking on, three finite losses."""
+        cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6)
+        model = VideoJEPA(config=cfg)
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+            loss=None, jit_compile=False,
+        )
+        B, T = 2, cfg.num_frames
+
+        def gen():
+            for _ in range(2):
+                yield (
+                    {
+                        "pixels": np.random.rand(
+                            B, T, cfg.img_size, cfg.img_size, cfg.img_channels
+                        ).astype("float32"),
+                        "telemetry": np.random.randn(
+                            B, T, cfg.telemetry_dim
+                        ).astype("float32"),
+                    },
+                    np.float32(0.0),
+                )
+
+        import tensorflow as tf
+        ds = tf.data.Dataset.from_generator(
+            gen,
+            output_signature=(
+                {
+                    "pixels": tf.TensorSpec(
+                        shape=(B, T, cfg.img_size, cfg.img_size,
+                               cfg.img_channels), dtype=tf.float32,
+                    ),
+                    "telemetry": tf.TensorSpec(
+                        shape=(B, T, cfg.telemetry_dim), dtype=tf.float32,
+                    ),
+                },
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+            ),
+        )
+        h = model.fit(ds, epochs=1, steps_per_epoch=2, verbose=0)
+        loss_val = h.history["loss"][-1]
+        assert np.isfinite(loss_val), (
+            f"Training loss non-finite under masking: {loss_val}"
+        )
+
+
+# ============================================================================
 # TestSyntheticDataset — shape + finiteness of synthetic_drone_video_dataset
 # ============================================================================
 
