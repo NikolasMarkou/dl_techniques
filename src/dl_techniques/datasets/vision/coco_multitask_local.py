@@ -77,6 +77,10 @@ class COCOMultiTaskConfig:
     # can subtract downstream.
     pixel_scale: float = 1.0 / 255.0
 
+    # Detection box labels (optional; required for training a detection head).
+    emit_boxes: bool = False
+    max_boxes: int = 100  # per-image upper bound; images with more are truncated
+
 
 class COCO2017MultiTaskLoader(keras.utils.PyDataset):
     """Keras :class:`PyDataset` yielding (image, {classification, segmentation}).
@@ -184,6 +188,58 @@ class COCO2017MultiTaskLoader(keras.utils.PyDataset):
                 y[cls_idx] = 1.0
         return y
 
+    def _build_detection_labels(self, image_id: int) -> np.ndarray:
+        """Build ``(max_boxes, 5)`` xyxy-normalized box labels, ``-1.0``-padded.
+
+        Layout per row: ``[class_idx_contiguous, x1_norm, y1_norm, x2_norm, y2_norm]``.
+        COCO's native bbox = ``[x, y, w, h]`` in *pixel* coords against the
+        original image's ``(height, width)``; we convert to normalized xyxy in
+        ``[0, 1]`` which is invariant to the training-time image resize (the
+        segmentation/classification heads use the same invariance).
+        """
+        max_boxes = self.config.max_boxes
+        labels = -1.0 * np.ones((max_boxes, 5), dtype=np.float32)
+        info = self.coco.loadImgs(image_id)[0]
+        img_h = float(info["height"])
+        img_w = float(info["width"])
+        if img_h <= 0 or img_w <= 0:
+            return labels
+        ann_ids = self.coco.getAnnIds(imgIds=image_id, iscrowd=False)
+        anns = self.coco.loadAnns(ann_ids)
+        if len(anns) > max_boxes:
+            anns = anns[:max_boxes]
+        for i, ann in enumerate(anns):
+            cls_idx = self.cat_id_to_idx.get(ann["category_id"])
+            if cls_idx is None:
+                continue
+            x, y, w, h = ann["bbox"]  # COCO native: pixel xywh
+            if w <= 0 or h <= 0:
+                continue
+            x1 = max(0.0, x / img_w)
+            y1 = max(0.0, y / img_h)
+            x2 = min(1.0, (x + w) / img_w)
+            y2 = min(1.0, (y + h) / img_h)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            labels[i, 0] = float(cls_idx)
+            labels[i, 1:] = [x1, y1, x2, y2]
+        return labels
+
+    @staticmethod
+    def _hflip_boxes(boxes: np.ndarray) -> np.ndarray:
+        """Mirror xyxy-normalized boxes for a horizontal flip.
+
+        ``-1.0`` padded rows are left untouched (class_id stays < 0).
+        """
+        out = boxes.copy()
+        valid = out[:, 0] >= 0.0
+        if np.any(valid):
+            x1 = out[valid, 1].copy()
+            x2 = out[valid, 3].copy()
+            out[valid, 1] = 1.0 - x2
+            out[valid, 3] = 1.0 - x1
+        return out
+
     def _load_image(self, image_id: int, size: int) -> np.ndarray:
         info = self.coco.loadImgs(image_id)[0]
         path = os.path.join(self.images_dir, info["file_name"])
@@ -201,27 +257,44 @@ class COCO2017MultiTaskLoader(keras.utils.PyDataset):
         start = idx * bs
         end = min(start + bs, len(self.image_ids))
         batch_ids = self.image_ids[start:end]
+        B = len(batch_ids)
 
-        imgs = np.empty((len(batch_ids), size, size, 3), dtype=np.float32)
-        cls = np.empty((len(batch_ids), NUM_COCO_CLASSES), dtype=np.float32)
-        seg = np.empty((len(batch_ids), size, size), dtype=np.int32)
+        imgs = np.empty((B, size, size, 3), dtype=np.float32)
+        cls = np.empty((B, NUM_COCO_CLASSES), dtype=np.float32)
+        seg = np.empty((B, size, size), dtype=np.int32)
+        boxes = (
+            np.empty((B, self.config.max_boxes, 5), dtype=np.float32)
+            if self.config.emit_boxes
+            else None
+        )
 
         for i, image_id in enumerate(batch_ids):
             img = self._load_image(image_id, size)
             mask = self._build_mask(image_id, (size, size))
+            det_labels = (
+                self._build_detection_labels(image_id)
+                if self.config.emit_boxes
+                else None
+            )
 
             if self.config.augment and self._rng.random() < self.config.hflip_prob:
                 img = img[:, ::-1, :]
                 mask = mask[:, ::-1]
+                if det_labels is not None:
+                    det_labels = self._hflip_boxes(det_labels)
 
             imgs[i] = img
             cls[i] = self._build_classification(image_id)
             seg[i] = mask
+            if boxes is not None:
+                boxes[i] = det_labels
 
         labels: Dict[str, np.ndarray] = {
             "classification": cls,
             "segmentation": seg,
         }
+        if boxes is not None:
+            labels["detection"] = boxes
         return imgs, labels
 
     def on_epoch_end(self) -> None:
