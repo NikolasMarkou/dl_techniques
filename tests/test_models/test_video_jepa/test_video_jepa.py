@@ -25,6 +25,8 @@ import keras
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
 from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
 from dl_techniques.models.video_jepa.telemetry_embedder import TelemetryEmbedder
+from dl_techniques.models.video_jepa.predictor import VideoJEPAPredictor
+from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 
 class TestConfig:
@@ -186,4 +188,184 @@ class TestTelemetryEmbedder:
         keras.backend.clear_session()
         reloaded = keras.models.load_model(path)
         y_after = np.asarray(reloaded(t, training=False))
+        np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
+
+
+# ============================================================================
+# TestPredictor — HARDEST FIRST (C1 causality, C3 AdaLN identity-at-init,
+#                                C5 shapes, C2 SIGReg finiteness, C4 serialize)
+# ============================================================================
+
+
+def _make_predictor(
+    *, embed_dim: int = 32, T: int = 4, Hp: int = 4, depth: int = 2,
+    num_heads: int = 2, dim_head: int = 16, mlp_dim: int = 64,
+) -> VideoJEPAPredictor:
+    pred = VideoJEPAPredictor(
+        embed_dim=embed_dim,
+        num_frames_max=T,
+        patches_per_side=Hp,
+        depth=depth,
+        num_heads=num_heads,
+        dim_head=dim_head,
+        mlp_dim=mlp_dim,
+        shifts=(1, 2),
+        dropout=0.0,
+        name="pred",
+    )
+    # Explicit build so causality test can avoid re-tracing.
+    pred.build([(2, T, Hp, Hp, embed_dim), (2, T, embed_dim)])
+    return pred
+
+
+class TestPredictor:
+    """Predictor invariants. Causality runs first (highest-risk assertion)."""
+
+    # ------------------------------------------------------------------
+    # C1 — CAUSALITY (the critical test — runs first)
+    # ------------------------------------------------------------------
+    def test_causality(self) -> None:
+        """Perturbation at frame k must not alter outputs at frames < k.
+
+        Protocol: for each k in [1, T-1], build two inputs identical on
+        frames [0..k-1] and differing at frame k (and beyond). Assert
+        the predictor output on frames [0..k-1] is bitwise-identical (up
+        to float roundoff, atol 1e-5).
+        """
+        np.random.seed(0)
+        keras.utils.set_random_seed(0)
+
+        D, T, Hp, B = 32, 4, 4, 2
+        pred = _make_predictor(embed_dim=D, T=T, Hp=Hp, depth=2)
+
+        z_base = np.random.randn(B, T, Hp, Hp, D).astype("float32")
+        c_base = np.random.randn(B, T, D).astype("float32")
+
+        out_base = np.asarray(pred([z_base, c_base], training=False))
+        assert out_base.shape == (B, T, Hp, Hp, D)
+
+        for k in range(1, T):
+            z_pert = z_base.copy()
+            c_pert = c_base.copy()
+            # Perturb frames [k..T-1] by a large random delta.
+            z_pert[:, k:] += np.random.randn(B, T - k, Hp, Hp, D).astype(
+                "float32"
+            ) * 5.0
+            c_pert[:, k:] += np.random.randn(B, T - k, D).astype(
+                "float32"
+            ) * 5.0
+            out_pert = np.asarray(pred([z_pert, c_pert], training=False))
+
+            # Frames < k must be identical to the unperturbed baseline.
+            diff = np.max(np.abs(
+                out_base[:, :k] - out_pert[:, :k]
+            ))
+            assert diff < 1e-5, (
+                f"Causality violated at perturbation frame k={k}: "
+                f"max|Δ| on frames < k = {diff} (tol 1e-5). "
+                "See P1 in plan.md."
+            )
+
+            # Sanity: frames >= k SHOULD differ (otherwise the predictor
+            # is collapsed to a constant and the test is meaningless).
+            diff_future = np.max(np.abs(
+                out_base[:, k:] - out_pert[:, k:]
+            ))
+            assert diff_future > 1e-6, (
+                f"Predictor appears collapsed at frame k={k}: "
+                f"future-frame diff = {diff_future}."
+            )
+
+    # ------------------------------------------------------------------
+    # C3 — AdaLN-zero identity-at-init
+    # ------------------------------------------------------------------
+    def test_adaln_identity_init(self) -> None:
+        """At init, predictor output is independent of c.
+
+        Zero-initialized AdaLN modulation ⇒ gate=0 ⇒ every AdaLN block is
+        identity in x. The only thing that reads c is the AdaLN blocks, so
+        at init ``predictor(z, c) == predictor(z, c')`` for any c, c'.
+        """
+        np.random.seed(1)
+        keras.utils.set_random_seed(1)
+
+        D, T, Hp, B = 32, 4, 4, 2
+        pred = _make_predictor(embed_dim=D, T=T, Hp=Hp, depth=2)
+        z = np.random.randn(B, T, Hp, Hp, D).astype("float32")
+
+        diffs = []
+        for _ in range(10):
+            c1 = np.random.randn(B, T, D).astype("float32")
+            c2 = np.random.randn(B, T, D).astype("float32")
+            o1 = np.asarray(pred([z, c1], training=False))
+            o2 = np.asarray(pred([z, c2], training=False))
+            diffs.append(np.max(np.abs(o1 - o2)))
+
+        max_diff = max(diffs)
+        assert max_diff < 1e-6, (
+            f"AdaLN-zero identity-at-init violated: max|Δ| over 10 "
+            f"random (c, c') pairs = {max_diff} (tol 1e-6). See P2 in plan.md."
+        )
+
+    # ------------------------------------------------------------------
+    # C5 — Shape propagation
+    # ------------------------------------------------------------------
+    def test_forward_shape(self) -> None:
+        D, T, Hp, B = 32, 4, 4, 2
+        pred = _make_predictor(embed_dim=D, T=T, Hp=Hp, depth=2)
+        z = np.random.randn(B, T, Hp, Hp, D).astype("float32")
+        c = np.random.randn(B, T, D).astype("float32")
+        y = pred([z, c], training=False)
+        assert tuple(y.shape) == (B, T, Hp, Hp, D), y.shape
+
+    def test_rejects_bad_input_structure(self) -> None:
+        pred = _make_predictor()
+        with pytest.raises(ValueError, match=r"inputs = \[z, c\]"):
+            pred(np.random.randn(2, 4, 4, 4, 32).astype("float32"))
+
+    # ------------------------------------------------------------------
+    # C2 — SIGReg finiteness smoke (reshape to (B*T, N, D))
+    # ------------------------------------------------------------------
+    def test_sigreg_finite(self) -> None:
+        """SIGReg on reshape-to-(B*T, N, D) must be finite at init."""
+        D, T, Hp, B = 32, 4, 4, 2
+        pred = _make_predictor(embed_dim=D, T=T, Hp=Hp, depth=2)
+        z = np.random.randn(B, T, Hp, Hp, D).astype("float32")
+        c = np.random.randn(B, T, D).astype("float32")
+        y = pred([z, c], training=False)
+        y_r = np.asarray(y).reshape(B * T, Hp * Hp, D)
+
+        sig = SIGRegLayer(knots=17, num_proj=64, name="sigreg_smoke")
+        loss = sig(y_r)
+        loss_val = float(np.asarray(loss))
+        assert np.isfinite(loss_val), f"SIGReg non-finite at init: {loss_val}"
+        assert loss_val < 100.0, (
+            f"SIGReg > 100 at init: {loss_val} (P3 STOP-IF)."
+        )
+
+    # ------------------------------------------------------------------
+    # C4 — Serialization round-trip
+    # ------------------------------------------------------------------
+    def test_serialization_round_trip(self, tmp_path) -> None:
+        D, T, Hp, B = 32, 4, 4, 2
+        z_in = keras.Input(shape=(T, Hp, Hp, D), name="z")
+        c_in = keras.Input(shape=(T, D), name="c")
+        pred = VideoJEPAPredictor(
+            embed_dim=D, num_frames_max=T, patches_per_side=Hp,
+            depth=2, num_heads=2, dim_head=16, mlp_dim=64,
+            shifts=(1, 2), dropout=0.0, name="pred",
+        )
+        out = pred([z_in, c_in])
+        model = keras.Model([z_in, c_in], out, name="pred_wrap")
+
+        z = np.random.randn(B, T, Hp, Hp, D).astype("float32")
+        c = np.random.randn(B, T, D).astype("float32")
+        y_before = np.asarray(model([z, c], training=False))
+
+        path = str(tmp_path / "pred.keras")
+        model.save(path)
+        del model, pred
+        keras.backend.clear_session()
+        reloaded = keras.models.load_model(path)
+        y_after = np.asarray(reloaded([z, c], training=False))
         np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
