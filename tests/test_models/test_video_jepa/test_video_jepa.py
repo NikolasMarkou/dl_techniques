@@ -15,9 +15,15 @@ the remaining test classes.
 
 from __future__ import annotations
 
+import os
+import tempfile
+
+import numpy as np
 import pytest
+import keras
 
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
 
 
 class TestConfig:
@@ -74,3 +80,67 @@ class TestConfig:
             VideoJEPAConfig(encoder_clifford_depth=0)
         with pytest.raises(ValueError, match="predictor_depth"):
             VideoJEPAConfig(predictor_depth=0)
+
+
+# ============================================================================
+# TestEncoder — hybrid PatchEmbedding2D + PE2D + CliffordNetBlock stack (C5)
+# ============================================================================
+
+
+def _default_encoder_kwargs() -> dict:
+    return dict(
+        embed_dim=32, patch_size=8, img_size=32, img_channels=3,
+        depth=1, shifts=(1, 2), dropout=0.0,
+    )
+
+
+class TestEncoder:
+    """Shape + serialization tests for :class:`VideoJEPACliffordEncoder`."""
+
+    def test_forward_shape(self) -> None:
+        enc = VideoJEPACliffordEncoder(**_default_encoder_kwargs())
+        # B_total = B * T = 2 * 2 = 4 (>=2 for BN stability).
+        B_total, H, W, C = 4, 32, 32, 3
+        x = np.random.rand(B_total, H, W, C).astype("float32")
+        y = enc(x, training=False)
+        Hp = 32 // 8
+        assert tuple(y.shape) == (B_total, Hp, Hp, 32), y.shape
+
+    def test_forward_preserves_finiteness(self) -> None:
+        enc = VideoJEPACliffordEncoder(**_default_encoder_kwargs())
+        x = np.random.rand(4, 32, 32, 3).astype("float32")
+        y = np.asarray(enc(x, training=False))
+        assert np.all(np.isfinite(y))
+
+    def test_rejects_bad_rank(self) -> None:
+        enc = VideoJEPACliffordEncoder(**_default_encoder_kwargs())
+        with pytest.raises(ValueError, match="4D input"):
+            # Build via explicit build() with a 3D shape.
+            enc.build((4, 32, 3))
+
+    def test_even_embed_dim_enforced(self) -> None:
+        with pytest.raises(ValueError, match="even"):
+            VideoJEPACliffordEncoder(
+                embed_dim=31, patch_size=8, img_size=32, img_channels=3,
+            )
+
+    def test_serialization_round_trip(self, tmp_path) -> None:
+        kwargs = _default_encoder_kwargs()
+        # Wrap in a tiny functional model so save() captures the layer.
+        inputs = keras.Input(shape=(32, 32, 3))
+        enc = VideoJEPACliffordEncoder(**kwargs, name="enc")
+        outputs = enc(inputs)
+        model = keras.Model(inputs, outputs, name="enc_wrap")
+
+        x = np.random.rand(4, 32, 32, 3).astype("float32")
+        y_before = np.asarray(model(x, training=False))
+
+        path = str(tmp_path / "enc.keras")
+        model.save(path)
+        del model, enc
+        keras.backend.clear_session()
+        reloaded = keras.models.load_model(path)
+        y_after = np.asarray(reloaded(x, training=False))
+
+        # Round-trip must be numerically equal within atol 1e-5.
+        np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
