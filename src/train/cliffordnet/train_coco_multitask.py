@@ -516,20 +516,20 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
 
     # Detection mAP callback — runs val-end decode + pycocotools COCOeval,
     # logging val_map50 and val_map5095 into the epoch logs.
+    # Insert BEFORE CSVLogger (position 0) so CSVLogger snapshots its columns
+    # AFTER the mAP keys have been injected into logs.
     if config.enable_detection:
-        callbacks.append(
-            COCOMAPCallback(
-                val_loader=val_base,
-                image_size=config.image_size,
-                num_classes=NUM_COCO_CLASSES,
-                reg_max=config.detection_reg_max,
-                strides=det_strides,  # type: ignore[arg-type]
-                detection_head_key="detection",
-                score_threshold=config.detection_score_threshold,
-                iou_threshold=config.detection_iou_threshold,
-                frequency=config.detection_map_frequency,
-            )
-        )
+        callbacks.insert(0, COCOMAPCallback(
+            val_loader=val_base,
+            image_size=config.image_size,
+            num_classes=NUM_COCO_CLASSES,
+            reg_max=config.detection_reg_max,
+            strides=det_strides,  # type: ignore[arg-type]
+            detection_head_key="detection",
+            score_threshold=config.detection_score_threshold,
+            iou_threshold=config.detection_iou_threshold,
+            frequency=config.detection_map_frequency,
+        ))
 
     # Prediction-grid visualization: load a fixed set of val samples once.
     try:
@@ -537,14 +537,34 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
         needed = config.visualization_samples
         for bi in range(len(val_base)):
             xb, yb = val_base[bi]
-            vis_batches.append((xb, yb["classification"], yb["segmentation"]))
+            boxes_b = yb.get("detection") if config.enable_detection else None
+            vis_batches.append(
+                (xb, yb["classification"], yb["segmentation"], boxes_b)
+            )
             if sum(x[0].shape[0] for x in vis_batches) >= needed:
                 break
         if vis_batches:
             vis_rgb = np.concatenate([b[0] for b in vis_batches], axis=0)[:needed]
             vis_cls = np.concatenate([b[1] for b in vis_batches], axis=0)[:needed]
             vis_seg = np.concatenate([b[2] for b in vis_batches], axis=0)[:needed]
+            vis_boxes = (
+                np.concatenate([b[3] for b in vis_batches], axis=0)[:needed]
+                if config.enable_detection and all(b[3] is not None for b in vis_batches)
+                else None
+            )
             vis_dir = Path(results_dir) / "visualization_plots"
+            det_kwargs: Dict[str, Any] = {}
+            if config.enable_detection and vis_boxes is not None:
+                det_kwargs = dict(
+                    val_boxes=vis_boxes,
+                    detection_reg_max=config.detection_reg_max,
+                    detection_num_classes=NUM_COCO_CLASSES,
+                    detection_strides=det_strides,
+                    detection_score_threshold=max(
+                        0.25, config.detection_score_threshold
+                    ),
+                    detection_iou_threshold=config.detection_iou_threshold,
+                )
             callbacks.append(
                 COCOMultiTaskPredictionGridCallback(
                     val_rgb=vis_rgb,
@@ -553,11 +573,13 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
                     output_dir=str(vis_dir),
                     frequency=config.visualization_frequency,
                     max_samples=needed,
+                    **det_kwargs,
                 )
             )
             logger.info(
                 f"Visualization callback enabled: "
                 f"{vis_rgb.shape[0]} samples every {config.visualization_frequency} epochs"
+                + (" (with detection)" if det_kwargs else "")
             )
         else:
             logger.warning("No val samples for visualization callback; skipping.")

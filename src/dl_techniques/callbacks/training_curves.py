@@ -45,6 +45,7 @@ def _group_metrics(keys: List[str]) -> Dict[str, List[str]]:
         "loss": [],
         "classification": [],
         "segmentation": [],
+        "detection": [],
         "depth": [],
         "other": [],
     }
@@ -56,6 +57,8 @@ def _group_metrics(keys: List[str]) -> Dict[str, List[str]]:
                 groups["classification"].append(k)
             elif "segmentation" in k:
                 groups["segmentation"].append(k)
+            elif "detection" in k:
+                groups["detection"].append(k)
             elif "depth" in k:
                 groups["depth"].append(k)
             else:
@@ -66,6 +69,8 @@ def _group_metrics(keys: List[str]) -> Dict[str, List[str]]:
             groups["classification"].append(k)
         elif "segmentation" in k or "pix_acc" in k:
             groups["segmentation"].append(k)
+        elif "detection" in k or k in ("map50", "map5095"):
+            groups["detection"].append(k)
         elif any(tok in k for tok in ("abs_rel", "sq_rel", "rmse", "delta_")):
             groups["depth"].append(k)
         else:
