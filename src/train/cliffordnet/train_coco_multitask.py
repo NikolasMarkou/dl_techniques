@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import keras
+import numpy as np
 import tensorflow as tf
 
 from train.common import (
@@ -45,6 +46,11 @@ from dl_techniques.datasets.vision.coco_multitask_local import (
     COCO_DEFAULT_ROOT,
     NUM_COCO_CLASSES,
 )
+from dl_techniques.callbacks.coco_multitask_visualization import (
+    COCOMultiTaskPredictionGridCallback,
+)
+from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
+from dl_techniques.metrics.brier_score import BrierScore
 from dl_techniques.models.cliffordnet.unet import CliffordNetUNet
 from dl_techniques.optimization import (
     deep_supervision_schedule_builder,
@@ -55,6 +61,21 @@ from dl_techniques.utils.logger import logger
 
 
 NUM_SEG_CLASSES: int = NUM_COCO_CLASSES + 1  # +1 background
+
+
+class _LogitF1Score(keras.metrics.F1Score):
+    """F1Score that applies sigmoid to its logit inputs before thresholding.
+
+    Keras 3's F1Score requires ``threshold`` in ``(0, 1]`` — i.e. it expects
+    probability-space inputs.  Our classification head outputs raw logits
+    (consistent with ``BinaryCrossentropy(from_logits=True)``), so we sigmoid
+    internally and keep a natural ``threshold=0.5``.
+    """
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        return super().update_state(
+            y_true, keras.ops.sigmoid(y_pred), sample_weight
+        )
 
 
 # ---------------------------------------------------------------------
@@ -101,6 +122,9 @@ class COCOMultiTaskTrainingConfig:
 
     # Monitoring
     early_stopping_patience: int = 20
+    visualization_frequency: int = 1  # save prediction grid every N epochs
+    visualization_samples: int = 6
+    include_tensorboard: bool = True
 
     # I/O
     output_dir: str = "results"
@@ -350,10 +374,24 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
             (0.5 ** j) if j > 0 else 1.0 for j in range(n_seg)
         ))
 
-    # Metrics — primary outputs only
+    # Metrics — primary outputs only.
+    # Note on classification: BinaryAccuracy(threshold=0) is misleading on
+    # multi-label COCO — the "always negative" baseline is ~94% (4.5 / 80
+    # average positives per image).  Use macro-F1 + multi-label AUC, which
+    # start near 0 and grow as the model learns to predict positives.
+    # Precision/Recall skipped because Keras 3 requires sigmoid-space thresholds
+    # in (0, 1]; we compute them post-hoc from AUC / F1 if needed.
     metrics: Dict[str, Any] = {
         "classification": [
-            keras.metrics.BinaryAccuracy(name="acc", threshold=0.0),
+            _LogitF1Score(
+                average="macro", threshold=0.5, name="macro_f1",
+            ),
+            keras.metrics.AUC(
+                multi_label=True, from_logits=True, name="auc",
+            ),
+            BrierScore(
+                from_logits=True, name="brier",
+            ),
         ],
         "segmentation": [
             keras.metrics.SparseCategoricalAccuracy(name="pix_acc"),
@@ -378,6 +416,7 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
         include_analyzer=False,  # large — skip for multi-task
+        include_tensorboard=config.include_tensorboard,
     )
     callbacks.append(
         _SegDeepSupervisionScheduler(
@@ -389,6 +428,49 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
             schedule_config=config.deep_supervision_schedule_config,
         )
     )
+
+    # Prediction-grid visualization: load a fixed set of val samples once.
+    try:
+        vis_batches = []
+        needed = config.visualization_samples
+        for bi in range(len(val_base)):
+            xb, yb = val_base[bi]
+            vis_batches.append((xb, yb["classification"], yb["segmentation"]))
+            if sum(x[0].shape[0] for x in vis_batches) >= needed:
+                break
+        if vis_batches:
+            vis_rgb = np.concatenate([b[0] for b in vis_batches], axis=0)[:needed]
+            vis_cls = np.concatenate([b[1] for b in vis_batches], axis=0)[:needed]
+            vis_seg = np.concatenate([b[2] for b in vis_batches], axis=0)[:needed]
+            vis_dir = Path(results_dir) / "visualization_plots"
+            callbacks.append(
+                COCOMultiTaskPredictionGridCallback(
+                    val_rgb=vis_rgb,
+                    val_seg=vis_seg,
+                    val_cls=vis_cls,
+                    output_dir=str(vis_dir),
+                    frequency=config.visualization_frequency,
+                    max_samples=needed,
+                )
+            )
+            logger.info(
+                f"Visualization callback enabled: "
+                f"{vis_rgb.shape[0]} samples every {config.visualization_frequency} epochs"
+            )
+        else:
+            logger.warning("No val samples for visualization callback; skipping.")
+    except Exception as e:
+        logger.warning(f"Failed to set up visualization callback: {e}")
+
+    # Per-epoch training curves PNGs (loss / classification / segmentation).
+    curves_dir = Path(results_dir) / "training_curves"
+    callbacks.append(
+        TrainingCurvesCallback(
+            output_dir=str(curves_dir),
+            frequency=config.visualization_frequency,
+        )
+    )
+    logger.info(f"Training curves callback enabled → {curves_dir}")
 
     output_dir = Path(results_dir)
     with open(output_dir / "config.json", "w") as f:
@@ -443,6 +525,18 @@ def main() -> None:
     parser.add_argument("--gpu", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
+    parser.add_argument(
+        "--viz-frequency", type=int, default=1,
+        help="Save RGB|GT|pred seg grid every N epochs (default: 1 = every epoch).",
+    )
+    parser.add_argument(
+        "--viz-samples", type=int, default=6,
+        help="Number of fixed val samples shown in the grid.",
+    )
+    parser.add_argument(
+        "--no-tensorboard", action="store_true",
+        help="Disable TensorBoard logging.",
+    )
     args = parser.parse_args()
 
     setup_gpu(args.gpu)
@@ -464,6 +558,9 @@ def main() -> None:
         experiment_name=args.experiment_name,
         workers=args.workers,
         use_multiprocessing=not args.no_multiprocessing,
+        visualization_frequency=args.viz_frequency,
+        visualization_samples=args.viz_samples,
+        include_tensorboard=not args.no_tensorboard,
     )
     train_coco_multitask(config)
 

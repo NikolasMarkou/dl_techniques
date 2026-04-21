@@ -12,6 +12,7 @@ Custom Keras metrics for specialized evaluation tasks.
 - `psnr_metric.py` — Peak Signal-to-Noise Ratio for image quality
 - `time_series_metrics.py` — Time series forecasting metrics (MASE, SMAPE, quantile loss, etc.)
 - `depth_metrics.py` — Monocular depth estimation metrics (AbsRel, SqRel, RMSE, RMSE log, delta threshold)
+- `brier_score.py` — Brier Score (proper scoring rule for probabilistic predictions): `BrierScore` for binary / multi-label classification, `CategoricalBrierScore` for multi-class (with sparse-label fast path for segmentation). See `research/brier_score.md` for background.
 
 ## Conventions
 
