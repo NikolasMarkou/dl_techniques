@@ -257,7 +257,7 @@ from train.common.megadepth import (
     load_and_process_pair,
     MegaDepthDataset,
 )
-from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
+from dl_techniques.models.cliffordnet.unet import create_cliffordnet_depth
 from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
 from dl_techniques.callbacks.depth_visualization import (
     DepthPredictionGridCallback,
@@ -276,7 +276,7 @@ def train_model(config):
     )
 
     # Model
-    model = CliffordNetDepthEstimator.from_variant(config.model_variant)
+    model = create_cliffordnet_depth(variant=config.model_variant, enable_deep_supervision=True)
 
     # Compile with depth-specific loss + metrics from dl_techniques
     model.compile(

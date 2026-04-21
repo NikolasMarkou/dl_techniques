@@ -55,7 +55,10 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     deep_supervision_schedule_builder,
 )
-from dl_techniques.models.cliffordnet.depth import CliffordNetDepthEstimator
+from dl_techniques.models.cliffordnet.unet import (
+    CliffordNetUNet,
+    create_cliffordnet_depth,
+)
 from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
 from dl_techniques.callbacks.depth_visualization import (
     DepthPredictionGridCallback,
@@ -238,11 +241,12 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
     def __init__(
         self,
         config: DepthTrainingConfig,
-        num_outputs: int,
+        output_names: List[str],
     ) -> None:
         super().__init__()
         self.total_epochs = config.epochs
-        self.num_outputs = num_outputs
+        self.output_names = list(output_names)
+        self.num_outputs = len(output_names)
 
         ds_config = {
             "type": config.deep_supervision_schedule_type,
@@ -253,7 +257,7 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
         )
         logger.info(
             f"DS weight scheduler ({config.deep_supervision_schedule_type}) "
-            f"for {num_outputs} outputs"
+            f"for outputs {output_names}"
         )
 
     def on_epoch_begin(
@@ -261,11 +265,15 @@ class DeepSupervisionWeightScheduler(keras.callbacks.Callback):
     ) -> None:
         progress = min(1.0, epoch / max(1, self.total_epochs - 1))
         new_weights = self.scheduler(progress)
-        self.model.loss_weights = new_weights
-        weights_str = ", ".join(f"{w:.4f}" for w in new_weights)
+        # Dict-output model: assign a dict of weights keyed by output name.
+        self.model.loss_weights = {
+            name: float(w) for name, w in zip(self.output_names, new_weights)
+        }
+        weights_str = ", ".join(
+            f"{n}={w:.4f}" for n, w in zip(self.output_names, new_weights)
+        )
         logger.info(
-            f"Epoch {epoch + 1}/{self.total_epochs} — "
-            f"DS weights: [{weights_str}]"
+            f"Epoch {epoch + 1}/{self.total_epochs} — DS weights: {weights_str}"
         )
 
 
@@ -367,7 +375,7 @@ def create_model(config: DepthTrainingConfig) -> keras.Model:
     Uses CliffordNet encoder-decoder with standard (with-bias)
     CliffordNet blocks, RGB input, and 1-channel depth output.
     """
-    return CliffordNetDepthEstimator.from_variant(
+    return create_cliffordnet_depth(
         variant=config.model_variant,
         in_channels=3,
         out_channels=1,
@@ -383,15 +391,18 @@ def create_model(config: DepthTrainingConfig) -> keras.Model:
 
 
 class _MultiScaleDataset(keras.utils.PyDataset):
-    """Wraps a MegaDepthDataset to produce multi-scale ``y_true`` labels.
+    """Wraps a MegaDepthDataset to produce a dict of multi-scale ``y_true`` labels.
 
-    For each output dimension, resizes both the depth channel (bilinear)
-    and the mask channel (nearest-neighbor) and re-concatenates them.
+    For each (output_name, output_dim) pair, resizes both the depth channel
+    (bilinear) and the mask channel (nearest-neighbor) and re-concatenates
+    them.  Returned labels are a ``Dict[str, np.ndarray]`` keyed by head
+    output name, matching ``CliffordNetUNet``'s dict output.
     """
 
     def __init__(
         self,
         base_dataset: "MegaDepthDataset",
+        output_names: List[str],
         output_dims: List[Tuple[Optional[int], Optional[int]]],
     ) -> None:
         # PyDataset requires workers/use_multiprocessing — delegate to base
@@ -399,8 +410,14 @@ class _MultiScaleDataset(keras.utils.PyDataset):
             workers=base_dataset.workers,
             use_multiprocessing=base_dataset.use_multiprocessing,
         )
+        if len(output_names) != len(output_dims):
+            raise ValueError(
+                f"output_names ({len(output_names)}) and output_dims "
+                f"({len(output_dims)}) must match"
+            )
         self.base = base_dataset
-        self.output_dims = output_dims
+        self.output_names = list(output_names)
+        self.output_dims = list(output_dims)
 
     def __len__(self) -> int:
         return len(self.base)
@@ -408,10 +425,10 @@ class _MultiScaleDataset(keras.utils.PyDataset):
     def __getitem__(self, idx: int):
         rgb, y_true = self.base[idx]
         # y_true: (B, H, W, 2) — channel 0=depth, channel 1=mask
-        labels = []
-        for dim in self.output_dims:
+        labels: Dict[str, Any] = {}
+        for name, dim in zip(self.output_names, self.output_dims):
             if dim[0] is None or dim == (y_true.shape[1], y_true.shape[2]):
-                labels.append(y_true)
+                labels[name] = y_true
             else:
                 h, w = dim
                 # Use scipy for resizing — runs in worker processes
@@ -427,8 +444,8 @@ class _MultiScaleDataset(keras.utils.PyDataset):
                 resized[..., 1:] = (resized[..., 1:] > 0.5).astype(
                     resized.dtype,
                 )
-                labels.append(resized)
-        return rgb, tuple(labels)
+                labels[name] = resized
+        return rgb, labels
 
     def on_epoch_end(self):
         self.base.on_epoch_end()
@@ -540,59 +557,64 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         lr_schedule,
     )
 
-    # Detect multi-output (deep supervision) via probe forward pass
-    has_multiple_outputs = config.enable_deep_supervision
-    if has_multiple_outputs:
-        probe = tf.zeros((1, ps, ps, 3))
-        probe_out = model(probe, training=False)
-        if isinstance(probe_out, (list, tuple)):
-            num_outputs = len(probe_out)
-            output_dims = [
-                (o.shape[1], o.shape[2]) for o in probe_out
-            ]
-        else:
-            has_multiple_outputs = False
-            num_outputs = 1
-            output_dims = None
-        del probe, probe_out
-    else:
-        num_outputs = 1
-        output_dims = None
+    # Probe model to discover output structure (dict from CliffordNetUNet).
+    probe = tf.zeros((1, ps, ps, 3))
+    probe_out = model(probe, training=False)
+    if not isinstance(probe_out, dict):
+        raise RuntimeError(
+            f"Expected dict output from CliffordNetUNet, got {type(probe_out)}"
+        )
+    # Ordered output names: primary ("depth") first, then aux by ascending level.
+    primary_name = "depth"
+    aux_names = sorted(
+        (k for k in probe_out if k != primary_name),
+        key=lambda k: int(k.rsplit("_", 1)[-1]),
+    )
+    output_names: List[str] = [primary_name] + aux_names
+    output_dims: List[Tuple[Optional[int], Optional[int]]] = [
+        (probe_out[n].shape[1], probe_out[n].shape[2]) for n in output_names
+    ]
+    num_outputs = len(output_names)
+    has_multiple_outputs = num_outputs > 1
+    del probe, probe_out
 
     logger.info(
-        f"Model has {num_outputs} output(s)"
+        f"Model has {num_outputs} output(s): {output_names}"
         + (" (deep supervision)" if has_multiple_outputs else "")
     )
 
-    # Wrap datasets for multi-scale labels if needed
+    # Wrap datasets to produce dict labels matching model outputs.
     if has_multiple_outputs:
-        logger.info(f"Multi-scale output dims: {output_dims}")
-        train_ds = _MultiScaleDataset(train_ds, output_dims)
-        val_ds = _MultiScaleDataset(val_ds, output_dims)
-
-    # Compile with SSI + gradient matching loss (MiDaS/Depth Anything V2 recipe)
-    if has_multiple_outputs:
-        loss_fns = [
-            DepthEstimationLoss(gradient_weight=0.5, n_scales=4)
-            for _ in range(num_outputs)
-        ]
-        initial_weights = [1.0 / num_outputs] * num_outputs
-        # Metrics only on primary (full-res) output, empty for auxiliaries
-        metrics = [
-            [AbsRelMetric(name="abs_rel"),
-             DeltaThresholdMetric(threshold=1.25, name="delta_1.25")],
-        ] + [[] for _ in range(num_outputs - 1)]
+        logger.info(f"Multi-scale output dims: {dict(zip(output_names, output_dims))}")
+        train_ds = _MultiScaleDataset(train_ds, output_names, output_dims)
+        val_ds = _MultiScaleDataset(val_ds, output_names, output_dims)
     else:
-        loss_fns = DepthEstimationLoss(gradient_weight=0.5, n_scales=4)
-        initial_weights = None
-        metrics = [
+        # Single head — also wrap with a single-entry dict for consistent compile()
+        train_ds = _MultiScaleDataset(train_ds, output_names, output_dims)
+        val_ds = _MultiScaleDataset(val_ds, output_names, output_dims)
+
+    # Compile with SSI + gradient matching loss (MiDaS/Depth Anything V2 recipe).
+    # Dict losses keyed by model output name.
+    losses: Dict[str, Any] = {
+        name: DepthEstimationLoss(gradient_weight=0.5, n_scales=4)
+        for name in output_names
+    }
+    initial_weights: Dict[str, float] = {
+        name: 1.0 / num_outputs for name in output_names
+    }
+    # Metrics only on primary (full-res) output; empty lists for aux heads.
+    metrics: Dict[str, Any] = {
+        primary_name: [
             AbsRelMetric(name="abs_rel"),
             DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
-        ]
+        ],
+    }
+    for name in aux_names:
+        metrics[name] = []
 
     model.compile(
         optimizer=optimizer,
-        loss=loss_fns,
+        loss=losses,
         loss_weights=initial_weights,
         metrics=metrics,
     )
@@ -602,7 +624,7 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     callbacks, results_dir = create_callbacks(config, val_rgb, val_depth)
     if has_multiple_outputs:
         callbacks.append(
-            DeepSupervisionWeightScheduler(config, num_outputs)
+            DeepSupervisionWeightScheduler(config, output_names)
         )
     output_dir = Path(results_dir)
 
@@ -620,9 +642,8 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
             f"({config.phase1_epochs} epochs) ==="
         )
         phase1_train, phase1_val = _make_datasets(use_resize=True)
-        if has_multiple_outputs:
-            phase1_train = _MultiScaleDataset(phase1_train, output_dims)
-            phase1_val = _MultiScaleDataset(phase1_val, output_dims)
+        phase1_train = _MultiScaleDataset(phase1_train, output_names, output_dims)
+        phase1_val = _MultiScaleDataset(phase1_val, output_names, output_dims)
 
         history = model.fit(
             phase1_train,
@@ -649,9 +670,8 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
                 break
 
         phase2_train, phase2_val = _make_datasets(use_resize=False)
-        if has_multiple_outputs:
-            phase2_train = _MultiScaleDataset(phase2_train, output_dims)
-            phase2_val = _MultiScaleDataset(phase2_val, output_dims)
+        phase2_train = _MultiScaleDataset(phase2_train, output_names, output_dims)
+        phase2_val = _MultiScaleDataset(phase2_val, output_names, output_dims)
 
         history = model.fit(
             phase2_train,
@@ -743,7 +763,7 @@ def parse_arguments() -> argparse.Namespace:
     # Model
     parser.add_argument(
         "--model-variant",
-        choices=list(CliffordNetDepthEstimator.MODEL_VARIANTS.keys()),
+        choices=list(CliffordNetUNet.MODEL_VARIANTS.keys()),
         default="base",
     )
 

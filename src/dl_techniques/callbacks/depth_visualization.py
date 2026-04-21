@@ -94,6 +94,15 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
             # Deep supervision: use primary (full-res) output only
             if isinstance(pred_depth, (list, tuple)):
                 pred_depth = pred_depth[0]
+            elif isinstance(pred_depth, dict):
+                # CliffordNetUNet returns dict keyed by head name; primary head
+                # is the one without an ``_aux_`` suffix.  Prefer an explicit
+                # ``depth`` key if present.
+                if "depth" in pred_depth:
+                    pred_depth = pred_depth["depth"]
+                else:
+                    primary = [k for k in pred_depth if "_aux_" not in k]
+                    pred_depth = pred_depth[primary[0]]
 
             # Log masked MSE for quick monitoring
             import keras.ops as ops
