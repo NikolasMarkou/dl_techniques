@@ -1,6 +1,150 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-04-21_421088a1
+### User-Provided Context (seed)
+
+### Target
+Drone video streaming (mixed altitude), ~30 FPS RTX 4070 12GB. Patch-level anomaly/surprise
+detection + SSL backbone. Telemetry (IMU Δr/p/y, GPS velocity, altitude) via AdaLN-zero.
+
+### LeWM assets (plan_2026-04-21_8416bc0b)
+- `src/dl_techniques/models/lewm/` — global-CLS JEPA.
+- `src/dl_techniques/layers/adaln_zero.py` — AdaLN-zero (identity-at-init).
+- `src/dl_techniques/regularizers/sigreg.py` — SIGReg (no EMA needed).
+
+### Clifford primitives (`src/dl_techniques/layers/geometric/clifford_block.py`)
+- `SparseRollingGeometricProduct`, `GatedGeometricResidual` (LayerScale).
+- `CliffordNetBlock` — 4D `(B,H,W,D)` dual-stream.
+- `CausalCliffordNetBlock` — 4D `(B,1,T,D)` left-padded causal.
+
+### Open design decisions (must present in PLAN)
+D-001 encoder (ViT vs Clifford vs hybrid); D-002 predictor 5D handling (factorized/flatten/3D);
+D-003 target (tube-mask / next-frame / both); D-004 conditioning (where, per-frame vs global);
+D-005 SIGReg placement (per-patch vs pooled); D-006 positional; D-007 streaming contract.
+
+### Scope
+IN: `models/video_jepa/`, synthetic drone dataset, training smoke test, tests
+(shape/causality/serialization/AdaLN-id/SIGReg-finite), streaming API.
+OUT: real drone data, surprise viz, downstream heads, full-scale training.
+
+### Ops constraints
+`.venv/bin/python`, `CUDA_VISIBLE_DEVICES=1`, `MPLBACKEND=Agg`, never parallel GPU.
+Commit per step. Verify hardest case (causality + SIGReg stability) first.
+
+### Index
+
+1. **[clifford-primitives.md](plan_2026-04-21_421088a1/findings/clifford-primitives.md)** — Full contracts of
+   `SparseRollingGeometricProduct`, `GatedGeometricResidual`, `CliffordNetBlock`
+   (4D `(B,H,W,D)`), `CausalCliffordNetBlock` (4D `(B,1,T,D)` with left-pad & causal
+   cumsum mean). Factorized 5D handling is the clean path. BatchNorm-batch-of-1
+   risk noted. Identity-at-init possible via LayerScale γ=1e-5.
+2. **[lewm-reusable-assets.md](plan_2026-04-21_421088a1/findings/lewm-reusable-assets.md)** —
+   `AdaLNZeroConditionalBlock`: `inputs=[x,c]` (B,T,D)(B,T,D), zero-init ⇒
+   identity-at-init. `SIGRegLayer`: `(..., N, D)` averages over axis=-3, 3 placement
+   options for 5D latents. `LeWM.rollout` is the exact streaming precedent.
+   `encode_pixels` pattern (reshape B*T) lifts to patch-level with `pooling=None`.
+3. **[positional-and-infrastructure.md](plan_2026-04-21_421088a1/findings/positional-and-infrastructure.md)** —
+   `PatchEmbedding2D` (Conv2D) + `PositionEmbeddingSine2D` (channels-first!) +
+   `ContinuousSinCosEmbed` for telemetry. Training template copied from
+   `src/train/lewm/train_lewm.py`. `JEPAMaskingStrategy` exists for images but not
+   temporal tubes — small extension if D-003 = tube masking.
+
+### Key Constraints
+
+### Hard
+- **Clifford blocks BatchNormalization** inside context stream — unsafe at batch-of-1.
+  Smoke tests must keep B ≥ 2; fallback is swap BN→LayerNorm (structural change,
+  noted as risk).
+- **`CausalCliffordNetBlock` requires H=1** input. Any 5D handling must reshape
+  `(B, H_p, W_p, T, D)` → `(B*H_p*W_p, 1, T, D)` for the temporal pass.
+- **`AdaLNZeroConditionalBlock` expects `inputs=[x,c]`** (list, length 2). Keras
+  serialization of dict inputs has trapped prior plans — use list.
+- **`SIGRegLayer` input convention `(..., N, D)`** — averaging over axis=-3.
+  Upstream LeWM passes `(T, B, D)`. For 5D latents we must choose a reshape and
+  document it (D-005).
+- **Keras 3.8 serialization rules** (LESSONS): every custom class
+  `@keras.saving.register_keras_serializable()` + complete `get_config()`,
+  sublayers as explicit attrs (not dict).
+- **GPU policy**: `CUDA_VISIBLE_DEVICES=1` (RTX 4070 12 GB), never parallel, `MPLBACKEND=Agg`.
+- **Causality test = hardest case**: perturbation at temporal position k must not
+  alter outputs at positions < k. This invariant MUST be tested first.
+
+### Soft
+- ViT-tiny (192d) is the default carryover from LeWM — but a hybrid encoder
+  (PatchEmbed + 2-4 Clifford blocks) is parameter-cheap and better for drone
+  small-object sensitivity.
+- Smoke-scale defaults mirror LeWM: `num_proj=64`, small depth, B=2, short T.
+- Commit cadence `[iter-N/step-M] desc`; user pushes.
+
+### Ghost / deferred
+- Real drone dataset — not in scope, synthetic only.
+- Downstream fine-tuning heads (tracking, detection) — follow-up plan.
+- Patch-level surprise visualization — follow-up.
+- Scaling beyond smoke — follow-up.
+
+### Key reusable components
+- `src/dl_techniques/layers/geometric/clifford_block.py` — `CliffordNetBlock`,
+  `CausalCliffordNetBlock`, `SparseRollingGeometricProduct`, `GatedGeometricResidual`.
+- `src/dl_techniques/layers/adaln_zero.py` — `AdaLNZeroConditionalBlock`.
+- `src/dl_techniques/regularizers/sigreg.py` — `SIGRegLayer`.
+- `src/dl_techniques/layers/embedding/patch_embedding.py` — `PatchEmbedding2D`.
+- `src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py` — fixed 2D PE.
+- `src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py` — telemetry PE.
+- `src/dl_techniques/models/lewm/model.py` — `encode_pixels`, `rollout` patterns.
+- `src/dl_techniques/models/vit/model.py` — fallback encoder (include_top=False, pooling=None).
+- `src/train/lewm/train_lewm.py` + `train.common` — training script template.
+- `src/dl_techniques/datasets/pusht_hdf5.py:synthetic_lewm_dataset` — synthetic
+  data generator precedent.
+
+### Exploration Confidence
+- **Problem scope**: deep — drone streaming target + patch-level prediction +
+  telemetry + Clifford primitives are all concrete with code references.
+- **Solution space**: open — seven genuine design decisions (D-001..D-007) each
+  with defensible alternatives.
+- **Risk visibility**: clear — causality (test first), BN-batch-of-1, serialization
+  round-trip, and AdaLN identity-at-init are all testable invariants.
+
+## plan_2026-04-21_5dadc8ce
+### Index
+
+1. **[yolo12-interfaces.md](plan_2026-04-21_5dadc8ce/findings/yolo12-interfaces.md)** — Exact signatures of `YOLOv12DetectionHead` (takes list-of-3, stride-agnostic, serializable) and `YOLOv12ObjectDetectionLoss` (strides hardcoded `[8,16,32]` at line 123 of the init, returns scalar, boxes xyxy-normalized with mask-by-sum>0, TAL assigner built-in). DFL decoder inlined in loss (lines 387–401), not standalone. No NMS utility graph-compatible. No COCOeval anywhere.
+2. **[box-format-and-eval.md](plan_2026-04-21_5dadc8ce/findings/box-format-and-eval.md)** — Confirms `y_true = (B, max_gt, 5) = [class_id, x1_norm, y1_norm, x2_norm, y2_norm]`. `COCODatasetBuilder` agrees. COCO cat_ids non-contiguous → remap via `idx_to_cat_id`. Risk hotspots: image_id mapping, pixel vs normalized, NMS implementation.
+3. **[multi-tap-design.md](plan_2026-04-21_5dadc8ce/findings/multi-tap-design.md)** — Minimal diff to `unet.py` (~30 lines): extend `Tap` union, add `_DETECTION_HEAD_TYPES`, list-tap validation, reject multi-tap + DS, new `_DetectionHeadBlock` inline class wrapping `YOLOv12DetectionHead`, rank-3 `compute_output_shape` case. `tap: [1,2,3]` is accepted user-ordered (shallow-to-deep). Serialization via JSON already handles lists.
+
+### Key Constraints
+
+### Hard
+- **YOLOv12ObjectDetectionLoss hardcodes strides in __init__ (line 123).** Any subclass must rebuild `self.anchors` / `self.strides` after `super().__init__()` (or override `_make_anchors`).
+- **YOLOv12DetectionHead.call() requires exactly 3 input tensors** (`yolo12_heads.py:292`). Detection heads in our system must declare exactly 3 taps.
+- **Box format is xyxy-normalized `[0, 1]`** end-to-end: loader → loss → decoder. No silent unit conversion.
+- **COCO category IDs are non-contiguous** (gaps at 12/26/29/30/45/66/68/69/71/83). Model trains on 0..79; detection JSON for pycocotools needs remapping back to COCO IDs via `idx_to_cat_id`.
+- **pycocotools `COCOeval` expects pixel coords in each image's original (H, W)**, not the training-resized size. Callback must look up `coco.loadImgs(image_id)[0]["height"/"width"]`.
+- **Multi-tap heads cannot use deep_supervision.** Validation must reject `tap=list + deep_supervision=True`.
+
+### Soft
+- **YOLO defaults (reg_max=16, TAL top-k=10, focal γ=1.5, box_weight=7.5, cls_weight=0.5, dfl_weight=1.5)** per user Q5. Don't retune at start.
+- **Padding sentinel `-1.0`** for empty box slots — D-006.
+
+### Ghost / deferred
+- **Detection neck (YOLO-standard `[8, 16, 32]` strides)** — user explicitly chose natural decoder strides in Q1. Revisit only if anchor count causes OOM / slowness (S1 pre-mortem).
+- **Detection-only training script** — user chose multi-task integration in Q3.
+
+### Key Reusable Components
+
+- `YOLOv12DetectionHead` at `src/dl_techniques/layers/yolo12_heads.py:68` — our detection head block will wrap it.
+- `YOLOv12ObjectDetectionLoss` at `src/dl_techniques/losses/yolo12_multitask_loss.py:51` — our loss will subclass it.
+- `COCO2017MultiTaskLoader` — we extend it with `emit_boxes`. Already has `self.image_ids`, `self.idx_to_cat_id` — needed by mAP callback.
+- `pycocotools` (already installed) — COCO + COCOeval classes.
+- `TrainingCurvesCallback` (previous plan) — auto-picks up new `val_map50` / `val_map5095` keys via the "other" group or a new "detection" group.
+
+### Known Pitfalls (from prior plan's LESSONS)
+
+- Keras 3.8 `.keras` + `by_name=True` — not relevant here (we're not transferring weights in this plan).
+- `MultiTaskHead.task_heads` dict bug — we don't use MultiTaskHead (D-001 of the prior plan).
+- Multi-label accuracy illusion — not relevant; detection has its own metric (mAP).
+- Always probe actual layer names at runtime — we'll do this during step 2 tests.
+
 ## plan_2026-04-21_8416bc0b
 ### Index
 1. **lewm-source-schema.md** — (seed, user-provided) PyTorch LeWM architecture at `/tmp/lewm_source/`. JEPA top-level, ARPredictor (6-deep ConditionalBlock stack), Embedder (Conv1d + 2-layer MLP), MLP projector/pred_proj, SIGReg regularizer, ViT-tiny encoder (patch=14, img=224). Config: embed_dim=192, history_size=3, num_preds=1, sigreg.weight=0.09, knots=17, num_proj=1024. Loss: `pred_loss + 0.09 * sigreg_loss`.
