@@ -30,6 +30,7 @@ Usage::
 
 import gc
 import json
+import random
 import time
 import keras
 import argparse
@@ -59,7 +60,14 @@ from dl_techniques.models.cliffordnet.unet import (
     CliffordNetUNet,
     create_cliffordnet_depth,
 )
-from dl_techniques.metrics.depth_metrics import AbsRelMetric, DeltaThresholdMetric
+from dl_techniques.metrics.depth_metrics import (
+    AbsRelMetric,
+    DeltaThresholdMetric,
+    RMSELogMetric,
+    RMSEMetric,
+    SqRelMetric,
+)
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.callbacks.depth_visualization import (
     DepthPredictionGridCallback,
     DepthMetricsCurveCallback,
@@ -124,6 +132,10 @@ class DepthTrainingConfig:
     # Output
     output_dir: str = "results"
     experiment_name: Optional[str] = None
+
+    # Pretrained init (e.g. backbone from COCO multi-task pretraining)
+    init_from: Optional[str] = None  # path to a .keras checkpoint
+    seed: int = 42
 
     def __post_init__(self):
         if self.two_phase:
@@ -456,8 +468,23 @@ class _MultiScaleDataset(keras.utils.PyDataset):
 # ---------------------------------------------------------------------
 
 
+def _set_seeds(seed: int) -> None:
+    """Seed Python, NumPy, TensorFlow, and Keras for bitwise-reproducible init.
+
+    Note: ``MegaDepthDataset`` does not currently expose a seed parameter, so
+    dataset shuffle ordering is not reproducible.  Model weight initialization,
+    optimizer state, and any in-process RNG draws are reproducible.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    keras.utils.set_random_seed(seed)
+    logger.info(f"Seeded random (python, numpy, tf, keras) = {seed}")
+
+
 def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     """Train CliffordNet for monocular depth estimation on MegaDepth."""
+    _set_seeds(config.seed)
     logger.info(
         f"Starting CliffordNet depth estimation training: "
         f"{config.experiment_name}"
@@ -540,6 +567,21 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     model.build((None, ps, ps, 3))
     model.summary()
 
+    # Optional pretrained init — load backbone (non-head) weights from a
+    # saved .keras checkpoint (e.g. COCO multi-task pretraining output).
+    if config.init_from is not None:
+        logger.info(f"Initializing from pretrained checkpoint: {config.init_from}")
+        report = load_weights_from_checkpoint(
+            target=model,
+            ckpt_path=config.init_from,
+            skip_prefixes=("head_",),
+        )
+        if report.num_loaded == 0:
+            raise RuntimeError(
+                f"Pretrained init loaded 0 layers from {config.init_from} — "
+                f"likely a checkpoint / architecture mismatch."
+            )
+
     # Optimizer with LR schedule
     lr_schedule = learning_rate_schedule_builder({
         "type": config.lr_schedule_type,
@@ -603,9 +645,13 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
         name: 1.0 / num_outputs for name in output_names
     }
     # Metrics only on primary (full-res) output; empty lists for aux heads.
+    # Full Eigen-protocol suite (all five metrics) for richer comparison.
     metrics: Dict[str, Any] = {
         primary_name: [
             AbsRelMetric(name="abs_rel"),
+            SqRelMetric(name="sq_rel"),
+            RMSEMetric(name="rmse"),
+            RMSELogMetric(name="rmse_log"),
             DeltaThresholdMetric(threshold=1.25, name="delta_1.25"),
         ],
     }
@@ -805,6 +851,19 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
 
+    # Pretrained init (e.g. COCO multi-task backbone)
+    parser.add_argument(
+        "--init-from", type=str, default=None,
+        help=(
+            "Path to a .keras checkpoint whose non-head weights will be "
+            "loaded into the freshly-built depth model before training."
+        ),
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for Python/NumPy/TF/Keras init.",
+    )
+
     # GPU
     parser.add_argument(
         "--gpu", type=int, default=None, help="GPU device index"
@@ -839,6 +898,8 @@ def main():
         two_phase=args.two_phase,
         phase1_epochs=args.phase1_epochs,
         phase2_epochs=args.phase2_epochs,
+        init_from=args.init_from,
+        seed=args.seed,
     )
 
     logger.info(
