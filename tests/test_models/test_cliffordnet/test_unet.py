@@ -10,6 +10,7 @@ import pytest
 from dl_techniques.models.cliffordnet.unet import (
     CliffordNetUNet,
     _ClassificationHeadBlock,
+    _DetectionHeadBlock,
     _SpatialHeadBlock,
     create_cliffordnet_depth,
 )
@@ -27,6 +28,20 @@ def _tiny_backbone_kwargs():
         level_channels=[8, 16, 32],
         level_blocks=[1, 1, 1],
         level_shifts=[[1], [1, 2], [1, 2]],
+        cli_mode="full",
+        ctx_mode="diff",
+        use_global_context=False,
+        kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+    )
+
+
+def _four_level_backbone_kwargs():
+    """Minimal 4-level backbone (realistic detection shape — base-like)."""
+    return dict(
+        in_channels=3,
+        level_channels=[8, 16, 32, 64],
+        level_blocks=[1, 1, 1, 1],
+        level_shifts=[[1], [1, 2], [1, 2, 4], [1, 2, 4]],
         cli_mode="full",
         ctx_mode="diff",
         use_global_context=False,
@@ -263,6 +278,174 @@ class TestLayerNameStability:
         names_cls = self._backbone_layer_names(m_cls)
         names_seg = self._backbone_layer_names(m_seg)
         assert names_none == names_cls == names_seg
+
+    def test_backbone_names_unchanged_with_detection(self):
+        """Detection head must not pollute backbone layer names."""
+        kwargs = _tiny_backbone_kwargs()
+        m_none = CliffordNetUNet(**kwargs)
+        m_det = CliffordNetUNet(
+            head_configs={
+                "det": {
+                    "type": "detection",
+                    "tap": [0, 1, 2],
+                    "num_classes": 7,
+                    "reg_max": 8,
+                }
+            },
+            **kwargs,
+        )
+        x = _dummy_image(batch=1, h=32, w=32)
+        _ = m_none(x, training=False)
+        _ = m_det(x, training=False)
+        assert self._backbone_layer_names(m_none) == self._backbone_layer_names(m_det)
+
+
+# ---------------------------------------------------------------------------
+# Multi-tap detection head
+# ---------------------------------------------------------------------------
+
+
+class TestMultiTapDetectionHead:
+    def test_forward_shape_3_level_variant(self):
+        """tap=[0,1,2] on 3-level backbone produces rank-3 det output."""
+        model = CliffordNetUNet(
+            head_configs={
+                "det": {
+                    "type": "detection",
+                    "tap": [0, 1, 2],
+                    "num_classes": 7,
+                    "reg_max": 8,
+                }
+            },
+            **_tiny_backbone_kwargs(),
+        )
+        x = _dummy_image(batch=2, h=32, w=32)
+        out = model(x, training=False)
+        assert set(out.keys()) == {"det"}
+        # Feature sizes: 32, 16, 8 → anchors 1024 + 256 + 64 = 1344
+        # out_dim = 4*8 + 7 = 39
+        assert tuple(out["det"].shape) == (2, 1344, 39)
+
+    def test_forward_shape_4_level_variant(self):
+        """tap=[1,2,3] on 4-level backbone matches plan expectation."""
+        model = CliffordNetUNet(
+            head_configs={
+                "det": {
+                    "type": "detection",
+                    "tap": [1, 2, 3],
+                    "num_classes": 5,
+                    "reg_max": 8,
+                }
+            },
+            **_four_level_backbone_kwargs(),
+        )
+        x = _dummy_image(batch=1, h=64, w=64)
+        out = model(x, training=False)
+        # Strides [2,4,8] → sizes 32, 16, 8 → anchors 1024 + 256 + 64 = 1344
+        # out_dim = 4*8 + 5 = 37
+        assert tuple(out["det"].shape) == (1, 1344, 37)
+
+    def test_multi_tap_wrong_length_rejected(self):
+        with pytest.raises(ValueError, match="exactly 3 taps"):
+            CliffordNetUNet(
+                head_configs={
+                    "det": {"type": "detection", "tap": [0, 1], "num_classes": 7}
+                },
+                **_tiny_backbone_kwargs(),
+            )
+
+    def test_multi_tap_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="out of range|is not an int"):
+            CliffordNetUNet(
+                head_configs={
+                    "det": {"type": "detection", "tap": [0, 1, 99], "num_classes": 7}
+                },
+                **_tiny_backbone_kwargs(),
+            )
+
+    def test_multi_tap_duplicates_rejected(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            CliffordNetUNet(
+                head_configs={
+                    "det": {"type": "detection", "tap": [0, 0, 1], "num_classes": 7}
+                },
+                **_tiny_backbone_kwargs(),
+            )
+
+    def test_multi_tap_ds_rejected(self):
+        with pytest.raises(ValueError, match="deep_supervision"):
+            CliffordNetUNet(
+                head_configs={
+                    "det": {
+                        "type": "detection",
+                        "tap": [0, 1, 2],
+                        "num_classes": 7,
+                        "deep_supervision": True,
+                    }
+                },
+                **_tiny_backbone_kwargs(),
+            )
+
+    def test_detection_scalar_tap_rejected(self):
+        with pytest.raises(ValueError, match="list\\[int\\]"):
+            CliffordNetUNet(
+                head_configs={
+                    "det": {"type": "detection", "tap": 0, "num_classes": 7}
+                },
+                **_tiny_backbone_kwargs(),
+            )
+
+    def test_detection_missing_num_classes(self):
+        with pytest.raises(ValueError, match="num_classes"):
+            CliffordNetUNet(
+                head_configs={
+                    "det": {"type": "detection", "tap": [0, 1, 2]}
+                },
+                **_tiny_backbone_kwargs(),
+            )
+
+    def test_detection_serialization_roundtrip(self, tmp_path):
+        model = CliffordNetUNet(
+            head_configs={
+                "det": {
+                    "type": "detection",
+                    "tap": [0, 1, 2],
+                    "num_classes": 7,
+                    "reg_max": 8,
+                }
+            },
+            **_tiny_backbone_kwargs(),
+        )
+        x = _dummy_image(batch=1, h=32, w=32)
+        y1 = model(x, training=False)
+        path = os.path.join(str(tmp_path), "det.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        y2 = reloaded(x, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y1["det"]),
+            keras.ops.convert_to_numpy(y2["det"]),
+            atol=1e-5,
+        )
+
+    def test_multitask_with_detection(self):
+        """Cls + seg + det all active in one model."""
+        model = CliffordNetUNet(
+            head_configs={
+                "cls": {"type": "classification", "tap": "bottleneck", "num_classes": 10},
+                "seg": {"type": "segmentation", "tap": 0, "num_classes": 5},
+                "det": {
+                    "type": "detection", "tap": [0, 1, 2], "num_classes": 7, "reg_max": 8,
+                },
+            },
+            **_tiny_backbone_kwargs(),
+        )
+        x = _dummy_image(batch=2, h=32, w=32)
+        out = model(x, training=False)
+        assert set(out.keys()) == {"cls", "seg", "det"}
+        assert tuple(out["cls"].shape) == (2, 10)
+        assert tuple(out["seg"].shape) == (2, 32, 32, 5)
+        assert tuple(out["det"].shape) == (2, 1344, 39)
 
 
 # ---------------------------------------------------------------------------

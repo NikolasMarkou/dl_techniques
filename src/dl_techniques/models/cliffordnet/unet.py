@@ -54,11 +54,13 @@ from dl_techniques.utils.logger import logger
 # Constants / types
 # ---------------------------------------------------------------------------
 
-Tap = Union[int, str]  # int = decoder level; "bottleneck" = post-bottleneck features
+Tap = Union[int, str, List[int]]
+"""int = decoder level; ``"bottleneck"`` = post-bottleneck features; ``list[int]`` = multi-tap (FPN-style, for detection)."""
 
 _BOTTLENECK_TAP: str = "bottleneck"
 _SPATIAL_HEAD_TYPES: Tuple[str, ...] = ("segmentation", "depth", "spatial")
 _POOLED_HEAD_TYPES: Tuple[str, ...] = ("classification",)
+_DETECTION_HEAD_TYPES: Tuple[str, ...] = ("detection",)
 
 # Match CliffordNet reference: trunc_normal_(std=0.02)
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -256,6 +258,86 @@ class _SpatialHeadBlock(keras.layers.Layer):
         return config
 
 
+# ---------------------------------------------------------------------------
+# Detection head block — thin wrapper around YOLOv12DetectionHead
+# ---------------------------------------------------------------------------
+#
+# Accepts a ``List[KerasTensor]`` ordered shallow-to-deep (smallest-stride
+# first, matching YOLO FPN convention P3→P4→P5).  Delegates entirely to
+# :class:`YOLOv12DetectionHead` — we do not reimplement DFL / head convs.
+# Output: ``(B, total_anchors, 4*reg_max + num_classes)`` rank-3 logits.
+#
+# Stride-agnostic — anchor layout is the loss's concern, not the head's.
+
+
+@keras.saving.register_keras_serializable()
+class _DetectionHeadBlock(keras.layers.Layer):
+    """FPN-style detection head wrapping :class:`YOLOv12DetectionHead`.
+
+    :param num_classes: Number of detection classes (80 for COCO).
+    :param reg_max: DFL regression bins per box edge (YOLO default 16).
+    :param kernel_initializer: Forwarded to the inner head's conv blocks.
+    :param kernel_regularizer: Forwarded to the inner head's conv blocks.
+    :param use_bias: Present for API parity with sibling heads; not used by YOLOv12DetectionHead.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        reg_max: int = 16,
+        kernel_initializer: Any = None,
+        kernel_regularizer: Any = None,
+        use_bias: bool = True,  # noqa: ARG002 — kept for API parity
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        if num_classes <= 0:
+            raise ValueError(f"num_classes must be positive, got {num_classes}")
+        if reg_max <= 0:
+            raise ValueError(f"reg_max must be positive, got {reg_max}")
+        self.num_classes = int(num_classes)
+        self.reg_max = int(reg_max)
+        self.kernel_initializer = (
+            initializers.get(kernel_initializer)
+            if kernel_initializer is not None
+            else _DEFAULT_KERNEL_INIT
+        )
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+
+        # Lazy import to avoid pulling yolo12 deps unless detection is used.
+        from dl_techniques.layers.yolo12_heads import YOLOv12DetectionHead
+
+        self._det_head = YOLOv12DetectionHead(
+            num_classes=self.num_classes,
+            reg_max=self.reg_max,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name="det_head",
+        )
+
+    def call(
+        self, inputs: List[keras.KerasTensor], training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        if not isinstance(inputs, (list, tuple)):
+            raise ValueError(
+                f"_DetectionHeadBlock expects a list/tuple of feature tensors, "
+                f"got {type(inputs).__name__}"
+            )
+        return self._det_head(list(inputs), training=training)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "reg_max": self.reg_max,
+                "kernel_initializer": initializers.serialize(self.kernel_initializer),
+                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            }
+        )
+        return config
+
+
 # ===========================================================================
 # CliffordNetUNet
 # ===========================================================================
@@ -389,10 +471,13 @@ class CliffordNetUNet(keras.Model):
                 )
             spec = dict(spec)
             htype = spec.get("type")
-            if htype not in _SPATIAL_HEAD_TYPES + _POOLED_HEAD_TYPES:
+            _ALL_HEAD_TYPES = (
+                _SPATIAL_HEAD_TYPES + _POOLED_HEAD_TYPES + _DETECTION_HEAD_TYPES
+            )
+            if htype not in _ALL_HEAD_TYPES:
                 raise ValueError(
                     f"head_configs['{name}'].type must be one of "
-                    f"{_SPATIAL_HEAD_TYPES + _POOLED_HEAD_TYPES}, got {htype!r}"
+                    f"{_ALL_HEAD_TYPES}, got {htype!r}"
                 )
             tap = spec.get("tap")
             if isinstance(tap, int):
@@ -401,30 +486,64 @@ class CliffordNetUNet(keras.Model):
                         f"head_configs['{name}'].tap={tap} out of range "
                         f"[0, {self.num_levels})"
                     )
+            elif isinstance(tap, list):
+                if len(tap) < 2:
+                    raise ValueError(
+                        f"head_configs['{name}'].tap list must have >= 2 elements, "
+                        f"got {tap}"
+                    )
+                for t in tap:
+                    if not isinstance(t, int) or not 0 <= t < self.num_levels:
+                        raise ValueError(
+                            f"head_configs['{name}'].tap list element {t!r} "
+                            f"is not an int in [0, {self.num_levels})"
+                        )
+                if len(set(tap)) != len(tap):
+                    raise ValueError(
+                        f"head_configs['{name}'].tap list has duplicate levels: {tap}"
+                    )
             elif tap == _BOTTLENECK_TAP:
                 pass
             else:
                 raise ValueError(
                     f"head_configs['{name}'].tap must be int in "
-                    f"[0, {self.num_levels}) or {_BOTTLENECK_TAP!r}, got {tap!r}"
+                    f"[0, {self.num_levels}), {_BOTTLENECK_TAP!r}, or list[int], got {tap!r}"
                 )
             if htype in _POOLED_HEAD_TYPES and tap != _BOTTLENECK_TAP:
-                # Pooled heads may technically live anywhere but we restrict
-                # them to the bottleneck for clarity.  Relax later if needed.
                 logger.warning(
                     f"head_configs['{name}']: pooled head at tap={tap!r} is "
                     f"unusual; bottleneck is the recommended tap."
                 )
+            if htype in _DETECTION_HEAD_TYPES:
+                if not isinstance(tap, list):
+                    raise ValueError(
+                        f"head_configs['{name}']: detection heads require "
+                        f"tap=list[int] (FPN-style multi-tap), got {tap!r}"
+                    )
+                if len(tap) != 3:
+                    raise ValueError(
+                        f"head_configs['{name}']: detection heads require "
+                        f"exactly 3 taps (YOLOv12DetectionHead constraint), "
+                        f"got {len(tap)}"
+                    )
             ds = bool(spec.get("deep_supervision", False))
-            if ds and (htype in _POOLED_HEAD_TYPES or tap == _BOTTLENECK_TAP):
+            if ds and (
+                htype in _POOLED_HEAD_TYPES
+                or tap == _BOTTLENECK_TAP
+                or isinstance(tap, list)
+            ):
                 raise ValueError(
                     f"head_configs['{name}']: deep_supervision requires a "
-                    f"spatial head with an integer decoder-level tap "
+                    f"spatial head with a single integer decoder-level tap "
                     f"(got type={htype!r}, tap={tap!r})"
                 )
             if htype in _POOLED_HEAD_TYPES and "num_classes" not in spec:
                 raise ValueError(
                     f"head_configs['{name}']: pooled heads require 'num_classes'"
+                )
+            if htype in _DETECTION_HEAD_TYPES and "num_classes" not in spec:
+                raise ValueError(
+                    f"head_configs['{name}']: detection heads require 'num_classes'"
                 )
             if htype in _SPATIAL_HEAD_TYPES:
                 if "out_channels" not in spec and "num_classes" not in spec:
@@ -624,6 +743,15 @@ class CliffordNetUNet(keras.Model):
                 hidden_dim=spec.get("hidden_dim"),
                 **shared_kwargs,
             )
+        if htype in _DETECTION_HEAD_TYPES:
+            det_kwargs = {
+                k: v for k, v in shared_kwargs.items() if k != "use_bias"
+            }
+            return _DetectionHeadBlock(
+                num_classes=int(spec["num_classes"]),
+                reg_max=int(spec.get("reg_max", 16)),
+                **det_kwargs,
+            )
         raise ValueError(f"Unknown head type {htype!r}")
 
     def _build_heads(self) -> None:
@@ -760,10 +888,13 @@ class CliffordNetUNet(keras.Model):
         outputs: Dict[str, keras.KerasTensor] = {}
         for name, head in self._primary_heads.items():
             tap = self._head_taps[name]
-            feat = (
-                bottleneck_features if tap == _BOTTLENECK_TAP else decoder_features[int(tap)]
-            )
-            outputs[name] = head(feat, training=training)
+            if isinstance(tap, list):
+                feats = [decoder_features[t] for t in tap]
+                outputs[name] = head(feats, training=training)
+            elif tap == _BOTTLENECK_TAP:
+                outputs[name] = head(bottleneck_features, training=training)
+            else:
+                outputs[name] = head(decoder_features[int(tap)], training=training)
             if name in self._aux_heads:
                 for L, aux_head in self._aux_heads[name].items():
                     outputs[f"{name}_aux_{L}"] = aux_head(
@@ -801,6 +932,10 @@ class CliffordNetUNet(keras.Model):
             tap = spec["tap"]
             if spec["type"] in _POOLED_HEAD_TYPES:
                 shapes[name] = (s[0], spec["num_classes"])
+            elif spec["type"] in _DETECTION_HEAD_TYPES:
+                reg_max = int(spec.get("reg_max", 16))
+                out_dim = 4 * reg_max + int(spec["num_classes"])
+                shapes[name] = (s[0], None, out_dim)
             else:
                 level = int(tap) if tap != _BOTTLENECK_TAP else (self.num_levels - 1)
                 h, w = _level_hw(level)
