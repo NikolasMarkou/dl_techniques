@@ -302,6 +302,25 @@ def train_model(config):
 | `load_and_process_pair(rgb_path, depth_path, patch_size, ...)` | Load, crop, normalize, augment one RGB+depth pair |
 | `MegaDepthDataset(rgb_paths, depth_paths, batch_size, patch_size, ...)` | `keras.utils.PyDataset` with multiprocessing for batched loading |
 
+#### Pretrained backbone init (`--init-from`)
+
+`train_depth_estimation.py` supports initializing the backbone (non-head layers) from a saved `.keras` model — typically a COCO multi-task pretraining checkpoint produced by `train_coco_multitask.py`:
+
+```bash
+MPLBACKEND=Agg python -m train.cliffordnet.train_depth_estimation \
+    --model-variant base --epochs 100 --batch-size 16 --patch-size 256 \
+    --enable-deep-supervision \
+    --init-from results/cliffordnet_coco_multitask_*/final_model.keras \
+    --seed 42 \
+    --gpu 0
+```
+
+Under the hood this calls `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint` which, after `model.build()` and before the probe forward pass, loads weights layer-by-layer (skipping any layer whose name starts with `head_`).
+
+**Gotcha — Keras 3.8 `.keras` + `by_name` is broken.** `model.load_weights(path.keras, by_name=True, skip_mismatch=True)` raises `ValueError("Invalid keyword arguments: {'by_name': True}")` in Keras 3.8+ — the `by_name` path is only supported for legacy `.h5`/`.hdf5` files. Use `load_weights_from_checkpoint` (full-model load + layer-by-layer `set_weights`) for name-based transfer from `.keras` checkpoints. Three helpers in the repo (`cliffordnet/model.py:413`, `bfunet.py:515`, `convnext_v2.py:400`) still pass `by_name=by_name` and carry this latent bug.
+
+**Reproducibility.** `--seed <int>` (default 42) seeds Python/NumPy/TF/Keras at startup so two runs with the same seed have bitwise-identical initialization. `MegaDepthDataset` does not currently expose a seed, so dataset shuffle ordering is not reproducible — acceptable for baseline-vs-pretrained-init comparison (init differences dwarf shuffle differences at realistic run lengths).
+
 ---
 
 ## `create_callbacks()` Full API Reference
@@ -353,11 +372,13 @@ create_callbacks(
 - `validate_model_loading(path, sample, expected, custom_objects)` — round-trip serialization check.
 - `run_model_analysis(model, test_data, history, name, results_dir, config)` — full ModelAnalyzer pipeline.
 - `discover_megadepth_pairs(root)`, `MegaDepthDataset(...)` — MegaDepth RGB+depth dataset pipeline.
+- `compare_runs(run_a_dir, run_b_dir, labels, output_dir)` — side-by-side two-run comparison. CLI: `python -m train.common.compare_runs A B [--labels A B]`. Emits `comparison.md` + PNG loss/metric curves.
 
 **Use from `dl_techniques` (library-level components):**
 - `dl_techniques.metrics.depth_metrics` — AbsRelMetric, DeltaThresholdMetric, SqRelMetric, RMSEMetric, RMSELogMetric.
 - `dl_techniques.callbacks.depth_visualization` — DepthPredictionGridCallback, DepthMetricsCurveCallback.
 - `dl_techniques.optimization` — `optimizer_builder()`, `learning_rate_schedule_builder()`.
+- `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)` — layer-by-layer weight transfer from a saved `.keras` model. Use this (not `model.load_weights(by_name=True)` which is broken in Keras 3.8 for `.keras` files).
 
 **Keep local to each script:**
 - Model creation and compilation — architecture-specific.
