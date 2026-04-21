@@ -46,10 +46,12 @@ from dl_techniques.datasets.vision.coco_multitask_local import (
     COCO_DEFAULT_ROOT,
     NUM_COCO_CLASSES,
 )
+from dl_techniques.callbacks.coco_map_callback import COCOMAPCallback
 from dl_techniques.callbacks.coco_multitask_visualization import (
     COCOMultiTaskPredictionGridCallback,
 )
 from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
+from dl_techniques.losses.clifford_detection_loss import CliffordDetectionLoss
 from dl_techniques.metrics.brier_score import BrierScore
 from dl_techniques.models.cliffordnet.unet import CliffordNetUNet
 from dl_techniques.optimization import (
@@ -126,6 +128,15 @@ class COCOMultiTaskTrainingConfig:
     visualization_samples: int = 6
     include_tensorboard: bool = True
 
+    # Detection (third head — optional; off by default for non-regression)
+    enable_detection: bool = False
+    detection_loss_weight: float = 1.0
+    detection_reg_max: int = 16
+    detection_max_boxes: int = 100
+    detection_score_threshold: float = 0.01
+    detection_iou_threshold: float = 0.45
+    detection_map_frequency: int = 1
+
     # I/O
     output_dir: str = "results"
     experiment_name: Optional[str] = None
@@ -143,9 +154,34 @@ class COCOMultiTaskTrainingConfig:
 # ---------------------------------------------------------------------
 
 
+def _detection_taps_and_strides(
+    num_levels: int, image_size: int,
+) -> Tuple[List[int], Tuple[int, int, int]]:
+    """Choose the 3 deepest decoder levels for detection + compute their strides.
+
+    Convention: taps are shallow-to-deep (smallest stride first = P3 equiv).
+    - 4-level variants (base/medium/large/xlarge): taps [1, 2, 3] → strides [2, 4, 8].
+    - 3-level variants (tiny/small): taps [0, 1, 2] → strides [1, 2, 4].
+      NOTE: stride 1 means feature map = full image size — dense anchors.
+      Use 3-level variants for smoke/debugging only.
+    """
+    if num_levels < 3:
+        raise ValueError(
+            f"Detection requires backbone with >= 3 levels, got {num_levels}"
+        )
+    top = num_levels - 1  # deepest decoder level index
+    taps = [top - 2, top - 1, top]  # ascending → shallow-to-deep
+    strides = tuple(2 ** t for t in taps)  # decoder level k = stride 2^k
+    if any(image_size % s != 0 for s in strides):
+        raise ValueError(
+            f"image_size={image_size} not divisible by all detection strides {strides}"
+        )
+    return taps, strides  # type: ignore[return-value]
+
+
 def create_model(config: COCOMultiTaskTrainingConfig) -> keras.Model:
-    """Create a CliffordNetUNet with classification + segmentation heads."""
-    head_configs = {
+    """Create a CliffordNetUNet with classification + segmentation [+ detection] heads."""
+    head_configs: Dict[str, Dict[str, Any]] = {
         "classification": {
             "type": "classification",
             "tap": "bottleneck",
@@ -161,6 +197,22 @@ def create_model(config: COCOMultiTaskTrainingConfig) -> keras.Model:
             "hidden_dim": config.segmentation_hidden_dim,
         },
     }
+    if config.enable_detection:
+        num_levels = len(
+            CliffordNetUNet.MODEL_VARIANTS[config.model_variant]["level_channels"]
+        )
+        det_taps, det_strides = _detection_taps_and_strides(num_levels, config.image_size)
+        head_configs["detection"] = {
+            "type": "detection",
+            "tap": list(det_taps),
+            "num_classes": NUM_COCO_CLASSES,
+            "reg_max": config.detection_reg_max,
+        }
+        logger.info(
+            f"Detection enabled: taps={det_taps}, strides={det_strides}, "
+            f"reg_max={config.detection_reg_max}"
+        )
+
     logger.info(
         f"Creating CliffordNetUNet ({config.model_variant}) with heads: "
         f"{list(head_configs.keys())}"
@@ -219,6 +271,11 @@ class _MultiScaleSegDataset(keras.utils.PyDataset):
                 pil = pil.resize((size, size), resample=Image.NEAREST)
                 small[i] = np.asarray(pil, dtype=np.int32)
             out[f"segmentation_aux_{k}"] = small
+        # Pass-through arbitrary extra keys emitted by the base loader
+        # (e.g. "detection" when emit_boxes=True).
+        for extra_key, extra_val in labels.items():
+            if extra_key not in out:
+                out[extra_key] = extra_val
         return x, out
 
     def on_epoch_end(self) -> None:
@@ -246,12 +303,14 @@ class _SegDeepSupervisionScheduler(keras.callbacks.Callback):
         seg_total_weight: float,
         schedule_type: str,
         schedule_config: Dict[str, Any],
+        det_weight: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.total_epochs = total_epochs
         self.seg_output_names = list(seg_output_names)
         self.cls_weight = cls_weight
         self.seg_total_weight = seg_total_weight
+        self.det_weight = det_weight  # None = no detection head
         ds_config = {"type": schedule_type, "config": schedule_config}
         self.scheduler = deep_supervision_schedule_builder(
             ds_config, len(seg_output_names), invert_order=False,
@@ -259,6 +318,7 @@ class _SegDeepSupervisionScheduler(keras.callbacks.Callback):
         logger.info(
             f"SegDS scheduler ({schedule_type}) "
             f"for seg outputs {seg_output_names}"
+            + (f" + detection (weight={det_weight})" if det_weight is not None else "")
         )
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
@@ -267,6 +327,8 @@ class _SegDeepSupervisionScheduler(keras.callbacks.Callback):
         weights: Dict[str, float] = {"classification": float(self.cls_weight)}
         for name, w in zip(self.seg_output_names, seg_weights):
             weights[name] = float(w) * float(self.seg_total_weight)
+        if self.det_weight is not None:
+            weights["detection"] = float(self.det_weight)
         self.model.loss_weights = weights
         wstr = ", ".join(f"{k}={v:.4f}" for k, v in weights.items())
         logger.info(f"Epoch {epoch + 1}/{self.total_epochs} — weights: {wstr}")
@@ -292,6 +354,8 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
         workers=config.workers,
         use_multiprocessing=config.use_multiprocessing,
         seed=0,
+        emit_boxes=config.enable_detection,
+        max_boxes=config.detection_max_boxes,
     )
     val_cfg = COCOMultiTaskConfig(
         coco_root=config.coco_root,
@@ -304,6 +368,8 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
         workers=max(1, config.workers // 2),
         use_multiprocessing=config.use_multiprocessing,
         seed=1,
+        emit_boxes=config.enable_detection,
+        max_boxes=config.detection_max_boxes,
     )
     train_base = COCO2017MultiTaskLoader(train_cfg)
     val_base = COCO2017MultiTaskLoader(val_cfg)
@@ -362,6 +428,20 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
     for name in seg_output_names:
         losses[name] = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
+    # Detection loss — stride-configurable YOLOv12 (CIoU + focal BCE + DFL + TAL).
+    det_strides: Optional[Tuple[int, int, int]] = None
+    if config.enable_detection:
+        num_levels = len(
+            CliffordNetUNet.MODEL_VARIANTS[config.model_variant]["level_channels"]
+        )
+        _det_taps, det_strides = _detection_taps_and_strides(num_levels, config.image_size)
+        losses["detection"] = CliffordDetectionLoss(
+            strides=det_strides,
+            num_classes=NUM_COCO_CLASSES,
+            input_shape=(config.image_size, config.image_size),
+            reg_max=config.detection_reg_max,
+        )
+
     # Initial loss_weights (will be overwritten by scheduler on epoch_begin)
     n_seg = len(seg_output_names)
     initial_weights: Dict[str, float] = {
@@ -373,6 +453,8 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
         initial_weights[name] = w * (config.segmentation_loss_weight / sum(
             (0.5 ** j) if j > 0 else 1.0 for j in range(n_seg)
         ))
+    if config.enable_detection:
+        initial_weights["detection"] = config.detection_loss_weight
 
     # Metrics — primary outputs only.
     # Note on classification: BinaryAccuracy(threshold=0) is misleading on
@@ -426,8 +508,28 @@ def train_coco_multitask(config: COCOMultiTaskTrainingConfig) -> keras.Model:
             seg_total_weight=config.segmentation_loss_weight,
             schedule_type=config.deep_supervision_schedule_type,
             schedule_config=config.deep_supervision_schedule_config,
+            det_weight=(
+                config.detection_loss_weight if config.enable_detection else None
+            ),
         )
     )
+
+    # Detection mAP callback — runs val-end decode + pycocotools COCOeval,
+    # logging val_map50 and val_map5095 into the epoch logs.
+    if config.enable_detection:
+        callbacks.append(
+            COCOMAPCallback(
+                val_loader=val_base,
+                image_size=config.image_size,
+                num_classes=NUM_COCO_CLASSES,
+                reg_max=config.detection_reg_max,
+                strides=det_strides,  # type: ignore[arg-type]
+                detection_head_key="detection",
+                score_threshold=config.detection_score_threshold,
+                iou_threshold=config.detection_iou_threshold,
+                frequency=config.detection_map_frequency,
+            )
+        )
 
     # Prediction-grid visualization: load a fixed set of val samples once.
     try:
@@ -537,6 +639,35 @@ def main() -> None:
         "--no-tensorboard", action="store_true",
         help="Disable TensorBoard logging.",
     )
+    # Detection (third head)
+    parser.add_argument(
+        "--enable-detection", action="store_true",
+        help="Add a YOLOv12 detection head (+ mAP callback) alongside cls+seg.",
+    )
+    parser.add_argument(
+        "--detection-loss-weight", type=float, default=1.0,
+        help="Weight for the detection head's total loss.",
+    )
+    parser.add_argument(
+        "--detection-reg-max", type=int, default=16,
+        help="DFL regression bins per box edge (YOLO default 16).",
+    )
+    parser.add_argument(
+        "--detection-max-boxes", type=int, default=100,
+        help="Max ground-truth boxes per image emitted by the loader.",
+    )
+    parser.add_argument(
+        "--detection-score-threshold", type=float, default=0.01,
+        help="Pre-NMS score threshold for mAP decoding.",
+    )
+    parser.add_argument(
+        "--detection-iou-threshold", type=float, default=0.45,
+        help="NMS IoU threshold.",
+    )
+    parser.add_argument(
+        "--detection-map-frequency", type=int, default=1,
+        help="Run COCO mAP evaluation every N epochs.",
+    )
     args = parser.parse_args()
 
     setup_gpu(args.gpu)
@@ -561,6 +692,13 @@ def main() -> None:
         visualization_frequency=args.viz_frequency,
         visualization_samples=args.viz_samples,
         include_tensorboard=not args.no_tensorboard,
+        enable_detection=args.enable_detection,
+        detection_loss_weight=args.detection_loss_weight,
+        detection_reg_max=args.detection_reg_max,
+        detection_max_boxes=args.detection_max_boxes,
+        detection_score_threshold=args.detection_score_threshold,
+        detection_iou_threshold=args.detection_iou_threshold,
+        detection_map_frequency=args.detection_map_frequency,
     )
     train_coco_multitask(config)
 
