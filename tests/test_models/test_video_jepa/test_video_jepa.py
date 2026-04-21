@@ -32,6 +32,7 @@ import pytest
 import keras
 
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
+from dl_techniques.models.video_jepa.masking import TubeMaskGenerator
 from dl_techniques.models.video_jepa.encoder import VideoJEPACliffordEncoder
 from dl_techniques.models.video_jepa.telemetry_embedder import TelemetryEmbedder
 from dl_techniques.models.video_jepa.predictor import VideoJEPAPredictor
@@ -134,6 +135,103 @@ class TestConfig:
             VideoJEPAConfig(lambda_next_frame=-0.01)
         with pytest.raises(ValueError, match="lambda_mask"):
             VideoJEPAConfig(lambda_mask=-0.01)
+
+
+# ============================================================================
+# TestTubeMaskGenerator — iter-2, HARDEST-FIRST (mask cardinality is load-
+# bearing for the entire mask-loss branch). Mask ratio correctness is C8.
+# ============================================================================
+
+
+class TestTubeMaskGenerator:
+    """Unit tests for :class:`TubeMaskGenerator` (iter-2, C8/C9/C12).
+
+    Hardest-first: :meth:`test_mask_ratio_exact` sweeps 50 random batches
+    and asserts exact per-row cardinality. Any off-by-one in the argsort
+    sampler surfaces here before it can corrupt the training loss.
+    """
+
+    def test_mask_ratio_exact(self) -> None:
+        """C8 — exact per-row cardinality across 50 random batches+seeds."""
+        H_p = 8  # matches default config (img_size=64, patch_size=8)
+        mask_ratio = 0.6
+        expected_K = round(mask_ratio * H_p * H_p)  # = 38
+        gen = TubeMaskGenerator(mask_ratio=mask_ratio, patches_per_side=H_p)
+
+        for trial in range(50):
+            B = 2 + (trial % 5)  # sweep B in {2..6}
+            keras.utils.set_random_seed(trial)
+            mask = np.asarray(gen(B))
+            assert mask.shape == (B, H_p, H_p), mask.shape
+            # dtype + value set
+            assert mask.dtype == np.float32
+            unique = np.unique(mask)
+            assert set(unique.tolist()) <= {0.0, 1.0}, unique
+            # exact cardinality per row
+            per_row = mask.reshape(B, -1).sum(axis=-1)
+            assert np.all(per_row == expected_K), (
+                f"trial={trial}, per_row={per_row}, expected {expected_K}"
+            )
+
+    def test_per_sample_independence(self) -> None:
+        """C9 — different samples in the same batch get different masks."""
+        gen = TubeMaskGenerator(mask_ratio=0.6, patches_per_side=8)
+        keras.utils.set_random_seed(0)
+        mask = np.asarray(gen(8))
+        # At ratio=0.6 on 64 patches the collision probability is tiny;
+        # at least two samples must differ.
+        pairwise_eq = []
+        for i in range(mask.shape[0]):
+            for j in range(i + 1, mask.shape[0]):
+                pairwise_eq.append(np.array_equal(mask[i], mask[j]))
+        assert not all(pairwise_eq), (
+            "All masks identical across batch — likely missing per-row sampling."
+        )
+
+    def test_tube_structure_by_broadcast(self) -> None:
+        """By construction the generator emits a spatial mask. Broadcasting
+        to T frames preserves the mask identically across T (= tube)."""
+        gen = TubeMaskGenerator(mask_ratio=0.5, patches_per_side=4)
+        keras.utils.set_random_seed(1)
+        mask = np.asarray(gen(2))  # (2, 4, 4)
+        T = 5
+        broadcast = np.broadcast_to(mask[:, None, :, :], (2, T, 4, 4))
+        # All T slices must be identical to the original mask.
+        for t in range(T):
+            np.testing.assert_array_equal(broadcast[:, t], mask)
+
+    def test_ratio_zero_all_visible(self) -> None:
+        """Regression-guard edge: mask_ratio=0 ⇒ all-zeros mask."""
+        gen = TubeMaskGenerator(mask_ratio=0.0, patches_per_side=8)
+        mask = np.asarray(gen(4))
+        assert np.all(mask == 0.0)
+        assert mask.shape == (4, 8, 8)
+        assert gen.num_masked == 0
+
+    def test_ratio_high(self) -> None:
+        """mask_ratio=0.75 on 16 patches → K=12 per row."""
+        gen = TubeMaskGenerator(mask_ratio=0.75, patches_per_side=4)
+        keras.utils.set_random_seed(2)
+        mask = np.asarray(gen(3))
+        per_row = mask.reshape(3, -1).sum(axis=-1)
+        assert np.all(per_row == 12), per_row
+
+    def test_serialization_round_trip(self) -> None:
+        """C12 precursor — TubeMaskGenerator alone round-trips."""
+        gen = TubeMaskGenerator(mask_ratio=0.6, patches_per_side=8)
+        config = gen.get_config()
+        gen2 = TubeMaskGenerator.from_config(config)
+        assert gen2.mask_ratio == gen.mask_ratio
+        assert gen2.patches_per_side == gen.patches_per_side
+        assert gen2.num_masked == gen.num_masked
+
+    def test_rejects_bad_args(self) -> None:
+        with pytest.raises(ValueError, match="mask_ratio"):
+            TubeMaskGenerator(mask_ratio=-0.01, patches_per_side=8)
+        with pytest.raises(ValueError, match="mask_ratio"):
+            TubeMaskGenerator(mask_ratio=1.01, patches_per_side=8)
+        with pytest.raises(ValueError, match="patches_per_side"):
+            TubeMaskGenerator(mask_ratio=0.5, patches_per_side=0)
 
 
 # ============================================================================
