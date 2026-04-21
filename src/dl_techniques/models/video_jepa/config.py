@@ -51,10 +51,24 @@ class VideoJEPAConfig:
     :param sigreg_weight: Weight applied to SIGReg loss when added via
         ``add_loss`` (D-005).
     :param dropout: Dropout rate used inside the AdaLN conditional block.
+    :param mask_prediction_enabled: If True, V-JEPA-style tube-masked latent
+        prediction runs alongside next-frame prediction (iter-2, D-008/D-009).
+        When False, the model degrades to iter-1-equivalent two-loss behavior
+        (next-frame MSE + SIGReg). Regression-guard flag.
+    :param mask_ratio: Fraction of spatial patch positions masked per sample
+        in the tube mask (iter-2, D-011). ``0.0 <= mask_ratio < 1.0`` strict.
+        0.5–0.75 typical for V-JEPA; 0.6 default.
+    :param lambda_next_frame: Scalar weight applied to the next-frame
+        prediction loss via ``add_loss`` (iter-2, D-012).
+    :param lambda_mask: Scalar weight applied to the mask-prediction loss
+        via ``add_loss`` (iter-2, D-012).
 
     .. note::
        Invariant: ``img_size % patch_size == 0``. Invariant:
        ``cond_dim == embed_dim`` so AdaLN modulation broadcasts cleanly.
+       Invariant: ``0.0 <= mask_ratio < 1.0`` (strict upper bound; a mask
+       ratio of 1.0 would leave the next-frame loss undefined).
+       Invariant: ``lambda_next_frame >= 0.0`` and ``lambda_mask >= 0.0``.
     """
 
     # --- Vision / patches ---
@@ -90,6 +104,12 @@ class VideoJEPAConfig:
     # --- Dropout / regularization ---
     dropout: float = 0.0
 
+    # --- Iter-2: V-JEPA-style tube-masked latent prediction (D-008..D-012) ---
+    mask_prediction_enabled: bool = True
+    mask_ratio: float = 0.6
+    lambda_next_frame: float = 1.0
+    lambda_mask: float = 1.0
+
     # ------------------------------------------------------------------
     # Invariants
     # ------------------------------------------------------------------
@@ -120,6 +140,22 @@ class VideoJEPAConfig:
         if self.predictor_depth < 1:
             raise ValueError(
                 f"predictor_depth must be >= 1, got {self.predictor_depth}"
+            )
+        # --- Iter-2 invariants (D-008..D-012) ---
+        if not (0.0 <= self.mask_ratio < 1.0):
+            raise ValueError(
+                f"mask_ratio must be in [0.0, 1.0), got {self.mask_ratio}. "
+                "Upper bound is strict: a mask ratio of 1.0 leaves no "
+                "unmasked positions for the next-frame loss."
+            )
+        if self.lambda_next_frame < 0.0:
+            raise ValueError(
+                f"lambda_next_frame must be >= 0.0, got "
+                f"{self.lambda_next_frame}"
+            )
+        if self.lambda_mask < 0.0:
+            raise ValueError(
+                f"lambda_mask must be >= 0.0, got {self.lambda_mask}"
             )
 
     # ------------------------------------------------------------------

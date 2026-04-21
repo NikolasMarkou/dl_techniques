@@ -94,6 +94,47 @@ class TestConfig:
         with pytest.raises(ValueError, match="predictor_depth"):
             VideoJEPAConfig(predictor_depth=0)
 
+    # ------------------------------------------------------------------
+    # Iter-2: V-JEPA tube-masked prediction fields (D-008..D-012)
+    # ------------------------------------------------------------------
+    def test_iter2_defaults(self) -> None:
+        """Iter-2 defaults: masking enabled, ratio=0.6, equal λ weights."""
+        cfg = VideoJEPAConfig()
+        assert cfg.mask_prediction_enabled is True
+        assert cfg.mask_ratio == 0.6
+        assert cfg.lambda_next_frame == 1.0
+        assert cfg.lambda_mask == 1.0
+
+    def test_iter2_fields_round_trip(self) -> None:
+        cfg = VideoJEPAConfig(
+            mask_prediction_enabled=False,
+            mask_ratio=0.75,
+            lambda_next_frame=0.5,
+            lambda_mask=2.0,
+        )
+        cfg2 = VideoJEPAConfig.from_dict(cfg.to_dict())
+        assert cfg2 == cfg
+        assert cfg2.mask_prediction_enabled is False
+        assert cfg2.mask_ratio == 0.75
+        assert cfg2.lambda_next_frame == 0.5
+        assert cfg2.lambda_mask == 2.0
+
+    def test_iter2_mask_ratio_bounds(self) -> None:
+        # Strict upper bound at 1.0.
+        with pytest.raises(ValueError, match="mask_ratio"):
+            VideoJEPAConfig(mask_ratio=1.0)
+        with pytest.raises(ValueError, match="mask_ratio"):
+            VideoJEPAConfig(mask_ratio=-0.1)
+        # Edge: zero is allowed (regression-guard path).
+        cfg = VideoJEPAConfig(mask_ratio=0.0)
+        assert cfg.mask_ratio == 0.0
+
+    def test_iter2_lambda_non_negative(self) -> None:
+        with pytest.raises(ValueError, match="lambda_next_frame"):
+            VideoJEPAConfig(lambda_next_frame=-0.01)
+        with pytest.raises(ValueError, match="lambda_mask"):
+            VideoJEPAConfig(lambda_mask=-0.01)
+
 
 # ============================================================================
 # TestEncoder — hybrid PatchEmbedding2D + PE2D + CliffordNetBlock stack (C5)
