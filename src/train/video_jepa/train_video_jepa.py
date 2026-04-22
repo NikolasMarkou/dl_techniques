@@ -42,6 +42,7 @@ from dl_techniques.models.video_jepa.model import VideoJEPA
 from dl_techniques.datasets.synthetic_drone_video import (
     synthetic_drone_video_dataset,
 )
+from dl_techniques.datasets.bdd100k_video import bdd100k_video_dataset
 from dl_techniques.utils.logger import logger
 
 
@@ -67,8 +68,6 @@ def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
         predictor_dim_head=args.predictor_dim_head,
         predictor_mlp_dim=args.predictor_mlp_dim,
         predictor_shifts=tuple(args.predictor_shifts),
-        cond_dim=args.embed_dim,  # AdaLN broadcast invariant
-        telemetry_dim=args.telemetry_dim,
         sigreg_knots=args.sigreg_knots,
         sigreg_num_proj=args.sigreg_num_proj,
         sigreg_weight=args.sigreg_weight,
@@ -128,8 +127,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--predictor-mlp-dim", type=int, default=128)
     p.add_argument("--predictor-shifts", type=int, nargs="+", default=[1, 2])
 
-    # Telemetry
-    p.add_argument("--telemetry-dim", type=int, default=7)
+    # Dataset selection (iter-3: BDD100K support)
+    p.add_argument(
+        "--dataset", type=str, default="synthetic",
+        choices=["synthetic", "bdd100k"],
+        help="Which dataset to train on. 'bdd100k' requires --videos-root.",
+    )
+    p.add_argument(
+        "--videos-root", type=str,
+        default="/media/arxwn/data0_4tb/datasets/bdd_data/train/videos",
+        help="Root directory for BDD100K .mov files (flat layout).",
+    )
 
     # SIGReg
     p.add_argument("--sigreg-knots", type=int, default=17)
@@ -179,15 +187,29 @@ def main() -> None:
 
     model = VideoJEPA(config=cfg)
 
-    dataset = synthetic_drone_video_dataset(
-        batch_size=args.batch_size,
-        num_batches=args.steps_per_epoch,
-        T=args.T,
-        img_size=args.img_size,
-        img_channels=args.img_channels,
-        telemetry_dim=args.telemetry_dim,
-        seed=args.seed,
-    )
+    if args.dataset == "bdd100k":
+        logger.info(
+            f"Using BDD100K loader from {args.videos_root} "
+            f"(steps_per_epoch={args.steps_per_epoch})."
+        )
+        dataset = bdd100k_video_dataset(
+            videos_root=args.videos_root,
+            batch_size=args.batch_size,
+            T=args.T,
+            img_size=args.img_size,
+            num_steps=args.steps_per_epoch,
+            seed=args.seed,
+        )
+    else:
+        logger.info("Using synthetic drone-video dataset (smoke).")
+        dataset = synthetic_drone_video_dataset(
+            batch_size=args.batch_size,
+            num_batches=args.steps_per_epoch,
+            T=args.T,
+            img_size=args.img_size,
+            img_channels=args.img_channels,
+            seed=args.seed,
+        )
 
     model.compile(
         optimizer=keras.optimizers.AdamW(
