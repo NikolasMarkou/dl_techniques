@@ -43,6 +43,11 @@ from dl_techniques.datasets.synthetic_drone_video import (
     synthetic_drone_video_dataset,
 )
 from dl_techniques.datasets.bdd100k_video import bdd100k_video_dataset
+from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
+from dl_techniques.callbacks.jepa_visualization import (
+    LatentMaskOverlayCallback,
+    PatchPredictionErrorCallback,
+)
 from dl_techniques.utils.logger import logger
 
 
@@ -80,9 +85,35 @@ def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
     )
 
 
-def _build_callbacks(output_dir: Path) -> list:
+def _extract_pixels(batch) -> np.ndarray:
+    """Pull the pixel tensor out of a training-dataset batch.
+
+    The synthetic_drone_video / BDD100K datasets yield
+    ``({"pixels": (B, T, H, W, C)}, 0.0)``. Returns a numpy array.
+    """
+    inputs = batch[0] if isinstance(batch, tuple) else batch
+    if isinstance(inputs, dict):
+        pixels = inputs.get("pixels")
+    else:
+        pixels = inputs
+    if pixels is None:
+        raise ValueError(
+            f"Could not extract 'pixels' from dataset batch of type {type(batch)}."
+        )
+    return np.asarray(pixels)
+
+
+def _build_callbacks(
+    output_dir: Path,
+    eval_pixels: np.ndarray,
+    visualization_frequency: int,
+) -> list:
     output_dir.mkdir(parents=True, exist_ok=True)
+    jepa_viz_dir = output_dir / "jepa_viz"
+    curves_dir = output_dir / "training_curves"
     return [
+        # Keep TerminateOnNaN first so NaN losses short-circuit before any
+        # visualization callback attempts to re-use the model.
         keras.callbacks.TerminateOnNaN(),
         keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
         keras.callbacks.ModelCheckpoint(
@@ -90,6 +121,21 @@ def _build_callbacks(output_dir: Path) -> list:
             save_best_only=False,
             save_weights_only=False,
             verbose=0,
+        ),
+        # Visualization (additive — never injects new log keys).
+        TrainingCurvesCallback(
+            output_dir=str(curves_dir),
+            frequency=visualization_frequency,
+        ),
+        LatentMaskOverlayCallback(
+            eval_pixels=eval_pixels,
+            output_dir=str(jepa_viz_dir),
+            frequency=visualization_frequency,
+        ),
+        PatchPredictionErrorCallback(
+            eval_pixels=eval_pixels,
+            output_dir=str(jepa_viz_dir),
+            frequency=visualization_frequency,
         ),
     ]
 
@@ -164,6 +210,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lambda-mask", type=float, default=1.0,
                    help="Weight on the mask-prediction loss.")
 
+    # Visualization
+    p.add_argument("--visualization-frequency", type=int, default=1,
+                   help="Write visualization PNGs every N epochs.")
+
     args = p.parse_args()
     return args
 
@@ -222,7 +272,21 @@ def main() -> None:
 
     output_dir = _resolve_output_dir(args)
     logger.info(f"Output dir: {output_dir}")
-    callbacks = _build_callbacks(output_dir)
+
+    # Pull one training batch once and cache as the fixed eval batch for
+    # visualization callbacks (D-003 in plans/plan_2026-04-22_016e549b).
+    first_batch = next(iter(dataset))
+    eval_pixels = _extract_pixels(first_batch)
+    logger.info(
+        f"Cached visualization eval batch: shape={eval_pixels.shape} "
+        f"(freq={args.visualization_frequency})"
+    )
+
+    callbacks = _build_callbacks(
+        output_dir,
+        eval_pixels=eval_pixels,
+        visualization_frequency=args.visualization_frequency,
+    )
 
     history = model.fit(
         dataset,
