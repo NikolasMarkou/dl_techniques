@@ -6,20 +6,16 @@ Produces ``tf.data.Dataset`` batches matching the VideoJEPA training schema:
 
     ({
         "pixels":    (B, T, H, W, C),   # float32, in [0, 1]
-        "telemetry": (B, T, k),         # float32, weakly correlated with motion
      },
      dummy_y)  # zero scalar so model.fit with loss=None works
 
 **Scene model.** Each "drone pass" is a short sequence of frames where a
 colored moving rectangle translates linearly over a stationary random-noise
-background. The translation velocity drives a k-dim telemetry vector — this
-gives the predictor *some* real coupling between pixels and telemetry
-(useful to validate that AdaLN conditioning at least doesn't hurt), but the
-scene is deliberately simple: the goal is smoke-test end-to-end training,
-not learning anything meaningful.
+background. The goal is smoke-test end-to-end training, not learning
+anything meaningful.
 
-Mirrors the usage pattern of
-:func:`dl_techniques.datasets.pusht_hdf5.synthetic_lewm_dataset`.
+Iter-3 (D-013): telemetry emission was dropped alongside the removal of
+telemetry conditioning from the model.
 """
 
 from __future__ import annotations
@@ -38,12 +34,11 @@ except ImportError as _e:  # pragma: no cover
 
 
 def _render_sequence(
-    T: int, H: int, W: int, C: int, k: int, rng: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Render a single (pixels, telemetry) pair of length T.
+    T: int, H: int, W: int, C: int, rng: np.random.Generator,
+) -> np.ndarray:
+    """Render a single pixel sequence of length T.
 
-    :return: ``pixels: (T, H, W, C)`` float32 in [0, 1];
-             ``telemetry: (T, k)`` float32, signed.
+    :return: ``pixels: (T, H, W, C)`` float32 in [0, 1].
     """
     # Stationary random background (same across frames).
     bg = rng.random((H, W, C), dtype=np.float32) * 0.3
@@ -60,7 +55,6 @@ def _render_sequence(
     vy = float(rng.normal(0.0, 1.5))
 
     pixels = np.empty((T, H, W, C), dtype=np.float32)
-    telemetry = np.empty((T, k), dtype=np.float32)
 
     for t in range(T):
         x = int(np.clip(x0 + vx * t, 0, W - rect_w - 1))
@@ -75,21 +69,7 @@ def _render_sequence(
         frame = np.clip(frame, 0.0, 1.0)
         pixels[t] = frame
 
-        # Telemetry: first 2 channels = (vx, vy) (signed), 3rd = altitude proxy
-        # (constant per sequence), rest = independent noise. Weakly couples
-        # pixel motion to telemetry (by construction of vx, vy).
-        tel = np.zeros((k,), dtype=np.float32)
-        if k >= 1:
-            tel[0] = vx
-        if k >= 2:
-            tel[1] = vy
-        if k >= 3:
-            tel[2] = float(y0) / float(H)  # altitude-ish proxy
-        if k > 3:
-            tel[3:] = rng.normal(0.0, 0.1, size=k - 3).astype(np.float32)
-        telemetry[t] = tel
-
-    return pixels, telemetry
+    return pixels
 
 
 def synthetic_drone_video_dataset(
@@ -98,7 +78,6 @@ def synthetic_drone_video_dataset(
     T: int = 4,
     img_size: int = 64,
     img_channels: int = 3,
-    telemetry_dim: int = 7,
     seed: int = 0,
 ) -> "tf.data.Dataset":
     """Yield synthetic drone-video batches for VideoJEPA training.
@@ -110,10 +89,10 @@ def synthetic_drone_video_dataset(
     :param T: Frames per clip.
     :param img_size: Square frame edge length.
     :param img_channels: Number of channels.
-    :param telemetry_dim: ``k`` — telemetry channels per frame.
     :param seed: RNG seed.
     :return: ``tf.data.Dataset`` emitting ``(inputs_dict, zero_scalar)``
-        tuples, already batched and prefetched.
+        tuples, already batched and prefetched. ``inputs_dict`` has a
+        single key ``pixels`` (iter-3: telemetry removed, D-013).
     """
     if batch_size < 2:
         raise ValueError(
@@ -122,22 +101,17 @@ def synthetic_drone_video_dataset(
         )
     if T <= 0:
         raise ValueError(f"T must be positive, got {T}")
-    if telemetry_dim <= 0:
-        raise ValueError(
-            f"telemetry_dim must be positive, got {telemetry_dim}"
-        )
 
     rng = np.random.default_rng(seed)
     num_episodes = batch_size * num_batches
 
     def gen() -> Iterator[Tuple[dict, float]]:
         for _ in range(num_episodes):
-            pixels, telemetry = _render_sequence(
-                T=T, H=img_size, W=img_size, C=img_channels,
-                k=telemetry_dim, rng=rng,
+            pixels = _render_sequence(
+                T=T, H=img_size, W=img_size, C=img_channels, rng=rng,
             )
             yield (
-                {"pixels": pixels, "telemetry": telemetry},
+                {"pixels": pixels},
                 np.float32(0.0),
             )
 
@@ -146,9 +120,6 @@ def synthetic_drone_video_dataset(
             "pixels": tf.TensorSpec(
                 shape=(T, img_size, img_size, img_channels),
                 dtype=tf.float32,
-            ),
-            "telemetry": tf.TensorSpec(
-                shape=(T, telemetry_dim), dtype=tf.float32,
             ),
         },
         tf.TensorSpec(shape=(), dtype=tf.float32),

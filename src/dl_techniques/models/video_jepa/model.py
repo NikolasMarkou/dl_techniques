@@ -3,20 +3,20 @@
 Composes:
 
 - :class:`VideoJEPACliffordEncoder` (per-frame hybrid encoder, D-001).
-- :class:`TelemetryEmbedder` (per-frame telemetry → cond_dim, D-004/D-006).
-- :class:`VideoJEPAPredictor` (factorized spatial + causal-temporal, D-002).
+- :class:`VideoJEPAPredictor` (factorized spatial + causal-temporal, D-002,
+  iter-3 pixels-only, D-013).
 - :class:`SIGRegLayer` (middle placement on (B*T, N, D), D-005).
 
 Training forward (``call``)
 ---------------------------
-Inputs: ``{"pixels": (B, T, H, W, C), "telemetry": (B, T, k)}``.
+Inputs: ``{"pixels": (B, T, H, W, C)}``.
 
 1. Encode frames: ``pixels → z: (B, T, H_p, W_p, D)``.
-2. Embed telemetry: ``telemetry → c: (B, T, D)``.
-3. Predict: ``pred: (B, T, H_p, W_p, D) = predictor([z, c])``.
-4. Losses via ``add_loss`` (training forward uses ``loss=None`` compile):
+2. Predict: ``pred: (B, T, H_p, W_p, D) = predictor(z)``.
+3. Losses via ``add_loss`` (training forward uses ``loss=None`` compile):
 
    * MSE: ``mean((pred[:, :-1] - z[:, 1:]) ** 2)`` (skipped if ``T < 2``).
+   * Mask-prediction L2 (iter-2, if ``mask_prediction_enabled``).
    * SIGReg: ``sigreg_weight * sigreg(pred.reshape(B*T, N, D))``.
 
 Returns ``pred``.
@@ -24,9 +24,9 @@ Returns ``pred``.
 Streaming inference (D-007)
 ---------------------------
 - :meth:`stream_reset(B)` — set internal embedding buffer to ``None``.
-- :meth:`stream_step(frame, telemetry_frame)` — encode one frame, append
-  to the rolling ``K``-length buffer, run the predictor on the current
-  buffer (up to ``K`` frames), and emit the last frame's patch-prediction
+- :meth:`stream_step(frame)` — encode one frame, append to the rolling
+  ``K``-length buffer, run the predictor on the current buffer (up to
+  ``K`` frames), and emit the last frame's patch-prediction
   ``(B, H_p, W_p, D)``. O(1) amortized per call once the buffer is full.
 
 The streaming path reuses the predictor on a growing (then rolling)
@@ -47,12 +47,11 @@ from .config import VideoJEPAConfig
 from .encoder import VideoJEPACliffordEncoder
 from .masking import TubeMaskGenerator
 from .predictor import VideoJEPAPredictor
-from .telemetry_embedder import TelemetryEmbedder
 
 
 @keras.saving.register_keras_serializable()
 class VideoJEPA(keras.Model):
-    """Video-JEPA-Clifford top-level model.
+    """Video-JEPA-Clifford top-level model (pixels-only, iter-3).
 
     :param config: :class:`VideoJEPAConfig`. If ``None``, default config is used.
     :param kwargs: passthrough to :class:`keras.Model`.
@@ -79,11 +78,6 @@ class VideoJEPA(keras.Model):
             shifts=tuple(cfg.encoder_shifts),
             dropout=cfg.dropout,
             name="encoder",
-        )
-        self.telemetry_embedder = TelemetryEmbedder(
-            cond_dim=cfg.cond_dim,
-            telemetry_dim=cfg.telemetry_dim,
-            name="telemetry_embedder",
         )
         self.predictor = VideoJEPAPredictor(
             embed_dim=cfg.embed_dim,
@@ -182,22 +176,24 @@ class VideoJEPA(keras.Model):
     ) -> keras.KerasTensor:
         """Training forward pass.
 
-        :param inputs: dict with keys ``pixels`` (B, T, H, W, C) and
-            ``telemetry`` (B, T, k).
+        :param inputs: dict with key ``pixels`` (B, T, H, W, C).
         :param training: forwarded.
         :return: ``pred`` of shape (B, T, H_p, W_p, D).
         """
         if not isinstance(inputs, dict):
             raise ValueError(
-                "VideoJEPA expects inputs as a dict with keys 'pixels' and "
-                f"'telemetry'. Got type={type(inputs)}."
+                "VideoJEPA expects inputs as a dict with key 'pixels'. "
+                f"Got type={type(inputs)}."
+            )
+        if "pixels" not in inputs:
+            raise ValueError(
+                "VideoJEPA inputs dict must contain key 'pixels'. "
+                f"Got keys: {list(inputs.keys())}"
             )
         pixels = inputs["pixels"]
-        telemetry = inputs["telemetry"]
 
         cfg = self.config
         z = self.encode_frames(pixels)                      # (B, T, H_p, W_p, D)
-        c = self.telemetry_embedder(telemetry, training=training)  # (B, T, D)
 
         # --- Iter-2: optionally substitute mask_token at masked positions ---
         # The tube mask is spatial (B, H_p, W_p); broadcasting over T keeps
@@ -224,7 +220,7 @@ class VideoJEPA(keras.Model):
             M = None
             z_masked = z
 
-        pred = self.predictor([z_masked, c], training=training)  # (B,T,H_p,W_p,D)
+        pred = self.predictor(z_masked, training=training)  # (B,T,H_p,W_p,D)
 
         # --- L1: MSE next-frame patch loss (D-003, iter-1) ---
         # Evaluated on **unmasked** positions only (iter-2 accounting rule:
@@ -297,12 +293,10 @@ class VideoJEPA(keras.Model):
     def stream_step(
         self,
         frame: keras.KerasTensor,
-        telemetry_frame: keras.KerasTensor,
     ) -> keras.KerasTensor:
         """Advance the stream by one frame and return its patch prediction.
 
         :param frame: ``(B, H, W, C)`` single-frame pixel tensor.
-        :param telemetry_frame: ``(B, k)`` single-frame telemetry vector.
         :return: ``(B, H_p, W_p, D)`` patch-prediction for the latest frame.
 
         Rolling buffer (D-007): keeps the last ``K`` encoded frame grids in
@@ -327,20 +321,8 @@ class VideoJEPA(keras.Model):
             if int(self._stream_buf.shape[1]) > K:
                 self._stream_buf = self._stream_buf[:, -K:]
 
-        # Embed telemetry window — reuse the same number of frames as buffer.
-        t = int(self._stream_buf.shape[1])
-        # We only have `telemetry_frame` for the current frame; pad by
-        # replicating for history (caller is expected to maintain their
-        # own telemetry buffer in realistic use — for the in-library smoke
-        # test we replicate).
-        tel_1 = ops.expand_dims(telemetry_frame, axis=1)   # (B, 1, k)
-        tel_window = ops.broadcast_to(
-            tel_1, (ops.shape(tel_1)[0], t, cfg.telemetry_dim)
-        )
-        c = self.telemetry_embedder(tel_window, training=False)
-
         pred = self.predictor(
-            [self._stream_buf, c], training=False
+            self._stream_buf, training=False
         )  # (B, t, H_p, W_p, D)
 
         return pred[:, -1]  # (B, H_p, W_p, D)

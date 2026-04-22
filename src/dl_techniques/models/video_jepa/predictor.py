@@ -1,14 +1,13 @@
-"""Video-JEPA-Clifford predictor (D-002, D-004).
+"""Video-JEPA-Clifford predictor (D-002, D-013).
 
-Factorized spatial + causal-temporal stack with AdaLN-zero telemetry
-conditioning.
+Factorized spatial + causal-temporal stack. Pixels-only — no telemetry
+conditioning (D-013, iter-3).
 
 Architecture
 ------------
 
 Input:
     z  : (B, T, H_p, W_p, D)  — per-frame patch latents
-    c  : (B, T, cond_dim)     — per-frame telemetry conditioning (cond_dim == D)
 
 Per predictor "pair", we alternate:
 
@@ -17,12 +16,13 @@ Per predictor "pair", we alternate:
    strictly causal (no cross-frame info).
 
 2. **Temporal pass** — transpose (B, T, H_p, W_p, D) → (B, H_p, W_p, T, D) →
-   reshape (B*H_p*W_p, T, D) → ``AdaLNZeroConditionalBlock([x, c_tile])``
-   with causal self-attention, tiling c: (B, T, D) → (B*H_p*W_p, T, D)
-   → reshape (B*H_p*W_p, 1, T, D) → ``CausalCliffordNetBlock`` → reshape
-   (B*H_p*W_p, T, D) → reshape/transpose back to (B, T, H_p, W_p, D).
+   reshape (B*H_p*W_p, T, D) → ``CausalSelfAttnMLPBlock`` (causal MHA + MLP
+   wrapped in LayerScale γ=1e-5 residual for identity-at-init)
+   → reshape (B*H_p*W_p, 1, T, D) → ``CausalCliffordNetBlock``
+   → reshape (B*H_p*W_p, T, D) → reshape/transpose back to
+   (B, T, H_p, W_p, D).
 
-A learned 1D temporal positional embedding ``pos_t: (1, T_max, 1, 1, D)``
+A learned 1D temporal positional embedding ``pos_t: (1, T_max, D)``
 is added to ``z`` **once** before block 0.
 
 Causality invariant
@@ -30,7 +30,7 @@ Causality invariant
 A perturbation at frame ``k`` must not alter any output at frame ``< k``.
 
 - Spatial pass: trivially independent across ``T``.
-- Temporal AdaLN block: ``MultiHeadAttention(use_causal_mask=True)``.
+- Temporal attention: ``MultiHeadAttention(use_causal_mask=True)``.
 - CausalCliffordNetBlock: left-padded valid convs over the W (=T) axis.
 - Temporal PE: applied once, additive — causal-safe by construction.
 
@@ -39,12 +39,11 @@ test_causality``.
 
 Identity-at-init invariant
 --------------------------
-At init, every ``AdaLNZeroConditionalBlock`` is identity in x (zero-initialized
-modulation MLP ⇒ gate=0). Each ``CausalCliffordNetBlock`` is near-identity
-via LayerScale γ=1e-5. Each spatial ``CliffordNetBlock`` is near-identity
-via LayerScale γ=1e-5. So at init the predictor is ``z + pos_t + eps`` ,
-and ``predictor(z, c) - predictor(z, c') ≈ 0`` independent of ``c``
-because only the AdaLN blocks read ``c`` and their output is zero-gated.
+At init, every ``CausalSelfAttnMLPBlock`` residual path is scaled by
+LayerScale γ=1e-5 on both the attention and MLP branches, making the
+block near-identity. ``CausalCliffordNetBlock`` is near-identity via
+its own LayerScale γ=1e-5, and each spatial ``CliffordNetBlock`` is
+similarly near-identity. So at init the predictor is ``z + pos_t + eps``.
 """
 
 from __future__ import annotations
@@ -54,7 +53,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import keras
 from keras import ops
 
-from dl_techniques.layers.adaln_zero import AdaLNZeroConditionalBlock
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
     CliffordNetBlock,
@@ -62,19 +60,145 @@ from dl_techniques.layers.geometric.clifford_block import (
 
 
 @keras.saving.register_keras_serializable()
+class CausalSelfAttnMLPBlock(keras.layers.Layer):
+    """Plain causal self-attention + MLP block with LayerScale-identity init.
+
+    Structure (pre-norm + residual):
+        y = x + gamma_a * Attn(LN(x))
+        out = y + gamma_m * MLP(LN(y))
+
+    where ``gamma_a``, ``gamma_m`` are per-channel learnable scales
+    initialized to ``1e-5`` so the block is near-identity at init.
+
+    :param dim: Channel dimension ``D``.
+    :param num_heads: Number of attention heads.
+    :param dim_head: Per-head dimension (``key_dim`` of MHA).
+    :param mlp_dim: Hidden dimension of the MLP.
+    :param dropout: Dropout rate inside both attention and MLP.
+    :param layer_scale_init: Initial value of the LayerScale γ (default 1e-5).
+    :param kwargs: passthrough.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 4,
+        dim_head: int = 16,
+        mlp_dim: int = 128,
+        dropout: float = 0.0,
+        layer_scale_init: float = 1e-5,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if dim_head <= 0:
+            raise ValueError(f"dim_head must be positive, got {dim_head}")
+        if mlp_dim <= 0:
+            raise ValueError(f"mlp_dim must be positive, got {mlp_dim}")
+
+        self.dim = dim
+        self.num_heads = num_heads
+        self.dim_head = dim_head
+        self.mlp_dim = mlp_dim
+        self.dropout_rate = dropout
+        self.layer_scale_init = layer_scale_init
+
+        # Sub-layers.
+        self.ln1 = keras.layers.LayerNormalization(name="ln_attn")
+        self.attn = keras.layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=dim_head,
+            dropout=dropout,
+            name="mha",
+        )
+        self.ln2 = keras.layers.LayerNormalization(name="ln_mlp")
+        self.mlp_hidden = keras.layers.Dense(mlp_dim, activation="gelu",
+                                             name="mlp_hidden")
+        self.mlp_drop = keras.layers.Dropout(dropout, name="mlp_dropout")
+        self.mlp_out = keras.layers.Dense(dim, name="mlp_out")
+
+    def build(self, input_shape: Any) -> None:
+        """Build sub-layers with shape ``(B, T, D)``."""
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"CausalSelfAttnMLPBlock expects 3D input (B, T, D), got "
+                f"shape {input_shape}."
+            )
+        self.ln1.build(input_shape)
+        # MHA builds on (query_shape, value_shape).
+        self.attn.build(input_shape, input_shape)
+        self.ln2.build(input_shape)
+        self.mlp_hidden.build(input_shape)
+        mlp_hidden_shape = tuple(input_shape[:-1]) + (self.mlp_dim,)
+        self.mlp_drop.build(mlp_hidden_shape)
+        self.mlp_out.build(mlp_hidden_shape)
+
+        # LayerScale γ vectors: per-channel, initialized to layer_scale_init.
+        self.gamma_a = self.add_weight(
+            name="gamma_attn",
+            shape=(self.dim,),
+            initializer=keras.initializers.Constant(self.layer_scale_init),
+            trainable=True,
+        )
+        self.gamma_m = self.add_weight(
+            name="gamma_mlp",
+            shape=(self.dim,),
+            initializer=keras.initializers.Constant(self.layer_scale_init),
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(
+        self, x: keras.KerasTensor, training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        # --- Attention branch (causal) ---
+        h = self.ln1(x)
+        a = self.attn(h, h, use_causal_mask=True, training=training)
+        x = x + a * self.gamma_a
+
+        # --- MLP branch ---
+        h = self.ln2(x)
+        h = self.mlp_hidden(h)
+        h = self.mlp_drop(h, training=training)
+        h = self.mlp_out(h)
+        x = x + h * self.gamma_m
+        return x
+
+    def compute_output_shape(
+        self, input_shape: Any,
+    ) -> Tuple[Optional[int], ...]:
+        return tuple(input_shape)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "dim": self.dim,
+            "num_heads": self.num_heads,
+            "dim_head": self.dim_head,
+            "mlp_dim": self.mlp_dim,
+            "dropout": self.dropout_rate,
+            "layer_scale_init": self.layer_scale_init,
+        })
+        return config
+
+
+@keras.saving.register_keras_serializable()
 class VideoJEPAPredictor(keras.layers.Layer):
-    """Factorized spatial + causal-temporal Clifford predictor.
+    """Factorized spatial + causal-temporal Clifford predictor (pixels-only).
 
     :param embed_dim: Latent dimension ``D`` (must equal encoder ``embed_dim``).
     :param num_frames_max: Maximum window length ``T_max`` for the learned
         1D temporal PE (usually ``num_frames`` from config).
     :param patches_per_side: ``H_p = W_p`` — used to build static shapes.
     :param depth: Number of (spatial, temporal) pairs.
-    :param num_heads: Heads for the AdaLN block's MHA.
-    :param dim_head: Per-head dimension for the AdaLN block's MHA.
-    :param mlp_dim: MLP hidden dim inside the AdaLN block.
+    :param num_heads: Heads for the temporal self-attention.
+    :param dim_head: Per-head dimension for the temporal MHA.
+    :param mlp_dim: MLP hidden dim inside the temporal block.
     :param shifts: Channel-shift offsets for predictor Clifford blocks.
-    :param dropout: Dropout rate inside the AdaLN block.
+    :param dropout: Dropout rate inside the temporal block.
     :param kwargs: passthrough.
     """
 
@@ -127,15 +251,14 @@ class VideoJEPAPredictor(keras.layers.Layer):
             )
             for i in range(depth)
         ]
-        self.adaln_blocks: List[AdaLNZeroConditionalBlock] = [
-            AdaLNZeroConditionalBlock(
+        self.attn_blocks: List[CausalSelfAttnMLPBlock] = [
+            CausalSelfAttnMLPBlock(
                 dim=embed_dim,
                 num_heads=num_heads,
                 dim_head=dim_head,
                 mlp_dim=mlp_dim,
                 dropout=dropout,
-                use_causal_mask=True,
-                name=f"adaln_block_{i}",
+                name=f"attn_block_{i}",
             )
             for i in range(depth)
         ]
@@ -155,24 +278,15 @@ class VideoJEPAPredictor(keras.layers.Layer):
     def build(self, input_shape: Any) -> None:
         """Build sub-layers.
 
-        :param input_shape: list/tuple ``[z_shape, c_shape]`` where
-            ``z_shape = (B, T, H_p, W_p, D)`` and ``c_shape = (B, T, D)``.
+        :param input_shape: ``z_shape = (B, T, H_p, W_p, D)``.
         """
-        if (
-            not isinstance(input_shape, (list, tuple))
-            or len(input_shape) != 2
-            or not all(isinstance(s, (list, tuple)) for s in input_shape)
-        ):
+        if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 5:
             raise ValueError(
-                "VideoJEPAPredictor expects input_shape = [z_shape, c_shape]. "
+                "VideoJEPAPredictor expects input_shape = "
+                "(B, T, H_p, W_p, D) (5D). "
                 f"Got: {input_shape}"
             )
-        z_shape, c_shape = input_shape
-        if len(z_shape) != 5 or len(c_shape) != 3:
-            raise ValueError(
-                f"z_shape must be 5D (B,T,H_p,W_p,D), c_shape must be 3D "
-                f"(B,T,D). Got z_shape={z_shape}, c_shape={c_shape}"
-            )
+        z_shape = input_shape
 
         # Learned 1D temporal PE: (1, T_max, D) — expanded on add.
         self.pos_t = self.add_weight(
@@ -188,11 +302,10 @@ class VideoJEPAPredictor(keras.layers.Layer):
         for blk in self.spatial_blocks:
             blk.build(spatial_in)
 
-        # AdaLN blocks consume [x:(B*H_p*W_p, T, D), c_tile:(B*H_p*W_p, T, D)].
-        adaln_x_shape = (None, z_shape[1], self.embed_dim)
-        adaln_c_shape = (None, z_shape[1], self.embed_dim)
-        for blk in self.adaln_blocks:
-            blk.build([adaln_x_shape, adaln_c_shape])
+        # Attention blocks consume (B*H_p*W_p, T, D).
+        attn_in = (None, z_shape[1], self.embed_dim)
+        for blk in self.attn_blocks:
+            blk.build(attn_in)
 
         # Causal Clifford blocks consume (B*H_p*W_p, 1, T, D).
         causal_in = (None, 1, z_shape[1], self.embed_dim)
@@ -204,22 +317,23 @@ class VideoJEPAPredictor(keras.layers.Layer):
     # ------------------------------------------------------------------
     def call(
         self,
-        inputs,
+        z: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
         """Forward pass.
 
-        :param inputs: list/tuple ``[z, c]`` where
-            ``z : (B, T, H_p, W_p, D)`` and ``c : (B, T, D)``.
+        :param z: ``(B, T, H_p, W_p, D)`` per-frame patch latents.
         :param training: Forwarded to all sub-layers.
         :return: ``(B, T, H_p, W_p, D)`` predicted next-frame patch latents.
         """
-        if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
+        # Backward-compat guard: if a caller passes ``[z]`` or ``[z, c]`` we
+        # raise a clear error rather than silently unpack.
+        if isinstance(z, (list, tuple)):
             raise ValueError(
-                "VideoJEPAPredictor expects inputs = [z, c] (list/tuple of "
-                f"length 2). Got: {type(inputs)}"
+                "VideoJEPAPredictor now expects a single tensor z "
+                "(B, T, H_p, W_p, D); telemetry conditioning was removed "
+                "in iter-3 (D-013). Got a list/tuple input."
             )
-        z, c = inputs
 
         # --- Shapes ---
         shape = ops.shape(z)
@@ -246,13 +360,9 @@ class VideoJEPAPredictor(keras.layers.Layer):
             # → reshape (B*H_p*W_p, T, D)
             z_t = ops.reshape(z_t, (B * N, T, D))
 
-            # Tile c: (B, T, D) → (B, 1, T, D) → (B, N, T, D) → (B*N, T, D)
-            c_e = ops.expand_dims(c, axis=1)                  # (B, 1, T, D)
-            c_t = ops.broadcast_to(c_e, (B, N, T, D))
-            c_t = ops.reshape(c_t, (B * N, T, D))
-
-            # AdaLN-zero block (identity at init, causal self-attn).
-            z_t = self.adaln_blocks[i]([z_t, c_t], training=training)
+            # Causal self-attention + MLP block (identity at init via
+            # LayerScale γ=1e-5).
+            z_t = self.attn_blocks[i](z_t, training=training)
 
             # → reshape (B*N, 1, T, D) for CausalCliffordNetBlock.
             z_t = ops.reshape(z_t, (B * N, 1, T, D))
@@ -270,13 +380,6 @@ class VideoJEPAPredictor(keras.layers.Layer):
         self, input_shape: Any
     ) -> Tuple[Optional[int], ...]:
         """Output matches ``z_shape``."""
-        if (
-            isinstance(input_shape, (list, tuple))
-            and len(input_shape) == 2
-            and all(isinstance(s, (list, tuple)) for s in input_shape)
-        ):
-            z_shape, _ = input_shape
-            return tuple(z_shape)
         return tuple(input_shape)
 
     # ------------------------------------------------------------------
