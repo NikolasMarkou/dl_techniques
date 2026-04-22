@@ -132,6 +132,8 @@ def bdd100k_video_dataset(
     num_steps: Optional[int] = None,
     seed: int = 0,
     max_resample_attempts: int = 8,
+    split: str = "all",
+    val_fraction: float = 0.1,
 ) -> "tf.data.Dataset":
     """Build a tf.data.Dataset of BDD100K video clips.
 
@@ -141,17 +143,36 @@ def bdd100k_video_dataset(
     :param img_size: spatial size (square). Frames are resized via INTER_AREA.
     :param num_steps: if provided, the dataset yields exactly
         ``num_steps`` batches per iteration (via ``.take``).
-    :param seed: numpy RNG seed for shuffling + per-clip offsets.
+    :param seed: numpy RNG seed for shuffling + per-clip offsets. Also
+        determines the train/val split when ``split != "all"``.
     :param max_resample_attempts: per-draw cap on retries when a video is
         unreadable or shorter than ``T``. Raises after exhausting.
+    :param split: one of ``"all"``, ``"train"``, ``"val"``. The files under
+        ``videos_root`` are deterministically shuffled by ``seed`` and the
+        last ``val_fraction`` become val.
+    :param val_fraction: fraction of files assigned to val when ``split``
+        is ``"train"`` or ``"val"``. Ignored for ``"all"``.
     :return: ``tf.data.Dataset`` yielding ``({"pixels": clip}, 0.0)`` where
         ``clip`` has shape ``(B, T, img_size, img_size, 3)`` float32 in [0, 1].
     """
+    if split not in ("all", "train", "val"):
+        raise ValueError(f"split must be one of all|train|val, got {split!r}.")
     videos_root = Path(videos_root)
-    paths = _list_video_files(videos_root)
+    all_paths = _list_video_files(videos_root)
+    if split == "all":
+        paths = all_paths
+    else:
+        order = np.random.default_rng(seed).permutation(len(all_paths))
+        n_val = max(1, int(round(len(all_paths) * val_fraction)))
+        val_idx = set(order[-n_val:].tolist())
+        if split == "val":
+            paths = [all_paths[i] for i in sorted(val_idx)]
+        else:
+            paths = [all_paths[i] for i in range(len(all_paths)) if i not in val_idx]
     logger.info(
-        f"bdd100k_video_dataset: {len(paths)} video files found under "
-        f"{videos_root}. T={T}, img_size={img_size}, B={batch_size}."
+        f"bdd100k_video_dataset(split={split}): {len(paths)} of "
+        f"{len(all_paths)} video files selected under {videos_root}. "
+        f"T={T}, img_size={img_size}, B={batch_size}."
     )
 
     # Seed numpy globally for both cv2 seek offsets and path selection.

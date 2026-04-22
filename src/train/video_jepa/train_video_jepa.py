@@ -27,6 +27,7 @@ import datetime as _dt
 import os
 import random
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -107,11 +108,14 @@ def _build_callbacks(
     output_dir: Path,
     eval_pixels: np.ndarray,
     visualization_frequency: int,
+    early_stopping_patience: Optional[int] = None,
+    has_validation: bool = False,
 ) -> list:
     output_dir.mkdir(parents=True, exist_ok=True)
     jepa_viz_dir = output_dir / "jepa_viz"
     curves_dir = output_dir / "training_curves"
-    return [
+    monitor = "val_loss" if has_validation else "loss"
+    cbs = [
         # Keep TerminateOnNaN first so NaN losses short-circuit before any
         # visualization callback attempts to re-use the model.
         keras.callbacks.TerminateOnNaN(),
@@ -119,6 +123,13 @@ def _build_callbacks(
         keras.callbacks.ModelCheckpoint(
             filepath=str(output_dir / "last.keras"),
             save_best_only=False,
+            save_weights_only=False,
+            verbose=0,
+        ),
+        keras.callbacks.ModelCheckpoint(
+            filepath=str(output_dir / "best.keras"),
+            monitor=monitor,
+            save_best_only=True,
             save_weights_only=False,
             verbose=0,
         ),
@@ -138,6 +149,16 @@ def _build_callbacks(
             frequency=visualization_frequency,
         ),
     ]
+    if early_stopping_patience is not None and early_stopping_patience > 0:
+        cbs.append(
+            keras.callbacks.EarlyStopping(
+                monitor=monitor,
+                patience=early_stopping_patience,
+                restore_best_weights=True,
+                verbose=1,
+            )
+        )
+    return cbs
 
 
 def parse_args() -> argparse.Namespace:
@@ -211,6 +232,13 @@ def parse_args() -> argparse.Namespace:
                    help="Weight on the mask-prediction loss.")
 
     # Visualization
+    p.add_argument("--val-steps", type=int, default=0,
+                   help="Validation batches per epoch. 0 disables validation. "
+                        "BDD100K only.")
+    p.add_argument("--val-fraction", type=float, default=0.1,
+                   help="Fraction of BDD100K files held out for val.")
+    p.add_argument("--early-stopping-patience", type=int, default=0,
+                   help="Patience (epochs) for EarlyStopping. 0 disables.")
     p.add_argument("--visualization-frequency", type=int, default=1,
                    help="Write visualization PNGs every N epochs.")
 
@@ -237,18 +265,33 @@ def main() -> None:
 
     model = VideoJEPA(config=cfg)
 
+    val_dataset = None
     if args.dataset == "bdd100k":
         logger.info(
             f"Using BDD100K loader from {args.videos_root} "
-            f"(steps_per_epoch={args.steps_per_epoch})."
+            f"(steps_per_epoch={args.steps_per_epoch}, "
+            f"val_steps={args.val_steps})."
         )
+        split_train = "train" if args.val_steps > 0 else "all"
         dataset = bdd100k_video_dataset(
             videos_root=args.videos_root,
             batch_size=args.batch_size,
             T=args.T,
             img_size=args.img_size,
             seed=args.seed,
+            split=split_train,
+            val_fraction=args.val_fraction,
         )
+        if args.val_steps > 0:
+            val_dataset = bdd100k_video_dataset(
+                videos_root=args.videos_root,
+                batch_size=args.batch_size,
+                T=args.T,
+                img_size=args.img_size,
+                seed=args.seed,
+                split="val",
+                val_fraction=args.val_fraction,
+            )
     else:
         logger.info("Using synthetic drone-video dataset (smoke).")
         dataset = synthetic_drone_video_dataset(
@@ -285,12 +328,16 @@ def main() -> None:
         output_dir,
         eval_pixels=eval_pixels,
         visualization_frequency=args.visualization_frequency,
+        early_stopping_patience=args.early_stopping_patience,
+        has_validation=val_dataset is not None,
     )
 
     history = model.fit(
         dataset,
         epochs=args.epochs,
         steps_per_epoch=args.steps_per_epoch,
+        validation_data=val_dataset,
+        validation_steps=args.val_steps if val_dataset is not None else None,
         callbacks=callbacks,
         verbose=2,
     )
