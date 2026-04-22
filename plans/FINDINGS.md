@@ -1,6 +1,49 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-04-22_016e549b
+### Index
+1. `findings/existing-callbacks.md` — TrainingCurvesCallback auto-groups `*_loss` keys; DepthPredictionGridCallback skeleton is the template for fixed-eval-batch viz.
+2. `findings/video-jepa-tensors.md` — model.encode_frames, model.predictor, model.mask_gen, model.mask_token, model.config.{patches_per_side, mask_prediction_enabled, embed_dim} are the public surface needed.
+3. `findings/train-script-patterns.md` — Pattern A (loss curves) + Pattern B (domain viz callback under dl_techniques.callbacks.*) match; Pattern C (post-fit summary) skipped per D-002.
+
+### Key Constraints
+- **Hard**: Keras 3 / TF 2.18 callback interface. Fixed eval batch cached at construction. `TerminateOnNaN` first in callback list. No edits to `src/dl_techniques/models/video_jepa/**`.
+- **Hard**: `model.mask_gen` is stochastic — each call re-samples (documented, acceptable).
+- **Soft**: Match `depth_visualization.py` skeleton (lazy matplotlib, try/except, logger.warning, gc.collect). Place tests under `tests/test_callbacks/` (repo convention).
+- **Ghost constraint (EXECUTE)**: plan.md "≤220 LOC" target did not budget docstrings + helpers; repo convention requires Google-style docstrings, relaxed via D-006.
+
+## plan_2026-04-22_4f29c76f
+### Index
+
+1. **[module-surface.md](plan_2026-04-22_4f29c76f/findings/module-surface.md)** — Current video_jepa module: 7 source files (1379 LOC), 44-test suite, 221-LOC training script, 163-LOC synthetic dataset. Hybrid Clifford encoder + factorized predictor + TubeMaskGenerator + triple loss (next-frame MSE + mask MSE + SIGReg). All serialization registered. Config has 23 fields incl. 5 iter-2 fields.
+2. **[telemetry-surface.md](plan_2026-04-22_4f29c76f/findings/telemetry-surface.md)** — "Telemetry" is ambiguous in the codebase: (A) drone IMU/GPS conditioning via `TelemetryEmbedder` + AdaLN-zero — MODEL FEATURE, not instrumentation; (B) per-loss Keras Mean trackers added in iter-2 step 5 — actual instrumentation. User clarification needed, but recommendation is to remove BOTH since switching to BDD100K removes drone-telemetry motivation.
+3. **[dataset-candidates.md](plan_2026-04-22_4f29c76f/findings/dataset-candidates.md)** — BDD100K is the top pick (28,641 dashcam MOVs, 489 GB, at `/media/arxwn/data0_4tb/datasets/bdd_data/train/videos/`). Stanford Drone Dataset is a domain-match alternative. Other local candidates (UCSD, KITTI) not recommended. ~150 LOC for a `bdd100k_video.py` loader with decord or OpenCV.
+
+### Key Constraints
+
+### Hard
+- **Batch size >= 2** — `CliffordNetBlock` BN stability.
+- **Load-bearing tests**: causality (`TestPredictor::test_causality`), AdaLN identity-at-init, serialization round-trip. Must survive refactor regardless of path.
+- **GPU policy**: `CUDA_VISIBLE_DEVICES=1` (4070 12GB) or 0 (4090 24GB), never parallel. `MPLBACKEND=Agg` for all training.
+- **Keras 3.8 serialization**: `@keras.saving.register_keras_serializable()` + complete `get_config()` on every custom class.
+- **If removing telemetry (A1)**: 3 config fields deleted, 1 file deleted, AdaLN-zero block either swapped or fed zero `c`. ~200 LOC churn + test fixture updates.
+- **If removing only trackers (B)**: ~15 LOC, trivial.
+
+### Soft
+- BDD100K MOV decoding: `decord` (new dep) or `opencv-python` (broader). Decord is faster.
+- BDD frames are 1280x720 — letterbox or center-crop to square `img_size`.
+- Realistic smoke-to-training scale: B=4, T=8, img=112, D=128 — fits 4070 12GB with margin.
+
+### Ghost / deferred
+- **FW-001..FW-004** from iter-2 CLOSE (lambda rebalance, longer training, EMA target encoder, mean-predictor probe) are worth folding in NOW during the refactor rather than as separate future plans — we're touching these files anyway. User sign-off required on scope.
+- **"Refine architecture"**: beyond telemetry removal, candidate simplifications include (a) dropping the factorized-alternating predictor in favor of a pure-temporal V-JEPA-style block (since mask loss is primary and next-frame secondary per iter-2 observation); (b) optionally adding EMA target (FW-003) to address the shortcut-learning concern from iter-2 REFLECT.
+
+### Exploration Confidence
+- **Problem scope**: deep — file inventory, test inventory, architecture traces, local dataset inventory, cross-plan decision history all mapped.
+- **Solution space**: open — "remove telemetry" is ambiguous and "refine architecture" has multiple degrees of freedom; user-facing branch points are identified.
+- **Risk visibility**: clear — causality + identity-at-init tests anchor the invariants; dataset-integration risk is bounded to decoder choice + memory footprint; the lambda-imbalance warning from iter-2 is a known failure mode.
+
 ## plan_2026-04-21_421088a1
 ### User-Provided Context (seed)
 

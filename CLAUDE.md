@@ -17,6 +17,8 @@ make structure  # display src tree
 make docs       # generate documentation
 ```
 
+> **Full test suite runtime ≈ 1.5 hours** (this is also the pre-push hook). Do NOT run `make test` or `pytest tests/` as a routine regression check. Instead, scope pytest to the module(s) you changed (e.g. `pytest tests/test_models/test_video_jepa/`) plus any modules that import what you touched. Reserve the full suite for when the user explicitly asks, or immediately before a push they've requested.
+
 ## Repository Structure
 
 ```
@@ -58,6 +60,14 @@ Pytest test suite mirroring the `src/dl_techniques/` structure. See `src/dl_tech
 - **numpy** >=1.22, **scipy** >=1.15.1, **scikit-learn** >=1.6.1, **pandas** >=2.2.3
 - **matplotlib** >=3.10, **seaborn** >=0.13.2, **tqdm**
 - Dev: pytest, pytest-cov, pylint, pre-commit
+
+## Running Training Scripts
+
+Always set matplotlib to non-interactive mode to avoid X11 crashes on headless/remote systems:
+
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.<model>.train_<script> [args]
+```
 
 ## Core Conventions
 

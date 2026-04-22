@@ -3,41 +3,240 @@
 
 <!-- COMPRESSED-SUMMARY -->
 ## Summary (compressed)
-*Auto-compressed from 593 lines. Read full content below line 600 if needed.*
+*Auto-compressed. Read full content below if needed.*
 
 ### Key Decisions (outcomes + active constraints)
+- **video_jepa training viz reuse** (`plan_2026-04-22_016e549b`): reused
+  `TrainingCurvesCallback` as-is; added `LatentMaskOverlayCallback` +
+  `PatchPredictionErrorCallback` in `src/dl_techniques/callbacks/jepa_visualization.py`
+  (skeleton cloned from `DepthPredictionGridCallback`). Zero model edits.
+  `callbacks/__init__.py` is empty by convention — full-module-path imports.
+  Tests live under `tests/test_callbacks/`, not `tests/dl_techniques/callbacks/`.
+- **video_jepa telemetry strip + BDD100K** (`plan_2026-04-22_4f29c76f`):
+  dropped drone-telemetry conditioning path (scope A) + kept iter-2 per-loss
+  Mean trackers; replaced AdaLN-zero predictor block with `CausalSelfAttnMLPBlock`
+  (LayerScale γ=1e-5 restores identity-at-init); new BDD100K loader via
+  opencv-python; sanity-run-first cadence. Architecture otherwise frozen.
 - **video_jepa iter-1/2** (`plan_2026-04-21_421088a1`): hybrid Clifford encoder
   (PatchEmbedding2D + 2-4 CliffordNetBlock); factorized spatial+causal-temporal
-  predictor; next-frame + tube-masked latent dual-loss; AdaLN-zero predictor-only
-  conditioning; SIGReg middle placement `(B*T, N, D)`; rolling-buffer streaming.
-  Latent-space masking = HARD CONSTRAINT (pixel-space incompatible with 2D-grid
-  encoder). Future work queued: FW-001 lambda rebalance, FW-002 longer training,
-  FW-003 EMA target encoder, FW-004 mean-predictor shortcut probe.
-- **cliffordnet detection** (`plan_2026-04-21_5dadc8ce`): YOLOv12 head reused via
-  subclass-and-override (CliffordDetectionLoss rebuilds anchors/strides after
-  super().__init__); 3-tap multi-level detection; declarative head specs via
+  predictor; next-frame + tube-masked latent dual-loss; SIGReg middle placement
+  `(B*T, N, D)`; rolling-buffer streaming. Latent-space masking = HARD CONSTRAINT
+  (pixel-space incompatible with 2D-grid encoder). Future work: FW-001 lambda
+  rebalance, FW-002 longer training, FW-003 EMA target encoder, FW-004
+  mean-predictor shortcut probe.
+- **cliffordnet detection** (`plan_2026-04-21_5dadc8ce`): YOLOv12 head reused
+  via subclass-and-override (CliffordDetectionLoss rebuilds anchors/strides
+  after super().__init__); 3-tap multi-level; declarative head specs via
   JSON-serialized dict; MultiTaskHead in vision_heads/factory.py is BROKEN
   (dict sublayers untracked by Keras).
 - **lewm port** (`plan_2026-04-21_8416bc0b`): PyTorch->Keras 3; D-001 live
-  target encoder (no EMA, no stop_gradient); D-002 LayerNorm not BatchNorm in
-  MLPProjector (matches upstream, dodges BN-batch-of-1).
+  target encoder (no EMA, no stop_gradient); D-002 LayerNorm not BatchNorm
+  in MLPProjector.
 - **weight transfer** (`plan_2026-04-21_4c4451e5`): D-001 layer-by-layer
   set_weights is the only robust name-based path in Keras 3.8 `.keras` files;
   `load_weights(.keras, by_name=True)` RAISES — latent bug in 3 places.
 - **cliffordnet depth refactor** (`plan_2026-04-21_c49eca98`): minimal inline
-  heads beat shared factories; head specs as declarative dicts with JSON
-  serialization; deep_supervision as per-head flag.
+  heads beat shared factories; declarative head specs; deep_supervision as
+  per-head flag.
 
 ### Things NOT to do (failed approaches / hard rejections)
 - Do not subclass `JEPAMaskingStrategy` for latent tube masking (pixel-level;
   wrong abstraction).
 - Do not use `load_weights(path, by_name=True)` on `.keras` files (Keras 3.8).
-- Do not drop patch tokens before a 2D-grid encoder (D-001/D-009 hard
-  constraint).
+- Do not drop patch tokens before a 2D-grid encoder (hard constraint).
 - Do not use `MultiTaskHead` factory until dict-tracking bug is fixed.
 - Do not run GPU jobs in parallel (GPU 0 = 4090 24GB, GPU 1 = 4070 12GB).
 - Do not fork YOLOv12 loss/head; subclass and rebuild baked constants.
+- Do not run full `make test` as routine regression (~1.5h; pre-push hook).
+- Do not add decord when opencv-python random-seek suffices for sanity-scale.
 <!-- /COMPRESSED-SUMMARY -->
+
+## plan_2026-04-22_016e549b
+### D-001 (2026-04-22, PLAN iter-1) — Library placement for new viz callbacks
+
+**Decision.** Add two new callbacks to
+`src/dl_techniques/callbacks/jepa_visualization.py` as:
+- `LatentMaskOverlayCallback`
+- `PatchPredictionErrorCallback`
+
+**Why.** User directive: prefer library placement with an accurate name.
+Names reflect the actual contract: the callbacks require a model exposing
+`encode_frames + predictor + mask_gen + mask_token` — i.e. the JEPA
+latent-masking trainer. Not generic "video" viz, not strictly "video_jepa"
+(could apply to still-image JEPA or other latent-masking variants).
+
+**Trade-off.** Library surface grows by one module and two classes at the
+cost of leanness; in return, future JEPA-style models (image-JEPA, etc.)
+can reuse these callbacks without copy-paste from the train script.
+
+**Alternatives rejected.**
+- Keep callbacks local to `train_video_jepa.py`: leaner, no public surface,
+  but non-reusable and inconsistent with `depth_visualization` precedent.
+- Name them `video_jepa_*`: too specific — the API they target is JEPA
+  latent masking, not video-specific.
+- Name them generically (`MaskOverlay`, `PatchL2Heatmap`): aspirational —
+  the implementation has no generic abstraction over arbitrary models.
+
+---
+
+### D-002 (2026-04-22, PLAN iter-1) — Skip post-fit summary PNG (Pattern C)
+
+**Decision.** Do not call `generate_training_curves(history, results_dir)`
+after `model.fit`.
+
+**Why.** User directive. Per-epoch `TrainingCurvesCallback` output is
+sufficient; post-fit call is redundant for this workflow.
+
+**Trade-off.** No publication-style final PNG at the cost of a nominal
+one-line call; acceptable since loss curves already exist per-epoch.
+
+---
+
+### D-003 (2026-04-22, PLAN iter-1) — Fixed eval batch = first batch of training dataset
+
+**Decision.** At callback construction time, pull one batch from the
+training dataset via `next(iter(train_dataset))`, convert pixels to numpy,
+and cache on the callback. Both JEPA viz callbacks share this fixed batch.
+
+**Why.** User directive. Simplest and matches `DepthPredictionGridCallback`'s
+"fixed eval batch" spirit from `findings/existing-callbacks.md`. Provides
+cross-epoch visual stability without needing a separate validation pipeline.
+
+**Trade-off.** Visualization shows a sample that the model has been trained
+on, at the cost of "true" held-out fidelity; acceptable for this smoke /
+sanity-check use case. If held-out viz is ever needed, swap the batch source
+in the train script without touching the callbacks.
+
+**Note on mask stochasticity.** `model.mask_gen` re-samples on each call;
+the fixed *pixels* batch is cached, but the mask will differ epoch-to-epoch.
+Documented in plan.md Failure Modes. If deterministic masks are needed
+later, cache `M_spatial` once at construction — not in scope for this plan.
+
+---
+
+### D-004 (2026-04-22, PLAN iter-1) — Chosen approach: three callbacks, no model edits
+
+**Decision.** Use `TrainingCurvesCallback` as-is for loss curves, and add
+the two JEPA-specific callbacks (D-001) for mask overlay + patch error
+heatmap. No edits to `src/dl_techniques/models/video_jepa/**`.
+
+**Why.** All required tensors are reachable through the public submodule
+API (`findings/video-jepa-tensors.md`). The only gap is a viz layer; that
+belongs in `callbacks/`, not in the model.
+
+**Trade-off.** A new module + two classes in the library at the cost of
+isolation (would be zero new surface if we inlined into the train script);
+in return, reusability and consistency with the `depth_visualization`
+pattern.
+
+**Alternatives rejected.**
+- Inline callbacks in the train script: rejected per D-001.
+- Extend the `visualization` plugin framework: heavier than needed — a
+  full manager/plugin pair for one domain is over-abstraction.
+- Add a forward-hook in `model.py` that stores intermediate tensors for
+  a passive callback to read: rejected — mutates model for viz, violates
+  the "no model edits" invariant.
+
+---
+
+### D-005 (2026-04-22, EXECUTE iter-1, Step 0) — Skeleton source & callbacks package surface
+
+**Findings.**
+- `src/dl_techniques/callbacks/__init__.py` is effectively empty (1 line,
+  per the subpackage CLAUDE: "import directly from modules"). So A4 is
+  **FALSE** — we do NOT export the new callbacks from `__init__.py`.
+  Step 2 collapses to a no-op; the train script imports by full module path.
+- Skeleton source confirmed: `src/dl_techniques/callbacks/depth_visualization.py`
+  (`DepthPredictionGridCallback`). Pattern: lazy `_import_matplotlib()`,
+  `try/except` with `logger.warning`, `gc.collect()`, `plt.close`,
+  `epoch_{NNN:03d}_<name>.png` filenames, `(epoch + 1) % frequency != 0`
+  guard, handle `n == 1` axes shape corner.
+- Depth callbacks do **NOT** use `@keras.saving.register_keras_serializable()`.
+  Callbacks aren't saved with models; plan.md's note to add it is overruled
+  by following the actual repo precedent (depth_visualization).
+- Dataset yield shape (synthetic_drone_video): `({"pixels": (B, T, H, W, C)}, 0.0)`.
+  Extraction for eval batch: `batch[0]["pixels"]`. A3 is grounded.
+
+**Decision.** Follow `depth_visualization.py` skeleton verbatim (no serialization
+decorator, lazy matplotlib, try/except+logger.warning). Skip `__init__.py`
+export (Step 2 no-op). Use `batch[0]["pixels"]` to pull pixels from the
+dataset in the train script.
+
+**Trade-off.** Matching depth precedent (no serialization decorator) over
+plan.md's aspirational note, at the cost of minor inconsistency with the
+broader "register everything serializable" convention — acceptable because
+callbacks aren't serialized as part of models anywhere in this repo.
+
+---
+
+### D-006 (2026-04-22, EXECUTE iter-1, Step 1) — LOC overrun on jepa_visualization.py
+
+**Finding.** `jepa_visualization.py` lands at 395 LOC (332 non-blank/non-comment)
+vs. the plan-v1 target of ≤220.
+
+**Cause.** Plan's ≤220 target scoped "the two callback classes"; it did not
+budget the module-level helpers (`_import_matplotlib`, `_normalize_pixels`,
+`_to_display_image`, `_upsample_mask`) nor the Google-style docstrings
+required by repo convention (CLAUDE.md). The two class bodies themselves
+are ~220 LOC combined; docstrings + helpers + import block add the rest.
+
+**Decision.** Accept overrun; surface at REFLECT. Criterion #1 ("file ≤220
+LOC") is in scope-drift status. Rationale: code is straightforward, split
+into small functions, heavily commented — tightening would remove docstrings
+(violates project convention) or inline helpers (reduces clarity).
+
+**Trade-off.** Accept ~+175 LOC over budget for docstring completeness and
+helper clarity, at the cost of the literal ≤220 target. If REFLECT flags
+this as a blocker, we can strip docstrings to one-liners and inline
+helpers to land ≤250 quickly.
+
+---
+
+### D-007 (2026-04-22, EXECUTE iter-1, Step 3) — Test directory correction
+
+**Finding.** Plan.md specifies `tests/dl_techniques/callbacks/test_jepa_visualization.py`
+but the repo's actual test tree is `tests/test_callbacks/` (mirrored from
+`src/dl_techniques/callbacks/` via the `test_<pkg>/` convention, see
+`tests/test_losses/`, `tests/test_layers/`, etc.). User's reminder echoed the
+plan text verbatim — intent is to place tests under the standard tree.
+
+**Decision.** Put the test at `tests/test_callbacks/test_jepa_visualization.py`
+following the existing convention. Verification command updated in practice
+(pytest target path): `tests/test_callbacks/test_jepa_visualization.py`.
+
+**Trade-off.** Deviate from plan-v1 literal path at the cost of plan/file drift,
+in return for matching the actual repo convention (single source of truth
+for test discovery).
+
+## plan_2026-04-22_4f29c76f
+### 2026-04-22 iter-1 PLAN — scope & architecture decisions (chosen)
+
+### D-P1: Telemetry scope = A only (drop drone conditioning; keep per-loss Mean trackers B)
+**Trade-off**: Lose drone-telemetry feature path **at the cost of** discarding a model capability that was never validated on real drone data. Synthetic-only usage means the cost is near-zero. Keeping B (trackers) preserves CSV logging — the feature the user is actively using.
+
+### D-P2: Replace AdaLN-zero conditional block with plain causal self-attn + MLP + LayerScale
+**Trade-off**: Predictor becomes strictly unconditional (simpler) **at the cost of** giving up the documented "identity-at-init via zero-gated modulation" guarantee. Mitigation: LayerScale γ=1e-5 on both attn and MLP residual paths provides equivalent near-identity-at-init (same mechanism `CausalCliffordNetBlock` already uses). The renamed test (`test_predictor_identity_init`) validates this. Causality is preserved structurally (causal mask unchanged).
+
+### D-P3: Architecture otherwise frozen (no EMA, no lambda rebalance, no predictor simplification, no loss drop)
+**Trade-off**: Avoid compounding refactor risk **at the cost of** deferring iter-2 future-work items (FW-001..FW-004). If sanity run surfaces issues (e.g. lambda imbalance from iter-2 REFLECT), we address them in a follow-up plan — not in this surgical pass.
+
+### D-P4: BDD100K with opencv-python (no decord)
+**Trade-off**: opencv-python has broader compatibility and is already a likely transitive dep **at the cost of** slower random-frame access than decord. We accept the cost because sanity config (200 steps × B=4 × T=8) is I/O-bound at only ~6400 frames total — well within opencv's capability.
+
+### D-P5: Sanity-run-first training cadence
+**Trade-off**: 1 epoch × 200 steps at B=4/T=8/112² gives a fast signal (target ≤ 15 min) **at the cost of** not detecting long-horizon instabilities that only appear after 1k+ steps. Mitigation: if sanity passes, user will decide whether to schedule a full run as a follow-up plan.
+
+### D-P6: GPU 0 (RTX 4090 24 GB) for sanity
+**Trade-off**: Use the larger GPU even though B=4/T=8/112² fits on the 4070 **at the cost of** tying up the 4090. Benefit: maximum headroom if we bump config for the full run later; consistent with "sanity first, full later" plan cadence.
+
+### D-P7: Synthetic dataset simplified (drop telemetry emission) rather than kept as-is
+**Trade-off**: Cleaner synthetic loader (30 LOC less) **at the cost of** removing the feature that exercised the now-deleted telemetry path. The feature is dead code once D-P1 lands; keeping it would be a ghost constraint.
+
+### Alternatives considered (rejected)
+- **Keep AdaLN block with zero-tensor c** (A2 from findings) — rejected: leaves vestigial conditioning code + config fields for no benefit.
+- **Switch predictor to pure-temporal V-JEPA block** — rejected by user (D-P3 freeze).
+- **decord decoder** — rejected by user (D-P4).
+- **Stanford Drone Dataset** — rejected: user chose BDD100K.
 
 ## plan_2026-04-21_421088a1
 ### 2026-04-21 — Locked design decisions (post-EXPLORE, pre-PLAN)

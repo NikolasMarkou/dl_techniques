@@ -8,3 +8,5 @@
 | plan_2026-04-21_8416bc0b | 2026-04-21 | Port LeWM (JEPA-based action-conditioned world model) from P | "tiny" |
 | plan_2026-04-21_5dadc8ce | 2026-04-21 | Add object detection as a third head to the CliffordNet mult | yolo12-interfaces.md, 8,16,32, box-format-and-eval.md |
 | plan_2026-04-21_421088a1 | 2026-04-21 | Extend the iter-1 `VideoJEPA` backbone with a **second train | clifford-primitives.md, lewm-reusable-assets.md, x,c |
+| plan_2026-04-22_4f29c76f | 2026-04-22 | video_jepa overhaul: strip drone-telemetry conditioning (sco | module-surface.md, telemetry-surface.md, dataset-candidates.md |
+| plan_2026-04-22_016e549b | 2026-04-22 | Wire up training-time visualization for `video_jepa` by reus |  |
