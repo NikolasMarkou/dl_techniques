@@ -247,7 +247,6 @@ def main() -> None:
             batch_size=args.batch_size,
             T=args.T,
             img_size=args.img_size,
-            num_steps=args.steps_per_epoch,
             seed=args.seed,
         )
     else:
