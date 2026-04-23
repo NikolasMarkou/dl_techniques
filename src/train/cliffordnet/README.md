@@ -766,12 +766,20 @@ Image (B, H, W, 3)                           Tokens (B, L)
 
 ### Variants
 
-| Variant | Vision channels | Vision depth | Text channels | Text depth | Embed dim | Params |
-|:--------|:---------------:|:------------:|:-------------:|:----------:|:---------:|:------:|
-| `nano` | 96 | 8 | 128 | 6 | 256 | ~8.5M |
-| `mini` | 128 | 10 | 192 | 8 | 384 | ~18M |
-| `base` | 192 | 12 | 256 | 10 | 512 | ~45M |
-| `large` | 256 | 16 | 384 | 12 | 768 | ~120M |
+Source of truth: `CliffordCLIP.MODEL_VARIANTS`. Params are counted at `image_size=160`, `context_length=64`, `vision_patch_size=4`, `vocab_size=50257`.
+
+| Variant  | Vision ch / depth / shifts | Text ch / depth / shifts | Embed dim | Params  |
+|:---------|:---------------------------|:-------------------------|:---------:|:-------:|
+| `nano`   | 128 / 12 / [1,2]           | 128 / 12 / [1,2]         | 256       | ~9.5M   |
+| `nano_g` | 128 / 12 / [1,2] +gFFN-G   | 128 / 12 / [1,2]         | 256       | ~10.3M  |
+| `mini`   | 192 / 12 / [1,2,4]         | 192 / 12 / [1,2,4]       | 384       | ~18M    |
+| `small`  | 192 / 15 / [1,2,4]         | 192 / 15 / [1,2,4]       | 384       | ~20M    |
+| `base`   | 256 / 16 / [1,2,4,8]       | 256 / 12 / [1,2,4]       | 512       | ~33M    |
+| `large`  | 384 / 20 / [1,2,4,8,16]    | 384 / 16 / [1,2,4,8]     | 768       | ~120M   |
+
+`nano` and `nano_g` are depth/shift-matched to `CliffordNet.nano` and `CliffordNetLM.from_variant("nano", ...)` so the CLIP backbone can be ablated against the vanilla classifier / LM at matched capacity. `nano_g` adds a global-context branch on the vision tower only -- the text tower stays `use_global_context=False` because `CliffordNetLM` has no global-context variant.
+
+Both towers also expose an optional pre-projection `head_dropout` gated on `dropout_rate > 0`, placed after `*_head_norm` and before the projection Dense. This mirrors the `head_dropout` hook in `CliffordNet.model` and `CliffordNetLM.lm`; at `dropout_rate=0.0` the sublayer is not materialised.
 
 ### Tokenizer
 
@@ -865,8 +873,8 @@ PYTHONPATH=src python -m train.cliffordnet.train_clip \
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `--variant` | `mini` | Model variant (`nano`, `mini`, `base`, `large`) |
-| `--dataset` | `synthetic` | `synthetic`, `coco`, `cc3m` |
+| `--variant` | `nano` | Model variant (`nano`, `nano_g`, `mini`, `small`, `base`, `large`) |
+| `--dataset` | `coco2017` | `coco2017` or `cc3m`; `--synthetic` flag overrides with in-memory random pairs |
 | `--batch-size` | 32 | Proven to fit mini on 12 GB VRAM at 112² |
 | `--context-length` | 64 | Text sequence length |
 | `--stage1-image-size` | 112 | Training resolution (single-stage proven) |
