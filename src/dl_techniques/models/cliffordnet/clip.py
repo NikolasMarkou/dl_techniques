@@ -371,6 +371,22 @@ class CliffordCLIP(keras.Model):
             vision_stochastic_depth_rate=0.05,
             text_stochastic_depth_rate=0.05,
         ),
+        # nano_g: nano with a global-context branch on the vision tower
+        # (gFFN-G), mirroring CliffordNet.lite_g. Text tower keeps
+        # use_global_context=False to match CliffordNetLM, which has no
+        # global-context variant in its ladder.
+        "nano_g": dict(
+            vision_channels=128,
+            vision_depth=12,
+            vision_shifts=[1, 2],
+            vision_use_global_context=True,
+            text_channels=128,
+            text_depth=12,
+            text_shifts=[1, 2],
+            embed_dim=256,
+            vision_stochastic_depth_rate=0.05,
+            text_stochastic_depth_rate=0.05,
+        ),
         "mini": dict(
             vision_channels=192,
             vision_depth=12,
