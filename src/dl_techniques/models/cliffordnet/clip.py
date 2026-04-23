@@ -362,10 +362,10 @@ class CliffordCLIP(keras.Model):
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "nano": dict(
             vision_channels=128,
-            vision_depth=8,
+            vision_depth=12,
             vision_shifts=[1, 2],
             text_channels=128,
-            text_depth=8,
+            text_depth=12,
             text_shifts=[1, 2],
             embed_dim=256,
             vision_stochastic_depth_rate=0.05,
@@ -685,6 +685,14 @@ class CliffordCLIP(keras.Model):
         self.vision_head_norm = keras.layers.LayerNormalization(
             epsilon=_LN_EPS, name="vision_head_norm"
         )
+        # Optional pre-projection dropout, gated on dropout_rate > 0 — mirrors
+        # CliffordNet.head_dropout (model.py) so the CLIP vision head has the
+        # same regularisation hook as the vanilla classifier head.
+        self.vision_head_dropout = (
+            keras.layers.Dropout(self.dropout_rate, name="vision_head_dropout")
+            if self.dropout_rate > 0.0
+            else None
+        )
 
     def _build_text_tower(self) -> None:
         """Text tower: embeddings -> CausalCliffordNetBlocks -> LN."""
@@ -734,6 +742,14 @@ class CliffordCLIP(keras.Model):
 
         self.text_head_norm = keras.layers.LayerNormalization(
             epsilon=_LN_EPS, name="text_head_norm"
+        )
+        # Optional pre-projection dropout on the (B, L, D) sequence — mirrors
+        # CliffordNetLM.head_dropout (lm.py) which also drops on the 3D
+        # sequence after head_norm and before the output projection.
+        self.text_head_dropout = (
+            keras.layers.Dropout(self.dropout_rate, name="text_head_dropout")
+            if self.dropout_rate > 0.0
+            else None
         )
 
     def _build_projections(self) -> None:
@@ -929,6 +945,8 @@ class CliffordCLIP(keras.Model):
                 mixed = geo
 
         mixed = self.vision_head_norm(mixed)
+        if self.vision_head_dropout is not None:
+            mixed = self.vision_head_dropout(mixed, training=training)
         mixed = self.vision_projection(mixed)
         if normalize:
             mixed = mixed / (ops.norm(mixed, axis=-1, keepdims=True) + 1e-8)
@@ -963,6 +981,8 @@ class CliffordCLIP(keras.Model):
             x = block(x, training=training)
         x = ops.squeeze(x, axis=1)             # (B, L, D_t)
         x = self.text_head_norm(x)
+        if self.text_head_dropout is not None:
+            x = self.text_head_dropout(x, training=training)
 
         # Pad mask (1 = real token, 0 = pad).
         non_pad = ops.cast(
