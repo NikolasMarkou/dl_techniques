@@ -296,7 +296,12 @@ class CliffordCLIP(keras.Model):
     :param text_stochastic_depth_rate: Max DropPath rate for text blocks.
     :param embed_dim: Shared projection dimension.
     :param layer_scale_init: Initial LayerScale gamma for all blocks.
-    :param dropout_rate: Embedding/head dropout probability.
+    :param dropout_rate: Dropout probability applied to the text embedding
+        and to the optional pre-projection ``head_dropout`` on both towers
+        (vision: after ``vision_head_norm`` on ``(B, D_v)``; text: after
+        ``text_head_norm`` on ``(B, L, D_t)``). When ``0.0`` the
+        head-dropout sublayers are not materialised, matching the gate in
+        :class:`CliffordNet` / :class:`CliffordNetLM`.
     :param pad_token_id: ID used as padding in text inputs (the last-token
         gather finds the last position where ``input_ids != pad_token_id``).
         Defaults to 0.
@@ -358,7 +363,11 @@ class CliffordCLIP(keras.Model):
     LAYERNORM_EPSILON: float = _LN_EPS
 
     # Scaling ladder; both towers share depth/channels so the contrastive
-    # temperature update sees balanced gradient magnitudes.
+    # temperature update sees balanced gradient magnitudes. ``nano`` and
+    # ``nano_g`` match the depth/shifts of :class:`CliffordNet` / :class:`
+    # CliffordNetLM` nano (channels=128, depth=12, shifts=[1,2]); ``nano_g``
+    # adds a global-context branch on the vision tower, mirroring
+    # :class:`CliffordNet.lite_g`.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "nano": dict(
             vision_channels=128,
@@ -1199,7 +1208,9 @@ class CliffordCLIP(keras.Model):
     ) -> "CliffordCLIP":
         """Construct a CliffordCLIP from a predefined variant.
 
-        :param variant: One of ``"nano"``, ``"mini"``, ``"small"``, ``"base"``, ``"large"``.
+        :param variant: One of ``"nano"``, ``"nano_g"``, ``"mini"``, ``"small"``, ``"base"``, ``"large"``.
+            ``nano_g`` is ``nano`` with a global-context branch on the vision
+            tower (analogue of :class:`CliffordNet.lite_g`).
         :param vocab_size: Vocabulary size (use the tokenizer's
             ``vocab_size``).
         :param image_size: Image resolution.
