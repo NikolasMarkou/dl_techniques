@@ -1,8 +1,20 @@
 """Training script for CliffordCLIP (CLIP with Clifford geometric blocks).
 
 Trains :class:`CliffordCLIP` on an image-caption dataset using a symmetric
-contrastive cross-entropy objective. The training recipe borrows schedule
-ideas from the Penguin-VL paper (arXiv:2603.06569):
+contrastive cross-entropy objective. An **optional Stage 0** pretrains the
+two towers independently before contrastive training:
+
+- Vision tower on CIFAR-100 classification (recipe from
+  ``train.cliffordnet.train_cliffordnet``).
+- Text tower on Wikipedia causal LM (recipe from
+  ``train.cliffordnet.train_cliffordnet_nlp``).
+
+Stage 0 mutates the existing ``CliffordCLIP`` object in-place via thin
+throwaway wrappers — no save/reload between stages. Defaults: 50,000 steps
+per sub-stage. Disable with ``--skip-stage0`` or ``--stage0-{vision,lm}-steps 0``.
+
+The training recipe borrows schedule ideas from the Penguin-VL paper
+(arXiv:2603.06569):
 
 - AdamW optimiser, cosine LR decay with a 3% warmup ratio
 - Two-stage **low-to-high resolution curriculum**: Stage 1 at a smaller
@@ -1332,6 +1344,41 @@ def train(args: argparse.Namespace) -> None:
         retrieval_probe_cb,
     ]
 
+    # --- Stage 0: optional independent pretraining ---
+    # Resolve skip flag up-front so later checks read the effective values.
+    if args.skip_stage0:
+        args.stage0_vision_steps = 0
+        args.stage0_lm_steps = 0
+    if args.synthetic and args.stage0_lm_steps > 0:
+        logger.warning(
+            "--synthetic + stage0_lm_steps > 0: Wikipedia is not synthetic; "
+            "forcing stage0_lm_steps=0 for this run."
+        )
+        args.stage0_lm_steps = 0
+
+    if args.stage0_vision_steps > 0:
+        _run_stage0_vision(clip_model, args, results_dir)
+    else:
+        logger.info("Stage 0 vision: skipped (stage0_vision_steps=0)")
+
+    if args.stage0_lm_steps > 0:
+        _run_stage0_lm(clip_model, args, results_dir)
+    else:
+        logger.info("Stage 0 LM: skipped (stage0_lm_steps=0)")
+
+    # Sanity: all CLIP layers trainable again so Stage 1 trains the full model.
+    for layer in _iter_clip_sublayers(clip_model):
+        if not layer.trainable:
+            raise RuntimeError(
+                f"Layer {layer.name} still frozen after Stage 0. "
+                "_unfreeze_clip did not restore trainable flags."
+            )
+    if clip_model.logit_scale is not None and not clip_model.logit_scale.trainable:
+        raise RuntimeError(
+            "logit_scale still frozen after Stage 0 — contrastive training "
+            "would be broken."
+        )
+
     # --- Curriculum ---
     histories: Dict[str, keras.callbacks.History] = {}
     for stage in (1, 2):
@@ -1470,6 +1517,16 @@ def train(args: argparse.Namespace) -> None:
         f.write(f"Context length: {args.context_length}\n")
         f.write(f"Parameters: {clip_model.count_params():,}\n\n")
         f.write(
+            f"Stage 0 vision: steps={args.stage0_vision_steps}, "
+            f"lr={args.stage0_vision_lr}, wd={args.stage0_vision_wd}, "
+            f"batch={args.stage0_vision_batch_size}\n"
+        )
+        f.write(
+            f"Stage 0 LM:     steps={args.stage0_lm_steps}, "
+            f"lr={args.stage0_lm_lr}, wd={args.stage0_lm_wd}, "
+            f"batch={args.stage0_lm_batch_size}\n"
+        )
+        f.write(
             f"Stage 1: size={args.stage1_image_size}, "
             f"epochs={args.stage1_epochs}, lr={args.stage1_lr}\n"
         )
@@ -1550,6 +1607,37 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage2-image-size", type=int, default=160)
     parser.add_argument("--stage2-epochs", type=int, default=20)
     parser.add_argument("--stage2-lr", type=float, default=5e-4)
+
+    # Stage 0 (optional independent pretraining — vision on CIFAR-100, text on Wikipedia)
+    parser.add_argument(
+        "--stage0-vision-steps", type=int, default=50000,
+        help=(
+            "Number of training steps for Stage 0 vision pretraining on "
+            "CIFAR-100. 0 disables. Default 50000."
+        ),
+    )
+    parser.add_argument(
+        "--stage0-lm-steps", type=int, default=50000,
+        help=(
+            "Number of training steps for Stage 0 LM pretraining on "
+            "Wikipedia. 0 disables. Default 50000."
+        ),
+    )
+    parser.add_argument(
+        "--skip-stage0", action="store_true",
+        help="Shortcut: zero out both Stage 0 step counts.",
+    )
+    parser.add_argument("--stage0-vision-lr", type=float, default=1e-3)
+    parser.add_argument("--stage0-vision-wd", type=float, default=0.1)
+    parser.add_argument("--stage0-vision-batch-size", type=int, default=128)
+    parser.add_argument("--stage0-lm-lr", type=float, default=3e-4)
+    parser.add_argument("--stage0-lm-wd", type=float, default=0.01)
+    parser.add_argument("--stage0-lm-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--stage0-lm-hf-cache", type=str,
+        default="/media/arxwn/data0_4tb/datasets/wikipedia",
+        help="HuggingFace cache dir for the Wikipedia dataset.",
+    )
 
     # Shared training
     parser.add_argument("--batch-size", type=int, default=128)
