@@ -844,6 +844,175 @@ def _run_stage0_vision(
     logger.info("Stage 0 vision: complete (CLIP layers unfrozen for Stage 1).")
 
 
+class _TextLMWrapper(keras.Model):
+    """Stage 0 wrapper that reuses CliffordCLIP text sub-layers for CLM.
+
+    Mirrors :meth:`CliffordCLIP.encode_text` up to ``text_head_dropout``,
+    then applies a fresh ``Dense(vocab_size)`` for per-token logits.
+    Returns a dict ``{"logits": (B, L, V)}`` so it composes with
+    ``MaskedCausalLMLoss`` via ``loss={"logits": ...}`` / labels wrapped
+    as ``(x, {"logits": y})``.
+    """
+
+    def __init__(
+        self,
+        clip_model: CliffordCLIP,
+        vocab_size: int,
+        context_length: int,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.clip_model = clip_model
+        self.context_length = context_length
+        self.lm_head = keras.layers.Dense(vocab_size, name="stage0_lm_head")
+
+    def call(self, input_ids, training: Optional[bool] = None):
+        from keras import ops
+        m = self.clip_model
+        positions = ops.arange(self.context_length)
+        x = m.token_embedding(input_ids) + m.position_embedding(positions)
+        x = m.text_embed_norm(x)
+        x = m.text_embed_dropout(x, training=training)
+        x = ops.expand_dims(x, axis=1)
+        for block in m.text_blocks:
+            x = block(x, training=training)
+        x = ops.squeeze(x, axis=1)
+        x = m.text_head_norm(x)
+        if m.text_head_dropout is not None:
+            x = m.text_head_dropout(x, training=training)
+        return {"logits": self.lm_head(x)}
+
+
+def _run_stage0_lm(
+    clip_model: CliffordCLIP,
+    args: argparse.Namespace,
+    run_dir: str,
+) -> None:
+    """Pretrain the CliffordCLIP text tower on Wikipedia causal LM.
+
+    Uses the same context length as CliffordCLIP (``args.context_length``)
+    so the in-place position_embedding remains shape-compatible with the
+    subsequent contrastive stages. Tokenizer is plain tiktoken ``gpt2``
+    (vocab 50257, EOT 50256); the 4 extra specials that
+    ``train_cliffordnet_nlp.py`` declares for MLM are not emitted in the
+    CLM path, so we can pretrain without them.
+    """
+    from train.common.nlp import preprocess_clm_packed_dataset
+    from dl_techniques.datasets.nlp import load_wikipedia_train_val
+    from dl_techniques.losses import MaskedCausalLMLoss
+    import tiktoken
+
+    steps_budget = int(args.stage0_lm_steps)
+    logger.info("=" * 60)
+    logger.info(f"Stage 0 LM: Wikipedia CLM pretrain ({steps_budget:,} steps)")
+    logger.info("=" * 60)
+
+    # Tokenizer — plain gpt2, no specials; mirrors what train_clip.py uses.
+    encoder = tiktoken.get_encoding("gpt2")
+    vocab_size = encoder.n_vocab
+    eot_token_id = int(encoder.eot_token)
+    logger.info(
+        f"Stage 0 LM tokenizer: gpt2, vocab_size={vocab_size}, "
+        f"eot_token_id={eot_token_id}"
+    )
+    if vocab_size != clip_model.vocab_size:
+        raise RuntimeError(
+            f"Vocab mismatch: tokenizer n_vocab={vocab_size}, "
+            f"clip_model.vocab_size={clip_model.vocab_size}. "
+            "Rebuild CliffordCLIP with vocab_size=50257 or change tokenizer."
+        )
+
+    # Wikipedia data — fail fast if cache dir is absent.
+    if not os.path.isdir(args.stage0_lm_hf_cache):
+        raise RuntimeError(
+            f"Wikipedia cache dir not found: {args.stage0_lm_hf_cache}. "
+            "Point --stage0-lm-hf-cache at a pre-downloaded HF cache or "
+            "pass --stage0-lm-steps 0 / --skip-stage0 to bypass LM pretrain."
+        )
+    train_raw, _val_raw = load_wikipedia_train_val(
+        cache_dir=args.stage0_lm_hf_cache,
+        min_article_length=500,
+        val_fraction=0.02,
+        max_val_samples=5000,
+        max_train_samples=None,
+    )
+
+    chunk_length = args.context_length + 1  # +1 for the causal shift.
+    train_ds = preprocess_clm_packed_dataset(
+        train_raw,
+        encoding_name="gpt2",
+        chunk_length=chunk_length,
+        batch_size=args.stage0_lm_batch_size,
+        eot_token_id=eot_token_id,
+        repeat=True,  # guarantee steps_per_epoch never StopIteration.
+    )
+    train_ds = train_ds.map(
+        lambda x, y: (x, {"logits": y}),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
+    # Schedule: warmup + cosine over the step budget.
+    warmup_steps = max(1, int(0.05 * steps_budget))
+    decay_steps = max(1, steps_budget - warmup_steps)
+    schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay",
+        "learning_rate": args.stage0_lm_lr,
+        "decay_steps": decay_steps,
+        "alpha": 1e-2,
+        "warmup_steps": warmup_steps,
+        "warmup_start_lr": 1e-8,
+    })
+    optimizer = optimizer_builder({
+        "type": "adamw",
+        "beta_1": 0.9,
+        "beta_2": 0.999,
+        "epsilon": 1e-8,
+        "weight_decay": args.stage0_lm_wd,
+    }, schedule)
+
+    _freeze_clip_for_stage0(clip_model, train_tower="text")
+
+    wrapper = _TextLMWrapper(
+        clip_model,
+        vocab_size=vocab_size,
+        context_length=args.context_length,
+    )
+    wrapper.build((None, args.context_length))
+
+    n_train = sum(int(np.prod(v.shape)) for v in wrapper.trainable_variables)
+    n_total = sum(int(np.prod(v.shape)) for v in wrapper.variables)
+    logger.info(
+        f"Stage 0 LM: trainable={n_train:,} / total={n_total:,} params "
+        f"| 1 epoch × {steps_budget} steps/epoch "
+        f"(warmup {warmup_steps:,}, peak_lr={args.stage0_lm_lr}, "
+        f"wd={args.stage0_lm_wd}, context_length={args.context_length})"
+    )
+
+    wrapper.compile(
+        optimizer=optimizer,
+        loss={"logits": MaskedCausalLMLoss()},
+        metrics={"logits": ["accuracy"]},
+    )
+
+    tb_dir = os.path.join(run_dir, "tensorboard", "stage0_lm")
+    os.makedirs(tb_dir, exist_ok=True)
+    wrapper.fit(
+        train_ds,
+        epochs=1,
+        steps_per_epoch=steps_budget,
+        callbacks=[
+            keras.callbacks.TerminateOnNaN(),
+            keras.callbacks.TensorBoard(
+                log_dir=tb_dir, write_graph=False, update_freq="epoch",
+            ),
+        ],
+        verbose=1,
+    )
+
+    _unfreeze_clip(clip_model)
+    logger.info("Stage 0 LM: complete (CLIP layers unfrozen for Stage 1).")
+
+
 # =============================================================================
 # Stage training
 # =============================================================================
