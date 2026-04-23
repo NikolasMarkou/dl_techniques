@@ -34,11 +34,12 @@ References:
 import keras
 import argparse
 from dataclasses import dataclass
-from typing import Optional
 
 from train.common import setup_gpu
 from train.gpt2.pretrain import (
     TrainingConfig,
+    create_gpt2_model,
+    train_gpt2,
     _build_parser,
     _config_from_args,
 )
@@ -156,37 +157,21 @@ def wrap_model_with_so(
 
 
 # ---------------------------------------------------------------------
-# Override model creation to inject regularization
+# Training entry point
 # ---------------------------------------------------------------------
 
 
-import train.gpt2.pretrain as _pretrain_module
-
-_original_train = _pretrain_module.train_gpt2
-_original_create = _pretrain_module.create_gpt2_model
-
-# Store config for the patched create function
-_so_config_ref: Optional[SOTrainingConfig] = None
-
-
-def _patched_create(config):
-    """Create model, then wrap with SO if config is SOTrainingConfig."""
-    model = _original_create(config)
-    if _so_config_ref is not None:
-        model = wrap_model_with_so(model, _so_config_ref)
-    return model
-
-
 def train_gpt2_so(config: SOTrainingConfig):
-    """Run train_gpt2 with SO regularization injected into train_step."""
-    global _so_config_ref
-    _so_config_ref = config
-    _pretrain_module.create_gpt2_model = _patched_create
-    try:
-        return _original_train(config)
-    finally:
-        _pretrain_module.create_gpt2_model = _original_create
-        _so_config_ref = None
+    """Run train_gpt2 with SO regularization injected into train_step.
+
+    Builds a model factory that wraps the freshly-created GPT-2 with
+    SO regularization, then delegates to ``train_gpt2`` via its
+    ``model_factory`` hook. No module-level state, no monkey-patching.
+    """
+    def _so_model_factory(cfg: SOTrainingConfig) -> "keras.Model":
+        return wrap_model_with_so(create_gpt2_model(cfg), cfg)
+
+    return train_gpt2(config, model_factory=_so_model_factory)
 
 
 # ---------------------------------------------------------------------
@@ -228,7 +213,7 @@ def _so_config_from_args(args: argparse.Namespace) -> SOTrainingConfig:
     """Map parsed CLI args to SOTrainingConfig."""
     base = _config_from_args(args)
     return SOTrainingConfig(
-        **{k: v for k, v in base.__dict__.items()},
+        **vars(base),
         so_lambda=args.so_lambda,
         so_l1=args.so_l1,
         so_l2=args.so_l2,
