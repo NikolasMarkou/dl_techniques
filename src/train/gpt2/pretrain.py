@@ -26,7 +26,7 @@ import glob
 import time
 import argparse
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List
+from typing import Callable, Optional, Tuple, List
 
 import keras
 import numpy as np
@@ -610,10 +610,15 @@ def _estimate_steps_per_epoch(config: TrainingConfig) -> int:
 
 def train_gpt2(
     config: TrainingConfig,
+    model_factory: Callable[[TrainingConfig], GPT2] = create_gpt2_model,
 ) -> Tuple[GPT2, keras.callbacks.History]:
     """Run GPT-2 CLM pre-training.
 
     :param config: Training configuration.
+    :param model_factory: Callable that builds a fresh GPT-2 model from the
+        config. Defaults to :func:`create_gpt2_model`. Override to inject
+        post-construction wrapping (e.g. SO regularization). Not used when
+        resuming from a checkpoint.
     :return: Trained model and training history.
     """
     logger.info("=" * 60)
@@ -646,7 +651,7 @@ def train_gpt2(
     if config.resume_from:
         model, initial_step = load_model_from_checkpoint(config.resume_from)
     else:
-        model = create_gpt2_model(config)
+        model = model_factory(config)
 
     compile_model(model, config, steps_per_epoch)
 
