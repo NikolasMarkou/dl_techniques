@@ -818,7 +818,9 @@ def _run_stage0_vision(
 
     _freeze_clip_for_stage0(clip_model, train_tower="vision")
 
-    wrapper = _VisionClassifier(clip_model, num_classes=num_classes)
+    wrapper = _VisionClassifier(
+        clip_model, num_classes=num_classes, name="stage0_vision_wrapper",
+    )
     wrapper.build((None, 32, 32, 3))
 
     n_train = sum(int(np.prod(v.shape)) for v in wrapper.trainable_variables)
@@ -988,6 +990,7 @@ def _run_stage0_lm(
         clip_model,
         vocab_size=vocab_size,
         context_length=args.context_length,
+        name="stage0_lm_wrapper",
     )
     wrapper.build((None, args.context_length))
 
