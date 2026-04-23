@@ -175,13 +175,18 @@ This design preserves:
 
 ### Variants
 
-| Variant | Vision ch/depth/shifts | Text ch/depth/shifts | embed_dim | Params |
-|:--------|:-----------------------|:---------------------|:---------:|-------:|
-| `nano`  | 128 / 8 / [1,2]        | 128 / 8 / [1,2]      | 256       | ~8.5M  |
-| `mini`  | 192 / 12 / [1,2,4]     | 192 / 12 / [1,2,4]   | 384       | ~18M   |
-| `small` | 192 / 15 / [1,2,4]     | 192 / 15 / [1,2,4]   | 384       | ~20M   |
-| `base`  | 256 / 16 / [1,2,4,8]   | 256 / 12 / [1,2,4]   | 512       | ~33M   |
-| `large` | 384 / 20 / [1,2,4,8,16]| 384 / 16 / [1,2,4,8] | 768       | ~120M  |
+| Variant  | Vision ch/depth/shifts | Text ch/depth/shifts | embed_dim | Params |
+|:---------|:-----------------------|:---------------------|:---------:|-------:|
+| `nano`   | 128 / 12 / [1,2]       | 128 / 12 / [1,2]     | 256       | ~9.5M  |
+| `nano_g` | 128 / 12 / [1,2] +gFFN-G | 128 / 12 / [1,2]   | 256       | ~10.3M |
+| `mini`   | 192 / 12 / [1,2,4]     | 192 / 12 / [1,2,4]   | 384       | ~18M   |
+| `small`  | 192 / 15 / [1,2,4]     | 192 / 15 / [1,2,4]   | 384       | ~20M   |
+| `base`   | 256 / 16 / [1,2,4,8]   | 256 / 12 / [1,2,4]   | 512       | ~33M   |
+| `large`  | 384 / 20 / [1,2,4,8,16]| 384 / 16 / [1,2,4,8] | 768       | ~120M  |
+
+`nano` and `nano_g` are depth/shift-aligned with `CliffordNet.nano` and `CliffordNetLM.from_variant("nano", ...)` on every shared axis (channels=128, depth=12, shifts=[1,2]) so the CLIP backbone can be ablated against the vanilla classifier / LM at matched capacity. `nano_g` adds a global-context branch on the vision tower only, mirroring `CliffordNet.lite_g`; the text side stays `use_global_context=False` because `CliffordNetLM` has no global-context variant in its ladder.
+
+Both towers also expose an optional pre-projection `head_dropout` gated on `dropout_rate > 0`, placed after `*_head_norm` and before the projection Dense -- the same hook `CliffordNet.head_dropout` (on the pooled vector) and `CliffordNetLM.head_dropout` (on the `(B, L, D)` sequence) provide. `dropout_rate=0.0` skips the sublayer entirely.
 
 The `small` variant is parameter-matched to ViT-CLIP at the same channel width (192) and vocabulary (GPT-2 BPE, 50,257 tokens). ViT-CLIP at 192ch/12 layers has ~20.4M params; CliffordCLIP-small reaches the same count with 15+15 depth instead of 12+12 -- 25% more layers at the same budget because each Clifford block carries no FFN and no QKV projections.
 
