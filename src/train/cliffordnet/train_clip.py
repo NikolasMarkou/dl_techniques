@@ -219,8 +219,15 @@ class ContrastiveCliffordCLIP(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ContrastiveCliffordCLIP":
+        # Explicit keys only. ``Model.get_config`` also stores standard
+        # base-class fields (``name``, ``dtype``, ``trainable``); we accept
+        # ``name`` because it round-trips cleanly, and silently drop the rest
+        # rather than forwarding arbitrary ``**config`` -- that would mask
+        # typos in saved configs and couple this loader to keras internals.
         inner = keras.saving.deserialize_keras_object(config.pop("clip_model"))
-        return cls(clip_model=inner, **config)
+        label_smoothing = config.pop("label_smoothing", 0.0)
+        name = config.get("name", None)
+        return cls(clip_model=inner, label_smoothing=label_smoothing, name=name)
 
 
 # =============================================================================
@@ -545,12 +552,13 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
             return
 
         # Scrape logit_scale directly from the model so we record its
-        # instantaneous value rather than an averaged training metric.
+        # instantaneous value rather than an averaged training metric. Use
+        # ``_get_logit_scale`` so the recorded number is the clipped exp
+        # that the forward pass actually multiplied into the logits -- not
+        # the raw exp which can exceed logit_scale_max mid-training.
         try:
             scale_val = float(
-                keras.ops.convert_to_numpy(
-                    keras.ops.exp(self.clip_model.logit_scale)
-                )
+                keras.ops.convert_to_numpy(self.clip_model._get_logit_scale())
             )
         except Exception:
             scale_val = float("nan")
