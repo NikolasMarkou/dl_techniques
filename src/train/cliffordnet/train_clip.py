@@ -589,6 +589,262 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
 
 
 # =============================================================================
+# Stage 0: independent pretraining (vision on CIFAR-100, text on Wikipedia)
+# =============================================================================
+#
+# The two Stage 0 helpers train the *existing* ``CliffordCLIP`` sub-layers
+# in place via a throwaway wrapper that attaches a task-specific head
+# (classifier for vision, LM head for text). Weights land directly in
+# ``clip_model`` — no save/reload, no cross-model weight transfer.
+#
+# Why not train standalone ``CliffordNet`` / ``CliffordNetLM`` and transfer?
+# Layer names don't match (``clifford_block_N`` vs ``vision_clifford_block_N``
+# / ``text_clifford_block_N``), so ``load_weights_from_checkpoint`` would
+# need a per-layer name map. Wrapping is simpler and keeps the whole thing
+# in one process.
+
+
+def _iter_clip_sublayers(clip_model: CliffordCLIP):
+    """Yield every ``keras.layers.Layer`` tracked by CliffordCLIP we care about."""
+    _stem_attrs = (
+        "vision_stem_conv", "vision_stem_conv1", "vision_stem_bn1",
+        "vision_stem_conv2", "vision_stem_norm",
+    )
+    _vision_head_attrs = (
+        "vision_global_pool", "vision_global_max_pool",
+        "vision_head_norm", "vision_head_dropout",
+    )
+    _text_embed_attrs = (
+        "token_embedding", "position_embedding",
+        "text_embed_norm", "text_embed_dropout",
+    )
+    _text_head_attrs = ("text_head_norm", "text_head_dropout")
+    _projection_attrs = (
+        "vision_head_geo", "text_head_geo",
+        "vision_query_pool", "text_query_pool",
+        "vision_head_scale", "text_head_scale",
+        "vision_projection", "text_projection",
+    )
+    for name in _stem_attrs:
+        layer = getattr(clip_model, name, None)
+        if layer is not None:
+            yield layer
+    for block in clip_model.vision_blocks:
+        yield block
+    for name in _vision_head_attrs:
+        layer = getattr(clip_model, name, None)
+        if layer is not None:
+            yield layer
+    for name in _text_embed_attrs:
+        layer = getattr(clip_model, name, None)
+        if layer is not None:
+            yield layer
+    for block in clip_model.text_blocks:
+        yield block
+    for name in _text_head_attrs:
+        layer = getattr(clip_model, name, None)
+        if layer is not None:
+            yield layer
+    for name in _projection_attrs:
+        layer = getattr(clip_model, name, None)
+        if layer is not None:
+            yield layer
+
+
+# Projection / Clifford-head / cross-modal layers — always frozen during
+# Stage 0 (they'd learn against a nonexistent contrastive objective).
+_STAGE0_ALWAYS_FROZEN = frozenset({
+    "vision_projection", "text_projection",
+    "vision_head_geo", "text_head_geo",
+    "vision_query_pool", "text_query_pool",
+    "vision_head_scale", "text_head_scale",
+    "vision_global_max_pool",
+})
+
+
+def _is_vision_backbone(name: str) -> bool:
+    return (
+        name.startswith("vision_stem")
+        or name.startswith("vision_clifford_block_")
+        or name in ("vision_global_pool", "vision_head_norm", "vision_head_dropout")
+    )
+
+
+def _is_text_backbone(name: str) -> bool:
+    return (
+        name in (
+            "token_embedding", "position_embedding",
+            "text_embed_norm", "text_embed_dropout",
+            "text_head_norm", "text_head_dropout",
+        )
+        or name.startswith("text_clifford_block_")
+    )
+
+
+def _freeze_clip_for_stage0(
+    clip_model: CliffordCLIP, *, train_tower: str,
+) -> None:
+    """Freeze all sub-layers except the requested tower's backbone.
+
+    The learnable ``logit_scale`` scalar is also frozen — it has no role
+    before contrastive training and must not drift under weight decay.
+    """
+    assert train_tower in ("vision", "text"), train_tower
+    for layer in _iter_clip_sublayers(clip_model):
+        name = layer.name
+        if name in _STAGE0_ALWAYS_FROZEN:
+            layer.trainable = False
+        elif train_tower == "vision":
+            layer.trainable = _is_vision_backbone(name)
+        else:
+            layer.trainable = _is_text_backbone(name)
+    if clip_model.logit_scale is not None:
+        clip_model.logit_scale.trainable = False
+
+
+def _unfreeze_clip(clip_model: CliffordCLIP) -> None:
+    """Undo Stage 0 freezes so Stage 1 contrastive training trains everything."""
+    for layer in _iter_clip_sublayers(clip_model):
+        layer.trainable = True
+    if clip_model.logit_scale is not None:
+        clip_model.logit_scale.trainable = True
+
+
+class _VisionClassifier(keras.Model):
+    """Stage 0 wrapper that reuses CliffordCLIP vision sub-layers.
+
+    Forward path: ``_apply_vision_stem`` → ``vision_blocks`` →
+    ``vision_global_pool`` → ``vision_head_norm`` → (optional
+    ``vision_head_dropout``) → fresh ``Dense(num_classes)``. The projection
+    / Clifford-head sub-layers are intentionally skipped — they have no
+    meaning outside contrastive training and should be frozen anyway.
+    """
+
+    def __init__(
+        self, clip_model: CliffordCLIP, num_classes: int, **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.clip_model = clip_model
+        self.classifier = keras.layers.Dense(
+            num_classes, name="stage0_vision_classifier",
+        )
+
+    def call(self, images, training: Optional[bool] = None):
+        m = self.clip_model
+        x = m._apply_vision_stem(images, training=training)
+        for block in m.vision_blocks:
+            x = block(x, training=training)
+        x = m.vision_global_pool(x)
+        x = m.vision_head_norm(x)
+        if m.vision_head_dropout is not None:
+            x = m.vision_head_dropout(x, training=training)
+        return self.classifier(x)
+
+
+def _run_stage0_vision(
+    clip_model: CliffordCLIP,
+    args: argparse.Namespace,
+    run_dir: str,
+) -> None:
+    """Pretrain the CliffordCLIP vision tower on CIFAR-100 classification.
+
+    Reuses the augmentation + normalisation pipeline from
+    ``train.cliffordnet.train_cliffordnet`` (AutoAugment CIFAR-10 policy,
+    random crop, HFlip, per-channel normalise, RandomErasing).
+    """
+    from train.cliffordnet.train_cliffordnet import (
+        build_train_dataset as _cifar_build_train,
+        build_eval_dataset as _cifar_build_eval,
+    )
+    from train.common import load_dataset
+
+    steps_budget = int(args.stage0_vision_steps)
+    logger.info("=" * 60)
+    logger.info(f"Stage 0 vision: CIFAR-100 pretrain ({steps_budget:,} steps)")
+    logger.info("=" * 60)
+
+    (x_train, y_train), (x_test, y_test), _shape, num_classes = load_dataset(
+        "cifar100", batch_size=args.stage0_vision_batch_size,
+    )
+    if num_classes != 100:
+        raise RuntimeError(
+            f"Stage 0 vision expected CIFAR-100 (100 classes); "
+            f"got num_classes={num_classes}"
+        )
+
+    train_ds = _cifar_build_train(
+        x_train, y_train,
+        batch_size=args.stage0_vision_batch_size,
+        dataset_name="cifar100",
+        random_erasing_prob=0.25,
+    )
+    val_ds = _cifar_build_eval(
+        x_test, y_test,
+        batch_size=args.stage0_vision_batch_size,
+        dataset_name="cifar100",
+    )
+    steps_per_epoch = max(1, len(x_train) // args.stage0_vision_batch_size)
+    stage0_epochs = max(1, -(-steps_budget // steps_per_epoch))  # ceil
+    warmup_steps = max(1, int(0.05 * steps_budget))
+    decay_steps = max(1, steps_budget - warmup_steps)
+
+    schedule = learning_rate_schedule_builder({
+        "type": "cosine_decay",
+        "learning_rate": args.stage0_vision_lr,
+        "decay_steps": decay_steps,
+        "alpha": 1e-2,
+        "warmup_steps": warmup_steps,
+        "warmup_start_lr": 1e-8,
+    })
+    optimizer = optimizer_builder({
+        "type": "adamw",
+        "beta_1": 0.9,
+        "beta_2": 0.999,
+        "epsilon": 1e-8,
+        "weight_decay": args.stage0_vision_wd,
+    }, schedule)
+
+    _freeze_clip_for_stage0(clip_model, train_tower="vision")
+
+    wrapper = _VisionClassifier(clip_model, num_classes=num_classes)
+    wrapper.build((None, 32, 32, 3))
+
+    n_train = sum(int(np.prod(v.shape)) for v in wrapper.trainable_variables)
+    n_total = sum(int(np.prod(v.shape)) for v in wrapper.variables)
+    logger.info(
+        f"Stage 0 vision: trainable={n_train:,} / total={n_total:,} params "
+        f"| {stage0_epochs} epochs × {steps_per_epoch} steps/epoch "
+        f"(budget {steps_budget:,}, warmup {warmup_steps:,}, "
+        f"peak_lr={args.stage0_vision_lr}, wd={args.stage0_vision_wd})"
+    )
+
+    wrapper.compile(
+        optimizer=optimizer,
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=["accuracy"],
+    )
+
+    tb_dir = os.path.join(run_dir, "tensorboard", "stage0_vision")
+    os.makedirs(tb_dir, exist_ok=True)
+    wrapper.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=stage0_epochs,
+        steps_per_epoch=steps_per_epoch,
+        callbacks=[
+            keras.callbacks.TerminateOnNaN(),
+            keras.callbacks.TensorBoard(
+                log_dir=tb_dir, write_graph=False, update_freq="epoch",
+            ),
+        ],
+        verbose=1,
+    )
+
+    _unfreeze_clip(clip_model)
+    logger.info("Stage 0 vision: complete (CLIP layers unfrozen for Stage 1).")
+
+
+# =============================================================================
 # Stage training
 # =============================================================================
 
