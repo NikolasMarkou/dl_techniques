@@ -42,6 +42,75 @@ Dataset: uses the ``coco_captions`` tfds builder by default. Pass
 ``--synthetic`` for a CPU-friendly smoke test that generates random
 pixel/caption pairs on the fly.
 
+Reference training recipes
+--------------------------
+
+The defaults in this script are deliberately scaled *down* for a nano
+model on a single 4090. For context, here are the two canonical CLIP
+recipes. Any divergence from them is intentional (smaller model, smaller
+data, single GPU) but worth being aware of when tuning.
+
+**OpenAI CLIP (Radford et al., 2021 — arXiv:2103.00020).**
+Trained on 400M web image-text pairs ("WIT") for 32 epochs.
+
+- Architectures: ViT-B/32, ViT-B/16, ViT-L/14 (and ResNet variants).
+  Vision patch sizes: 32x32 (B/32), 16x16 (B/16), 14x14 (L/14) on a
+  224x224 input → 49, 196, and 256 tokens respectively (plus CLS).
+  Text: 12-layer 512-wide 8-head Transformer, 49,408 BPE vocab, context
+  length 76 (+ BOS/EOS = 77), max 63M params (tied to ViT-L).
+- Optimiser: Adam with decoupled weight decay (`AdamW`-style), applied
+  to all weights except biases, gains, and LayerNorm (which is what
+  "decoupled weight decay" means here).
+- LR: cosine decay, linear warmup over the first 2,000 steps; peak LR
+  5e-4 for the ResNet/ViT-B models, 4e-4 for ViT-L.
+- Weight decay: 0.2. beta_1=0.9, beta_2=0.98, eps=1e-6.
+- Batch size: **32,768** (global, across 256/592 V100 GPUs) — the
+  large-batch InfoNCE is central to CLIP's sample efficiency.
+- Learnable temperature ``log(1/tau)`` init 0.07, clipped so
+  ``exp(logit_scale) <= 100`` to prevent training instability.
+- Mixed precision (fp16) with loss-scaling; gradient checkpointing on
+  the largest variants; the vision tower runs in mixed precision and
+  the text tower in fp32 for ViT-L.
+- No weight decay on the temperature.
+- Augmentation: only random resized crop from the original image.
+- Data: 400M pairs collected from the public web (not released).
+
+**OpenCLIP (Ilharco et al., 2021+; Cherti et al., 2023 —
+arXiv:2212.07143).** Reproduces and scales CLIP on LAION-400M and
+LAION-2B. Recipes differ slightly per variant but the pattern is:
+
+- Architectures: same B/32, B/16, L/14, plus H/14 (14x14 patches on
+  224x224 → 256 tokens) and G/14. Later high-res runs (e.g., L/14-336,
+  H/14-378) keep the patch size and grow the input.
+- Batch size: 32k–88k (multi-node distributed InfoNCE with
+  ``gather-with-grad=True`` — gradients flow through the all-gather so
+  negatives from other ranks count toward the loss).
+- Peak LR: 5e-4 (B/32, B/16), 4e-4 (L/14), 1e-3 for very small models.
+- Warmup: 2,000–10,000 steps; cosine decay to 0 over the full run.
+- Weight decay: 0.1–0.2 (typically 0.1 for LAION runs, 0.2 for WIT-like).
+- beta_2: 0.98 (kept from OpenAI); eps: 1e-6 or 1e-8.
+- Training length: 32 epochs on LAION-400M = 12.8B seen samples
+  (B/32), up to 34B samples for the H/14 runs.
+- Learnable temperature clipped to ``exp(logit_scale) <= 100`` (same
+  as OpenAI).
+- Mixed precision (bf16 or fp16) via ``torch.cuda.amp``; activation
+  checkpointing for the large models; LayerNorm kept in fp32.
+- Random resized crop + horizontal flip; no color jitter in the
+  canonical recipes (added in some later runs).
+- Text: same 49,408 BPE vocab and context length 77 as OpenAI CLIP.
+
+**This script's defaults vs. the above.** Nano variant (d=256, 12/12),
+single 4090, batch 32-64, COCO-2017 (~591k pairs after the all-captions
+fix), tiktoken `gpt2` vocab (50,257) with context length 64, cosine
+schedule + 3% warmup, weight decay 0.1, `logit_scale_max=100`. Vision
+patch size is configurable via ``--vision-patch-size`` — the example CLI
+uses 4 on a 96/160-px input (→ 576/1600 tokens) because at those small
+resolutions a CLIP-style 14-16 patch would leave too few tokens; full
+224-px runs should use 14 or 16 to stay close to the CLIP regime. The
+biggest qualitative gap is the batch size: 32 negatives vs. 32k means
+contrastive signal is much weaker, which is why nano-on-COCO recall@K
+numbers are roughly an order of magnitude below published CLIP results.
+
 Example::
 
     python -m train.cliffordnet.train_clip \\
