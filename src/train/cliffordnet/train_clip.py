@@ -714,6 +714,14 @@ def _iter_clip_sublayers(clip_model: CliffordCLIP):
             yield layer
     for block in clip_model.vision_blocks:
         yield block
+    # New under hierarchical vision: PatchMerging downsamples + optional
+    # Dense projections between stages. Both must be visible to the freeze
+    # sweep so that vision pretrain can actually train them.
+    for merge in getattr(clip_model, "vision_merge_layers", []):
+        yield merge
+    for proj in getattr(clip_model, "vision_merge_projections", []):
+        if proj is not None:
+            yield proj
     for name in _vision_head_attrs:
         layer = getattr(clip_model, name, None)
         if layer is not None:
@@ -749,6 +757,8 @@ def _is_vision_backbone(name: str) -> bool:
     return (
         name.startswith("vision_stem")
         or name.startswith("vision_clifford_block_")
+        or name.startswith("vision_patch_merge_")
+        or name.startswith("vision_merge_proj_")
         or name in ("vision_global_pool", "vision_head_norm", "vision_head_dropout")
     )
 
@@ -796,11 +806,12 @@ def _unfreeze_clip(clip_model: CliffordCLIP) -> None:
 class _VisionClassifier(keras.Model):
     """Pretraining wrapper that reuses CliffordCLIP vision sub-layers.
 
-    Forward path: ``_apply_vision_stem`` → ``vision_blocks`` →
-    ``vision_global_pool`` → ``vision_head_norm`` → (optional
-    ``vision_head_dropout``) → fresh ``Dense(num_classes)``. The projection
-    / Clifford-head sub-layers are intentionally skipped — they have no
-    meaning outside contrastive training and should be frozen anyway.
+    Forward path: ``_apply_vision_body`` (stem + staged Clifford blocks +
+    PatchMerging downsamples) → ``vision_global_pool`` → ``vision_head_norm``
+    → (optional ``vision_head_dropout``) → fresh ``Dense(num_classes)``.
+    The projection / Clifford-head sub-layers are intentionally skipped —
+    they have no meaning outside contrastive training and should be frozen
+    anyway.
     """
 
     def __init__(
@@ -814,9 +825,7 @@ class _VisionClassifier(keras.Model):
 
     def call(self, images, training: Optional[bool] = None):
         m = self.clip_model
-        x = m._apply_vision_stem(images, training=training)
-        for block in m.vision_blocks:
-            x = block(x, training=training)
+        x = m._apply_vision_body(images, training=training)
         x = m.vision_global_pool(x)
         x = m.vision_head_norm(x)
         if m.vision_head_dropout is not None:
