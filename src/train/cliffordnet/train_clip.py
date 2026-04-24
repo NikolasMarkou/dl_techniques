@@ -1,17 +1,18 @@
 """Training script for CliffordCLIP (CLIP with Clifford geometric blocks).
 
 Trains :class:`CliffordCLIP` on an image-caption dataset using a symmetric
-contrastive cross-entropy objective. An **optional Stage 0** pretrains the
-two towers independently before contrastive training:
+contrastive cross-entropy objective. An **optional pretraining phase**
+pretrains the two towers independently before contrastive training:
 
 - Vision tower on CIFAR-100 classification (recipe from
   ``train.cliffordnet.train_cliffordnet``).
 - Text tower on Wikipedia causal LM (recipe from
   ``train.cliffordnet.train_cliffordnet_nlp``).
 
-Stage 0 mutates the existing ``CliffordCLIP`` object in-place via thin
-throwaway wrappers — no save/reload between stages. Defaults: 50,000 steps
-per sub-stage. Disable with ``--skip-stage0`` or ``--stage0-{vision,lm}-steps 0``.
+Pretraining mutates the existing ``CliffordCLIP`` object in-place via thin
+throwaway wrappers — no save/reload between phases. Defaults: 50,000 steps
+per pretraining helper. Disable with ``--skip-pretrain`` or
+``--pretrain-{vision,lm}-steps 0``.
 
 The training recipe borrows schedule ideas from the Penguin-VL paper
 (arXiv:2603.06569):
@@ -611,7 +612,7 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
     ) -> None:
         """Install the probe dataset for the current stage.
 
-        Called once per stage from :func:`_run_stage` so the callback
+        Called once per stage from the training loop so the callback
         always evaluates at the active training resolution.
         """
         self._probe_ds = probe_ds
@@ -670,10 +671,10 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
 
 
 # =============================================================================
-# Stage 0: independent pretraining (vision on CIFAR-100, text on Wikipedia)
+# Pretraining: independent tower pretraining (vision on CIFAR-100, text on Wikipedia)
 # =============================================================================
 #
-# The two Stage 0 helpers train the *existing* ``CliffordCLIP`` sub-layers
+# The two pretraining helpers train the *existing* ``CliffordCLIP`` sub-layers
 # in place via a throwaway wrapper that attaches a task-specific head
 # (classifier for vision, LM head for text). Weights land directly in
 # ``clip_model`` — no save/reload, no cross-model weight transfer.
@@ -733,8 +734,8 @@ def _iter_clip_sublayers(clip_model: CliffordCLIP):
 
 
 # Projection / Clifford-head / cross-modal layers — always frozen during
-# Stage 0 (they'd learn against a nonexistent contrastive objective).
-_STAGE0_ALWAYS_FROZEN = frozenset({
+# pretraining (they'd learn against a nonexistent contrastive objective).
+_PRETRAIN_ALWAYS_FROZEN = frozenset({
     "vision_projection", "text_projection",
     "vision_head_geo", "text_head_geo",
     "vision_query_pool", "text_query_pool",
@@ -762,7 +763,7 @@ def _is_text_backbone(name: str) -> bool:
     )
 
 
-def _freeze_clip_for_stage0(
+def _freeze_clip_for_pretrain(
     clip_model: CliffordCLIP, *, train_tower: str,
 ) -> None:
     """Freeze all sub-layers except the requested tower's backbone.
@@ -773,7 +774,7 @@ def _freeze_clip_for_stage0(
     assert train_tower in ("vision", "text"), train_tower
     for layer in _iter_clip_sublayers(clip_model):
         name = layer.name
-        if name in _STAGE0_ALWAYS_FROZEN:
+        if name in _PRETRAIN_ALWAYS_FROZEN:
             layer.trainable = False
         elif train_tower == "vision":
             layer.trainable = _is_vision_backbone(name)
@@ -784,7 +785,7 @@ def _freeze_clip_for_stage0(
 
 
 def _unfreeze_clip(clip_model: CliffordCLIP) -> None:
-    """Undo Stage 0 freezes so Stage 1 contrastive training trains everything."""
+    """Undo pretraining freezes so contrastive training trains everything."""
     for layer in _iter_clip_sublayers(clip_model):
         layer.trainable = True
     if clip_model.logit_scale is not None:
@@ -792,7 +793,7 @@ def _unfreeze_clip(clip_model: CliffordCLIP) -> None:
 
 
 class _VisionClassifier(keras.Model):
-    """Stage 0 wrapper that reuses CliffordCLIP vision sub-layers.
+    """Pretraining wrapper that reuses CliffordCLIP vision sub-layers.
 
     Forward path: ``_apply_vision_stem`` → ``vision_blocks`` →
     ``vision_global_pool`` → ``vision_head_norm`` → (optional
@@ -807,7 +808,7 @@ class _VisionClassifier(keras.Model):
         super().__init__(**kwargs)
         self.clip_model = clip_model
         self.classifier = keras.layers.Dense(
-            num_classes, name="stage0_vision_classifier",
+            num_classes, name="pretrain_vision_classifier",
         )
 
     def call(self, images, training: Optional[bool] = None):
@@ -822,7 +823,7 @@ class _VisionClassifier(keras.Model):
         return self.classifier(x)
 
 
-def _run_stage0_vision(
+def _run_pretrain_vision(
     clip_model: CliffordCLIP,
     args: argparse.Namespace,
     run_dir: str,
@@ -839,39 +840,39 @@ def _run_stage0_vision(
     )
     from train.common import load_dataset
 
-    steps_budget = int(args.stage0_vision_steps)
+    steps_budget = int(args.pretrain_vision_steps)
     logger.info("=" * 60)
-    logger.info(f"Stage 0 vision: CIFAR-100 pretrain ({steps_budget:,} steps)")
+    logger.info(f"Pretrain vision: CIFAR-100 pretrain ({steps_budget:,} steps)")
     logger.info("=" * 60)
 
     (x_train, y_train), (x_test, y_test), _shape, num_classes = load_dataset(
-        "cifar100", batch_size=args.stage0_vision_batch_size,
+        "cifar100", batch_size=args.pretrain_vision_batch_size,
     )
     if num_classes != 100:
         raise RuntimeError(
-            f"Stage 0 vision expected CIFAR-100 (100 classes); "
+            f"Pretrain vision expected CIFAR-100 (100 classes); "
             f"got num_classes={num_classes}"
         )
 
     train_ds = _cifar_build_train(
         x_train, y_train,
-        batch_size=args.stage0_vision_batch_size,
+        batch_size=args.pretrain_vision_batch_size,
         dataset_name="cifar100",
         random_erasing_prob=0.25,
     )
     val_ds = _cifar_build_eval(
         x_test, y_test,
-        batch_size=args.stage0_vision_batch_size,
+        batch_size=args.pretrain_vision_batch_size,
         dataset_name="cifar100",
     )
-    steps_per_epoch = max(1, len(x_train) // args.stage0_vision_batch_size)
-    stage0_epochs = max(1, -(-steps_budget // steps_per_epoch))  # ceil
+    steps_per_epoch = max(1, len(x_train) // args.pretrain_vision_batch_size)
+    pretrain_epochs = max(1, -(-steps_budget // steps_per_epoch))  # ceil
     warmup_steps = max(1, int(0.05 * steps_budget))
     decay_steps = max(1, steps_budget - warmup_steps)
 
     schedule = learning_rate_schedule_builder({
         "type": "cosine_decay",
-        "learning_rate": args.stage0_vision_lr,
+        "learning_rate": args.pretrain_vision_lr,
         "decay_steps": decay_steps,
         "alpha": 1e-2,
         "warmup_steps": warmup_steps,
@@ -882,23 +883,23 @@ def _run_stage0_vision(
         "beta_1": 0.9,
         "beta_2": 0.999,
         "epsilon": 1e-8,
-        "weight_decay": args.stage0_vision_wd,
+        "weight_decay": args.pretrain_vision_wd,
     }, schedule)
 
-    _freeze_clip_for_stage0(clip_model, train_tower="vision")
+    _freeze_clip_for_pretrain(clip_model, train_tower="vision")
 
     wrapper = _VisionClassifier(
-        clip_model, num_classes=num_classes, name="stage0_vision_wrapper",
+        clip_model, num_classes=num_classes, name="pretrain_vision_wrapper",
     )
     wrapper.build((None, 32, 32, 3))
 
     n_train = sum(int(np.prod(v.shape)) for v in wrapper.trainable_variables)
     n_total = sum(int(np.prod(v.shape)) for v in wrapper.variables)
     logger.info(
-        f"Stage 0 vision: trainable={n_train:,} / total={n_total:,} params "
-        f"| {stage0_epochs} epochs × {steps_per_epoch} steps/epoch "
+        f"Pretrain vision: trainable={n_train:,} / total={n_total:,} params "
+        f"| {pretrain_epochs} epochs × {steps_per_epoch} steps/epoch "
         f"(budget {steps_budget:,}, warmup {warmup_steps:,}, "
-        f"peak_lr={args.stage0_vision_lr}, wd={args.stage0_vision_wd})"
+        f"peak_lr={args.pretrain_vision_lr}, wd={args.pretrain_vision_wd})"
     )
 
     wrapper.compile(
@@ -907,12 +908,12 @@ def _run_stage0_vision(
         metrics=["accuracy"],
     )
 
-    tb_dir = os.path.join(run_dir, "tensorboard", "stage0_vision")
+    tb_dir = os.path.join(run_dir, "tensorboard", "pretrain_vision")
     os.makedirs(tb_dir, exist_ok=True)
     wrapper.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=stage0_epochs,
+        epochs=pretrain_epochs,
         steps_per_epoch=steps_per_epoch,
         callbacks=[
             keras.callbacks.TerminateOnNaN(),
@@ -924,11 +925,11 @@ def _run_stage0_vision(
     )
 
     _unfreeze_clip(clip_model)
-    logger.info("Stage 0 vision: complete (CLIP layers unfrozen for Stage 1).")
+    logger.info("Pretrain vision: complete (CLIP layers unfrozen for CLIP training).")
 
 
 class _TextLMWrapper(keras.Model):
-    """Stage 0 wrapper that reuses CliffordCLIP text sub-layers for CLM.
+    """Pretraining wrapper that reuses CliffordCLIP text sub-layers for CLM.
 
     Mirrors :meth:`CliffordCLIP.encode_text` up to ``text_head_dropout``,
     then applies a fresh ``Dense(vocab_size)`` for per-token logits.
@@ -947,7 +948,7 @@ class _TextLMWrapper(keras.Model):
         super().__init__(**kwargs)
         self.clip_model = clip_model
         self.context_length = context_length
-        self.lm_head = keras.layers.Dense(vocab_size, name="stage0_lm_head")
+        self.lm_head = keras.layers.Dense(vocab_size, name="pretrain_lm_head")
 
     def call(self, input_ids, training: Optional[bool] = None):
         from keras import ops
@@ -966,7 +967,7 @@ class _TextLMWrapper(keras.Model):
         return {"logits": self.lm_head(x)}
 
 
-def _run_stage0_lm(
+def _run_pretrain_lm(
     clip_model: CliffordCLIP,
     args: argparse.Namespace,
     run_dir: str,
@@ -975,7 +976,7 @@ def _run_stage0_lm(
 
     Uses the same context length as CliffordCLIP (``args.context_length``)
     so the in-place position_embedding remains shape-compatible with the
-    subsequent contrastive stages. Tokenizer is plain tiktoken ``gpt2``
+    subsequent contrastive training. Tokenizer is plain tiktoken ``gpt2``
     (vocab 50257, EOT 50256); the 4 extra specials that
     ``train_cliffordnet_nlp.py`` declares for MLM are not emitted in the
     CLM path, so we can pretrain without them.
@@ -985,9 +986,9 @@ def _run_stage0_lm(
     from dl_techniques.losses import MaskedCausalLMLoss
     import tiktoken
 
-    steps_budget = int(args.stage0_lm_steps)
+    steps_budget = int(args.pretrain_lm_steps)
     logger.info("=" * 60)
-    logger.info(f"Stage 0 LM: Wikipedia CLM pretrain ({steps_budget:,} steps)")
+    logger.info(f"Pretrain LM: Wikipedia CLM pretrain ({steps_budget:,} steps)")
     logger.info("=" * 60)
 
     # Tokenizer — plain gpt2, no specials; mirrors what train_clip.py uses.
@@ -995,7 +996,7 @@ def _run_stage0_lm(
     vocab_size = encoder.n_vocab
     eot_token_id = int(encoder.eot_token)
     logger.info(
-        f"Stage 0 LM tokenizer: gpt2, vocab_size={vocab_size}, "
+        f"Pretrain LM tokenizer: gpt2, vocab_size={vocab_size}, "
         f"eot_token_id={eot_token_id}"
     )
     if vocab_size != clip_model.vocab_size:
@@ -1006,14 +1007,14 @@ def _run_stage0_lm(
         )
 
     # Wikipedia data — fail fast if cache dir is absent.
-    if not os.path.isdir(args.stage0_lm_hf_cache):
+    if not os.path.isdir(args.pretrain_lm_hf_cache):
         raise RuntimeError(
-            f"Wikipedia cache dir not found: {args.stage0_lm_hf_cache}. "
-            "Point --stage0-lm-hf-cache at a pre-downloaded HF cache or "
-            "pass --stage0-lm-steps 0 / --skip-stage0 to bypass LM pretrain."
+            f"Wikipedia cache dir not found: {args.pretrain_lm_hf_cache}. "
+            "Point --pretrain-lm-hf-cache at a pre-downloaded HF cache or "
+            "pass --pretrain-lm-steps 0 / --skip-pretrain to bypass LM pretrain."
         )
     train_raw, _val_raw = load_wikipedia_train_val(
-        cache_dir=args.stage0_lm_hf_cache,
+        cache_dir=args.pretrain_lm_hf_cache,
         min_article_length=500,
         val_fraction=0.02,
         max_val_samples=5000,
@@ -1025,7 +1026,7 @@ def _run_stage0_lm(
         train_raw,
         encoding_name="gpt2",
         chunk_length=chunk_length,
-        batch_size=args.stage0_lm_batch_size,
+        batch_size=args.pretrain_lm_batch_size,
         eot_token_id=eot_token_id,
         repeat=True,  # guarantee steps_per_epoch never StopIteration.
     )
@@ -1039,7 +1040,7 @@ def _run_stage0_lm(
     decay_steps = max(1, steps_budget - warmup_steps)
     schedule = learning_rate_schedule_builder({
         "type": "cosine_decay",
-        "learning_rate": args.stage0_lm_lr,
+        "learning_rate": args.pretrain_lm_lr,
         "decay_steps": decay_steps,
         "alpha": 1e-2,
         "warmup_steps": warmup_steps,
@@ -1050,26 +1051,26 @@ def _run_stage0_lm(
         "beta_1": 0.9,
         "beta_2": 0.999,
         "epsilon": 1e-8,
-        "weight_decay": args.stage0_lm_wd,
+        "weight_decay": args.pretrain_lm_wd,
     }, schedule)
 
-    _freeze_clip_for_stage0(clip_model, train_tower="text")
+    _freeze_clip_for_pretrain(clip_model, train_tower="text")
 
     wrapper = _TextLMWrapper(
         clip_model,
         vocab_size=vocab_size,
         context_length=args.context_length,
-        name="stage0_lm_wrapper",
+        name="pretrain_lm_wrapper",
     )
     wrapper.build((None, args.context_length))
 
     n_train = sum(int(np.prod(v.shape)) for v in wrapper.trainable_variables)
     n_total = sum(int(np.prod(v.shape)) for v in wrapper.variables)
     logger.info(
-        f"Stage 0 LM: trainable={n_train:,} / total={n_total:,} params "
+        f"Pretrain LM: trainable={n_train:,} / total={n_total:,} params "
         f"| 1 epoch × {steps_budget} steps/epoch "
-        f"(warmup {warmup_steps:,}, peak_lr={args.stage0_lm_lr}, "
-        f"wd={args.stage0_lm_wd}, context_length={args.context_length})"
+        f"(warmup {warmup_steps:,}, peak_lr={args.pretrain_lm_lr}, "
+        f"wd={args.pretrain_lm_wd}, context_length={args.context_length})"
     )
 
     wrapper.compile(
@@ -1078,7 +1079,7 @@ def _run_stage0_lm(
         metrics={"logits": ["accuracy"]},
     )
 
-    tb_dir = os.path.join(run_dir, "tensorboard", "stage0_lm")
+    tb_dir = os.path.join(run_dir, "tensorboard", "pretrain_lm")
     os.makedirs(tb_dir, exist_ok=True)
     wrapper.fit(
         train_ds,
@@ -1094,7 +1095,7 @@ def _run_stage0_lm(
     )
 
     _unfreeze_clip(clip_model)
-    logger.info("Stage 0 LM: complete (CLIP layers unfrozen for Stage 1).")
+    logger.info("Pretrain LM: complete (CLIP layers unfrozen for CLIP training).")
 
 
 # =============================================================================
@@ -1429,25 +1430,25 @@ def train(args: argparse.Namespace) -> None:
         args.stage0_lm_steps = 0
 
     if args.stage0_vision_steps > 0:
-        _run_stage0_vision(clip_model, args, results_dir)
+        _run_pretrain_vision(clip_model, args, results_dir)
     else:
-        logger.info("Stage 0 vision: skipped (stage0_vision_steps=0)")
+        logger.info("Pretrain vision: skipped (pretrain_vision_steps=0)")
 
     if args.stage0_lm_steps > 0:
-        _run_stage0_lm(clip_model, args, results_dir)
+        _run_pretrain_lm(clip_model, args, results_dir)
     else:
-        logger.info("Stage 0 LM: skipped (stage0_lm_steps=0)")
+        logger.info("Pretrain LM: skipped (pretrain_lm_steps=0)")
 
-    # Sanity: all CLIP layers trainable again so Stage 1 trains the full model.
+    # Sanity: all CLIP layers trainable again so contrastive training trains the full model.
     for layer in _iter_clip_sublayers(clip_model):
         if not layer.trainable:
             raise RuntimeError(
-                f"Layer {layer.name} still frozen after Stage 0. "
+                f"Layer {layer.name} still frozen after pretraining. "
                 "_unfreeze_clip did not restore trainable flags."
             )
     if clip_model.logit_scale is not None and not clip_model.logit_scale.trainable:
         raise RuntimeError(
-            "logit_scale still frozen after Stage 0 — contrastive training "
+            "logit_scale still frozen after pretraining — contrastive training "
             "would be broken."
         )
 
