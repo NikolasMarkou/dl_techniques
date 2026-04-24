@@ -447,8 +447,8 @@ Reshape to (B, N_patches, D_vis)                   |
 [Clifford Vision Projector]                        |
   z_det = Dense(vision_tokens)                     |
   z_ctx = LearnedQueryPool(vision_tokens)          |
-  geo   = SRGP(z_det, z_ctx)                      |
-  proj  = LN(z_det + gamma * geo)                 |
+  geo   = SRGP(z_det, z_ctx)                       |
+  proj  = LN(z_det + gamma * geo)                  | 
   out   = Dense(D_lm)                              |
      |                                             |
      v                                             v
