@@ -57,6 +57,35 @@ def validate_model_loading(
 
         loaded_output = loaded_model.predict(test_sample, verbose=0)
 
+        if isinstance(expected_output, dict) or isinstance(loaded_output, dict):
+            if not (isinstance(expected_output, dict) and isinstance(loaded_output, dict)):
+                logger.warning(
+                    "Model output structure mismatch after loading "
+                    f"(expected={type(expected_output).__name__}, "
+                    f"loaded={type(loaded_output).__name__})"
+                )
+                return False
+            if set(expected_output.keys()) != set(loaded_output.keys()):
+                logger.warning(
+                    "Model output keys differ after loading "
+                    f"(expected={sorted(expected_output.keys())}, "
+                    f"loaded={sorted(loaded_output.keys())})"
+                )
+                return False
+            max_diff = 0.0
+            for k in expected_output:
+                diff = np.max(np.abs(
+                    np.asarray(loaded_output[k]) - np.asarray(expected_output[k])
+                ))
+                max_diff = max(max_diff, float(diff))
+            if max_diff <= tolerance:
+                logger.info("Model loading validation passed")
+                return True
+            logger.warning(
+                f"Model outputs differ after loading (max_diff={max_diff:.6f})"
+            )
+            return False
+
         if np.allclose(expected_output, loaded_output, atol=tolerance):
             logger.info("Model loading validation passed")
             return True

@@ -199,9 +199,10 @@ def load_coco2017_local_split(
     reads directly from the extracted 2017 tree and returns image paths
     (not decoded arrays) so the tf.data pipeline can stream JPEGs lazily.
 
-    Each image contributes exactly one ``(image, caption)`` pair (the
-    first caption), matching CLIP's one-to-one alignment for the
-    symmetric contrastive loss.
+    For ``split="train"`` every annotation becomes a pair (~5 captions per
+    image, ~591k pairs). For ``split="val"`` exactly one caption per image
+    is emitted so the 5k-pair retrieval R@K eval keeps its standard
+    one-correct-per-query semantics.
 
     :param split: ``"train"`` or ``"val"``.
     :param coco_root: Directory containing ``train2017/``, ``val2017/``,
@@ -235,21 +236,32 @@ def load_coco2017_local_split(
     image_id_to_file = {
         img["id"]: img["file_name"] for img in data["images"]
     }
-    first_caption: dict = {}
-    for ann in data["annotations"]:
-        if ann["image_id"] not in first_caption:
-            first_caption[ann["image_id"]] = ann["caption"]
 
     paths: List[str] = []
     captions: List[str] = []
-    for image_id, caption in first_caption.items():
-        filename = image_id_to_file.get(image_id)
-        if filename is None:
-            continue
-        paths.append(os.path.join(img_dir, filename))
-        captions.append(caption)
-        if max_samples is not None and len(paths) >= max_samples:
-            break
+    if split == "train":
+        for ann in data["annotations"]:
+            filename = image_id_to_file.get(ann["image_id"])
+            if filename is None:
+                continue
+            paths.append(os.path.join(img_dir, filename))
+            captions.append(ann["caption"])
+            if max_samples is not None and len(paths) >= max_samples:
+                break
+    else:
+        seen: set = set()
+        for ann in data["annotations"]:
+            image_id = ann["image_id"]
+            if image_id in seen:
+                continue
+            filename = image_id_to_file.get(image_id)
+            if filename is None:
+                continue
+            seen.add(image_id)
+            paths.append(os.path.join(img_dir, filename))
+            captions.append(ann["caption"])
+            if max_samples is not None and len(paths) >= max_samples:
+                break
 
     token_ids = tokenize_captions(captions, encoder, context_length)
     logger.info(
