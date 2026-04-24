@@ -828,32 +828,36 @@ Output layout (matching `load_cc3m_local_split`):
 Usage:
 
 ```bash
-# Smoke run: 100k CC3M subset, ~12.5k steps, ~1h on RTX 4070
+# Smoke run: 100k CC3M subset, ~12.5k steps, ~1h on RTX 4070.
+# --skip-pretrain bypasses the optional CIFAR-100 vision + Wikipedia LM
+# pretraining helpers and goes straight to single-stage CLIP training.
 PYTHONPATH=src python -m train.cliffordnet.train_clip \
     --variant mini --dataset cc3m \
     --batch-size 32 --context-length 64 \
-    --stage1-image-size 112 --stage1-epochs 4 --stage1-lr 5e-4 \
-    --stage2-epochs 0 \
+    --image-size 112 --epochs 4 --peak-lr 5e-4 \
     --warmup-ratio 0.03 --weight-decay 0.1 --dropout-rate 0.1 \
     --label-smoothing 0.1 \
+    --skip-pretrain \
     --max-train-samples 100000 --max-val-samples 5000 \
     --save-every-steps 500 --log-every-steps 50 \
     --probe-every-steps 500 --probe-num-pairs 512 \
     --max-checkpoints 3 --gpu 1
 
-# Full run: 950k CC3M, ~30k steps, ~5h on RTX 4090
+# Full run: 950k CC3M, ~30k steps, ~5h on RTX 4090.
 PYTHONPATH=src python -m train.cliffordnet.train_clip \
     --variant mini --dataset cc3m \
     --batch-size 32 --context-length 64 \
-    --stage1-image-size 112 --stage1-epochs 1 --stage1-lr 5e-4 \
-    --stage2-epochs 0 \
+    --image-size 112 --epochs 1 --peak-lr 5e-4 \
     --warmup-ratio 0.03 --weight-decay 0.1 --dropout-rate 0.1 \
     --label-smoothing 0.1 \
+    --skip-pretrain \
     --max-train-samples 950000 --max-val-samples 5000 \
     --save-every-steps 2000 --log-every-steps 100 \
     --probe-every-steps 2000 --probe-num-pairs 512 \
     --max-checkpoints 3 --gpu 0
 ```
+
+CLIP training is a single contrastive pass at one configurable resolution. Two optional pretraining helpers run before CLIP training unless `--skip-pretrain` is passed: a CIFAR-100 vision pretrain (controlled by `--pretrain-vision-*` flags, including `--pretrain-vision-steps`) and a Wikipedia LM pretrain (controlled by `--pretrain-lm-*` flags, including `--pretrain-lm-steps` and `--pretrain-lm-hf-cache`). Both pretrains warm up the respective backbones; the projection heads, `logit_scale`, and the opposite tower stay frozen during each helper.
 
 ### Training protocol
 
@@ -877,10 +881,13 @@ PYTHONPATH=src python -m train.cliffordnet.train_clip \
 | `--dataset` | `coco2017` | `coco2017` or `cc3m`; `--synthetic` flag overrides with in-memory random pairs |
 | `--batch-size` | 32 | Proven to fit mini on 12 GB VRAM at 112² |
 | `--context-length` | 64 | Text sequence length |
-| `--stage1-image-size` | 112 | Training resolution (single-stage proven) |
-| `--stage1-epochs` | 10 | Stage-1 epochs |
-| `--stage2-epochs` | 0 | Stage-2 (higher resolution) -- set 0 for single-stage |
-| `--stage1-lr` | 5e-4 | Peak LR |
+| `--image-size` | 112 | CLIP training resolution (single-stage) |
+| `--epochs` | 10 | CLIP training epochs |
+| `--peak-lr` | 5e-4 | Peak learning rate (cosine decay + warmup) |
+| `--skip-pretrain` | flag | Skip optional CIFAR-100 vision + Wikipedia LM pretraining |
+| `--pretrain-vision-steps` | 50000 | CIFAR-100 vision pretrain steps (set 0 to skip just vision) |
+| `--pretrain-lm-steps` | 50000 | Wikipedia LM pretrain steps (set 0 to skip just LM) |
+| `--pretrain-lm-hf-cache` | `None` | Pre-downloaded HF cache dir for Wikipedia (offline runs) |
 | `--warmup-ratio` | 0.03 | Linear warmup fraction |
 | `--label-smoothing` | 0.1 | Contrastive loss label smoothing |
 | `--save-every-steps` | 2000 | Checkpoint cadence |
@@ -942,7 +949,7 @@ The default `head_kind` is set to `learned_query_residual` with `cli_mode=full`.
 
 Paid for these in real training incidents -- documented here so future runs avoid them:
 
-1. **XLA fragmentation at stage transitions**. When a curriculum increases resolution (e.g. 112² -> 128²), stage-1's compiled kernels stay resident while stage-2 compiles its own, spiking VRAM during the transition window. This OOM'd three times on a 12 GB card between 160² / 128² / 112². **Fix**: set `--stage2-epochs 0` for single-stage training on 12 GB cards. The curriculum is nice-to-have, not load-bearing. The save-model -> `clear_session()` -> load-model trick would work for a true curriculum but is a non-trivial refactor.
+1. **No multi-resolution curriculum (historical)**. An earlier version of this script had a low-res-to-high-res CLIP curriculum. When the curriculum bumped resolution (e.g. 112² -> 128²), the lower-res compiled kernels stayed resident while the higher-res ones compiled their own, spiking VRAM during the transition and OOM'ing three times on a 12 GB card between 160² / 128² / 112². The curriculum was nice-to-have, not load-bearing — it has been removed in favor of single-stage CLIP training at one configurable `--image-size`. If a real multi-resolution curriculum is wanted in the future, a save-model -> `clear_session()` -> load-model trick at each transition would prevent the kernel-resident OOM, but that's a non-trivial refactor.
 
 2. **`logit_scale` in weight decay is a silent killer**. AdamW's decoupled weight decay will quietly drive the learnable temperature to zero, flattening the softmax and killing the contrastive signal regardless of how good the embeddings are. Verify the startup log line on every run.
 
@@ -958,7 +965,7 @@ Paid for these in real training incidents -- documented here so future runs avoi
 results/cliffordclip_<variant>_<timestamp>/
   checkpoints/step_NNNNNNN.keras      # rolling window + final.keras
   retrieval_probes/probes.jsonl        # one line per probe
-  tensorboard/<stage>/{train,validation}/
+  tensorboard/{train,validation}/
   training_log.csv                     # step-level loss, lr, logit_scale
   cliffordclip_<variant>.keras         # final model at run root
   training_summary.txt                 # final val R@K + hyperparameters
