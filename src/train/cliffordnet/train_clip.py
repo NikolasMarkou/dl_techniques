@@ -18,10 +18,10 @@ The training recipe borrows schedule ideas from the Penguin-VL paper
 (arXiv:2603.06569):
 
 - AdamW optimiser, cosine LR decay with a 3% warmup ratio
-- Two-stage **low-to-high resolution curriculum**: Stage 1 at a smaller
-  resolution (e.g., 96x96) followed by Stage 2 at the target resolution
-  (e.g., 224x224). The model is the same object across stages; only the
-  image preprocessing pipeline and the LR schedule are rebuilt.
+- Single CLIP contrastive stage at a configurable target resolution
+  (``--image-size``, default 112). The previous two-stage low-to-high
+  resolution curriculum was removed in favour of training directly at
+  the final patch size.
 - Learnable temperature clipped to ``logit_scale_max`` (OpenCLIP style).
 
 **English-only**: the text tokenizer defaults to tiktoken's ``gpt2``
@@ -115,12 +115,13 @@ numbers are roughly an order of magnitude below published CLIP results.
 Example::
 
     python -m train.cliffordnet.train_clip \\
-        --variant nano --stage1-image-size 96 --stage2-image-size 160 \\
-        --stage1-epochs 5 --stage2-epochs 20 --batch-size 64 --gpu 0
+        --variant nano --image-size 112 --epochs 10 --peak-lr 5e-4 \\
+        --batch-size 64 --gpu 0
 
     # smoke test
-    python -m train.cliffordnet.train_clip --synthetic --stage1-epochs 1 \\
-        --stage2-epochs 1 --batch-size 8 --max-train-samples 64
+    python -m train.cliffordnet.train_clip --synthetic --epochs 1 \\
+        --image-size 32 --batch-size 8 --max-train-samples 64 \\
+        --skip-pretrain
 """
 
 from __future__ import annotations
@@ -1103,23 +1104,23 @@ def _run_pretrain_lm(
 # =============================================================================
 
 
-def _build_stage_optimizer(
-    stage_cfg: CliffordCLIPTrainConfig,
+def _build_optimizer(
+    train_cfg: CliffordCLIPTrainConfig,
     steps_per_epoch: int,
 ) -> keras.optimizers.Optimizer:
     """Cosine LR with warmup_ratio warmup + AdamW — Penguin-VL recipe."""
-    total_steps = max(1, stage_cfg.epochs * steps_per_epoch)
-    warmup_steps = max(1, int(round(stage_cfg.warmup_ratio * total_steps)))
+    total_steps = max(1, train_cfg.epochs * steps_per_epoch)
+    warmup_steps = max(1, int(round(train_cfg.warmup_ratio * total_steps)))
     decay_steps = max(1, total_steps - warmup_steps)
 
     schedule = learning_rate_schedule_builder(
         {
             "type": "cosine_decay",
-            "learning_rate": stage_cfg.peak_lr,
+            "learning_rate": train_cfg.peak_lr,
             "decay_steps": decay_steps,
-            "alpha": stage_cfg.lr_alpha,
+            "alpha": train_cfg.lr_alpha,
             "warmup_steps": warmup_steps,
-            "warmup_start_lr": stage_cfg.min_warmup_lr,
+            "warmup_start_lr": train_cfg.min_warmup_lr,
         }
     )
     optimizer = optimizer_builder(
@@ -1128,7 +1129,7 @@ def _build_stage_optimizer(
             "beta_1": 0.9,
             "beta_2": 0.98,
             "epsilon": 1e-6,
-            "weight_decay": stage_cfg.weight_decay,
+            "weight_decay": train_cfg.weight_decay,
         },
         schedule,
     )
@@ -1155,87 +1156,16 @@ def _build_stage_optimizer(
             )
 
     logger.info(
-        f"Stage optimizer: cosine_decay peak_lr={stage_cfg.peak_lr}, "
+        f"CLIP optimizer: cosine_decay peak_lr={train_cfg.peak_lr}, "
         f"warmup_steps={warmup_steps}/{total_steps} "
-        f"(ratio={stage_cfg.warmup_ratio}), wd={stage_cfg.weight_decay}"
+        f"(ratio={train_cfg.warmup_ratio}), wd={train_cfg.weight_decay}"
     )
     return optimizer
-
-
-def _run_stage(
-    stage_name: str,
-    wrapper: ContrastiveCliffordCLIP,
-    stage_cfg: CliffordCLIPTrainConfig,
-    train_ds: tf.data.Dataset,
-    val_ds: Optional[tf.data.Dataset],
-    probe_ds: Optional[tf.data.Dataset],
-    steps_per_epoch: int,
-    run_dir: str,
-    persistent_callbacks: List[keras.callbacks.Callback],
-    retrieval_probe_cb: Optional[RetrievalProbeCallback],
-) -> keras.callbacks.History:
-    """Run a single curriculum stage via ``model.fit``.
-
-    The caller owns the persistent step-based callbacks
-    (:class:`StepCheckpointCallback`, :class:`RetrievalProbeCallback`) so
-    their state (global step, open CSV writer, JSONL file) crosses the
-    stage boundary. Each stage contributes only a stage-local
-    ``TerminateOnNaN`` + ``TensorBoard`` pair on top of that shared list.
-    """
-    logger.info(
-        f"=== {stage_name}: image_size={stage_cfg.image_size}, "
-        f"epochs={stage_cfg.epochs}, batch={stage_cfg.batch_size} ==="
-    )
-
-    optimizer = _build_stage_optimizer(stage_cfg, steps_per_epoch)
-    wrapper.compile(optimizer=optimizer)
-
-    tb_dir = os.path.join(run_dir, "tensorboard", stage_name)
-    os.makedirs(tb_dir, exist_ok=True)
-    stage_local: List[keras.callbacks.Callback] = [
-        keras.callbacks.TerminateOnNaN(),
-        keras.callbacks.TensorBoard(
-            log_dir=tb_dir,
-            write_graph=False,
-            update_freq="epoch",
-        ),
-    ]
-
-    if retrieval_probe_cb is not None and probe_ds is not None:
-        retrieval_probe_cb.set_probe_dataset(probe_ds, stage_label=stage_name)
-
-    callbacks = stage_local + list(persistent_callbacks)
-    logger.info(
-        f"Stage {stage_name}: tensorboard={tb_dir}; "
-        f"step-checkpoints + retrieval probes inherited from run-level state"
-    )
-
-    history = wrapper.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=stage_cfg.epochs,
-        steps_per_epoch=steps_per_epoch,
-        callbacks=callbacks,
-        verbose=1,
-    )
-    return history
 
 
 # =============================================================================
 # Main
 # =============================================================================
-
-
-def _resolve_image_size(args: argparse.Namespace, stage: int) -> int:
-    return args.stage1_image_size if stage == 1 else args.stage2_image_size
-
-
-def _resolve_epochs(args: argparse.Namespace, stage: int) -> int:
-    return args.stage1_epochs if stage == 1 else args.stage2_epochs
-
-
-def _resolve_lr(args: argparse.Namespace, stage: int) -> float:
-    return args.stage1_lr if stage == 1 else args.stage2_lr
 
 
 def _prepare_datasets(
@@ -1254,7 +1184,7 @@ def _prepare_datasets(
     if args.synthetic:
         train_images, train_tokens = build_synthetic_image_text_dataset(
             num_samples=args.max_train_samples or 256,
-            image_size=args.stage2_image_size,
+            image_size=args.image_size,
             context_length=args.context_length,
             vocab_size=vocab_size,
             eot_token_id=eot_token_id,
@@ -1262,7 +1192,7 @@ def _prepare_datasets(
         )
         val_images, val_tokens = build_synthetic_image_text_dataset(
             num_samples=args.max_val_samples or 64,
-            image_size=args.stage2_image_size,
+            image_size=args.image_size,
             context_length=args.context_length,
             vocab_size=vocab_size,
             eot_token_id=eot_token_id,
@@ -1337,7 +1267,7 @@ def train(args: argparse.Namespace) -> None:
     clip_model = CliffordCLIP.from_variant(
         variant=args.variant,
         vocab_size=vocab_size,
-        image_size=args.stage2_image_size,  # final target resolution
+        image_size=args.image_size,
         context_length=args.context_length,
         vision_patch_size=args.vision_patch_size,
         dropout_rate=args.dropout_rate,
@@ -1345,15 +1275,14 @@ def train(args: argparse.Namespace) -> None:
         head_kind=args.head_kind,
         head_cli_mode=args.head_cli_mode,
     )
-    # Build at the final resolution so shape checks pass at stage 2 even
-    # when we pass stage 1 data through first. Clifford blocks are
+    # Build at the configured resolution. Clifford blocks are
     # resolution-agnostic because they are fully convolutional.
     clip_model.build(
         {
             "image": (
                 None,
-                args.stage2_image_size,
-                args.stage2_image_size,
+                args.image_size,
+                args.image_size,
                 3,
             ),
             "text": (None, args.context_length),
@@ -1369,8 +1298,8 @@ def train(args: argparse.Namespace) -> None:
         {
             "image": (
                 None,
-                args.stage2_image_size,
-                args.stage2_image_size,
+                args.image_size,
+                args.image_size,
                 3,
             ),
             "text": (None, args.context_length),
@@ -1383,7 +1312,7 @@ def train(args: argparse.Namespace) -> None:
     #   results/cliffordclip_<variant>_<timestamp>/
     #     checkpoints/step_NNNNNNN.keras + final.keras
     #     retrieval_probes/probes.jsonl  <- intermediate results
-    #     tensorboard/stageX_sizeY/
+    #     tensorboard/clip/
     #     training_log.csv               <- step-level metrics
     #     cliffordclip_<variant>.keras   <- final model (convenience)
     #     training_summary.txt
@@ -1396,11 +1325,10 @@ def train(args: argparse.Namespace) -> None:
     os.makedirs(results_dir, exist_ok=True)
     logger.info(f"Run directory: {results_dir}")
 
-    # --- Persistent run-level callbacks (shared across stages) ---
+    # --- Persistent run-level callbacks ---
     # Both callbacks update their own global step counters on every
-    # ``on_train_batch_end`` — reusing the same instances across both
-    # ``fit()`` calls is what gives us a continuous step timeline and
-    # one coherent ``checkpoints/`` + ``retrieval_probes/probes.jsonl``.
+    # ``on_train_batch_end``, giving a continuous step timeline and a
+    # coherent ``checkpoints/`` + ``retrieval_probes/probes.jsonl``.
     step_ckpt_cb = StepCheckpointCallback(
         save_dir=results_dir,
         save_every_steps=args.save_every_steps,
@@ -1452,96 +1380,95 @@ def train(args: argparse.Namespace) -> None:
             "would be broken."
         )
 
-    # --- Curriculum ---
-    histories: Dict[str, keras.callbacks.History] = {}
-    for stage in (1, 2):
-        stage_image_size = _resolve_image_size(args, stage)
-        stage_epochs = _resolve_epochs(args, stage)
-        if stage_epochs <= 0:
-            logger.info(f"Stage {stage} skipped (epochs=0)")
-            continue
+    # --- CLIP contrastive training ---
+    train_ds = make_image_text_tf_dataset(
+        train_images,
+        train_tokens,
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        training=True,
+        cache_decoded=args.cache_decoded,
+    )
+    val_ds = make_image_text_tf_dataset(
+        val_images,
+        val_tokens,
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        training=False,
+        cache_decoded=args.cache_decoded,
+    )
 
-        # Synthetic mode: images already fixed at stage 2 size. For
-        # non-synthetic mode, build the pipeline at the stage-specific size.
-        if args.synthetic and stage_image_size != args.stage2_image_size:
-            # Resize the pre-generated array via a cheap bilinear pass.
-            train_imgs_stage = tf.image.resize(
-                train_images, (stage_image_size, stage_image_size),
-                method="bilinear",
-            ).numpy()
-            val_imgs_stage = tf.image.resize(
-                val_images, (stage_image_size, stage_image_size),
-                method="bilinear",
-            ).numpy()
-        else:
-            train_imgs_stage = train_images
-            val_imgs_stage = val_images
+    # A smaller slice of val used for in-training retrieval probes.
+    # Intentionally capped so each probe is fast; the full-val
+    # retrieval is computed once at the very end of training. The
+    # probe set is tiny (~512 pairs), so caching it is always fine
+    # regardless of the main ``--cache-decoded`` setting.
+    probe_n = min(args.probe_num_pairs, len(val_tokens))
+    if isinstance(val_images, np.ndarray):
+        probe_imgs = val_images[:probe_n]
+    else:
+        probe_imgs = list(val_images[:probe_n])
+    probe_ds = make_image_text_tf_dataset(
+        probe_imgs,
+        val_tokens[:probe_n],
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        training=False,
+        cache_decoded=True,
+    )
 
-        train_ds = make_image_text_tf_dataset(
-            train_imgs_stage,
-            train_tokens,
-            image_size=stage_image_size,
-            batch_size=args.batch_size,
-            training=True,
-            cache_decoded=args.cache_decoded,
-        )
-        val_ds = make_image_text_tf_dataset(
-            val_imgs_stage,
-            val_tokens,
-            image_size=stage_image_size,
-            batch_size=args.batch_size,
-            training=False,
-            cache_decoded=args.cache_decoded,
-        )
+    # steps_per_epoch for the cosine schedule. For list-backed datasets
+    # we can't rely on cardinality being known.
+    n_train = len(train_tokens)
+    steps_per_epoch = max(1, n_train // args.batch_size)
 
-        # A smaller slice of val used for in-training retrieval probes.
-        # Intentionally capped so each probe is fast; the full-val
-        # retrieval is computed once at the very end of training. The
-        # probe set is tiny (~512 pairs), so caching it is always fine
-        # regardless of the main ``--cache-decoded`` setting.
-        probe_n = min(args.probe_num_pairs, len(val_tokens))
-        if isinstance(val_imgs_stage, np.ndarray):
-            probe_imgs = val_imgs_stage[:probe_n]
-        else:
-            probe_imgs = list(val_imgs_stage[:probe_n])
-        probe_ds = make_image_text_tf_dataset(
-            probe_imgs,
-            val_tokens[:probe_n],
-            image_size=stage_image_size,
-            batch_size=args.batch_size,
-            training=False,
-            cache_decoded=True,
-        )
+    train_cfg = CliffordCLIPTrainConfig(
+        image_size=args.image_size,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        peak_lr=args.peak_lr,
+        warmup_ratio=args.warmup_ratio,
+        weight_decay=args.weight_decay,
+    )
 
-        # steps_per_epoch for the cosine schedule. For list-backed datasets
-        # we can't rely on cardinality being known.
-        n_train = len(train_tokens)
-        steps_per_epoch = max(1, n_train // args.batch_size)
+    logger.info(
+        f"=== CLIP training: image_size={train_cfg.image_size}, "
+        f"epochs={train_cfg.epochs}, batch={train_cfg.batch_size}, "
+        f"peak_lr={train_cfg.peak_lr} ==="
+    )
 
-        stage_cfg = CliffordCLIPTrainConfig(
-            image_size=stage_image_size,
-            epochs=stage_epochs,
-            batch_size=args.batch_size,
-            peak_lr=_resolve_lr(args, stage),
-            warmup_ratio=args.warmup_ratio,
-            weight_decay=args.weight_decay,
-        )
+    optimizer = _build_optimizer(train_cfg, steps_per_epoch)
+    wrapper.compile(optimizer=optimizer)
 
-        stage_name = f"stage{stage}_size{stage_image_size}"
-        histories[f"stage{stage}"] = _run_stage(
-            stage_name=stage_name,
-            wrapper=wrapper,
-            stage_cfg=stage_cfg,
-            train_ds=train_ds,
-            val_ds=val_ds,
-            probe_ds=probe_ds,
-            steps_per_epoch=steps_per_epoch,
-            run_dir=results_dir,
-            persistent_callbacks=persistent_callbacks,
-            retrieval_probe_cb=retrieval_probe_cb,
-        )
+    tb_dir = os.path.join(results_dir, "tensorboard", "clip")
+    os.makedirs(tb_dir, exist_ok=True)
+    stage_local: List[keras.callbacks.Callback] = [
+        keras.callbacks.TerminateOnNaN(),
+        keras.callbacks.TensorBoard(
+            log_dir=tb_dir,
+            write_graph=False,
+            update_freq="epoch",
+        ),
+    ]
 
-    # Close the persistent CSV writer cleanly after both stages.
+    retrieval_probe_cb.set_probe_dataset(probe_ds, stage_label="clip")
+
+    callbacks = stage_local + list(persistent_callbacks)
+    logger.info(
+        f"CLIP training: tensorboard={tb_dir}; "
+        f"step-checkpoints + retrieval probes inherited from run-level state"
+    )
+
+    wrapper.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=train_cfg.epochs,
+        steps_per_epoch=steps_per_epoch,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    # Close the persistent CSV writer cleanly.
     step_ckpt_cb.close()
 
     # --- Save final model ---
@@ -1551,7 +1478,7 @@ def train(args: argparse.Namespace) -> None:
         logger.info(f"Saved final CliffordCLIP to: {final_path}")
         sample = {
             "image": np.zeros(
-                (2, args.stage2_image_size, args.stage2_image_size, 3),
+                (2, args.image_size, args.image_size, 3),
                 dtype=np.float32,
             ),
             "text": np.zeros((2, args.context_length), dtype=np.int32),
@@ -1569,7 +1496,7 @@ def train(args: argparse.Namespace) -> None:
     val_ds_final = make_image_text_tf_dataset(
         val_images,
         val_tokens,
-        image_size=args.stage2_image_size,
+        image_size=args.image_size,
         batch_size=args.batch_size,
         training=False,
         cache_decoded=False,  # one-shot eval, no reuse benefit
@@ -1600,12 +1527,8 @@ def train(args: argparse.Namespace) -> None:
             f"batch={args.pretrain_lm_batch_size}\n"
         )
         f.write(
-            f"Stage 1: size={args.stage1_image_size}, "
-            f"epochs={args.stage1_epochs}, lr={args.stage1_lr}\n"
-        )
-        f.write(
-            f"Stage 2: size={args.stage2_image_size}, "
-            f"epochs={args.stage2_epochs}, lr={args.stage2_lr}\n\n"
+            f"CLIP training: image_size={args.image_size}, "
+            f"epochs={args.epochs}, peak_lr={args.peak_lr}\n\n"
         )
         f.write("Retrieval metrics (val split):\n")
         for k, v in metrics.items():
@@ -1621,7 +1544,7 @@ def train(args: argparse.Namespace) -> None:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train CliffordCLIP with two-stage resolution curriculum"
+        description="Train CliffordCLIP: optional pretraining + single CLIP stage"
     )
 
     # Model
@@ -1671,15 +1594,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # Stage 1 (low-res)
-    parser.add_argument("--stage1-image-size", type=int, default=96)
-    parser.add_argument("--stage1-epochs", type=int, default=5)
-    parser.add_argument("--stage1-lr", type=float, default=1e-3)
-
-    # Stage 2 (high-res, target)
-    parser.add_argument("--stage2-image-size", type=int, default=160)
-    parser.add_argument("--stage2-epochs", type=int, default=20)
-    parser.add_argument("--stage2-lr", type=float, default=5e-4)
+    # CLIP training (single stage at the configured resolution)
+    parser.add_argument("--image-size", type=int, default=112)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--peak-lr", type=float, default=5e-4)
 
     # Pretraining (optional independent pretraining — vision on CIFAR-100, text on Wikipedia)
     parser.add_argument(
