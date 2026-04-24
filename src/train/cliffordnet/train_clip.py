@@ -1260,6 +1260,57 @@ def train(args: argparse.Namespace) -> None:
         args, encoder
     )
 
+    # --- Dataset summary ---
+    # One bracketed, greppable block so dataset sizes are immediately visible
+    # in the training log. Distinct-image counts are reported because COCO
+    # carries multiple captions per image (pairs > distinct images).
+    if args.synthetic:
+        source_name = "synthetic"
+        source_root = "(in-memory)"
+    elif args.dataset == "coco2017":
+        source_name = "coco2017"
+        source_root = args.coco_root
+    elif args.dataset == "cc3m":
+        source_name = "cc3m"
+        source_root = args.cc3m_root
+    else:
+        source_name = args.dataset
+        source_root = "(unknown)"
+
+    def _distinct_image_count(images):
+        if isinstance(images, np.ndarray):
+            return int(images.shape[0])
+        # path list (COCO/CC3M): caption-per-image so dedup by path string
+        return len(set(images))
+
+    n_train_pairs = len(train_tokens)
+    n_val_pairs = len(val_tokens)
+    n_train_distinct = _distinct_image_count(train_images)
+    n_val_distinct = _distinct_image_count(val_images)
+    summary_steps_per_epoch = max(1, n_train_pairs // args.batch_size)
+    summary_total_steps = summary_steps_per_epoch * args.epochs
+
+    logger.info("=" * 60)
+    logger.info("[Dataset summary]")
+    logger.info(f"  source           : {source_name}")
+    logger.info(f"  source root      : {source_root}")
+    logger.info(
+        f"  train pairs      : {n_train_pairs:,} "
+        f"(distinct images: {n_train_distinct:,})"
+    )
+    logger.info(
+        f"  val pairs        : {n_val_pairs:,} "
+        f"(distinct images: {n_val_distinct:,})"
+    )
+    logger.info(f"  image resolution : {args.image_size}x{args.image_size}")
+    logger.info(f"  context length   : {args.context_length}")
+    logger.info(f"  vocab size       : {vocab_size}")
+    logger.info(f"  batch size       : {args.batch_size}")
+    logger.info(f"  steps per epoch  : {summary_steps_per_epoch:,}")
+    logger.info(f"  epochs           : {args.epochs}")
+    logger.info(f"  total steps      : {summary_total_steps:,}")
+    logger.info("=" * 60)
+
     # --- Model ---
     # Pad sentinel must match the token id used to right-pad the sequences
     # (see train.common.image_text.tokenize_captions /
