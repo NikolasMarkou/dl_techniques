@@ -1417,24 +1417,24 @@ def train(args: argparse.Namespace) -> None:
         retrieval_probe_cb,
     ]
 
-    # --- Stage 0: optional independent pretraining ---
+    # --- Pretraining: optional independent tower pretraining ---
     # Resolve skip flag up-front so later checks read the effective values.
-    if args.skip_stage0:
-        args.stage0_vision_steps = 0
-        args.stage0_lm_steps = 0
-    if args.synthetic and args.stage0_lm_steps > 0:
+    if args.skip_pretrain:
+        args.pretrain_vision_steps = 0
+        args.pretrain_lm_steps = 0
+    if args.synthetic and args.pretrain_lm_steps > 0:
         logger.warning(
-            "--synthetic + stage0_lm_steps > 0: Wikipedia is not synthetic; "
-            "forcing stage0_lm_steps=0 for this run."
+            "--synthetic + pretrain_lm_steps > 0: Wikipedia is not synthetic; "
+            "forcing pretrain_lm_steps=0 for this run."
         )
-        args.stage0_lm_steps = 0
+        args.pretrain_lm_steps = 0
 
-    if args.stage0_vision_steps > 0:
+    if args.pretrain_vision_steps > 0:
         _run_pretrain_vision(clip_model, args, results_dir)
     else:
         logger.info("Pretrain vision: skipped (pretrain_vision_steps=0)")
 
-    if args.stage0_lm_steps > 0:
+    if args.pretrain_lm_steps > 0:
         _run_pretrain_lm(clip_model, args, results_dir)
     else:
         logger.info("Pretrain LM: skipped (pretrain_lm_steps=0)")
@@ -1590,14 +1590,14 @@ def train(args: argparse.Namespace) -> None:
         f.write(f"Context length: {args.context_length}\n")
         f.write(f"Parameters: {clip_model.count_params():,}\n\n")
         f.write(
-            f"Stage 0 vision: steps={args.stage0_vision_steps}, "
-            f"lr={args.stage0_vision_lr}, wd={args.stage0_vision_wd}, "
-            f"batch={args.stage0_vision_batch_size}\n"
+            f"Pretrain vision: steps={args.pretrain_vision_steps}, "
+            f"lr={args.pretrain_vision_lr}, wd={args.pretrain_vision_wd}, "
+            f"batch={args.pretrain_vision_batch_size}\n"
         )
         f.write(
-            f"Stage 0 LM:     steps={args.stage0_lm_steps}, "
-            f"lr={args.stage0_lm_lr}, wd={args.stage0_lm_wd}, "
-            f"batch={args.stage0_lm_batch_size}\n"
+            f"Pretrain LM:     steps={args.pretrain_lm_steps}, "
+            f"lr={args.pretrain_lm_lr}, wd={args.pretrain_lm_wd}, "
+            f"batch={args.pretrain_lm_batch_size}\n"
         )
         f.write(
             f"Stage 1: size={args.stage1_image_size}, "
@@ -1681,33 +1681,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage2-epochs", type=int, default=20)
     parser.add_argument("--stage2-lr", type=float, default=5e-4)
 
-    # Stage 0 (optional independent pretraining — vision on CIFAR-100, text on Wikipedia)
+    # Pretraining (optional independent pretraining — vision on CIFAR-100, text on Wikipedia)
     parser.add_argument(
-        "--stage0-vision-steps", type=int, default=50000,
+        "--pretrain-vision-steps", type=int, default=50000,
         help=(
-            "Number of training steps for Stage 0 vision pretraining on "
+            "Number of training steps for vision pretraining on "
             "CIFAR-100. 0 disables. Default 50000."
         ),
     )
     parser.add_argument(
-        "--stage0-lm-steps", type=int, default=50000,
+        "--pretrain-lm-steps", type=int, default=50000,
         help=(
-            "Number of training steps for Stage 0 LM pretraining on "
+            "Number of training steps for LM pretraining on "
             "Wikipedia. 0 disables. Default 50000."
         ),
     )
     parser.add_argument(
-        "--skip-stage0", action="store_true",
-        help="Shortcut: zero out both Stage 0 step counts.",
+        "--skip-pretrain", action="store_true",
+        help="Shortcut: zero out both pretraining step counts.",
     )
-    parser.add_argument("--stage0-vision-lr", type=float, default=1e-3)
-    parser.add_argument("--stage0-vision-wd", type=float, default=0.1)
-    parser.add_argument("--stage0-vision-batch-size", type=int, default=128)
-    parser.add_argument("--stage0-lm-lr", type=float, default=3e-4)
-    parser.add_argument("--stage0-lm-wd", type=float, default=0.01)
-    parser.add_argument("--stage0-lm-batch-size", type=int, default=8)
+    parser.add_argument("--pretrain-vision-lr", type=float, default=1e-3)
+    parser.add_argument("--pretrain-vision-wd", type=float, default=0.1)
+    parser.add_argument("--pretrain-vision-batch-size", type=int, default=128)
+    parser.add_argument("--pretrain-lm-lr", type=float, default=3e-4)
+    parser.add_argument("--pretrain-lm-wd", type=float, default=0.01)
+    parser.add_argument("--pretrain-lm-batch-size", type=int, default=8)
     parser.add_argument(
-        "--stage0-lm-hf-cache", type=str,
+        "--pretrain-lm-hf-cache", type=str,
         default="/media/arxwn/data0_4tb/datasets/wikipedia",
         help="HuggingFace cache dir for the Wikipedia dataset.",
     )
