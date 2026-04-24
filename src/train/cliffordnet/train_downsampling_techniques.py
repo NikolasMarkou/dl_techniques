@@ -528,9 +528,15 @@ def train_one_variant(
     )
 
     # ---- Callbacks ----
+    # Note: create_callbacks() unconditionally prepends "results/" to the
+    # prefix.  We pass a prefix relative to "results/" so all per-variant
+    # directories nest under the single per-run root we created earlier.
+    relative_prefix = os.path.relpath(
+        os.path.join(run_root, variant_name), start="results"
+    )
     callbacks, results_dir = create_callbacks(
-        model_name=f"downsampling_{variant_name}",
-        results_dir_prefix=os.path.join(run_root, variant_name),
+        model_name="downsampling",
+        results_dir_prefix=relative_prefix,
         monitor="val_accuracy",
         patience=args.patience,
         use_lr_schedule=True,
@@ -685,8 +691,7 @@ def _write_comparison_csv(
 
 def train_all_variants(args: argparse.Namespace) -> None:
     """Train every variant in :data:`VARIANTS` (or the one in args.variant)."""
-    setup_gpu(gpu_id=args.gpu)
-
+    # GPU setup is performed in main() before TF allocates devices.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_root = os.path.join(
         "results", f"cliffordnet_downsampling_{timestamp}"
@@ -794,6 +799,10 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main() -> None:
     """Entry point."""
     args = _parse_args()
+    # Configure CUDA_VISIBLE_DEVICES BEFORE TF / Keras allocate any device.
+    if args.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    setup_gpu(gpu_id=None)  # memory growth on the visible GPU(s)
     try:
         train_all_variants(args)
     except KeyboardInterrupt:
