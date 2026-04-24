@@ -115,6 +115,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     SparseRollingGeometricProduct,
 )
+from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.utils.logger import logger
 
 
@@ -369,10 +370,18 @@ class CliffordCLIP(keras.Model):
     # adds a global-context branch on the vision tower, mirroring
     # :class:`CliffordNet.lite_g`.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        # Vision tower is now hierarchical: 4 stages with PatchMerging
+        # between them and the channel progression ``[D, D, 2D, 2D]``
+        # (D-002: doubling twice across 4 stages keeps the parameter
+        # budget within ~2x of the pre-refactor isotropic count while
+        # delivering the activation-memory win from spatial halving).
+        # Total vision depth is preserved against the pre-refactor
+        # ladder (sum of stage depths == old vision_depth).
+        # The text tower remains isotropic per D-001.
         "nano": dict(
-            vision_channels=128,
-            vision_depth=12,
-            vision_shifts=[1, 2],
+            vision_stage_channels=[128, 128, 256, 256],
+            vision_stage_depths=[3, 3, 3, 3],          # sum 12
+            vision_stage_shifts=[[1, 2], [1, 2], [1, 2, 4], [1, 2, 4]],
             text_channels=128,
             text_depth=12,
             text_shifts=[1, 2],
@@ -381,13 +390,14 @@ class CliffordCLIP(keras.Model):
             text_stochastic_depth_rate=0.05,
         ),
         # nano_g: nano with a global-context branch on the vision tower
-        # (gFFN-G), mirroring CliffordNet.lite_g. Text tower keeps
-        # use_global_context=False to match CliffordNetLM, which has no
-        # global-context variant in its ladder.
+        # (gFFN-G), mirroring CliffordNet.lite_g. The global-context flag
+        # currently broadcasts to all stages (parking-lot decision in
+        # decisions.md). Text tower keeps use_global_context=False to
+        # match CliffordNetLM.
         "nano_g": dict(
-            vision_channels=128,
-            vision_depth=12,
-            vision_shifts=[1, 2],
+            vision_stage_channels=[128, 128, 256, 256],
+            vision_stage_depths=[3, 3, 3, 3],
+            vision_stage_shifts=[[1, 2], [1, 2], [1, 2, 4], [1, 2, 4]],
             vision_use_global_context=True,
             text_channels=128,
             text_depth=12,
@@ -397,9 +407,9 @@ class CliffordCLIP(keras.Model):
             text_stochastic_depth_rate=0.05,
         ),
         "mini": dict(
-            vision_channels=192,
-            vision_depth=12,
-            vision_shifts=[1, 2, 4],
+            vision_stage_channels=[192, 192, 384, 384],
+            vision_stage_depths=[3, 3, 3, 3],          # sum 12
+            vision_stage_shifts=[[1, 2, 4], [1, 2, 4], [1, 2, 4, 8], [1, 2, 4, 8]],
             text_channels=192,
             text_depth=12,
             text_shifts=[1, 2, 4],
@@ -408,9 +418,9 @@ class CliffordCLIP(keras.Model):
             text_stochastic_depth_rate=0.1,
         ),
         "small": dict(
-            vision_channels=192,
-            vision_depth=15,
-            vision_shifts=[1, 2, 4],
+            vision_stage_channels=[192, 192, 384, 384],
+            vision_stage_depths=[4, 4, 4, 3],          # sum 15
+            vision_stage_shifts=[[1, 2, 4], [1, 2, 4], [1, 2, 4, 8], [1, 2, 4, 8]],
             text_channels=192,
             text_depth=15,
             text_shifts=[1, 2, 4],
@@ -419,9 +429,9 @@ class CliffordCLIP(keras.Model):
             text_stochastic_depth_rate=0.1,
         ),
         "base": dict(
-            vision_channels=256,
-            vision_depth=16,
-            vision_shifts=[1, 2, 4, 8],
+            vision_stage_channels=[256, 256, 512, 512],
+            vision_stage_depths=[4, 4, 4, 4],          # sum 16
+            vision_stage_shifts=[[1, 2, 4], [1, 2, 4, 8], [1, 2, 4, 8], [1, 2, 4, 8]],
             text_channels=256,
             text_depth=12,
             text_shifts=[1, 2, 4],
@@ -430,9 +440,9 @@ class CliffordCLIP(keras.Model):
             text_stochastic_depth_rate=0.1,
         ),
         "large": dict(
-            vision_channels=384,
-            vision_depth=20,
-            vision_shifts=[1, 2, 4, 8, 16],
+            vision_stage_channels=[384, 384, 768, 768],
+            vision_stage_depths=[5, 5, 5, 5],          # sum 20
+            vision_stage_shifts=[[1, 2, 4, 8], [1, 2, 4, 8], [1, 2, 4, 8, 16], [1, 2, 4, 8, 16]],
             text_channels=384,
             text_depth=16,
             text_shifts=[1, 2, 4, 8],
@@ -448,9 +458,18 @@ class CliffordCLIP(keras.Model):
         image_size: int = 224,
         image_channels: int = 3,
         vision_patch_size: int = 4,
-        vision_channels: int = 192,
-        vision_depth: int = 12,
+        vision_channels: Optional[int] = None,
+        vision_depth: Optional[int] = None,
         vision_shifts: Optional[List[int]] = None,
+        # Hierarchical vision config (preferred over scalar legacy fields).
+        # Each list has one entry per stage; PatchMerging is inserted between
+        # adjacent stages, halving spatial resolution. Channel transitions
+        # between stages are handled by PatchMerging (always 4*src -> 2*src)
+        # followed by an optional Dense projection to the target stage's
+        # channel count when ``target != 2*src``.
+        vision_stage_channels: Optional[List[int]] = None,
+        vision_stage_depths: Optional[List[int]] = None,
+        vision_stage_shifts: Optional[List[List[int]]] = None,
         vision_cli_mode: CliMode = "full",
         vision_ctx_mode: CtxMode = "diff",
         vision_use_global_context: bool = False,
@@ -496,9 +515,9 @@ class CliffordCLIP(keras.Model):
                 f"image_size ({image_size}) must be divisible by "
                 f"vision_patch_size ({vision_patch_size})"
             )
-        if vision_channels <= 0 or text_channels <= 0 or embed_dim <= 0:
+        if text_channels <= 0 or embed_dim <= 0:
             raise ValueError("channels and embed_dim must be positive")
-        if vision_depth <= 0 or text_depth <= 0:
+        if text_depth <= 0:
             raise ValueError("depth must be positive")
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
@@ -507,15 +526,88 @@ class CliffordCLIP(keras.Model):
                 f"context_length must be positive, got {context_length}"
             )
 
+        # --- Resolve vision staged config (back-compat with scalar fields) ---
+        # Preference order:
+        #   1. Explicit per-stage lists (``vision_stage_channels`` etc.)
+        #   2. Legacy scalar fields (``vision_channels`` / ``vision_depth`` /
+        #      ``vision_shifts``) -> single-stage isotropic, no PatchMerging.
+        #   3. Default scalar fallback (channels=192, depth=12) -> single stage.
+        if vision_stage_channels is not None or vision_stage_depths is not None:
+            if (
+                vision_stage_channels is None
+                or vision_stage_depths is None
+            ):
+                raise ValueError(
+                    "vision_stage_channels and vision_stage_depths must both "
+                    "be provided when using the staged vision config."
+                )
+            stage_channels = list(vision_stage_channels)
+            stage_depths = list(vision_stage_depths)
+            if vision_stage_shifts is None:
+                # Broadcast scalar ``vision_shifts`` (or default) to all stages.
+                base_shifts = (
+                    list(vision_shifts) if vision_shifts is not None else [1, 2]
+                )
+                stage_shifts = [list(base_shifts) for _ in stage_channels]
+            else:
+                stage_shifts = [list(s) for s in vision_stage_shifts]
+        else:
+            # Legacy single-stage path.
+            scalar_channels = vision_channels if vision_channels is not None else 192
+            scalar_depth = vision_depth if vision_depth is not None else 12
+            scalar_shifts = (
+                list(vision_shifts) if vision_shifts is not None else [1, 2]
+            )
+            stage_channels = [scalar_channels]
+            stage_depths = [scalar_depth]
+            stage_shifts = [scalar_shifts]
+
+        n_stages = len(stage_channels)
+        if not (len(stage_depths) == n_stages == len(stage_shifts)):
+            raise ValueError(
+                f"vision stage lists must have equal length; got "
+                f"channels={len(stage_channels)}, depths={len(stage_depths)}, "
+                f"shifts={len(stage_shifts)}"
+            )
+        if n_stages == 0:
+            raise ValueError("Need at least one vision stage")
+        for i, c in enumerate(stage_channels):
+            if c <= 0:
+                raise ValueError(f"vision_stage_channels[{i}] must be positive, got {c}")
+        for i, d in enumerate(stage_depths):
+            if d <= 0:
+                raise ValueError(f"vision_stage_depths[{i}] must be positive, got {d}")
+        for i, sh in enumerate(stage_shifts):
+            if not sh:
+                raise ValueError(f"vision_stage_shifts[{i}] is empty")
+            if max(sh) >= stage_channels[i]:
+                raise ValueError(
+                    f"vision_stage_shifts[{i}] has shift >= channels "
+                    f"({max(sh)} >= {stage_channels[i]})"
+                )
+        # Validate post-stem spatial dim allows ``n_stages - 1`` halvings.
+        post_stem = image_size // vision_patch_size
+        if post_stem < (1 << (n_stages - 1)):
+            raise ValueError(
+                f"Hierarchical vision tower requires post-stem spatial dim "
+                f"({post_stem}) >= 2^(n_stages-1) = {1 << (n_stages - 1)}; "
+                f"got image_size={image_size}, patch_size={vision_patch_size}, "
+                f"n_stages={n_stages}"
+            )
+
         # --- Store config ---
         self.image_size = image_size
         self.image_channels = image_channels
         self.vision_patch_size = vision_patch_size
-        self.vision_channels = vision_channels
-        self.vision_depth = vision_depth
-        self.vision_shifts = (
-            list(vision_shifts) if vision_shifts is not None else [1, 2]
-        )
+        self.vision_stage_channels = stage_channels
+        self.vision_stage_depths = stage_depths
+        self.vision_stage_shifts = stage_shifts
+        # Derived scalars for downstream sizing + back-compat introspection.
+        self.vision_channels = stage_channels[-1]   # last-stage channel count
+        self.vision_depth = sum(stage_depths)
+        self.vision_shifts = list(stage_shifts[0])  # representative for legacy callers
+        # Stem produces stage-0 channels.
+        self._vision_stem_channels = stage_channels[0]
         self.vision_cli_mode = vision_cli_mode
         self.vision_ctx_mode = vision_ctx_mode
         self.vision_use_global_context = vision_use_global_context
@@ -571,7 +663,8 @@ class CliffordCLIP(keras.Model):
 
         logger.info(
             f"Created CliffordCLIP (image_size={image_size}, "
-            f"vision_channels={vision_channels}, vision_depth={vision_depth}, "
+            f"vision_stage_channels={self.vision_stage_channels}, "
+            f"vision_stage_depths={self.vision_stage_depths}, "
             f"text_channels={text_channels}, text_depth={text_depth}, "
             f"embed_dim={embed_dim}, vocab_size={vocab_size}, "
             f"context_length={context_length})"
@@ -591,7 +684,18 @@ class CliffordCLIP(keras.Model):
         )
 
     def _build_vision_tower(self) -> None:
-        """Vision tower: patch stem -> CliffordNetBlocks -> GAP -> LN."""
+        """Vision tower: patch stem -> staged CliffordNetBlocks (with
+        PatchMerging between stages) -> GAP -> LN.
+
+        The body is built as ``len(vision_stage_channels)`` consecutive
+        stages. Each stage has ``vision_stage_depths[i]`` shape-preserving
+        :class:`CliffordNetBlock` layers operating at
+        ``vision_stage_channels[i]`` channels and ``vision_stage_shifts[i]``
+        shifts. Between adjacent stages a :class:`PatchMerging` halves the
+        spatial resolution (and produces ``2 * src_channels`` channels);
+        an optional ``Dense`` projects to the next stage's channel count
+        when it differs from ``2 * src``.
+        """
         _conv_kw: Dict[str, Any] = dict(
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -599,10 +703,12 @@ class CliffordCLIP(keras.Model):
             bias_regularizer=self.bias_regularizer,
         )
 
+        stem_channels = self._vision_stem_channels  # = stage_channels[0]
+
         # Stem: mirrors CliffordNet.model._build_stem semantics.
         if self.vision_patch_size == 1:
             self.vision_stem_conv1 = keras.layers.Conv2D(
-                filters=self.vision_channels // 2,
+                filters=stem_channels // 2,
                 kernel_size=3,
                 strides=1,
                 padding="same",
@@ -614,7 +720,7 @@ class CliffordCLIP(keras.Model):
                 name="vision_stem_bn1"
             )
             self.vision_stem_conv2 = keras.layers.Conv2D(
-                filters=self.vision_channels,
+                filters=stem_channels,
                 kernel_size=3,
                 strides=1,
                 padding="same",
@@ -625,7 +731,7 @@ class CliffordCLIP(keras.Model):
             self._vision_stem_kind = "two_stage"
         elif self.vision_patch_size == 2:
             self.vision_stem_conv = keras.layers.Conv2D(
-                filters=self.vision_channels,
+                filters=stem_channels,
                 kernel_size=3,
                 strides=2,
                 padding="same",
@@ -636,7 +742,7 @@ class CliffordCLIP(keras.Model):
             self._vision_stem_kind = "single"
         elif self.vision_patch_size == 4:
             self.vision_stem_conv1 = keras.layers.Conv2D(
-                filters=self.vision_channels // 2,
+                filters=stem_channels // 2,
                 kernel_size=3,
                 strides=2,
                 padding="same",
@@ -648,7 +754,7 @@ class CliffordCLIP(keras.Model):
                 name="vision_stem_bn1"
             )
             self.vision_stem_conv2 = keras.layers.Conv2D(
-                filters=self.vision_channels,
+                filters=stem_channels,
                 kernel_size=3,
                 strides=2,
                 padding="same",
@@ -659,7 +765,7 @@ class CliffordCLIP(keras.Model):
             self._vision_stem_kind = "two_stage"
         else:
             self.vision_stem_conv = keras.layers.Conv2D(
-                filters=self.vision_channels,
+                filters=stem_channels,
                 kernel_size=self.vision_patch_size,
                 strides=self.vision_patch_size,
                 padding="same",
@@ -673,31 +779,83 @@ class CliffordCLIP(keras.Model):
             name="vision_stem_norm"
         )
 
-        # CliffordNet blocks
-        vision_drop_rates = _linear_drop_path_rates(
-            self.vision_depth, self.vision_stochastic_depth_rate
+        # --- Staged CliffordNet blocks + PatchMerging downsamples ---
+        # Global linear DropPath schedule across the *total* depth.
+        total_depth = sum(self.vision_stage_depths)
+        global_drop_rates = _linear_drop_path_rates(
+            total_depth, self.vision_stochastic_depth_rate
         )
-        _v_block_kw: Dict[str, Any] = dict(
-            channels=self.vision_channels,
-            shifts=self.vision_shifts,
-            cli_mode=self.vision_cli_mode,
-            ctx_mode=self.vision_ctx_mode,
-            use_global_context=self.vision_use_global_context,
-            layer_scale_init=self.layer_scale_init,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-        )
-        self.vision_blocks: List[CliffordNetBlock] = [
-            CliffordNetBlock(
-                drop_path_rate=vision_drop_rates[i],
-                name=f"vision_clifford_block_{i}",
-                **_v_block_kw,
+
+        self.vision_blocks: List[CliffordNetBlock] = []
+        # Cumulative depth offsets of length n_stages (offset of stage i is
+        # the index in ``vision_blocks`` of stage i's first block).
+        self._vision_stage_offsets: List[int] = []
+        block_idx = 0
+        for stage_idx, (stage_c, stage_d, stage_sh) in enumerate(
+            zip(
+                self.vision_stage_channels,
+                self.vision_stage_depths,
+                self.vision_stage_shifts,
             )
-            for i in range(self.vision_depth)
-        ]
+        ):
+            self._vision_stage_offsets.append(block_idx)
+            block_kw: Dict[str, Any] = dict(
+                channels=stage_c,
+                shifts=stage_sh,
+                cli_mode=self.vision_cli_mode,
+                ctx_mode=self.vision_ctx_mode,
+                use_global_context=self.vision_use_global_context,
+                layer_scale_init=self.layer_scale_init,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+            )
+            for _ in range(stage_d):
+                self.vision_blocks.append(
+                    CliffordNetBlock(
+                        drop_path_rate=global_drop_rates[block_idx],
+                        name=f"vision_clifford_block_{block_idx}",
+                        **block_kw,
+                    )
+                )
+                block_idx += 1
+
+        # PatchMerging between adjacent stages. PatchMerging always emits
+        # ``2 * src``; an optional Dense projects to ``target`` when the
+        # progression is not pure-doubling (e.g. D -> D needs a 2D -> D
+        # projection; D -> 2D needs no projection because src=D, 2*src=2D).
+        self.vision_merge_layers: List[PatchMerging] = []
+        self.vision_merge_projections: List[Optional[keras.layers.Dense]] = []
+        for i in range(len(self.vision_stage_channels) - 1):
+            src_c = self.vision_stage_channels[i]
+            dst_c = self.vision_stage_channels[i + 1]
+            self.vision_merge_layers.append(
+                PatchMerging(
+                    dim=src_c,
+                    use_bias=self.use_bias,
+                    kernel_initializer=self.kernel_initializer,
+                    bias_initializer=self.bias_initializer,
+                    kernel_regularizer=self.kernel_regularizer,
+                    bias_regularizer=self.bias_regularizer,
+                    name=f"vision_patch_merge_{i}",
+                )
+            )
+            if dst_c != 2 * src_c:
+                self.vision_merge_projections.append(
+                    keras.layers.Dense(
+                        dst_c,
+                        use_bias=self.use_bias,
+                        kernel_initializer=self.kernel_initializer,
+                        bias_initializer=self.bias_initializer,
+                        kernel_regularizer=self.kernel_regularizer,
+                        bias_regularizer=self.bias_regularizer,
+                        name=f"vision_merge_proj_{i}",
+                    )
+                )
+            else:
+                self.vision_merge_projections.append(None)
 
         self.vision_global_pool = keras.layers.GlobalAveragePooling2D(
             name="vision_global_pool"
@@ -933,6 +1091,41 @@ class CliffordCLIP(keras.Model):
             x = self.vision_stem_conv(images)
         return self.vision_stem_norm(x, training=training)
 
+    def _apply_vision_body(
+        self,
+        images: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Apply stem + staged vision body, returning the last-stage map.
+
+        Walks ``vision_blocks`` in order and inserts a
+        :class:`PatchMerging` (and optional Dense projection) at the
+        boundary between each pair of stages. Returns
+        ``(B, H', W', vision_stage_channels[-1])``.
+        """
+        x = self._apply_vision_stem(images, training=training)
+        n_stages = len(self.vision_stage_channels)
+        # Stage end indices in the flat ``vision_blocks`` list.
+        stage_ends: List[int] = []
+        running = 0
+        for d in self.vision_stage_depths:
+            running += d
+            stage_ends.append(running)
+        next_boundary_stage = 0
+        for i, block in enumerate(self.vision_blocks):
+            x = block(x, training=training)
+            if (
+                next_boundary_stage < n_stages - 1
+                and i + 1 == stage_ends[next_boundary_stage]
+            ):
+                merge = self.vision_merge_layers[next_boundary_stage]
+                proj = self.vision_merge_projections[next_boundary_stage]
+                x = merge(x, training=training)
+                if proj is not None:
+                    x = proj(x)
+                next_boundary_stage += 1
+        return x
+
     def encode_image(
         self,
         images: keras.KerasTensor,
@@ -947,9 +1140,7 @@ class CliffordCLIP(keras.Model):
             raw projected features (useful for auxiliary losses).
         :return: Embedding tensor ``(B, embed_dim)``.
         """
-        x = self._apply_vision_stem(images, training=training)
-        for block in self.vision_blocks:
-            x = block(x, training=training)
+        x = self._apply_vision_body(images, training=training)
 
         # x: (B, H, W, D_v)
         z_det = self.vision_global_pool(x)  # (B, D_v) — canonical CLIP anchor
@@ -1143,9 +1334,10 @@ class CliffordCLIP(keras.Model):
                 "image_size": self.image_size,
                 "image_channels": self.image_channels,
                 "vision_patch_size": self.vision_patch_size,
-                "vision_channels": self.vision_channels,
-                "vision_depth": self.vision_depth,
-                "vision_shifts": self.vision_shifts,
+                # Staged vision config (preferred over scalar legacy fields).
+                "vision_stage_channels": self.vision_stage_channels,
+                "vision_stage_depths": self.vision_stage_depths,
+                "vision_stage_shifts": self.vision_stage_shifts,
                 "vision_cli_mode": self.vision_cli_mode,
                 "vision_ctx_mode": self.vision_ctx_mode,
                 "vision_use_global_context": self.vision_use_global_context,
