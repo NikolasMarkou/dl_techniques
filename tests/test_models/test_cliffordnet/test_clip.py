@@ -57,14 +57,53 @@ def _build_nano(vocab_size=50257, **overrides):
 
 
 def test_nano_matches_cliffordnet_nano_depth_and_shifts():
-    """CLIP nano must share channels / depth / shifts with CliffordNet.nano."""
+    """CLIP nano vision tower is staged ([D, D, 2D, 2D] per D-002) but
+    preserves total depth against the pre-refactor isotropic ladder; the
+    text tower remains isotropic per D-001."""
     m = _build_nano()
-    assert m.vision_channels == 128
+    # Vision tower (hierarchical): stage_channels [D, D, 2D, 2D],
+    # stage_depths sum to the legacy depth, and the head is sized off the
+    # last-stage channel count.
+    assert m.vision_stage_channels == [128, 128, 256, 256]
+    assert m.vision_stage_depths == [3, 3, 3, 3]
+    assert sum(m.vision_stage_depths) == 12
+    assert m.vision_stage_shifts == [
+        [1, 2], [1, 2], [1, 2, 4], [1, 2, 4]
+    ]
+    # Derived back-compat scalars.
+    assert m.vision_channels == 256       # last-stage channels (head sizing)
+    assert m.vision_depth == 12           # sum of stage depths
+    assert m.vision_shifts == [1, 2]      # representative (stage 0)
+    # Text tower (still isotropic).
     assert m.text_channels == 128
-    assert m.vision_depth == 12
     assert m.text_depth == 12
-    assert m.vision_shifts == [1, 2]
     assert m.text_shifts == [1, 2]
+
+
+def test_vision_body_halves_spatial_per_stage():
+    """For image=32, patch=4 (post-stem 8x8) and 4 stages, the post-stem
+    feature map must halve at each PatchMerging boundary: 8 -> 4 -> 2 -> 1.
+    """
+    m = _build_nano()
+    m.build({"image": (None, 32, 32, 3), "text": (None, 16)})
+    # Three merges between four stages.
+    assert len(m.vision_merge_layers) == 3
+    spatial = 32 // m.vision_patch_size  # 8
+    channels = m.vision_stage_channels[0]
+    for i, merge in enumerate(m.vision_merge_layers):
+        out_shape = merge.compute_output_shape((1, spatial, spatial, channels))
+        assert out_shape[1] == (spatial + 1) // 2, (
+            f"merge {i}: spatial {spatial} -> {out_shape[1]} (expected {(spatial+1)//2})"
+        )
+        spatial = out_shape[1]
+        # PatchMerging emits 2*src; an optional Dense projects to next stage.
+        proj = m.vision_merge_projections[i]
+        if proj is None:
+            channels = 2 * channels
+        else:
+            channels = m.vision_stage_channels[i + 1]
+    # After 3 halvings starting from 8: 8 -> 4 -> 2 -> 1.
+    assert spatial == 1
 
 
 def test_nano_g_enables_global_context_on_vision_only():
