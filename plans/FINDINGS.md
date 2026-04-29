@@ -1,6 +1,25 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-04-29_b6dbc601
+### Index
+- `findings/existing-block.md` — current CliffordNetBlock structure, context stream, forward path, project conventions
+- `findings/variant-design.md` — proposed CliffordNetBlockDS API, forward path, edge cases, validation tests
+- `findings/test-conventions.md` — test file structure and patterns to follow
+
+### Key Constraints
+- HARD: detail and context streams must share spatial+channel shape (element-wise geometric product).
+- HARD: residual `x_skip + h_mix` requires matching spatial dims; when downsampling, x_skip must be pooled.
+- HARD: channels are preserved through the block (no channel projection inside).
+- SOFT: kernel_size default 7 (per goal); strides default 1 (preserves dim-preserving default behaviour).
+- SOFT: skip_pool default "avg" (matches existing patterns for downsamplers per LESSONS.md L23).
+- GHOST: docstring says "effective 7x7 RF" for two stacked 3x3 — actually 5x5. New variant truly uses 7x7.
+
+### Exploration confidence
+- Problem scope: deep — exact lines and shapes traced
+- Solution space: constrained — shape invariants pin the design (pool x_norm before stream split)
+- Risk visibility: clear — identified residual-shape and stream-shape invariants up front
+
 ## plan_2026-04-24_cf1a9ab7
 ### Index
 - `findings/cliffordnet-architecture.md` — current `CliffordNet` model + `CliffordNetBlock` API (block is dim-preserving — must be wrapped, not modified, for hierarchical use). Files: `src/dl_techniques/models/cliffordnet/model.py`, `src/dl_techniques/layers/geometric/clifford_block.py`.

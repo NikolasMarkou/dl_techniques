@@ -1,6 +1,38 @@
 # Consolidated Decisions
 *Cross-plan decision archive. Entries merged from per-plan decisions.md on close. Newest first.*
 
+## plan_2026-04-29_b6dbc601
+### D-001 (PLAN, iter-1): Pool x_norm BEFORE stream split (instead of pooling z_det only)
+**Choice**: When `strides>1`, apply pool to `x_norm` once before computing both `z_det` and `z_ctx`; the strided DWConv produces the already-pooled context.
+
+**Trade-off**: Cleanest invariant satisfaction (z_det and z_ctx share shape automatically) at the cost of computing the LayerNorm on full-resolution input (Linear projection done on pooled tensor instead).
+
+**Alternatives considered**:
+- Pool z_det after Linear (full-res Linear then pool): wastes compute on the linear projection, no quality benefit.
+- Pool x_prev once and feed both streams from there (skipping LayerNorm on full-res): would change normalization semantics — LN computes statistics on a smaller spatial map.
+
+Going with: pool x_norm post-LN, before both streams. Same skip-pool type used for residual `x_prev`.
+
+### D-002 (PLAN, iter-1): Naming — `CliffordNetBlockDS`
+**Choice**: Class name `CliffordNetBlockDS` (DS = downsample / single-conv).
+
+**Trade-off**: Communicates the new capability (downsampling) at the cost of a slightly cryptic suffix. Alternative `CliffordNetBlock7x7` only describes the kernel size, not the strided variant — misleading when users use `strides=1`.
+
+### D-003 (PLAN, iter-1): Single class, not a parameter on existing block
+**Choice**: New class instead of adding `kernel_size` / `strides` / `skip_pool` parameters to existing `CliffordNetBlock`.
+
+**Trade-off**: Some duplication of forward-pass scaffolding at the cost of keeping the existing isotropic block exactly stable (no signature change → no risk to existing CliffordNet models that have been tuned in prior plans, see LESSONS L21-25). Existing serialized checkpoints continue to deserialize unchanged.
+
+### D-004 (PLAN, iter-1): Two pool instances (stream-split + skip), not shared
+**Choice**: Build two separate `keras.layers.AveragePooling2D` (or `MaxPooling2D`) instances when `strides>1`. They have identical configs but are not the same object.
+
+**Trade-off**: Slightly more verbose at the cost of avoiding any chance of state-sharing surprises (pool layers have no state, but Keras serialization sometimes treats shared sublayers oddly). Two layers also makes the forward path more readable: `pool_stream(x_norm)` vs `pool_skip(x_prev)`.
+
+### D-005 (REFLECT, iter-1): Devil's advocate — what could still be wrong
+- The strided DWConv with `padding="same"` and the 2x2 pool with `padding="same"` both ceil-divide spatial dims, so they produce matching shapes. Verified empirically across H ∈ {8, 16, 32}. Edge case: H=7 with strides=2 → both produce 4. Not exhaustively tested but `padding="same"` semantics are stable. Risk: low.
+- Devil's advocate concern: residual identity test at strides=2 only covers `skip_pool="avg"` against an explicit `AveragePooling2D` reference. The corresponding `skip_pool="max"` case isn't pixel-checked but is implicitly verified by `test_skip_pool_avg_vs_max_differ` (proves max path is wired distinctly). Acceptable.
+- All criteria PASS, no regressions. Recommend CLOSE.
+
 ## plan_2026-04-24_cf1a9ab7
 ### D-001: Wrap `CliffordNetBlock`, do NOT modify it (2026-04-24, PLAN iter-1)
 
