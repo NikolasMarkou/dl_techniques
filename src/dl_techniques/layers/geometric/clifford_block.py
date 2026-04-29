@@ -1195,6 +1195,8 @@ class CliffordNetBlockDS(keras.layers.Layer):
         kernel_size: int = 7,
         strides: int = 1,
         skip_pool: SkipPool = "avg",
+        use_ctx_bn: bool = True,
+        ctx_activation: Optional[str] = "silu",
         layer_scale_init: float = 1e-5,
         drop_path_rate: float = 0.0,
         use_bias: bool = True,
@@ -1233,6 +1235,8 @@ class CliffordNetBlockDS(keras.layers.Layer):
         self.kernel_size = kernel_size
         self.strides = strides
         self.skip_pool = skip_pool
+        self.use_ctx_bn = use_ctx_bn
+        self.ctx_activation = ctx_activation
         self.layer_scale_init = layer_scale_init
         self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
@@ -1260,14 +1264,20 @@ class CliffordNetBlockDS(keras.layers.Layer):
         )
 
         # --- Step 2b: Context stream — single (kernel_size x kernel_size) DW conv with optional stride ---
+        # When ``use_ctx_bn`` is False the conv carries a learnable bias to
+        # restore the affine degree of freedom that BN would have provided.
         self.dw_conv = keras.layers.DepthwiseConv2D(
             kernel_size=kernel_size,
             strides=strides,
             padding="same",
-            use_bias=False,
+            use_bias=not use_ctx_bn,
             name="dw_conv",
         )
-        self.ctx_bn = keras.layers.BatchNormalization(name="ctx_bn")
+        self.ctx_bn = (
+            keras.layers.BatchNormalization(name="ctx_bn")
+            if use_ctx_bn
+            else None
+        )
 
         # --- Pool layers (only when strides > 1) ---
         # Two separate instances: one used to pool x_norm before the
@@ -1382,7 +1392,8 @@ class CliffordNetBlockDS(keras.layers.Layer):
         # Its output spatial dims equal the pooled shape (same ceil
         # semantics for stride+"same" padding).
         self.dw_conv.build(input_shape)
-        self.ctx_bn.build(stream_shape)
+        if self.ctx_bn is not None:
+            self.ctx_bn.build(stream_shape)
 
         # Step 3: local product
         self.local_geo_prod.build(stream_shape)
@@ -1430,7 +1441,10 @@ class CliffordNetBlockDS(keras.layers.Layer):
         # When strides>1, the strided conv directly produces the
         # downsampled spatial map (matches x_norm_p shape).
         z_ctx = self.dw_conv(x_norm)
-        z_ctx = keras.activations.silu(self.ctx_bn(z_ctx, training=training))
+        if self.ctx_bn is not None:
+            z_ctx = self.ctx_bn(z_ctx, training=training)
+        if self.ctx_activation is not None:
+            z_ctx = keras.activations.get(self.ctx_activation)(z_ctx)
 
         if self.ctx_mode == "diff":
             z_ctx = z_ctx - z_det  # discrete Laplacian approximation
@@ -1486,6 +1500,8 @@ class CliffordNetBlockDS(keras.layers.Layer):
                 "kernel_size": self.kernel_size,
                 "strides": self.strides,
                 "skip_pool": self.skip_pool,
+                "use_ctx_bn": self.use_ctx_bn,
+                "ctx_activation": self.ctx_activation,
                 "layer_scale_init": self.layer_scale_init,
                 "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
