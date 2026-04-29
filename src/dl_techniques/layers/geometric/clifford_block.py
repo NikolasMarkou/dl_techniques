@@ -27,7 +27,7 @@ Fixes vs previous version
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import keras
 from keras import initializers, regularizers
@@ -41,6 +41,7 @@ from ...utils.logger import logger
 
 CliMode = Literal["inner", "wedge", "full"]
 CtxMode = Literal["diff", "abs"]
+SkipPool = Literal["avg", "max"]
 
 # Global-branch constants matching the original implementation
 _GLOBAL_SHIFTS: List[int] = [1, 2]
@@ -1060,4 +1061,438 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
         })
+        return config
+
+
+# ===========================================================================
+# CliffordNetBlockDS — single-7x7-DW context with optional stride downsampling
+# ===========================================================================
+
+
+@keras.saving.register_keras_serializable()
+class CliffordNetBlockDS(keras.layers.Layer):
+    """CliffordNetBlock variant with single 7x7 depthwise context conv and
+    optional stride-based downsampling.
+
+    Architectural differences vs :class:`CliffordNetBlock`:
+
+    1. The context stream uses a *single* ``DepthwiseConv2D`` with
+       ``kernel_size=7`` (configurable) instead of two stacked 3x3
+       depthwise convolutions. The 7x7 DW captures the same effective
+       receptive field but with a single kernel and BN.
+    2. The depthwise conv may use ``strides > 1`` to spatially
+       downsample the feature map. When ``strides > 1``:
+
+       - ``x_norm`` is pooled (avg or max, selected by ``skip_pool``)
+         before being split into the detail and context streams, so
+         both streams share spatial dims for the element-wise
+         geometric product.
+       - The residual ``x_prev`` is pooled with the same pool type
+         and stride, so the residual addition shape-matches.
+
+       Channel dimensionality is preserved through the block. To
+       change channels at a stage boundary, place a 1x1 projection
+       outside the block (matches the existing CliffordNet hierarchy
+       conventions).
+
+    With ``strides == 1`` the block behaves like a thin
+    single-7x7-DW variant of :class:`CliffordNetBlock` (no pooling
+    layers built or applied).
+
+    **Architecture Overview** (with ``strides=s``):
+
+    .. code-block:: text
+
+        ┌────────────────────────────────┐
+        │  X_prev  [B, H, W, D]          │
+        └───────────────┬────────────────┘
+                        ▼
+        ┌────────────────────────────────┐
+        │  LayerNorm → X_norm            │
+        └───────────────┬────────────────┘
+                        ▼
+            (if s>1) Pool(stream)
+                        │
+                        ▼
+        ┌──────────────────────────────────┐
+        │  X_norm_p  [B, H/s, W/s, D]      │
+        └────────┬───────────────┬─────────┘
+                 ▼               ▼
+        ┌──────────────┐ ┌──────────────────┐
+        │ Detail       │ │ Context          │
+        │ Z_det=       │ │ DWConv7x7(s)→    │
+        │  Linear(Xp)  │ │ BN→SiLU→Z_ctx    │
+        └──────┬───────┘ └────────┬─────────┘
+               │  (diff: Z_ctx -= Z_det)
+               ├──────────┬───────┘
+               ▼          ▼
+        ┌────────────────────────────────┐
+        │ Local Sparse Geometric Product │
+        │ → G_feat                       │
+        └───────────────┬────────────────┘
+                        │  (+ optional global branch)
+                        ▼
+        ┌────────────────────────────────┐
+        │ GGR(X_norm_p, G_feat) → H_mix  │
+        └───────────────┬────────────────┘
+                        ▼
+            (if s>1) Pool(skip) on X_prev
+                        │
+                        ▼
+        ┌────────────────────────────────┐
+        │ X_out = X_skip + H_mix         │
+        │ [B, H/s, W/s, D]               │
+        └────────────────────────────────┘
+
+    :param channels: Feature dimensionality D (constant throughout).
+    :type channels: int
+    :param shifts: Channel-shift offsets for the local interaction.
+    :type shifts: List[int]
+    :param cli_mode: Algebraic components (``"inner"``, ``"wedge"``,
+        ``"full"``). Defaults to ``"full"``.
+    :type cli_mode: CliMode
+    :param ctx_mode: Context mode (``"diff"`` or ``"abs"``).
+        Defaults to ``"diff"``.
+    :type ctx_mode: CtxMode
+    :param use_global_context: Whether to add a global-average-pool
+        branch. Defaults to ``False``.
+    :type use_global_context: bool
+    :param kernel_size: Depthwise context kernel size. Defaults to ``7``.
+    :type kernel_size: int
+    :param strides: Spatial stride for the depthwise context conv and
+        the residual / stream-split pool. ``1`` (default) preserves
+        spatial dims; ``2`` halves H and W.
+    :type strides: int
+    :param skip_pool: Pool type used both to downsample ``x_norm``
+        before the stream split and to downsample ``x_prev`` for the
+        residual when ``strides > 1``. ``"avg"`` (default) or ``"max"``.
+        Has no effect when ``strides == 1``.
+    :type skip_pool: SkipPool
+    :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
+    :type layer_scale_init: float
+    :param drop_path_rate: DropPath probability. Defaults to 0.0.
+    :type drop_path_rate: float
+    :param use_bias: Whether Dense layers use bias. Defaults to ``True``.
+    :type use_bias: bool
+    :param kernel_initializer: Kernel initializer for Dense layers.
+    :type kernel_initializer: Any
+    :param bias_initializer: Bias initializer for Dense layers.
+    :type bias_initializer: Any
+    :param kernel_regularizer: Kernel regularizer for Dense layers.
+    :type kernel_regularizer: Optional[Any]
+    :param bias_regularizer: Bias regularizer for Dense layers.
+    :type bias_regularizer: Optional[Any]
+    :param kwargs: Passed to ``keras.layers.Layer``.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        shifts: List[int],
+        cli_mode: CliMode = "full",
+        ctx_mode: CtxMode = "diff",
+        use_global_context: bool = False,
+        kernel_size: int = 7,
+        strides: int = 1,
+        skip_pool: SkipPool = "avg",
+        layer_scale_init: float = 1e-5,
+        drop_path_rate: float = 0.0,
+        use_bias: bool = True,
+        kernel_initializer: Any = "glorot_uniform",
+        bias_initializer: Any = "zeros",
+        kernel_regularizer: Optional[Any] = None,
+        bias_regularizer: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if channels <= 0:
+            raise ValueError(f"channels must be positive, got {channels}")
+        if ctx_mode not in ("diff", "abs"):
+            raise ValueError(
+                f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}"
+            )
+        if not isinstance(kernel_size, int) or kernel_size <= 0:
+            raise ValueError(
+                f"kernel_size must be a positive int, got {kernel_size!r}"
+            )
+        if not isinstance(strides, int) or strides < 1:
+            raise ValueError(
+                f"strides must be an int >= 1, got {strides!r}"
+            )
+        if skip_pool not in ("avg", "max"):
+            raise ValueError(
+                f"skip_pool must be 'avg' or 'max', got {skip_pool!r}"
+            )
+
+        self.channels = channels
+        self.shifts = list(shifts)
+        self.cli_mode = cli_mode
+        self.ctx_mode = ctx_mode
+        self.use_global_context = use_global_context
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.skip_pool = skip_pool
+        self.layer_scale_init = layer_scale_init
+        self.drop_path_rate = drop_path_rate
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+
+        _dense_kwargs: Dict[str, Any] = dict(
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+        )
+
+        # --- Step 1: Input norm ---
+        self.input_norm = keras.layers.LayerNormalization(
+            epsilon=1e-6, name="input_norm"
+        )
+
+        # --- Step 2a: Detail stream (1x1 pointwise) ---
+        self.linear_det = keras.layers.Dense(
+            channels, name="linear_det", **_dense_kwargs
+        )
+
+        # --- Step 2b: Context stream — single (kernel_size x kernel_size) DW conv with optional stride ---
+        self.dw_conv = keras.layers.DepthwiseConv2D(
+            kernel_size=kernel_size,
+            strides=strides,
+            padding="same",
+            use_bias=False,
+            name="dw_conv",
+        )
+        self.ctx_bn = keras.layers.BatchNormalization(name="ctx_bn")
+
+        # --- Pool layers (only when strides > 1) ---
+        # Two separate instances: one used to pool x_norm before the
+        # stream split, the other to pool x_prev for the residual skip.
+        # Pools have no trainable state but separate instances keep
+        # serialization and naming clean.
+        if strides > 1:
+            pool_cls = (
+                keras.layers.AveragePooling2D
+                if skip_pool == "avg"
+                else keras.layers.MaxPooling2D
+            )
+            self.stream_pool = pool_cls(
+                pool_size=strides,
+                strides=strides,
+                padding="same",
+                name="stream_pool",
+            )
+            self.skip_pool_layer = pool_cls(
+                pool_size=strides,
+                strides=strides,
+                padding="same",
+                name="skip_pool",
+            )
+        else:
+            self.stream_pool = None
+            self.skip_pool_layer = None
+
+        # --- Step 3: Local sparse rolling product ---
+        self.local_geo_prod = SparseRollingGeometricProduct(
+            channels=channels,
+            shifts=shifts,
+            cli_mode=cli_mode,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="local_geo_prod",
+        )
+
+        # --- Optional global context branch ---
+        if use_global_context:
+            self.global_geo_prod = SparseRollingGeometricProduct(
+                channels=channels,
+                shifts=_GLOBAL_SHIFTS,
+                cli_mode=_GLOBAL_CLI_MODE,
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name="global_geo_prod",
+            )
+        else:
+            self.global_geo_prod = None
+
+        # --- Step 4 / 5: GGR ---
+        self.ggr = GatedGeometricResidual(
+            channels=channels,
+            layer_scale_init=layer_scale_init,
+            drop_path_rate=drop_path_rate,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="ggr",
+        )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ceildiv(a: Optional[int], b: int) -> Optional[int]:
+        """Ceiling division that propagates ``None`` (dynamic dim)."""
+        if a is None:
+            return None
+        return -(-a // b)
+
+    def _pooled_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Return shape after stream/skip pool given current ``strides``."""
+        if self.strides == 1:
+            return input_shape
+        b, h, w, d = input_shape
+        return (b, self._ceildiv(h, self.strides),
+                self._ceildiv(w, self.strides), d)
+
+    # ------------------------------------------------------------------
+    def build(self, input_shape: Tuple) -> None:
+        """Build all sub-layers in dependency order.
+
+        :param input_shape: ``(B, H, W, D)``
+        :type input_shape: Tuple
+        """
+        # Step 1: norm operates on full-resolution input
+        self.input_norm.build(input_shape)
+
+        # Pool layers operate on full-resolution input
+        if self.stream_pool is not None:
+            self.stream_pool.build(input_shape)
+        if self.skip_pool_layer is not None:
+            self.skip_pool_layer.build(input_shape)
+
+        # Stream-side shapes (after optional stream pool)
+        pooled_shape = self._pooled_shape(input_shape)
+
+        # Step 2a: detail linear (operates on pooled shape)
+        self.linear_det.build(pooled_shape)
+        stream_shape = self.linear_det.compute_output_shape(pooled_shape)
+
+        # Step 2b: depthwise context conv operates on full-res input.
+        # Its output spatial dims equal the pooled shape (same ceil
+        # semantics for stride+"same" padding).
+        self.dw_conv.build(input_shape)
+        self.ctx_bn.build(stream_shape)
+
+        # Step 3: local product
+        self.local_geo_prod.build(stream_shape)
+
+        # Optional global branch
+        if self.global_geo_prod is not None:
+            self.global_geo_prod.build(stream_shape)
+
+        # GGR
+        self.ggr.build(stream_shape)
+
+        super().build(input_shape)
+
+    # ------------------------------------------------------------------
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Forward pass.
+
+        :param inputs: Feature tensor ``(B, H, W, D)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Updated feature tensor
+            ``(B, H/strides, W/strides, D)``.
+        :rtype: keras.KerasTensor
+        """
+        x_prev = inputs
+
+        # --- Step 1: Normalise (full resolution) ---
+        x_norm = self.input_norm(x_prev)
+
+        # --- Optional spatial downsample of x_norm before stream split ---
+        if self.stream_pool is not None:
+            x_norm_p = self.stream_pool(x_norm)
+        else:
+            x_norm_p = x_norm
+
+        # --- Step 2a: Detail stream on (possibly pooled) x_norm ---
+        z_det = self.linear_det(x_norm_p)
+
+        # --- Step 2b: Context stream — single (kxk) DW conv on full-res ---
+        # When strides>1, the strided conv directly produces the
+        # downsampled spatial map (matches x_norm_p shape).
+        z_ctx = self.dw_conv(x_norm)
+        z_ctx = keras.activations.silu(self.ctx_bn(z_ctx, training=training))
+
+        if self.ctx_mode == "diff":
+            z_ctx = z_ctx - z_det  # discrete Laplacian approximation
+
+        # --- Step 3: Local sparse geometric interaction ---
+        g_feat = self.local_geo_prod(z_det, z_ctx)
+
+        # --- Step 4: Optional global context branch ---
+        if self.global_geo_prod is not None:
+            c_glo = keras.ops.mean(x_norm_p, axis=[1, 2], keepdims=True)
+            c_glo = keras.ops.broadcast_to(c_glo, keras.ops.shape(z_det))
+            c_glo = c_glo - z_det
+            g_glo = self.global_geo_prod(z_det, c_glo)
+            g_feat = g_feat + g_glo
+
+        # --- Step 5 & 6: GGR + residual (with skip pool when strides>1) ---
+        h_mix = self.ggr(x_norm_p, g_feat, training=training)
+        if self.skip_pool_layer is not None:
+            x_skip = self.skip_pool_layer(x_prev)
+        else:
+            x_skip = x_prev
+        return x_skip + h_mix
+
+    # ------------------------------------------------------------------
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape.
+
+        :param input_shape: Input shape ``(B, H, W, D)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape with H, W divided by ``strides``
+            (ceiling semantics for ``padding="same"``).
+        :rtype: Tuple[Optional[int], ...]
+        """
+        return self._pooled_shape(input_shape)
+
+    # ------------------------------------------------------------------
+    def get_config(self) -> Dict[str, Any]:
+        """Return serialisable configuration.
+
+        :return: Dictionary with all constructor arguments.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update(
+            {
+                "channels": self.channels,
+                "shifts": self.shifts,
+                "cli_mode": self.cli_mode,
+                "ctx_mode": self.ctx_mode,
+                "use_global_context": self.use_global_context,
+                "kernel_size": self.kernel_size,
+                "strides": self.strides,
+                "skip_pool": self.skip_pool,
+                "layer_scale_init": self.layer_scale_init,
+                "drop_path_rate": self.drop_path_rate,
+                "use_bias": self.use_bias,
+                "kernel_initializer": initializers.serialize(self.kernel_initializer),
+                "bias_initializer": initializers.serialize(self.bias_initializer),
+                "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+                "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            }
+        )
         return config

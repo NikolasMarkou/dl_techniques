@@ -10,6 +10,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     GatedGeometricResidual,
     CliffordNetBlock,
     CausalCliffordNetBlock,
+    CliffordNetBlockDS,
 )
 
 
@@ -992,6 +993,419 @@ class TestCausalCliffordNetBlock:
             x = block(x)
         assert x.shape == (2, 1, 16, channels)
         assert not np.any(np.isnan(x.numpy()))
+
+
+# ===========================================================================
+# TestCliffordNetBlockDS
+# ===========================================================================
+
+
+class TestCliffordNetBlockDS:
+    """Test suite for CliffordNetBlockDS (single-7x7-DW + optional stride)."""
+
+    @pytest.fixture
+    def channels(self) -> int:
+        return 16
+
+    @pytest.fixture
+    def shifts(self) -> list:
+        return [1, 2]
+
+    @pytest.fixture
+    def input_tensor(self) -> tf.Tensor:
+        return tf.random.normal([2, 16, 16, 16])
+
+    @pytest.fixture
+    def layer_instance(self, channels, shifts) -> CliffordNetBlockDS:
+        return CliffordNetBlockDS(channels=channels, shifts=shifts)
+
+    # ---- Initialization ---------------------------------------------------
+
+    def test_initialization_defaults(self, channels, shifts):
+        layer = CliffordNetBlockDS(channels=channels, shifts=shifts)
+        assert layer.channels == channels
+        assert layer.shifts == shifts
+        assert layer.cli_mode == "full"
+        assert layer.ctx_mode == "diff"
+        assert layer.use_global_context is False
+        assert layer.kernel_size == 7
+        assert layer.strides == 1
+        assert layer.skip_pool == "avg"
+        assert layer.layer_scale_init == 1e-5
+        assert layer.drop_path_rate == 0.0
+
+    def test_initialization_custom(self, channels, shifts):
+        layer = CliffordNetBlockDS(
+            channels=channels,
+            shifts=shifts,
+            cli_mode="inner",
+            ctx_mode="abs",
+            use_global_context=True,
+            kernel_size=5,
+            strides=2,
+            skip_pool="max",
+            layer_scale_init=1e-3,
+            drop_path_rate=0.1,
+            name="custom_ds",
+        )
+        assert layer.cli_mode == "inner"
+        assert layer.ctx_mode == "abs"
+        assert layer.use_global_context is True
+        assert layer.kernel_size == 5
+        assert layer.strides == 2
+        assert layer.skip_pool == "max"
+        assert layer.drop_path_rate == 0.1
+        assert layer.name == "custom_ds"
+
+    def test_invalid_channels(self, shifts):
+        with pytest.raises(ValueError, match="channels"):
+            CliffordNetBlockDS(channels=0, shifts=shifts)
+
+    def test_invalid_ctx_mode(self, channels, shifts):
+        with pytest.raises(ValueError, match="ctx_mode"):
+            CliffordNetBlockDS(channels=channels, shifts=shifts, ctx_mode="bad")
+
+    def test_invalid_kernel_size(self, channels, shifts):
+        with pytest.raises(ValueError, match="kernel_size"):
+            CliffordNetBlockDS(channels=channels, shifts=shifts, kernel_size=0)
+        with pytest.raises(ValueError, match="kernel_size"):
+            CliffordNetBlockDS(channels=channels, shifts=shifts, kernel_size=-3)
+
+    def test_invalid_strides(self, channels, shifts):
+        with pytest.raises(ValueError, match="strides"):
+            CliffordNetBlockDS(channels=channels, shifts=shifts, strides=0)
+        with pytest.raises(ValueError, match="strides"):
+            CliffordNetBlockDS(channels=channels, shifts=shifts, strides=-1)
+
+    def test_invalid_skip_pool(self, channels, shifts):
+        with pytest.raises(ValueError, match="skip_pool"):
+            CliffordNetBlockDS(
+                channels=channels, shifts=shifts, skip_pool="median",
+            )
+
+    # ---- Build & shape ----------------------------------------------------
+
+    def test_build_strides1(self, layer_instance, input_tensor):
+        layer_instance(input_tensor)
+        assert layer_instance.built is True
+        assert layer_instance.input_norm.built is True
+        assert layer_instance.linear_det.built is True
+        assert layer_instance.dw_conv.built is True
+        assert layer_instance.ctx_bn.built is True
+        assert layer_instance.local_geo_prod.built is True
+        assert layer_instance.ggr.built is True
+        # No pool layers when strides==1
+        assert layer_instance.stream_pool is None
+        assert layer_instance.skip_pool_layer is None
+
+    def test_build_strides2_creates_pools(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="avg",
+        )
+        layer(input_tensor)
+        assert layer.built is True
+        assert layer.stream_pool is not None
+        assert layer.skip_pool_layer is not None
+        assert isinstance(layer.stream_pool, keras.layers.AveragePooling2D)
+        assert isinstance(layer.skip_pool_layer, keras.layers.AveragePooling2D)
+
+    def test_build_strides2_max_pool(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="max",
+        )
+        layer(input_tensor)
+        assert isinstance(layer.stream_pool, keras.layers.MaxPooling2D)
+        assert isinstance(layer.skip_pool_layer, keras.layers.MaxPooling2D)
+
+    def test_output_shape_strides1(self, layer_instance, input_tensor):
+        out = layer_instance(input_tensor)
+        assert out.shape == input_tensor.shape
+
+    def test_output_shape_strides2_avg(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="avg",
+        )
+        out = layer(input_tensor)
+        b, h, w, d = input_tensor.shape
+        assert out.shape == (b, h // 2, w // 2, d)
+
+    def test_output_shape_strides2_max(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="max",
+        )
+        out = layer(input_tensor)
+        b, h, w, d = input_tensor.shape
+        assert out.shape == (b, h // 2, w // 2, d)
+
+    def test_compute_output_shape_strides1(self, layer_instance, input_tensor):
+        layer_instance(input_tensor)
+        computed = layer_instance.compute_output_shape(input_tensor.shape)
+        assert computed == input_tensor.shape
+
+    def test_compute_output_shape_strides2(self, channels, shifts):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        result = layer.compute_output_shape((None, 16, 16, channels))
+        assert result == (None, 8, 8, channels)
+
+    def test_compute_output_shape_before_build(self, channels, shifts):
+        layer = CliffordNetBlockDS(channels=channels, shifts=shifts, strides=2)
+        result = layer.compute_output_shape((None, 8, 8, channels))
+        assert result == (None, 4, 4, channels)
+
+    # ---- Functional behaviour --------------------------------------------
+
+    def test_residual_identity_at_init_strides1(self, channels, shifts):
+        """gamma~0 + strides=1 → output ≈ x_prev."""
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, layer_scale_init=1e-10,
+        )
+        x = tf.random.normal([2, 8, 8, channels])
+        out = layer(x)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_residual_identity_at_init_strides2_avg(self, channels, shifts):
+        """gamma~0 + strides=2 + avg pool → output ≈ avg_pool(x_prev)."""
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="avg",
+            layer_scale_init=1e-10,
+        )
+        x = tf.random.normal([2, 8, 8, channels])
+        out = layer(x)
+        # Reference: avg pool 2x2 over x
+        ref = keras.layers.AveragePooling2D(
+            pool_size=2, strides=2, padding="same",
+        )(x)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(ref),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_skip_pool_avg_vs_max_differ(self, channels, shifts):
+        """skip_pool='avg' and 'max' should produce different outputs at strides=2."""
+        x = tf.random.normal([2, 8, 8, channels], seed=7)
+        # Use the same weights would require sharing — instead just check
+        # outputs differ. Both random init + different pool ⇒ different.
+        layer_avg = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="avg",
+            layer_scale_init=1e-10,  # makes residual dominate
+        )
+        layer_max = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, skip_pool="max",
+            layer_scale_init=1e-10,
+        )
+        out_avg = layer_avg(x).numpy()
+        out_max = layer_max(x).numpy()
+        # With residual dominant, outputs ≈ avg_pool(x) vs max_pool(x).
+        # These pools differ on most natural-looking inputs.
+        assert not np.allclose(out_avg, out_max, atol=1e-3)
+
+    def test_ctx_mode_diff_vs_abs_differ_strides2(self, channels, shifts):
+        x = tf.random.normal([2, 16, 16, channels], seed=42)
+        layer_diff = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, ctx_mode="diff",
+            layer_scale_init=1.0,
+        )
+        layer_abs = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, ctx_mode="abs",
+            layer_scale_init=1.0,
+        )
+        out_diff = layer_diff(x, training=False).numpy()
+        out_abs = layer_abs(x, training=False).numpy()
+        assert not np.allclose(out_diff, out_abs, atol=1e-3)
+
+    def test_all_cli_modes_strides2(self, channels, shifts, input_tensor):
+        for mode in ("inner", "wedge", "full"):
+            layer = CliffordNetBlockDS(
+                channels=channels, shifts=shifts, strides=2, cli_mode=mode,
+            )
+            out = layer(input_tensor)
+            b, h, w, d = input_tensor.shape
+            assert out.shape == (b, h // 2, w // 2, d)
+            assert not np.any(np.isnan(out.numpy())), f"NaN in cli_mode={mode}"
+
+    def test_global_branch_strides2(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2,
+            use_global_context=True,
+        )
+        out = layer(input_tensor)
+        b, h, w, d = input_tensor.shape
+        assert out.shape == (b, h // 2, w // 2, d)
+        assert layer.global_geo_prod is not None
+
+    def test_kernel_size_5(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, kernel_size=5,
+        )
+        out = layer(input_tensor)
+        assert out.shape == input_tensor.shape
+
+    def test_numerical_stability_strides2(self, channels, shifts):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        for scale in [1e-8, 1e8]:
+            x = tf.ones([2, 8, 8, channels]) * scale
+            out = layer(x)
+            assert not np.any(np.isnan(out.numpy())), f"NaN at scale {scale}"
+            assert not np.any(np.isinf(out.numpy())), f"Inf at scale {scale}"
+
+    def test_different_spatial_sizes_strides2(self, channels, shifts):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        for hw in [8, 16, 32]:
+            x = tf.random.normal([2, hw, hw, channels])
+            out = layer(x)
+            assert out.shape == (2, hw // 2, hw // 2, channels)
+
+    def test_different_batch_sizes_strides2(self, channels, shifts):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        for bs in [1, 4, 16]:
+            x = tf.random.normal([bs, 8, 8, channels])
+            out = layer(x)
+            assert out.shape[0] == bs
+
+    def test_inference_deterministic(self, channels, shifts, input_tensor):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2, drop_path_rate=0.0,
+        )
+        o1 = layer(input_tensor, training=False)
+        o2 = layer(input_tensor, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(o1),
+            keras.ops.convert_to_numpy(o2),
+            rtol=1e-6, atol=1e-6,
+        )
+
+    # ---- Stacking ---------------------------------------------------------
+
+    def test_stacking_strides2_halves_each(self, channels, shifts):
+        """Stack 3 blocks with strides=2 each: 32 → 16 → 8 → 4."""
+        x = tf.random.normal([2, 32, 32, channels])
+        blocks = [
+            CliffordNetBlockDS(
+                channels=channels, shifts=shifts, strides=2, name=f"ds{i}",
+            )
+            for i in range(3)
+        ]
+        for block in blocks:
+            x = block(x)
+        assert x.shape == (2, 4, 4, channels)
+        assert not np.any(np.isnan(x.numpy()))
+
+    def test_stacking_strides1_preserves(self, channels, shifts):
+        x = tf.random.normal([2, 8, 8, channels])
+        blocks = [
+            CliffordNetBlockDS(
+                channels=channels, shifts=shifts, strides=1, name=f"ds{i}",
+            )
+            for i in range(4)
+        ]
+        for block in blocks:
+            x = block(x)
+        assert x.shape == (2, 8, 8, channels)
+        assert not np.any(np.isnan(x.numpy()))
+
+    # ---- Gradient flow ----------------------------------------------------
+
+    def test_gradient_flow_strides1(self, channels, shifts):
+        layer = CliffordNetBlockDS(channels=channels, shifts=shifts)
+        x = tf.Variable(tf.random.normal([2, 8, 8, channels]))
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out))
+        grads = tape.gradient(loss, x)
+        assert grads is not None
+        assert np.any(grads.numpy() != 0)
+
+    def test_gradient_flow_strides2(self, channels, shifts):
+        layer = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        x = tf.Variable(tf.random.normal([2, 8, 8, channels]))
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out))
+        grads = tape.gradient(loss, x)
+        assert grads is not None
+        assert np.any(grads.numpy() != 0)
+
+    # ---- Serialization ----------------------------------------------------
+
+    def test_serialization(self, channels, shifts):
+        original = CliffordNetBlockDS(
+            channels=channels, shifts=shifts,
+            cli_mode="wedge", ctx_mode="abs",
+            use_global_context=True,
+            kernel_size=5, strides=2, skip_pool="max",
+            layer_scale_init=1e-3, drop_path_rate=0.1,
+            name="ds_s",
+        )
+        config = original.get_config()
+        restored = CliffordNetBlockDS.from_config(config)
+
+        assert restored.channels == original.channels
+        assert restored.shifts == original.shifts
+        assert restored.cli_mode == original.cli_mode
+        assert restored.ctx_mode == original.ctx_mode
+        assert restored.use_global_context == original.use_global_context
+        assert restored.kernel_size == original.kernel_size
+        assert restored.strides == original.strides
+        assert restored.skip_pool == original.skip_pool
+        assert restored.layer_scale_init == original.layer_scale_init
+        assert restored.drop_path_rate == original.drop_path_rate
+
+    def test_model_save_load_strides1(self, channels, shifts):
+        x = tf.random.normal([2, 8, 8, channels])
+        inp = keras.Input(shape=(8, 8, channels))
+        out = CliffordNetBlockDS(
+            channels=channels, shifts=shifts, name="ds",
+        )(inp)
+        model = keras.Model(inputs=inp, outputs=out)
+
+        original_pred = model.predict(x, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "model.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        loaded_pred = loaded.predict(x, verbose=0)
+        np.testing.assert_allclose(
+            original_pred, loaded_pred, rtol=1e-5, atol=1e-5,
+        )
+
+    def test_model_save_load_strides2(self, channels, shifts):
+        x = tf.random.normal([2, 16, 16, channels])
+        inp = keras.Input(shape=(16, 16, channels))
+        out = CliffordNetBlockDS(
+            channels=channels, shifts=shifts,
+            strides=2, skip_pool="max",
+            name="ds_strided",
+        )(inp)
+        model = keras.Model(inputs=inp, outputs=out)
+
+        original_pred = model.predict(x, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "model.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        loaded_pred = loaded.predict(x, verbose=0)
+        np.testing.assert_allclose(
+            original_pred, loaded_pred, rtol=1e-5, atol=1e-5,
+        )
 
 
 if __name__ == "__main__":
