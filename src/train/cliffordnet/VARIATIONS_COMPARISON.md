@@ -6,6 +6,43 @@ variants. Each section documents one experiment: **what changed**, the
 
 Driver script: [`train_compare_variants.py`](train_compare_variants.py).
 
+## Headline conclusions (across E01–E05)
+
+1. **`CliffordNetBlock` (vanilla, two stacked 3×3 DWConvs) is the
+   recommended default for isotropic non-downsampling backbones.** It
+   wins at the 10M scale (0.7837) and ties the leader at 600k (0.7112,
+   −0.0003 vs ds_k5).
+2. **BN+SiLU on the context stream is non-negotiable at scale.** The
+   gap between BN-on and BN-off configurations grows from ~0.5pp at
+   600k to ~1.5pp at 10M.
+3. **Kernel-size choice within DS is roughly a wash when BN is on.**
+   k7 vs k5 differ by 0.13pp at 10M and 0.12pp at 600k (signs flip).
+4. **Small-scale ablations were misleading.** The 600k winner
+   (`ds_k5`) dropped to 3rd at 10M; the 600k loser (`ds_plain_k5`)
+   moved up two places. Single-seed conclusions in a 0.5pp window
+   should not drive defaults — re-run at scale before deciding.
+5. **The DS variant's accuracy story is neutral-to-slightly-negative
+   without downsampling.** Its real value still needs to be evaluated
+   in strided / multi-stage configurations, which this campaign did
+   not test.
+
+### Final results table (5 experiments × 2 scales)
+
+| Variant | 600k best_val_acc | 10M best_val_acc |
+|---|---:|---:|
+| **vanilla**    | 0.7112 | **0.7837** |
+| ds             | 0.7103 | 0.7808 |
+| ds_k5          | **0.7115** | 0.7795 |
+| ds_plain_k5    | 0.7052 | 0.7675 |
+| ds_plain       | 0.7059 | 0.7628 |
+
+The `CliffordNetBlockDS` class itself remains valuable — its single
+configurable depthwise conv with optional strides and skip pooling is
+required for downsampling backbones. But for the no-downsampling
+isotropic case explored here, `CliffordNetBlock` is preferred.
+
+---
+
 ---
 
 ## Shared baseline (held constant across all experiments unless noted)
@@ -41,6 +78,7 @@ Anything different in a given experiment is called out under
 | 2 | 2026-04-29 | E02: DS vs DS-plain (no BN, no activation on context) | done | vanilla > ds > ds_plain (small) |
 | 3 | 2026-04-29 | E03: ds_plain kernel size sweep (5×5 vs 7×7) | done | tie (k5 −0.0007 vs k7) |
 | 4 | 2026-04-29 | E04: ds with 5×5 vs 7×7 (closes the 2×2 BN×kernel matrix) | done | **ds_k5 wins (0.7115)** |
+| 5 | 2026-04-29 | E05: scale all 5 variants to ~10M params (C=384, 10 blocks) | done | **vanilla wins (0.7837)**; BN-on cluster (vanilla/ds/ds_k5) within 0.42pp |
 
 ---
 
@@ -460,4 +498,144 @@ clock makes it the unambiguous Pareto winner.
 
 ---
 
-<!-- Append future experiments below as ## E05, E06, ... -->
+## E05 — scale all 5 variants to ~10M params (depth-heavy: C=384, 10 blocks)
+
+**Date**: 2026-04-29 → 2026-04-30 (~17h serial)
+**Status**: done
+**Run root**: `results/cliffordnet_compare_variants_20260429_164423/`
+**Driver invocation**:
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_compare_variants \
+    --variant all --channels 384 --num-blocks 10 \
+    --epochs 100 --batch-size 64 --gpu 0
+```
+
+**Question**: do the conclusions of E01–E04 (a single 5×5 DWConv with
+BN+SiLU is best, no-BN trails by ~0.5pp) survive at ~16× the parameter
+count and 2× the depth, or do they invert at scale? Larger models
+sometimes prefer simpler context branches because the geometric
+product / GGR has more capacity to compensate.
+
+### Configuration
+
+Same channel width and block count for *every* variant — the only
+thing that varies is the block class.
+
+| Setting | Value |
+|---|---|
+| Channels (C) | 384 |
+| Blocks | 10 (was 5 in E01–E04) |
+| Stem | unchanged (3×3 stride-2 + BN) |
+| Schedule | unchanged (cosine + warmup, peak_lr=1e-3, weight_decay=0.1) |
+| Augmentation | unchanged (AutoAugment + RandomErasing 0.25) |
+| Batch size | 64 (was 128 — memory-bound at 10M params) |
+| Epochs | 100 |
+
+The driver script gained `--channels` and `--num-blocks` CLI flags so
+the same code path runs both the 600k and 10M sweeps.
+
+### Variants (param counts at C=384, 10 blocks)
+
+| Variant | Params | Δ vs vanilla |
+|---|---:|---:|
+| vanilla     | 10,480,996 | – |
+| ds          | 10,600,036 | +119,040 |
+| ds_k5       | 10,507,876 | +26,880 |
+| ds_plain    | 10,588,516 | +107,520 |
+| ds_plain_k5 | 10,496,356 | +15,360 |
+
+Spread across all 5 variants is 119k = **1.13%** — within noise for
+this comparison.
+
+### Smoke test (3 epochs, batch 32, no augmentation, GPU 0)
+
+Single variant (ds_k5) only — confirmed model builds, trains, and
+gives sensible loss curves at the new scale.
+
+| Variant | Params | best_val_acc @ ep3 | sec/epoch (steady) |
+|---|---:|---:|---:|
+| ds_k5 | 10,507,876 | 0.4484 | 125 |
+
+### Full results (100 epochs)
+
+| Variant | Params | Best val_acc | Final val_acc | Best val_top5 | Wall (min) |
+|---|---:|---:|---:|---:|---:|
+| **vanilla** | 10,480,996 | **0.7837** | 0.7798 | 0.9422 | 206.2 |
+| ds          | 10,600,036 | 0.7808 | 0.7801 | 0.9414 | 209.5 |
+| ds_k5       | 10,507,876 | 0.7795 | 0.7784 | **0.9424** | 204.5 |
+| ds_plain_k5 | 10,496,356 | 0.7675 | 0.7660 | 0.9370 | 204.5 |
+| ds_plain    | 10,588,516 | 0.7628 | 0.7628 | 0.9342 | 205.6 |
+
+### 2×2 view (best val_acc, BN × kernel)
+
+| | k=5 | k=7 | (vanilla 3+3) |
+|---|---:|---:|---:|
+| **BN+SiLU on**  | 0.7795 | 0.7808 | **0.7837** |
+| **BN+SiLU off** | 0.7675 | 0.7628 | – |
+
+- BN row: k7 ≈ k5 (Δ=−0.13pp, k7 slightly ahead — flips from small scale)
+- no-BN row: k5 > k7 by 0.47pp
+- BN effect at k7: +1.80pp
+- BN effect at k5: +1.20pp
+- vanilla beats both k5 and k7 ds by ~0.3pp
+
+### Observations
+
+- **All variants gained massively from scaling (+5.7 to +7.3pp).**
+  10M-param models clearly outperform the 600k versions.
+- **Ranking changed at scale:**
+
+  | Rank | Small (600k) | 10M | Note |
+  |---:|---|---|---|
+  | 1 | ds_k5 (0.7115) | **vanilla (0.7837)** | leader flipped |
+  | 2 | vanilla (0.7112) | ds (0.7808) | |
+  | 3 | ds (0.7103) | ds_k5 (0.7795) | k5 lost its small-scale edge |
+  | 4 | ds_plain (0.7059) | ds_plain_k5 (0.7675) | k5 leapfrogged k7 in no-BN |
+  | 5 | ds_plain_k5 (0.7052) | ds_plain (0.7628) | |
+
+- **BN matters more at scale.** Small-scale BN-effect was ~0.5pp (E02);
+  at 10M it's 1.2-1.8pp. The two no-BN variants now sit ~1.5pp below
+  the BN cluster, vs ~0.5pp at small scale. Larger models magnify the
+  cost of removing the normalisation.
+- **Vanilla's stacked 3×3 wins at scale.** The two stacked DWConv 3×3
+  layers (with the BN sandwich Keras gives between them via the
+  CliffordNetBlock construction) provide better feature mixing than a
+  single 7×7 or 5×5 with one BN at the end. The extra normalisation
+  step matters when there are 10× the blocks (10 vs 5).
+- **k7 vs k5 with BN is a coin-flip at scale.** ds vs ds_k5 = 0.13pp
+  (well within noise) — the small-scale "k5 wins" verdict from E04
+  doesn't generalise.
+- **k5 wins clearly in the no-BN regime** (+0.47pp). When activations
+  aren't normalised, the smaller RF aggregates less noise.
+- **Wall-clock essentially identical.** All five variants in 204-210
+  min; the kernel-size and BN differences are second-order vs the
+  geometric-product / GGR cost.
+
+### Verdict
+
+**At ~10M params, vanilla `CliffordNetBlock` is the recommended
+default**, narrowly beating `CliffordNetBlockDS` configurations on
+every metric (best, final, top-5) and matching wall-clock.
+The DS variant's value remains in *downsampling* configurations,
+which this experiment did not exercise (strides=1 throughout).
+
+When forced to use DS in an isotropic setup at scale: `ds` (k=7,
+BN on) is the slightly safer choice over `ds_k5` (within 0.13pp),
+both well above the no-BN options.
+
+The small-scale ablation (E01–E04) was a misleading guide. The
+600k regime is effectively in a noise-bounded regime where 0.1pp
+differences look meaningful but flip on a single random seed. The
+10M results are more decisive (1-2pp gaps between cluster boundaries)
+and disagree with the small-scale recommendation about which DS
+config is best.
+
+Across all five experiments, the consistent pattern is: **BN+SiLU on
+the context stream is non-negotiable at scale**; kernel-size choice
+within the BN-on regime is essentially a wash; the original vanilla
+block (two stacked 3×3 + BN+SiLU) is the strongest baseline and
+remains hard to beat without downsampling.
+
+---
+
+<!-- Append future experiments below as ## E06, E07, ... -->

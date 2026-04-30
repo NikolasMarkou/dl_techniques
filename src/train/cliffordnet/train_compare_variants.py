@@ -75,12 +75,14 @@ from train.common import (
 
 
 # ---------------------------------------------------------------------
-# Fixed comparison configuration
+# Default comparison configuration (overridable via CLI)
 # ---------------------------------------------------------------------
 
-# Held constant across both variants — only the block class differs.
-_CHANNELS: int = 128
-_NUM_BLOCKS: int = 5
+# Held constant across all variants — only the block class differs.
+# Channels and block count are CLI-tunable so the same script can run
+# both the small (~600k) and large (~10M) sweeps without copy-paste.
+_DEFAULT_CHANNELS: int = 128
+_DEFAULT_NUM_BLOCKS: int = 5
 _SHIFTS: List[int] = [1, 2]
 _CLI_MODE: str = "full"
 _CTX_MODE: str = "diff"
@@ -174,6 +176,8 @@ def build_variant(
     variant_name: str,
     num_classes: int,
     input_shape: Tuple[int, int, int] = (32, 32, 3),
+    channels: int = _DEFAULT_CHANNELS,
+    num_blocks: int = _DEFAULT_NUM_BLOCKS,
     stochastic_depth_rate: float = 0.1,
     layer_scale_init: float = 1e-5,
     dropout_rate: float = 0.0,
@@ -195,20 +199,20 @@ def build_variant(
             f"Available: {list(VARIANTS.keys())}"
         )
 
-    if _NUM_BLOCKS <= 1:
-        drop_rates = [0.0] * _NUM_BLOCKS
+    if num_blocks <= 1:
+        drop_rates = [0.0] * num_blocks
     else:
-        step = stochastic_depth_rate / (_NUM_BLOCKS - 1)
-        drop_rates = [round(i * step, 6) for i in range(_NUM_BLOCKS)]
+        step = stochastic_depth_rate / (num_blocks - 1)
+        drop_rates = [round(i * step, 6) for i in range(num_blocks)]
 
     inputs = keras.layers.Input(shape=input_shape, name="input")
-    x = _build_stem(inputs, _CHANNELS)
+    x = _build_stem(inputs, channels)
 
     cfg = VARIANTS[variant_name]
     if cfg["ds_kwargs"] is None:
-        for i in range(_NUM_BLOCKS):
+        for i in range(num_blocks):
             x = CliffordNetBlock(
-                channels=_CHANNELS,
+                channels=channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
                 ctx_mode=_CTX_MODE,
@@ -219,9 +223,9 @@ def build_variant(
             )(x)
     else:
         ds_kwargs = cfg["ds_kwargs"]
-        for i in range(_NUM_BLOCKS):
+        for i in range(num_blocks):
             x = CliffordNetBlockDS(
-                channels=_CHANNELS,
+                channels=channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
                 ctx_mode=_CTX_MODE,
@@ -290,6 +294,8 @@ def train_one_variant(
             variant_name,
             num_classes=num_classes,
             input_shape=input_shape,
+            channels=args.channels,
+            num_blocks=args.num_blocks,
             stochastic_depth_rate=args.stochastic_depth_rate,
             layer_scale_init=args.layer_scale_init,
             dropout_rate=args.dropout_rate,
@@ -405,8 +411,8 @@ def train_one_variant(
                 "variant": variant_name,
                 "description": VARIANTS[variant_name]["description"],
                 "block_cls": VARIANTS[variant_name]["block_cls"],
-                "channels": _CHANNELS,
-                "num_blocks": _NUM_BLOCKS,
+                "channels": args.channels,
+                "num_blocks": args.num_blocks,
                 "shifts": _SHIFTS,
                 "cli_mode": _CLI_MODE,
                 "ctx_mode": _CTX_MODE,
@@ -599,6 +605,11 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--gpu", type=int, default=None,
                         help="GPU index to use (None -> all visible).")
+    parser.add_argument("--channels", type=int, default=_DEFAULT_CHANNELS,
+                        help=f"Backbone channel width (default {_DEFAULT_CHANNELS}).")
+    parser.add_argument("--num-blocks", type=int, default=_DEFAULT_NUM_BLOCKS,
+                        dest="num_blocks",
+                        help=f"Number of isotropic blocks (default {_DEFAULT_NUM_BLOCKS}).")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128,
                         dest="batch_size")
