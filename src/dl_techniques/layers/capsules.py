@@ -300,7 +300,7 @@ class RoutingCapsule(keras.layers.Layer):
                            ▼
         ┌────────────────────────────────────────┐
         │  Transform: u_hat = W * u_i            │
-        │  W: (1, N_in, N_out, D_out, D_in)     │
+        │  W: (1, N_in, N_out, D_out, D_in)      │
         └──────────────────┬─────────────────────┘
                            ▼
         ┌────────────────────────────────────────┐
@@ -649,12 +649,21 @@ class CapsuleBlock(keras.layers.Layer):
             self.dropout = None
 
         if self.use_layer_norm:
+            # NOTE: LayerNorm is applied to the *direction* component only,
+            # not the full capsule vector — see the call() method. A plain
+            # LN over axis=-1 destroys ||v||, which encodes detection
+            # probability under capsule margin loss. The layer instance below
+            # is reused on direction (unit) vectors.
+            # DECISION D-002 (plan 2026-04-30_9c4cdf31): API stable, behavior
+            # corrected to length-preserving LN.
             self.layer_norm = keras.layers.LayerNormalization(
                 axis=-1,
                 name="block_norm"
             )
+            self._ln_eps = 1e-7
         else:
             self.layer_norm = None
+            self._ln_eps = 1e-7
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer based on input shape.
@@ -673,6 +682,11 @@ class CapsuleBlock(keras.layers.Layer):
 
         if self.layer_norm is not None:
             self.layer_norm.build(output_shape)
+            logger.info(
+                "CapsuleBlock layer_norm uses length-preserving wrapper: "
+                "magnitudes are preserved, LN is applied to the unit-direction "
+                "subspace only (see DECISION D-002)."
+            )
 
         super().build(input_shape)
 
@@ -701,7 +715,22 @@ class CapsuleBlock(keras.layers.Layer):
             x = self.dropout(x, training=training)
 
         if self.layer_norm is not None:
-            x = self.layer_norm(x, training=training)
+            # Length-preserving LayerNorm: split magnitude/direction, normalize
+            # the direction subspace, re-project to unit length, multiply the
+            # original magnitude back. Preserves ||x|| (= detection probability)
+            # while still giving the routing-to-routing pose subspace the
+            # benefit of LN's training stability.
+            mag = ops.sqrt(
+                ops.sum(ops.square(x), axis=-1, keepdims=True) + self._ln_eps
+            )
+            direction = x / mag
+            direction_normed = self.layer_norm(direction, training=training)
+            dir_mag = ops.sqrt(
+                ops.sum(ops.square(direction_normed), axis=-1, keepdims=True)
+                + self._ln_eps
+            )
+            direction_unit = direction_normed / dir_mag
+            x = mag * direction_unit
 
         return x
 
