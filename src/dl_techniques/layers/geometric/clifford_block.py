@@ -1512,3 +1512,448 @@ class CliffordNetBlockDS(keras.layers.Layer):
             }
         )
         return config
+
+
+# ===========================================================================
+# CliffordNetBlockDSv2 — design-space sibling for downsampling experiments
+# ===========================================================================
+
+# Type aliases for v2 (additive — do not modify the v1 aliases above).
+SkipPoolV2 = Literal[
+    "avg", "max", "blur", "gaussian_dw", "pixel_unshuffle", "resnetd"
+]
+CtxModeV2 = Literal["diff", "abs", "pyramid_diff"]
+CtxNormType = Literal["bn", "gn", "ln", "none"]
+
+
+def _make_pool_v2(
+    kind: str,
+    channels: int,
+    strides: int,
+    name: str,
+) -> keras.layers.Layer:
+    """Build a single stride-``s`` downsampling layer that maps
+    ``(B, H, W, C) -> (B, H/s, W/s, channels)``.
+
+    Used by ``CliffordNetBlockDSv2`` for both the stream and skip paths.
+    All paths target ``channels`` output channels so downstream layers
+    (SRGP, GGR, residual sum) see a uniform channel dim. Internal
+    channel expansion (axis E) happens after the residual sum via a
+    separate 1x1 projection on the block's output.
+    """
+    from ..blur_pool import BlurPool2D
+    from ..pixel_unshuffle import PixelUnshuffle2D
+
+    if strides == 1:
+        return keras.layers.Identity(name=name)
+    if kind == "avg":
+        return keras.layers.AveragePooling2D(
+            pool_size=strides, strides=strides, padding="same", name=name
+        )
+    if kind == "max":
+        return keras.layers.MaxPooling2D(
+            pool_size=strides, strides=strides, padding="same", name=name
+        )
+    if kind == "blur":
+        return BlurPool2D(strides=strides, padding="same", name=name)
+    if kind == "gaussian_dw":
+        from ...utils.tensors import depthwise_gaussian_kernel
+        k = max(5, 2 * strides + 1)
+        gauss_np = depthwise_gaussian_kernel(
+            channels=channels,
+            kernel_size=(k, k),
+            nsig=(2.0, 2.0),
+            dtype="float32",
+        )
+        return keras.layers.DepthwiseConv2D(
+            kernel_size=k,
+            strides=strides,
+            padding="same",
+            use_bias=False,
+            depthwise_initializer=keras.initializers.Constant(gauss_np),
+            name=name,
+        )
+    if kind == "pixel_unshuffle":
+        return PixelUnshuffle2D(
+            scale=strides, out_channels=channels, name=name
+        )
+    if kind == "resnetd":
+        return keras.Sequential(
+            [
+                keras.layers.AveragePooling2D(
+                    pool_size=strides, strides=strides, padding="same"
+                ),
+                keras.layers.Conv2D(
+                    channels, kernel_size=1, padding="same", use_bias=True
+                ),
+            ],
+            name=name,
+        )
+    raise ValueError(f"Unknown pool kind: {kind!r}")
+
+
+def _make_ctx_norm(
+    norm_type: str, channels: int, name: str
+) -> Optional[keras.layers.Layer]:
+    """Build the context-stream normalisation layer."""
+    if norm_type == "bn":
+        return keras.layers.BatchNormalization(name=name)
+    if norm_type == "gn":
+        groups = max(1, min(32, channels // 4))
+        while channels % groups != 0:
+            groups -= 1
+        return keras.layers.GroupNormalization(groups=groups, name=name)
+    if norm_type == "ln":
+        return keras.layers.LayerNormalization(epsilon=1e-6, name=name)
+    if norm_type == "none":
+        return None
+    raise ValueError(f"Unknown ctx_norm_type: {norm_type!r}")
+
+
+@keras.saving.register_keras_serializable()
+class CliffordNetBlockDSv2(keras.layers.Layer):
+    """Design-space sibling of :class:`CliffordNetBlockDS` for the
+    downsampling experiments described in
+    ``analyses/analysis_2026-04-30_41b5e415/summary.md``.
+
+    Differences vs :class:`CliffordNetBlockDS`:
+
+    1. **Decoupled stream/skip pool kinds (axes A and B).** ``stream_pool``
+       and ``skip_pool`` are independent and accept ``avg | max | blur |
+       gaussian_dw | pixel_unshuffle | resnetd``.
+    2. **Internal channel expansion (axis E).** Optional ``out_channels``
+       triggers a 1x1 projection at the END of the block (after the
+       residual sum), so the block output has ``out_channels`` channels.
+       SRGP / GGR still operate at ``channels``.
+    3. **Configurable context-stream norm (axis G).** ``ctx_norm_type``
+       selects ``bn | gn | ln | none`` — the input LayerNorm is unchanged.
+    4. **Pyramid-diff context mode (axis D).** ``ctx_mode="pyramid_diff"``
+       at ``strides>1`` applies a Laplacian-pyramid level subtraction
+       (``z_ctx -= upsample(avg_pool(z_ctx, s))``). At ``strides=1`` it
+       falls back to plain ``"diff"``.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        shifts: List[int],
+        cli_mode: CliMode = "full",
+        ctx_mode: CtxModeV2 = "diff",
+        use_global_context: bool = False,
+        kernel_size: int = 7,
+        strides: int = 1,
+        stream_pool: SkipPoolV2 = "avg",
+        skip_pool: SkipPoolV2 = "avg",
+        out_channels: Optional[int] = None,
+        ctx_norm_type: CtxNormType = "bn",
+        ctx_activation: Optional[str] = "silu",
+        layer_scale_init: float = 1e-5,
+        drop_path_rate: float = 0.0,
+        use_bias: bool = True,
+        kernel_initializer: Any = "glorot_uniform",
+        bias_initializer: Any = "zeros",
+        kernel_regularizer: Optional[Any] = None,
+        bias_regularizer: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if channels <= 0:
+            raise ValueError(f"channels must be positive, got {channels}")
+        if ctx_mode not in ("diff", "abs", "pyramid_diff"):
+            raise ValueError(
+                f"ctx_mode must be 'diff'|'abs'|'pyramid_diff', got "
+                f"{ctx_mode!r}"
+            )
+        if not isinstance(kernel_size, int) or kernel_size <= 0:
+            raise ValueError(
+                f"kernel_size must be a positive int, got {kernel_size!r}"
+            )
+        if not isinstance(strides, int) or strides < 1:
+            raise ValueError(f"strides must be int>=1, got {strides!r}")
+        valid_pools = {
+            "avg", "max", "blur", "gaussian_dw", "pixel_unshuffle", "resnetd"
+        }
+        if stream_pool not in valid_pools:
+            raise ValueError(
+                f"stream_pool must be one of {sorted(valid_pools)}, "
+                f"got {stream_pool!r}"
+            )
+        if skip_pool not in valid_pools:
+            raise ValueError(
+                f"skip_pool must be one of {sorted(valid_pools)}, "
+                f"got {skip_pool!r}"
+            )
+        if out_channels is not None and out_channels <= 0:
+            raise ValueError(
+                f"out_channels must be positive or None, got {out_channels!r}"
+            )
+        if ctx_norm_type not in ("bn", "gn", "ln", "none"):
+            raise ValueError(
+                f"ctx_norm_type must be 'bn'|'gn'|'ln'|'none', got "
+                f"{ctx_norm_type!r}"
+            )
+
+        self.channels = channels
+        self.shifts = list(shifts)
+        self.cli_mode = cli_mode
+        self.ctx_mode = ctx_mode
+        self.use_global_context = use_global_context
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.stream_pool_kind = stream_pool
+        self.skip_pool_kind = skip_pool
+        self.out_channels = out_channels
+        self.ctx_norm_type = ctx_norm_type
+        self.ctx_activation = ctx_activation
+        self.layer_scale_init = layer_scale_init
+        self.drop_path_rate = drop_path_rate
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+
+        self.input_norm = keras.layers.LayerNormalization(
+            epsilon=1e-6, name="input_norm"
+        )
+        self.linear_det = keras.layers.Dense(
+            channels,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="linear_det",
+        )
+        self.dw_conv = keras.layers.DepthwiseConv2D(
+            kernel_size=kernel_size,
+            strides=strides,
+            padding="same",
+            use_bias=(ctx_norm_type == "none"),
+            name="dw_conv",
+        )
+        self.ctx_norm = _make_ctx_norm(
+            ctx_norm_type, channels, name="ctx_norm"
+        )
+
+        self.stream_pool = _make_pool_v2(
+            stream_pool, channels, strides, name="stream_pool"
+        )
+        self.skip_pool = _make_pool_v2(
+            skip_pool, channels, strides, name="skip_pool"
+        )
+
+        self._pyr_pool: Optional[keras.layers.Layer] = None
+        self._pyr_up: Optional[keras.layers.Layer] = None
+        if ctx_mode == "pyramid_diff" and strides > 1:
+            self._pyr_pool = keras.layers.AveragePooling2D(
+                pool_size=strides, strides=strides, padding="same",
+                name="pyr_pool",
+            )
+            self._pyr_up = keras.layers.UpSampling2D(
+                size=strides, interpolation="bilinear", name="pyr_up",
+            )
+
+        self.local_geo_prod = SparseRollingGeometricProduct(
+            channels=channels,
+            shifts=shifts,
+            cli_mode=cli_mode,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="local_geo_prod",
+        )
+
+        if use_global_context:
+            self.global_geo_prod = SparseRollingGeometricProduct(
+                channels=channels,
+                shifts=_GLOBAL_SHIFTS,
+                cli_mode=_GLOBAL_CLI_MODE,
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name="global_geo_prod",
+            )
+        else:
+            self.global_geo_prod = None
+
+        self.ggr = GatedGeometricResidual(
+            channels=channels,
+            layer_scale_init=layer_scale_init,
+            drop_path_rate=drop_path_rate,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="ggr",
+        )
+
+        self.out_proj: Optional[keras.layers.Conv2D] = None
+        if out_channels is not None and out_channels != channels:
+            self.out_proj = keras.layers.Conv2D(
+                filters=out_channels,
+                kernel_size=1,
+                padding="same",
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name="out_proj",
+            )
+
+    @staticmethod
+    def _ceildiv(a: Optional[int], b: int) -> Optional[int]:
+        return None if a is None else -(-a // b)
+
+    def build(self, input_shape: Tuple) -> None:
+        """Explicitly build every sub-layer in dependency order.
+
+        Required for clean save/load: Keras serialisation records the
+        built-state of each sub-layer at the moment of saving, and
+        complains on load if any layer was implicitly built only via
+        ``call``-time tracing. Mirrors :class:`CliffordNetBlockDS.build`.
+        """
+        b, h, w, _ = input_shape
+
+        self.input_norm.build(input_shape)
+
+        # Pool layers consume full-resolution input.
+        self.stream_pool.build(input_shape)
+        self.skip_pool.build(input_shape)
+
+        # Stream-side shape after stream pool.
+        pooled_h = self._ceildiv(h, self.strides)
+        pooled_w = self._ceildiv(w, self.strides)
+        stream_shape = (b, pooled_h, pooled_w, self.channels)
+
+        self.linear_det.build(stream_shape)
+
+        # DW conv consumes full-resolution input; its output spatial
+        # dims equal the pooled shape (same ceil semantics for
+        # stride+"same" padding).
+        self.dw_conv.build(input_shape)
+        if self.ctx_norm is not None:
+            self.ctx_norm.build(stream_shape)
+
+        # Pyramid-diff helpers (only present when ctx_mode='pyramid_diff'
+        # AND strides>1).
+        if self._pyr_pool is not None:
+            self._pyr_pool.build(stream_shape)
+        if self._pyr_up is not None:
+            # AveragePooling2D output:
+            pyr_lo_shape = (
+                b,
+                self._ceildiv(pooled_h, self.strides),
+                self._ceildiv(pooled_w, self.strides),
+                self.channels,
+            )
+            self._pyr_up.build(pyr_lo_shape)
+
+        self.local_geo_prod.build(stream_shape)
+        if self.global_geo_prod is not None:
+            self.global_geo_prod.build(stream_shape)
+        self.ggr.build(stream_shape)
+
+        if self.out_proj is not None:
+            self.out_proj.build(stream_shape)
+
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        x_prev = inputs
+
+        x_norm = self.input_norm(x_prev)
+        x_norm_p = self.stream_pool(x_norm)
+        z_det = self.linear_det(x_norm_p)
+
+        z_ctx = self.dw_conv(x_norm)
+        if self.ctx_norm is not None:
+            z_ctx = self.ctx_norm(z_ctx, training=training)
+        if self.ctx_activation is not None:
+            z_ctx = keras.activations.get(self.ctx_activation)(z_ctx)
+
+        if self.ctx_mode == "diff":
+            z_ctx = z_ctx - z_det
+        elif self.ctx_mode == "abs":
+            pass
+        elif self.ctx_mode == "pyramid_diff":
+            if self._pyr_pool is not None and self._pyr_up is not None:
+                z_lo = self._pyr_pool(z_ctx)
+                z_lo_up = self._pyr_up(z_lo)
+                z_ctx = z_ctx - z_lo_up
+            else:
+                z_ctx = z_ctx - z_det
+
+        g_feat = self.local_geo_prod(z_det, z_ctx)
+
+        if self.global_geo_prod is not None:
+            c_glo = keras.ops.mean(x_norm_p, axis=[1, 2], keepdims=True)
+            c_glo = keras.ops.broadcast_to(c_glo, keras.ops.shape(z_det))
+            c_glo = c_glo - z_det
+            g_glo = self.global_geo_prod(z_det, c_glo)
+            g_feat = g_feat + g_glo
+
+        h_mix = self.ggr(x_norm_p, g_feat, training=training)
+        x_skip = self.skip_pool(x_prev)
+        out = x_skip + h_mix
+
+        if self.out_proj is not None:
+            out = self.out_proj(out)
+        return out
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        b, h, w, _ = input_shape
+        new_h = None if h is None else self._ceildiv(h, self.strides)
+        new_w = None if w is None else self._ceildiv(w, self.strides)
+        out_c = (
+            self.out_channels if self.out_channels is not None
+            else self.channels
+        )
+        return (b, new_h, new_w, out_c)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "channels": self.channels,
+                "shifts": self.shifts,
+                "cli_mode": self.cli_mode,
+                "ctx_mode": self.ctx_mode,
+                "use_global_context": self.use_global_context,
+                "kernel_size": self.kernel_size,
+                "strides": self.strides,
+                "stream_pool": self.stream_pool_kind,
+                "skip_pool": self.skip_pool_kind,
+                "out_channels": self.out_channels,
+                "ctx_norm_type": self.ctx_norm_type,
+                "ctx_activation": self.ctx_activation,
+                "layer_scale_init": self.layer_scale_init,
+                "drop_path_rate": self.drop_path_rate,
+                "use_bias": self.use_bias,
+                "kernel_initializer": initializers.serialize(
+                    self.kernel_initializer
+                ),
+                "bias_initializer": initializers.serialize(
+                    self.bias_initializer
+                ),
+                "kernel_regularizer": regularizers.serialize(
+                    self.kernel_regularizer
+                ),
+                "bias_regularizer": regularizers.serialize(
+                    self.bias_regularizer
+                ),
+            }
+        )
+        return config
