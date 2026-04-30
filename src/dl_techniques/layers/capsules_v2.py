@@ -180,11 +180,12 @@ class AttentionRoutingCapsule(keras.layers.Layer):
                 "dimension at build time."
             )
 
-        # Transformation weights W: same shape as legacy RoutingCapsule's W
-        # so config dicts can share dimensions.
+        # Transformation weights W: shape (N_in, N_out, D_out, D_in).
+        # Used via einsum for robust graph-mode behavior (the legacy
+        # matmul+squeeze pattern can lose static shape info under
+        # tf.function tracing).
         self.W = self.add_weight(
             shape=(
-                1,
                 self.num_input_capsules,
                 self.num_capsules,
                 self.dim_capsules,
@@ -263,15 +264,9 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
         # inputs: (B, N_in, D_in)
-        # Build u_hat = W @ u_i with explicit broadcasting.
-        # u: (B, N_in, 1, 1, D_in)  — expand for broadcasting against W
-        u = ops.expand_dims(ops.expand_dims(inputs, axis=-1), axis=2)
-        u_tiled = ops.tile(u, [1, 1, self.num_capsules, 1, 1])
-        # W: (1, N_in, N_out, D_out, D_in)
-        # u_tiled: (B, N_in, N_out, 1, D_in)
-        # matmul over the last two axes: (D_out, D_in) @ (D_in, 1) -> (D_out, 1)
-        u_hat_5d = ops.matmul(self.W, u_tiled)  # (B, N_in, N_out, D_out, 1)
-        u_hat = ops.squeeze(u_hat_5d, axis=-1)  # (B, N_in, N_out, D_out)
+        # u_hat[b, i, o, d] = sum_e W[i, o, d, e] * inputs[b, i, e]
+        # einsum keeps static shapes intact under tf.function tracing.
+        u_hat = ops.einsum("iode,bie->biod", self.W, inputs)  # (B, N_in, N_out, D_out)
 
         # Score: (u_hat · q) / sqrt(D_out)
         # u_hat: (B, N_in, N_out, D_out); q: (1, 1, N_out, D_out)
