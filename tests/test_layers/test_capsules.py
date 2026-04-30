@@ -781,3 +781,99 @@ class TestUtilityFunctions:
         large_lengths = length(large_vectors)
         assert not np.any(np.isnan(large_lengths.numpy()))
         assert not np.any(np.isinf(large_lengths.numpy()))
+
+# ---------------------------------------------------------------------
+# Bug fix verification (DECISION D-002 plan_2026-04-30_9c4cdf31):
+# CapsuleBlock(use_layer_norm=True) must preserve capsule magnitudes,
+# because ||v|| encodes detection probability under capsule margin loss.
+# ---------------------------------------------------------------------
+
+
+class TestCapsuleBlockBugFix:
+    """Verify length-preserving LayerNorm in CapsuleBlock.
+
+    Prior to the fix, `use_layer_norm=True` applied a plain
+    LayerNormalization(axis=-1) which rescaled the capsule vector
+    magnitudes — destroying the length-as-probability signal that
+    capsule_margin_loss reads.
+    """
+
+    @pytest.fixture
+    def input_tensor(self):
+        return keras.random.normal([4, 1152, 8])
+
+    def test_length_preservation(self, input_tensor):
+        """||CapsuleBlock(x)|| must equal ||CapsuleBlock_no_LN(x)||."""
+        # Baseline: identical block without LN.
+        block_no_ln = CapsuleBlock(
+            num_capsules=10,
+            dim_capsules=16,
+            use_layer_norm=False,
+            kernel_initializer=keras.initializers.RandomNormal(seed=0),
+        )
+        block_with_ln = CapsuleBlock(
+            num_capsules=10,
+            dim_capsules=16,
+            use_layer_norm=True,
+            kernel_initializer=keras.initializers.RandomNormal(seed=0),
+        )
+
+        # Build both with the same input shape.
+        out_no_ln = block_no_ln(input_tensor)
+        out_with_ln = block_with_ln(input_tensor)
+
+        # Copy weights from the no-LN block to the LN block so the two
+        # routing pathways produce identical pre-LN outputs.
+        block_with_ln.capsule_layer.set_weights(
+            block_no_ln.capsule_layer.get_weights()
+        )
+
+        out_no_ln = block_no_ln(input_tensor)
+        out_with_ln = block_with_ln(input_tensor)
+
+        # Vector norms (lengths) along the capsule dimension.
+        len_no_ln = np.sqrt(
+            np.sum(np.square(out_no_ln.numpy()), axis=-1)
+        )
+        len_with_ln = np.sqrt(
+            np.sum(np.square(out_with_ln.numpy()), axis=-1)
+        )
+
+        # Length-preserving LN should keep the magnitudes within numerical
+        # tolerance of the no-LN baseline.
+        assert np.allclose(len_no_ln, len_with_ln, atol=1e-5), (
+            f"LN-on path rescaled magnitudes. "
+            f"max abs diff = {np.max(np.abs(len_no_ln - len_with_ln))}"
+        )
+
+    def test_lengths_in_unit_interval(self, input_tensor):
+        """After fix, lengths must still satisfy the squash invariant [0,1)."""
+        block = CapsuleBlock(num_capsules=10, dim_capsules=16, use_layer_norm=True)
+        output = block(input_tensor)
+        lengths = np.sqrt(np.sum(np.square(output.numpy()), axis=-1))
+        assert np.all(lengths >= 0.0)
+        assert np.all(lengths < 1.0 + 1e-5)
+        assert not np.any(np.isnan(lengths))
+        assert not np.any(np.isinf(lengths))
+
+    def test_lengths_show_variance(self, input_tensor):
+        """Lengths must not collapse to a single constant (would mean LN
+        wiped out the discriminative signal)."""
+        block = CapsuleBlock(num_capsules=10, dim_capsules=16, use_layer_norm=True)
+        output = block(input_tensor)
+        lengths = np.sqrt(np.sum(np.square(output.numpy()), axis=-1))
+        assert lengths.std() > 1e-4, (
+            f"Capsule lengths collapsed to constant; std={lengths.std()}"
+        )
+
+    def test_serialization_roundtrip_with_ln(self, input_tensor):
+        """The fixed block must still serialize and deserialize cleanly."""
+        original = CapsuleBlock(num_capsules=10, dim_capsules=16, use_layer_norm=True)
+        # Build via forward pass.
+        _ = original(input_tensor)
+        config = original.get_config()
+        recreated = CapsuleBlock.from_config(config)
+        assert recreated.use_layer_norm is True
+        assert recreated.num_capsules == 10
+        assert recreated.dim_capsules == 16
+
