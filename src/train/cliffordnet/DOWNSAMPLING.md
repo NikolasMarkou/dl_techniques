@@ -201,3 +201,102 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_downsampling_experime
 - `src/dl_techniques/layers/pixel_unshuffle.py` — `PixelUnshuffle2D`
 - `analyses/analysis_2026-04-30_41b5e415/summary.md` — design-space report (priors)
 - `results/cliffordnet_downsampling_experiments_20260430_164707/comparison.csv` — raw results
+
+---
+
+## Follow-Up Campaign (iter-2)
+
+After iter-1 produced V1 (blur/blur, 0.7573, +0.59pp) and V7 (blur/pxsh
++abs+int, 0.7562, +0.48pp) as the two strongest single variants, four
+open questions remained:
+
+1. **What is σ on this benchmark?** The +0.59pp / +0.48pp leads sit close
+   to estimated ±0.2..0.4pp seed noise. Without σ we cannot credit
+   sub-half-point deltas.
+2. **Does V1 + V7 stack?** The prior campaign never measured V1's
+   stream/skip with V7's ctx_mode on the V0 substrate (V11 stacked
+   different axes on V4 and lost).
+3. **Is GN-at-H/4-and-below clean?** V5 applied GN at *every* stage,
+   confounding the result.
+4. **Is LN viable at low resolution?** LN is the modern transformer
+   default for sample-thin regimes; never measured here.
+
+### Variant table (iter-2)
+
+All four follow-up variants use the **V1 substrate** (blur/blur
+stream+skip, external channel expansion) and stack one axis on top.
+A0 anchor seed-panel uses the existing V0/V1/V7 entries with the new
+`--seed` arg.
+
+| Block | Variant | What it changes vs V1 | Predicted Δ |
+|-------|---------|-----------------------|------------:|
+| A0 | `V0/V1/V7 × seed=42,137,2025` | seed only | establishes σ |
+| B1 | `B1_blur_blur_abs` | `ctx_mode=abs` at strided transitions | +0.1..+0.5pp vs V1 |
+| B2 | `B2_blur_blur_pyrdiff` | `ctx_mode=pyramid_diff` at strided | -0.2..+0.3pp vs V1 |
+| C1 | `C1_blur_blur_gn_late` | GN ctx-norm at stages 2,3 (BN at stage 1) | +0.0..+0.3pp vs V1 |
+| C2 | `C2_blur_blur_ln_late` | LN ctx-norm at stages 2,3 | -0.2..+0.2pp vs V1 |
+
+13 runs total. All variants are ~18M params (matching V0..V12).
+
+### Engineering changes (committed iter-1/step-1-3)
+
+* `--seed <int>` CLI arg seeds Python/NumPy/TF/Keras at startup. Default
+  None preserves the original non-deterministic behaviour. Seed is
+  persisted into each run's `config.json`.
+* Per-stage `ctx_norm_type` override: pass either a scalar str
+  (uniform across stages 1/2/3 — back-compat) OR a length-3 list
+  `[stage1, stage2, stage3]`. Used by C1 (`["bn","gn","gn"]`) and
+  C2 (`["bn","ln","ln"]`).
+* Determinism verified: two seeded builds produce bit-identical initial
+  weights and forward-pass outputs.
+
+### Launch command (full 13-run STRETCH campaign)
+
+Serial on GPU 0. ~115 min/run × 13 runs ≈ 25h.
+
+```bash
+# A0: anchor seed panel — 9 runs (V0/V1/V7 × seeds 42/137/2025)
+for V in V0_baseline_avg_avg V1_blur_blur V7_blur_pxsh_int_abs; do
+  for S in 42 137 2025; do
+    MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_downsampling_experiments \
+        --variant "$V" --seed "$S" --epochs 100 --batch-size 128 --gpu 0
+  done
+done
+
+# B + C: 4 follow-up cells, single seed (42)
+for V in B1_blur_blur_abs B2_blur_blur_pyrdiff C1_blur_blur_gn_late C2_blur_blur_ln_late; do
+  MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_downsampling_experiments \
+      --variant "$V" --seed 42 --epochs 100 --batch-size 128 --gpu 0
+done
+```
+
+Each invocation creates its own
+`results/cliffordnet_downsampling_experiments_<ts>/` run-root with a
+per-run `comparison.csv`. To merge results across runs, concatenate the
+13 individual `comparison.csv` files post-hoc (the script does NOT
+chain runs — each launch is its own root).
+
+### Expected outcomes
+
+* If A0 σ ≥ 0.4pp → V1's +0.59pp lead over V0 is borderline.
+  Re-evaluate the entire iter-1 ranking under the new error bar.
+* B1 wins (>V1 + 1σ) → ctx_mode=abs at strides matters; recommended
+  default for downsampling-heavy backbones.
+* C1 wins (>V1 + 1σ) → GN-at-H/4-and-below is a free improvement.
+  Roll into the default block factory.
+* B2/C2 not significantly different from V1 → confirms axes D and G
+  saturated; close them.
+
+### Smoke-test status (committed iter-1/step-1-3)
+
+All 4 new variants pass `--smoke-test` (3 epochs / batch 32) on RTX 4090:
+
+| Variant | Smoke val_acc (3 ep) | Wall | Notes |
+|---------|---------------------:|-----:|-------|
+| B1_blur_blur_abs | 0.4993 | 7.6 min | round-trip-load OK |
+| B2_blur_blur_pyrdiff | 0.4945 | 7.7 min | — |
+| C1_blur_blur_gn_late | 0.5140 | 7.6 min | round-trip-load OK |
+| C2_blur_blur_ln_late | 0.5128 | 7.7 min | — |
+
+Smoke numbers are not predictive of 100-epoch outcomes — they only
+prove forward+backward+save are wired correctly.
