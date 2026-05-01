@@ -50,9 +50,10 @@ import argparse
 import csv
 import json
 import os
+import random
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import numpy as np
@@ -99,6 +100,34 @@ _USE_GLOBAL_CONTEXT: bool = False
 _DEFAULT_CTX_MODE_ISO: str = "diff"  # isotropic block ctx_mode (always diff)
 _DEFAULT_KERNEL_SIZE_ISO: int = 7    # isotropic block context-DW kernel
 _DEFAULT_NORM_TYPE_ISO: str = "bn"   # isotropic block ctx norm
+
+
+# ---------------------------------------------------------------------
+# Reproducibility helper
+# ---------------------------------------------------------------------
+
+
+def _apply_seed(seed: Optional[int]) -> None:
+    """Seed Python / NumPy / TF / Keras for reproducible runs.
+
+    Mirrors the convention used in ``train_depth_estimation.py``:
+    Python/NumPy/TF/Keras only — does NOT enable
+    ``tf.config.experimental.enable_op_determinism()`` (too costly for
+    100-epoch CIFAR-100 runs). This guarantees identical initial weights
+    and reduces, but does not eliminate, run-to-run training-loss
+    variance from non-deterministic GPU kernels.
+
+    No-op when ``seed`` is ``None`` (preserves the original
+    non-deterministic behaviour for back-compat).
+    """
+    if seed is None:
+        return
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    keras.utils.set_random_seed(seed)
+    logger.info(f"Seeded Python/NumPy/TF/Keras with seed={seed}")
 
 
 # ---------------------------------------------------------------------
@@ -258,6 +287,75 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
         ),
         internal_expansion=False,
     ),
+    # ------------------------------------------------------------------
+    # Iter-2 follow-up cells (B1, B2, C1, C2 — see DOWNSAMPLING.md
+    # "Follow-Up Campaign"). All four use the V1 substrate (blur/blur,
+    # external channel expansion) and stack a single axis on top.
+    # ------------------------------------------------------------------
+    "B1_blur_blur_abs": dict(
+        description=(
+            "V1 substrate (blur/blur, external expansion) + ctx_mode=abs at "
+            "strided transitions. Tests the unmeasured V1 + V7 stack "
+            "(both empirical winners on V0 substrate) without the V4 "
+            "internal-expansion confound. +0.7..+1.0pp vs V0 predicted."
+        ),
+        transition=dict(
+            stream_pool="blur",
+            skip_pool="blur",
+            kernel_size=7,
+            ctx_mode="abs",
+            ctx_norm_type="bn",
+        ),
+        internal_expansion=False,
+    ),
+    "B2_blur_blur_pyrdiff": dict(
+        description=(
+            "V1 substrate + ctx_mode=pyramid_diff at strided transitions. "
+            "Disambiguates 'pyrdiff is broken' (V6 result on V4) vs "
+            "'pyrdiff is broken on the pxsh substrate'. "
+            "+0.3..+0.8pp vs V0 predicted."
+        ),
+        transition=dict(
+            stream_pool="blur",
+            skip_pool="blur",
+            kernel_size=7,
+            ctx_mode="pyramid_diff",
+            ctx_norm_type="bn",
+        ),
+        internal_expansion=False,
+    ),
+    "C1_blur_blur_gn_late": dict(
+        description=(
+            "V1 substrate + GroupNorm context-stream norm at H/4-and-below "
+            "(stages 2 and 3 transitions). Stage-1 transition keeps BN. "
+            "Clean re-run of axis G that V5 confounded by applying GN "
+            "everywhere. +0.0..+0.3pp vs V1 predicted."
+        ),
+        transition=dict(
+            stream_pool="blur",
+            skip_pool="blur",
+            kernel_size=7,
+            ctx_mode="diff",
+            ctx_norm_type=["bn", "gn", "gn"],
+        ),
+        internal_expansion=False,
+    ),
+    "C2_blur_blur_ln_late": dict(
+        description=(
+            "V1 substrate + LayerNorm context-stream norm at H/4-and-below. "
+            "Literature control for C1 (LN is the sample-thin-friendly "
+            "default in modern transformers; never measured in iter-1). "
+            "-0.2..+0.2pp vs V1 predicted."
+        ),
+        transition=dict(
+            stream_pool="blur",
+            skip_pool="blur",
+            kernel_size=7,
+            ctx_mode="diff",
+            ctx_norm_type=["bn", "ln", "ln"],
+        ),
+        internal_expansion=False,
+    ),
 }
 
 
@@ -308,8 +406,25 @@ def build_variant(
             f"Available: {list(VARIANTS.keys())}"
         )
     cfg = VARIANTS[variant_name]
-    transition_kwargs: Dict[str, Any] = cfg["transition"]
+    # Copy so we can mutate (pop) without affecting the module-level dict.
+    transition_kwargs: Dict[str, Any] = dict(cfg["transition"])
     internal_expansion: bool = cfg["internal_expansion"]
+
+    # Per-stage `ctx_norm_type` override:
+    #   - scalar str  -> applies uniformly via **transition_kwargs (back-compat).
+    #   - list/tuple of length 3 -> stages 1,2,3 transitions get
+    #     per_stage_norms[stage_idx-1]. The key is popped from
+    #     transition_kwargs and passed explicitly at each transition build site.
+    per_stage_norms: Optional[List[str]] = None
+    raw_norm = transition_kwargs.get("ctx_norm_type", None)
+    if isinstance(raw_norm, (list, tuple)):
+        if len(raw_norm) != 3:
+            raise ValueError(
+                f"Variant {variant_name!r}: ctx_norm_type list must have "
+                f"length 3 (stages 1,2,3); got {len(raw_norm)}: {raw_norm!r}"
+            )
+        per_stage_norms = [str(n) for n in raw_norm]
+        transition_kwargs.pop("ctx_norm_type")
 
     # Linear DropPath schedule across every block in the model.
     total_blocks = sum(n for _, n in _STAGES)
@@ -352,6 +467,11 @@ def build_variant(
         # NB: the transition block reads `prev_channels` and produces
         # `channels` either internally (out_channels) or via an external
         # 1x1 Conv2D applied AFTER the strided block.
+        # Resolve per-stage norm override (if any) into an extra kwarg dict.
+        stage_norm_kwarg: Dict[str, Any] = {}
+        if per_stage_norms is not None:
+            stage_norm_kwarg["ctx_norm_type"] = per_stage_norms[stage_idx - 1]
+
         if internal_expansion:
             x = CliffordNetBlockDSv2(
                 channels=prev_channels,
@@ -364,6 +484,7 @@ def build_variant(
                 drop_path_rate=drop_rates[block_idx],
                 name=f"stage{stage_idx}_transition",
                 **transition_kwargs,
+                **stage_norm_kwarg,
             )(x)
         else:
             x = CliffordNetBlockDSv2(
@@ -377,6 +498,7 @@ def build_variant(
                 drop_path_rate=drop_rates[block_idx],
                 name=f"stage{stage_idx}_transition",
                 **transition_kwargs,
+                **stage_norm_kwarg,
             )(x)
             # External 1x1 channel expansion after spatial downsample.
             x = keras.layers.Conv2D(
@@ -589,6 +711,7 @@ def train_one_variant(
                 "stochastic_depth_rate": args.stochastic_depth_rate,
                 "layer_scale_init": args.layer_scale_init,
                 "parameters": param_count,
+                "seed": args.seed,
             }, f, indent=2)
         with open(os.path.join(results_dir, "training_history.json"), "w") as f:
             json.dump(
@@ -790,6 +913,13 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--skip-save", action="store_true",
                         dest="skip_save",
                         help="Skip model.save and round-trip check.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help=(
+                            "Reproducibility seed for Python/NumPy/TF/Keras. "
+                            "Default None = non-deterministic (back-compat). "
+                            "Use the same seed across runs for the A0 anchor "
+                            "seed panel (V0/V1/V7 with seeds 42/137/2025)."
+                        ))
     return parser.parse_args(argv)
 
 
@@ -799,6 +929,7 @@ def main() -> None:
     if args.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     setup_gpu(gpu_id=None)
+    _apply_seed(args.seed)
     try:
         train_all_variants(args)
     except KeyboardInterrupt:
