@@ -1631,6 +1631,12 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
        at ``strides>1`` applies a Laplacian-pyramid level subtraction
        (``z_ctx -= upsample(avg_pool(z_ctx, s))``). At ``strides=1`` it
        falls back to plain ``"diff"``.
+
+    Defaults reflect the empirical winner of the 11-variant downsampling
+    sweep documented in ``src/train/cliffordnet/DOWNSAMPLING.md``: V1
+    (``stream_pool="blur"``, ``skip_pool="blur"``). Pass
+    ``stream_pool="avg", skip_pool="avg"`` explicitly to reproduce the
+    legacy ``CliffordNetBlockDS`` behaviour (the V0 baseline of the sweep).
     """
 
     def __init__(
@@ -1642,8 +1648,8 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         use_global_context: bool = False,
         kernel_size: int = 7,
         strides: int = 1,
-        stream_pool: SkipPoolV2 = "avg",
-        skip_pool: SkipPoolV2 = "avg",
+        stream_pool: SkipPoolV2 = "blur",
+        skip_pool: SkipPoolV2 = "blur",
         out_channels: Optional[int] = None,
         ctx_norm_type: CtxNormType = "bn",
         ctx_activation: Optional[str] = "silu",

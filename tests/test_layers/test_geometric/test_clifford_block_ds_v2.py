@@ -32,11 +32,14 @@ def input_4d() -> tf.Tensor:
 # ---------------------------------------------------------------------
 
 
-def test_default_init():
+def test_default_init_uses_v1_winner():
+    """Defaults reflect the V1 winner of the downsampling sweep
+    (see src/train/cliffordnet/DOWNSAMPLING.md): stream_pool=blur,
+    skip_pool=blur. Other knobs unchanged from CliffordNetBlockDS."""
     blk = CliffordNetBlockDSv2(channels=32, shifts=[1, 2])
     assert blk.channels == 32
-    assert blk.stream_pool_kind == "avg"
-    assert blk.skip_pool_kind == "avg"
+    assert blk.stream_pool_kind == "blur"
+    assert blk.skip_pool_kind == "blur"
     assert blk.out_channels is None
     assert blk.ctx_norm_type == "bn"
     assert blk.ctx_mode == "diff"
