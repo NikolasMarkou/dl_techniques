@@ -300,3 +300,76 @@ All 4 new variants pass `--smoke-test` (3 epochs / batch 32) on RTX 4090:
 
 Smoke numbers are not predictive of 100-epoch outcomes — they only
 prove forward+backward+save are wired correctly.
+
+### Iter-2 results (executed 2026-05-02, 24h53m wall, RTX 4090)
+
+13/13 runs completed cleanly, no NaN, no crashes. Aggregated results
+in ``results/iter2_sweep_20260502_031640/aggregated.csv`` and
+``aggregated.md``.
+
+#### Anchor seed panel (axis-A0): σ-calibration
+
+| Variant | seed=42 | seed=137 | seed=2025 | mean | σ (pp) |
+|---------|--------:|---------:|----------:|-----:|-------:|
+| V0_baseline_avg_avg | 0.7537 | 0.7477 | 0.7517 | **0.7510** | 0.31 |
+| V1_blur_blur | 0.7564 | 0.7541 | 0.7551 | **0.7552** | 0.12 |
+| V7_blur_pxsh_int_abs | 0.7499 | 0.7472 | 0.7477 | **0.7483** | 0.14 |
+
+**Pooled within-variant σ ≈ 0.20pp** across the 9 anchor seeds. The
+V0 σ of 0.31pp is the conservative single-variant estimate; the V1
+and V7 panels happened to land tighter.
+
+#### B/C single-seed cells (seed=42)
+
+| Variant | best val_acc | Δ vs V1 mean | Verdict |
+|---------|-------------:|-------------:|---------|
+| **B1_blur_blur_abs** | 0.7562 | +0.10pp | within noise — axis D null on V1 substrate |
+| B2_blur_blur_pyrdiff | 0.7534 | -0.18pp | within noise (slight slack) — pyramid_diff null |
+| C1_blur_blur_gn_late | 0.7472 | -0.80pp | clearly worse — GN-late harmful (clean test) |
+| C2_blur_blur_ln_late | 0.7510 | -0.42pp | worse — LN-late also harmful |
+
+#### Verdicts (all four open questions answered)
+
+1. **σ on this benchmark = ~0.20pp pooled** (0.31pp single-variant for V0).
+   The iter-1 V1 lead of +0.59pp is real (≈2 pooled-σ); the iter-1 V7 lead of
+   +0.48pp was **a single-seed high-tail outlier**. V7's true mean is
+   −0.27pp **below** V0 (~1.3σ deficit).
+2. **V1 + V7 does not stack** — but B1 (V1+abs@strided) ≈ V1 within noise,
+   so axis D (`ctx_mode=abs` at strided transitions) is *neutral* on V1
+   substrate. The V7 deficit comes from V7's pxsh-skip + internal-expansion
+   combination, NOT from the abs mode itself.
+3. **GN-at-H/4-and-below is harmful** (−0.80pp). The "axis G is good but
+   was confounded" hypothesis is falsified by the clean test. V5's
+   GN-everywhere number was harmful for the same reason, just amplified.
+4. **LN-at-H/4-and-below is also harmful** (−0.42pp). Alternative norms
+   at low resolution do not help on this benchmark with this recipe.
+
+#### Final ranking (across iter-1 + iter-2)
+
+| Rank | Variant | best | mean (n) | seed σ | vs V0 mean (Δ pp / σ-units) |
+|---:|---------|-----:|---------:|-------:|----------------------------:|
+| 1 | **V1_blur_blur** | 0.7564 | 0.7552 (3) | 0.12 | **+0.42pp / +2.1σ** ✓ |
+| 2 | B1_blur_blur_abs | 0.7562 | 0.7562 (1) | — | +0.52pp / +2.6σ (single seed) |
+| 3 | B2_blur_blur_pyrdiff | 0.7534 | 0.7534 (1) | — | +0.24pp / +1.2σ (single seed) |
+| 4 | V0_baseline_avg_avg | 0.7537 | 0.7510 (3) | 0.31 | (anchor) |
+| 5 | C2_blur_blur_ln_late | 0.7510 | 0.7510 (1) | — | +0.00pp |
+| 6 | V7_blur_pxsh_int_abs | 0.7499 | 0.7483 (3) | 0.14 | −0.27pp / −1.3σ |
+| 7 | C1_blur_blur_gn_late | 0.7472 | 0.7472 (1) | — | −0.38pp |
+
+The currently-shipped V1 default in ``CliffordNetBlockDSv2`` is the
+empirical winner across every test run so far on this benchmark. No
+default change recommended.
+
+#### What further runs would be useful (not executed)
+
+* **B1 multi-seed**: B1 single-seed lands +0.10pp above V1 mean. Within
+  V1's 0.12pp σ, so the result is "≈ V1 within noise". A 2-seed B1
+  follow-up would tell us if B1 is actually better than V1 (rather than
+  just inside its tight σ-cluster). Cost: ~4h on GPU 0.
+* **V8 / V9** still deferred (need block-level refactor / open-research
+  grade-grouping design — see ``plans/DECISIONS.md`` D-001).
+
+#### Wall-time budget (actual)
+
+* 13 × 100-epoch runs × ~1h54m each = 24h53m end-to-end serial on RTX 4090.
+* No retries or restarts. Sweep ran clean.

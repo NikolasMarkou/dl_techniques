@@ -21,10 +21,24 @@ import sys
 from glob import glob
 
 
-def _find_runs(after_ts: float) -> list[tuple[str, dict]]:
+def _sweep_start_stamp(sweep_root: str) -> str:
+    """Extract YYYYMMDD_HHMMSS timestamp from sweep root dirname."""
+    base = os.path.basename(sweep_root.rstrip("/"))
+    parts = base.split("_")
+    return f"{parts[-2]}_{parts[-1]}" if len(parts) >= 2 else ""
+
+
+def _find_runs(sweep_root: str, min_epochs: int = 50) -> list[tuple[str, dict]]:
+    """Walk every per-run dir created at-or-after the sweep start.
+
+    Filters out 3-epoch smoke runs by ``epochs_trained >= min_epochs``.
+    """
     rows = []
+    start_stamp = _sweep_start_stamp(sweep_root)
     for d in sorted(glob("results/cliffordnet_downsampling_experiments_*")):
-        if os.path.getmtime(d) < after_ts - 60:
+        base = os.path.basename(d.rstrip("/"))
+        ts = base.replace("cliffordnet_downsampling_experiments_", "")
+        if ts < start_stamp:
             continue
         comp = os.path.join(d, "comparison.csv")
         if not os.path.exists(comp):
@@ -32,8 +46,11 @@ def _find_runs(after_ts: float) -> list[tuple[str, dict]]:
         with open(comp) as f:
             reader = csv.DictReader(f)
             for r in reader:
-                # Pull seed from per-variant config.json if present
-                results_dir = r.get("results_dir", "")
+                try:
+                    if int(r.get("epochs_trained", 0)) < min_epochs:
+                        continue
+                except ValueError:
+                    continue
                 seed = None
                 for cfg in glob(os.path.join(d, "**/config.json"),
                                 recursive=True):
@@ -98,8 +115,7 @@ def main(argv: list[str]) -> int:
         print("usage: aggregate_iter2.py <sweep_log_root>")
         return 2
     sweep_root = argv[1]
-    after_ts = os.path.getmtime(sweep_root)
-    found = _find_runs(after_ts)
+    found = _find_runs(sweep_root)
     rows = [r for _, r in found]
     _write_csv(rows, os.path.join(sweep_root, "aggregated.csv"))
     _write_md(rows, os.path.join(sweep_root, "aggregated.md"))
