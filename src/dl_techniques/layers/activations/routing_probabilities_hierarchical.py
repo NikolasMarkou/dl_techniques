@@ -80,7 +80,7 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
                            ▼
         ┌─────────────────────────────────────────┐
         │  Sigmoid Activation                     │
-        │  p_k = sigma(logit_k) -> Decision Probs│
+        │  p_k = sigma(logit_k) -> Decision Probs │
         │  [batch, d]                             │
         └──────────────────┬──────────────────────┘
                            │
@@ -88,12 +88,12 @@ class HierarchicalRoutingLayer(keras.layers.Layer):
         ┌─────────────────────────────────────────┐
         │  Hierarchical Probability Tree          │
         │                                         │
-        │            Root (p=1.0)                  │
+        │            Root (p=1.0)                 │
         │           ┌───┴───┐                     │
         │       (1-p0)    (p0)                    │
         │       ┌──┴──┐  ┌──┴──┐                  │
         │      ...   ... ...   ...                │
-        │       │     │   │     │                  │
+        │       │     │   │     │                 │
         │      L0    L1  L2    L3  ...            │
         │                                         │
         │  Binary splits at each level k          │

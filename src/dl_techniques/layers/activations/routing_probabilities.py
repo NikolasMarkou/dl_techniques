@@ -96,15 +96,15 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                            ▼
         ┌─────────────────────────────────────────┐
         │  Deterministic Weight Projections       │
-        │  w_{k,i} = cos(2pi*(k+1)*i / D)        │
+        │  w_{k,i} = cos(2pi*(k+1)*i / D)         │
         │  d = log2(padded_dim) projections       │
-        │  z_k = <x, w_k>  (dot product)         │
+        │  z_k = <x, w_k>  (dot product)          │
         └──────────────────┬──────────────────────┘
                            │
                            ▼
         ┌─────────────────────────────────────────┐
         │  Sigmoid Activation                     │
-        │  p_k = sigma(z_k) -> Decision Probs    │
+        │  p_k = sigma(z_k) -> Decision Probs     │
         │  [batch, d]                             │
         └──────────────────┬──────────────────────┘
                            │
@@ -112,12 +112,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         ┌─────────────────────────────────────────┐
         │  Hierarchical Probability Tree          │
         │                                         │
-        │            Root (p=1.0)                  │
+        │            Root (p=1.0)                 │
         │           ┌───┴───┐                     │
         │       (1-p0)    (p0)                    │
         │       ┌──┴──┐  ┌──┴──┐                  │
         │      ...   ... ...   ...                │
-        │       │     │   │     │                  │
+        │       │     │   │     │                 │
         │      L0    L1  L2    L3  ...            │
         │                                         │
         │  Binary splits at each level k          │
