@@ -65,6 +65,7 @@ ActivationType = Literal[
     'xsilu'
 ]
 
+# ---------------------------------------------------------------------
 
 # Activation layer registry mapping types to classes and parameter info
 ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -534,6 +535,8 @@ def create_activation_layer(
         raise ValueError(error_msg) from e
 
 
+# ---------------------------------------------------------------------
+
 def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
     Create an activation layer from a configuration dictionary.
@@ -554,3 +557,5 @@ def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     activation_type = config_copy.pop('type')
 
     return create_activation_layer(activation_type, **config_copy)
+
+# ---------------------------------------------------------------------

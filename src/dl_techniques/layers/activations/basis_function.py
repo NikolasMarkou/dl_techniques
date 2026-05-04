@@ -85,7 +85,7 @@ class BasisFunction(keras.layers.Layer):
                        │                   │
                        ▼                   ▼
         ┌──────────────────────┐  ┌────────────────┐
-        │  Identity Branch: x  │  │ Gate: sigmoid(x)│
+        │  Identity Branch: x  │  │Gate: sigmoid(x)│
         └──────────┬───────────┘  └───────┬────────┘
                    │                      │
                    └──────────┬───────────┘
@@ -98,7 +98,7 @@ class BasisFunction(keras.layers.Layer):
                               │
                               ▼
                ┌──────────────────────────────┐
-               │  Output [..., features]       │
+               │  Output [..., features]      │
                └──────────────────────────────┘
 
     :param kwargs: Additional keyword arguments passed to the Layer parent class,

@@ -1,6 +1,125 @@
 # Consolidated Decisions
 *Cross-plan decision archive. Entries merged from per-plan decisions.md on close. Newest first.*
 
+## plan_2026-05-01_1c080382
+### D-001 — Choose STRETCH scope (A0 + B1 + B2 + C1 + C2) (2026-05-01, PLAN, iter-1)
+
+**Decision**: User explicitly chose STRETCH scope (13 runs, ~25h). Implement all four B/C cells, plus A0 anchor-seed panel via `--seed` reuse of existing V0/V1/V7.
+
+**Trade-off**: Maximum experimental coverage at cost of ~25h GPU time vs. ~21h MIN scope. Buys the pyrdiff-on-V1-substrate disambiguation (B2) and the LN late-stage control (C2). Worth it given user explicitly accepted the cost.
+
+### D-002 — Extend in-place, do not create sibling script (2026-05-01, PLAN, iter-1)
+
+**Decision**: Add the 4 new VARIANTS and the per-stage / seed plumbing to the existing `train_downsampling_experiments.py`. No `train_downsampling_followup.py` sibling.
+
+**Trade-off**: Single-script consistency and shared comparison.csv across both campaigns at cost of growing one file beyond 850 lines. User explicitly chose in-place. Deferring sibling-split until the file becomes unwieldy (≥1500 lines).
+
+### D-003 — Operate autonomously (no PLAN→EXECUTE approval gate) (2026-05-01, PLAN, iter-1)
+
+**Decision**: User said "WORK UNSUPERVISED". Skip the user-approval handoff after PLAN. Proceed directly into EXECUTE. Treat any further user-input gates as auto-approved unless hitting a genuine blocker (irreversible op, ambiguous failure, autonomy-leash exhaustion). Still STOP before launching the full 25h training run — only present the launch command.
+
+**Trade-off**: Faster iteration at cost of losing the early plan-review checkpoint. Mitigation: the plan is small (4 variants, 1 helper, 1 plumbing change), risk is low, and CLOSE still surfaces a final review.
+
+### D-004 — Per-stage `ctx_norm_type`: list-of-3 with scalar back-compat (2026-05-01, PLAN, iter-1)
+
+**Decision**: Encode the per-stage override as either a scalar str (existing behaviour, applies uniformly to stages 1/2/3 transitions) OR a length-3 list `[stage1, stage2, stage3]`. Pop the key out of `transition_kwargs` when it's a list and inject explicitly at each transition build site.
+
+**Trade-off**: Backwards-compatible at the cost of a single conditional in `build_variant`. Alternative (separate `ctx_norm_schedule` dict key) would have been cleaner but more invasive. Sticking with overload-the-existing-key per project preference for minimal surface-area churn.
+
+### D-005 — Use V1 substrate (no `internal_expansion`) for B1/B2/C1/C2 (2026-05-01, PLAN, iter-1)
+
+**Decision**: All four new variants use `internal_expansion=False` (matching V1's substrate exactly). They stack ONE axis at a time on V1.
+
+**Trade-off**: Tests the marginal contribution of each axis on the empirical winner at cost of NOT testing axis interactions with internal expansion. The prior V11 kitchen-sink stack on V4 substrate already failed (-0.51pp); we're avoiding that failure mode by keeping the substrate clean.
+
+## plan_2026-04-30_3a94be21
+### D-001 — 2026-04-30 — Implement V0–V7, V10–V12 (11 variants); defer V8 + V9
+
+**Decision.** Implement 11 of 12 variants from `analysis_2026-04-30_41b5e415/summary.md` §4. Defer V8 (full-res product, axis F) and V9 (grade-aware grouped pool).
+
+**Why.** V8 requires structural refactor of `CliffordNetBlockDS.call()` that reverses pool/product order — high blast radius, +30–50% FLOPs, marginal payoff per analysis §3 hierarchy table. V9 is an open research question (no grade metadata in repo, requires constructive design choice) — analysis §6.1 calls it out as needing separate research scope. Both are explicitly low priority in the analysis.
+
+**Cost.** The campaign cannot test the principled "interact-then-pool" hypothesis (V8) or the Clifford-correct grade-aware pool (V9). User loses the ability to validate H5 (bilinear bandwidth doubling) and H14 (grade-aware pool) in this iteration. Mitigation: leave hooks in `VARIANTS` dict commented out; structure the block refactor so V8/V9 can be added incrementally.
+
+### D-002 — 2026-04-30 — Stage layout `(96,2),(192,2),(384,4),(768,4)` with patch1 stem
+
+**Decision.** 4-stage backbone with channel schedule 96-192-384-768 (2-2-4-4 blocks). Patch1 stem (no spatial reduction at stem) so first strided transition is 32→16, then 16→8, 8→4. Total ~10M params at C=96 base — matches analysis "10M multi-stage" scale.
+
+**Why.** Analysis §6 H_SCOPE_MACRO assumes "4-stage backbone with channel ratios (96, 192, 384, 768) or similar". 96 is divisible by 4 and 16 (pixel-unshuffle skip needs `C·s²` integer; trivially satisfied). 12 total blocks ≈ existing `V4_4stage_aggressive` (12 blocks too) so wall-time per variant is comparable to E05 (~200 min at 10M).
+
+**Cost.** Different macro-arch may shift relative ranking (acknowledged as H_SCOPE_MACRO open in §6). Mitigation: layout is one constant in the script, easy to re-run with `(64,2),(128,2),(256,4),(512,4)` if needed.
+
+### D-003 — 2026-04-30 — Refactor `CliffordNetBlockDS` rather than subclass
+
+**Decision.** Extend `CliffordNetBlockDS` constructor with new params (`stream_pool`, `out_channels`, `ctx_norm_type`, additional `skip_pool` and `ctx_mode` enum values) rather than create a sibling class `CliffordNetBlockDSv2`.
+
+**Why.** The new knobs are orthogonal axes of the same architectural concept; a sibling class would duplicate ~70% of code. Strict additivity (defaults preserve current behavior) avoids breaking `train_compare_variants.py`, `train_downsampling_techniques.py`, and existing tests. `use_ctx_bn` kept as deprecated alias for `ctx_norm_type` to avoid call-site churn.
+
+**Cost.** Higher refactor risk on a layer used by other scripts. Mitigation: keep all new params optional with current-behavior defaults; verify with smoke-build of legacy training scripts before declaring step 3 done.
+
+### D-003-AMENDED — 2026-04-30 — Use sibling class `CliffordNetBlockDSv2` (user direction)
+
+**Decision (supersedes D-003).** Per user direction, create a NEW sibling class `CliffordNetBlockDSv2` in `src/dl_techniques/layers/geometric/clifford_block.py` that contains all axis A–H knobs natively. Leave `CliffordNetBlockDS` untouched.
+
+**Why.** User wants zero-risk back-compat. A sibling class:
+- Cannot accidentally break existing tests / training scripts (they keep using `CliffordNetBlockDS`).
+- Lets us add new parameters without deprecation aliases (`use_ctx_bn`).
+- Lets us refactor `call()` cleanly for `pyramid_diff` and the future V8 full-res-product variant without nesting flags.
+- Code duplication is acceptable (~70% overlap) since this is a research artifact.
+
+**Cost.** ~400 lines of duplicated code in `clifford_block.py`. Two classes to maintain. Mitigation: file already houses both `CliffordNetBlock` and `CliffordNetBlockDS` so a third class is consistent with the file's role.
+
+### D-005 — 2026-04-30 — Run smoke-test first, then full training only after user re-approval
+
+**Decision.** Step 5 = smoke-test (3 epochs × batch 32 × 11 variants, ~10–15 min total). Step 7 added: full 100-epoch training run (`--variant all --epochs 100 --batch-size 128 --gpu 0`) — ONLY after smoke passes AND user explicitly approves the full run.
+
+**Why.** Full run is ~40h serial on RTX 4090 (analysis §5 estimate ~75h for 21 cells = ~3.5h per 10M cell × 11 variants). User wants smoke validation as a checkpoint before committing GPU time.
+
+**Cost.** Adds a sync point. Trivial.
+
+### D-004 — 2026-04-30 — V11 picks `pyramid_diff` over `abs` (V6 dominates V7)
+
+**Decision.** V11 (`DS-kitchen_sink`) uses `ctx_mode=pyramid_diff` rather than `abs at strides>1`. V6 and V7 are mutually-exclusive ctx_mode choices.
+
+**Why.** Analysis §3 hierarchy table puts V6 (pyramid_diff) and V7 (abs) at +0.1–0.3 each but V6 is principled-as-Laplacian-replacement while V7 is bypass. Stacking both is impossible at one ctx_mode value. Pyramid_diff preserves the Laplacian semantics axis D was meant to express. Cost: V11 won't isolate V7's contribution — that's already isolated in V7 itself.
+
+## plan_2026-04-30_9c4cdf31
+### D-001 (PLAN, 2026-04-30) — V2 alongside, legacy untouched
+**Decision**: Add `CapsNetV2`, `AttentionRoutingCapsule`, `CapsuleBlockV2` as new files alongside the existing `CapsNet`/`RoutingCapsule`/`CapsuleBlock`. Modify legacy code only for the LayerNorm bug fix.
+**Rationale**: User-confirmed default (Q1 answer). Existing tests stay green; users opting in to V2 get the new architecture without API breakage.
+**Trade-off**: More code (≈1500 net+) and two parallel APIs **at the cost of** a clean migration path and zero risk of regressing currently-working behavior.
+
+### D-002 (PLAN, 2026-04-30) — Bug fix: length-preserving LN, API stable
+**Decision**: Keep `CapsuleBlock(use_layer_norm=True)` as the public API; change its IMPLEMENTATION to length-preserving (split magnitude/direction, LN the direction, re-normalize, multiply magnitude back).
+**Rationale**: API stability for legacy users; the broken behavior is replaced with the correct behavior (margin loss now sees the magnitude it expects). Cleaner than introducing a new flag.
+**Trade-off**: Behavior change for any user who was depending on the old (buggy) magnitude rescaling **at the cost of** correctness for the documented length-as-probability semantics. Mitigated by `logger.info` at build time noting the correction.
+
+### D-003 (PLAN, 2026-04-30) — Decoupled length × probability in `AttentionRoutingCapsule`
+**Decision**: Replace squash entirely in V2. Use `v = sigmoid(prob_head(s)) * (s / (||s|| + eps))` — magnitude is a learned scalar from a per-capsule Dense head; direction is unit vector from raw routing aggregate.
+**Rationale**: Matches the Stage 3a design from the prior epistemic-deconstructor analysis (OBS-004). Eliminates squash saturation at 0 and conflation of "detection probability" with "vector magnitude side-effect".
+**Trade-off**: Slightly more parameters (the prob head) and a behavior different from "classical" capsules **at the cost of** clean gradient flow at small magnitudes and clearer semantic separation.
+
+### D-004 (PLAN, 2026-04-30) — Softmax over output capsules (axis=2)
+**Decision**: Default `softmax_axis="output"` in `AttentionRoutingCapsule` — each input capsule distributes its weight competitively across output capsules (matches dynamic routing semantics).
+**Rationale**: Preserves the "routing-by-agreement" intuition: an input votes for one parent, with probabilistic mass distributed by competition.
+**Trade-off**: Risk of coupling collapse (one parent wins all) **at the cost of** clearer semantic match to capsule routing literature. Pre-mortem signal Scenario 2 covers the fallback (switch to axis="input" if collapse observed at random init).
+
+### D-005 (PLAN, 2026-04-30) — No mixup in factory; defer to data pipeline
+**Decision**: `create_capsnet_v2` does NOT include mixup in the modern recipe defaults.
+**Rationale**: Mixup is a data-augmentation pipeline concern, not a model-side default. No mixup utility in `dl_techniques/datasets/` was found. Adding it would either (a) couple the model factory to a specific augmentation library or (b) require a new mixup utility — out of scope for "code path only" Stage 1.
+**Trade-off**: Recipe is missing one component **at the cost of** factory-pipeline coupling cleanliness. Document mixup as a recommended training-time augmentation.
+
+### D-007 (REFLECT, 2026-04-30) — Refactor `AttentionRoutingCapsule` matmul to `ops.einsum`
+**Decision (in EXECUTE step 6)**: replaced `ops.matmul(W, u_tiled).squeeze(axis=-1)` (with `W: (1, N_in, N_out, D_out, D_in)` × `u_tiled: (B, N_in, N_out, D_in, 1)`) with `ops.einsum("iode,bie->biod", self.W, inputs)` and reshaped W to `(N_in, N_out, D_out, D_in)`.
+**Why**: the matmul + squeeze pattern works in eager mode but the static last-axis size is lost under `tf.function` tracing inside `model.fit()`, raising "Cannot squeeze axis=-1, because the dimension is not 1". Einsum is shape-robust under graph mode.
+**Trade-off**: Slightly less explicit indexing **at the cost of** clean graph-mode execution. All 24 V2 layer tests + 16 V2 model tests + 80 legacy tests still pass after the refactor.
+**Falsification signal status**: Pre-Mortem Scenario 1 (serialization break) — did NOT fire. Scenario 2 (routing collapse) — did NOT fire (test_lengths_show_variance passes). Scenario 3 (pretrained fallback) — did NOT fire (test_..._falls_back_to_random_init passes).
+
+### D-006 (PLAN, 2026-04-30) — Pretrained URL placeholders accepted; rely on existing fallback
+**Decision**: Stage 2 factory `create_capsnet_v2_pretrained` passes through to `create_resnet(pretrained=...)` and inherits its fallback behavior (try download → fail → log warning → random init).
+**Rationale**: The repo's existing pattern. No new code path; failure mode is explicit and degrades gracefully. Users with a local weights file can pass `stem_pretrained="/path/to/weights.keras"`.
+**Trade-off**: Can't actually load ImageNet weights from the placeholder URL **at the cost of** complexity. Acceptable — code path is the deliverable.
+
 ## plan_2026-04-29_b6dbc601
 ### D-001 (PLAN, iter-1): Pool x_norm BEFORE stream split (instead of pooling z_det only)
 **Choice**: When `strides>1`, apply pool to `x_norm` once before computing both `z_det` and `z_ctx`; the strided DWConv produces the already-pooled context.

@@ -105,7 +105,7 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
                        ▼
         ┌─────────────────────────────────────┐
         │     Shannon Entropy Computation     │
-        │     H = -Sigma p_i * log(p_i + e)  │
+        │     H = -Sigma p_i * log(p_i + e)   │
         └──────────────┬──────────────────────┘
                        │
                        ▼

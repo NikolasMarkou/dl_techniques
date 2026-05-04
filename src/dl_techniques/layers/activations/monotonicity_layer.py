@@ -105,8 +105,8 @@ class MonotonicityLayer(keras.layers.Layer):
         ┌─────────────────────────────────────┐
         │  Split Along Monotonicity Axis      │
         │  ┌───────────┐  ┌────────────────┐  │
-        │  │ First (r0) │  │ Rest (r1..rN)  │  │
-        │  │  (anchor)  │  │                │  │
+        │  │ First (r0)│  │ Rest (r1..rN)  │  │
+        │  │  (anchor) │  │                │  │
         │  └─────┬─────┘  └───────┬────────┘  │
         └────────┼────────────────┼───────────┘
                  │                │

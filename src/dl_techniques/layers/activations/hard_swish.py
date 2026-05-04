@@ -74,7 +74,7 @@ class HardSwish(keras.layers.Layer):
                 │                       │
                 ▼                       ▼
         ┌──────────────┐   ┌────────────────────────┐
-        │   Identity   │   │    Hard Sigmoid:        │
+        │   Identity   │   │    Hard Sigmoid:       │
         │      x       │   │  ReLU6(x + 3) / 6      │
         └──────┬───────┘   └───────────┬────────────┘
                │                       │

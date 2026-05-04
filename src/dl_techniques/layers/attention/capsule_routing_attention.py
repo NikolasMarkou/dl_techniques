@@ -69,8 +69,8 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         │                                                             │
         │  Input [B, seq, embed_dim]                                  │
         │         │                                                   │
-        │         ├──────────────┬──────────────┐                     │
-        │         ▼              ▼              ▼                     │
+        │         ├──────────────┬───────────┐                        │
+        │         ▼              ▼           ▼                        │
         │    ┌────────┐    ┌────────┐    ┌────────┐                   │
         │    │ Q Proj │    │ K Proj │    │ V Proj │                   │
         │    └───┬────┘    └───┬────┘    └───┬────┘                   │

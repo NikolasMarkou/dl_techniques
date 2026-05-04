@@ -136,7 +136,7 @@ class Mish(keras.layers.Layer):
                 │
                 ▼
         ┌───────────────────────────────────┐
-        │  Mish(x) = x * tanh(softplus(x)) │
+        │  Mish(x) = x * tanh(softplus(x))  │
         └───────────────┬───────────────────┘
                         │
                         ▼

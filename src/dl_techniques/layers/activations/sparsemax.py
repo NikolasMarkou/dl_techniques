@@ -76,14 +76,14 @@ class Sparsemax(keras.layers.Layer):
                     │
                     ▼
         ┌───────────────────────────┐
-        │  Flatten to 2D: (N, K)   │
+        │  Flatten to 2D: (N, K)    │
         └───────────┬───────────────┘
                     │
                     ▼
         ┌───────────────────────────┐
         │  Sort descending          │
         │  Cumulative sum           │
-        │  Find support set k(z)   │
+        │  Find support set k(z)    │
         └───────────┬───────────────┘
                     │
                     ▼

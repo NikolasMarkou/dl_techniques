@@ -151,7 +151,7 @@ class GELU(BaseActivation):
                        │
                        ▼
         ┌─────────────────────────────────────┐
-        │  GELU(x) = x * 0.5 * (1 + erf(x/  │
+        │  GELU(x) = x * 0.5 * (1 + erf(x/    │
         │                          sqrt(2)))  │
         └──────────────┬──────────────────────┘
                        │
@@ -246,15 +246,15 @@ class ExpandedActivation(BaseActivation):
                        │                   │
                        ▼                   ▼
         ┌──────────────────────┐  ┌────────────────────────┐
-        │   Identity: x        │  │ Expanded Gate:          │
-        │                      │  │ g(x)*(1+2*alpha)-alpha  │
+        │   Identity: x        │  │ Expanded Gate:         │
+        │                      │  │ g(x)*(1+2*alpha)-alpha │
         └──────────┬───────────┘  └───────┬────────────────┘
                    │                      │
                    └──────────┬───────────┘
                               │ element-wise multiply
                               ▼
                ┌──────────────────────────────┐
-               │     Output [...]              │
+               │     Output [...]             │
                └──────────────────────────────┘
 
     :param alpha_initializer: Initializer for the alpha parameter.
@@ -347,7 +347,7 @@ class xATLU(ExpandedActivation):
                        ▼                   ▼
         ┌──────────────────────┐  ┌────────────────────────┐
         │   Identity: x        │  │ Gate: (arctan(x)+pi/2) │
-        │                      │  │       / pi              │
+        │                      │  │       / pi             │
         │                      │  │ Expand: g*(1+2a) - a   │
         └──────────┬───────────┘  └───────┬────────────────┘
                    │                      │
@@ -355,7 +355,7 @@ class xATLU(ExpandedActivation):
                               │ multiply
                               ▼
                ┌──────────────────────────────┐
-               │     Output [...]              │
+               │     Output [...]             │
                └──────────────────────────────┘
 
     :param alpha_initializer: Initializer for the alpha parameter.
@@ -409,7 +409,7 @@ class xGELU(ExpandedActivation):
                        ▼                   ▼
         ┌──────────────────────┐  ┌────────────────────────┐
         │   Identity: x        │  │ Gate: 0.5*(1+erf(x/    │
-        │                      │  │            sqrt(2)))    │
+        │                      │  │            sqrt(2)))   │
         │                      │  │ Expand: g*(1+2a) - a   │
         └──────────┬───────────┘  └───────┬────────────────┘
                    │                      │
@@ -417,7 +417,7 @@ class xGELU(ExpandedActivation):
                               │ multiply
                               ▼
                ┌──────────────────────────────┐
-               │     Output [...]              │
+               │     Output [...]             │
                └──────────────────────────────┘
 
     :param alpha_initializer: Initializer for the alpha parameter.
@@ -478,7 +478,7 @@ class xSiLU(ExpandedActivation):
                               │ multiply
                               ▼
                ┌──────────────────────────────┐
-               │     Output [...]              │
+               │     Output [...]             │
                └──────────────────────────────┘
 
     :param alpha_initializer: Initializer for the alpha parameter.
@@ -543,7 +543,7 @@ class EluPlusOne(BaseActivation):
                        │
                        ▼
         ┌─────────────────────────────────────┐
-        │  ELU(x) + 1 + epsilon              │
+        │  ELU(x) + 1 + epsilon               │
         │  Guarantees output > 0              │
         └──────────────┬──────────────────────┘
                        │
@@ -598,3 +598,5 @@ def get_activation(activation_name: str) -> BaseActivation:
         )
 
     return activation_class()
+
+# ---------------------------------------------------------------------
