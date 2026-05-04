@@ -269,12 +269,27 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
         # DECISION D-003: both modes share the same projection
         # [input_dim, num_decisions] with attribute name `self.kernel`. The
-        # only difference is whether it is a trainable Keras weight. In
-        # deterministic mode the cosine basis is a plain (non-tracked) tensor
-        # so the layer remains parameter-free and lazy-build/save-load works
-        # without get_build_config plumbing.
+        # only difference is whether it is a trainable Keras weight.
+        # DECISION D-004: in deterministic mode the cosine basis is stored
+        # as a non-trainable Keras weight (add_weight(trainable=False))
+        # rather than a plain tensor. Plain tensors created inside build()
+        # get captured in the FuncGraph used by Keras' compute_output_spec
+        # symbolic tracing, which then becomes "out of scope" when the
+        # layer is reused — this surfaced when embedding the layer inside
+        # a keras.Model subclass (CliffordNetLMRouting). Non-trainable
+        # weights are tracked by the layer and live outside any transient
+        # graph, so they remain accessible across calls and survive
+        # save/load. The layer is still parameter-free in the
+        # trainable-parameter sense.
         if self.mode == "deterministic":
-            self.kernel = self._cosine_basis(input_dim)
+            cosine_np = self._cosine_basis_numpy(input_dim)
+            self.kernel = self.add_weight(
+                name="cosine_basis",
+                shape=(input_dim, self.num_decisions),
+                initializer=keras.initializers.Constant(cosine_np),
+                trainable=False,
+                dtype=self.compute_dtype,
+            )
         else:
             self.kernel = self.add_weight(
                 name="kernel",
@@ -295,20 +310,25 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _cosine_basis(self, input_dim: int):
-        """L2-normalized cosine basis, shape (input_dim, num_decisions)."""
+    def _cosine_basis_numpy(self, input_dim: int):
+        """L2-normalized cosine basis as numpy, shape (input_dim, num_decisions).
+
+        Computed in pure numpy so the result has no FuncGraph affinity and
+        can be passed to ``keras.initializers.Constant`` for storage as a
+        non-trainable weight (see DECISION D-004 in build()).
+        """
+        import numpy as _np
         cols = []
         for decision_idx in range(self.num_decisions):
-            col = [
+            col = _np.array([
                 math.cos(
                     2.0 * math.pi * (decision_idx + 1) * feature_idx / input_dim
                 )
                 for feature_idx in range(input_dim)
-            ]
-            col_tensor = ops.convert_to_tensor(col, dtype=self.compute_dtype)
-            col_norm = ops.sqrt(ops.sum(ops.square(col_tensor)))
-            cols.append(col_tensor / (col_norm + self.epsilon))
-        return ops.stack(cols, axis=1)
+            ], dtype=_np.float32)
+            col_norm = _np.sqrt(_np.sum(_np.square(col)))
+            cols.append(col / (col_norm + self.epsilon))
+        return _np.stack(cols, axis=1).astype(_np.float32)
 
     def call(
             self,
