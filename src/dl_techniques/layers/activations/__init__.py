@@ -20,7 +20,6 @@ from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
-from .routing_probabilities_hierarchical import HierarchicalRoutingLayer
 from .sparsemax import Sparsemax
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
@@ -46,7 +45,6 @@ __all__ = [
     "MonotonicityLayer",
     "ReLUK",
     "RoutingProbabilitiesLayer",
-    "HierarchicalRoutingLayer",
     "Sparsemax",
     "SquashLayer",
     "ThreshMax",

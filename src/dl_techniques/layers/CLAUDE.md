@@ -26,7 +26,7 @@ Standard transformer, Swin transformer block, Swin conv block, perceiver transfo
 Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder.
 
 ### Activations (`activations/`)
-GoLU, Mish, hard sigmoid, hard swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability output, routing probabilities (flat + hierarchical), basis function. Includes `factory.py`.
+GoLU, Mish, hard sigmoid, hard swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability output, routing probabilities (unified deterministic / trainable modes), basis function. Includes `factory.py`.
 
 ### Geometric (`geometric/`)
 Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/` subpackage: connection layer, field embedding, gauge-invariant attention, holonomic transformer, holonomy layer, manifold stress, parallel transport.

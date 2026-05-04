@@ -50,14 +50,14 @@ class TestRoutingProbabilitiesLayer:
         # Before build, these should be None
         assert layer.padded_output_dim is None
         assert layer.num_decisions is None
-        assert layer.decision_weights is None
+        assert layer.kernel is None
 
         # After build
         inputs = tf.random.normal([1, 16])
         layer(inputs)
         assert layer.padded_output_dim == expected_padded
         assert layer.num_decisions == expected_decisions
-        assert layer.decision_weights is not None
+        assert layer.kernel is not None
 
     @pytest.mark.parametrize("axis", [-1, -2, 0, 1, 2])
     def test_initialization_with_axis_parameter(self, axis: int) -> None:
@@ -137,12 +137,12 @@ class TestRoutingProbabilitiesLayer:
 
         # Critical: Layer should have NO trainable weights
         assert len(layer.trainable_weights) == 0
-        # It has no non-trainable weights as they are recomputed on build.
+        # Cosine basis is a plain tensor, not a tracked Keras weight.
         assert len(layer.non_trainable_weights) == 0
 
-        # Decision weights should be precomputed
-        assert layer.decision_weights is not None
-        assert layer.decision_weights.shape == (layer.num_decisions, input_features)
+        # Kernel should be precomputed (cosine basis)
+        assert layer.kernel is not None
+        assert layer.kernel.shape == (input_features, layer.num_decisions)
 
     @pytest.mark.parametrize(
         "batch_size, input_features, output_dim",
@@ -345,12 +345,12 @@ class TestRoutingProbabilitiesLayer:
         inputs = tf.random.normal([1, 16])
         layer(inputs)  # Build layer
 
-        # Check shape
-        assert layer.decision_weights.shape == (layer.num_decisions, 16)
+        # Check shape: kernel is (input_dim, num_decisions)
+        assert layer.kernel.shape == (16, layer.num_decisions)
 
-        # Check that weights are normalized (unit L2 norm for each decision)
+        # Check that each decision column has unit L2 norm
         for i in range(layer.num_decisions):
-            weights = layer.decision_weights[i, :]
+            weights = layer.kernel[:, i]
             norm = tf.sqrt(tf.reduce_sum(tf.square(weights))).numpy()
             assert np.isclose(norm, 1.0, atol=1e-5), \
                 f"Decision {i} weights are not normalized: norm={norm}"

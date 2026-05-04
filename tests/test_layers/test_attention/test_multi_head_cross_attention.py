@@ -75,7 +75,7 @@ class TestRoutingProbabilitiesLayer:
         assert layer.built is True
         assert layer.padded_output_dim == 16  # Next power of 2 >= 10
         assert layer.num_decisions == 4  # log2(16)
-        assert layer.decision_weights.shape == (4, 15)  # (num_decisions, input_dim)
+        assert layer.kernel.shape == (15, 4)  # (input_dim, num_decisions)
 
     def test_build_with_inferred_output_dim(self):
         """Test build process with output_dim inferred from input."""
@@ -121,13 +121,13 @@ class TestRoutingProbabilitiesLayer:
         layer = RoutingProbabilitiesLayer(output_dim=10)
         layer.build((None, 20))
 
-        # Check shape
-        assert layer.decision_weights.shape[0] == layer.num_decisions
-        assert layer.decision_weights.shape[1] == 20
+        # Check shape: kernel is (input_dim, num_decisions)
+        assert layer.kernel.shape[0] == 20
+        assert layer.kernel.shape[1] == layer.num_decisions
 
-        # Check that weights are normalized (unit L2 norm)
+        # Check that weights are normalized (unit L2 norm per decision column)
         for i in range(layer.num_decisions):
-            weights = layer.decision_weights[i]
+            weights = layer.kernel[:, i]
             norm = tf.sqrt(tf.reduce_sum(tf.square(weights)))
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(norm),

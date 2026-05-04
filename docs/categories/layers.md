@@ -196,34 +196,20 @@ A powered ReLU activation function, `f(x) = max(0, x)^k`.
 *📁 File: `src/dl_techniques/layers/activations/relu_k.py`*
 
 ### layers.activations.routing_probabilities
-Deterministic, parameter-free routing tree for classification.
+Hierarchical routing tree for classification (deterministic or trainable).
 
 **Classes:**
 
 - `RoutingProbabilitiesLayer` - Keras Layer
-  Non-trainable hierarchical routing layer for probabilistic classification.
+  Hierarchical routing layer supporting both `mode="deterministic"` (parameter-free
+  cosine basis) and `mode="trainable"` (learnable Dense projection).
   ```python
-  RoutingProbabilitiesLayer(output_dim: Optional[int] = None, axis: int = -1, epsilon: float = 1e-07, ...)
+  RoutingProbabilitiesLayer(output_dim: Optional[int] = None, axis: int = -1, epsilon: float = 1e-07, mode: str = "deterministic", ...)
   ```
 
 **Functions:** `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/layers/activations/routing_probabilities.py`*
-
-### layers.activations.routing_probabilities_hierarchical
-Trainable hierarchical routing tree for large-scale classification.
-
-**Classes:**
-
-- `HierarchicalRoutingLayer` - Keras Layer
-  Trainable hierarchical routing layer for probabilistic classification.
-  ```python
-  HierarchicalRoutingLayer(output_dim: int, axis: int = -1, epsilon: float = 1e-07, ...)
-  ```
-
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/activations/routing_probabilities_hierarchical.py`*
 
 ### layers.activations.sparsemax
 Projects a vector of logits onto the probability simplex for sparse outputs.

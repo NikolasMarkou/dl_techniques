@@ -1,56 +1,37 @@
 """
-Deterministic, parameter-free routing tree for classification.
+Hierarchical routing tree for classification (deterministic or trainable).
 
-This module provides a non-trainable alternative to the standard softmax
-activation function for multi-class classification. Instead of learning a
-dense transformation, it computes a probability distribution by routing an
-initial probability mass through a fixed binary decision tree. This approach
-is computationally efficient and introduces a structured, hierarchical bias
-without adding any trainable parameters to the model.
+This module unifies two routing variants behind a single layer,
+``RoutingProbabilitiesLayer``, selectable via the ``mode`` parameter:
 
-The routing process works as follows:
+1. ``mode="deterministic"`` (default): Non-trainable, parameter-free routing
+   using a fixed cosine basis projection. A drop-in alternative to softmax that
+   introduces a structured, hierarchical bias without adding any trainable
+   parameters.
 
-1. **Padding**: The number of classes ``output_dim`` is padded to the
-   next highest power of two, ``padded_dim``, to ensure a complete
-   binary tree structure can be formed. The number of routing
-   decisions (tree depth) is ``d = log2(padded_dim)``.
+2. ``mode="trainable"``: Learnable routing using a standard affine projection
+   (``W x + b``). A drop-in replacement for ``Dense -> Softmax`` whose output
+   projection cost is reduced from ``O(N)`` to ``O(log N)`` decisions.
 
-2. **Deterministic Projections**: For each of the ``d`` decisions, a
-   fixed, non-trainable weight vector is pre-computed. The input
-   feature vector is projected onto each of these ``d`` vectors to
-   produce ``d`` scalar logits.
+Both modes share the same hierarchical probability tree:
 
-3. **Probabilistic Decisions**: Each logit is passed through a sigmoid
-   activation function to yield ``d`` probabilities. Each probability
-   ``p_k`` represents the likelihood of taking the "right" branch at
-   level ``k`` of the tree.
+1. **Padding**: ``output_dim`` is padded to the next power of two,
+   ``padded_dim``. The number of routing decisions is
+   ``d = log2(padded_dim)``.
 
-4. **Hierarchical Routing**: The layer simulates the flow of
-   probability mass, starting with 1.0 at the root. At each level ``k``,
-   the probability mass at every node is split between its left and
-   right children according to ``1 - p_k`` and ``p_k``, respectively.
+2. **Decision Logits**: For each of the ``d`` decisions, a logit ``z_k`` is
+   produced. In deterministic mode, ``z_k = <x, w_k>`` with
+   ``w_{k,i} = cos(2*pi * (k+1) * i / D)``. In trainable mode,
+   ``z = x W + b`` for a learnable ``W`` of shape ``[D, d]``.
 
-5. **Renormalization**: After ``d`` splits, the accumulated mass at each
-   of the ``padded_dim`` leaves forms a valid probability distribution.
-   This distribution is then truncated to the original ``output_dim`` and
-   renormalized to sum to 1.0.
+3. **Probabilistic Decisions**: ``p_k = sigmoid(z_k)`` is the probability of
+   taking the right branch at level ``k``.
 
-The mechanism relies on two key mathematical ideas: deterministic feature
-extraction using basis functions and hierarchical probability decomposition.
+4. **Hierarchical Routing**: Probability mass starts at 1.0 and is split at
+   each level: ``left = parent * (1 - p_k)``, ``right = parent * p_k``.
 
-The weight vectors used for the projections are generated from a cosine basis:
-``w_{k,i} = cos(2*pi * (k+1) * i / D)``
-
-where ``D`` is the input feature dimension. The decision logit is the dot product:
-``z_k = <x, w_k> = Sigma_i x_i * w_{k,i}``
-
-The probability of reaching a specific leaf (class) is the product of the
-probabilities of the choices along its unique path from the root:
-``P(leaf) = product_{k=0}^{d-1} P(b_k)``
-
-where branch probabilities are determined by:
-``P(right_k) = sigma(z_k) = 1 / (1 + e^{-z_k})``
-``P(left_k)  = 1 - sigma(z_k)``
+5. **Renormalization**: The accumulated mass at each of the ``padded_dim``
+   leaves is sliced to ``output_dim`` and renormalized to sum to 1.0.
 
 References:
     - Zhang, Z., et al. (2024). "Softmax-free Large-scale Language Modeling".
@@ -62,7 +43,7 @@ References:
 import math
 import keras
 from keras import ops
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -74,16 +55,23 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 
+# DECISION D-001: A single class with a `mode` flag is preferred over two
+# distinct classes or an inheritance hierarchy. This keeps the shared
+# axis-manipulation, tree-build, and slice/renormalize logic in one place.
+# Trainable-only kwargs are accepted but ignored in deterministic mode so
+# that get_config / from_config round-trip is symmetric.
 @keras.saving.register_keras_serializable()
 class RoutingProbabilitiesLayer(keras.layers.Layer):
     """
-    Non-trainable hierarchical routing layer for probabilistic classification.
+    Hierarchical routing layer for probabilistic classification.
 
-    This layer provides a deterministic, parameter-free alternative to softmax
-    by building a probabilistic routing tree. It computes routing decisions
-    directly from input features using deterministic patterns (Fourier-like
-    cosine basis functions), then routes probability mass through a binary
-    tree to produce class probabilities.
+    Supports two modes selected via ``mode``:
+
+    - ``"deterministic"``: parameter-free routing using a fixed cosine basis
+      projection. ``output_dim`` may be ``None`` (inferred at build time
+      from the input shape at ``axis``).
+    - ``"trainable"``: learnable routing via a Dense projection. ``output_dim``
+      is required.
 
     **Architecture Overview:**
 
@@ -95,17 +83,16 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                            │
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Deterministic Weight Projections       │
-        │  w_{k,i} = cos(2pi*(k+1)*i / D)         │
-        │  d = log2(padded_dim) projections       │
-        │  z_k = <x, w_k>  (dot product)          │
+        │  Decision Projection                    │
+        │  deterministic: z = <x, cos_basis>      │
+        │  trainable:     z = x W + b             │
+        │  -> [batch, d]                          │
         └──────────────────┬──────────────────────┘
                            │
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Sigmoid Activation                     │
-        │  p_k = sigma(z_k) -> Decision Probs     │
-        │  [batch, d]                             │
+        │  Sigmoid + Clip                         │
+        │  p_k = sigma(z_k) in [eps, 1-eps]       │
         └──────────────────┬──────────────────────┘
                            │
                            ▼
@@ -127,323 +114,279 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                            │
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Slice & Renormalize                    │
+        │  Slice & Renormalize to output_dim      │
         │  Keep first output_dim leaves           │
         │  Renormalize to sum = 1.0               │
         └──────────────────┬──────────────────────┘
                            │
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Output Probabilities                   │
-        │  [batch, ..., output_dim] (sum = 1.0)   │
+        │  Output Probabilities [batch, ..., N]   │
         └─────────────────────────────────────────┘
 
-    :param output_dim: Dimensionality of the output space. If None, will be
-        inferred from the dimension at the specified axis of the input shape
-        during build(). Must be an integer greater than 1.
+    :param output_dim: Dimensionality of the output space (number of classes).
+        In ``"deterministic"`` mode this may be ``None`` and is inferred from
+        the dimension at ``axis`` of the input shape during build. In
+        ``"trainable"`` mode it must be an integer greater than 1.
     :type output_dim: Optional[int]
-    :param axis: Axis along which the routing is applied. Defaults to -1
-        (the last axis), following the same convention as softmax. Can be
-        negative to index from the end.
+    :param axis: Axis along which the routing is applied. Defaults to -1.
     :type axis: int
-    :param epsilon: Small float added to prevent numerical issues during
-        probability clipping and renormalization.
+    :param epsilon: Small float added for numerical stability.
     :type epsilon: float
-    :param kwargs: Additional arguments for the Layer base class (e.g., name).
-    :type kwargs: Any
+    :param mode: Routing mode. ``"deterministic"`` (default) for the
+        parameter-free cosine-basis projection, or ``"trainable"`` for a
+        learnable Dense projection.
+    :type mode: str
+    :param kernel_initializer: Initializer for the trainable kernel
+        (``"trainable"`` mode only). Stored unconditionally so config is
+        round-trip stable.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Initializer for the trainable bias.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for the trainable kernel.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param use_bias: Whether to use a bias vector in trainable mode.
+    :type use_bias: bool
+    :param kwargs: Additional arguments for the Layer base class.
     """
+
+    _VALID_MODES = ("deterministic", "trainable")
 
     def __init__(
             self,
             output_dim: Optional[int] = None,
             axis: int = -1,
             epsilon: float = 1e-7,
+            mode: str = "deterministic",
+            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
+            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            use_bias: bool = True,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the RoutingProbabilitiesLayer.
-
-        :param output_dim: Optional integer for output dimensionality.
-        :type output_dim: Optional[int]
-        :param axis: Integer specifying the axis along which to apply routing.
-        :type axis: int
-        :param epsilon: Small float for numerical stability.
-        :type epsilon: float
-        :param kwargs: Additional layer arguments.
-        :type kwargs: Any
-        """
         super().__init__(**kwargs)
 
-        if output_dim is not None:
-            if not isinstance(output_dim, int) or output_dim <= 1:
-                raise ValueError(
-                    f"The 'output_dim' must be an integer greater than 1, "
-                    f"but received: {output_dim}"
-                )
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"'mode' must be one of {self._VALID_MODES}, got: {mode!r}"
+            )
 
         if not isinstance(axis, int):
             raise ValueError(
                 f"The 'axis' must be an integer, but received: {axis}"
             )
 
+        if mode == "trainable":
+            if not isinstance(output_dim, int) or output_dim <= 1:
+                raise ValueError(
+                    f"In 'trainable' mode, 'output_dim' must be an integer "
+                    f"greater than 1, but received: {output_dim}"
+                )
+        else:  # deterministic
+            if output_dim is not None:
+                if not isinstance(output_dim, int) or output_dim <= 1:
+                    raise ValueError(
+                        f"The 'output_dim' must be an integer greater than 1, "
+                        f"but received: {output_dim}"
+                    )
+
         self.output_dim = output_dim
         self.axis = axis
         self.epsilon = epsilon
-        self.padded_output_dim = None
-        self.num_decisions = None
-        self.decision_weights = None
-        self._normalized_axis = None
+        self.mode = mode
+        self.use_bias = use_bias
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+
+        # Computed in build()
+        self.padded_output_dim: Optional[int] = None
+        self.num_decisions: Optional[int] = None
+        self._normalized_axis: Optional[int] = None
+
+        # Projection weight (shape: [input_dim, num_decisions]).
+        # Non-trainable cosine basis in deterministic mode, learnable in trainable mode.
+        self.kernel = None
+        self.bias = None  # trainable mode only
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer by computing output dimensions and weight patterns.
-
-        Computes the padded output dimension to form a complete binary tree,
-        determines the number of routing decisions (tree depth), and generates
-        deterministic weight patterns using cosine basis functions.
-
-        Weight pattern generation (cosine basis):
-        For each decision ``k`` (row) and feature ``i`` (column):
-        ``w[k,i] = cos(2*pi * (k+1) * i / D)``
-
-        These patterns are near-orthogonal and capture different
-        "frequencies" in the input features, enabling diverse routing
-        decisions without training.
-
-        :param input_shape: Shape tuple of the input tensor.
-        :type input_shape: Tuple[Optional[int], ...]
-        :raises ValueError: If axis is out of bounds for input shape.
-        :raises ValueError: If output_dim cannot be inferred and is None.
-        :raises ValueError: If output_dim is not greater than 1.
-        """
-        # Normalize axis to handle negative indices
+        """Build the layer: compute tree dims and create projection state."""
+        # Normalize axis
         input_rank = len(input_shape)
         if self.axis < 0:
             self._normalized_axis = input_rank + self.axis
         else:
             self._normalized_axis = self.axis
 
-        # Validate normalized axis
         if self._normalized_axis < 0 or self._normalized_axis >= input_rank:
             raise ValueError(
                 f"axis {self.axis} is out of bounds for input shape "
                 f"{input_shape}"
             )
 
-        # Infer output_dim from input shape at specified axis if not provided
+        input_dim = input_shape[self._normalized_axis]
+
+        # Infer output_dim if needed (deterministic mode only)
         if self.output_dim is None:
-            if input_shape[self._normalized_axis] is None:
+            if self.mode != "deterministic":
+                # Defensive: __init__ should have rejected this, but check.
+                raise ValueError(
+                    "output_dim cannot be None in 'trainable' mode."
+                )
+            if input_dim is None:
                 raise ValueError(
                     f"Cannot infer output_dim when the dimension at axis "
                     f"{self.axis} of input_shape is None. Please provide "
                     f"output_dim explicitly."
                 )
-            self.output_dim = int(input_shape[self._normalized_axis])
+            self.output_dim = int(input_dim)
             logger.info(
                 f"[{self.name}] Inferred output_dim={self.output_dim} "
                 f"from input shape: {input_shape} at axis {self.axis}"
             )
 
-        # Validate output_dim
         if self.output_dim <= 1:
             raise ValueError(
                 f"output_dim must be greater than 1, got {self.output_dim}"
             )
 
-        # Calculate padded dimensions for tree structure
-        # Next power of 2: 2^ceil(log2(output_dim))
+        # Padded power-of-two tree size
         self.padded_output_dim = 1 << (self.output_dim - 1).bit_length()
         self.num_decisions = int(math.log2(self.padded_output_dim))
 
+        if input_dim is None:
+            raise ValueError(
+                f"The dimension at axis {self.axis} of input_shape must "
+                f"be defined to build the projection kernel, got None."
+            )
+
         logger.info(
-            f"[{self.name}] Built for {self.output_dim} classes along axis "
-            f"{self.axis}. Padded to {self.padded_output_dim} for tree "
-            f"construction, requiring {self.num_decisions} routing decisions."
+            f"[{self.name}] ({self.mode}) Built for {self.output_dim} "
+            f"classes along axis {self.axis}. Padded to "
+            f"{self.padded_output_dim}, requiring {self.num_decisions} "
+            f"routing decisions."
         )
 
-        # Precompute deterministic weight patterns for each decision
-        # Uses Fourier-like cosine basis to create diverse, orthogonal
-        # patterns
-        input_dim = input_shape[self._normalized_axis]
-        decision_weights_list = []
-
-        for decision_idx in range(self.num_decisions):
-            # Create a unique pattern for each decision using cosine basis
-            # This ensures different decisions respond to different feature
-            # patterns
-            weights = []
-            for feature_idx in range(input_dim):
-                # Cosine basis with varying frequency based on decision index
-                weight = math.cos(
-                    2.0 * math.pi * (decision_idx + 1) * feature_idx /
-                    input_dim
-                )
-                weights.append(weight)
-
-            # Convert to tensor and normalize to have unit L2 norm
-            weight_tensor = ops.convert_to_tensor(
-                weights, dtype=self.compute_dtype
+        # DECISION D-003: both modes share the same projection
+        # [input_dim, num_decisions] with attribute name `self.kernel`. The
+        # only difference is whether it is a trainable Keras weight. In
+        # deterministic mode the cosine basis is a plain (non-tracked) tensor
+        # so the layer remains parameter-free and lazy-build/save-load works
+        # without get_build_config plumbing.
+        if self.mode == "deterministic":
+            self.kernel = self._cosine_basis(input_dim)
+        else:
+            self.kernel = self.add_weight(
+                name="kernel",
+                shape=(input_dim, self.num_decisions),
+                initializer=self.kernel_initializer,
+                regularizer=self.kernel_regularizer,
+                trainable=True,
+                dtype=self.compute_dtype,
             )
-            weight_norm = ops.sqrt(ops.sum(ops.square(weight_tensor)))
-            normalized_weights = weight_tensor / (weight_norm + self.epsilon)
-
-            decision_weights_list.append(normalized_weights)
-
-        # Stack all weight patterns into a single tensor for efficient
-        # computation
-        # Shape: (num_decisions, input_dim)
-        # This is a regular attribute, not a Keras weight, as it's
-        # recomputed deterministically on build, so no state needs saving.
-        self.decision_weights = ops.stack(decision_weights_list, axis=0)
+        if self.mode == "trainable" and self.use_bias:
+            self.bias = self.add_weight(
+                name="bias",
+                shape=(self.num_decisions,),
+                initializer=self.bias_initializer,
+                trainable=True,
+                dtype=self.compute_dtype,
+            )
 
         super().build(input_shape)
+
+    def _cosine_basis(self, input_dim: int):
+        """L2-normalized cosine basis, shape (input_dim, num_decisions)."""
+        cols = []
+        for decision_idx in range(self.num_decisions):
+            col = [
+                math.cos(
+                    2.0 * math.pi * (decision_idx + 1) * feature_idx / input_dim
+                )
+                for feature_idx in range(input_dim)
+            ]
+            col_tensor = ops.convert_to_tensor(col, dtype=self.compute_dtype)
+            col_norm = ops.sqrt(ops.sum(ops.square(col_tensor)))
+            cols.append(col_tensor / (col_norm + self.epsilon))
+        return ops.stack(cols, axis=1)
 
     def call(
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply hierarchical routing to transform inputs into class probabilities.
-
-        Applies deterministic projections using cosine basis weight patterns,
-        then routes probability mass through a binary tree via iterative
-        splitting and interleaving.
-
-        :param inputs: Input tensor of arbitrary rank. The routing is applied
-            along the specified axis. All other dimensions are treated as
-            batch dimensions.
-        :type inputs: keras.KerasTensor
-        :param training: Boolean or None, whether the layer is in training
-            mode. Not used in this layer as it has no trainable parameters.
-        :type training: Optional[bool]
-        :return: Output tensor of the same shape as inputs, except the
-            dimension at the specified axis may be different if
-            output_dim != input_dim. Probabilities sum to 1.0 across the
-            specified axis.
-        :rtype: keras.KerasTensor
-        """
-        # Step 0: Handle axis manipulation for arbitrary rank tensors
-        # Move the target axis to the last position for easier computation
+        """Apply hierarchical routing to produce class probabilities."""
+        # --- Step 0: Move target axis to last, flatten to 2D ---
         input_rank = len(inputs.shape)
-
-        # Create permutation to move target axis to last position
         perm = list(range(input_rank))
         perm[self._normalized_axis] = input_rank - 1
         perm[input_rank - 1] = self._normalized_axis
 
-        # Transpose if axis is not already last
         if self._normalized_axis != input_rank - 1:
             inputs_transposed = ops.transpose(inputs, perm)
         else:
             inputs_transposed = inputs
 
-        # Reshape to 2D: (batch_size, input_dim)
-        # Using -1 for the batch dimension handles dynamic shapes safely
-        # in graph mode, unlike passing a symbolic batch_size calculation.
         input_dim = inputs_transposed.shape[-1]
         inputs_2d = ops.reshape(inputs_transposed, (-1, input_dim))
 
-        # Step 1: Compute deterministic routing decisions from inputs
-        # Shape: inputs_2d = (batch_size, input_dim)
-        # Shape: decision_weights = (num_decisions, input_dim)
-        # Result shape: (batch_size, num_decisions)
-        decision_logits = ops.matmul(
-            inputs_2d, ops.transpose(self.decision_weights)
-        )
+        # --- Step 1: Decision logits ---
+        decision_logits = ops.matmul(inputs_2d, self.kernel)
+        if self.bias is not None:
+            decision_logits = decision_logits + self.bias
 
-        # Apply sigmoid to convert logits to probabilities (0 to 1)
-        # Each value represents the probability of taking the "right" branch
         decision_probs = ops.sigmoid(decision_logits)
-
-        # Clip decision probabilities to prevent exactly 0 or 1
-        # This avoids zero probabilities in the final output which would
-        # cause NaN loss from log(0) in cross-entropy
         decision_probs = ops.clip(
             decision_probs, self.epsilon, 1.0 - self.epsilon
         )
 
-        # Step 2: Initialize root probability using ones_like for XLA safety
-        # Start with probability mass of 1.0 for each batch item
-        # Shape: (batch_size, 1)
+        # --- Step 2: Initialize root probability mass = 1.0 ---
         ones_template = inputs_2d[:, 0:1]
         padded_probs = ops.ones_like(ones_template)
 
-        # Step 3: Iteratively build the tree by splitting probabilities
-        # At each level, split each existing leaf into two children
+        # --- Step 3: Iteratively split tree ---
         for i in range(self.num_decisions):
-            # Get routing probability for current decision level
-            # Shape: (batch_size, 1)
             p_go_right = decision_probs[:, i:i + 1]
             p_go_left = 1.0 - p_go_right
 
-            # Split probability mass for each leaf
-            # Left children get: parent_prob * p_go_left
-            # Right children get: parent_prob * p_go_right
-            probs_for_left_branches = padded_probs * p_go_left
-            probs_for_right_branches = padded_probs * p_go_right
+            probs_for_left = padded_probs * p_go_left
+            probs_for_right = padded_probs * p_go_right
 
-            # Interleave left and right branches
-            # Stack creates shape: (batch_size, 2**i, 2)
             combined = ops.stack(
-                [probs_for_left_branches, probs_for_right_branches],
-                axis=2
+                [probs_for_left, probs_for_right], axis=2
             )
-
-            # Reshape to flatten, creating interleaved structure
-            # Final shape: (batch_size, 2**(i+1))
-            # Note: Using -1 for batch dimension is graph-safe
             padded_probs = ops.reshape(combined, (-1, 2 ** (i + 1)))
 
-        # After the loop, padded_probs contains a valid probability
-        # distribution over padded_output_dim leaves, guaranteed to sum
-        # to 1.0
-
-        # Step 4: Handle non-power-of-2 output dimensions
-        # If output_dim != padded_dim, we need to slice and renormalize
+        # --- Step 4: Slice and renormalize ---
+        # DECISION D-002 (revised): Preserve mode-specific renormalization to
+        # avoid regressing the deterministic-mode test, which asserts
+        # exact sum=1.0 for arbitrary epsilon. Trainable mode keeps the
+        # original `+ epsilon` safety margin (its prior behavior).
         if self.output_dim == self.padded_output_dim:
-            # Output dimension is already a power of 2, no adjustment needed
             final_probs = padded_probs
         else:
-            # Slice to get only the true class probabilities
             unnormalized_probs = padded_probs[:, :self.output_dim]
-
-            # Compute sum of sliced probabilities (will be < 1.0)
             prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
+            if self.mode == "trainable":
+                final_probs = unnormalized_probs / (prob_sum + self.epsilon)
+            else:
+                final_probs = unnormalized_probs / prob_sum
 
-            # Renormalize to ensure output sums to 1.0
-            final_probs = unnormalized_probs / prob_sum
-
-        # Step 5: Reshape back to original shape (with axis still at last
-        # position)
-        # Reverse the 2D flattening from Step 0
-
-        # Get the symbolic shape tensor of the transposed input.
+        # --- Step 5: Reshape back to original rank ---
         input_transposed_shape = ops.shape(inputs_transposed)
         input_transposed_shape_tensor = ops.convert_to_tensor(
             input_transposed_shape, dtype="int32"
         )
-
-        # Slice to get all dimensions except the last one (B, H, W)
         batch_shape_tensor = input_transposed_shape_tensor[:-1]
-
-        # Create a tensor for the new output dimension
         target_dim_tensor = ops.convert_to_tensor(
             [self.output_dim], dtype="int32"
         )
-
-        # Concatenate to form the full target shape: (B, H, W, output_dim)
-        # Both inputs to concatenate are now strictly tensors.
         target_shape_tensor = ops.concatenate(
-            [batch_shape_tensor, target_dim_tensor],
-            axis=0
+            [batch_shape_tensor, target_dim_tensor], axis=0
         )
-
-        # Reshape the 2D final_probs back to the rank of the input
         outputs_transposed = ops.reshape(final_probs, target_shape_tensor)
 
-        # Step 6: Transpose back to original axis order if needed
-        # Reverse the transpose from Step 0 to restore original axis layout
+        # --- Step 6: Restore original axis order ---
         if self._normalized_axis != input_rank - 1:
             outputs = ops.transpose(outputs_transposed, perm)
         else:
@@ -455,45 +398,41 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape of the layer.
-
-        :param input_shape: Shape tuple of the input.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple. Same as input shape except at the
-            specified axis, which will be output_dim if specified.
-        :rtype: Tuple[Optional[int], ...]
-        """
+        """Output shape: input shape with `axis` replaced by `output_dim`."""
         output_shape = list(input_shape)
 
-        # Determine which axis to modify
         if self._normalized_axis is not None:
             axis_to_modify = self._normalized_axis
         else:
-            # During shape inference before build, normalize the axis
             input_rank = len(input_shape)
             axis_to_modify = (input_rank + self.axis if self.axis < 0
                               else self.axis)
 
         if self.output_dim is not None:
             output_shape[axis_to_modify] = self.output_dim
-        # If output_dim is None, it will be inferred in build()
-        # and the output shape will match the input shape
+        # If output_dim is None (deterministic + pre-build), shape inference
+        # leaves the axis unchanged — matches old RoutingProbabilitiesLayer.
 
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return the configuration of the layer for serialization.
-
-        :return: Dictionary containing the layer configuration.
-        :rtype: Dict[str, Any]
-        """
+        """Serialize all parameters (both modes) for round-trip stability."""
         config = super().get_config()
         config.update({
-            'output_dim': self.output_dim,
-            'axis': self.axis,
-            'epsilon': self.epsilon,
+            "output_dim": self.output_dim,
+            "axis": self.axis,
+            "epsilon": self.epsilon,
+            "mode": self.mode,
+            "use_bias": self.use_bias,
+            "kernel_initializer": keras.initializers.serialize(
+                self.kernel_initializer
+            ),
+            "bias_initializer": keras.initializers.serialize(
+                self.bias_initializer
+            ),
+            "kernel_regularizer": keras.regularizers.serialize(
+                self.kernel_regularizer
+            ),
         })
         return config
 

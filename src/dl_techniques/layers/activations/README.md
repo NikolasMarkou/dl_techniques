@@ -20,12 +20,12 @@ The following layers are supported by the factory system:
 | `golu` | `GoLU` | Gompertz Linear Unit, asymmetrical self-gated activation. |
 | `hard_sigmoid` | `HardSigmoid` | Piecewise linear approximation of the sigmoid function. |
 | `hard_swish` | `HardSwish` | Computationally efficient approximation of Swish/SiLU. |
-| `hierarchical_routing` | `HierarchicalRoutingLayer` | Trainable probabilistic routing tree for `O(log N)` classification. |
+| `hierarchical_routing` | `RoutingProbabilitiesLayer(mode="trainable")` | Trainable probabilistic routing tree for `O(log N)` classification. |
 | `mish` | `Mish` | Self-regularized, non-monotonic activation. |
 | `monotonicity` | `MonotonicityLayer` | Enforces monotonic constraints (e.g., for quantile regression). |
 | `relu` | `keras.layers.ReLU` | Standard Rectified Linear Unit. |
 | `relu_k` | `ReLUK` | Powered ReLU activation: `max(0, x)^k`. |
-| `routing_probabilities` | `RoutingProbabilitiesLayer` | Parameter-free hierarchical routing using cosine basis patterns. |
+| `routing_probabilities` | `RoutingProbabilitiesLayer` | Parameter-free hierarchical routing using cosine basis patterns (`mode="deterministic"`). |
 | `saturated_mish` | `SaturatedMish` | Mish variant that smoothly saturates for large inputs. |
 | `silu` | `SiLU` | Sigmoid Linear Unit (Swish). |
 | `sparsemax` | `Sparsemax` | Euclidean projection onto the probability simplex (sparse outputs). |
@@ -132,7 +132,10 @@ adaptive = create_activation_layer(
 ```
 
 ### RoutingProbabilities (Parameter-Free)
-Deterministic routing based on fixed cosine patterns.
+Deterministic routing based on fixed cosine patterns. The unified
+`RoutingProbabilitiesLayer` supports both modes via the `mode` parameter
+(`"deterministic"` is the default; `"trainable"` enables learnable routing
+and is equivalent to selecting the `hierarchical_routing` factory key).
 ```python
 # Infers output_dim from input shape if not provided
 fixed_routing = create_activation_layer(

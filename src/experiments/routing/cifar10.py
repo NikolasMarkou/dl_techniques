@@ -3,7 +3,7 @@ CIFAR-10 Output Layer Comparison: Hierarchical Routing vs. Softmax
 ===================================================================
 
 This experiment evaluates the performance and characteristics of the novel
-`HierarchicalRoutingLayer` against the standard `Dense` -> `Softmax`
+`RoutingProbabilitiesLayer(mode="trainable")` against the standard `Dense` -> `Softmax`
 classifier for image classification on the CIFAR-10 dataset.
 
 The study aims to answer a critical question for large-scale classification:
@@ -37,7 +37,7 @@ with only the final output layer differing. The base architecture includes:
    Complexity: O(N), where N is the number of classes.
 
 2. **Hierarchical Routing**: A probabilistic binary tree approach. The
-   `HierarchicalRoutingLayer` directly produces a probability distribution.
+   `RoutingProbabilitiesLayer(mode="trainable")` directly produces a probability distribution.
    Complexity: O(log₂N), offering significant computational advantages for
    large N.
 
@@ -93,7 +93,7 @@ Expected Outcomes and Insights
 This experiment is designed to reveal:
 
 1. **Performance Trade-offs**: Does the computational efficiency of the
-   `HierarchicalRoutingLayer` come at the cost of classification accuracy?
+   `RoutingProbabilitiesLayer(mode="trainable")` come at the cost of classification accuracy?
 
 2. **Training Dynamics**: How does the routing-based learning process affect
    convergence speed and stability compared to the standard softmax?
@@ -107,7 +107,7 @@ This experiment is designed to reveal:
 
 5. **Scalability Implications**: While CIFAR-10 has only 10 classes, this
    experiment provides a crucial proof-of-concept for applying the
-   `HierarchicalRoutingLayer` to problems with much larger output spaces,
+   `RoutingProbabilitiesLayer(mode="trainable")` to problems with much larger output spaces,
    such as large-vocabulary language models or fine-grained classification.
 
 Theoretical Foundation
@@ -139,7 +139,6 @@ from typing import Dict, Any, List, Tuple, Callable
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.layers.activations.routing_probabilities import RoutingProbabilitiesLayer
-from dl_techniques.layers.activations.routing_probabilities_hierarchical import HierarchicalRoutingLayer
 
 from dl_techniques.visualization import (
     VisualizationManager,
@@ -473,8 +472,9 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
 
     elif model_type == 'HierarchicalRouting':
         # Hierarchical routing layer (O(log N) complexity)
-        predictions = HierarchicalRoutingLayer(
+        predictions = RoutingProbabilitiesLayer(
             output_dim=config.num_classes,
+            mode='trainable',
             name='predictions'
         )(x)
 

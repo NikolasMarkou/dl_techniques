@@ -29,7 +29,6 @@ from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
-from .routing_probabilities_hierarchical import HierarchicalRoutingLayer
 from .sparsemax import Sparsemax
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
@@ -144,12 +143,15 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'use_case': 'High-performance activation for mobile-optimized models like MobileNetV3.'
     },
     'hierarchical_routing': {
-        'class': HierarchicalRoutingLayer,
+        # Unified RoutingProbabilitiesLayer in trainable mode (formerly the
+        # standalone HierarchicalRoutingLayer).
+        'class': RoutingProbabilitiesLayer,
         'description': 'Trainable hierarchical probability tree for O(log N) classification.',
         'required_params': ['output_dim'],
         'optional_params': {
             'axis': -1,
             'epsilon': 1e-7,
+            'mode': 'trainable',
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
@@ -211,7 +213,8 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'optional_params': {
             'output_dim': None,
             'axis': -1,
-            'epsilon': 1e-7
+            'epsilon': 1e-7,
+            'mode': 'deterministic',
         },
         'use_case': (
             'Parameter-free alternative to softmax for multi-class '

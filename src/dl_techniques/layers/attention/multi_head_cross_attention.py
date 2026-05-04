@@ -339,12 +339,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
 
-        # Build hierarchical routing layer if exists
-        # NOTE routing layer is lazily built later, no need to instantiate here
-        # if self.hierarchical_routing is not None:
-        #     # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
-        #     attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
-        #     self.hierarchical_routing.build(attn_shape)
+        # Hierarchical routing layer is built lazily on first call (the
+        # attention-weight shape depends on runtime kv_len, not build-time
+        # kv_shape). Serialization handled via the routing layer's own
+        # get_build_config / build_from_config.
 
         # Build adaptive softmax layer if exists
         if self.adaptive_softmax is not None:

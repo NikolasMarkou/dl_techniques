@@ -31,7 +31,7 @@ To maintain consistency across the library, adhere to these naming standards:
 
 ### Class Naming
 *   **Standard:** Use CamelCase without suffixes (e.g., `Sparsemax`, `ThreshMax`, `Mish`).
-*   **Complex Layers:** Use `Layer` suffix only if the component involves significant internal routing or projection logic (e.g., `HierarchicalRoutingLayer`, `MonotonicityLayer`).
+*   **Complex Layers:** Use `Layer` suffix only if the component involves significant internal routing or projection logic (e.g., `RoutingProbabilitiesLayer`, `MonotonicityLayer`).
 *   **Expanded Variants:** Prefix with `x` for expanded gating ranges (e.g., `xGELU`, `xSiLU`).
 
 ### Parameter Standards
@@ -132,7 +132,7 @@ class MyActivation(keras.layers.Layer):
 ```
 
 ### Pattern B: Learnable Activation (Stateful)
-For activations with trainable parameters (e.g., `DifferentiableStep`, `HierarchicalRouting`).
+For activations with trainable parameters (e.g., `DifferentiableStep`, `RoutingProbabilitiesLayer(mode="trainable")`).
 
 ```python
 @keras.saving.register_keras_serializable()

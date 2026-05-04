@@ -32,7 +32,6 @@ from .sparsemax import Sparsemax
 from .thresh_max import ThreshMax
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
 from .routing_probabilities import RoutingProbabilitiesLayer
-from .routing_probabilities_hierarchical import HierarchicalRoutingLayer
 
 
 # Type alias for supported probability types
@@ -72,7 +71,7 @@ class ProbabilityOutput(keras.layers.Layer):
       Input: Logits. Config: ``{"min_temp": 0.1, "max_temp": 1.0, "entropy_threshold": 0.5}``.
     - **"routing"**: ``RoutingProbabilitiesLayer`` (Deterministic).
       Input: **Features** (Not logits). Config: ``{"output_dim": int, "axis": -1}``.
-    - **"hierarchical"**: ``HierarchicalRoutingLayer`` (Trainable).
+    - **"hierarchical"**: ``RoutingProbabilitiesLayer(mode="trainable")``.
       Input: **Features** (Not logits). Config: ``{"output_dim": int, "axis": -1}``.
 
     For ``routing`` and ``hierarchical`` types, the input should be features
@@ -200,8 +199,9 @@ class ProbabilityOutput(keras.layers.Layer):
             )
 
         elif self._probability_type in ("hierarchical", "hierarchical_routing"):
-            return HierarchicalRoutingLayer(
+            return RoutingProbabilitiesLayer(
                 name="hierarchical_routing",
+                mode="trainable",
                 **self._type_config
             )
 

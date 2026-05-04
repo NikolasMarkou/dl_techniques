@@ -5,16 +5,23 @@ import keras
 import os
 import tempfile
 
-from dl_techniques.layers.activations.routing_probabilities_hierarchical import HierarchicalRoutingLayer
+from dl_techniques.layers.activations.routing_probabilities import RoutingProbabilitiesLayer
 
 
 # ==============================================================================
 # Test Suite
 # ==============================================================================
 
+def _make_layer(**kwargs):
+    """Helper: instantiate the unified layer in trainable mode."""
+    kwargs.setdefault('mode', 'trainable')
+    return RoutingProbabilitiesLayer(**kwargs)
+
+
 class TestHierarchicalRoutingLayer:
     """
-    Test suite for the refined HierarchicalRoutingLayer implementation.
+    Test suite for the unified RoutingProbabilitiesLayer in trainable mode
+    (formerly HierarchicalRoutingLayer).
 
     Covers initialization, shape inference (arbitrary ranks), probability logic,
     numerical stability, serialization, and training integration.
@@ -33,11 +40,9 @@ class TestHierarchicalRoutingLayer:
     )
     def test_initialization_attributes(self, output_dim, expected_padded, expected_decisions):
         """Test that internal tree attributes are calculated correctly."""
-        layer = HierarchicalRoutingLayer(output_dim=output_dim)
+        layer = _make_layer(output_dim=output_dim)
 
-        # Trigger build to calculate attributes that depend on build (if any moved there)
-        # Note: In the refactor, these are calculated in build, but some are init-dependent.
-        # We call build with a dummy shape to ensure all state is set.
+        # Trigger build to calculate attributes
         layer.build((None, 10))
 
         assert layer.output_dim == output_dim
@@ -52,9 +57,9 @@ class TestHierarchicalRoutingLayer:
     def test_invalid_initialization(self):
         """Test validation logic in __init__."""
         with pytest.raises(ValueError, match="must be an integer greater than 1"):
-            HierarchicalRoutingLayer(output_dim=1)
-        with pytest.raises(ValueError, match="axis' must be an integer"):
-            HierarchicalRoutingLayer(output_dim=10, axis="invalid")
+            _make_layer(output_dim=1)
+        with pytest.raises(ValueError, match="'axis' must be an integer"):
+            _make_layer(output_dim=10, axis="invalid")
 
     @pytest.mark.parametrize("axis", [-1, 1])
     def test_build_weights(self, axis):
@@ -64,7 +69,7 @@ class TestHierarchicalRoutingLayer:
         # Expected depth: log2(16) = 4 (padded 10 -> 16)
         expected_decisions = 4
 
-        layer = HierarchicalRoutingLayer(output_dim=output_dim, axis=axis)
+        layer = _make_layer(output_dim=output_dim, axis=axis)
 
         # Shape depends on axis
         if axis == -1:
@@ -103,7 +108,7 @@ class TestHierarchicalRoutingLayer:
         Test that the layer correctly handles arbitrary rank inputs and axes.
         This validates the transpose-flatten-reshape logic introduced in the refactor.
         """
-        layer = HierarchicalRoutingLayer(output_dim=output_dim, axis=axis)
+        layer = _make_layer(output_dim=output_dim, axis=axis)
         inputs = tf.random.normal(input_shape)
 
         # Run forward pass
@@ -122,7 +127,7 @@ class TestHierarchicalRoutingLayer:
         input_dim = 8
         output_dim = 5  # Non-power of 2 to trigger renormalization
 
-        layer = HierarchicalRoutingLayer(output_dim=output_dim)
+        layer = _make_layer(output_dim=output_dim)
         inputs = tf.random.normal((batch_size, time_steps, input_dim))
 
         outputs = layer(inputs)
@@ -139,22 +144,13 @@ class TestHierarchicalRoutingLayer:
         input_dim = 1
         output_dim = 4  # Padded dim is 4, Depth = 2
 
-        layer = HierarchicalRoutingLayer(output_dim=output_dim, use_bias=True, epsilon=0.0)
+        layer = _make_layer(output_dim=output_dim, use_bias=True, epsilon=0.0)
         inputs = tf.ones((1, input_dim))  # Input is 1.0
         layer.build((1, input_dim))
 
         # We want logits:
         # Decision 0 (Root): High positive -> Sigmoid ~ 1.0 -> Go Right
         # Decision 1 (L1): High negative -> Sigmoid ~ 0.0 -> Go Left
-        #
-        # Tree Path for leaves:
-        # L0 (Left, Left): (1-p0)(1-p1) = 0 * 1 = 0
-        # L1 (Left, Right): (1-p0)p1    = 0 * 0 = 0
-        # L2 (Right, Left): p0(1-p1)    = 1 * 1 = 1  <-- Target
-        # L3 (Right, Right): p0p1       = 1 * 0 = 0
-
-        # Weights: [input_dim, num_decisions] -> [1, 2]
-        # We set kernel to 0 and control via bias for simplicity
         kernel = np.zeros((input_dim, 2))
         bias = np.array([10.0, -10.0])  # Logits: +10, -10
 
@@ -162,19 +158,17 @@ class TestHierarchicalRoutingLayer:
 
         preds = layer(inputs).numpy().flatten()
 
-        # Sigmoid(10) ~= 0.99995, Sigmoid(-10) ~= 0.000045
         p0 = 1.0 / (1.0 + np.exp(-10.0))
         p1 = 1.0 / (1.0 + np.exp(10.0))  # sigmoid(-10)
 
         expected = np.array([
             (1 - p0) * (1 - p1),  # L0
-            (1 - p0) * p1,  # L1
-            p0 * (1 - p1),  # L2 (Dominant)
-            p0 * p1  # L3
+            (1 - p0) * p1,        # L1
+            p0 * (1 - p1),        # L2 (Dominant)
+            p0 * p1               # L3
         ])
 
         assert np.allclose(preds, expected, atol=1e-5)
-        # Verify L2 is indeed the winner
         assert np.argmax(preds) == 2
 
     def test_manual_logic_renormalization(self):
@@ -185,29 +179,25 @@ class TestHierarchicalRoutingLayer:
         input_dim = 1
         output_dim = 3
 
-        layer = HierarchicalRoutingLayer(output_dim=output_dim, epsilon=0.0)
+        layer = _make_layer(output_dim=output_dim, epsilon=0.0)
         inputs = tf.ones((1, input_dim))
         layer.build((1, input_dim))
 
-        # Force uniform probability across all 4 padded leaves
-        # Logits = 0 -> Sigmoid = 0.5
+        # Force uniform probability across all 4 padded leaves: Logits=0 -> Sigmoid=0.5
         kernel = np.zeros((1, 2))
         bias = np.zeros((2,))
         layer.set_weights([kernel, bias])
 
         preds = layer(inputs).numpy().flatten()
 
-        # Padded leaves would be [0.25, 0.25, 0.25, 0.25]
-        # Slice first 3: [0.25, 0.25, 0.25] -> Sum = 0.75
-        # Renormalize: 0.25 / 0.75 = 1/3
-
+        # Padded leaves uniform 0.25 each. Slice first 3 -> 0.75 -> renormalize to 1/3 each.
         expected = np.array([1 / 3, 1 / 3, 1 / 3])
 
         assert np.allclose(preds, expected, atol=1e-6)
 
     def test_numerical_stability(self):
         """Test that extreme logits don't cause NaNs due to epsilon clipping."""
-        layer = HierarchicalRoutingLayer(output_dim=10, epsilon=1e-7)
+        layer = _make_layer(output_dim=10, epsilon=1e-7)
         inputs = tf.ones((1, 5))
         layer.build(inputs.shape)
 
@@ -219,11 +209,11 @@ class TestHierarchicalRoutingLayer:
         outputs = layer(inputs)
 
         assert not np.any(np.isnan(outputs))
-        assert np.all(outputs > 0.0)  # Should be at least epsilon-ish
+        assert np.all(outputs > 0.0)
 
     def test_serialization(self):
         """Test get_config and from_config."""
-        layer = HierarchicalRoutingLayer(
+        layer = _make_layer(
             output_dim=5,
             axis=1,
             epsilon=1e-5,
@@ -232,12 +222,13 @@ class TestHierarchicalRoutingLayer:
         )
 
         config = layer.get_config()
-        new_layer = HierarchicalRoutingLayer.from_config(config)
+        new_layer = RoutingProbabilitiesLayer.from_config(config)
 
         assert new_layer.output_dim == 5
         assert new_layer.axis == 1
         assert new_layer.epsilon == 1e-5
         assert new_layer.use_bias is False
+        assert new_layer.mode == "trainable"
         assert new_layer.name == "serial_test"
 
     def test_training_integration(self):
@@ -249,7 +240,7 @@ class TestHierarchicalRoutingLayer:
         model = keras.Sequential([
             keras.Input(shape=(input_dim,)),
             keras.layers.Dense(8, activation='relu'),
-            HierarchicalRoutingLayer(output_dim=output_dim)
+            _make_layer(output_dim=output_dim)
         ])
 
         model.compile(optimizer='adam', loss='categorical_crossentropy')
@@ -257,39 +248,28 @@ class TestHierarchicalRoutingLayer:
         x = np.random.randn(batch_size, input_dim).astype(np.float32)
         y = np.eye(output_dim)[np.random.choice(output_dim, batch_size)].astype(np.float32)
 
-        # Check loss before training
         initial_loss = model.evaluate(x, y, verbose=0)
-
-        # Train for a few steps
         model.fit(x, y, epochs=5, verbose=0)
-
-        # Check loss decreased
         final_loss = model.evaluate(x, y, verbose=0)
         assert final_loss < initial_loss
 
-        # Explicit check for gradients on the routing layer kernel
         routing_layer = model.layers[-1]
         assert routing_layer.kernel is not None
 
-        # Simple gradient check
         with tf.GradientTape() as tape:
             preds = model(x)
-            # FIX: Use a loss that varies with the distribution.
-            # sum(probs) is always 1, so gradients would be 0.
-            # sum(probs^2) varies (min at uniform, max at one-hot).
             loss = tf.reduce_mean(tf.square(preds))
         grads = tape.gradient(loss, routing_layer.trainable_weights)
 
-        # Ensure gradients are being computed for kernel and bias
         assert len(grads) == 2
-        assert np.any(grads[0].numpy() != 0), "Kernel gradients are zero (loss might be constant w.r.t weights)"
+        assert np.any(grads[0].numpy() != 0), "Kernel gradients are zero"
         assert np.any(grads[1].numpy() != 0), "Bias gradients are zero"
 
     def test_model_save_and_load(self):
         """Test full model saving and loading."""
         model = keras.Sequential([
             keras.layers.Dense(4, input_shape=(4,)),
-            HierarchicalRoutingLayer(output_dim=3)
+            _make_layer(output_dim=3)
         ])
 
         x = np.random.randn(1, 4).astype(np.float32)
@@ -303,7 +283,9 @@ class TestHierarchicalRoutingLayer:
             y_new = loaded_model.predict(x)
 
             np.testing.assert_allclose(y_ref, y_new, atol=1e-6)
-            assert isinstance(loaded_model.layers[-1], HierarchicalRoutingLayer)
+            assert isinstance(loaded_model.layers[-1], RoutingProbabilitiesLayer)
+            assert loaded_model.layers[-1].mode == "trainable"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

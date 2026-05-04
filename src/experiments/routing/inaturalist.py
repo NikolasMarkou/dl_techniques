@@ -3,7 +3,7 @@ iNaturalist 2021 Output Layer Comparison: Hierarchical Routing vs. Softmax
 ==========================================================================
 
 This experiment evaluates the performance and characteristics of the novel
-`HierarchicalRoutingLayer` against the standard `Dense` -> `Softmax`
+`RoutingProbabilitiesLayer(mode="trainable")` against the standard `Dense` -> `Softmax`
 classifier for large-scale fine-grained image classification on the
 iNaturalist 2021 dataset.
 
@@ -41,7 +41,7 @@ with only the final output layer differing. The base architecture includes:
    Complexity: O(N), where N=10,000. This is computationally heavy.
 
 2. **Hierarchical Routing**: A probabilistic binary tree approach. The
-   `HierarchicalRoutingLayer` directly produces a probability distribution.
+   `RoutingProbabilitiesLayer(mode="trainable")` directly produces a probability distribution.
    Complexity: O(log₂N), offering significant computational advantages for
    large N (log2(10000) ≈ 13.3 vs 10000 linear ops).
 
@@ -97,7 +97,7 @@ Expected Outcomes and Insights
 This experiment is designed to reveal:
 
 1. **Performance Trade-offs**: Does the computational efficiency of the
-   `HierarchicalRoutingLayer` come at the cost of classification accuracy on
+   `RoutingProbabilitiesLayer(mode="trainable")` come at the cost of classification accuracy on
    a massive 10,000 class dataset?
 
 2. **Training Dynamics**: How does the routing-based learning process affect
@@ -143,7 +143,6 @@ from typing import Dict, Any, List, Tuple, Callable, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.train import TrainingConfig, train_model
-from dl_techniques.layers.hierarchical_routing import HierarchicalRoutingLayer
 from dl_techniques.layers.activations.routing_probabilities import RoutingProbabilitiesLayer
 
 from dl_techniques.visualization import (
@@ -547,8 +546,9 @@ def build_model(config: ExperimentConfig, model_type: str, name: str) -> keras.M
 
     elif model_type == 'HierarchicalRouting':
         # Hierarchical routing layer (O(log N) complexity - 13 steps vs 10000)
-        predictions = HierarchicalRoutingLayer(
+        predictions = RoutingProbabilitiesLayer(
             output_dim=config.num_classes,
+            mode='trainable',
             name='predictions'
         )(x)
 

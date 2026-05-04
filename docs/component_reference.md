@@ -3451,29 +3451,6 @@ HierarchicalReasoningModule(
 
 *📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:57*
 
-#### `HierarchicalRoutingLayer`
-**Module:** `layers.activations.routing_probabilities_hierarchical`
-
-Trainable hierarchical routing layer for probabilistic classification.
-
-**Constructor Arguments:**
-```python
-HierarchicalRoutingLayer(
-    output_dim: int,
-    axis: int = -1,
-    epsilon: float = 1e-07,
-    kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-    bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-    kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-    use_bias: bool = True,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/activations/routing_probabilities_hierarchical.py:103*
-
 #### `HolonomicFieldProjection`
 **Module:** `layers.experimental.field_embeddings`
 
@@ -6084,7 +6061,9 @@ RoutingCapsule(
 #### `RoutingProbabilitiesLayer`
 **Module:** `layers.activations.routing_probabilities`
 
-Non-trainable hierarchical routing layer for probabilistic classification.
+Hierarchical routing layer for probabilistic classification. Supports both
+`mode="deterministic"` (parameter-free cosine basis projection) and
+`mode="trainable"` (learnable Dense projection).
 
 **Constructor Arguments:**
 ```python
@@ -6092,13 +6071,18 @@ RoutingProbabilitiesLayer(
     output_dim: Optional[int] = None,
     axis: int = -1,
     epsilon: float = 1e-07,
+    mode: str = "deterministic",
+    kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+    bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+    kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+    use_bias: bool = True,
     **kwargs
 )
 ```
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/routing_probabilities.py:143*
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py*
 
 #### `SHGCNLayer`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
@@ -14098,13 +14082,6 @@ Build the layer.
 *📁 src/dl_techniques/layers/activations/monotonicity_layer.py:258*
 
 #### `build(self, input_shape)`
-**Module:** `layers.activations.routing_probabilities_hierarchical`
-
-Build the layer by creating trainable weights and tree structure.
-
-*📁 src/dl_techniques/layers/activations/routing_probabilities_hierarchical.py:203*
-
-#### `build(self, input_shape)`
 **Module:** `layers.memory.mann`
 
 Create the layer's own weights and build sub-layers.
@@ -16252,13 +16229,6 @@ Apply sparsemax activation to input logits.
 Apply squashing non-linearity to input vectors.
 
 *📁 src/dl_techniques/layers/activations/squash.py:160*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.activations.routing_probabilities_hierarchical`
-
-Define the forward pass logic of the layer.
-
-*📁 src/dl_techniques/layers/activations/routing_probabilities_hierarchical.py:262*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.hard_swish`
@@ -18462,13 +18432,6 @@ Compute output shape (same as input shape).
 Compute the output shape of the layer.
 
 *📁 src/dl_techniques/layers/activations/squash.py:203*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.activations.routing_probabilities_hierarchical`
-
-Compute the output shape of the layer.
-
-*📁 src/dl_techniques/layers/activations/routing_probabilities_hierarchical.py:409*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.hard_swish`
@@ -21438,13 +21401,6 @@ Get layer configuration for serialization.
 Get the layer configuration for serialization.
 
 *📁 src/dl_techniques/layers/activations/squash.py:220*
-
-#### `get_config(self)`
-**Module:** `layers.activations.routing_probabilities_hierarchical`
-
-Return the configuration of the layer for serialization.
-
-*📁 src/dl_techniques/layers/activations/routing_probabilities_hierarchical.py:429*
 
 #### `get_config(self)`
 **Module:** `layers.activations.hard_swish`
