@@ -1,6 +1,52 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-05-04_1b2810b6
+### Index
+- [lm-structure.md](plan_2026-05-04_1b2810b6/findings/lm-structure.md) — `CliffordNetLM` forward path, vocab projection wiring, head naming, dict-output `{"logits": ...}` contract, serialization, no deep supervision.
+- [loss-compatibility.md](plan_2026-05-04_1b2810b6/findings/loss-compatibility.md) — `MaskedCausalLMLoss` and `FocalCausalLMLoss` both accept `from_logits=False` and work correctly on probabilities. No new loss class needed. Numerical stability bounded by layer's epsilon clip.
+- [routing-cost-and-modes.md](plan_2026-05-04_1b2810b6/findings/routing-cost-and-modes.md) — at vocab=50261 padded=65536 / 16 decisions; trainable mode 2K-6K params (~3000x fewer than Dense); deterministic mode is too tight (16 cosine projections to discriminate 50K tokens). Memory peak ~25% higher than Dense head. No existing test covers vocab-scale or 3D `(B, L, V)` routing calls.
+
+### Key Constraints
+
+### Hard
+- Output dict key must remain `"logits"` — `train.fit` data wrapper does `(x, y) -> (x, {"logits": y})` and compile uses `loss={"logits": ...}, metrics={"logits": ["accuracy"]}`. Renaming would force changes to the dataset wrapper and loss spec.
+- Loss must use `from_logits=False` — RoutingProbabilitiesLayer outputs probabilities in `[eps, 1-eps]` summing to 1. Passing them through `from_logits=True` (default) would softmax already-softmaxed values → wrong loss.
+- Causality preserved automatically — routing acts per-token along channels axis, no inter-token mixing.
+- Keras 3 conventions: `@keras.saving.register_keras_serializable()`, full `get_config()` round-trip, `dl_techniques.utils.logger` (no print), `MPLBACKEND=Agg` for training, single GPU only.
+- Import path: `dl_techniques.layers.activations.routing_probabilities.RoutingProbabilitiesLayer`.
+- `load_model_from_checkpoint` `custom_objects` must include `RoutingProbabilitiesLayer` for resume to work.
+
+### Soft
+- Routing mode default: `"trainable"` (user's stated preference). Expose `"deterministic"` as opt-in for ablation.
+- Naming: model class `CliffordNetLMRouting`; file `lm_routing.py`. Train script `train_cliffordnet_nlp_routing.py`. Sibling files; no edits to `lm.py` or `train_cliffordnet_nlp.py`.
+- Head layer naming: keep `head_norm`, `head_dropout`; name routing layer `output_routing` for symmetry with existing `output_proj`.
+- Variants: reuse the existing `MODEL_VARIANTS` dict 1:1 (nano/mini/base/large/xl).
+
+### Ghost constraints (none)
+- "Must define a new NLL loss for probabilities" — not needed; both existing CLM losses support `from_logits=False`.
+- "Must rename output dict key to 'probs'" — not needed; loss is agnostic to key name.
+
+### Exploration Confidence
+- **Problem scope**: deep — every line of the swap point (lm.py 257-265, train script 553-566) is mapped; layer behavior at axis/sum level understood; loss compatibility verified.
+- **Solution space**: constrained — single swap point in the model, single config flag in the train script. Mode flag is the one open knob, exposed as CLI arg.
+- **Risk visibility**: clear — risks are (1) loss collapse / NaN (mitigated by layer epsilon clip), (2) memory bump on `(B*L, 65536)` intermediate (~25% over Dense), (3) expressive bottleneck (16 decisions → 50K classes at info-theoretic floor).
+
+Ready to transition to PLAN.
+
+## plan_2026-05-04_38e259bf
+### Index
+- [layer-internals.md](plan_2026-05-04_38e259bf/findings/layer-internals.md) — public APIs, internals, and behavioral differences between `RoutingProbabilitiesLayer` and `HierarchicalRoutingLayer`.
+- [usage-sites.md](plan_2026-05-04_38e259bf/findings/usage-sites.md) — every src/tests/docs reference, with line numbers, that must be updated.
+- [api-design.md](plan_2026-05-04_38e259bf/findings/api-design.md) — chosen merged API: `mode` flag (`"deterministic"` default, `"trainable"` opt-in), validation rules, build/call/get_config plan.
+
+### Key Constraints
+- **Hard**: Keras 3 serialization round-trip must work for both modes (`@register_keras_serializable`, full `get_config`).
+- **Hard**: Existing call sites in `multi_head_cross_attention.py` and `single_window_attention.py` instantiate `RoutingProbabilitiesLayer()` with default args — must remain valid (deterministic default preserves this).
+- **Hard**: `inaturalist.py:146` has a stale import `dl_techniques.layers.hierarchical_routing` that does not exist; must be fixed when migrating that file.
+- **Soft**: Test file `test_routing_probabilities_hierarchical.py` should be renamed/merged into `test_routing_probabilities.py` or kept separate using the new API. Decision: keep it as a separate file with updated imports/classname/kwargs (smallest delta, preserves pytest organization).
+- **Ghost constraint check**: No backwards-compatibility alias is required — task explicitly says delete the hierarchical file.
+
 ## plan_2026-04-29_b6dbc601
 ### Index
 - `findings/existing-block.md` — current CliffordNetBlock structure, context stream, forward path, project conventions

@@ -1,6 +1,82 @@
 # Consolidated Decisions
 *Cross-plan decision archive. Entries merged from per-plan decisions.md on close. Newest first.*
 
+## plan_2026-05-04_1b2810b6
+### 2026-05-04 — Plan v1: routing-LM variant as parallel files (no edits to existing lm.py / train script)
+
+**Decision**: Implement the routing-LM variant as new sibling files (`lm_routing.py`, `train_cliffordnet_nlp_routing.py`, dedicated test file) rather than adding a flag to `CliffordNetLM` or `train_cliffordnet_nlp.py`.
+
+**Trade-off**: code duplication (~700 lines mirrored) at the cost of bisectability and zero risk to the existing baseline. Existing trained checkpoints and training pipelines remain bit-identical and untouchable.
+
+**Why not the alternative (flag-on-existing)**: a `use_routing_head: bool` flag on `CliffordNetLM` would require also threading a `from_logits` flag through the train script's loss creation, changing the model's serialization shape, and risk breaking existing depth-estimation / CLIP code paths that import `CliffordNetLM`. Cost (duplication) is bounded; cost of regression on shipped baselines is unbounded.
+
+**Anchored at**: `D-001` (in `lm_routing.py` near dict construction) — output dict key remains `"logits"` despite values being probabilities. `D-002` (in `lm_routing.py` near routing layer instantiation) — `from_logits=False` requirement and rationale for `routing_mode="trainable"` default. `D-003` (in `train_cliffordnet_nlp_routing.py` near `create_loss_fn`) — `from_logits=False` is required for routing output.
+
+**Default routing_mode**: `"trainable"`. Deterministic mode (16 fixed cosine projections to discriminate ~50K tokens) is information-theoretically too tight; exposed only as opt-in for ablation.
+
+**Loss reuse**: keep `MaskedCausalLMLoss` and `FocalCausalLMLoss` (existing classes). Both already support `from_logits=False` via `ops.log(y_pred + 1e-8)`. No new loss class needed.
+
+**Output key**: keep `"logits"` (not `"probs"`). The train data wrapper does `(x, y) -> (x, {"logits": y})` and compile uses `loss={"logits": ...}, metrics={"logits": ["accuracy"]}`. Renaming would force changes to the dataset wrapper and loss spec — out of scope.
+
+**Smoke verification only**: smoke runs check pipeline integrity (no crash, no NaN, gradient flow), not final perplexity. Convergence quality is out of scope; this is research scaffolding.
+
+### 2026-05-04 — Step 3: Surprise discovery — RoutingProbabilitiesLayer deterministic-mode FuncGraph capture bug
+
+**What happened**: Test 4-5 (`test_forward_shape[deterministic]`, `test_save_load_roundtrip[deterministic]`, etc.) failed with "tensor cannot be accessed from here, it was defined in FuncGraph(...) which is out of scope". The cosine basis was created in `build()` via `ops.stack(...)` returning a plain Tensor (not a tracked weight). When the layer is embedded inside a `keras.Model` subclass, Keras runs `compute_output_spec` in a transient scratch graph; `build()` runs there too and the cosine basis gets captured by that graph. Subsequent eager calls to `layer.kernel` then dereference a dead tensor.
+
+This bug surfaces only when `RoutingProbabilitiesLayer(deterministic)` is used as a sub-layer of a `keras.Model` subclass. Direct standalone use (the way the existing layer tests exercise it) works fine because there is no surrounding compute_output_spec scratch graph.
+
+**Falsification signal fired**: yes — Pre-Mortem Scenario 4 ("tests catch a contract violation that smoke run would have hidden"). Caught by tests rather than at runtime.
+
+**Root cause analysis**:
+1. Immediate cause: `ops.stack(...)` inside `build()` produces a graph-bound tensor.
+2. Contributing factor: the layer's previous design comment (D-003) explicitly chose "plain (non-tracked) tensor" over `add_weight` to "remain parameter-free and avoid get_build_config plumbing." This was an over-correction — `add_weight(trainable=False)` keeps the layer parameter-free in the trainable-parameter sense, while making the basis a tracked, graph-independent weight.
+3. Failed defense: the existing `test_no_trainable_parameters` and `test_build_process` asserted `len(non_trainable_weights) == 0`, encoding the buggy design as a contract. They would have flagged my fix as "regression" if I hadn't recognized them as the bug-encoding tests.
+4. Prevention: any layer that holds frozen state should store it via `add_weight(trainable=False)` so it's tracked and graph-independent. Plain tensors created inside `build()` are a foot-gun for Keras Model composition.
+
+**Fix (1 file in dl_techniques layer + 1 test file update)**:
+- `src/dl_techniques/layers/activations/routing_probabilities.py`: rename `_cosine_basis` to `_cosine_basis_numpy` (pure numpy), and in `build()` deterministic branch store the result via `add_weight(trainable=False, initializer=keras.initializers.Constant(...))`. Anchored as `# DECISION D-004` in the layer.
+- `tests/test_layers/test_activations/test_routing_probabilities.py`: update two tests (`test_build_process`, `test_no_trainable_parameters`) to expect `len(non_trainable_weights) == 1`, with comments pointing to D-004.
+
+**Fix attempts**: 1 (one). Within autonomy leash. Revert-first not used because the diagnosis was definitive (matches the FuncGraph error class) and the fix was minimal (no wrapper cascades, no new classes, just changing storage from plain-tensor to non-trainable-weight).
+
+**Verification**: full re-run of `tests/test_layers/test_activations/test_routing_probabilities*.py` (113 tests) + `tests/test_models/test_cliffordnet/test_cliffordnet_lm_routing.py` (21 tests) = **134 passed**. Both deterministic and trainable modes verified through Keras Model embedding (save/load roundtrip included).
+
+**Plan files touched (out-of-scope additions)**: Two unplanned edits beyond the original Files To Modify table:
+- `src/dl_techniques/layers/activations/routing_probabilities.py` (1 fix to library bug)
+- `tests/test_layers/test_activations/test_routing_probabilities.py` (2 test asserts updated)
+
+These are justified by the surprise discovery and noted here. The original plan's no-edit constraint applied to `lm.py` and `train_cliffordnet_nlp.py` — both untouched.
+
+## plan_2026-05-04_38e259bf
+### D-001 (PLAN, iter-1): unified `mode` parameter rather than two distinct classes or inheritance
+**Choice**: Single class with `mode: Literal["deterministic","trainable"]`. Default `"deterministic"` preserves existing call-site semantics.
+**Trade-off**: Single API surface and shared call/build math at the cost of a slightly larger constructor signature and dead kwargs (`kernel_initializer`, `bias_initializer`, etc.) when `mode="deterministic"`.
+**Alternatives rejected**:
+- Inheritance (`HierarchicalRoutingLayer(RoutingProbabilitiesLayer)`): keeps two classes, contradicts the "single layer" goal.
+- Class-method factory (`RoutingProbabilitiesLayer.trainable(...)`): non-idiomatic for Keras serialization; `from_config` would need extra plumbing.
+- Backward-compat alias `HierarchicalRoutingLayer = ...`: not requested; task says delete the file.
+
+### D-002 (PLAN, iter-1): renormalization uses `prob_sum + epsilon` in both modes
+**Choice**: Adopt the trainable variant's `unnormalized_probs / (prob_sum + self.epsilon)` for both modes.
+**Trade-off**: Tiny numerical bias in deterministic mode at the cost of guaranteed no-divide-by-zero. Magnitude < epsilon = 1e-7 — well below test tolerance (1e-6).
+**Why safe**: Decision probs are clipped to `[epsilon, 1-epsilon]`, so `prob_sum > 0` always, but the safer form costs nothing and unifies the code path.
+
+### D-002b (EXECUTE, iter-1): D-002 falsified — revert to mode-specific renormalization
+**Trigger**: `test_epsilon_parameter` in `test_routing_probabilities.py` regressed:
+asserts `sum == 1.0 atol=1e-6` for `epsilon=1e-5`. With `+ epsilon` denominator,
+sum is ~0.99998 — outside tolerance.
+**Reason**: Deterministic mode's original semantics guarantee exact sum=1.0; the
+"safety" of `+ epsilon` is unnecessary because clipping ensures `prob_sum > 0`.
+**Fix**: Branch on `self.mode`. Deterministic uses bare `prob_sum`; trainable
+keeps original `+ epsilon`. Both modes preserve their pre-merge semantics.
+**Lesson**: "Safer" numerical changes can violate API contracts asserted by tests.
+Default to preserving exact original behavior unless there is a real regression to fix.
+
+### D-003 (PLAN, iter-1): factory `'hierarchical_routing'` key and `probability_output` strings preserved
+**Choice**: Keep the public string keys; redirect them internally to `RoutingProbabilitiesLayer(mode="trainable", ...)`.
+**Trade-off**: API stability at the cost of a tiny indirection.
+
 ## plan_2026-05-01_1c080382
 ### D-001 — Choose STRETCH scope (A0 + B1 + B2 + C1 + C2) (2026-05-01, PLAN, iter-1)
 
@@ -330,88 +406,3 @@ Tests at `test_clip.py:84` also iterate `m.text_blocks` — same principle appli
 - **Variant ladder symmetry with `CliffordNet` / `CliffordNetLM`** (raised in `findings.md` ghost-constraint section): the existing `nano` test asserts `vision_depth == 12` to enforce ladder match with `CliffordNet.nano`. After refactor, the CLIP vision tower has staged depths summing to 12, but the standalone `CliffordNet.nano` is still flat depth=12. **Decision**: keep the sum equal (so total compute is roughly comparable) and document the divergence in the docstring. Update the test to assert the sum, not the exact int. Recorded as part of step 9 in `plan.md`; no separate D-NNN entry needed unless the user pushes back.
 
 - **`nano_g` global-context branch placement under hierarchical vision**: currently `vision_use_global_context` is a single bool applied to every block. Under hierarchical staging, do we apply it (a) to all blocks at all stages, (b) only to the last stage (whole-image summary at the most abstract scale), or (c) only to the first stage (matching CliffordNet.lite_g spirit which puts global context at the base)? **Default in plan v1**: option (a) — apply uniformly, matches existing `nano_g` behaviour exactly. **If user wants finer control**, the plan can be amended to make `vision_use_global_context: List[bool]` per stage (back-compat: scalar bool broadcasts to all stages).
-
-## plan_2026-04-24_1c5ae010
-### D-001 (PLAN, iter-1): Strip both Stage 0 and the Stage 1/2 curriculum in one pass
-**At the cost of**: losing a working code path (CIFAR-100 vision pretrain + Wikipedia
-LM pretrain + low-to-high resolution curriculum) that *could* be useful in future
-recipes. Recovery requires `git revert` of this plan's commits or pulling code
-back from `d35c27b`/`af205cc`.
-**Why**: the user's stated goal is to drop staging and go directly to "the big patch."
-PLAN_CONTINUE.md confirms the curriculum was never used in production runs (always
-`--stage2-epochs 0`). Keeping dead, untested branches in a script the user actively
-edits is worse than removing them — they show up in every read of the file and
-invite future bit-rot.
-
-### D-002 (PLAN, iter-1): New CLI uses flat names (`--image-size`, `--epochs`, `--peak-lr`)
-**At the cost of**: every existing shell history / launch script that mentions
-`--stage1-*` or `--stage2-*` will fail with "unrecognized arguments". The README
-becomes stale.
-**Why**: keeping the `--stage2-*` names after staging is gone would be misleading
-(the "2" implies a "1" that no longer exists). PLAN_CONTINUE.md and the README are
-the only documents that mention the old flags; the user said docs are out of scope.
-Defaults preserve the proven config (image_size=112, epochs=10, lr=5e-4).
-
-### D-003 (PLAN, iter-1): Dataset summary as a single bracketed log block, not scattered logs
-**At the cost of**: slight duplication — the per-loader "Loaded N pairs" lines
-remain in the loaders, so the same numbers appear twice in the log.
-**Why**: the user's literal request — "able to read the logs and immediately see
-dataset sizes" — is best served by one greppable block. Loader-internal logs are
-helpful when triaging the loader itself; we don't strip them because they live
-in `train.common` and are out of this plan's scope.
-
-### D-004 (PLAN, iter-1): No new abstractions — fold `_run_stage` inline
-**At the cost of**: `train()` grows by ~20 lines.
-**Why**: `_run_stage` exists today only because it was called twice (once per
-stage). With one stage, an extra helper just adds a hop with no callers.
-Complexity-control rule: if a function has a single caller, inline it.
-
-### D-005 (PLAN, iter-1, plan v2): Keep Stage 0 functionality but rename to "pretraining"
-**At the cost of**: bigger surface to keep working — every `_run_stage0_*`,
-`--stage0-*`, `_STAGE0_*`, and `_freeze_clip_for_stage0` reference must be
-renamed in lock-step. Risk of leaving a stale name behind that breaks at runtime
-(NameError) rather than at import. Mitigated by SC1's grep gate plus the smoke
-test in step 5.
-
-This **supersedes D-001's "drop Stage 0"** decision. The user's revised
-direction (plan v2) is: keep CIFAR-100 vision pretrain + Wikipedia LM pretrain
-as a useful capability under a clearer name. PLAN_CONTINUE.md showed Stage 0
-was rarely exercised in production *runs* but never said the capability itself
-was unwanted — only the "stage 0 / stage 1 / stage 2" naming was confusing.
-**Why** "pretraining" specifically: it's the standard ML term for what these
-helpers actually do (initialize backbones via auxiliary objectives before the
-main contrastive loss). The rename makes the script self-documenting without
-adding a new abstraction.
-
-### D-006 (PLAN, iter-1, plan v2): Merge Stage 1 + Stage 2 → single CLIP stage
-**At the cost of**: same as D-001 for the curriculum portion — losing the
-low-res-to-high-res warmup as a built-in code path. Recovery requires reading
-the deletion from git.
-
-**Why**: the user's revised direction confirms the curriculum was never the
-desired permanent shape — only the "big patch" final-resolution training is.
-Keeping the curriculum loop "just in case" while users run with
-`--stage2-epochs 0` would leave dead code in a file the user actively edits.
-
-### D-007 (PLAN, iter-1, plan v2): `--skip-pretrain` (single flag), not `--skip-pretrain-vision` + `--skip-pretrain-lm`
-**At the cost of**: less granular control — to skip only one of the two
-pretraining helpers, users set its `--pretrain-*-steps` to 0 (the existing
-mechanism, unchanged from the `--stage0-*-steps 0` semantics today).
-
-**Why**: matches the existing `--skip-stage0` shape one-for-one, so the rename
-is mechanical and not a behavioral change. Keeping a single skip flag also
-keeps the smoke test single-flag (cleaner SC4).
-
-### D-008 (PLAN, iter-1, plan v2): Smoke test uses `--skip-pretrain`
-**At the cost of**: the smoke run does not exercise the (renamed) pretraining
-code paths end-to-end. NameError-style rename mistakes inside
-`_run_pretrain_vision` / `_run_pretrain_lm` bodies could escape.
-
-**Why**: pretraining requires CIFAR-100 (~170MB download) and the Wikipedia HF
-cache (multi-GB). Triggering both for a CLI sanity check is hostile to dev
-loops and contradicts the smoke run's purpose (verify imports, CLI parsing,
-single-stage CLIP path). Mitigation: SC1's grep gate catches *referenced* old
-names in any code path; SC2's grep gate confirms new names exist. The
-pretraining bodies themselves are not modified — only their names — so a NameError
-inside a renamed function would only fire if step 1 missed updating the
-function's own internal recursive calls (none exist; verified during EXPLORE).
