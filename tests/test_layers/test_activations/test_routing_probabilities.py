@@ -903,5 +903,151 @@ class TestRoutingProbabilitiesLayer:
         sums = tf.reduce_sum(predictions, axis=-1).numpy()
         assert np.allclose(sums, 1.0, atol=1e-6)
 
+
+# ==============================================================================
+# Mixed-precision (fp16/bf16) regression tests — B-1 / B-2 / D-005
+# ==============================================================================
+
+
+class TestRoutingProbabilitiesMixedPrecision:
+    """
+    Mixed-precision regression suite.
+
+    Targets findings B-1 (fp16 underflow before fp32 cast) and B-2 (fp16 final
+    output cast) plus the D-005 conditional cast scoped to ``float16`` only.
+
+    Under ``mixed_float16`` the sigmoid clip floor (epsilon=1e-7) is below the
+    smallest fp16 normal (~6.1e-5), so logits computed at fp16 then sigmoid+clip
+    underflow to zero on deep trees; if the final output is also cast to fp16,
+    individual leaf probabilities at vocab~50K (~1.5e-5) round to 0 even though
+    the fp32 computation produced a valid sum-to-one distribution.
+
+    These tests MUST FAIL on current main (proving the bug) and MUST PASS after
+    Step 2 of the plan lands.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_global_policy(self):
+        """Ensure each test restores the global policy on teardown."""
+        original = keras.mixed_precision.global_policy().name
+        try:
+            yield
+        finally:
+            keras.mixed_precision.set_global_policy("float32")
+            # Sanity: restore to whatever was active before, in case some other
+            # test/fixture had set a non-default policy.
+            if original != keras.mixed_precision.global_policy().name:
+                keras.mixed_precision.set_global_policy(original)
+
+    def test_fp16_deterministic_deep_tree_no_underflow(self) -> None:
+        """
+        Deterministic mode at vocab=65536 (deepest tree, num_decisions=16) under
+        mixed_float16 with very-negative logits.
+
+        Every leaf must remain strictly positive when summed in fp32 and the
+        distribution must sum to one within tolerance. No NaN/Inf allowed.
+        Output dtype must be fp32 (D-005: fp16 input → fp32 output override).
+        """
+        keras.mixed_precision.set_global_policy("mixed_float16")
+
+        vocab = 65536
+        feat = 32
+        layer = RoutingProbabilitiesLayer(output_dim=vocab, mode="deterministic")
+
+        # Very-negative logits: drives sigmoid to its lower clip, deepest stress.
+        # Use fp16 input directly (typical under mixed_float16 a Dense above
+        # would already be producing fp16). Build with a Keras Input to exercise
+        # the auto-cast path the same way real models do.
+        inp = keras.Input(shape=(feat,), dtype="float16")
+        out = layer(inp)
+        assert out.dtype == "float32", (
+            f"Under fp16 input, output must remain fp32 (D-005); got {out.dtype}"
+        )
+
+        model = keras.Model(inputs=inp, outputs=out)
+        x = tf.fill((2, feat), tf.constant(-50.0, dtype=tf.float16))
+        y = model(x).numpy()
+
+        assert not np.any(np.isnan(y)), "fp16 path produced NaN"
+        assert not np.any(np.isinf(y)), "fp16 path produced Inf"
+        assert np.all(y >= 0.0), "negative probability in fp16 path"
+        sums = y.sum(axis=-1)
+        np.testing.assert_allclose(sums, 1.0, atol=1e-5)
+        # B-1/B-2 regression: at deep trees with very-negative logits, leaves
+        # must not all collapse to zero with sum-to-one on a single leaf —
+        # i.e. the structural mask must still resolve a non-degenerate
+        # distribution. The deterministic structural mask guarantees a single
+        # representative leaf path; what we forbid is "all zeros + NaN sum".
+        assert np.all(sums > 0.0)
+
+    def test_fp16_trainable_large_vocab_sum_to_one(self) -> None:
+        """
+        Trainable mode at vocab=50261 padded=65536 (real LM scale) under
+        mixed_float16 with ones input.
+
+        Every leaf probability ~ 1/50261 ~ 2e-5 < smallest fp16 normal.
+        Without the fp32 sigmoid path AND without the D-005 output override,
+        either the inner accumulation underflows or the final cast clobbers
+        each leaf to zero.
+
+        Must produce sum-to-one within tolerance, no NaN, fp32 output.
+        """
+        keras.mixed_precision.set_global_policy("mixed_float16")
+
+        vocab = 50261
+        feat = 64
+        layer = RoutingProbabilitiesLayer(
+            output_dim=vocab, mode="trainable", use_bias=True
+        )
+
+        inp = keras.Input(shape=(feat,), dtype="float16")
+        out = layer(inp)
+        assert out.dtype == "float32", (
+            f"Under fp16 input, output must remain fp32 (D-005); got {out.dtype}"
+        )
+
+        model = keras.Model(inputs=inp, outputs=out)
+        x = tf.ones((2, feat), dtype=tf.float16)
+        y = model(x).numpy()
+
+        assert not np.any(np.isnan(y)), "fp16 trainable path produced NaN"
+        assert not np.any(np.isinf(y)), "fp16 trainable path produced Inf"
+        assert np.all(y >= 0.0)
+        sums = y.sum(axis=-1)
+        np.testing.assert_allclose(sums, 1.0, atol=1e-5)
+        # No row should be all-zero (the symptom of B-2 fp16 cast clobbering).
+        assert np.all(sums > 0.5), (
+            "leaf masses underflowed: sum collapsed below 0.5 — "
+            "B-1/B-2 regression"
+        )
+
+    def test_bf16_output_dtype_matches_input(self) -> None:
+        """
+        bf16 has fp32-like range, so the D-005 override is scoped to fp16 only.
+        Under mixed_bfloat16 the output dtype must match the input dtype (bf16),
+        and the distribution must still be valid.
+        """
+        keras.mixed_precision.set_global_policy("mixed_bfloat16")
+
+        vocab = 8
+        feat = 4
+        layer = RoutingProbabilitiesLayer(output_dim=vocab, mode="deterministic")
+        inp = keras.Input(shape=(feat,), dtype="bfloat16")
+        out = layer(inp)
+        assert out.dtype == "bfloat16", (
+            f"bf16 input must yield bf16 output (D-005 fp16-only override); "
+            f"got {out.dtype}"
+        )
+
+        model = keras.Model(inputs=inp, outputs=out)
+        x = tf.ones((2, feat), dtype=tf.bfloat16)
+        y = tf.cast(model(x), tf.float32).numpy()
+
+        assert not np.any(np.isnan(y))
+        assert not np.any(np.isinf(y))
+        assert np.all(y >= 0.0)
+        # bf16 has ~3 decimal digits of precision; relax tolerance accordingly.
+        np.testing.assert_allclose(y.sum(axis=-1), 1.0, atol=1e-2)
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
