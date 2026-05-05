@@ -68,8 +68,9 @@ class TrainingConfig:
     max_seq_length: int = 512
     num_layers: Optional[int] = None
     num_heads: Optional[int] = None
-    dropout_rate: float = 0.1
-    attention_dropout_rate: float = 0.1
+    dropout_rate: float = 0.0
+    attention_dropout_rate: float = 0.0
+    tie_word_embeddings: bool = True
 
     # Tokenizer (Tiktoken gpt2 encoding — 50,257 base + 4 special)
     encoding_name: str = "gpt2"
@@ -466,6 +467,7 @@ def create_gpt2_model(config: TrainingConfig) -> GPT2:
         max_seq_len=config.max_seq_length,
         dropout_rate=config.dropout_rate,
         attention_dropout_rate=config.attention_dropout_rate,
+        tie_word_embeddings=config.tie_word_embeddings,
     )
     if config.num_layers is not None:
         variant_kwargs["depth"] = config.num_layers
@@ -737,6 +739,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Override number of transformer layers")
     p.add_argument("--num-heads", type=int, default=None,
                     help="Override number of attention heads")
+    p.add_argument(
+        "--tie-word-embeddings",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Tie LM head to token embeddings (use --no-tie-word-embeddings to disable)",
+    )
 
     # Training
     p.add_argument("--epochs", type=int, default=3)
@@ -792,6 +800,7 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         gpt2_variant=args.variant,
         num_layers=args.num_layers,
         num_heads=args.num_heads,
+        tie_word_embeddings=args.tie_word_embeddings,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         max_seq_length=args.max_seq_length,

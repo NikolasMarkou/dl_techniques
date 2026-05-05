@@ -88,8 +88,9 @@ class TrainingConfig:
     cli_mode: str = "full"
     ctx_mode: str = "diff"
     use_global_context: bool = False
-    dropout_rate: float = 0.1
+    dropout_rate: float = 0.0
     stochastic_depth_rate: float = 0.1
+    tie_word_embeddings: bool = True
 
     # Tokenizer (Tiktoken gpt2 encoding -- 50,257 base + 4 special)
     vocab_size: int = 50261
@@ -517,6 +518,7 @@ def create_model(config: TrainingConfig) -> CliffordNetLM:
             vocab_size=config.vocab_size,
             max_seq_length=config.max_seq_length,
             dropout_rate=config.dropout_rate,
+            tie_word_embeddings=config.tie_word_embeddings,
         )
     else:
         # Custom variant: use explicit params from config
@@ -531,6 +533,7 @@ def create_model(config: TrainingConfig) -> CliffordNetLM:
             use_global_context=config.use_global_context,
             dropout_rate=config.dropout_rate,
             stochastic_depth_rate=config.stochastic_depth_rate,
+            tie_word_embeddings=config.tie_word_embeddings,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         )
 
@@ -820,13 +823,19 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Enable global context branch (custom variant)")
     p.add_argument("--stochastic-depth-rate", type=float, default=0.1,
                     help="Maximum stochastic depth rate")
+    p.add_argument(
+        "--tie-word-embeddings",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Tie LM head to token embeddings (use --no-tie-word-embeddings to disable)",
+    )
 
     # Training
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--max-seq-length", type=int, default=512)
     p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--dropout-rate", type=float, default=0.1)
+    p.add_argument("--dropout-rate", type=float, default=0.0)
 
     # Loss
     p.add_argument(
@@ -880,6 +889,7 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         ctx_mode=args.ctx_mode,
         use_global_context=args.use_global_context,
         stochastic_depth_rate=args.stochastic_depth_rate,
+        tie_word_embeddings=args.tie_word_embeddings,
         dropout_rate=args.dropout_rate,
         num_epochs=args.epochs,
         batch_size=args.batch_size,

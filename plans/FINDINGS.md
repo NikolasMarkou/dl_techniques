@@ -1,6 +1,118 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-05-05_0eac2c81
+### Index
+
+- [F-001] Existing test suite passes (115/115). `tests/test_layers/test_geometric/test_clifford_block.py` covers all five layer classes.
+- [F-002] Empirical verification of Phase-5 review findings — corrections below.
+- [F-003] Call sites of these layers — `models/cliffordnet/{denoiser, clip, conditional_denoiser, confidence_denoiser}.py`. Any signature change must be checked against them.
+- [F-004] Existing test pattern (per LESSONS.md): pytest fixtures + class-per-layer + init/build/shape/cli_modes/numerical_stability/serialization/save_load/gradient_flow/stacking. New tests should mirror this.
+
+### Key Constraints
+
+- **Hard:** No public-API breaking changes — these layers are used by 4 cliffordnet models.
+- **Hard:** Existing 115 tests must continue to pass.
+- **Hard:** Keras 3.8 + TF 2.18 idioms (no print, use `dl_techniques.utils.logger`).
+- **Soft:** Match existing class-by-class test layout.
+
+### Empirical Re-verification of Phase-5 Findings
+
+| ID | Claim | Verdict | Evidence |
+|----|-------|---------|----------|
+| B1/B5 | Multi-input `build` crashes Functional API in `SparseRollingGeometricProduct` / `GatedGeometricResidual` | **REFUTED** | `test_model_save_load` (line 186-200) wraps SRGP in Functional API with two inputs, saves+loads, and passes. Keras 3 resolves the multi-input case by using the first input shape for build. |
+| B7 | `CliffordNetBlock` silently fails when input D ≠ self.channels | **CONFIRMED** | Empirical: `CliffordNetBlock(channels=16)(D=8 input)` → cryptic `InvalidArgumentError: required broadcastable shapes` at residual. Should raise at build with a clear message. |
+| B16 | `CliffordNetBlockDSv2 ctx_mode='pyramid_diff'` shape mismatch on odd `H/s` | **CONFIRMED** | Empirical: `H=10, strides=2` (so H/s=5, odd) → broadcast error in `z_ctx - z_lo_up`. `H=8` works. |
+| B17 | `_make_pool_v2` silently returns `Identity` for `pixel_unshuffle`/`resnetd`/`blur` at `strides=1` | **CONFIRMED** | Empirical: all three return Identity at strides=1. User intent silently dropped. |
+| B11 | `CausalCliffordNetBlock` causality is unverified by tests | **PARTIALLY CONFIRMED** | Empirical leak test passes (modifying position 9 changes only output 9, not 0..8). Causality currently holds — but no regression test guards it. Add test. |
+| B4 | SRGP accepts `s=0` and negative shifts | **CONFIRMED** | Empirical: `shifts=[0,1]` accepted, `0` kept (wedge term identically zero). |
+| B8 | `CliffordNetBlock(channels=1, use_global_context=True)` crashes | **CONFIRMED** | Empirical: `ValueError: All provided shifts [1] are >= channels (1)` from filter inside SRGP. Need clearer validation at outer block. |
+| B9 | `(input_shape[2] or 0) + 2` corrupts dynamic seq_len | **REFUTED in practice** | Empirical: `keras.Input(shape=(1, None, 8))` builds and forwards correctly. The `or 0` produces W=2 in build_config but DepthwiseConv2D ignores spatial dims at build-time. Cosmetic-only. Demote to LATENT, optional fix. |
+| B3 | `SparseRollingGeometricProduct.get_config` comment claims to store unfiltered shifts but stores filtered list | **CONFIRMED** | Direct inspection: line 252 comment vs line 253 code. |
+| B13 | `CliffordNetBlockDS` conv-bias comment claims to "restore the affine degree of freedom" | **CONFIRMED** | A bias only restores shift, not scale. Comment misleads. |
+| P1 | SRGP `roll(z_det, s)` is computed for `cli_mode='inner'` even though only wedge uses it | **CONFIRMED** | Direct read of `call`: `z_det_s` is computed unconditionally. |
+| P2 | `keras.ops.broadcast_to(c_glo, shape(z_det))` materializes (B,H,W,D) before subtraction | **CONFIRMED** | Read of `CliffordNetBlock.call` lines 733-734. Subtraction would broadcast natively. |
+| L1 | `_proj_input_dim` is dead state in SRGP | **CONFIRMED** | Set in `__init__`, used only inside `__init__` to build proj. Could be removed; or used as build-time assertion. |
+| L5 | DSv2 `skip_pool="pixel_unshuffle"` is not a true identity skip | **CONFIRMED, doc only** | PixelUnshuffle includes a learned 1×1. Not a bug; document. |
+| B12 | Cumsum precision under fp16 | **THEORETICAL** | No current evidence of failure (we don't run fp16 here). Defer. |
+| Other | B6, L2, L3, L4, L6, X1, X2, X3, B14, B15, B18 | **DEFER** | Mostly defensive / design choices. Cost > benefit at this iteration. |
+
+### Confirmed Real Bugs to Fix
+
+1. **B16** — `CliffordNetBlockDSv2` pyramid_diff: crop or dynamic-resize `z_lo_up` to match `z_ctx`.
+2. **B7** — `CliffordNetBlock.build`: validate `input_shape[-1] == self.channels`, raise `ValueError`.
+3. **B17** — `_make_pool_v2`: raise `ValueError` (or warn) when `kind ∈ {pixel_unshuffle, resnetd, blur, gaussian_dw}` and `strides=1` — these kinds only make sense with downsampling.
+4. **B4** — `SparseRollingGeometricProduct`: validate `s >= 1` for every shift; reject `0` and negatives.
+5. **B8** — `CliffordNetBlock` (and DS variants): when `use_global_context=True`, require `channels >= 2`.
+6. **B3** — Fix comment in SRGP `get_config` to match what the code actually does.
+7. **B13** — Fix comment in `CliffordNetBlockDS` about conv-bias / affine.
+8. **P1** — Guard `z_det_s` computation behind `cli_mode in ("wedge", "full")`.
+9. **P2** — Drop `broadcast_to` in CliffordNetBlock global branch (and DS / DSv2 mirrors).
+10. **L1** — Remove dead `_proj_input_dim` attribute (or add explicit build assertion).
+11. **B11 (test only)** — Add `test_causal_block_no_future_leak` regression test.
+
+### Out of scope (this plan)
+
+B1, B5, B6, B9 (cosmetic), B12, B14, B15, B18, L2, L3, L4, L6, X1, X2, X3.
+
+### Files to modify
+
+- `src/dl_techniques/layers/geometric/clifford_block.py` — primary surgery.
+- `tests/test_layers/test_geometric/test_clifford_block.py` — add regression tests for each fix.
+- (No model changes — all four cliffordnet models pass channels==D, never trip B7/B8.)
+
+## plan_2026-05-05_60c5be7d
+### Index
+- [code-and-line-refs.md](plan_2026-05-05_60c5be7d/findings/code-and-line-refs.md) — Verified line numbers for every B/H/M finding, current weight count in tests, fp16 test coverage audit (none exists), and D-004 risk assessment for H-5/M-1.
+
+### Key Constraints
+
+### Hard
+- Existing tests at `test_routing_probabilities.py`, `test_routing_probabilities_hierarchical.py`, `test_cliffordnet_lm_routing.py` MUST still pass after fixes.
+- D-004 (LESSONS.md L31): plain tensors in `build()` captured by `compute_output_spec` FuncGraph cause "out of scope" errors. Cosine basis is stored as `add_weight(trainable=False)` for this reason. User instruction: do not change cosine basis storage unless verified safe in Keras 3.8+; if uncertain, leave it.
+- No `print` statements; use `dl_techniques.utils.logger`.
+- Keras 3 / TF 2.18 backend, mixed precision matters.
+- `.venv` for all runs. Scope pytest to changed modules.
+- No parallel GPU jobs. User pushes commits.
+
+### Soft
+- Conservative: prefer smaller change. Decline M-1 (cosine basis) unless explicitly verified.
+- H-4 (epsilon=0 warning) is low priority — info-level log only when `epsilon == 0 and mode == 'trainable'`.
+
+### Ghost constraints
+- "test asserts `non_trainable_weights == 3` is a load-bearing API contract" — false. Test-as-truth (LESSONS L12). Update when H-5 lands.
+- "set_weights ordering in trainable mode is part of public API" — false. Internal tests only.
+
+### Exploration Confidence
+- Problem scope: deep — every line ref verified, every external user audited, every test impact mapped.
+- Solution space: constrained — fixes are small, localized to `routing_probabilities.py` + 2 test files.
+- Risk visibility: clear — main risk is H-5 + cliffordnet save/load (mitigated by running that test on the H-5 step). M-1 explicitly opted out per user guidance.
+
+Ready to transition to PLAN.
+
+### Critical Findings (inline summary)
+
+- B-1 fp16 sigmoid clip underflow: L658-661 sigmoid+clip on fp16 dtype; L669 cast to fp32 too late. Doc L60-65 wrong.
+- B-2 Final fp16 cast: L717 `cast(final_probs, inputs.dtype)`. Vocab~50K leaf ~1.5e-5 < fp16 normal (6.1e-5).
+- B-3 compute_output_shape: L753-757 uses cached `_normalized_axis`; wrong if called with different-rank shape.
+- H-1 _RENORM_TINY comment: L308-313 false fp16 claim. Divide actually fp32 (after L669).
+- H-2 bool output_dim: L369, L377-378. `isinstance(True, int)` is True. Add `not isinstance(output_dim, bool)`.
+- H-3 deterministic use_bias: L430-431 warns only on `not use_bias`. Should also warn when `use_bias=True` AND `mode=='deterministic'`.
+- H-4 epsilon=0 + trainable: L349-358 accepted. Info-level log only.
+- H-5 mask weights recomputable: L590-605. ~8*(padded-1) bytes per checkpoint per layer (~512KB at vocab 65536).
+- M-1 cosine basis: L555-564. DECLINED — D-004 anchors as add_weight.
+
+### Test impact
+
+- `test_routing_probabilities.py` L142, L547: `non_trainable_weights == 3` → after H-5: `== 1`.
+- `test_routing_probabilities_hierarchical.py` L160-162, L200-202, L221-223: `set_weights([kernel, bias, mask_mul, mask_add])` → `[kernel, bias]`.
+- No fp16 test anywhere — must ADD for B-1/B-2.
+- `test_cliffordnet_lm_routing.py` save/load — must keep working post-H-5.
+
+### D-004 FuncGraph residual risk for H-5
+
+H-5 plan: store `np.ndarray` on `self._mask_mul_np` (numpy, not tensor), then `ops.convert_to_tensor(...)` in call(). Conversion lives in call's trace, unlike D-004's failure mode (tensor stored on self). Should be safe; verified by cliffordnet save/load test on the H-5 commit.
+
 ## plan_2026-05-04_1b2810b6
 ### Index
 - [lm-structure.md](plan_2026-05-04_1b2810b6/findings/lm-structure.md) — `CliffordNetLM` forward path, vocab projection wiring, head naming, dict-output `{"logits": ...}` contract, serialization, no deep supervision.

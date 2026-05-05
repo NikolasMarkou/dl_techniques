@@ -73,10 +73,10 @@ class GPT2(keras.Model):
     :param max_seq_len: Maximum sequence length. Default: 1024.
     :type max_seq_len: int
     :param dropout_rate: Dropout rate for embeddings and residual paths.
-        Default: 0.1.
+        Default: 0.0.
     :type dropout_rate: float
     :param attention_dropout_rate: Dropout rate for attention weights.
-        Default: 0.1.
+        Default: 0.0.
     :type attention_dropout_rate: float
     :param initializer_range: Stddev for TruncatedNormal weight init.
         Default: 0.02.
@@ -87,6 +87,13 @@ class GPT2(keras.Model):
     :type attention_type: str
     :param ffn_type: FFN architecture type. Default: ``'mlp'``.
     :type ffn_type: str
+    :param tie_word_embeddings: If True, the LM head reuses the (transposed)
+        token embedding matrix. If False, an independent Dense projection is
+        used. Tying saves ``vocab_size * embed_dim`` parameters and matches
+        the original GPT-2 recipe; untying is the modern preference at
+        multi-billion-parameter scale (Llama 3, OLMo 2, DeepSeek-V3, large
+        Qwen3 variants). Default: True.
+    :type tie_word_embeddings: bool
     :param kwargs: Additional keyword arguments for ``keras.Model``.
 
     Example:
@@ -153,12 +160,13 @@ class GPT2(keras.Model):
         depth: int = 12,
         num_heads: int = 12,
         max_seq_len: int = 1024,
-        dropout_rate: float = 0.1,
-        attention_dropout_rate: float = 0.1,
+        dropout_rate: float = 0.0,
+        attention_dropout_rate: float = 0.0,
         initializer_range: float = DEFAULT_INITIALIZER_RANGE,
         layer_norm_eps: float = DEFAULT_LAYER_NORM_EPS,
         attention_type: str = "multi_head",
         ffn_type: str = "mlp",
+        tie_word_embeddings: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -180,6 +188,7 @@ class GPT2(keras.Model):
         self.layer_norm_eps = layer_norm_eps
         self.attention_type = attention_type
         self.ffn_type = ffn_type
+        self.tie_word_embeddings = tie_word_embeddings
 
         # Build architecture
         self._build_architecture()
@@ -187,7 +196,8 @@ class GPT2(keras.Model):
         logger.info(
             f"Created GPT-2: {self.depth} layers, "
             f"embed_dim={self.embed_dim}, heads={self.num_heads}, "
-            f"max_seq_len={self.max_seq_len}"
+            f"max_seq_len={self.max_seq_len}, "
+            f"tie_word_embeddings={self.tie_word_embeddings}"
         )
 
     @staticmethod
@@ -247,6 +257,18 @@ class GPT2(keras.Model):
             name="decoder",
         )
 
+        if not self.tie_word_embeddings:
+            self.lm_head = keras.layers.Dense(
+                self.vocab_size,
+                use_bias=False,
+                kernel_initializer=keras.initializers.TruncatedNormal(
+                    stddev=self.initializer_range,
+                ),
+                name="lm_head",
+            )
+        else:
+            self.lm_head = None
+
     def call(
         self,
         inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
@@ -285,9 +307,14 @@ class GPT2(keras.Model):
             training=training,
         )
 
-        # Weight-tied LM head: logits = hidden_states @ embedding_weights.T
-        embedding_weights = self.decoder.word_embeddings.embeddings
-        logits = ops.matmul(hidden_states, ops.transpose(embedding_weights))
+        if self.tie_word_embeddings:
+            # Weight-tied LM head: logits = hidden_states @ embedding_weights.T
+            embedding_weights = self.decoder.word_embeddings.embeddings
+            logits = ops.matmul(
+                hidden_states, ops.transpose(embedding_weights),
+            )
+        else:
+            logits = self.lm_head(hidden_states)
 
         return {
             "logits": logits,
@@ -322,6 +349,7 @@ class GPT2(keras.Model):
             "layer_norm_eps": self.layer_norm_eps,
             "attention_type": self.attention_type,
             "ffn_type": self.ffn_type,
+            "tie_word_embeddings": self.tie_word_embeddings,
         })
         return config
 

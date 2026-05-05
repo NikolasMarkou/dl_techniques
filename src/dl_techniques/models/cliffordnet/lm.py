@@ -82,6 +82,11 @@ class CliffordNetLM(keras.Model):
     :param layer_scale_init: Initial LayerScale gamma value.
     :param stochastic_depth_rate: Maximum DropPath rate (linear schedule).
     :param dropout_rate: Embedding and pre-output dropout rate.
+    :param tie_word_embeddings: If True, the LM head reuses the (transposed)
+        token embedding matrix instead of an independent Dense projection.
+        Saves ``vocab_size * channels`` parameters and matches the Press &
+        Wolf (2017) recipe used in GPT-2 / small modern LMs. For
+        large-scale models the modern preference is untying. Default: True.
     :param use_bias: Whether Dense/projection layers use bias.
     :param kernel_initializer: Kernel initializer for all dense layers.
     :param bias_initializer: Bias initializer for all dense layers.
@@ -173,7 +178,8 @@ class CliffordNetLM(keras.Model):
         use_global_context: bool = False,
         layer_scale_init: float = 1e-5,
         stochastic_depth_rate: float = 0.1,
-        dropout_rate: float = 0.1,
+        dropout_rate: float = 0.0,
+        tie_word_embeddings: bool = True,
         use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
@@ -194,6 +200,7 @@ class CliffordNetLM(keras.Model):
         self.layer_scale_init = layer_scale_init
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
+        self.tie_word_embeddings = tie_word_embeddings
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -247,21 +254,37 @@ class CliffordNetLM(keras.Model):
             if dropout_rate > 0.0
             else None
         )
-        self.output_proj = keras.layers.Dense(
-            vocab_size,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name="output_proj",
-        )
+        if tie_word_embeddings:
+            self.output_proj = None
+            self.output_bias = (
+                self.add_weight(
+                    name="output_bias",
+                    shape=(vocab_size,),
+                    initializer=bias_initializer,
+                    regularizer=bias_regularizer,
+                    trainable=True,
+                )
+                if use_bias
+                else None
+            )
+        else:
+            self.output_proj = keras.layers.Dense(
+                vocab_size,
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name="output_proj",
+            )
+            self.output_bias = None
 
         logger.info(
             f"Created CliffordNetLM (vocab_size={vocab_size}, "
             f"max_seq_length={max_seq_length}, channels={channels}, "
             f"depth={depth}, shifts={self.shifts}, cli_mode={cli_mode}, "
-            f"ctx_mode={ctx_mode}, global_ctx={use_global_context})"
+            f"ctx_mode={ctx_mode}, global_ctx={use_global_context}, "
+            f"tie_word_embeddings={tie_word_embeddings})"
         )
 
     def call(
@@ -297,7 +320,14 @@ class CliffordNetLM(keras.Model):
         x = self.head_norm(x, training=training)
         if self.head_dropout is not None:
             x = self.head_dropout(x, training=training)
-        logits = self.output_proj(x)
+        if self.tie_word_embeddings:
+            logits = keras.ops.matmul(
+                x, keras.ops.transpose(self.token_embedding.embeddings),
+            )
+            if self.output_bias is not None:
+                logits = logits + self.output_bias
+        else:
+            logits = self.output_proj(x)
 
         return {"logits": logits}
 
@@ -320,6 +350,7 @@ class CliffordNetLM(keras.Model):
             "layer_scale_init": self.layer_scale_init,
             "stochastic_depth_rate": self.stochastic_depth_rate,
             "dropout_rate": self.dropout_rate,
+            "tie_word_embeddings": self.tie_word_embeddings,
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "bias_initializer": initializers.serialize(self.bias_initializer),
