@@ -60,9 +60,15 @@ Caveats:
 - **Mixed precision.** The hierarchical product accumulates up to
   ``log2(padded_dim)`` clipped sigmoid factors. Under ``float16`` the
   sigmoid clip floor (``epsilon=1e-7``) lies below the smallest normal
-  (~6.1e-5), so deep trees can underflow. The layer therefore performs the
-  tree accumulation in ``float32`` regardless of the compute dtype and
-  casts the output back at the end.
+  (~6.1e-5), so deep trees can underflow. The layer therefore casts the
+  decision logits to ``float32`` BEFORE the sigmoid+clip, and runs the
+  tree accumulation in ``float32`` regardless of the compute dtype.
+  Output dtype: under ``float16`` compute_dtype the output stays
+  ``float32`` to preserve the sum-to-one invariant (individual leaves at
+  large vocab are below the smallest fp16 normal); under ``bfloat16`` /
+  ``float32`` the output matches the input dtype as usual. This scoped
+  override of the mixed-precision compute_dtype contract is anchored as
+  ``# DECISION D-005`` at the cast site.
 
 - **Cosine basis is not orthogonal.** Columns are L2-normalized, but the
   set ``{cos(2*pi*k*i/D) : k=1..d}`` is mutually orthogonal only for
@@ -306,10 +312,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     _VALID_MODES = ("deterministic", "trainable")
     _VALID_INPUT_NORMS = (None, "l2", "rms")
     # Smallest representable value used as a clamp on the renormalization
-    # denominator. Chosen large enough to be representable in float16
-    # (smallest normal ~6.1e-5) so the layer stays numerically safe under
-    # mixed precision, and small enough that in normal operation the clamp
-    # never activates and ``sum == 1.0`` exactly. See C2/M3 in review.
+    # denominator. The renormalization divide runs in float32 regardless of
+    # the compute dtype (decision logits are cast to float32 before the
+    # sigmoid+clip and the tree accumulates in float32), so the 1e-7 floor
+    # is float32-safe. The earlier rationale tying this constant to the
+    # smallest float16 normal no longer applies and was misleading.
+    # See C2/M3 in review and DECISION D-005.
     _RENORM_TINY = 1e-7
     # Smallest divisor used inside cosine-basis L2 normalization. Decoupled
     # from ``self.epsilon`` (which controls sigmoid clipping) so the two can
@@ -655,18 +663,21 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         if self.bias is not None:
             decision_logits = decision_logits + self.bias
 
+        # B-1 fix: cast logits to float32 BEFORE the sigmoid+clip. Under fp16
+        # mixed precision the sigmoid clip floor (epsilon=1e-7) is below the
+        # smallest fp16 normal (~6.1e-5), so clipping in fp16 would round the
+        # floor to zero. Doing the sigmoid+clip and the entire tree
+        # accumulation in float32 is the supported path under mixed precision.
+        decision_logits = ops.cast(decision_logits, "float32")
+
         decision_probs = ops.sigmoid(decision_logits)
         decision_probs = ops.clip(
             decision_probs, self.epsilon, 1.0 - self.epsilon
         )
 
         # --- Step 2: Initialize root probability mass = 1.0 ---
-        # H-3: tree accumulation runs in float32 regardless of compute
-        # dtype. Under fp16 mixed precision the sigmoid clip floor (eps=1e-7)
-        # is below the smallest fp16 normal (~6.1e-5), so deep trees would
-        # otherwise underflow to zero. Decision_probs are cast up here and
-        # the final probabilities are cast back to the input dtype at the end.
-        decision_probs = ops.cast(decision_probs, "float32")
+        # decision_probs is already float32 from the cast above; the tree
+        # accumulation continues in float32 regardless of compute dtype.
         mask_mul = ops.cast(self._mask_mul, "float32")
         mask_add = ops.cast(self._mask_add, "float32")
         batch_size = ops.shape(inputs_2d)[0]
@@ -713,8 +724,19 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         else:
             final_probs = unnormalized_probs
 
-        # Cast back to the input compute dtype for downstream layers.
-        final_probs = ops.cast(final_probs, inputs.dtype)
+        # DECISION D-005: scoped override of the mixed-precision compute_dtype
+        # contract — under fp16 ONLY, keep the output in float32 to preserve
+        # the sum-to-one invariant. At large vocab (e.g. 50K+) individual leaf
+        # masses (~2e-5) are below the smallest fp16 normal (~6.1e-5), so a
+        # final cast to fp16 would clobber every leaf to zero. bfloat16 has
+        # fp32-like dynamic range so this concern doesn't apply; bf16/fp32
+        # callers see the historical behavior (output dtype == input dtype).
+        # Anchor: see plans/.../decisions.md (D-005 entry) and the module-
+        # level "Mixed precision" docstring.
+        if inputs.dtype == "float16":
+            pass  # keep final_probs as fp32
+        else:
+            final_probs = ops.cast(final_probs, inputs.dtype)
 
         # --- Step 5: Reshape back to original rank ---
         input_transposed_shape = ops.shape(inputs_transposed)
@@ -777,6 +799,34 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             output_shape[normalized_axis] = inferred
 
         return tuple(output_shape)
+
+    def compute_output_spec(self, inputs):
+        """Override the symbolic output dtype for D-005.
+
+        Keras' default ``compute_output_spec`` (when ``compute_output_shape``
+        is implemented) declares the symbolic output dtype as
+        ``self.compute_dtype``. Under ``mixed_float16`` that is ``float16``,
+        which would force the runtime tensor returned by ``call()`` to be
+        coerced to fp16 by the surrounding Functional graph. We must keep
+        the output in fp32 under fp16 compute_dtype (D-005 — see the cast
+        site in ``call()`` and the module-level "Mixed precision" docstring).
+
+        This override only changes the declared dtype; the shape logic still
+        delegates to ``compute_output_shape``.
+        """
+        from keras import KerasTensor  # local import to avoid module cycles
+        input_shape = inputs.shape if hasattr(inputs, "shape") else inputs
+        output_shape = self.compute_output_shape(input_shape)
+        # D-005: under fp16 compute_dtype, output stays fp32.
+        if self.compute_dtype == "float16":
+            out_dtype = "float32"
+        else:
+            # Match the input dtype (bf16/fp32 callers see historical
+            # behavior). The runtime ``call()`` casts to ``inputs.dtype``.
+            out_dtype = (
+                inputs.dtype if hasattr(inputs, "dtype") else self.compute_dtype
+            )
+        return KerasTensor(output_shape, dtype=out_dtype)
 
     def get_build_config(self) -> Dict[str, Any]:
         """Return the input shape so the layer can rebuild on load.
