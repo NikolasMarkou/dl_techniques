@@ -570,6 +570,31 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             return input_shape[0]
         return input_shape
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Capture build state of lazy-built children for save/load.
+
+        The hierarchical_routing child is built lazily on first call() with
+        a shape that depends on runtime kv_seq_len. The standard build path
+        cannot reconstruct it from the parent's input_shape alone, so we
+        explicitly record the routing layer's build shape here and replay
+        it in build_from_config().
+        """
+        config = super().get_build_config() or {}
+        if (self.hierarchical_routing is not None
+                and self.hierarchical_routing.built):
+            config["hierarchical_routing_build_config"] = (
+                self.hierarchical_routing.get_build_config()
+            )
+        return config
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Restore build state, including lazy-built routing child."""
+        routing_cfg = config.pop("hierarchical_routing_build_config", None) \
+            if config else None
+        super().build_from_config(config)
+        if routing_cfg and self.hierarchical_routing is not None:
+            self.hierarchical_routing.build_from_config(routing_cfg)
+
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
 
