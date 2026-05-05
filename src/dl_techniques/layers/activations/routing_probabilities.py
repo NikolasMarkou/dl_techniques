@@ -441,13 +441,18 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 ignored.append("kernel_constraint")
             if self.bias_constraint is not None:
                 ignored.append("bias_constraint")
-            if not use_bias:
-                ignored.append("use_bias")
+            # H-3: ``use_bias`` has NO effect in deterministic mode regardless
+            # of value (no bias is ever created). The original guard only
+            # warned for ``use_bias=False``, which left ``use_bias=True``
+            # callers believing a learnable bias was in play. Always include
+            # ``use_bias`` in the ignored list when in deterministic mode.
+            ignored.append(f"use_bias={use_bias}")
             if ignored:
                 logger.warning(
                     f"[{self.name}] mode='deterministic' ignores trainable-only "
                     f"kwargs: {ignored}. They are stored for round-trip "
-                    f"serialization but have no effect on layer behavior."
+                    f"serialization but have no effect on layer behavior "
+                    f"(no bias variable is created in either case)."
                 )
 
         self.supports_masking = True
