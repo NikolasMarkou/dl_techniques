@@ -577,6 +577,15 @@ class CliffordNetBlock(keras.layers.Layer):
             raise ValueError(f"channels must be positive, got {channels}")
         if ctx_mode not in ("diff", "abs"):
             raise ValueError(f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}")
+        # DECISION D-002: the global branch hardcodes shifts=[1, 2]; with
+        # channels < 2 the inner SRGP filter would either silently drop
+        # shifts (channels=2 -> only shift=1 remains, warning) or reject
+        # the layer entirely (channels=1 -> ValueError). Fail up front.
+        if use_global_context and channels < 2:
+            raise ValueError(
+                f"use_global_context=True requires channels >= 2 "
+                f"(global branch uses shifts=[1, 2]); got channels={channels}"
+            )
 
         self.channels = channels
         self.shifts = list(shifts)
@@ -676,6 +685,15 @@ class CliffordNetBlock(keras.layers.Layer):
         :param input_shape: ``(B, H, W, D)``
         :type input_shape: Tuple
         """
+        # B7: this block is isotropic in channels. Mismatched D produces a
+        # cryptic broadcast error at the residual addition; reject early.
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"CliffordNetBlock is isotropic: expected last dim == "
+                f"channels={self.channels}, got input_shape[-1]={input_shape[-1]}. "
+                f"Project the input before the block (e.g. with a 1x1 Conv) "
+                f"or rebuild the block with channels={input_shape[-1]}."
+            )
         spatial_shape = input_shape
 
         # Step 1: norm
@@ -742,8 +760,10 @@ class CliffordNetBlock(keras.layers.Layer):
         # The global branch always uses differential context and is
         # independent of the local ctx_mode setting.
         if self.global_geo_prod is not None:
+            # GAP keeps spatial dims as 1; let the subtraction broadcast
+            # to (B,H,W,D) — materialising the broadcast via broadcast_to
+            # would just allocate a redundant intermediate.
             c_glo = keras.ops.mean(x_norm, axis=[1, 2], keepdims=True)
-            c_glo = keras.ops.broadcast_to(c_glo, keras.ops.shape(z_det))
             # Hardcoded differential: C_glo = GAP(X_norm) - Z_det
             c_glo = c_glo - z_det
             g_glo = self.global_geo_prod(z_det, c_glo)
@@ -850,6 +870,12 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             raise ValueError(f"channels must be positive, got {channels}")
         if ctx_mode not in ("diff", "abs"):
             raise ValueError(f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}")
+        # See D-002 (CliffordNetBlock): global branch needs channels >= 2.
+        if use_global_context and channels < 2:
+            raise ValueError(
+                f"use_global_context=True requires channels >= 2 "
+                f"(global branch uses shifts=[1, 2]); got channels={channels}"
+            )
 
         self.channels = channels
         self.shifts = list(shifts)
