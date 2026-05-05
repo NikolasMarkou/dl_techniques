@@ -285,6 +285,13 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     :type bias_constraint: Optional[Union[str, keras.constraints.Constraint]]
     :param use_bias: Whether to use a bias vector in trainable mode.
     :type use_bias: bool
+    :param normalize: If ``True`` (default), the sliced leaf masses are
+        divided by their sum (defensive cleanup of fp roundoff from sigmoid
+        clipping). If ``False``, the divide is skipped and the raw masses
+        are returned. With structural masking, invalid leaves are exactly
+        zero either way; the sum over valid leaves equals 1 up to fp drift.
+        Set to ``False`` if you want to consume raw masses downstream.
+    :type normalize: bool
     :param input_normalization: Optional input normalization applied before
         the projection. ``None`` (default) leaves inputs unchanged.
         ``"l2"`` divides by per-sample L2 norm; ``"rms"`` divides by per-sample
@@ -323,6 +330,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             bias_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
             use_bias: bool = True,
             input_normalization: Optional[str] = None,
+            normalize: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -382,6 +390,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         self.epsilon = epsilon
         self.mode = mode
         self.use_bias = use_bias
+        self.normalize = bool(normalize)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -697,9 +706,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             unnormalized_probs = padded_probs
         else:
             unnormalized_probs = padded_probs[:, :self.output_dim]
-        prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
-        safe_denom = ops.maximum(prob_sum, self._RENORM_TINY)
-        final_probs = unnormalized_probs / safe_denom
+        if self.normalize:
+            prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
+            safe_denom = ops.maximum(prob_sum, self._RENORM_TINY)
+            final_probs = unnormalized_probs / safe_denom
+        else:
+            final_probs = unnormalized_probs
 
         # Cast back to the input compute dtype for downstream layers.
         final_probs = ops.cast(final_probs, inputs.dtype)
@@ -799,6 +811,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             "mode": self.mode,
             "use_bias": self.use_bias,
             "input_normalization": self.input_normalization,
+            "normalize": self.normalize,
             "kernel_initializer": keras.initializers.serialize(
                 self.kernel_initializer
             ),
