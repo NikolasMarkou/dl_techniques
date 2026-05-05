@@ -772,10 +772,15 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         """
         output_shape = list(input_shape)
         input_rank = len(input_shape)
+        # B-3: always recompute the normalized axis from the argument's rank.
+        # The cached ``self._normalized_axis`` reflects the rank seen at
+        # build() time; if compute_output_shape is later called with a
+        # different-rank shape (e.g. by a wrapper layer or an outer model),
+        # using the cached value yields the wrong axis. ``self.axis`` is the
+        # source of truth for the configured axis; resolve it against the
+        # actual input shape.
         normalized_axis = (
-            self._normalized_axis
-            if self._normalized_axis is not None
-            else (input_rank + self.axis if self.axis < 0 else self.axis)
+            input_rank + self.axis if self.axis < 0 else self.axis
         )
 
         if normalized_axis < 0 or normalized_axis >= input_rank:

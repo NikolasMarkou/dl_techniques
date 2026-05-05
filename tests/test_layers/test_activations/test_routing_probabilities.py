@@ -1049,5 +1049,44 @@ class TestRoutingProbabilitiesMixedPrecision:
         # bf16 has ~3 decimal digits of precision; relax tolerance accordingly.
         np.testing.assert_allclose(y.sum(axis=-1), 1.0, atol=1e-2)
 
+
+# ==============================================================================
+# compute_output_shape rank-mismatch regression — B-3
+# ==============================================================================
+
+
+class TestComputeOutputShapeRankMismatch:
+    """B-3: compute_output_shape must always recompute the normalized axis.
+
+    Pre-fix, the layer cached ``self._normalized_axis`` at build() time. When
+    a caller later invoked ``compute_output_shape`` with a different-rank
+    shape (common in wrapper layers / outer model graphs), the cached axis
+    pointed at the wrong dimension and the returned shape was wrong.
+    """
+
+    def test_axis_neg_one_after_build_with_different_rank(self) -> None:
+        """Build with rank-2; query rank-3 with axis=-1."""
+        layer = RoutingProbabilitiesLayer(output_dim=16, axis=-1)
+        layer.build((None, 16))
+        # Query with a different-rank shape; axis=-1 must resolve to dim 2.
+        out_shape = layer.compute_output_shape((None, 8, 16))
+        assert out_shape == (None, 8, 16)
+
+    def test_axis_neg_one_after_build_with_higher_rank(self) -> None:
+        """Build with rank-2; query rank-4."""
+        layer = RoutingProbabilitiesLayer(output_dim=10, axis=-1)
+        layer.build((None, 64))
+        out_shape = layer.compute_output_shape((None, 4, 5, 64))
+        # axis=-1 resolves to index 3 of rank 4; output_dim replaces it.
+        assert out_shape == (None, 4, 5, 10)
+
+    def test_positive_axis_consistent_across_ranks(self) -> None:
+        """Build with rank-3 axis=1; query rank-3 again — axis stable."""
+        layer = RoutingProbabilitiesLayer(output_dim=4, axis=1)
+        layer.build((None, 4, 8))
+        out_shape = layer.compute_output_shape((None, 4, 8))
+        assert out_shape == (None, 4, 8)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
