@@ -387,6 +387,11 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
 
+        # Reclaim Python wrappers + tf-eager intermediates accumulated by
+        # the 300 autoregressive `model(...)` calls; without this, ~70 MB
+        # per probe event leaked into RSS over the run.
+        gc.collect()
+
     def _generate(self, prompt: str) -> str:
         """Autoregressive generation. Model outputs probabilities, so we
         take ``log(p)`` and treat it as logits for the standard pipeline."""
