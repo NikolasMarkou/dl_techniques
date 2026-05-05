@@ -1597,6 +1597,11 @@ def _make_pool_v2(
     from ..blur_pool import BlurPool2D
     from ..pixel_unshuffle import PixelUnshuffle2D
 
+    # All pool kinds collapse to Identity at strides=1 by design. This
+    # lets a hierarchical model use a single ``stream_pool="blur"``
+    # configuration across every stage; only the strided stages actually
+    # apply the kind-specific transform, and the others are pass-through.
+    # Validating the kind name happens upstream in __init__.
     if strides == 1:
         return keras.layers.Identity(name=name)
     if kind == "avg":
@@ -1752,6 +1757,12 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
                 f"ctx_norm_type must be 'bn'|'gn'|'ln'|'none', got "
                 f"{ctx_norm_type!r}"
             )
+        # See D-002: global branch needs channels >= 2.
+        if use_global_context and channels < 2:
+            raise ValueError(
+                f"use_global_context=True requires channels >= 2 "
+                f"(global branch uses shifts=[1, 2]); got channels={channels}"
+            )
 
         self.channels = channels
         self.shifts = list(shifts)
@@ -1878,6 +1889,13 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         complains on load if any layer was implicitly built only via
         ``call``-time tracing. Mirrors :class:`CliffordNetBlockDS.build`.
         """
+        # B7: isotropic core (the optional out_proj at the end is the only
+        # place channels may change).
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"CliffordNetBlockDSv2 expects input last dim == "
+                f"channels={self.channels}, got input_shape[-1]={input_shape[-1]}."
+            )
         b, h, w, _ = input_shape
 
         self.input_norm.build(input_shape)
@@ -1947,8 +1965,20 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
             pass
         elif self.ctx_mode == "pyramid_diff":
             if self._pyr_pool is not None and self._pyr_up is not None:
+                # DECISION D-003: pyramid_diff at strides>1.
+                # AveragePooling2D(padding="same", pool_size=s) on a tensor
+                # of spatial shape (H/s, W/s) produces ceil((H/s)/s) rows;
+                # UpSampling2D(size=s) then expands those by an exact factor
+                # of s. When (H/s) is not divisible by s, the upsample is
+                # strictly larger than z_ctx and the subtraction broadcasts
+                # incorrectly (or errors). Crop to z_ctx's spatial extent
+                # so the Laplacian-pyramid level subtraction is well-defined
+                # for arbitrary input dims.
                 z_lo = self._pyr_pool(z_ctx)
                 z_lo_up = self._pyr_up(z_lo)
+                target_h = keras.ops.shape(z_ctx)[1]
+                target_w = keras.ops.shape(z_ctx)[2]
+                z_lo_up = z_lo_up[:, :target_h, :target_w, :]
                 z_ctx = z_ctx - z_lo_up
             else:
                 z_ctx = z_ctx - z_det
@@ -1956,8 +1986,8 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         g_feat = self.local_geo_prod(z_det, z_ctx)
 
         if self.global_geo_prod is not None:
+            # P2 mirror: drop redundant broadcast_to.
             c_glo = keras.ops.mean(x_norm_p, axis=[1, 2], keepdims=True)
-            c_glo = keras.ops.broadcast_to(c_glo, keras.ops.shape(z_det))
             c_glo = c_glo - z_det
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
