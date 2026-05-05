@@ -740,84 +740,9 @@ def create_bfunet_variant(
 # Utility Functions for Deep Supervision
 # ---------------------------------------------------------------------
 
-def get_model_output_info(model: keras.Model) -> Dict[str, Any]:
-    """
-    Get information about model outputs for deep supervision models.
-
-    Args:
-        model: Keras model to analyze
-
-    Returns:
-        Dictionary containing output information:
-        - 'num_outputs': Number of outputs
-        - 'has_deep_supervision': Whether model has multiple outputs
-        - 'output_shapes': List of output shapes
-        - 'primary_output_index': Index of the primary inference output (always 0)
-
-    Example:
-        >>> model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
-        >>> info = get_model_output_info(model)
-        >>> print(f"Number of outputs: {info['num_outputs']}")
-        >>> print(f"Primary output shape: {info['output_shapes'][info['primary_output_index']]}")
-    """
-    # Handle both single output and multi-output models
-    if isinstance(model.output, list):
-        num_outputs = len(model.output)
-        output_shapes = [output.shape for output in model.output]
-        has_deep_supervision = True
-    else:
-        num_outputs = 1
-        output_shapes = [model.output.shape]
-        has_deep_supervision = False
-
-    return {
-        'num_outputs': num_outputs,
-        'has_deep_supervision': has_deep_supervision,
-        'output_shapes': output_shapes,
-        'primary_output_index': 0  # Primary output is always at index 0
-    }
-
-def create_inference_model_from_training_model(training_model: keras.Model) -> keras.Model:
-    """
-    Create a single-output inference model from a multi-output training model.
-
-    Args:
-        training_model: Multi-output training model with deep supervision
-
-    Returns:
-        Single-output model using only the primary output (index 0)
-
-    Example:
-        >>> # Create training model with deep supervision
-        >>> training_model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
-        >>>
-        >>> # Create inference model (single output)
-        >>> inference_model = create_inference_model_from_training_model(training_model)
-        >>>
-        >>> # Inference model accepts flexible input shapes
-        >>> inference_model = keras.Model(
-        ...     inputs=keras.Input(shape=(None, None, 3)),
-        ...     outputs=inference_model.layers[-1].output  # Get final layer output
-        ... )
-    """
-    model_info = get_model_output_info(training_model)
-
-    if not model_info['has_deep_supervision']:
-        logger.info("Model already has single output, returning as-is")
-        return training_model
-
-    # Extract only the primary output (index 0)
-    primary_output = training_model.output[model_info['primary_output_index']]
-
-    # Create new model with single output
-    inference_model = keras.Model(
-        inputs=training_model.input,
-        outputs=primary_output,
-        name=f"{training_model.name}_inference"
-    )
-
-    logger.info(f"Created inference model with single output shape: {primary_output.shape}")
-
-    return inference_model
+from dl_techniques.utils.deep_supervision import (
+    get_model_output_info,
+    create_inference_model_from_training_model,
+)
 
 # ---------------------------------------------------------------------
