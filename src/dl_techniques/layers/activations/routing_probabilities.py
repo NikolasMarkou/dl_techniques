@@ -270,7 +270,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     :param axis: Axis along which the routing is applied. Defaults to -1.
     :type axis: int
     :param epsilon: Small float for sigmoid clipping (probabilities are
-        clipped into ``[epsilon, 1 - epsilon]``).
+        clipped into ``[epsilon, 1 - epsilon]``). ``epsilon=0`` disables
+        the clip; in ``"trainable"`` mode this can starve gradients on
+        saturated decisions and emits an info-level log on construction.
     :type epsilon: float
     :param mode: Routing mode. ``"deterministic"`` (default) for the
         parameter-free cosine-basis projection, or ``"trainable"`` for a
@@ -454,6 +456,20 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                     f"serialization but have no effect on layer behavior "
                     f"(no bias variable is created in either case)."
                 )
+
+        # H-4: epsilon=0 disables the sigmoid clip. In deterministic mode
+        # this is a documented escape hatch for exact-math tests (the cosine
+        # basis cannot drive logits to ±inf in normal operation). In
+        # trainable mode the same setting can starve gradients to zero on
+        # saturated decisions and is rarely the user's intent — surface it
+        # at info level so it shows up in training logs.
+        if self.epsilon == 0.0 and self.mode == "trainable":
+            logger.info(
+                f"[{self.name}] mode='trainable' with epsilon=0.0 disables "
+                f"the sigmoid clip; saturated decisions will produce zero "
+                f"gradient through this layer. Set epsilon>0 (default 1e-7) "
+                f"unless this is a deliberate exact-math configuration."
+            )
 
         self.supports_masking = True
 
