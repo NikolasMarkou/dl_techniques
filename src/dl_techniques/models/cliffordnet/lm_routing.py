@@ -66,6 +66,9 @@ from dl_techniques.layers.activations.routing_probabilities import (
 from dl_techniques.layers.embedding.hierarchical_codebook_embedding import (
     HierarchicalCodebookEmbedding,
 )
+from dl_techniques.layers.embedding.albert_factorized_embedding import (
+    AlbertFactorizedEmbedding,
+)
 
 # ---------------------------------------------------------------------------
 
@@ -368,7 +371,7 @@ class CliffordNetLMRouting(keras.Model):
                 if self.embedding_bottleneck_dim is not None
                 else max(8, min(self.channels // 2, 128))
             )
-            return _AlbertFactorizedEmbedding(
+            return AlbertFactorizedEmbedding(
                 vocab_size=self.vocab_size,
                 bottleneck_dim=k,
                 output_dim=self.channels,
@@ -505,102 +508,3 @@ class CliffordNetLMRouting(keras.Model):
             routing_mode=routing_mode,
             **defaults,
         )
-
-
-# ---------------------------------------------------------------------------
-# ALBERT-style factorized token embedding
-# ---------------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class _AlbertFactorizedEmbedding(keras.layers.Layer):
-    """ALBERT-style factorized embedding: ``Embedding(vocab, k) @ W``.
-
-    Used internally by :class:`CliffordNetLMRouting` when
-    ``input_embedding="albert"``. Reduces token-embedding parameter count
-    from ``vocab * channels`` to ``vocab * k + k * channels``. Each
-    token's embedding can independently occupy any direction in the
-    k-dim subspace projected to channels — full rank per token, unlike
-    HCE's restricted Minkowski-sum manifold.
-
-    Reference:
-        Lan, Z., et al. (2019). ALBERT: A Lite BERT for Self-supervised
-        Learning of Language Representations. arXiv:1909.11942.
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        bottleneck_dim: int,
-        output_dim: int,
-        embeddings_initializer: Any = "uniform",
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        if vocab_size <= 1:
-            raise ValueError(f"vocab_size must be > 1, got {vocab_size}")
-        if bottleneck_dim <= 0 or output_dim <= 0:
-            raise ValueError(
-                f"bottleneck_dim and output_dim must be positive, "
-                f"got {bottleneck_dim}, {output_dim}"
-            )
-        self.vocab_size = vocab_size
-        self.bottleneck_dim = bottleneck_dim
-        self.output_dim = output_dim
-        self.embeddings_initializer = initializers.get(embeddings_initializer)
-
-        self.inner_embedding = keras.layers.Embedding(
-            vocab_size,
-            bottleneck_dim,
-            embeddings_initializer=self.embeddings_initializer,
-            name="inner",
-        )
-        self.proj = keras.layers.Dense(
-            output_dim,
-            use_bias=False,
-            kernel_initializer=self.embeddings_initializer,
-            name="proj",
-        )
-
-        n_params = vocab_size * bottleneck_dim + bottleneck_dim * output_dim
-        n_dense = vocab_size * output_dim
-        logger.info(
-            f"_AlbertFactorizedEmbedding(vocab={vocab_size}, "
-            f"k={bottleneck_dim}, D={output_dim}): {n_params:,} params "
-            f"(~{n_dense / max(1, n_params):.1f}x smaller than "
-            f"Embedding({vocab_size},{output_dim})={n_dense:,} params)"
-        )
-
-    def call(
-        self, inputs: keras.KerasTensor, training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        return self.proj(self.inner_embedding(inputs))
-
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...],
-    ) -> Tuple[Optional[int], ...]:
-        return tuple(input_shape) + (self.output_dim,)
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            "vocab_size": self.vocab_size,
-            "bottleneck_dim": self.bottleneck_dim,
-            "output_dim": self.output_dim,
-            "embeddings_initializer": initializers.serialize(
-                self.embeddings_initializer,
-            ),
-        })
-        return config
-
-    @classmethod
-    def from_config(
-        cls, config: Dict[str, Any],
-    ) -> "_AlbertFactorizedEmbedding":
-        if config.get("embeddings_initializer") and isinstance(
-            config["embeddings_initializer"], dict,
-        ):
-            config["embeddings_initializer"] = initializers.deserialize(
-                config["embeddings_initializer"],
-            )
-        return cls(**config)

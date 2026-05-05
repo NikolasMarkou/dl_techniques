@@ -133,8 +133,8 @@ from dl_techniques.layers.activations.routing_probabilities import (
 from dl_techniques.layers.embedding.hierarchical_codebook_embedding import (
     HierarchicalCodebookEmbedding,
 )
-from dl_techniques.models.cliffordnet.lm_routing import (
-    _AlbertFactorizedEmbedding,
+from dl_techniques.layers.embedding.albert_factorized_embedding import (
+    AlbertFactorizedEmbedding,
 )
 from dl_techniques.models.cliffordnet import CliffordNetLMRouting
 from dl_techniques.utils.logger import logger
@@ -642,7 +642,7 @@ def load_model_from_checkpoint(
             "CausalCliffordNetBlock": CausalCliffordNetBlock,
             "RoutingProbabilitiesLayer": RoutingProbabilitiesLayer,
             "HierarchicalCodebookEmbedding": HierarchicalCodebookEmbedding,
-            "_AlbertFactorizedEmbedding": _AlbertFactorizedEmbedding,
+            "AlbertFactorizedEmbedding": AlbertFactorizedEmbedding,
             "MaskedCausalLMLoss": MaskedCausalLMLoss,
             "FocalCausalLMLoss": FocalCausalLMLoss,
         },
