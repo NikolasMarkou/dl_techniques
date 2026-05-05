@@ -131,6 +131,15 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
             raise ValueError(
                 f"cli_mode must be 'inner', 'wedge', or 'full', got {cli_mode!r}"
             )
+        # DECISION D-001: reject shifts <= 0. s=0 makes the wedge term
+        # identically zero and wastes a slot in the proj input; negative
+        # shifts are accepted by keras.ops.roll but are almost certainly
+        # unintended.
+        for _s in shifts:
+            if not isinstance(_s, (int,)) or isinstance(_s, bool) or _s < 1:
+                raise ValueError(
+                    f"shifts must be a list of ints >= 1; got {shifts!r}"
+                )
 
         self.channels = channels
         # Filter out offsets >= channels: a full cyclic roll contributes
@@ -208,11 +217,12 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         components: List[keras.KerasTensor] = []
 
         for s in self.shifts:
-            z_det_s = keras.ops.roll(z_det, shift=s, axis=-1)
             z_ctx_s = keras.ops.roll(z_ctx, shift=s, axis=-1)
 
             if self.cli_mode in ("wedge", "full"):
-                # Bivector: anti-symmetric cross-term
+                # Bivector: anti-symmetric cross-term. z_det_s is only
+                # needed for the wedge branch; skip it for cli_mode='inner'.
+                z_det_s = keras.ops.roll(z_det, shift=s, axis=-1)
                 wedge = z_det * z_ctx_s - z_ctx * z_det_s
                 components.append(wedge)
 
@@ -248,8 +258,10 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         config.update(
             {
                 "channels": self.channels,
-                # Store the original (unfiltered) shifts so that round-trip
-                # serialisation always re-applies the same filter.
+                # Stores the post-filter shift list (s < channels). Round-trip
+                # serialisation is idempotent for a fixed `channels`; if the
+                # caller reconstructs with a different `channels`, any shifts
+                # the original constructor dropped are not recoverable.
                 "shifts": self.shifts,
                 "cli_mode": self.cli_mode,
                 "use_bias": self.use_bias,
