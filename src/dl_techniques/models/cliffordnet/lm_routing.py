@@ -383,6 +383,9 @@ class CliffordNetLMRouting(keras.Model):
         for key in ("kernel_regularizer", "bias_regularizer"):
             if config.get(key) and isinstance(config[key], dict):
                 config[key] = regularizers.deserialize(config[key])
+        for key in ("kernel_initializer", "bias_initializer"):
+            if config.get(key) and isinstance(config[key], dict):
+                config[key] = initializers.deserialize(config[key])
         return cls(**config)
 
     @classmethod

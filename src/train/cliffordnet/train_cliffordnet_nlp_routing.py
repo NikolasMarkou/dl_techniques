@@ -47,7 +47,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 import tiktoken
-from keras import initializers, regularizers
+from keras import initializers
 
 from train.common import setup_gpu
 from train.common.evaluation import generate_training_curves
@@ -136,13 +136,26 @@ class TrainingConfig:
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
 
-    # Checkpointing & analysis (step-based for large datasets)
+    # Checkpointing & analysis (step-based for large datasets).
+    # analyze_every_steps default 0 = OFF: spectral analysis blocks the
+    # training thread for multiple seconds. Enable explicitly if needed.
     checkpoint_every_steps: int = 25000
-    analyze_every_steps: int = 50000
+    analyze_every_steps: int = 0
     max_checkpoints: int = 3
+
+    # Optional override of steps_per_epoch (for streaming HF data this is
+    # the only way to get a correct LR schedule horizon).
+    steps_per_epoch: Optional[int] = None
 
     # Resume from checkpoint
     resume_from: Optional[str] = None
+
+    # Architecture overrides for named variants. Only keys present here are
+    # forwarded to `from_variant(...)`; unset keys leave the variant default.
+    arch_overrides: Dict[str, Any] = field(default_factory=dict)
+
+    # Probe RNG seed
+    probe_seed: int = 42
 
     # Generation probes
     probe_prompts: List[str] = field(default_factory=lambda: [
@@ -157,8 +170,35 @@ class TrainingConfig:
 
 
 # ---------------------------------------------------------------------------
+# Shared step counter
+# ---------------------------------------------------------------------------
+
+
+class StepCounter(keras.callbacks.Callback):
+    """Owns the global training-step counter; other callbacks read from it.
+
+    Registered first so its on_train_batch_end runs before any consumer.
+    Without a single owner, multiple callbacks each maintain their own
+    counter and silently drift if one misses a batch.
+    """
+
+    def __init__(self, initial_step: int = 0):
+        super().__init__()
+        self.value: int = initial_step
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.value += 1
+
+
+# ---------------------------------------------------------------------------
 # Step-based Checkpoint & Analysis Callback
 # ---------------------------------------------------------------------------
+
+
+# Stable CSV schema — DictWriter is configured with extrasaction="ignore" and
+# restval="" so missing or extra fields never raise.
+_CSV_FIELDS = ("step", "epoch", "loss", "accuracy", "lr",
+               "val_loss", "val_accuracy")
 
 
 class StepCheckpointCallback(keras.callbacks.Callback):
@@ -167,19 +207,19 @@ class StepCheckpointCallback(keras.callbacks.Callback):
     def __init__(
         self,
         save_dir: str,
+        step_counter: StepCounter,
         save_every_steps: int = 25000,
-        analyze_every_steps: int = 50000,
+        analyze_every_steps: int = 0,
         max_checkpoints: int = 3,
         model_name: str = "cliffordnet_nlp_routing",
-        initial_step: int = 0,
         log_every_steps: int = 100,
     ):
         super().__init__()
+        self._counter = step_counter
         self.save_every_steps = save_every_steps
         self.analyze_every_steps = analyze_every_steps
         self.max_checkpoints = max_checkpoints
         self.model_name = model_name
-        self._global_step = initial_step
         self._log_every_steps = log_every_steps
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
@@ -187,10 +227,16 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         os.makedirs(self._ckpt_dir, exist_ok=True)
         if analyze_every_steps > 0:
             os.makedirs(self._analysis_dir, exist_ok=True)
+            logger.warning(
+                "Step analysis runs synchronously on the training thread; "
+                "expect a multi-second stall every "
+                f"{analyze_every_steps} steps."
+            )
 
         self._csv_path = os.path.join(save_dir, "training_log.csv")
         self._csv_file = None
         self._csv_writer = None
+        self._current_epoch = 0
 
         self._analysis_config = AnalysisConfig(
             analyze_weights=True,
@@ -202,22 +248,36 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         )
         logger.info(
             f"StepCheckpointCallback: save every {save_every_steps} steps, "
-            f"analyze every {analyze_every_steps} steps, "
+            f"analyze every {analyze_every_steps} steps "
+            f"({'off' if analyze_every_steps == 0 else 'on'}), "
             f"keep max {max_checkpoints} checkpoints, "
             f"log every {log_every_steps} steps"
         )
 
+    @property
+    def _global_step(self) -> int:
+        return self._counter.value
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._current_epoch = epoch
+
     def on_train_batch_end(self, batch, logs=None):
-        self._global_step += 1
-        if self._global_step % self._log_every_steps == 0:
-            self._log_metrics(logs)
-        if self._global_step % self.save_every_steps == 0:
+        step = self._global_step
+        if step > 0 and step % self._log_every_steps == 0:
+            self._log_metrics(logs, val_logs=None)
+        if step > 0 and step % self.save_every_steps == 0:
             self._save_checkpoint()
         if (
             self.analyze_every_steps > 0
-            and self._global_step % self.analyze_every_steps == 0
+            and step > 0
+            and step % self.analyze_every_steps == 0
         ):
             self._run_analysis()
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Flush a row that contains validation metrics from this epoch end.
+        # Keras puts val_* keys into `logs` only on epoch end.
+        self._log_metrics(logs, val_logs=logs)
 
     def on_train_end(self, logs=None):
         if self._csv_file is not None:
@@ -227,17 +287,39 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self.model.save(path)
         logger.info(f"Final checkpoint saved: {path}")
 
-    def _log_metrics(self, logs):
-        if logs is None:
-            return
-        row = {"step": self._global_step, **logs}
+    def _current_lr(self) -> float:
+        opt = getattr(self.model, "optimizer", None)
+        if opt is None:
+            return 0.0
+        lr = opt.learning_rate
+        try:
+            if callable(lr):
+                return float(lr(opt.iterations))
+            return float(keras.ops.convert_to_numpy(lr))
+        except Exception:
+            return 0.0
+
+    def _log_metrics(self, logs, val_logs):
         if self._csv_writer is None:
             self._csv_file = open(self._csv_path, "a", newline="")
             self._csv_writer = csv.DictWriter(
-                self._csv_file, fieldnames=list(row.keys()),
+                self._csv_file,
+                fieldnames=list(_CSV_FIELDS),
+                extrasaction="ignore",
+                restval="",
             )
             if self._csv_file.tell() == 0:
                 self._csv_writer.writeheader()
+        row = {
+            "step": self._global_step,
+            "epoch": self._current_epoch,
+            "lr": self._current_lr(),
+        }
+        if logs:
+            row.update(logs)
+        if val_logs:
+            row.update({k: v for k, v in val_logs.items()
+                        if k.startswith("val_")})
         self._csv_writer.writerow(row)
         self._csv_file.flush()
 
@@ -283,16 +365,16 @@ class StepCheckpointCallback(keras.callbacks.Callback):
 
 
 class GenerationProbeCallback(keras.callbacks.Callback):
-    """Generate sample text before each checkpoint to track quality.
+    """Generate sample text periodically to track quality.
 
-    Note: model output is *probabilities* (sum=1, in [eps, 1-eps]) rather
+    Model output is *probabilities* (sum=1, in [eps, 1-eps]) rather
     than logits, so the generation logic uses log-probs for nucleus
-    sampling. Functionally identical to the lm.py probe except for the
-    log() conversion.
+    sampling.
     """
 
     def __init__(
         self,
+        step_counter: StepCounter,
         probe_every_steps: int = 25000,
         prompts: Optional[List[str]] = None,
         encoding_name: str = "gpt2",
@@ -301,11 +383,13 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         top_p: float = 0.92,
         repetition_penalty: float = 1.3,
         eot_token_id: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
         ctx_length: int = 511,
         save_dir: Optional[str] = None,
-        initial_step: int = 0,
+        seed: int = 42,
     ):
         super().__init__()
+        self._counter = step_counter
         self.probe_every_steps = probe_every_steps
         self.prompts = prompts or [
             "The United States of America is a",
@@ -316,10 +400,16 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         self.temperature = temperature
         self.top_p = top_p
         self.repetition_penalty = repetition_penalty
-        self._global_step = initial_step
+        self._rng = np.random.default_rng(seed)
 
         self._enc = tiktoken.get_encoding(encoding_name)
-        self._eot_id = int(eot_token_id if eot_token_id is not None else self._enc.eot_token)
+        self._eot_id = int(
+            eot_token_id if eot_token_id is not None else self._enc.eot_token
+        )
+        # Distinct from EOT so the model sees a true PAD where context is
+        # short. Defaults to EOT for back-compat.
+        self._pad_id = int(pad_token_id if pad_token_id is not None
+                           else self._eot_id)
         self._ctx_len = ctx_length
 
         self._log_path = None
@@ -331,16 +421,17 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         logger.info(
             f"GenerationProbeCallback: {len(self.prompts)} prompts, "
             f"every {probe_every_steps} steps, "
-            f"max_tokens={max_tokens}, temp={temperature}, top_p={top_p}"
+            f"max_tokens={max_tokens}, temp={temperature}, top_p={top_p}, "
+            f"pad_id={self._pad_id}, eot_id={self._eot_id}"
         )
 
     def on_train_batch_end(self, batch, logs=None):
-        self._global_step += 1
-        if self._global_step % self.probe_every_steps == 0:
+        step = self._counter.value
+        if step > 0 and step % self.probe_every_steps == 0:
             self._run_probes(logs)
 
     def _run_probes(self, logs=None):
-        step = self._global_step
+        step = self._counter.value
         train_loss = logs.get("loss", 0.0) if logs else 0.0
 
         logger.info(f"{'=' * 50}")
@@ -358,11 +449,8 @@ class GenerationProbeCallback(keras.callbacks.Callback):
 
         for prompt in self.prompts:
             t0 = time.time()
-            text = self._generate(prompt)
+            text, tokens_generated = self._generate(prompt)
             elapsed = time.time() - t0
-            tokens_generated = (
-                len(self._enc.encode(text)) - len(self._enc.encode(prompt))
-            )
 
             gen_entry = {
                 "prompt": prompt,
@@ -392,33 +480,40 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         # per probe event leaked into RSS over the run.
         gc.collect()
 
-    def _generate(self, prompt: str) -> str:
+    def _generate(self, prompt: str) -> Tuple[str, int]:
         """Autoregressive generation. Model outputs probabilities, so we
-        take ``log(p)`` and treat it as logits for the standard pipeline."""
+        take ``log(p)`` and treat it as logits for the standard pipeline.
+
+        Returns ``(decoded_text, tokens_generated)``. Generation stops on
+        EOT. Context is trimmed to its actual length when shorter than
+        ``ctx_len`` so we don't waste compute on pad positions.
+        """
         ids = self._enc.encode(prompt)
+        len_initial = len(ids)
         ctx_len = self._ctx_len
-        pad_id = self._eot_id
 
         for _ in range(self.max_tokens):
             ctx = ids[-ctx_len:]
             real = len(ctx)
-            padded = ctx + [pad_id] * (ctx_len - real)
-            out = self.model(
-                np.array([padded], dtype="int32"), training=False,
-            )
+            # Trim to actual length — model.call uses ops.shape(input_ids)[1]
+            # for positional embeddings, so it accepts variable seq length.
+            # When real == ctx_len, no padding; when real < ctx_len, pad
+            # with PAD (not EOT) so the model sees true padding.
+            if real < ctx_len:
+                padded = ctx + [self._pad_id] * (ctx_len - real)
+                in_ids = np.asarray([padded], dtype="int32")
+            else:
+                in_ids = np.asarray([ctx], dtype="int32")
+            out = self.model(in_ids, training=False)
             probs = out["logits"][0, real - 1, :].numpy()
             # Convert probabilities to log-probs (logit-equivalent).
+            # log(p) is always <= 0 after clip — repetition penalty has only
+            # one branch.
             logits = np.log(np.clip(probs, 1e-12, 1.0))
 
-            logits[self._eot_id] = -1e9
-
             for t in set(ids[-50:]):
-                if t == self._eot_id:
-                    continue
-                if logits[t] >= 0:
-                    logits[t] /= self.repetition_penalty
-                else:
-                    logits[t] *= self.repetition_penalty
+                # Penalize repeats by pushing log-probs further negative.
+                logits[t] *= self.repetition_penalty
 
             logits /= self.temperature
 
@@ -431,10 +526,14 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             top_probs = probs_norm[:cutoff]
             top_probs /= top_probs.sum()
 
-            next_token = top_idx[np.random.choice(len(top_idx), p=top_probs)]
-            ids.append(int(next_token))
+            next_token = int(top_idx[
+                self._rng.choice(len(top_idx), p=top_probs)
+            ])
+            ids.append(next_token)
+            if next_token == self._eot_id:
+                break
 
-        return self._enc.decode(ids)
+        return self._enc.decode(ids), len(ids) - len_initial
 
 
 # ---------------------------------------------------------------------------
@@ -481,12 +580,23 @@ def create_model(config: TrainingConfig) -> CliffordNetLMRouting:
     )
 
     if config.variant in CliffordNetLMRouting.MODEL_VARIANTS:
+        # Forward any user-specified architecture overrides (channels,
+        # depth, shifts, cli_mode, ctx_mode, use_global_context,
+        # stochastic_depth_rate). dropout_rate is always forwarded.
+        from_variant_kwargs: Dict[str, Any] = {
+            "vocab_size": config.vocab_size,
+            "max_seq_length": config.max_seq_length,
+            "routing_mode": config.routing_mode,
+            "dropout_rate": config.dropout_rate,
+        }
+        from_variant_kwargs.update(config.arch_overrides)
+        if config.arch_overrides:
+            logger.info(
+                f"Variant '{config.variant}' with CLI overrides: "
+                f"{config.arch_overrides}"
+            )
         model = CliffordNetLMRouting.from_variant(
-            config.variant,
-            vocab_size=config.vocab_size,
-            max_seq_length=config.max_seq_length,
-            routing_mode=config.routing_mode,
-            dropout_rate=config.dropout_rate,
+            config.variant, **from_variant_kwargs,
         )
     else:
         # Custom variant
@@ -558,7 +668,13 @@ def load_train_val_datasets(
     config: TrainingConfig,
     preprocessor,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
-    """Load, preprocess, and wrap train/val datasets for dict-output model."""
+    """Load, preprocess, and wrap train/val datasets for dict-output model.
+
+    The training dataset is `.repeat()`'d so multi-epoch runs and explicit
+    ``steps_per_epoch`` arithmetic work — required for streaming HF data
+    and consistent for TFDS. Validation dataset is NOT repeated; it must
+    terminate so val metrics are computed once per epoch.
+    """
     if config.dataset_source == "tfds":
         train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
     elif config.dataset_source == "huggingface":
@@ -569,14 +685,14 @@ def load_train_val_datasets(
             f"Use 'tfds' or 'huggingface'."
         )
 
-    # Wrap labels for dict-output model: (x, y) -> (x, {"logits": y})
-    # Note: dict key remains "logits" even though values are probabilities;
-    # see DECISION D-001 in lm_routing.py.
-    wrap = lambda ds: ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    return wrap(train_ds), wrap(val_ds)
+    def _wrap_with_dict_label(ds: tf.data.Dataset) -> tf.data.Dataset:
+        return ds.map(
+            lambda x, y: (x, {"logits": y}),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+    train_ds = _wrap_with_dict_label(train_ds).repeat()
+    val_ds = _wrap_with_dict_label(val_ds)
+    return train_ds, val_ds
 
 
 def _load_tfds_datasets(config, preprocessor):
@@ -646,12 +762,26 @@ def compile_model(
 
 
 def _estimate_steps_per_epoch(config: TrainingConfig) -> int:
-    """Estimate steps per epoch for LR schedule."""
+    """Estimate steps per epoch for LR schedule.
+
+    The HF Wikipedia path packs documents into chunks of ``max_seq_length``
+    tokens, so the number of training steps is ~(total_tokens //
+    max_seq_length // batch_size), not ``num_articles // batch_size``.
+    Average article length after the ``min_article_length=500`` filter is
+    ~600 tokens, so we use that as a back-of-envelope multiplier. Users
+    should pass ``--steps-per-epoch`` explicitly for production runs.
+    """
+    if config.steps_per_epoch is not None:
+        return max(1, int(config.steps_per_epoch))
     if config.dataset_source == "tfds" and config.max_samples:
         return max(1, config.max_samples // config.batch_size)
     if config.max_train_samples:
-        return config.max_train_samples // config.batch_size
-    return 4_850_000 // config.batch_size
+        # Articles -> tokens (~600/article) -> chunks -> batches.
+        chunks = (config.max_train_samples * 600) // max(1, config.max_seq_length)
+        return max(1, chunks // config.batch_size)
+    # Full Wikipedia fallback: 4.85M articles * ~600 tokens.
+    chunks = (4_850_000 * 600) // max(1, config.max_seq_length)
+    return max(1, chunks // config.batch_size)
 
 
 def train_cliffordnet_nlp_routing(
@@ -683,34 +813,59 @@ def train_cliffordnet_nlp_routing(
 
     if config.resume_from:
         model, initial_step = load_model_from_checkpoint(config.resume_from)
+        # Skip recompile so optimizer slots, iteration counter, and the
+        # warmup+cosine LR schedule are all preserved. Older checkpoints
+        # saved without optimizer state load uncompiled — fall back to
+        # recompile and warn that LR/optimizer state is reset.
+        if getattr(model, "optimizer", None) is None:
+            logger.warning(
+                "Checkpoint loaded without compiled optimizer — "
+                "recompiling. Optimizer state and LR schedule will reset."
+            )
+            compile_model(model, config, steps_per_epoch)
+        else:
+            logger.info(
+                "Resumed model arrived compiled; preserving optimizer "
+                "state and LR schedule."
+            )
     else:
         model = create_model(config)
+        compile_model(model, config, steps_per_epoch)
 
-    compile_model(model, config, steps_per_epoch)
+    initial_epoch = initial_step // steps_per_epoch if steps_per_epoch > 0 else 0
 
     variant_label = config.variant
     if config.variant == "custom":
         variant_label = f"c{config.channels}d{config.depth}"
 
+    # create_nlp_callbacks defaults: monitor='val_loss', patience=15.
+    # 1-3 epoch runs effectively never trigger EarlyStopping — accepted.
     callbacks, results_dir = create_nlp_callbacks(
         model_name=f"CliffordNetLMRouting-{variant_label}-{config.routing_mode}",
         results_dir_prefix="cliffordnet_nlp_routing",
         include_analyzer=False,
     )
+    # Strip the default per-epoch CSVLogger; StepCheckpointCallback writes
+    # both per-step and per-epoch (with val metrics) into a single CSV.
     callbacks = [
         cb for cb in callbacks
         if not isinstance(cb, keras.callbacks.CSVLogger)
     ]
+
+    step_counter = StepCounter(initial_step=initial_step)
+    callbacks.insert(0, step_counter)  # must increment before consumers run
+
     callbacks.append(StepCheckpointCallback(
         save_dir=results_dir,
+        step_counter=step_counter,
         save_every_steps=config.checkpoint_every_steps,
         analyze_every_steps=config.analyze_every_steps,
         max_checkpoints=config.max_checkpoints,
         model_name=f"CliffordNetLMRouting-{variant_label}-{config.routing_mode}",
-        initial_step=initial_step,
     ))
 
     callbacks.append(GenerationProbeCallback(
+        step_counter=step_counter,
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
         encoding_name=config.encoding_name,
@@ -718,20 +873,24 @@ def train_cliffordnet_nlp_routing(
         temperature=config.probe_temperature,
         top_p=config.probe_top_p,
         repetition_penalty=config.probe_repetition_penalty,
+        pad_token_id=config.pad_token_id,
         ctx_length=config.max_seq_length - 1,
         save_dir=results_dir,
-        initial_step=initial_step,
+        seed=config.probe_seed,
     ))
 
     logger.info(
         f"Starting training: source={config.dataset_source}, "
-        f"steps_per_epoch~={steps_per_epoch:,}, "
+        f"steps_per_epoch={steps_per_epoch:,}, "
+        f"initial_epoch={initial_epoch}, initial_step={initial_step:,}, "
         f"batch_size={config.batch_size}, "
         f"routing_mode={config.routing_mode}"
     )
     history = model.fit(
         train_dataset,
         epochs=config.num_epochs,
+        initial_epoch=initial_epoch,
+        steps_per_epoch=steps_per_epoch,
         callbacks=callbacks,
         validation_data=val_dataset,
         verbose=1,
@@ -741,7 +900,7 @@ def train_cliffordnet_nlp_routing(
     generate_training_curves(history, results_dir)
 
     if "val_loss" in history.history:
-        best_epoch = tf.argmin(history.history["val_loss"]).numpy()
+        best_epoch = int(np.argmin(history.history["val_loss"]))
         logger.info(
             f"Best epoch: {best_epoch + 1} "
             f"(val_loss: {history.history['val_loss'][best_epoch]:.4f})"
@@ -768,19 +927,24 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=list(CliffordNetLMRouting.MODEL_VARIANTS.keys()) + ["custom"],
         help="Model variant (nano/mini/base/large/xl/custom)",
     )
-    p.add_argument("--channels", type=int, default=128)
-    p.add_argument("--depth", type=int, default=12)
-    p.add_argument("--shifts", type=str, default="1,2")
+    # Architecture-shaping args default to None so we can tell whether the
+    # user explicitly passed them. When non-None, they override the named
+    # variant's default; when None, the variant default wins. For
+    # --variant custom they fall back to TrainingConfig dataclass defaults.
+    p.add_argument("--channels", type=int, default=None)
+    p.add_argument("--depth", type=int, default=None)
+    p.add_argument("--shifts", type=str, default=None,
+                    help="Comma-separated ints, e.g. '1,2,4'")
     p.add_argument(
-        "--cli-mode", type=str, default="full",
+        "--cli-mode", type=str, default=None,
         choices=["inner", "wedge", "full"],
     )
     p.add_argument(
-        "--ctx-mode", type=str, default="diff",
+        "--ctx-mode", type=str, default=None,
         choices=["diff", "abs"],
     )
-    p.add_argument("--use-global-context", action="store_true")
-    p.add_argument("--stochastic-depth-rate", type=float, default=0.1)
+    p.add_argument("--use-global-context", action="store_true", default=None)
+    p.add_argument("--stochastic-depth-rate", type=float, default=None)
 
     # Routing head
     p.add_argument(
@@ -817,8 +981,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--val-fraction", type=float, default=0.02)
 
     p.add_argument("--checkpoint-every-steps", type=int, default=25000)
-    p.add_argument("--analyze-every-steps", type=int, default=50000)
+    p.add_argument("--analyze-every-steps", type=int, default=0,
+                    help="0 (default) disables blocking spectral analysis")
     p.add_argument("--max-checkpoints", type=int, default=3)
+    p.add_argument("--steps-per-epoch", type=int, default=None,
+                    help="Override LR-schedule horizon. Required for "
+                         "streaming HF data to get correct cosine decay.")
+    p.add_argument("--probe-seed", type=int, default=42)
 
     p.add_argument(
         "--resume", type=str, default=None,
@@ -832,16 +1001,40 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
-    shifts = [int(s) for s in args.shifts.split(",")]
+    # Build arch_overrides only from explicitly-set CLI args (non-None).
+    # These are forwarded to from_variant() for named variants.
+    arch_overrides: Dict[str, Any] = {}
+    if args.channels is not None:
+        arch_overrides["channels"] = args.channels
+    if args.depth is not None:
+        arch_overrides["depth"] = args.depth
+    if args.shifts is not None:
+        arch_overrides["shifts"] = [int(s) for s in args.shifts.split(",")]
+    if args.cli_mode is not None:
+        arch_overrides["cli_mode"] = args.cli_mode
+    if args.ctx_mode is not None:
+        arch_overrides["ctx_mode"] = args.ctx_mode
+    if args.use_global_context is not None:
+        arch_overrides["use_global_context"] = args.use_global_context
+    if args.stochastic_depth_rate is not None:
+        arch_overrides["stochastic_depth_rate"] = args.stochastic_depth_rate
+
+    # For TrainingConfig dataclass fields (used by --variant custom and for
+    # logging), use overrides where present, otherwise the dataclass defaults.
+    custom_defaults = TrainingConfig()
     return TrainingConfig(
         variant=args.variant,
-        channels=args.channels,
-        depth=args.depth,
-        shifts=shifts,
-        cli_mode=args.cli_mode,
-        ctx_mode=args.ctx_mode,
-        use_global_context=args.use_global_context,
-        stochastic_depth_rate=args.stochastic_depth_rate,
+        channels=arch_overrides.get("channels", custom_defaults.channels),
+        depth=arch_overrides.get("depth", custom_defaults.depth),
+        shifts=arch_overrides.get("shifts", custom_defaults.shifts),
+        cli_mode=arch_overrides.get("cli_mode", custom_defaults.cli_mode),
+        ctx_mode=arch_overrides.get("ctx_mode", custom_defaults.ctx_mode),
+        use_global_context=arch_overrides.get(
+            "use_global_context", custom_defaults.use_global_context,
+        ),
+        stochastic_depth_rate=arch_overrides.get(
+            "stochastic_depth_rate", custom_defaults.stochastic_depth_rate,
+        ),
         dropout_rate=args.dropout_rate,
         routing_mode=args.routing_mode,
         num_epochs=args.epochs,
@@ -860,8 +1053,11 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         checkpoint_every_steps=args.checkpoint_every_steps,
         analyze_every_steps=args.analyze_every_steps,
         max_checkpoints=args.max_checkpoints,
+        steps_per_epoch=args.steps_per_epoch,
         resume_from=args.resume,
         save_dir=args.save_dir,
+        arch_overrides=arch_overrides,
+        probe_seed=args.probe_seed,
     )
 
 
