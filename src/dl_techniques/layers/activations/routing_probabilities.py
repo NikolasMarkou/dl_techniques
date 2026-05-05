@@ -374,19 +374,25 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             )
 
         if mode == "trainable":
-            if not isinstance(output_dim, (int, np.integer)) or output_dim <= 1:
+            # H-2: reject bool — ``isinstance(True, int)`` is True in Python,
+            # so the int check alone admits ``output_dim=True`` silently.
+            if (not isinstance(output_dim, (int, np.integer))
+                    or isinstance(output_dim, bool)
+                    or output_dim <= 1):
                 raise ValueError(
                     f"In 'trainable' mode, 'output_dim' must be an integer "
-                    f"greater than 1, but received: {output_dim}"
+                    f"greater than 1, but received: {output_dim!r}"
                 )
             output_dim = int(output_dim)
         else:  # deterministic
             if output_dim is not None:
+                # H-2: reject bool (see above).
                 if (not isinstance(output_dim, (int, np.integer))
+                        or isinstance(output_dim, bool)
                         or output_dim <= 1):
                     raise ValueError(
                         f"The 'output_dim' must be an integer greater than 1, "
-                        f"but received: {output_dim}"
+                        f"but received: {output_dim!r}"
                     )
                 output_dim = int(output_dim)
 

@@ -1088,5 +1088,26 @@ class TestComputeOutputShapeRankMismatch:
         assert out_shape == (None, 4, 8)
 
 
+# ==============================================================================
+# Validation regression — H-2
+# ==============================================================================
+
+
+class TestOutputDimValidation:
+    """H-2: ``isinstance(True, int)`` is True; ensure bool is rejected."""
+
+    def test_output_dim_true_rejected_trainable(self) -> None:
+        with pytest.raises(ValueError, match="output_dim"):
+            RoutingProbabilitiesLayer(output_dim=True, mode="trainable")
+
+    def test_output_dim_false_rejected_trainable(self) -> None:
+        with pytest.raises(ValueError, match="output_dim"):
+            RoutingProbabilitiesLayer(output_dim=False, mode="trainable")
+
+    def test_output_dim_true_rejected_deterministic(self) -> None:
+        with pytest.raises(ValueError, match="output_dim"):
+            RoutingProbabilitiesLayer(output_dim=True, mode="deterministic")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
