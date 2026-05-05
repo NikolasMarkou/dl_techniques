@@ -1264,6 +1264,12 @@ class CliffordNetBlockDS(keras.layers.Layer):
             raise ValueError(
                 f"skip_pool must be 'avg' or 'max', got {skip_pool!r}"
             )
+        # See D-002: global branch uses shifts=[1, 2].
+        if use_global_context and channels < 2:
+            raise ValueError(
+                f"use_global_context=True requires channels >= 2 "
+                f"(global branch uses shifts=[1, 2]); got channels={channels}"
+            )
 
         self.channels = channels
         self.shifts = list(shifts)
@@ -1302,8 +1308,10 @@ class CliffordNetBlockDS(keras.layers.Layer):
         )
 
         # --- Step 2b: Context stream — single (kernel_size x kernel_size) DW conv with optional stride ---
-        # When ``use_ctx_bn`` is False the conv carries a learnable bias to
-        # restore the affine degree of freedom that BN would have provided.
+        # When ``use_ctx_bn`` is False the conv carries a learnable bias.
+        # Note: a conv bias only restores the SHIFT half of BN's affine
+        # transform, not the per-channel SCALE. If a calibrated scale is
+        # needed without BN, use a LayerScale layer in addition.
         self.dw_conv = keras.layers.DepthwiseConv2D(
             kernel_size=kernel_size,
             strides=strides,
@@ -1410,6 +1418,12 @@ class CliffordNetBlockDS(keras.layers.Layer):
         :param input_shape: ``(B, H, W, D)``
         :type input_shape: Tuple
         """
+        # B7: isotropic in channels (see CliffordNetBlock.build).
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"CliffordNetBlockDS is isotropic: expected last dim == "
+                f"channels={self.channels}, got input_shape[-1]={input_shape[-1]}."
+            )
         # Step 1: norm operates on full-resolution input
         self.input_norm.build(input_shape)
 
@@ -1492,8 +1506,9 @@ class CliffordNetBlockDS(keras.layers.Layer):
 
         # --- Step 4: Optional global context branch ---
         if self.global_geo_prod is not None:
+            # Drop redundant broadcast_to; subtraction broadcasts (B,1,1,D)
+            # against (B,H,W,D) without materialising the full tensor.
             c_glo = keras.ops.mean(x_norm_p, axis=[1, 2], keepdims=True)
-            c_glo = keras.ops.broadcast_to(c_glo, keras.ops.shape(z_det))
             c_glo = c_glo - z_det
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
