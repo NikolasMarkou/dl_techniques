@@ -117,6 +117,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 
 def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]:
@@ -142,14 +143,6 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 _LN_EPS: float = 1e-6
-
-
-def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
-    """Linearly spaced drop-path rates from 0 to ``max_rate``."""
-    if num_blocks <= 1:
-        return [0.0] * num_blocks
-    step = max_rate / (num_blocks - 1)
-    return [round(i * step, 6) for i in range(num_blocks)]
 
 
 @keras.saving.register_keras_serializable()
@@ -782,7 +775,7 @@ class CliffordCLIP(keras.Model):
         # --- Staged CliffordNet blocks + PatchMerging downsamples ---
         # Global linear DropPath schedule across the *total* depth.
         total_depth = sum(self.vision_stage_depths)
-        global_drop_rates = _linear_drop_path_rates(
+        global_drop_rates = linear_drop_path_rates(
             total_depth, self.vision_stochastic_depth_rate
         )
 
@@ -898,7 +891,7 @@ class CliffordCLIP(keras.Model):
             self.dropout_rate, name="text_embed_dropout"
         )
 
-        text_drop_rates = _linear_drop_path_rates(
+        text_drop_rates = linear_drop_path_rates(
             self.text_depth, self.text_stochastic_depth_rate
         )
         _t_block_kw: Dict[str, Any] = dict(

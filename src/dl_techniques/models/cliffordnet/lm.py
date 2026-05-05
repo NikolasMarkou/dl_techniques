@@ -46,6 +46,7 @@ from keras import initializers, regularizers
 from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.geometric.clifford_block import (
     CliMode,
     CtxMode,
@@ -55,14 +56,6 @@ from dl_techniques.layers.geometric.clifford_block import (
 # ---------------------------------------------------------------------------
 
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
-
-
-def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
-    """Linearly spaced drop-path rates from 0 to ``max_rate``."""
-    if num_blocks <= 1:
-        return [0.0] * num_blocks
-    step = max_rate / (num_blocks - 1)
-    return [round(i * step, 6) for i in range(num_blocks)]
 
 
 @keras.saving.register_keras_serializable()
@@ -222,7 +215,7 @@ class CliffordNetLM(keras.Model):
         )
 
         # --- CliffordNet blocks ---
-        drop_rates = _linear_drop_path_rates(depth, stochastic_depth_rate)
+        drop_rates = linear_drop_path_rates(depth, stochastic_depth_rate)
         _block_kw: Dict[str, Any] = dict(
             channels=channels,
             shifts=self.shifts,

@@ -44,6 +44,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 # Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -52,19 +53,6 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 # ---------------------------------------------------------------------------
 # Helper: stochastic-depth rate schedule
 # ---------------------------------------------------------------------------
-
-
-def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
-    """Return linearly spaced drop-path rates from 0 to ``max_rate``.
-
-    :param num_blocks: Total number of blocks.
-    :param max_rate: Maximum (last-block) drop probability.
-    :return: List of per-block drop-path rates.
-    """
-    if num_blocks <= 1:
-        return [0.0] * num_blocks
-    step = max_rate / (num_blocks - 1)
-    return [round(i * step, 6) for i in range(num_blocks)]
 
 
 # ===========================================================================
@@ -266,7 +254,7 @@ class CliffordNet(keras.Model):
 
     def _build_blocks(self) -> None:
         """Build and assign the CliffordNet block list with linear drop-path schedule."""
-        drop_rates = _linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
+        drop_rates = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         _block_kw: Dict[str, Any] = dict(
             channels=self.channels,

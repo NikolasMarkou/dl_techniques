@@ -71,10 +71,11 @@ from dl_techniques.layers.geometric.clifford_block import (
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 
+from dl_techniques.utils.drop_path import linear_drop_path_rates
+
 from .conditional_denoiser import (
     BiasFreeConditionedCliffordBlock,
     BiasFreeConditionedGGR,
-    _linear_drop_path_rates,
     _DEFAULT_KERNEL_INIT,
 )
 
@@ -610,7 +611,7 @@ class CliffordNetConfidenceDenoiser(keras.Model):
     def _build_encoder(self) -> None:
         """Build encoder levels with conditioned CliffordNet blocks."""
         total_blocks = sum(self.level_blocks)
-        drop_rates = _linear_drop_path_rates(
+        drop_rates = linear_drop_path_rates(
             total_blocks, self.stochastic_depth_rate
         )
 

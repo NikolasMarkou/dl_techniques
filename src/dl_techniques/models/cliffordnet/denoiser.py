@@ -41,6 +41,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 # Match CliffordNet reference: trunc_normal_(std=0.02)
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -49,14 +50,6 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
-
-
-def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
-    """Linearly spaced drop-path rates from 0 to *max_rate*."""
-    if num_blocks <= 1:
-        return [0.0] * num_blocks
-    step = max_rate / (num_blocks - 1)
-    return [round(i * step, 6) for i in range(num_blocks)]
 
 
 # ===========================================================================
@@ -456,7 +449,7 @@ class CliffordNetDenoiser(keras.Model):
 
     def _build_blocks(self) -> None:
         """Build L bias-free CliffordNet blocks with linear drop-path."""
-        drop_rates = _linear_drop_path_rates(
+        drop_rates = linear_drop_path_rates(
             self.depth, self.stochastic_depth_rate
         )
         self.blocks_list: List[BiasFreeClifordNetBlock] = []

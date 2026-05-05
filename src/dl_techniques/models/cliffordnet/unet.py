@@ -49,6 +49,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 # ---------------------------------------------------------------------------
 # Constants / types
@@ -64,14 +65,6 @@ _DETECTION_HEAD_TYPES: Tuple[str, ...] = ("detection",)
 
 # Match CliffordNet reference: trunc_normal_(std=0.02)
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
-
-
-def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
-    """Linearly spaced drop-path rates from 0 to *max_rate*."""
-    if num_blocks <= 1:
-        return [0.0] * num_blocks
-    step = max_rate / (num_blocks - 1)
-    return [round(i * step, 6) for i in range(num_blocks)]
 
 
 # ===========================================================================
@@ -581,7 +574,7 @@ class CliffordNetUNet(keras.Model):
 
     def _build_encoder(self) -> None:
         total_blocks = sum(self.level_blocks)
-        drop_rates = _linear_drop_path_rates(total_blocks, self.stochastic_depth_rate)
+        drop_rates = linear_drop_path_rates(total_blocks, self.stochastic_depth_rate)
 
         self.encoder_levels: List[Dict[str, Any]] = []
         block_idx = 0
