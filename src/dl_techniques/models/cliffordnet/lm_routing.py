@@ -63,12 +63,18 @@ from dl_techniques.layers.geometric.clifford_block import (
 from dl_techniques.layers.activations.routing_probabilities import (
     RoutingProbabilitiesLayer,
 )
+from dl_techniques.layers.embedding.hierarchical_codebook_embedding import (
+    HierarchicalCodebookEmbedding,
+)
 
 # ---------------------------------------------------------------------------
 
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 
 _VALID_ROUTING_MODES = ("trainable", "deterministic")
+
+# Token embedding strategies. See ``_build_token_embedding`` for descriptions.
+_VALID_INPUT_EMBEDDINGS = ("hce", "dense", "albert")
 
 
 def _linear_drop_path_rates(num_blocks: int, max_rate: float) -> List[float]:
@@ -203,6 +209,10 @@ class CliffordNetLMRouting(keras.Model):
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
         routing_mode: str = "trainable",
+        input_embedding: str = "hce",
+        embedding_bottleneck_dim: Optional[int] = None,
+        hce_num_chunks: int = 2,
+        hce_chunk_bits: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -211,6 +221,11 @@ class CliffordNetLMRouting(keras.Model):
             raise ValueError(
                 f"routing_mode must be one of {_VALID_ROUTING_MODES}, "
                 f"got: {routing_mode!r}"
+            )
+        if input_embedding not in _VALID_INPUT_EMBEDDINGS:
+            raise ValueError(
+                f"input_embedding must be one of {_VALID_INPUT_EMBEDDINGS}, "
+                f"got: {input_embedding!r}"
             )
 
         self.vocab_size = vocab_size
@@ -230,11 +245,33 @@ class CliffordNetLMRouting(keras.Model):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
         self.routing_mode = routing_mode
+        self.input_embedding = input_embedding
+        self.embedding_bottleneck_dim = embedding_bottleneck_dim
+        self.hce_num_chunks = hce_num_chunks
+        self.hce_chunk_bits = hce_chunk_bits
 
         # --- Embeddings ---
-        self.token_embedding = keras.layers.Embedding(
-            vocab_size, channels, name="token_embedding",
-        )
+        # Token embedding strategy. The token embedding is the single
+        # largest parameter sink (vocab * channels) at typical LM scales,
+        # so we expose three strategies:
+        #
+        # - "hce" (default): HierarchicalCodebookEmbedding. Additive
+        #   sum of K small codebooks indexed by chunks of the token
+        #   ID's bit pattern. Gives ~100x parameter reduction at K=2,
+        #   M=2^8=256 for 50K vocab. Embedding manifold is restricted
+        #   (Minkowski sum of K finite codebook sets); pairs naturally
+        #   with a Huffman/spectral vocab permutation.
+        # - "albert": Embedding(vocab, k) -> Dense(channels). ALBERT-
+        #   style factorization. Full-rank per-token embedding manifold;
+        #   compression ~ channels / k.
+        # - "dense": standard keras.layers.Embedding (legacy default).
+        #   No compression. Use as baseline.
+        #
+        # All three return tensors of shape (B, seq, channels), so
+        # downstream layers are unaffected. HCE's internal LayerNorm
+        # is disabled here because the model already applies
+        # ``embed_norm`` LayerNorm after the token+position sum.
+        self.token_embedding = self._build_token_embedding()
         self.position_embedding = keras.layers.Embedding(
             max_seq_length, channels, name="position_embedding",
         )
@@ -306,6 +343,46 @@ class CliffordNetLMRouting(keras.Model):
             f"routing_mode={routing_mode})"
         )
 
+    def _build_token_embedding(self) -> keras.layers.Layer:
+        """Construct the token embedding sub-layer per ``input_embedding``."""
+        if self.input_embedding == "hce":
+            return HierarchicalCodebookEmbedding(
+                vocab_size=self.vocab_size,
+                output_dim=self.channels,
+                num_chunks=self.hce_num_chunks,
+                chunk_bits=self.hce_chunk_bits,
+                # Disabled: ``embed_norm`` LN is applied right after the
+                # token+position sum, so an internal LN here would be
+                # redundant.
+                use_layer_norm=False,
+                embeddings_initializer=self.kernel_initializer,
+                name="token_embedding_hce",
+            )
+        if self.input_embedding == "albert":
+            # ALBERT-style factorized embedding:
+            # Embedding(vocab, k) -> Dense(channels). Default k =
+            # min(channels // 2, 128), giving at least 2x compression at
+            # all variant scales.
+            k = (
+                self.embedding_bottleneck_dim
+                if self.embedding_bottleneck_dim is not None
+                else max(8, min(self.channels // 2, 128))
+            )
+            return _AlbertFactorizedEmbedding(
+                vocab_size=self.vocab_size,
+                bottleneck_dim=k,
+                output_dim=self.channels,
+                embeddings_initializer=self.kernel_initializer,
+                name="token_embedding_albert",
+            )
+        # "dense" — original behavior.
+        return keras.layers.Embedding(
+            self.vocab_size,
+            self.channels,
+            embeddings_initializer=self.kernel_initializer,
+            name="token_embedding",
+        )
+
     def call(
         self,
         input_ids: keras.KerasTensor,
@@ -375,6 +452,10 @@ class CliffordNetLMRouting(keras.Model):
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
             "routing_mode": self.routing_mode,
+            "input_embedding": self.input_embedding,
+            "embedding_bottleneck_dim": self.embedding_bottleneck_dim,
+            "hce_num_chunks": self.hce_num_chunks,
+            "hce_chunk_bits": self.hce_chunk_bits,
         })
         return config
 
@@ -424,3 +505,102 @@ class CliffordNetLMRouting(keras.Model):
             routing_mode=routing_mode,
             **defaults,
         )
+
+
+# ---------------------------------------------------------------------------
+# ALBERT-style factorized token embedding
+# ---------------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class _AlbertFactorizedEmbedding(keras.layers.Layer):
+    """ALBERT-style factorized embedding: ``Embedding(vocab, k) @ W``.
+
+    Used internally by :class:`CliffordNetLMRouting` when
+    ``input_embedding="albert"``. Reduces token-embedding parameter count
+    from ``vocab * channels`` to ``vocab * k + k * channels``. Each
+    token's embedding can independently occupy any direction in the
+    k-dim subspace projected to channels — full rank per token, unlike
+    HCE's restricted Minkowski-sum manifold.
+
+    Reference:
+        Lan, Z., et al. (2019). ALBERT: A Lite BERT for Self-supervised
+        Learning of Language Representations. arXiv:1909.11942.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        bottleneck_dim: int,
+        output_dim: int,
+        embeddings_initializer: Any = "uniform",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        if vocab_size <= 1:
+            raise ValueError(f"vocab_size must be > 1, got {vocab_size}")
+        if bottleneck_dim <= 0 or output_dim <= 0:
+            raise ValueError(
+                f"bottleneck_dim and output_dim must be positive, "
+                f"got {bottleneck_dim}, {output_dim}"
+            )
+        self.vocab_size = vocab_size
+        self.bottleneck_dim = bottleneck_dim
+        self.output_dim = output_dim
+        self.embeddings_initializer = initializers.get(embeddings_initializer)
+
+        self.inner_embedding = keras.layers.Embedding(
+            vocab_size,
+            bottleneck_dim,
+            embeddings_initializer=self.embeddings_initializer,
+            name="inner",
+        )
+        self.proj = keras.layers.Dense(
+            output_dim,
+            use_bias=False,
+            kernel_initializer=self.embeddings_initializer,
+            name="proj",
+        )
+
+        n_params = vocab_size * bottleneck_dim + bottleneck_dim * output_dim
+        n_dense = vocab_size * output_dim
+        logger.info(
+            f"_AlbertFactorizedEmbedding(vocab={vocab_size}, "
+            f"k={bottleneck_dim}, D={output_dim}): {n_params:,} params "
+            f"(~{n_dense / max(1, n_params):.1f}x smaller than "
+            f"Embedding({vocab_size},{output_dim})={n_dense:,} params)"
+        )
+
+    def call(
+        self, inputs: keras.KerasTensor, training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        return self.proj(self.inner_embedding(inputs))
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...],
+    ) -> Tuple[Optional[int], ...]:
+        return tuple(input_shape) + (self.output_dim,)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "vocab_size": self.vocab_size,
+            "bottleneck_dim": self.bottleneck_dim,
+            "output_dim": self.output_dim,
+            "embeddings_initializer": initializers.serialize(
+                self.embeddings_initializer,
+            ),
+        })
+        return config
+
+    @classmethod
+    def from_config(
+        cls, config: Dict[str, Any],
+    ) -> "_AlbertFactorizedEmbedding":
+        if config.get("embeddings_initializer") and isinstance(
+            config["embeddings_initializer"], dict,
+        ):
+            config["embeddings_initializer"] = initializers.deserialize(
+                config["embeddings_initializer"],
+            )
+        return cls(**config)

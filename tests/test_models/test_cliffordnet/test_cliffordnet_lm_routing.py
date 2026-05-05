@@ -276,3 +276,102 @@ class TestCliffordNetLMRoutingRealisticVocab:
         # Confirm padded_output_dim was set as expected
         assert model.output_routing.padded_output_dim == 65536
         assert model.output_routing.num_decisions == 16
+
+
+# ---------------------------------------------------------------------
+# Input-embedding mode tests
+# ---------------------------------------------------------------------
+
+
+class TestCliffordNetLMRoutingInputEmbeddings:
+    """Coverage for input_embedding={hce,albert,dense}.
+
+    HCE is the default — verifies the new wiring doesn't break forward
+    pass, gradient flow, save/load, and parameter-count expectations.
+    """
+
+    @pytest.mark.parametrize("mode", ["hce", "albert", "dense"])
+    def test_forward_per_mode(self, tiny_config, mode):
+        model = CliffordNetLMRouting(
+            input_embedding=mode, routing_mode="trainable", **tiny_config,
+        )
+        ids = _random_ids((2, 16), tiny_config["vocab_size"])
+        out = model(ids, training=False)
+        assert out["logits"].shape == (2, 16, tiny_config["vocab_size"])
+
+    def test_default_is_hce(self, tiny_config):
+        model = CliffordNetLMRouting(
+            routing_mode="trainable", **tiny_config,
+        )
+        assert model.input_embedding == "hce"
+        # token_embedding sub-layer name reflects HCE choice.
+        assert model.token_embedding.name == "token_embedding_hce"
+
+    def test_hce_compresses_at_realistic_vocab(self):
+        """At vocab=50261, D=128, K=2: HCE total params << dense baseline."""
+        common = dict(
+            max_seq_length=16, channels=128, depth=2, shifts=[1, 2],
+            dropout_rate=0.0, stochastic_depth_rate=0.0,
+            routing_mode="trainable",
+        )
+        ids = _random_ids((1, 8), 50261)
+        m_dense = CliffordNetLMRouting(
+            vocab_size=50261, input_embedding="dense", **common,
+        )
+        m_dense(ids)
+        m_hce = CliffordNetLMRouting(
+            vocab_size=50261, input_embedding="hce", **common,
+        )
+        m_hce(ids)
+        # HCE model should be at least 10x smaller overall (embedding
+        # dominates at small depth/channels).
+        assert m_hce.count_params() * 10 < m_dense.count_params(), (
+            f"hce={m_hce.count_params():,} vs dense={m_dense.count_params():,}"
+        )
+
+    def test_albert_default_bottleneck_compresses(self):
+        """ALBERT with default k = max(8, min(channels//2, 128)) compresses."""
+        common = dict(
+            vocab_size=50261, max_seq_length=16, channels=128, depth=2,
+            shifts=[1, 2], dropout_rate=0.0, stochastic_depth_rate=0.0,
+            routing_mode="trainable",
+        )
+        ids = _random_ids((1, 8), 50261)
+        m_albert = CliffordNetLMRouting(input_embedding="albert", **common)
+        m_albert(ids)
+        m_dense = CliffordNetLMRouting(input_embedding="dense", **common)
+        m_dense(ids)
+        assert m_albert.count_params() < m_dense.count_params()
+
+    @pytest.mark.parametrize("mode", ["hce", "albert", "dense"])
+    def test_serialization_roundtrip(self, tiny_config, mode, tmp_path):
+        model = CliffordNetLMRouting(
+            input_embedding=mode, routing_mode="trainable", **tiny_config,
+        )
+        ids = _random_ids((1, 8), tiny_config["vocab_size"])
+        model(ids)  # build
+        original = keras.ops.convert_to_numpy(model(ids)["logits"])
+
+        path = str(tmp_path / f"lmrouting_{mode}.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        loaded_out = keras.ops.convert_to_numpy(loaded(ids)["logits"])
+        np.testing.assert_allclose(original, loaded_out, atol=1e-5)
+        assert loaded.input_embedding == mode
+
+    @pytest.mark.parametrize("mode", ["hce", "albert", "dense"])
+    def test_gradient_flow_per_mode(self, tiny_config, mode):
+        model = CliffordNetLMRouting(
+            input_embedding=mode, routing_mode="trainable", **tiny_config,
+        )
+        ids = tf.constant(_random_ids((1, 8), tiny_config["vocab_size"]))
+        with tf.GradientTape() as tape:
+            out = model(ids, training=True)
+            loss = tf.reduce_mean(out["logits"])
+        grads = tape.gradient(loss, model.trainable_variables)
+        # All trainable vars receive non-None gradients.
+        assert all(g is not None for g in grads)
+
+    def test_invalid_input_embedding_raises(self, tiny_config):
+        with pytest.raises(ValueError, match="input_embedding"):
+            CliffordNetLMRouting(input_embedding="garbage", **tiny_config)

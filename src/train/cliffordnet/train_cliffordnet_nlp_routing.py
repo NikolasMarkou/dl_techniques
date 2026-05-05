@@ -130,6 +130,12 @@ from dl_techniques.layers.geometric.clifford_block import (
 from dl_techniques.layers.activations.routing_probabilities import (
     RoutingProbabilitiesLayer,
 )
+from dl_techniques.layers.embedding.hierarchical_codebook_embedding import (
+    HierarchicalCodebookEmbedding,
+)
+from dl_techniques.models.cliffordnet.lm_routing import (
+    _AlbertFactorizedEmbedding,
+)
 from dl_techniques.models.cliffordnet import CliffordNetLMRouting
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
@@ -162,6 +168,15 @@ class TrainingConfig:
 
     # Routing head
     routing_mode: str = "trainable"
+
+    # Token (input) embedding strategy: "hce" (default, parameter-efficient
+    # additive codebook), "albert" (factorized inner-dim projection),
+    # "dense" (legacy keras.layers.Embedding). See lm_routing.py for the
+    # full design rationale and trade-offs.
+    input_embedding: str = "hce"
+    embedding_bottleneck_dim: Optional[int] = None  # ALBERT: k
+    hce_num_chunks: int = 2                          # HCE: K
+    hce_chunk_bits: Optional[int] = None             # HCE: log2(M); auto if None
 
     # Tokenizer (Tiktoken gpt2 encoding -- 50,257 base + 4 special)
     vocab_size: int = 50261
@@ -626,6 +641,8 @@ def load_model_from_checkpoint(
             "CliffordNetLMRouting": CliffordNetLMRouting,
             "CausalCliffordNetBlock": CausalCliffordNetBlock,
             "RoutingProbabilitiesLayer": RoutingProbabilitiesLayer,
+            "HierarchicalCodebookEmbedding": HierarchicalCodebookEmbedding,
+            "_AlbertFactorizedEmbedding": _AlbertFactorizedEmbedding,
             "MaskedCausalLMLoss": MaskedCausalLMLoss,
             "FocalCausalLMLoss": FocalCausalLMLoss,
         },
@@ -645,6 +662,13 @@ def create_model(config: TrainingConfig) -> CliffordNetLMRouting:
         f"(routing_mode={config.routing_mode})..."
     )
 
+    embedding_kwargs: Dict[str, Any] = {
+        "input_embedding": config.input_embedding,
+        "embedding_bottleneck_dim": config.embedding_bottleneck_dim,
+        "hce_num_chunks": config.hce_num_chunks,
+        "hce_chunk_bits": config.hce_chunk_bits,
+    }
+
     if config.variant in CliffordNetLMRouting.MODEL_VARIANTS:
         # Forward any user-specified architecture overrides (channels,
         # depth, shifts, cli_mode, ctx_mode, use_global_context,
@@ -654,6 +678,7 @@ def create_model(config: TrainingConfig) -> CliffordNetLMRouting:
             "max_seq_length": config.max_seq_length,
             "routing_mode": config.routing_mode,
             "dropout_rate": config.dropout_rate,
+            **embedding_kwargs,
         }
         from_variant_kwargs.update(config.arch_overrides)
         if config.arch_overrides:
@@ -679,6 +704,7 @@ def create_model(config: TrainingConfig) -> CliffordNetLMRouting:
             stochastic_depth_rate=config.stochastic_depth_rate,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
             routing_mode=config.routing_mode,
+            **embedding_kwargs,
         )
 
     # Build with dummy forward pass
@@ -1019,6 +1045,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Hierarchical routing layer mode",
     )
 
+    # Token (input) embedding
+    p.add_argument(
+        "--input-embedding", type=str, default="hce",
+        choices=["hce", "albert", "dense"],
+        help="Token embedding strategy. hce (default): additive multi-"
+             "codebook (~100x param compression). albert: factorized "
+             "Embedding(vocab,k)->Dense(D). dense: legacy keras Embedding.",
+    )
+    p.add_argument(
+        "--embedding-bottleneck-dim", type=int, default=None,
+        help="ALBERT bottleneck dim k. Default: max(8, min(channels//2, 128)).",
+    )
+    p.add_argument(
+        "--hce-num-chunks", type=int, default=2,
+        help="HCE number of codebooks (K).",
+    )
+    p.add_argument(
+        "--hce-chunk-bits", type=int, default=None,
+        help="HCE bits per chunk. Default: ceil(log2(vocab) / num_chunks).",
+    )
+
     # Training
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--batch-size", type=int, default=8)
@@ -1124,6 +1171,10 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         save_dir=args.save_dir,
         arch_overrides=arch_overrides,
         probe_seed=args.probe_seed,
+        input_embedding=args.input_embedding,
+        embedding_bottleneck_dim=args.embedding_bottleneck_dim,
+        hce_num_chunks=args.hce_num_chunks,
+        hce_chunk_bits=args.hce_chunk_bits,
     )
 
 
