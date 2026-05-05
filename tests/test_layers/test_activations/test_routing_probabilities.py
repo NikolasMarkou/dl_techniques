@@ -801,17 +801,21 @@ class TestRoutingProbabilitiesLayer:
 
     def test_4d_input_various_axes(self) -> None:
         """Test 4D input with routing on various axes."""
+        # output_dim=3 -> num_decisions=2; the smallest dim in ``shape`` is
+        # 2 (axis 0), which equals num_decisions and is the minimum the
+        # cosine-basis rank check accepts.
         shape = (2, 3, 4, 10)
+        output_dim = 3
 
         for axis in range(-4, 4):
-            layer = RoutingProbabilitiesLayer(output_dim=5, axis=axis)
+            layer = RoutingProbabilitiesLayer(output_dim=output_dim, axis=axis)
             inputs = tf.random.normal(shape)
             output = layer(inputs)
 
             # Calculate expected shape
             expected_shape = list(shape)
             normalized_axis = axis if axis >= 0 else len(shape) + axis
-            expected_shape[normalized_axis] = 5
+            expected_shape[normalized_axis] = output_dim
 
             assert output.shape == tuple(expected_shape), \
                 f"Failed for axis {axis}"

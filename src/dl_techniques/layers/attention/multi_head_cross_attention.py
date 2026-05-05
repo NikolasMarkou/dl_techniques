@@ -340,9 +340,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self.dropout_layer.build(attn_shape)
 
         # Hierarchical routing layer is built lazily on first call (the
-        # attention-weight shape depends on runtime kv_len, not build-time
-        # kv_shape). Serialization handled via the routing layer's own
-        # get_build_config / build_from_config.
+        # attention-weight last dim is kv_seq_len, which is known here only
+        # if kv_shape[1] is concrete and matches runtime — it often does not,
+        # since kv_len varies at runtime). Save/load of models that include
+        # routing as a child of MHA is therefore not supported via the
+        # standard config flow; use full model.save() with the model in a
+        # built state, or build the routing layer explicitly before save.
 
         # Build adaptive softmax layer if exists
         if self.adaptive_softmax is not None:

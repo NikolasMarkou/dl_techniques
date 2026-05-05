@@ -474,7 +474,11 @@ class TestRoutingProbabilitiesLayer:
         layer.build((None, 20))
 
         assert len(layer.trainable_variables) == 0, "Layer should have no trainable variables"
-        assert len(layer.non_trainable_variables) == 0, "Layer should have no non-trainable variables"
+        # The cosine basis is stored as a single non-trainable Keras weight
+        # (DECISION D-004 in routing_probabilities.py) so the layer survives
+        # being embedded inside a parent Model's compute_output_spec graph.
+        assert len(layer.non_trainable_variables) == 1, \
+            "Deterministic mode should have exactly one non-trainable weight (cosine basis)"
 
     # ==================== Comparison Tests ====================
 

@@ -33,6 +33,21 @@ Both modes share the same hierarchical probability tree:
 5. **Renormalization**: The accumulated mass at each of the ``padded_dim``
    leaves is sliced to ``output_dim`` and renormalized to sum to 1.0.
 
+Caveats:
+
+- **Class index ordering is load-bearing.** Class ``j`` is the ``j``-th leaf
+  in left-to-right tree traversal. In trainable mode the projection ``W`` can
+  permute classes to match an arbitrary semantic structure. In deterministic
+  mode the topology is fixed: classes whose indices are numerically adjacent
+  share long path prefixes; classes with distant indices share none.
+  Performance therefore depends on whether the class index space encodes
+  meaningful structure (e.g., language-model token IDs typically do not).
+
+- **Slice-then-renormalize biases gradients.** When ``output_dim <
+  padded_dim`` the discarded leaves carry probability mass that depends on
+  the decision logits non-uniformly. Renormalization fixes the sum but
+  couples otherwise-independent decisions in the gradient.
+
 References:
     - Zhang, Z., et al. (2024). "Softmax-free Large-scale Language Modeling".
       arXiv preprint arXiv:2402.01258.
@@ -42,6 +57,7 @@ References:
 
 import math
 import keras
+import numpy as np
 from keras import ops
 from typing import Optional, Tuple, Dict, Any, Union
 
@@ -58,8 +74,9 @@ from dl_techniques.utils.logger import logger
 # DECISION D-001: A single class with a `mode` flag is preferred over two
 # distinct classes or an inheritance hierarchy. This keeps the shared
 # axis-manipulation, tree-build, and slice/renormalize logic in one place.
-# Trainable-only kwargs are accepted but ignored in deterministic mode so
-# that get_config / from_config round-trip is symmetric.
+# Trainable-only kwargs are accepted in deterministic mode for config
+# round-trip symmetry, but a warning is logged if any non-default
+# trainable-only kwarg is supplied to a deterministic-mode layer.
 @keras.saving.register_keras_serializable()
 class RoutingProbabilitiesLayer(keras.layers.Layer):
     """
@@ -131,26 +148,42 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     :type output_dim: Optional[int]
     :param axis: Axis along which the routing is applied. Defaults to -1.
     :type axis: int
-    :param epsilon: Small float added for numerical stability.
+    :param epsilon: Small float for sigmoid clipping (probabilities are
+        clipped into ``[epsilon, 1 - epsilon]``).
     :type epsilon: float
     :param mode: Routing mode. ``"deterministic"`` (default) for the
         parameter-free cosine-basis projection, or ``"trainable"`` for a
         learnable Dense projection.
     :type mode: str
     :param kernel_initializer: Initializer for the trainable kernel
-        (``"trainable"`` mode only). Stored unconditionally so config is
-        round-trip stable.
+        (``"trainable"`` mode only).
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the trainable bias.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the trainable kernel.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param bias_regularizer: Regularizer for the trainable bias.
+    :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param kernel_constraint: Constraint for the trainable kernel.
+    :type kernel_constraint: Optional[Union[str, keras.constraints.Constraint]]
+    :param bias_constraint: Constraint for the trainable bias.
+    :type bias_constraint: Optional[Union[str, keras.constraints.Constraint]]
     :param use_bias: Whether to use a bias vector in trainable mode.
     :type use_bias: bool
     :param kwargs: Additional arguments for the Layer base class.
     """
 
     _VALID_MODES = ("deterministic", "trainable")
+    # Smallest representable value used as a clamp on the renormalization
+    # denominator. Chosen large enough to be representable in float16
+    # (smallest normal ~6.1e-5) so the layer stays numerically safe under
+    # mixed precision, and small enough that in normal operation the clamp
+    # never activates and ``sum == 1.0`` exactly. See C2/M3 in review.
+    _RENORM_TINY = 1e-7
+    # Smallest divisor used inside cosine-basis L2 normalization. Decoupled
+    # from ``self.epsilon`` (which controls sigmoid clipping) so the two can
+    # be tuned independently. See M4 in review.
+    _BASIS_NORM_EPS = 1e-12
 
     def __init__(
             self,
@@ -161,6 +194,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            kernel_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
+            bias_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
             use_bias: bool = True,
             **kwargs: Any
     ) -> None:
@@ -171,25 +207,34 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 f"'mode' must be one of {self._VALID_MODES}, got: {mode!r}"
             )
 
-        if not isinstance(axis, int):
+        # Accept both Python int and numpy integer types for axis.
+        if isinstance(axis, (int, np.integer)) and not isinstance(axis, bool):
+            axis = int(axis)
+        else:
             raise ValueError(
                 f"The 'axis' must be an integer, but received: {axis}"
             )
 
         if mode == "trainable":
-            if not isinstance(output_dim, int) or output_dim <= 1:
+            if not isinstance(output_dim, (int, np.integer)) or output_dim <= 1:
                 raise ValueError(
                     f"In 'trainable' mode, 'output_dim' must be an integer "
                     f"greater than 1, but received: {output_dim}"
                 )
+            output_dim = int(output_dim)
         else:  # deterministic
             if output_dim is not None:
-                if not isinstance(output_dim, int) or output_dim <= 1:
+                if (not isinstance(output_dim, (int, np.integer))
+                        or output_dim <= 1):
                     raise ValueError(
                         f"The 'output_dim' must be an integer greater than 1, "
                         f"but received: {output_dim}"
                     )
+                output_dim = int(output_dim)
 
+        # Track the user-provided value separately so get_config() preserves
+        # the original ``None`` semantics in deterministic mode (H1).
+        self._user_output_dim = output_dim
         self.output_dim = output_dim
         self.axis = axis
         self.epsilon = epsilon
@@ -198,11 +243,44 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.kernel_constraint = keras.constraints.get(kernel_constraint)
+        self.bias_constraint = keras.constraints.get(bias_constraint)
+
+        # H4: warn (once) when trainable-only kwargs are non-default in
+        # deterministic mode, since they are silently ignored.
+        if mode == "deterministic":
+            ignored = []
+            if not isinstance(self.kernel_initializer,
+                              keras.initializers.GlorotUniform):
+                ignored.append("kernel_initializer")
+            if not isinstance(self.bias_initializer,
+                              keras.initializers.Zeros):
+                ignored.append("bias_initializer")
+            if self.kernel_regularizer is not None:
+                ignored.append("kernel_regularizer")
+            if self.bias_regularizer is not None:
+                ignored.append("bias_regularizer")
+            if self.kernel_constraint is not None:
+                ignored.append("kernel_constraint")
+            if self.bias_constraint is not None:
+                ignored.append("bias_constraint")
+            if not use_bias:
+                ignored.append("use_bias")
+            if ignored:
+                logger.warning(
+                    f"[{self.name}] mode='deterministic' ignores trainable-only "
+                    f"kwargs: {ignored}. They are stored for round-trip "
+                    f"serialization but have no effect on layer behavior."
+                )
+
+        self.supports_masking = True
 
         # Computed in build()
         self.padded_output_dim: Optional[int] = None
         self.num_decisions: Optional[int] = None
         self._normalized_axis: Optional[int] = None
+        self._build_input_shape: Optional[Tuple[Optional[int], ...]] = None
 
         # Projection weight (shape: [input_dim, num_decisions]).
         # Non-trainable cosine basis in deterministic mode, learnable in trainable mode.
@@ -211,6 +289,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer: compute tree dims and create projection state."""
+        # Stash shape so get_build_config() can return it for save/load.
+        self._build_input_shape = tuple(input_shape)
+        # M7: mark layer built before creating weights so error tracebacks
+        # surface from add_weight, not from "layer not built" downstream.
+        super().build(input_shape)
+
         # Normalize axis
         input_rank = len(input_shape)
         if self.axis < 0:
@@ -240,7 +324,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                     f"output_dim explicitly."
                 )
             self.output_dim = int(input_dim)
-            logger.info(
+            logger.debug(
                 f"[{self.name}] Inferred output_dim={self.output_dim} "
                 f"from input shape: {input_shape} at axis {self.axis}"
             )
@@ -250,9 +334,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 f"output_dim must be greater than 1, got {self.output_dim}"
             )
 
-        # Padded power-of-two tree size
+        # Padded power-of-two tree size. H2: integer-exact via bit_length.
         self.padded_output_dim = 1 << (self.output_dim - 1).bit_length()
-        self.num_decisions = int(math.log2(self.padded_output_dim))
+        self.num_decisions = self.padded_output_dim.bit_length() - 1
 
         if input_dim is None:
             raise ValueError(
@@ -260,7 +344,26 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 f"be defined to build the projection kernel, got None."
             )
 
-        logger.info(
+        # H3: validate that the projection has enough columns to be
+        # independent. ``input_dim < num_decisions`` makes the cosine basis
+        # rank-deficient by construction; warn near the Nyquist boundary.
+        if self.mode == "deterministic":
+            if input_dim < self.num_decisions:
+                raise ValueError(
+                    f"In deterministic mode the input dimension at axis "
+                    f"{self.axis} ({input_dim}) must be at least "
+                    f"num_decisions={self.num_decisions} (= log2 of next "
+                    f"power-of-two of output_dim={self.output_dim}); "
+                    f"otherwise the cosine basis is rank-deficient."
+                )
+            if input_dim < 2 * self.num_decisions:
+                logger.warning(
+                    f"[{self.name}] input_dim={input_dim} is below 2 * "
+                    f"num_decisions={2 * self.num_decisions}; cosine basis "
+                    f"columns may be near-degenerate (Nyquist regime)."
+                )
+
+        logger.debug(
             f"[{self.name}] ({self.mode}) Built for {self.output_dim} "
             f"classes along axis {self.axis}. Padded to "
             f"{self.padded_output_dim}, requiring {self.num_decisions} "
@@ -275,12 +378,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # rather than a plain tensor. Plain tensors created inside build()
         # get captured in the FuncGraph used by Keras' compute_output_spec
         # symbolic tracing, which then becomes "out of scope" when the
-        # layer is reused — this surfaced when embedding the layer inside
-        # a keras.Model subclass (CliffordNetLMRouting). Non-trainable
-        # weights are tracked by the layer and live outside any transient
-        # graph, so they remain accessible across calls and survive
-        # save/load. The layer is still parameter-free in the
-        # trainable-parameter sense.
+        # layer is reused. Non-trainable weights are tracked by the layer
+        # and live outside any transient graph.
+        # C1: Do NOT pass dtype=self.compute_dtype here. Variables should
+        # live in the layer's variable_dtype (typically float32) even under
+        # mixed-precision policies; Keras automatically casts to
+        # compute_dtype inside call().
         if self.mode == "deterministic":
             cosine_np = self._cosine_basis_numpy(input_dim)
             self.kernel = self.add_weight(
@@ -288,7 +391,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 shape=(input_dim, self.num_decisions),
                 initializer=keras.initializers.Constant(cosine_np),
                 trainable=False,
-                dtype=self.compute_dtype,
             )
         else:
             self.kernel = self.add_weight(
@@ -296,47 +398,53 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 shape=(input_dim, self.num_decisions),
                 initializer=self.kernel_initializer,
                 regularizer=self.kernel_regularizer,
+                constraint=self.kernel_constraint,
                 trainable=True,
-                dtype=self.compute_dtype,
             )
         if self.mode == "trainable" and self.use_bias:
             self.bias = self.add_weight(
                 name="bias",
                 shape=(self.num_decisions,),
                 initializer=self.bias_initializer,
+                regularizer=self.bias_regularizer,
+                constraint=self.bias_constraint,
                 trainable=True,
-                dtype=self.compute_dtype,
             )
 
-        super().build(input_shape)
-
-    def _cosine_basis_numpy(self, input_dim: int):
+    def _cosine_basis_numpy(self, input_dim: int) -> np.ndarray:
         """L2-normalized cosine basis as numpy, shape (input_dim, num_decisions).
 
         Computed in pure numpy so the result has no FuncGraph affinity and
         can be passed to ``keras.initializers.Constant`` for storage as a
-        non-trainable weight (see DECISION D-004 in build()).
+        non-trainable weight (see DECISION D-004 in build()). M8: the basis
+        is generated in float32 regardless of layer dtype; Keras casts via
+        the Constant initializer when the variable dtype differs.
         """
-        import numpy as _np
-        cols = []
-        for decision_idx in range(self.num_decisions):
-            col = _np.array([
-                math.cos(
-                    2.0 * math.pi * (decision_idx + 1) * feature_idx / input_dim
-                )
-                for feature_idx in range(input_dim)
-            ], dtype=_np.float32)
-            col_norm = _np.sqrt(_np.sum(_np.square(col)))
-            cols.append(col / (col_norm + self.epsilon))
-        return _np.stack(cols, axis=1).astype(_np.float32)
+        # L5: vectorized construction. Equivalent to the previous per-element
+        # loop but ~10-100x faster and easier to read.
+        i = np.arange(input_dim, dtype=np.float64)
+        k = np.arange(1, self.num_decisions + 1, dtype=np.float64)
+        # outer(i, k) has shape (input_dim, num_decisions) with entries i*k.
+        basis = np.cos(2.0 * np.pi * np.outer(i, k) / input_dim)
+        col_norms = np.sqrt(np.sum(np.square(basis), axis=0, keepdims=True))
+        basis = basis / (col_norms + self._BASIS_NORM_EPS)
+        return basis.astype(np.float32)
 
     def call(
             self,
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply hierarchical routing to produce class probabilities."""
+        """Apply hierarchical routing to produce class probabilities.
+
+        ``training`` is accepted for API compatibility but unused: the layer
+        is deterministic in both modes (no dropout, no stochastic routing).
+        """
         # --- Step 0: Move target axis to last, flatten to 2D ---
+        # M2: ``perm`` is intentionally a self-inverse swap (not a
+        # move-to-end). The output is transposed back with the SAME ``perm``
+        # at the end of call(); changing this to a move-to-end would
+        # require computing a separate inverse permutation.
         input_rank = len(inputs.shape)
         perm = list(range(input_rank))
         perm[self._normalized_axis] = input_rank - 1
@@ -347,8 +455,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         else:
             inputs_transposed = inputs
 
-        input_dim = inputs_transposed.shape[-1]
-        inputs_2d = ops.reshape(inputs_transposed, (-1, input_dim))
+        # C3: pull the static feature dim from the kernel rather than from
+        # ``inputs.shape[-1]`` which can be ``None`` under symbolic tracing.
+        feature_dim = self.kernel.shape[0]
+        inputs_2d = ops.reshape(inputs_transposed, (-1, feature_dim))
 
         # --- Step 1: Decision logits ---
         decision_logits = ops.matmul(inputs_2d, self.kernel)
@@ -361,8 +471,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         )
 
         # --- Step 2: Initialize root probability mass = 1.0 ---
-        ones_template = inputs_2d[:, 0:1]
-        padded_probs = ops.ones_like(ones_template)
+        # M1: build the [batch, 1] shape carrier explicitly rather than via
+        # an obscure feature-column slice.
+        batch_size = ops.shape(inputs_2d)[0]
+        padded_probs = ops.ones((batch_size, 1), dtype=inputs_2d.dtype)
 
         # --- Step 3: Iteratively split tree ---
         for i in range(self.num_decisions):
@@ -378,19 +490,19 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             padded_probs = ops.reshape(combined, (-1, 2 ** (i + 1)))
 
         # --- Step 4: Slice and renormalize ---
-        # DECISION D-002 (revised): Preserve mode-specific renormalization to
-        # avoid regressing the deterministic-mode test, which asserts
-        # exact sum=1.0 for arbitrary epsilon. Trainable mode keeps the
-        # original `+ epsilon` safety margin (its prior behavior).
+        # M3 + C2: always renormalize, using ``ops.maximum(prob_sum, tiny)``
+        # so that in normal operation the divisor equals prob_sum exactly
+        # (sum=1.0 to within fp roundoff) but underflow to zero is impossible.
+        # For output_dim == padded_output_dim the slice is a no-op; the
+        # renormalize is a no-op in real arithmetic but corrects the small
+        # fp drift introduced by sigmoid clipping.
         if self.output_dim == self.padded_output_dim:
-            final_probs = padded_probs
+            unnormalized_probs = padded_probs
         else:
             unnormalized_probs = padded_probs[:, :self.output_dim]
-            prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
-            if self.mode == "trainable":
-                final_probs = unnormalized_probs / (prob_sum + self.epsilon)
-            else:
-                final_probs = unnormalized_probs / prob_sum
+        prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
+        safe_denom = ops.maximum(prob_sum, self._RENORM_TINY)
+        final_probs = unnormalized_probs / safe_denom
 
         # --- Step 5: Reshape back to original rank ---
         input_transposed_shape = ops.shape(inputs_transposed)
@@ -418,28 +530,70 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Output shape: input shape with `axis` replaced by `output_dim`."""
-        output_shape = list(input_shape)
+        """Output shape: input shape with `axis` replaced by `output_dim`.
 
-        if self._normalized_axis is not None:
-            axis_to_modify = self._normalized_axis
-        else:
-            input_rank = len(input_shape)
-            axis_to_modify = (input_rank + self.axis if self.axis < 0
-                              else self.axis)
+        M6: when ``output_dim`` is ``None`` and the layer has not been built,
+        attempt to infer it from the dimension at ``axis`` of ``input_shape``.
+        Raise if the dimension is also ``None`` (cannot infer).
+        """
+        output_shape = list(input_shape)
+        input_rank = len(input_shape)
+        normalized_axis = (
+            self._normalized_axis
+            if self._normalized_axis is not None
+            else (input_rank + self.axis if self.axis < 0 else self.axis)
+        )
+
+        if normalized_axis < 0 or normalized_axis >= input_rank:
+            raise ValueError(
+                f"axis {self.axis} is out of bounds for input shape "
+                f"{input_shape}"
+            )
 
         if self.output_dim is not None:
-            output_shape[axis_to_modify] = self.output_dim
-        # If output_dim is None (deterministic + pre-build), shape inference
-        # leaves the axis unchanged — matches old RoutingProbabilitiesLayer.
+            output_shape[normalized_axis] = self.output_dim
+        else:
+            # Pre-build deterministic mode with output_dim=None: try to
+            # infer from the input shape, matching what build() will do.
+            inferred = input_shape[normalized_axis]
+            if inferred is None:
+                raise ValueError(
+                    "Cannot compute output shape: output_dim is None and "
+                    f"input shape at axis {self.axis} is also None. Pass "
+                    "output_dim explicitly or call build() first."
+                )
+            output_shape[normalized_axis] = inferred
 
         return tuple(output_shape)
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """Return the input shape so the layer can rebuild on load.
+
+        Ensures that when the layer is a child of a parent whose ``build()``
+        does not eagerly invoke routing (e.g. attention modules that gate
+        routing on a flag), Keras can still reconstruct the kernel/bias
+        variables at load time.
+        """
+        if self.built and self._build_input_shape is not None:
+            return {"input_shape": self._build_input_shape}
+        return {}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Rebuild from a saved build config produced by ``get_build_config``."""
+        if config and "input_shape" in config:
+            self.build(config["input_shape"])
+
     def get_config(self) -> Dict[str, Any]:
-        """Serialize all parameters (both modes) for round-trip stability."""
+        """Serialize all parameters (both modes) for round-trip stability.
+
+        H1: the original user-supplied ``output_dim`` (which may be ``None``)
+        is preserved across save/load, rather than the value resolved during
+        build. This keeps the inference behavior of deterministic-mode
+        layers symmetric across reconstruction.
+        """
         config = super().get_config()
         config.update({
-            "output_dim": self.output_dim,
+            "output_dim": self._user_output_dim,
             "axis": self.axis,
             "epsilon": self.epsilon,
             "mode": self.mode,
@@ -452,6 +606,15 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             ),
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer
+            ),
+            "bias_regularizer": keras.regularizers.serialize(
+                self.bias_regularizer
+            ),
+            "kernel_constraint": keras.constraints.serialize(
+                self.kernel_constraint
+            ),
+            "bias_constraint": keras.constraints.serialize(
+                self.bias_constraint
             ),
         })
         return config
