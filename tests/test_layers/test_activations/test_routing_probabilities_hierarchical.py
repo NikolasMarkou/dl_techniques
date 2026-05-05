@@ -154,7 +154,12 @@ class TestHierarchicalRoutingLayer:
         kernel = np.zeros((input_dim, 2))
         bias = np.array([10.0, -10.0])  # Logits: +10, -10
 
-        layer.set_weights([kernel, bias])
+        # Trainable mode adds two non-trainable validity-mask weights
+        # (mask_mul, mask_add) of length padded-1=3. For pow2 output_dim
+        # they are all-ones / all-zeros respectively (no overrides).
+        mask_mul = layer._mask_mul.numpy()
+        mask_add = layer._mask_add.numpy()
+        layer.set_weights([kernel, bias, mask_mul, mask_add])
 
         preds = layer(inputs).numpy().flatten()
 
@@ -171,10 +176,17 @@ class TestHierarchicalRoutingLayer:
         assert np.allclose(preds, expected, atol=1e-5)
         assert np.argmax(preds) == 2
 
-    def test_manual_logic_renormalization(self):
+    def test_manual_logic_structural_masking(self):
         """
-        Verify logic when output_dim is not a power of 2.
-        Padded dim=4, Output dim=3. The 4th leaf is discarded and others renormalized.
+        Verify zero-mass-on-invalid-leaves behavior for non-pow2 output_dim.
+
+        Padded=4, Output=3. The right subtree of root has only one valid
+        leaf (index 2); the second decision under that branch is forced
+        toward it (mask_mul=0, mask_add=0 -> p_eff=0, all mass goes left).
+        With logits=0 (sigmoid=0.5), root splits 0.5/0.5; the left subtree
+        further splits 0.5/0.5 between leaves 0 and 1 (-> 0.25 each); the
+        right subtree's mass (0.5) is forced entirely to leaf 2.
+        Invalid leaf 3 receives EXACTLY zero, no renormalization needed.
         """
         input_dim = 1
         output_dim = 3
@@ -183,15 +195,17 @@ class TestHierarchicalRoutingLayer:
         inputs = tf.ones((1, input_dim))
         layer.build((1, input_dim))
 
-        # Force uniform probability across all 4 padded leaves: Logits=0 -> Sigmoid=0.5
         kernel = np.zeros((1, 2))
         bias = np.zeros((2,))
-        layer.set_weights([kernel, bias])
+        mask_mul = layer._mask_mul.numpy()
+        mask_add = layer._mask_add.numpy()
+        layer.set_weights([kernel, bias, mask_mul, mask_add])
 
         preds = layer(inputs).numpy().flatten()
 
-        # Padded leaves uniform 0.25 each. Slice first 3 -> 0.75 -> renormalize to 1/3 each.
-        expected = np.array([1 / 3, 1 / 3, 1 / 3])
+        # Class 0 = (1-p0)(1-p1); class 1 = (1-p0) p1; class 2 = p0
+        # (forced, regardless of p1). With p0=p1=0.5: [0.25, 0.25, 0.5].
+        expected = np.array([0.25, 0.25, 0.5])
 
         assert np.allclose(preds, expected, atol=1e-6)
 
@@ -204,7 +218,9 @@ class TestHierarchicalRoutingLayer:
         # Set extreme weights to force 0.0 and 1.0 sigmoids
         kernel = np.ones(layer.kernel.shape) * 1000.0
         bias = np.zeros(layer.bias.shape)
-        layer.set_weights([kernel, bias])
+        mask_mul = layer._mask_mul.numpy()
+        mask_add = layer._mask_add.numpy()
+        layer.set_weights([kernel, bias, mask_mul, mask_add])
 
         outputs = layer(inputs)
 

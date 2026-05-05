@@ -137,9 +137,9 @@ class TestRoutingProbabilitiesLayer:
 
         # Critical: Layer should have NO trainable weights
         assert len(layer.trainable_weights) == 0
-        # Cosine basis is stored as a single non-trainable weight so it
-        # survives Keras Model embedding (compute_output_spec FuncGraph).
-        assert len(layer.non_trainable_weights) == 1
+        # Three non-trainable weights: cosine basis + leaf validity masks
+        # (mask_mul, mask_add) used to zero out invalid leaves for non-pow2 N.
+        assert len(layer.non_trainable_weights) == 3
 
         # Kernel should be precomputed (cosine basis)
         assert layer.kernel is not None
@@ -542,11 +542,10 @@ class TestRoutingProbabilitiesLayer:
 
         assert len(layer.trainable_weights) == 0, \
             "RoutingProbabilitiesLayer should have no trainable weights"
-        # Cosine basis is stored as a non-trainable weight (see DECISION
-        # D-004 in routing_probabilities.py) — does not affect parameter
-        # count in the trainable sense.
-        assert len(layer.non_trainable_weights) == 1, \
-            "Deterministic mode should have exactly one non-trainable weight (cosine basis)"
+        # Three non-trainable weights: cosine basis + two leaf validity
+        # masks (mask_mul, mask_add) that zero invalid leaves for non-pow2 N.
+        assert len(layer.non_trainable_weights) == 3, \
+            "Deterministic mode should have three non-trainable weights"
 
     @pytest.mark.parametrize(
         "batch_size, input_dim, output_dim",

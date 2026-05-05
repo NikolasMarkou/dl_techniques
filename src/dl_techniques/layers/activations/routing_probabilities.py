@@ -43,10 +43,31 @@ Caveats:
   Performance therefore depends on whether the class index space encodes
   meaningful structure (e.g., language-model token IDs typically do not).
 
-- **Slice-then-renormalize biases gradients.** When ``output_dim <
-  padded_dim`` the discarded leaves carry probability mass that depends on
-  the decision logits non-uniformly. Renormalization fixes the sum but
-  couples otherwise-independent decisions in the gradient.
+- **Slice-then-renormalize is structurally biased for non-pow2 ``N``.** When
+  ``output_dim < padded_dim`` the discarded leaves form a contiguous tail of
+  the leaf array, so the first decision's "right" branch is always the one
+  partially or fully truncated. Renormalization corrects the sum but the
+  asymmetry couples decisions in the gradient and creates a per-decision
+  bias whose magnitude grows as ``output_dim`` moves away from a power of
+  two. Prefer ``output_dim`` close to (or equal to) a power of two.
+
+- **Input scale matters in deterministic mode.** ``z_k = <x, w_k>`` with
+  ``||w_k|| = 1`` but no constraint on ``||x||``. Logits scale linearly with
+  input norm, so unnormalized inputs can saturate the sigmoid into the
+  clipping range and starve gradients. If your upstream layer does not
+  normalize, set ``input_normalization="rms"`` (or ``"l2"``) on this layer.
+
+- **Mixed precision.** The hierarchical product accumulates up to
+  ``log2(padded_dim)`` clipped sigmoid factors. Under ``float16`` the
+  sigmoid clip floor (``epsilon=1e-7``) lies below the smallest normal
+  (~6.1e-5), so deep trees can underflow. The layer therefore performs the
+  tree accumulation in ``float32`` regardless of the compute dtype and
+  casts the output back at the end.
+
+- **Cosine basis is not orthogonal.** Columns are L2-normalized, but the
+  set ``{cos(2*pi*k*i/D) : k=1..d}`` is mutually orthogonal only for
+  specific commensurate ``(D, k)`` pairs. The basis is a fixed projection,
+  not an orthonormal frame.
 
 References:
     - Zhang, Z., et al. (2024). "Softmax-free Large-scale Language Modeling".
@@ -56,6 +77,7 @@ References:
 """
 
 import math
+import functools
 import keras
 import numpy as np
 from keras import ops
@@ -66,6 +88,91 @@ from typing import Optional, Tuple, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+
+
+# ---------------------------------------------------------------------
+# Cosine basis (module-level, cached)
+# ---------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=128)
+def _cached_cosine_basis(
+        input_dim: int,
+        num_decisions: int,
+        norm_eps: float = 1e-12,
+) -> np.ndarray:
+    """L2-normalized cosine basis as numpy, shape ``(input_dim, num_decisions)``.
+
+    Cached on ``(input_dim, num_decisions)``: rebuilding a layer with the
+    same shape re-uses the previously computed basis. The returned array is
+    treated as read-only by callers (it is passed to
+    ``keras.initializers.Constant`` which copies it on use).
+    """
+    i = np.arange(input_dim, dtype=np.float64)
+    k = np.arange(1, num_decisions + 1, dtype=np.float64)
+    basis = np.cos(2.0 * np.pi * np.outer(i, k) / input_dim)
+    col_norms = np.sqrt(np.sum(np.square(basis), axis=0, keepdims=True))
+    basis = basis / (col_norms + norm_eps)
+    return basis.astype(np.float32)
+
+
+# ---------------------------------------------------------------------
+# Structural validity masks for non-pow2 output_dim
+# ---------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=128)
+def _compute_validity_masks(
+        output_dim: int,
+        padded_dim: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-level decision overrides forcing invalid-leaf mass to be exactly 0.
+
+    Returns two flat numpy arrays of length ``padded_dim - 1`` (the total
+    number of internal-node positions across all decision levels). At
+    decision level ``k`` (with ``2**k`` parent positions), the slice
+    ``[2**k - 1 : 2**(k+1) - 1]`` of each array gives per-parent overrides
+    consumed by ``call()``:
+
+    .. code-block:: text
+
+        p_eff[k, j] = sigmoid(z_k) * mask_mul[k, j] + mask_add[k, j]
+
+    With:
+
+    - both children valid -> ``mask_mul=1, mask_add=0`` (use sigmoid as-is)
+    - only right child valid -> ``mask_mul=0, mask_add=1`` (force right)
+    - only left child valid -> ``mask_mul=0, mask_add=0`` (force left)
+
+    For ``output_dim == padded_dim`` (pow2 case), every parent has both
+    subtrees valid, ``mask_mul=1`` and ``mask_add=0`` everywhere — exactly
+    the unmasked tree.
+    """
+    if padded_dim & (padded_dim - 1) != 0 or padded_dim < 1:
+        raise ValueError(f"padded_dim must be a positive power of two, got {padded_dim}")
+    d = padded_dim.bit_length() - 1  # number of decisions
+    # Leaf validity: True for the first ``output_dim`` leaves.
+    valid = np.zeros(padded_dim, dtype=bool)
+    valid[:output_dim] = True
+    # Bottom-up: subtree_valid[k] is a length-2**k boolean array,
+    # subtree_valid[k][m] = True iff node m at level k has any valid leaf.
+    subtree_valid = [None] * (d + 1)
+    subtree_valid[d] = valid
+    for k in range(d - 1, -1, -1):
+        prev = subtree_valid[k + 1]
+        subtree_valid[k] = prev[0::2] | prev[1::2]
+    # Per-decision-level masks.
+    mul_chunks = []
+    add_chunks = []
+    for k in range(d):
+        children = subtree_valid[k + 1]  # length 2**(k+1)
+        valid_left = children[0::2]
+        valid_right = children[1::2]
+        mul_chunks.append((valid_left & valid_right).astype(np.float32))
+        add_chunks.append((valid_right & ~valid_left).astype(np.float32))
+    mask_mul = np.concatenate(mul_chunks) if mul_chunks else np.zeros((0,), np.float32)
+    mask_add = np.concatenate(add_chunks) if add_chunks else np.zeros((0,), np.float32)
+    return mask_mul, mask_add
 
 
 # ---------------------------------------------------------------------
@@ -131,9 +238,17 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                            │
                            ▼
         ┌─────────────────────────────────────────┐
+        │  Structural Validity Mask (non-pow2 N)  │
+        │  At each level, force decisions toward  │
+        │  subtrees that contain valid leaves.    │
+        │  Invalid leaves -> exactly 0 mass.      │
+        └──────────────────┬──────────────────────┘
+                           │
+                           ▼
+        ┌─────────────────────────────────────────┐
         │  Slice & Renormalize to output_dim      │
         │  Keep first output_dim leaves           │
-        │  Renormalize to sum = 1.0               │
+        │  Renormalize to sum = 1.0 (fp drift)    │
         └──────────────────┬──────────────────────┘
                            │
                            ▼
@@ -170,10 +285,19 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
     :type bias_constraint: Optional[Union[str, keras.constraints.Constraint]]
     :param use_bias: Whether to use a bias vector in trainable mode.
     :type use_bias: bool
+    :param input_normalization: Optional input normalization applied before
+        the projection. ``None`` (default) leaves inputs unchanged.
+        ``"l2"`` divides by per-sample L2 norm; ``"rms"`` divides by per-sample
+        RMS. Recommended in deterministic mode when the upstream layer does
+        not normalize: cosine-basis logits scale linearly with ``||x||``, so
+        unnormalized inputs can saturate the sigmoid into the clipping range
+        and starve gradients.
+    :type input_normalization: Optional[str]
     :param kwargs: Additional arguments for the Layer base class.
     """
 
     _VALID_MODES = ("deterministic", "trainable")
+    _VALID_INPUT_NORMS = (None, "l2", "rms")
     # Smallest representable value used as a clamp on the renormalization
     # denominator. Chosen large enough to be representable in float16
     # (smallest normal ~6.1e-5) so the layer stays numerically safe under
@@ -198,6 +322,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             kernel_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
             bias_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
             use_bias: bool = True,
+            input_normalization: Optional[str] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -206,6 +331,23 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             raise ValueError(
                 f"'mode' must be one of {self._VALID_MODES}, got: {mode!r}"
             )
+
+        if input_normalization not in self._VALID_INPUT_NORMS:
+            raise ValueError(
+                f"'input_normalization' must be one of "
+                f"{self._VALID_INPUT_NORMS}, got: {input_normalization!r}"
+            )
+
+        # H-1: validate epsilon. ``ops.clip(p, eps, 1-eps)`` is undefined
+        # when eps >= 0.5 (min > max) and silently degrades by backend.
+        # eps == 0 disables clipping (a valid choice for exact-math tests).
+        if (not isinstance(epsilon, (int, float))
+                or isinstance(epsilon, bool)
+                or not (0.0 <= float(epsilon) < 0.5)):
+            raise ValueError(
+                f"'epsilon' must be a float in [0, 0.5), got: {epsilon!r}"
+            )
+        epsilon = float(epsilon)
 
         # Accept both Python int and numpy integer types for axis.
         if isinstance(axis, (int, np.integer)) and not isinstance(axis, bool):
@@ -246,16 +388,27 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.kernel_constraint = keras.constraints.get(kernel_constraint)
         self.bias_constraint = keras.constraints.get(bias_constraint)
+        self.input_normalization = input_normalization
 
-        # H4: warn (once) when trainable-only kwargs are non-default in
-        # deterministic mode, since they are silently ignored.
+        # H-4: warn (once) when trainable-only kwargs differ from their
+        # canonical defaults in deterministic mode (they are stored for
+        # round-trip serialization but have no effect on layer behavior).
+        # Compare via ``serialize`` so a customized GlorotUniform(seed=42)
+        # or Zeros() with a non-default config is correctly detected.
+        # We strip ``shared_object_id`` because Keras assigns a fresh id
+        # per deserialization, which would otherwise produce false positives
+        # after save/load.
+        def _init_id(init: keras.initializers.Initializer) -> Tuple[str, Any]:
+            cfg = keras.initializers.serialize(init)
+            return (cfg.get("class_name"), cfg.get("config"))
+
         if mode == "deterministic":
+            default_kernel_id = _init_id(keras.initializers.GlorotUniform())
+            default_bias_id = _init_id(keras.initializers.Zeros())
             ignored = []
-            if not isinstance(self.kernel_initializer,
-                              keras.initializers.GlorotUniform):
+            if _init_id(self.kernel_initializer) != default_kernel_id:
                 ignored.append("kernel_initializer")
-            if not isinstance(self.bias_initializer,
-                              keras.initializers.Zeros):
+            if _init_id(self.bias_initializer) != default_bias_id:
                 ignored.append("bias_initializer")
             if self.kernel_regularizer is not None:
                 ignored.append("kernel_regularizer")
@@ -286,6 +439,12 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # Non-trainable cosine basis in deterministic mode, learnable in trainable mode.
         self.kernel = None
         self.bias = None  # trainable mode only
+        # Per-level structural masks ensuring zero mass on invalid leaves
+        # when ``output_dim < padded_output_dim`` (created in build()).
+        # Both have shape ``(padded_output_dim - 1,)`` and are concatenated
+        # by level: level k spans indices [2**k - 1, 2**(k+1) - 1).
+        self._mask_mul = None
+        self._mask_add = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer: compute tree dims and create projection state."""
@@ -385,7 +544,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # mixed-precision policies; Keras automatically casts to
         # compute_dtype inside call().
         if self.mode == "deterministic":
-            cosine_np = self._cosine_basis_numpy(input_dim)
+            cosine_np = _cached_cosine_basis(
+                input_dim, self.num_decisions, self._BASIS_NORM_EPS
+            )
             self.kernel = self.add_weight(
                 name="cosine_basis",
                 shape=(input_dim, self.num_decisions),
@@ -411,24 +572,28 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
                 trainable=True,
             )
 
-    def _cosine_basis_numpy(self, input_dim: int) -> np.ndarray:
-        """L2-normalized cosine basis as numpy, shape (input_dim, num_decisions).
-
-        Computed in pure numpy so the result has no FuncGraph affinity and
-        can be passed to ``keras.initializers.Constant`` for storage as a
-        non-trainable weight (see DECISION D-004 in build()). M8: the basis
-        is generated in float32 regardless of layer dtype; Keras casts via
-        the Constant initializer when the variable dtype differs.
-        """
-        # L5: vectorized construction. Equivalent to the previous per-element
-        # loop but ~10-100x faster and easier to read.
-        i = np.arange(input_dim, dtype=np.float64)
-        k = np.arange(1, self.num_decisions + 1, dtype=np.float64)
-        # outer(i, k) has shape (input_dim, num_decisions) with entries i*k.
-        basis = np.cos(2.0 * np.pi * np.outer(i, k) / input_dim)
-        col_norms = np.sqrt(np.sum(np.square(basis), axis=0, keepdims=True))
-        basis = basis / (col_norms + self._BASIS_NORM_EPS)
-        return basis.astype(np.float32)
+        # Structural validity masks: ensure that any leaf at index >=
+        # output_dim receives EXACTLY zero probability mass, by overriding
+        # decisions at internal nodes whose subtree contains no valid leaf.
+        # For pow2 output_dim every entry is (mul=1, add=0) and the masks
+        # are a no-op. Stored as non-trainable weights so they survive
+        # save/load and are tracked by Keras (matches D-004 reasoning).
+        mask_mul_np, mask_add_np = _compute_validity_masks(
+            self.output_dim, self.padded_output_dim
+        )
+        flat_len = self.padded_output_dim - 1
+        self._mask_mul = self.add_weight(
+            name="leaf_mask_mul",
+            shape=(flat_len,),
+            initializer=keras.initializers.Constant(mask_mul_np),
+            trainable=False,
+        )
+        self._mask_add = self.add_weight(
+            name="leaf_mask_add",
+            shape=(flat_len,),
+            initializer=keras.initializers.Constant(mask_add_np),
+            trainable=False,
+        )
 
     def call(
             self,
@@ -460,6 +625,22 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         feature_dim = self.kernel.shape[0]
         inputs_2d = ops.reshape(inputs_transposed, (-1, feature_dim))
 
+        # --- Step 0b: Optional input normalization (H-2) ---
+        # Cosine-basis logits scale linearly with ``||x||``; without
+        # normalization the sigmoid saturates and gradient is starved.
+        if self.input_normalization == "l2":
+            inv_norm = ops.rsqrt(
+                ops.sum(ops.square(inputs_2d), axis=-1, keepdims=True)
+                + self._BASIS_NORM_EPS
+            )
+            inputs_2d = inputs_2d * inv_norm
+        elif self.input_normalization == "rms":
+            inv_norm = ops.rsqrt(
+                ops.mean(ops.square(inputs_2d), axis=-1, keepdims=True)
+                + self._BASIS_NORM_EPS
+            )
+            inputs_2d = inputs_2d * inv_norm
+
         # --- Step 1: Decision logits ---
         decision_logits = ops.matmul(inputs_2d, self.kernel)
         if self.bias is not None:
@@ -471,14 +652,32 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         )
 
         # --- Step 2: Initialize root probability mass = 1.0 ---
-        # M1: build the [batch, 1] shape carrier explicitly rather than via
-        # an obscure feature-column slice.
+        # H-3: tree accumulation runs in float32 regardless of compute
+        # dtype. Under fp16 mixed precision the sigmoid clip floor (eps=1e-7)
+        # is below the smallest fp16 normal (~6.1e-5), so deep trees would
+        # otherwise underflow to zero. Decision_probs are cast up here and
+        # the final probabilities are cast back to the input dtype at the end.
+        decision_probs = ops.cast(decision_probs, "float32")
+        mask_mul = ops.cast(self._mask_mul, "float32")
+        mask_add = ops.cast(self._mask_add, "float32")
         batch_size = ops.shape(inputs_2d)[0]
-        padded_probs = ops.ones((batch_size, 1), dtype=inputs_2d.dtype)
+        padded_probs = ops.ones((batch_size, 1), dtype="float32")
 
-        # --- Step 3: Iteratively split tree ---
+        # --- Step 3: Iteratively split tree (with per-parent overrides) ---
+        # At each level k, p_eff[k, j] = p_decision * mask_mul[k, j]
+        # + mask_add[k, j]. This forces decisions toward subtrees that
+        # contain valid leaves and produces EXACTLY zero mass on every leaf
+        # at index >= output_dim, regardless of the decision logits.
+        offset = 0
         for i in range(self.num_decisions):
-            p_go_right = decision_probs[:, i:i + 1]
+            level_size = 1 << i  # 2**i parents at this level
+            mul_i = mask_mul[offset:offset + level_size]  # shape (2**i,)
+            add_i = mask_add[offset:offset + level_size]
+            offset += level_size
+
+            p_dec = decision_probs[:, i:i + 1]  # shape (batch, 1)
+            # Broadcast (batch, 1) * (2**i,) + (2**i,) -> (batch, 2**i)
+            p_go_right = p_dec * mul_i + add_i
             p_go_left = 1.0 - p_go_right
 
             probs_for_left = padded_probs * p_go_left
@@ -489,13 +688,11 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             )
             padded_probs = ops.reshape(combined, (-1, 2 ** (i + 1)))
 
-        # --- Step 4: Slice and renormalize ---
-        # M3 + C2: always renormalize, using ``ops.maximum(prob_sum, tiny)``
-        # so that in normal operation the divisor equals prob_sum exactly
-        # (sum=1.0 to within fp roundoff) but underflow to zero is impossible.
-        # For output_dim == padded_output_dim the slice is a no-op; the
-        # renormalize is a no-op in real arithmetic but corrects the small
-        # fp drift introduced by sigmoid clipping.
+        # --- Step 4: Slice and renormalize (fp drift cleanup) ---
+        # With structural masking, leaves at index >= output_dim are
+        # exactly 0 by construction, so the slice is a no-op on mass and
+        # the sum is 1.0 up to fp roundoff from the sigmoid clip. The
+        # renormalize remains as a defensive cleanup of that drift.
         if self.output_dim == self.padded_output_dim:
             unnormalized_probs = padded_probs
         else:
@@ -503,6 +700,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         prob_sum = ops.sum(unnormalized_probs, axis=-1, keepdims=True)
         safe_denom = ops.maximum(prob_sum, self._RENORM_TINY)
         final_probs = unnormalized_probs / safe_denom
+
+        # Cast back to the input compute dtype for downstream layers.
+        final_probs = ops.cast(final_probs, inputs.dtype)
 
         # --- Step 5: Reshape back to original rank ---
         input_transposed_shape = ops.shape(inputs_transposed)
@@ -598,6 +798,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             "epsilon": self.epsilon,
             "mode": self.mode,
             "use_bias": self.use_bias,
+            "input_normalization": self.input_normalization,
             "kernel_initializer": keras.initializers.serialize(
                 self.kernel_initializer
             ),
