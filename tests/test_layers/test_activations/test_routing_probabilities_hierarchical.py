@@ -154,12 +154,9 @@ class TestHierarchicalRoutingLayer:
         kernel = np.zeros((input_dim, 2))
         bias = np.array([10.0, -10.0])  # Logits: +10, -10
 
-        # Trainable mode adds two non-trainable validity-mask weights
-        # (mask_mul, mask_add) of length padded-1=3. For pow2 output_dim
-        # they are all-ones / all-zeros respectively (no overrides).
-        mask_mul = layer._mask_mul.numpy()
-        mask_add = layer._mask_add.numpy()
-        layer.set_weights([kernel, bias, mask_mul, mask_add])
+        # H-5: validity masks no longer occupy weight slots; they live as
+        # numpy on the layer (D-006). set_weights only takes [kernel, bias].
+        layer.set_weights([kernel, bias])
 
         preds = layer(inputs).numpy().flatten()
 
@@ -197,9 +194,8 @@ class TestHierarchicalRoutingLayer:
 
         kernel = np.zeros((1, 2))
         bias = np.zeros((2,))
-        mask_mul = layer._mask_mul.numpy()
-        mask_add = layer._mask_add.numpy()
-        layer.set_weights([kernel, bias, mask_mul, mask_add])
+        # H-5: masks are numpy on self, not weights. See D-006.
+        layer.set_weights([kernel, bias])
 
         preds = layer(inputs).numpy().flatten()
 
@@ -218,9 +214,8 @@ class TestHierarchicalRoutingLayer:
         # Set extreme weights to force 0.0 and 1.0 sigmoids
         kernel = np.ones(layer.kernel.shape) * 1000.0
         bias = np.zeros(layer.bias.shape)
-        mask_mul = layer._mask_mul.numpy()
-        mask_add = layer._mask_add.numpy()
-        layer.set_weights([kernel, bias, mask_mul, mask_add])
+        # H-5: masks are numpy on self, not weights. See D-006.
+        layer.set_weights([kernel, bias])
 
         outputs = layer(inputs)
 

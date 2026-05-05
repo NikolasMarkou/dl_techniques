@@ -137,9 +137,10 @@ class TestRoutingProbabilitiesLayer:
 
         # Critical: Layer should have NO trainable weights
         assert len(layer.trainable_weights) == 0
-        # Three non-trainable weights: cosine basis + leaf validity masks
-        # (mask_mul, mask_add) used to zero out invalid leaves for non-pow2 N.
-        assert len(layer.non_trainable_weights) == 3
+        # H-5: only one non-trainable weight (cosine basis). The leaf validity
+        # masks are stored as numpy on `self` (D-006) and converted at call
+        # time, so they no longer occupy a checkpoint slot.
+        assert len(layer.non_trainable_weights) == 1
 
         # Kernel should be precomputed (cosine basis)
         assert layer.kernel is not None
@@ -542,10 +543,10 @@ class TestRoutingProbabilitiesLayer:
 
         assert len(layer.trainable_weights) == 0, \
             "RoutingProbabilitiesLayer should have no trainable weights"
-        # Three non-trainable weights: cosine basis + two leaf validity
-        # masks (mask_mul, mask_add) that zero invalid leaves for non-pow2 N.
-        assert len(layer.non_trainable_weights) == 3, \
-            "Deterministic mode should have three non-trainable weights"
+        # H-5: one non-trainable weight (cosine basis only). Validity masks
+        # live as numpy on `self` per D-006 and are converted at call time.
+        assert len(layer.non_trainable_weights) == 1, \
+            "Deterministic mode should have one non-trainable weight"
 
     @pytest.mark.parametrize(
         "batch_size, input_dim, output_dim",

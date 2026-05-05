@@ -484,11 +484,17 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         self.kernel = None
         self.bias = None  # trainable mode only
         # Per-level structural masks ensuring zero mass on invalid leaves
-        # when ``output_dim < padded_output_dim`` (created in build()).
-        # Both have shape ``(padded_output_dim - 1,)`` and are concatenated
-        # by level: level k spans indices [2**k - 1, 2**(k+1) - 1).
-        self._mask_mul = None
-        self._mask_add = None
+        # when ``output_dim < padded_output_dim`` (recomputed in build()).
+        # H-5: stored as numpy arrays on ``self`` (NOT ``add_weight``). The
+        # masks are a pure deterministic function of
+        # ``(output_dim, padded_output_dim)`` so persisting them in the
+        # checkpoint is wasteful (~ 8 * (padded_output_dim - 1) bytes per
+        # mask per layer; ~512KB at vocab=65536). Conversion to a tensor
+        # happens inside ``call()`` so the conversion lives in call's trace
+        # rather than in build's transient FuncGraph (this is what
+        # distinguishes H-5 from D-004 — see DECISION D-006 below).
+        self._mask_mul_np: Optional[np.ndarray] = None
+        self._mask_add_np: Optional[np.ndarray] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer: compute tree dims and create projection state."""
@@ -620,23 +626,23 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # output_dim receives EXACTLY zero probability mass, by overriding
         # decisions at internal nodes whose subtree contains no valid leaf.
         # For pow2 output_dim every entry is (mul=1, add=0) and the masks
-        # are a no-op. Stored as non-trainable weights so they survive
-        # save/load and are tracked by Keras (matches D-004 reasoning).
-        mask_mul_np, mask_add_np = _compute_validity_masks(
+        # are a no-op.
+        # DECISION D-006: stored as numpy arrays on ``self`` (NOT as
+        # ``add_weight``). The masks are a deterministic function of
+        # ``(output_dim, padded_output_dim)``; persisting them as weights
+        # bloats every checkpoint by 8 * (padded_output_dim - 1) bytes per
+        # mask per layer (~512KB at vocab=65536). They are recomputed during
+        # build() on every load. This is SAFE despite the D-004 caveat about
+        # plain tensors in build() because the value stored on ``self`` here
+        # is a numpy array, not a backend tensor; conversion to a backend
+        # tensor happens INSIDE ``call()`` (see the convert_to_tensor lines
+        # below the matmul) and therefore lives in call's trace, not in
+        # build's transient FuncGraph. The cliffordnet save/load test exercises
+        # the full FuncGraph path on this commit and is the authoritative
+        # check; if it ever fails on this code path, revert this commit per
+        # plan Pre-Mortem Scenario A.
+        self._mask_mul_np, self._mask_add_np = _compute_validity_masks(
             self.output_dim, self.padded_output_dim
-        )
-        flat_len = self.padded_output_dim - 1
-        self._mask_mul = self.add_weight(
-            name="leaf_mask_mul",
-            shape=(flat_len,),
-            initializer=keras.initializers.Constant(mask_mul_np),
-            trainable=False,
-        )
-        self._mask_add = self.add_weight(
-            name="leaf_mask_add",
-            shape=(flat_len,),
-            initializer=keras.initializers.Constant(mask_add_np),
-            trainable=False,
         )
 
     def call(
@@ -705,8 +711,14 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # --- Step 2: Initialize root probability mass = 1.0 ---
         # decision_probs is already float32 from the cast above; the tree
         # accumulation continues in float32 regardless of compute dtype.
-        mask_mul = ops.cast(self._mask_mul, "float32")
-        mask_add = ops.cast(self._mask_add, "float32")
+        # DECISION D-006: convert the numpy validity masks to backend tensors
+        # INSIDE call() so the conversion is captured in the call trace, not
+        # in build()'s transient FuncGraph. The numpy arrays are constants
+        # (function of output_dim only) so the conversion is cheap and the
+        # XLA cache reuses the resulting constants. See the build() comment
+        # for the full rationale and the D-004 distinction.
+        mask_mul = ops.convert_to_tensor(self._mask_mul_np, dtype="float32")
+        mask_add = ops.convert_to_tensor(self._mask_add_np, dtype="float32")
         batch_size = ops.shape(inputs_2d)[0]
         padded_probs = ops.ones((batch_size, 1), dtype="float32")
 
