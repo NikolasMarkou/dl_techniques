@@ -31,6 +31,72 @@ Resume from checkpoint::
 
     python -m train.cliffordnet.train_cliffordnet_nlp_routing \\
         --resume results/cliffordnet_nlp_routing_*/checkpoints/step_0050000.keras
+
+================================================================================
+KNOWN MODELING LIMITATIONS (NOT BUGS — INHERENT TO THE ROUTING-HEAD DESIGN)
+================================================================================
+
+These are deliberate trade-offs, not defects. They are documented here so
+readers don't mistake low absolute perplexity for a training issue.
+
+1. Routing-head expressive ceiling (16-bit channel for 50K vocab)
+-----------------------------------------------------------------
+``RoutingProbabilitiesLayer`` makes ``d = ceil(log2(N))`` binary decisions
+to discriminate ``N`` classes. For vocab=50,261 -> padded to 65,536 ->
+``d = 16`` decisions.
+
+- Output manifold dimensionality: 16 (vs. ~768 effective dims for a Dense
+  head). The 65,536-dim probability vector lies on a 16-dim sigmoid
+  manifold, *not* on a free 65,535-dim simplex.
+- Parameter count: ~12K at D=768 (vs. ~38.6M for a Dense head). 3,000x
+  compression — and the lost capacity is *real* capacity, not redundancy.
+- Sibling entanglement: two leaves sharing ancestor bits have probabilities
+  that co-move under any change to those decisions. The model cannot raise
+  P(token_a) without also moving P of every token sharing ancestor bits
+  with token_a, regardless of context.
+- Trainable mode does NOT lift this ceiling: it learns *better* 16
+  directions in feature space, but the output manifold is still 16-dim.
+- Expected impact: a ~0.3-0.6 nats CE gap above a tied-embedding Dense
+  baseline at convergence, growing with vocabulary size.
+- Per-token CE leakage from sigmoid clipping (eps=1e-7, d=16):
+  ~1.6e-6 nats — negligible at the per-token level.
+
+2. Arbitrary token-id-to-leaf mapping (the "leaf-arrangement penalty")
+----------------------------------------------------------------------
+Tokens map to leaf positions by integer ID. Tiktoken gpt2 IDs are assigned
+in BPE merge-frequency order — essentially incidental from a semantic
+standpoint. ID 1234 is not semantically near ID 1235.
+
+- Two leaves' probability coupling is determined by their lowest-common-
+  ancestor depth. Random ID-to-leaf assignment means semantically-related
+  tokens (e.g. "mat", "floor", "chair", "bed") sit at unrelated leaves
+  with shallow LCAs, forcing the model to express common context-
+  conditional distributions through tree branches that don't align with
+  semantics. Every prediction pays a KL cost.
+- BPE merge order is *worse* than uniformly random in practice: it
+  accidentally clusters surface-form variants (" the"/"the"/"The") but
+  not semantic roles.
+- Fixable cheaply: a static permutation derived from a Huffman tree over
+  unigram frequencies (~0.15 nats recovered) or recursive spectral
+  clustering of token co-occurrence (~0.4 nats recovered) plugs in as a
+  fixed lookup table at the routing-layer boundary, with zero runtime
+  overhead. Currently neither is implemented — the trivial ID->leaf map
+  is the worst end of the design space.
+- A future change should add a ``--vocab-permutation {none,huffman,
+  spectral}`` flag and precompute the permutation from the training
+  corpus before the first epoch.
+
+3. Routing-tree gradient asymmetry (minor)
+------------------------------------------
+For a target leaf ``i``, the gradient w.r.t. decision logit ``z_k`` has
+magnitude that scales with the number of leaves in the sub-tree rooted at
+that decision. Root decisions see gradient aggregated over all 65K
+leaves; near-leaf decisions see gradient from only 2 leaves. This
+produces a systematic *gradient-magnitude imbalance by tree depth* that
+slows updates to deep decisions. Layer-wise LR scaling (deeper = higher
+LR) would help; not currently implemented.
+
+================================================================================
 """
 
 import os
