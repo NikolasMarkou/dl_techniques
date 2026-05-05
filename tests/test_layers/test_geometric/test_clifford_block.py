@@ -1408,5 +1408,108 @@ class TestCliffordNetBlockDS:
         )
 
 
+# ===========================================================================
+# Regression tests for issues identified in the deep review
+# (plans/plan_2026-05-05_0eac2c81)
+# ===========================================================================
+
+
+class TestReviewRegressions:
+    """Regression coverage for fixes applied in iter-1 of the deep-review plan."""
+
+    # --- B4: SRGP shift validation ---
+
+    def test_srgp_rejects_shift_zero(self):
+        with pytest.raises(ValueError, match="shifts"):
+            SparseRollingGeometricProduct(channels=8, shifts=[0, 1])
+
+    def test_srgp_rejects_negative_shift(self):
+        with pytest.raises(ValueError, match="shifts"):
+            SparseRollingGeometricProduct(channels=8, shifts=[-1, 1])
+
+    def test_srgp_rejects_bool_shift(self):
+        # bool is a subclass of int — explicit reject so True/False
+        # don't silently behave as shifts of 1 / 0.
+        with pytest.raises(ValueError, match="shifts"):
+            SparseRollingGeometricProduct(channels=8, shifts=[True, 1])
+
+    # --- B7: CliffordNetBlock channel validation ---
+
+    def test_cliffordnet_block_rejects_channel_mismatch(self):
+        block = CliffordNetBlock(channels=16, shifts=[1, 2])
+        x = tf.random.normal([1, 8, 8, 8])  # D=8 != channels=16
+        with pytest.raises(ValueError, match="isotropic"):
+            block(x)
+
+    def test_cliffordnet_block_ds_rejects_channel_mismatch(self):
+        block = CliffordNetBlockDS(channels=16, shifts=[1, 2])
+        x = tf.random.normal([1, 8, 8, 8])
+        with pytest.raises(ValueError, match="isotropic"):
+            block(x)
+
+    # --- B8: global branch needs channels >= 2 ---
+
+    def test_cliffordnet_block_global_context_requires_channels_ge_2(self):
+        with pytest.raises(ValueError, match="channels >= 2"):
+            CliffordNetBlock(channels=1, shifts=[1], use_global_context=True)
+        # channels=2 is allowed (matches B8 finding).
+        CliffordNetBlock(channels=2, shifts=[1], use_global_context=True)
+
+    def test_cliffordnet_block_ds_global_context_requires_channels_ge_2(self):
+        with pytest.raises(ValueError, match="channels >= 2"):
+            CliffordNetBlockDS(channels=1, shifts=[1], use_global_context=True)
+
+    def test_causal_cliffordnet_block_global_context_requires_channels_ge_2(self):
+        with pytest.raises(ValueError, match="channels >= 2"):
+            CausalCliffordNetBlock(channels=1, shifts=[1], use_global_context=True)
+
+    # --- B11: causality regression test (currently passes, lock it in) ---
+
+    def test_causal_cliffordnet_block_no_future_leakage(self):
+        """Modifying a future position must not change earlier outputs."""
+        keras.utils.set_random_seed(7)
+        block = CausalCliffordNetBlock(channels=8, shifts=[1, 2])
+        seq = 12
+
+        x1 = tf.random.normal([1, 1, seq, 8], seed=0)
+        out1 = block(x1, training=False).numpy()
+
+        x2 = x1.numpy().copy()
+        x2[0, 0, seq - 1, :] = 9999.0  # perturb only the LAST position
+        out2 = block(tf.constant(x2), training=False).numpy()
+
+        diff = np.abs(out1 - out2)
+        per_pos_max = diff.max(axis=(0, 1, 3))
+        # Earlier positions (0..seq-2) must be byte-identical (no leakage).
+        assert (per_pos_max[:-1] < 1e-5).all(), (
+            f"Future leak detected — earlier-position deltas: {per_pos_max[:-1]}"
+        )
+        # The last position SHOULD change (otherwise the block ignores its own input).
+        assert per_pos_max[-1] > 1e-3, (
+            "Last position unchanged after large perturbation — block dead?"
+        )
+
+    # --- B16: pyramid_diff odd dims ---
+
+    def test_dsv2_pyramid_diff_handles_odd_spatial_dims(self):
+        from dl_techniques.layers.geometric.clifford_block import (
+            CliffordNetBlockDSv2,
+        )
+        # Span both even and odd sides of the divisibility boundary
+        # for the strides=2 pyramid level.
+        for h in (8, 9, 10, 11):
+            block = CliffordNetBlockDSv2(
+                channels=8, shifts=[1, 2], strides=2,
+                ctx_mode="pyramid_diff",
+                stream_pool="avg", skip_pool="avg",
+            )
+            x = tf.random.normal([1, h, h, 8])
+            out = block(x)  # must not raise
+            # ceil(h/2) on each spatial axis
+            expected = -(-h // 2)
+            assert out.shape[1] == expected
+            assert out.shape[2] == expected
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
