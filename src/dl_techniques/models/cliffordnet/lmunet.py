@@ -320,22 +320,154 @@ class CliffordNetLMUNet(keras.Model):
         )
 
         # --- Encoder / bottleneck / decoder ----------------------------
-        # NOTE: Step 1 scaffold — the actual block lists are constructed
-        # in Step 2. ``call()`` raises NotImplementedError until Step 3.
+        # Total block count for the linear DropPath schedule across the
+        # entire encoder + bottleneck + decoder stack.
+        total_blocks = (
+            sum(self.blocks_per_stage)        # encoder
+            + bottleneck_blocks               # bottleneck
+            + sum(self.blocks_per_stage[:-1]) # decoder mirrors all but deepest
+        )
+        drop_rates = linear_drop_path_rates(total_blocks, stochastic_depth_rate)
+        dr_idx = 0  # running index into ``drop_rates``
+
+        _block_kw_common: Dict[str, Any] = dict(
+            shifts=self.shifts,
+            cli_mode=cli_mode,
+            ctx_mode=ctx_mode,
+            use_global_context=use_global_context,
+            layer_scale_init=layer_scale_init,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+        )
+
+        # Encoder: per-level blocks + downsampler (except the last level).
         self.encoder_blocks: List[List[CausalCliffordNetBlock]] = []
-        self.encoder_downsamplers: List[CausalCliffordNetBlockDSv2] = []
+        self.encoder_downsamplers: List[Optional[CausalCliffordNetBlockDSv2]] = []
+        for i in range(num_levels):
+            level_channels = self.channels_per_stage[i]
+            level_blocks = []
+            for j in range(self.blocks_per_stage[i]):
+                level_blocks.append(
+                    CausalCliffordNetBlock(
+                        channels=level_channels,
+                        drop_path_rate=drop_rates[dr_idx],
+                        name=f"enc_block_l{i}_b{j}",
+                        **_block_kw_common,
+                    )
+                )
+                dr_idx += 1
+            self.encoder_blocks.append(level_blocks)
+
+            if i < num_levels - 1:
+                next_channels = self.channels_per_stage[i + 1]
+                self.encoder_downsamplers.append(
+                    CausalCliffordNetBlockDSv2(
+                        channels=level_channels,
+                        out_channels=next_channels,
+                        strides=self.stride_per_stage[i],
+                        shifts=self.shifts,
+                        cli_mode=cli_mode,
+                        ctx_mode=ctx_mode,
+                        use_global_context=use_global_context,
+                        kernel_size=7,
+                        stream_pool="avg",
+                        skip_pool="avg",
+                        ctx_norm_type="bn",
+                        ctx_activation="silu",
+                        layer_scale_init=layer_scale_init,
+                        # Downsamplers run between block stacks, so use the
+                        # drop-path rate at the boundary (encoder block at
+                        # the level we're leaving). Use 0.0 to keep them
+                        # deterministic and let the blocks carry the
+                        # stochastic-depth burden.
+                        drop_path_rate=0.0,
+                        use_bias=use_bias,
+                        kernel_initializer=kernel_initializer,
+                        bias_initializer=bias_initializer,
+                        kernel_regularizer=kernel_regularizer,
+                        bias_regularizer=bias_regularizer,
+                        name=f"enc_downsample_l{i}",
+                    )
+                )
+            else:
+                self.encoder_downsamplers.append(None)
+
+        # Bottleneck: stack of dim-preserving blocks at the deepest level.
+        deepest_channels = self.channels_per_stage[-1]
         self.bottleneck_block_list: List[CausalCliffordNetBlock] = []
-        self.decoder_upsamplers: List[keras.layers.UpSampling2D] = []
-        self.decoder_concats: List[keras.layers.Concatenate] = []
-        self.decoder_skip_projs: List[keras.layers.Conv2D] = []
+        for k in range(bottleneck_blocks):
+            self.bottleneck_block_list.append(
+                CausalCliffordNetBlock(
+                    channels=deepest_channels,
+                    drop_path_rate=drop_rates[dr_idx],
+                    name=f"bottleneck_block_{k}",
+                    **_block_kw_common,
+                )
+            )
+            dr_idx += 1
+
+        # Decoder: walk levels in reverse, excluding the deepest one
+        # (i in num_levels-2 .. 0). At each level i:
+        #   upsample (s = stride_per_stage[i])
+        #   concat with encoder skip[i]  (channels: C_{i+1} + C_i = 3*C_i)
+        #   1x1 Conv2D project to C_i
+        #   blocks_per_stage[i] dim-preserving blocks
+        # Lists are kept in *encoder order* (index = encoder level i).
+        # Levels with index num_levels-1 hold None (no decoder stage there).
+        self.decoder_upsamplers: List[Optional[keras.layers.UpSampling2D]] = []
+        self.decoder_concats: List[Optional[keras.layers.Concatenate]] = []
+        self.decoder_skip_projs: List[Optional[keras.layers.Conv2D]] = []
         self.decoder_blocks: List[List[CausalCliffordNetBlock]] = []
+        for i in range(num_levels):
+            self.decoder_upsamplers.append(None)
+            self.decoder_concats.append(None)
+            self.decoder_skip_projs.append(None)
+            self.decoder_blocks.append([])
+
+        for i in reversed(range(num_levels - 1)):
+            level_channels = self.channels_per_stage[i]
+            self.decoder_upsamplers[i] = keras.layers.UpSampling2D(
+                size=(1, self.stride_per_stage[i]),
+                interpolation="nearest",
+                name=f"dec_upsample_l{i}",
+            )
+            self.decoder_concats[i] = keras.layers.Concatenate(
+                axis=-1, name=f"dec_concat_l{i}",
+            )
+            self.decoder_skip_projs[i] = keras.layers.Conv2D(
+                filters=level_channels,
+                kernel_size=1,
+                padding="same",
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name=f"dec_skip_proj_l{i}",
+            )
+            level_blocks: List[CausalCliffordNetBlock] = []
+            for j in range(self.blocks_per_stage[i]):
+                level_blocks.append(
+                    CausalCliffordNetBlock(
+                        channels=level_channels,
+                        drop_path_rate=drop_rates[dr_idx],
+                        name=f"dec_block_l{i}_b{j}",
+                        **_block_kw_common,
+                    )
+                )
+                dr_idx += 1
+            self.decoder_blocks[i] = level_blocks
+
+        assert dr_idx == total_blocks, (
+            f"drop-path index drift: dr_idx={dr_idx}, total_blocks={total_blocks}"
+        )
 
         # --- Output head ----------------------------------------------
-        deepest_channels = self.channels_per_stage[-1]
         # Head norm is applied after the decoder restores the level-0
         # resolution / channel count, so it operates on ``base_channels``.
-        # ``deepest_channels`` is recorded above for diagnostics only.
-        del deepest_channels  # silence unused
         self.head_norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON, name="head_norm",
         )
