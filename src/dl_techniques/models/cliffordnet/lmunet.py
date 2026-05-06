@@ -120,13 +120,17 @@ class CliffordNetLMUNet(keras.Model):
 
     Hierarchical encoder / bottleneck / decoder stack of causal Clifford
     blocks for autoregressive sequence modeling. Channels grow with depth
-    following the standard U-Net schedule
-    ``channels_per_stage[i] = base_channels * (2 ** i)``.
+    following ``channels_per_stage[i] = round(base_channels * (channel_multiplier ** i))``.
+    The default ``channel_multiplier=1.5`` keeps the deepest stages
+    tractable; pass ``2.0`` to recover a standard doubling U-Net.
 
     :param vocab_size: Vocabulary size (including special tokens).
     :param max_seq_length: Maximum sequence length for positional embeddings.
     :param base_channels: Channel count at level 0 (top of U).
         Equals the embedding dimensionality.
+    :param channel_multiplier: Per-stage channel growth factor. Stage ``i``
+        has ``round(base_channels * (channel_multiplier ** i))`` channels.
+        Default ``1.5``; use ``2.0`` for classical U-Net doubling.
     :param stride_per_stage: List of strides applied between consecutive
         encoder levels. ``num_levels = len(stride_per_stage) + 1``. The
         product is the model's ``total_stride``.
@@ -164,12 +168,12 @@ class CliffordNetLMUNet(keras.Model):
     LAYERNORM_EPSILON: float = 1e-6
 
     # Pre-defined variant configurations for NLP.
-    # Channel ladder is per-stage doubling (D-005):
-    #     channels_per_stage[i] = base_channels * (2 ** i)
+    # Channel ladder uses ``channel_multiplier=1.5`` (default) with
+    # base_channels matching the lm.py variants for fair comparison.
     # See plan_2026-05-06_82749628 plan.md "Channel ladder" for derivation.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "nano": dict(
-            base_channels=64,
+            base_channels=128,
             stride_per_stage=[2, 2],
             blocks_per_stage=[2, 2, 2],
             bottleneck_blocks=2,
@@ -182,7 +186,7 @@ class CliffordNetLMUNet(keras.Model):
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "mini": dict(
-            base_channels=96,
+            base_channels=192,
             stride_per_stage=[2, 2],
             blocks_per_stage=[2, 3, 3],
             bottleneck_blocks=2,
@@ -195,7 +199,7 @@ class CliffordNetLMUNet(keras.Model):
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "base": dict(
-            base_channels=96,
+            base_channels=384,
             stride_per_stage=[2, 2, 2],
             blocks_per_stage=[3, 3, 3, 3],
             bottleneck_blocks=3,
@@ -208,7 +212,7 @@ class CliffordNetLMUNet(keras.Model):
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "large": dict(
-            base_channels=128,
+            base_channels=512,
             stride_per_stage=[2, 2, 2],
             blocks_per_stage=[3, 4, 4, 4],
             bottleneck_blocks=4,
@@ -221,7 +225,7 @@ class CliffordNetLMUNet(keras.Model):
             kernel_initializer=_DEFAULT_KERNEL_INIT,
         ),
         "xl": dict(
-            base_channels=192,
+            base_channels=768,
             stride_per_stage=[2, 2, 2],
             blocks_per_stage=[4, 4, 4, 4],
             bottleneck_blocks=4,
@@ -240,6 +244,7 @@ class CliffordNetLMUNet(keras.Model):
         vocab_size: int,
         max_seq_length: int = 512,
         base_channels: int = 64,
+        channel_multiplier: float = 1.5,
         stride_per_stage: Optional[List[int]] = None,
         blocks_per_stage: Optional[List[int]] = None,
         bottleneck_blocks: int = 2,
@@ -279,6 +284,11 @@ class CliffordNetLMUNet(keras.Model):
             raise ValueError(
                 f"base_channels must be positive, got {base_channels!r}"
             )
+        if channel_multiplier < 1.0:
+            raise ValueError(
+                f"channel_multiplier must be >= 1.0 (channels must not "
+                f"shrink with depth), got {channel_multiplier!r}"
+            )
         if any(s < 1 for s in stride_per_stage):
             raise ValueError(
                 f"stride_per_stage entries must be >= 1, got {stride_per_stage!r}"
@@ -305,6 +315,7 @@ class CliffordNetLMUNet(keras.Model):
         self.vocab_size = vocab_size
         self.max_seq_length = max_seq_length
         self.base_channels = base_channels
+        self.channel_multiplier = channel_multiplier
         self.stride_per_stage = list(stride_per_stage)
         self.blocks_per_stage = list(blocks_per_stage)
         self.bottleneck_blocks = bottleneck_blocks
@@ -325,7 +336,8 @@ class CliffordNetLMUNet(keras.Model):
         # --- Derived quantities ----------------------------------------
         self.num_levels = num_levels
         self.channels_per_stage: List[int] = [
-            base_channels * (2 ** i) for i in range(num_levels)
+            int(round(base_channels * (channel_multiplier ** i)))
+            for i in range(num_levels)
         ]
         self.total_stride: int = 1
         for s in self.stride_per_stage:
@@ -530,6 +542,7 @@ class CliffordNetLMUNet(keras.Model):
         logger.info(
             f"Created CliffordNetLMUNet (vocab_size={vocab_size}, "
             f"max_seq_length={max_seq_length}, base_channels={base_channels}, "
+            f"channel_multiplier={channel_multiplier}, "
             f"channels_per_stage={self.channels_per_stage}, "
             f"stride_per_stage={self.stride_per_stage}, "
             f"blocks_per_stage={self.blocks_per_stage}, "
@@ -638,6 +651,7 @@ class CliffordNetLMUNet(keras.Model):
             "vocab_size": self.vocab_size,
             "max_seq_length": self.max_seq_length,
             "base_channels": self.base_channels,
+            "channel_multiplier": self.channel_multiplier,
             "stride_per_stage": self.stride_per_stage,
             "blocks_per_stage": self.blocks_per_stage,
             "bottleneck_blocks": self.bottleneck_blocks,

@@ -150,7 +150,7 @@ class TestInitialization:
         assert model.shifts == [1, 2]
         assert model.num_levels == 3
         assert model.total_stride == 4
-        assert model.channels_per_stage == [16, 32, 64]
+        assert model.channels_per_stage == [16, 24, 36]
 
     def test_default_initialization(self):
         model = CliffordNetLMUNet(vocab_size=256, base_channels=16)
@@ -158,7 +158,7 @@ class TestInitialization:
         assert model.stride_per_stage == [2, 2]
         assert model.blocks_per_stage == [2, 2, 2]
         assert model.num_levels == 3
-        assert model.channels_per_stage == [16, 32, 64]
+        assert model.channels_per_stage == [16, 24, 36]
         assert model.tie_word_embeddings is True
 
     def test_custom_initialization(self):
@@ -181,7 +181,7 @@ class TestInitialization:
         assert model.shifts == [1, 2, 4]
         assert model.num_levels == 4
         assert model.total_stride == 8
-        assert model.channels_per_stage == [24, 48, 96, 192]
+        assert model.channels_per_stage == [24, 36, 54, 81]
 
     def test_invalid_blocks_per_stage_length(self, tiny_config):
         bad = {**tiny_config, "blocks_per_stage": [1, 1]}  # should be 3
@@ -386,8 +386,8 @@ class TestVariants:
 
     def test_from_variant_nano_channel_ladder(self):
         model = CliffordNetLMUNet.from_variant("nano", vocab_size=128)
-        assert model.base_channels == 64
-        assert model.channels_per_stage == [64, 128, 256]
+        assert model.base_channels == 128
+        assert model.channels_per_stage == [128, 192, 288]
         # Confirm encoder block channels match the ladder.
         for i, level_blocks in enumerate(model.encoder_blocks):
             for blk in level_blocks:
@@ -397,13 +397,13 @@ class TestVariants:
 
     def test_from_variant_mini(self):
         model = CliffordNetLMUNet.from_variant("mini", vocab_size=128)
-        assert model.base_channels == 96
-        assert model.channels_per_stage == [96, 192, 384]
+        assert model.base_channels == 192
+        assert model.channels_per_stage == [192, 288, 432]
 
     def test_from_variant_with_overrides(self):
         model = CliffordNetLMUNet.from_variant("nano", vocab_size=128, dropout_rate=0.2)
         assert model.dropout_rate == 0.2
-        assert model.base_channels == 64
+        assert model.base_channels == 128
 
     def test_from_variant_unknown(self):
         with pytest.raises(ValueError, match="Unknown variant"):
