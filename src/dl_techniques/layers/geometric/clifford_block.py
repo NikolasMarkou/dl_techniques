@@ -2046,3 +2046,494 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
             }
         )
         return config
+
+
+# ===========================================================================
+# CausalCliffordNetBlockDSv2 — causal sibling of CliffordNetBlockDSv2
+# ===========================================================================
+
+
+# Type aliases scoped to the causal DSv2 surface (narrower than DSv2's).
+CausalCtxModeV2 = Literal["diff", "abs"]
+CausalSkipPoolV2 = Literal["avg", "max"]
+
+
+def _make_causal_pool(
+    kind: str,
+    strides: int,
+    name: str,
+) -> keras.layers.Layer:
+    """Build a causal-safe stride-``s`` downsampling pool along W.
+
+    Restricted to ``"avg"`` and ``"max"``: with ``padding="same"`` and a
+    ``(1, strides)`` kernel/stride along W, both pad with zero / ``-inf``
+    (resp.) on the right edge. Padding values carry no information about
+    future input, so position ``i`` in the output only depends on real
+    input positions ``<= i*strides + (strides-1)``. Other DSv2 pool kinds
+    (``blur``, ``gaussian_dw``, ``pixel_unshuffle``, ``resnetd``) are
+    excluded — see DECISION D-001 in ``CausalCliffordNetBlockDSv2``.
+
+    At ``strides == 1`` the pool collapses to ``Identity`` (matches the
+    DSv2 ``_make_pool_v2`` convention).
+    """
+    if strides == 1:
+        return keras.layers.Identity(name=name)
+    if kind == "avg":
+        return keras.layers.AveragePooling2D(
+            pool_size=(1, strides),
+            strides=(1, strides),
+            padding="same",
+            name=name,
+        )
+    if kind == "max":
+        return keras.layers.MaxPooling2D(
+            pool_size=(1, strides),
+            strides=(1, strides),
+            padding="same",
+            name=name,
+        )
+    raise ValueError(
+        f"Unknown causal pool kind: {kind!r} (expected 'avg' or 'max')."
+    )
+
+
+@keras.saving.register_keras_serializable()
+class CausalCliffordNetBlockDSv2(keras.layers.Layer):
+    """Causal sibling of :class:`CliffordNetBlockDSv2` for autoregressive
+    sequence modeling.
+
+    Combines the V2 design space of :class:`CliffordNetBlockDSv2` (dual
+    stream + ``local_geo_prod`` + GGR + skip + optional global branch +
+    optional ``out_channels`` projection + configurable ctx norm/activation)
+    with the causal padding paradigm of :class:`CausalCliffordNetBlock`.
+
+    Expects 4-D input ``(B, 1, seq_len, D)`` (sequence reshaped for 2-D
+    convolutions with ``H = 1``). The block is **strictly causal along W**:
+    output at position ``i`` depends only on inputs at positions
+    ``<= i*strides + (strides-1)`` (the input chunk that pools to output
+    ``i``).
+
+    Architectural differences vs :class:`CliffordNetBlockDSv2`:
+
+    1. **Causal DW context conv.** The depthwise conv uses
+       ``kernel_size=(1, kernel_size)``, ``padding="valid"`` and a manual
+       left-only zero-pad of width ``kernel_size-1`` along W (mirrors
+       :class:`CausalCliffordNetBlock`). Same output spatial shape as DSv2
+       (``ceil(seq_len/strides)``).
+    2. **Restricted ctx_mode.** ``"diff"`` and ``"abs"`` only —
+       ``"pyramid_diff"`` is forbidden because the bilinear upsample mixes
+       neighbours, breaking causality.
+    3. **Restricted pool kinds.** ``stream_pool`` and ``skip_pool`` are
+       restricted to ``{"avg", "max"}`` — ``blur``, ``gaussian_dw``,
+       ``pixel_unshuffle`` and ``resnetd`` either leak future information or
+       change channel semantics (see DECISION D-001 below).
+    4. **Causal global context.** When ``use_global_context=True`` the
+       global branch uses a *cumulative* mean along W (each pooled position
+       sees the average of past+current pooled positions only), not the
+       full spatial mean used by DSv2.
+
+    All other components — ``input_norm`` (LayerNorm), ``linear_det``
+    (1x1 Dense), SRGP local product, GGR, optional ``out_channels``
+    projection — are unchanged from DSv2.
+
+    :param channels: Feature dimensionality D. ``input_shape[-1]`` must
+        equal ``channels`` (B7 contract).
+    :param shifts: Channel-shift offsets for the sparse rolling product.
+    :param cli_mode: Algebraic components (``"inner"``, ``"wedge"``,
+        ``"full"``).
+    :param ctx_mode: ``"diff"`` or ``"abs"``.
+    :param use_global_context: Add causal cumulative-mean global branch.
+    :param kernel_size: DW conv kernel size along W.
+    :param strides: Downsampling factor along W. ``1`` preserves length;
+        ``>1`` reduces W to ``ceil(seq_len/strides)``.
+    :param stream_pool: ``"avg"`` or ``"max"``.
+    :param skip_pool: ``"avg"`` or ``"max"``.
+    :param out_channels: Optional 1x1 projection at the end of the block.
+        ``None`` (default) preserves channel count.
+    :param ctx_norm_type: ``"bn"``, ``"gn"``, ``"ln"``, or ``"none"``.
+    :param ctx_activation: Optional activation after ctx_norm
+        (default ``"silu"``).
+    :param layer_scale_init: Initial LayerScale value for GGR.
+    :param drop_path_rate: DropPath probability for GGR.
+    :param use_bias: Whether Dense layers use bias.
+    :param kernel_initializer: Kernel initializer.
+    :param bias_initializer: Bias initializer.
+    :param kernel_regularizer: Kernel regularizer.
+    :param bias_regularizer: Bias regularizer.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        shifts: List[int],
+        cli_mode: CliMode = "full",
+        ctx_mode: CausalCtxModeV2 = "diff",
+        use_global_context: bool = False,
+        kernel_size: int = 7,
+        strides: int = 1,
+        stream_pool: CausalSkipPoolV2 = "avg",
+        skip_pool: CausalSkipPoolV2 = "avg",
+        out_channels: Optional[int] = None,
+        ctx_norm_type: CtxNormType = "bn",
+        ctx_activation: Optional[str] = "silu",
+        layer_scale_init: float = 1e-5,
+        drop_path_rate: float = 0.0,
+        use_bias: bool = True,
+        kernel_initializer: Any = "glorot_uniform",
+        bias_initializer: Any = "zeros",
+        kernel_regularizer: Optional[Any] = None,
+        bias_regularizer: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if channels <= 0:
+            raise ValueError(f"channels must be positive, got {channels}")
+        # DECISION D-001: ctx_mode is restricted to 'diff'|'abs' for the
+        # causal variant. 'pyramid_diff' is excluded because the
+        # bilinear UpSampling2D used by the DSv2 pyramid path mixes
+        # neighbouring positions, which would leak future information
+        # along the W (sequence) axis. Anyone needing pyramid-diff must
+        # use the non-causal CliffordNetBlockDSv2.
+        if ctx_mode not in ("diff", "abs"):
+            raise ValueError(
+                f"ctx_mode must be 'diff' or 'abs' for the causal variant "
+                f"(pyramid_diff is non-causal), got {ctx_mode!r}"
+            )
+        if not isinstance(kernel_size, int) or kernel_size <= 0:
+            raise ValueError(
+                f"kernel_size must be a positive int, got {kernel_size!r}"
+            )
+        if not isinstance(strides, int) or strides < 1:
+            raise ValueError(f"strides must be int>=1, got {strides!r}")
+        # DECISION D-001 (cont.): stream_pool / skip_pool restricted to
+        # avg/max. blur and gaussian_dw use symmetric kernels that cross
+        # the temporal boundary on the right edge -> future leak.
+        # pixel_unshuffle changes channel count (incompatible with the
+        # H=1 layout). resnetd's pool has the same constraint as a plain
+        # pool but bundles a 1x1 Conv that we don't need here.
+        valid_pools = {"avg", "max"}
+        if stream_pool not in valid_pools:
+            raise ValueError(
+                f"stream_pool must be one of {sorted(valid_pools)} "
+                f"(causal variant), got {stream_pool!r}"
+            )
+        if skip_pool not in valid_pools:
+            raise ValueError(
+                f"skip_pool must be one of {sorted(valid_pools)} "
+                f"(causal variant), got {skip_pool!r}"
+            )
+        if out_channels is not None and out_channels <= 0:
+            raise ValueError(
+                f"out_channels must be positive or None, got {out_channels!r}"
+            )
+        if ctx_norm_type not in ("bn", "gn", "ln", "none"):
+            raise ValueError(
+                f"ctx_norm_type must be 'bn'|'gn'|'ln'|'none', got "
+                f"{ctx_norm_type!r}"
+            )
+        # See D-002 (CliffordNetBlock): global branch needs channels >= 2.
+        if use_global_context and channels < 2:
+            raise ValueError(
+                f"use_global_context=True requires channels >= 2 "
+                f"(global branch uses shifts=[1, 2]); got channels={channels}"
+            )
+
+        self.channels = channels
+        self.shifts = list(shifts)
+        self.cli_mode = cli_mode
+        self.ctx_mode = ctx_mode
+        self.use_global_context = use_global_context
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.stream_pool_kind = stream_pool
+        self.skip_pool_kind = skip_pool
+        self.out_channels = out_channels
+        self.ctx_norm_type = ctx_norm_type
+        self.ctx_activation = ctx_activation
+        self.layer_scale_init = layer_scale_init
+        self.drop_path_rate = drop_path_rate
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+
+        self.input_norm = keras.layers.LayerNormalization(
+            epsilon=1e-6, name="input_norm"
+        )
+        self.linear_det = keras.layers.Dense(
+            channels,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="linear_det",
+        )
+
+        # DECISION D-002: causal DW conv = (1, kernel_size) + valid +
+        # manual left-pad of (kernel_size - 1) along W. Same pattern as
+        # CausalCliffordNetBlock but generalised to arbitrary kernel_size
+        # and stride. With stride s, output W = ceil(W/s) (verified in
+        # findings/dsv2-merge-points.md): floor((W + k - 1 - k)/s) + 1 =
+        # floor((W-1)/s) + 1 = ceil(W/s).
+        # Implementation note: TF/CUDA's DepthwiseConv2D requires equal
+        # row/col strides, which we cannot satisfy here (we need
+        # strides=(1, s)). We use Conv2D with groups=channels instead
+        # — algebraically identical to depthwise but supports asymmetric
+        # strides on GPU.
+        self.dw_conv = keras.layers.Conv2D(
+            filters=channels,
+            kernel_size=(1, kernel_size),
+            strides=(1, strides),
+            padding="valid",
+            groups=channels,
+            use_bias=(ctx_norm_type == "none"),
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name="dw_conv",
+        )
+        self.ctx_norm = _make_ctx_norm(
+            ctx_norm_type, channels, name="ctx_norm"
+        )
+
+        self.stream_pool = _make_causal_pool(
+            stream_pool, strides, name="stream_pool"
+        )
+        self.skip_pool = _make_causal_pool(
+            skip_pool, strides, name="skip_pool"
+        )
+
+        self.local_geo_prod = SparseRollingGeometricProduct(
+            channels=channels,
+            shifts=shifts,
+            cli_mode=cli_mode,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="local_geo_prod",
+        )
+
+        if use_global_context:
+            self.global_geo_prod = SparseRollingGeometricProduct(
+                channels=channels,
+                shifts=_GLOBAL_SHIFTS,
+                cli_mode=_GLOBAL_CLI_MODE,
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name="global_geo_prod",
+            )
+        else:
+            self.global_geo_prod = None
+
+        self.ggr = GatedGeometricResidual(
+            channels=channels,
+            layer_scale_init=layer_scale_init,
+            drop_path_rate=drop_path_rate,
+            kernel_initializer=kernel_initializer,
+            bias_initializer=bias_initializer,
+            kernel_regularizer=kernel_regularizer,
+            bias_regularizer=bias_regularizer,
+            name="ggr",
+        )
+
+        self.out_proj: Optional[keras.layers.Conv2D] = None
+        if out_channels is not None and out_channels != channels:
+            self.out_proj = keras.layers.Conv2D(
+                filters=out_channels,
+                kernel_size=1,
+                padding="same",
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                name="out_proj",
+            )
+
+    @staticmethod
+    def _ceildiv(a: Optional[int], b: int) -> Optional[int]:
+        return None if a is None else -(-a // b)
+
+    @staticmethod
+    def _causal_pad_w(
+        x: keras.KerasTensor, kernel_size: int
+    ) -> keras.KerasTensor:
+        """Left-only zero-pad along W by ``kernel_size - 1``.
+
+        For ``(B, H, W, D)`` with ``H = 1``, pads ``kernel_size - 1`` zeros
+        on the LEFT of the W dimension so that a ``valid`` conv with
+        ``kernel_size=(1, kernel_size)`` preserves causality (each output
+        position only sees past/current input positions).
+        """
+        pad_w = kernel_size - 1
+        return keras.ops.pad(x, [[0, 0], [0, 0], [pad_w, 0], [0, 0]])
+
+    @staticmethod
+    def _causal_cumulative_mean_w(
+        x: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Causal cumulative mean along W (axis=2).
+
+        For input ``(B, 1, W, C)`` returns the same shape where pooled
+        position ``j`` is the average of pooled positions ``0..j``. Used
+        by the global-context branch to preserve causality (vs DSv2's
+        full-spatial mean which would mix future into past).
+        """
+        cumsum = keras.ops.cumsum(x, axis=2)
+        seq_len = keras.ops.shape(x)[2]
+        divisors = keras.ops.cast(
+            keras.ops.arange(1, seq_len + 1), x.dtype
+        )
+        divisors = keras.ops.reshape(divisors, (1, 1, -1, 1))
+        return cumsum / divisors
+
+    def build(self, input_shape: Tuple) -> None:
+        """Explicitly build every sub-layer in dependency order.
+
+        Validates the H=1 contract and ``input_shape[-1] == channels``.
+        Mirrors :class:`CliffordNetBlockDSv2.build` with two differences:
+        (1) accepts and validates the H=1 layout, (2) builds ``dw_conv``
+        on the LEFT-PADDED shape (W' = W + kernel_size - 1).
+        """
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"CausalCliffordNetBlockDSv2 expects input last dim == "
+                f"channels={self.channels}, got "
+                f"input_shape[-1]={input_shape[-1]} (isotropic core)."
+            )
+        if input_shape[1] is not None and input_shape[1] != 1:
+            raise ValueError(
+                f"CausalCliffordNetBlockDSv2 expects H == 1 (input shape "
+                f"(B, 1, seq_len, D)), got input_shape[1]={input_shape[1]}."
+            )
+        b, h, w, _ = input_shape
+
+        self.input_norm.build(input_shape)
+
+        # Pool layers consume full-resolution input.
+        self.stream_pool.build(input_shape)
+        self.skip_pool.build(input_shape)
+
+        # Stream-side shape after stream pool (H stays at 1).
+        pooled_w = self._ceildiv(w, self.strides)
+        stream_shape = (b, h, pooled_w, self.channels)
+
+        self.linear_det.build(stream_shape)
+
+        # DW conv consumes the LEFT-PADDED full-resolution input.
+        # padded_w = w + kernel_size - 1 (None-safe).
+        padded_w = None if w is None else (w + self.kernel_size - 1)
+        padded_shape = (b, h, padded_w, self.channels)
+        self.dw_conv.build(padded_shape)
+        if self.ctx_norm is not None:
+            self.ctx_norm.build(stream_shape)
+
+        self.local_geo_prod.build(stream_shape)
+        if self.global_geo_prod is not None:
+            self.global_geo_prod.build(stream_shape)
+        self.ggr.build(stream_shape)
+
+        if self.out_proj is not None:
+            self.out_proj.build(stream_shape)
+
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Forward pass with strict causal mixing along W.
+
+        :param inputs: Tensor ``(B, 1, seq_len, D)``.
+        :param training: Whether in training mode.
+        :return: Tensor ``(B, 1, ceil(seq_len/strides), out_channels)``
+            where ``out_channels`` defaults to ``channels``.
+        """
+        x_prev = inputs
+
+        x_norm = self.input_norm(x_prev)
+        x_norm_p = self.stream_pool(x_norm)
+        z_det = self.linear_det(x_norm_p)
+
+        # Causal context: left-pad along W, then valid conv with stride.
+        x_padded = self._causal_pad_w(x_norm, self.kernel_size)
+        z_ctx = self.dw_conv(x_padded)
+        if self.ctx_norm is not None:
+            z_ctx = self.ctx_norm(z_ctx, training=training)
+        if self.ctx_activation is not None:
+            z_ctx = keras.activations.get(self.ctx_activation)(z_ctx)
+
+        if self.ctx_mode == "diff":
+            z_ctx = z_ctx - z_det
+        # 'abs' is a no-op pass-through.
+
+        g_feat = self.local_geo_prod(z_det, z_ctx)
+
+        if self.global_geo_prod is not None:
+            # Causal global branch: cumulative mean over the pooled W axis.
+            c_glo = self._causal_cumulative_mean_w(x_norm_p)
+            c_glo = c_glo - z_det
+            g_glo = self.global_geo_prod(z_det, c_glo)
+            g_feat = g_feat + g_glo
+
+        h_mix = self.ggr(x_norm_p, g_feat, training=training)
+        x_skip = self.skip_pool(x_prev)
+        out = x_skip + h_mix
+
+        if self.out_proj is not None:
+            out = self.out_proj(out)
+        return out
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        b, h, w, _ = input_shape
+        new_w = None if w is None else self._ceildiv(w, self.strides)
+        out_c = (
+            self.out_channels if self.out_channels is not None
+            else self.channels
+        )
+        return (b, h, new_w, out_c)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "channels": self.channels,
+                "shifts": self.shifts,
+                "cli_mode": self.cli_mode,
+                "ctx_mode": self.ctx_mode,
+                "use_global_context": self.use_global_context,
+                "kernel_size": self.kernel_size,
+                "strides": self.strides,
+                "stream_pool": self.stream_pool_kind,
+                "skip_pool": self.skip_pool_kind,
+                "out_channels": self.out_channels,
+                "ctx_norm_type": self.ctx_norm_type,
+                "ctx_activation": self.ctx_activation,
+                "layer_scale_init": self.layer_scale_init,
+                "drop_path_rate": self.drop_path_rate,
+                "use_bias": self.use_bias,
+                "kernel_initializer": initializers.serialize(
+                    self.kernel_initializer
+                ),
+                "bias_initializer": initializers.serialize(
+                    self.bias_initializer
+                ),
+                "kernel_regularizer": regularizers.serialize(
+                    self.kernel_regularizer
+                ),
+                "bias_regularizer": regularizers.serialize(
+                    self.bias_regularizer
+                ),
+            }
+        )
+        return config
