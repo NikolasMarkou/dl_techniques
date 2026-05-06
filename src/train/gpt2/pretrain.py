@@ -20,6 +20,7 @@ Usage::
     python -m train.gpt2.pretrain --resume results/.../checkpoints/step_0450000.keras
 """
 
+import csv
 import os
 import json
 import glob
@@ -35,6 +36,7 @@ import tiktoken
 
 from train.common import setup_gpu
 from train.common.evaluation import generate_training_curves
+from train.common import plot_step_metrics
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -158,6 +160,8 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         max_checkpoints: int = 3,
         model_name: str = "gpt2",
         initial_step: int = 0,
+        log_every_steps: int = 100,
+        plot_every_steps: int = 25000,
     ):
         super().__init__()
         self.save_every_steps = save_every_steps
@@ -165,12 +169,19 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self.max_checkpoints = max_checkpoints
         self.model_name = model_name
         self._global_step = initial_step
+        self._log_every_steps = log_every_steps
+        self._plot_every_steps = plot_every_steps
+        self._save_dir = save_dir
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
         self._analysis_dir = os.path.join(save_dir, "step_analysis")
         os.makedirs(self._ckpt_dir, exist_ok=True)
         if analyze_every_steps > 0:
             os.makedirs(self._analysis_dir, exist_ok=True)
+
+        self._csv_path = os.path.join(save_dir, "training_log.csv")
+        self._csv_file = None
+        self._csv_writer = None
 
         self._analysis_config = AnalysisConfig(
             analyze_weights=True,
@@ -183,11 +194,15 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         logger.info(
             f"StepCheckpointCallback: save every {save_every_steps} steps, "
             f"analyze every {analyze_every_steps} steps, "
-            f"keep max {max_checkpoints} checkpoints"
+            f"keep max {max_checkpoints} checkpoints, "
+            f"log every {log_every_steps} steps, "
+            f"plot every {plot_every_steps} steps"
         )
 
     def on_train_batch_end(self, batch, logs=None):
         self._global_step += 1
+        if self._global_step % self._log_every_steps == 0:
+            self._log_metrics(logs)
         if self._global_step % self.save_every_steps == 0:
             self._save_checkpoint()
         if (
@@ -195,11 +210,40 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             and self._global_step % self.analyze_every_steps == 0
         ):
             self._run_analysis()
+        if (
+            self._plot_every_steps > 0
+            and self._global_step % self._plot_every_steps == 0
+        ):
+            self._plot_metrics()
 
     def on_train_end(self, logs=None):
+        if self._csv_file is not None:
+            self._csv_file.close()
+            self._csv_file = None
         path = os.path.join(self._ckpt_dir, "final.keras")
         self.model.save(path)
         logger.info(f"Final checkpoint saved: {path}")
+        self._plot_metrics()
+
+    def _log_metrics(self, logs):
+        if logs is None:
+            return
+        row = {"step": self._global_step, **logs}
+        if self._csv_writer is None:
+            self._csv_file = open(self._csv_path, "a", newline="")
+            self._csv_writer = csv.DictWriter(
+                self._csv_file, fieldnames=list(row.keys()),
+            )
+            if self._csv_file.tell() == 0:
+                self._csv_writer.writeheader()
+        self._csv_writer.writerow(row)
+        self._csv_file.flush()
+
+    def _plot_metrics(self):
+        try:
+            plot_step_metrics(self._csv_path, self._save_dir)
+        except Exception as e:
+            logger.warning(f"Step plot failed at step {self._global_step}: {e}")
 
     def _save_checkpoint(self):
         path = os.path.join(

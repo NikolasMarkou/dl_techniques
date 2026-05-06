@@ -117,6 +117,7 @@ from keras import initializers
 
 from train.common import setup_gpu
 from train.common.evaluation import generate_training_curves
+from train.common import plot_step_metrics
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -294,6 +295,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         max_checkpoints: int = 3,
         model_name: str = "cliffordnet_nlp_routing",
         log_every_steps: int = 100,
+        plot_every_steps: int = 25000,
     ):
         super().__init__()
         self._counter = step_counter
@@ -302,6 +304,8 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self.max_checkpoints = max_checkpoints
         self.model_name = model_name
         self._log_every_steps = log_every_steps
+        self._plot_every_steps = plot_every_steps
+        self._save_dir = save_dir
 
         self._ckpt_dir = os.path.join(save_dir, "checkpoints")
         self._analysis_dir = os.path.join(save_dir, "step_analysis")
@@ -354,6 +358,12 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             and step % self.analyze_every_steps == 0
         ):
             self._run_analysis()
+        if (
+            self._plot_every_steps > 0
+            and step > 0
+            and step % self._plot_every_steps == 0
+        ):
+            self._plot_metrics()
 
     def on_epoch_end(self, epoch, logs=None):
         # Flush a row that contains validation metrics from this epoch end.
@@ -367,6 +377,13 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         path = os.path.join(self._ckpt_dir, "final.keras")
         self.model.save(path)
         logger.info(f"Final checkpoint saved: {path}")
+        self._plot_metrics()
+
+    def _plot_metrics(self):
+        try:
+            plot_step_metrics(self._csv_path, self._save_dir)
+        except Exception as e:
+            logger.warning(f"Step plot failed at step {self._global_step}: {e}")
 
     def _current_lr(self) -> float:
         opt = getattr(self.model, "optimizer", None)
