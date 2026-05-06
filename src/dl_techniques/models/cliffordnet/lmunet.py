@@ -88,6 +88,32 @@ from dl_techniques.layers.geometric.clifford_block import (
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 
 
+def _causal_upsample(x: keras.KerasTensor, stride: int) -> keras.KerasTensor:
+    """Causally right-shift an upsampled feature by ``stride - 1`` along W.
+
+    # DECISION D-007: causal upsample via right-shift.
+    # Plain ``UpSampling2D(size=(1, s), interpolation="nearest")`` is NOT
+    # causal at fine resolution. Pooled cell ``j`` was computed by DSv2 from
+    # input positions ``[j*s, j*s+s-1]``. Nearest-upsample maps output
+    # position ``k`` to pooled cell ``k // s``, whose max-input-seen is
+    # ``(k//s)*s + s - 1``. For ``k % s != s - 1`` that exceeds ``k`` — a
+    # future leak. Empirically observed: nano (stride [2,2], total_stride=4)
+    # leaked positions 4-6 when only position 7 was perturbed (D-006).
+    #
+    # Right-shifting the upsampled feature by ``s - 1`` along W (left-zero-
+    # pad ``s - 1``, drop ``s - 1`` from the right) maps output ``k`` to
+    # pooled cell ``(k - (s - 1)) // s`` whose max-input-seen is
+    # ``((k - (s - 1)) // s) * s + s - 1 <= k``. Strictly causal for all k.
+    # See plans/plan_2026-05-06_82749628/decisions.md (D-007).
+    """
+    if stride <= 1:
+        return x
+    shift = stride - 1
+    w = keras.ops.shape(x)[2]
+    x = keras.ops.pad(x, [[0, 0], [0, 0], [shift, 0], [0, 0]])
+    return x[:, :, :w, :]
+
+
 @keras.saving.register_keras_serializable()
 class CliffordNetLMUNet(keras.Model):
     """CliffordNet causal U-Net language model.
@@ -525,11 +551,81 @@ class CliffordNetLMUNet(keras.Model):
         :param training: Whether in training mode.
         :return: Dict with ``"logits"`` key: ``(B, seq_len, vocab_size)``.
         """
-        # Implemented in Step 3 (encoder/bottleneck/decoder + pad/crop).
-        raise NotImplementedError(
-            "CliffordNetLMUNet.call is implemented in Step 3 of the plan; "
-            "Step 1 only provides the scaffold."
-        )
+        ops = keras.ops
+
+        # --- Embeddings ------------------------------------------------
+        seq_len = ops.shape(input_ids)[1]
+        positions = ops.arange(0, seq_len, dtype="int32")
+        tok = self.token_embedding(input_ids)              # (B, T, C0)
+        pos = self.position_embedding(positions)           # (T, C0)
+        x = tok + pos                                       # (B, T, C0)
+        x = self.embed_norm(x)
+        x = self.embed_dropout(x, training=training)
+
+        # Reshape to (B, 1, T, C0) for the 4D causal blocks.
+        x = ops.expand_dims(x, axis=1)
+
+        # --- Right-pad along W to multiple of total_stride (D-002) ----
+        # ``pad_w`` is a Python int when ``seq_len`` is static; if dynamic
+        # we still compute a tensor pad amount via keras.ops. We use the
+        # symbolic form so this works under tf.function tracing too.
+        total_stride = self.total_stride
+        # ``(-seq_len) % total_stride`` via integer ops.
+        pad_w = (-seq_len) % total_stride
+        # ops.pad accepts a static spec; for the dynamic case we use a
+        # conditional via ops.cond is overkill — instead we always pad and
+        # rely on pad_w being 0 when aligned (a no-op pad).
+        # Note: keras.ops.pad expects a static paddings spec. Build it as
+        # a list of [int|tensor, int|tensor].
+        x = ops.pad(x, [[0, 0], [0, 0], [0, pad_w], [0, 0]])
+
+        # --- Encoder ---------------------------------------------------
+        skip_features: List[keras.KerasTensor] = [None] * self.num_levels
+        for i in range(self.num_levels):
+            for blk in self.encoder_blocks[i]:
+                x = blk(x, training=training)
+            skip_features[i] = x
+            ds = self.encoder_downsamplers[i]
+            if ds is not None:
+                x = ds(x, training=training)
+
+        # --- Bottleneck ------------------------------------------------
+        for blk in self.bottleneck_block_list:
+            x = blk(x, training=training)
+
+        # --- Decoder ---------------------------------------------------
+        for i in reversed(range(self.num_levels - 1)):
+            up = self.decoder_upsamplers[i]
+            x = up(x)
+            # DECISION D-007: causal upsample via right-shift; without this
+            # the round trip pool->nearest-upsample leaks future info into
+            # past positions (see plans/plan_2026-05-06_82749628/decisions.md).
+            x = _causal_upsample(x, self.stride_per_stage[i])
+            skip = skip_features[i]
+            x = self.decoder_concats[i]([x, skip])
+            x = self.decoder_skip_projs[i](x)
+            for blk in self.decoder_blocks[i]:
+                x = blk(x, training=training)
+
+        # --- Crop along W back to original seq_len --------------------
+        x = x[:, :, :seq_len, :]
+
+        # --- Squeeze H, head norm/dropout, LM projection --------------
+        x = ops.squeeze(x, axis=1)             # (B, T, C0)
+        x = self.head_norm(x)
+        if self.head_dropout is not None:
+            x = self.head_dropout(x, training=training)
+
+        if self.tie_word_embeddings:
+            # x: (B, T, C0); embedding kernel: (V, C0); want (B, T, V).
+            emb_kernel = self.token_embedding.embeddings  # (V, C0)
+            logits = ops.matmul(x, ops.transpose(emb_kernel, (1, 0)))
+            if self.output_bias is not None:
+                logits = logits + self.output_bias
+        else:
+            logits = self.output_proj(x)
+
+        return {"logits": logits}
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...],
