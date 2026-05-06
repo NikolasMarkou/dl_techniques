@@ -37,7 +37,7 @@ from typing import Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from train.common import setup_gpu
+from train.common import setup_gpu, StepPlotCallback
 from train.common.nlp import (
     create_tokenizer,
     preprocess_clm_dataset,
@@ -339,6 +339,7 @@ def finetune_gpt2(
         analyzer_epoch_frequency=config.analysis_epoch_frequency,
         analyzer_start_epoch=config.analysis_start_epoch,
     )
+    callbacks.append(StepPlotCallback(save_dir=results_dir))
 
     # Train
     logger.info(

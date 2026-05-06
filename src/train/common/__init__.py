@@ -37,7 +37,7 @@ from train.common.megadepth import (
     load_and_process_pair as load_megadepth_pair,
     MegaDepthDataset,
 )
-from train.common.step_plots import plot_step_metrics
+from train.common.step_plots import plot_step_metrics, StepPlotCallback
 from train.common.tfrecord import (
     SchemaSpec,
     IMAGE_TEXT_SCHEMA,
