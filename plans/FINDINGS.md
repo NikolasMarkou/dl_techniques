@@ -1,6 +1,77 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-05-06_82749628
+### Index
+- [causal-blocks-api.md](plan_2026-05-06_82749628/findings/causal-blocks-api.md) — CausalCliffordNetBlock (dim-preserving) and CausalCliffordNetBlockDSv2 (causal stride downsampler). Shapes, allowed kwargs, ctx_mode/pool restrictions.
+- [upsampling-causality.md](plan_2026-05-06_82749628/findings/upsampling-causality.md) — keras.layers.UpSampling2D(size=(1, s), interpolation="nearest") is causal-safe. Bilinear / transposed-conv leak future. Tail right-pad + crop in call() solves the seq_len % total_stride != 0 case.
+- [lm-and-train-mirror.md](plan_2026-05-06_82749628/findings/lm-and-train-mirror.md) — lm.py contract (variants ladder, from_variant, get_config, tie_word_embeddings, {"logits": ...} dict). Train script callbacks are model-agnostic — only model class + custom_objects + dataset/results-dir prefix change.
+
+### Key Constraints
+
+### Hard
+- 4D layout (B, 1, seq_len, channels) end-to-end through encoder/decoder.
+- Strict causality: changing input position k must leave outputs at all positions < k byte-identical (within fp tolerance).
+- DSv2 ctx_mode restricted to {diff, abs} (no pyramid_diff); pool kinds restricted to {avg, max} (LESSONS L33).
+- Upsample must be nearest along W only — no bilinear, no transposed conv, no sub-pixel.
+- Output shape (B, seq_len, vocab_size) — must preserve full input length even when seq_len % total_stride != 0. Use right-pad + crop inside call().
+- Output dict key MUST remain "logits" — MaskedCausalLMLoss and the train script assume this.
+- Keras 3 conventions: @keras.saving.register_keras_serializable(), keras.ops, dl_techniques.utils.logger, full get_config() round-trip, no print.
+- tie_word_embeddings flag — same default as lm.py (True). Keep output_bias add_weight when tied.
+- Skip-connection fusion at SAME resolution as encoder skip — explicit Concatenate(axis=-1) followed by 1x1 Conv2D projection back to channels.
+- Test scope: pytest only on the new model file (LESSONS L20: never make test).
+- AdamW WD only — no kernel_regularizer=L2.
+- Use .venv/bin/python. Commit per step. User pushes themselves.
+
+### Soft
+- Mirror lm.py and train_cliffordnet_nlp.py line-by-line where it doesn't conflict with U-Net structure.
+- Variant ladder names: nano, mini, base, large, xl (1:1 with lm.py).
+- Class name: CliffordNetLMUNet. File path: src/dl_techniques/models/cliffordnet/lmunet.py. Train script: src/train/cliffordnet/train_cliffordnet_nlp_unet.py.
+- Default U-Net topology per variant: 3 stages (encoder + bottleneck + decoder), strides [2, 2], mirroring decoder. For deeper variants, allow 4 stages (strides [2, 2, 2]).
+- Default upsampler: keras.layers.UpSampling2D(size=(1, s), interpolation="nearest") + Concatenate(axis=-1) + 1x1 Conv2D.
+
+### Ghost constraints (none found)
+- "U-Net needs different output dict key" — false; loss + train wrapper + probe pivot on "logits".
+- "Need a custom causal upsampler layer" — false; UpSampling2D nearest is sufficient.
+- "Need to clone all callbacks" — false; they're model-agnostic.
+
+### Exploration Confidence
+- Problem scope: deep — exact line ranges of both causal blocks read; lm.py and train script read in full; vision unet skim confirms encoder/decoder fusion pattern; _make_causal_pool / padding="same" causal status grounded in LESSONS L33.
+- Solution space: constrained — block APIs and lm.py/train-script contracts pin the design. Only knobs are stages/strides/blocks-per-stage and skip-fusion (concat-1x1).
+- Risk visibility: clear — main risk is a subtle causality leak in upsample/concat/skip path; mitigated by the existing test_causality_* pattern from test_cliffordnet_lm.py (perturb position k, assert all positions < k byte-identical).
+
+Ready for PLAN.
+
+## plan_2026-05-06_13a2df9e
+### Index
+- [F-001 scope-and-callers.md](plan_2026-05-06_13a2df9e/findings/scope-and-callers.md) — pure-additive sibling class, no callers affected, layers `__init__.py` is empty so no export plumbing.
+- [F-002 causality-mechanics.md](plan_2026-05-06_13a2df9e/findings/causality-mechanics.md) — how `CausalCliffordNetBlock` enforces causality + which DSv2 ops are/are not causal under `(H=1, W=seq_len)` layout. Conclusion: avg/max with `padding="same"` are causal; `blur`, `gaussian_dw`, `pyramid_diff`, `pixel_unshuffle`, `resnetd` are not.
+- [F-003 dsv2-merge-points.md](plan_2026-05-06_13a2df9e/findings/dsv2-merge-points.md) — exact API delta, build-validation, and call-path changes vs DSv2; padding arithmetic for arbitrary `kernel_size`; tests to mirror.
+
+### Key Constraints
+
+### Hard
+- Same file: `src/dl_techniques/layers/geometric/clifford_block.py`. No new modules.
+- `H=1, W=seq_len` layout (matches `CausalCliffordNetBlock`).
+- Strict causality along W: future positions must not influence past outputs (must be regression-tested).
+- Existing 117+ tests in `test_clifford_block.py` must continue to pass — purely additive change.
+- Keras 3 / TF 2.18 idioms (`@keras.saving.register_keras_serializable()`, `keras.ops`, `dl_techniques.utils.logger`, no `print`).
+- No public-API breakage to existing classes.
+
+### Soft
+- Mirror existing class structure (init/build/call/get_config + the helper functions style).
+- Match test layout (per LESSONS.md) — class per layer, fixtures, save/load round-trip, gradient flow, causality regression.
+
+### Ghost constraints (not present)
+- Layers `__init__.py` is empty (per `layers/CLAUDE.md`) — no export plumbing needed.
+
+### Exploration Confidence
+- Problem scope: **deep** — exact line ranges and semantics of both parents read; constraints classified.
+- Solution space: **constrained** — combine two known patterns; only thing genuinely new is the narrower pool-kind surface and reasoning about which pools are causal.
+- Risk visibility: **clear** — main risk is a subtle pool-future-leak; mitigated by restricting to avg/max only and writing a perturb-future-position regression test.
+
+Ready for PLAN.
+
 ## plan_2026-05-05_0eac2c81
 ### Index
 
@@ -199,54 +270,3 @@ Ready to transition to PLAN.
 
 ### Ghost constraints (none found)
 - Considered: "must reuse `train_cliffordnet.py`". Not a real constraint — that script already takes a `variant` flag but is hardwired to `CliffordNet.from_variant`. Cleaner to write a new sibling script that imports its augmentation helpers.
-
-## plan_2026-04-24_e4c8ebab
-### Index
-1. **findings/vision-tower.md** — `CliffordCLIP._build_vision_tower` is isotropic (single `vision_channels`/`vision_depth`/`vision_shifts`); blocks are shape-preserving (`x_out = x_prev + H_mix`). Default nano (D=128, depth=12, image=112, patch=4) holds 28×28×128 maps for 12 blocks → ~500-600 MB activations at batch=32. `large` at 224 → ~12 GB. Reusable hierarchical primitives in repo: `layers/patch_merging.py:PatchMerging` (used by `models/swin_transformer/model.py`) and `layers/downsample.py`. Clifford constraints: `shifts < channels` per stage; downsample lives BETWEEN blocks.
-2. **findings/text-tower.md** — Text tower also isotropic; reshapes to `(B, 1, L, D_t)` for causal `DepthwiseConv2D(1, 3)`. Memory at L=77 modest (~50 MB nano) but linear in context_length. Causality is binding: stride-2 causal `DepthwiseConv2D(1, 2, strides=(1, 2))` is safe; `PatchMerging` 2D is wrong shape but a tiny `CausalSeqMerging` is straightforward. Pad mask must be downsampled in lockstep.
-3. **findings/clip-wiring-and-pretrain.md** — Output contract is `(B, embed_dim)` after L2 — invisible to contrastive loss after refactor. Two pretrain wrappers in `train_clip.py` walk `vision_blocks`/`text_blocks` directly: `_VisionClassifier` (CIFAR-100, easy to adapt via new `_apply_vision_body()` helper) and `_TextLMWrapper` (per-token CLM — **breaks** if text downsamples). Three strategies presented: (1) vision-only hierarchical, (2) both towers + LM pretrain bypass, (3) stem-only stride.
-
-### Key Constraints
-
-### Hard
-- `encode_image` / `encode_text` must remain `(B, embed_dim)` after L2 — contrastive loss math depends on it.
-- `_TextLMWrapper` (CLM pretrain) requires per-token logits at original `context_length` — text downsampling either breaks this or requires a bypass code path.
-- `CliffordNetBlock` / `CausalCliffordNetBlock` residuals require shape-preserving body — stride lives between blocks, not inside.
-- `SparseRollingGeometricProduct` requires `shift < channels` per layer — per-stage shift lists must size to per-stage channel count.
-- `get_config()` round-trip serialisation test (`test_from_variant_serialization_round_trip`) must keep passing — new config fields must be added.
-- Causal text tower must remain causal end-to-end; only causal-friendly downsamplers allowed.
-- No `print` (use `dl_techniques.utils.logger`); no parallel GPU jobs; never run `make test` (1.5h).
-
-### Soft
-- Variant ladder (`nano`/`nano_g`/`mini`/`small`/`base`/`large`) keys should remain importable via `from_variant`.
-- Existing tests assert `vision_depth == 12` etc. — keep `vision_depth` as int (sum of per-stage depths) or update assert.
-- Pretrain wrappers should keep working unchanged (the user's actual production loop relies on them).
-
-### Ghost-constraint check
-- The **isotropic shape was inherited from `CliffordNet` / `CliffordNetLM` standalone models** (verified by `test_nano_matches_cliffordnet_nano_depth_and_shifts` which asserts `vision_depth == 12, vision_shifts == [1, 2]` exactly). The CLIP-specific need is "two towers cheap to evaluate"; CliffordNet symmetry is a **soft** constraint (code reuse / pretrain compat), not hard. Worth surfacing in PLAN: do we keep CliffordCLIP variant names matching CliffordNet's, or accept a structural divergence?
-
-### Exploration Confidence
-- **Problem scope**: deep — exact line numbers for tower construction, forward path, pretrain wrappers, and tests are all known.
-- **Solution space**: constrained — three concrete strategies named, each with known costs.
-- **Risk visibility**: clear — pretrain wrapper coupling is the main subtle risk; causality on text is named; serialization round-trip test enforces config completeness.
-
-Ready to transition to PLAN.
-
-## plan_2026-04-24_1c5ae010
-### Index
-1. findings/staging-structure.md — current 4-stage layout, helpers, CLI flags, what "big patch" means.
-2. findings/dataset-logging-gaps.md — what is and isn't logged today; proposed summary block.
-3. findings/callers-and-impact.md — no callers or tests depend on staging; README has stale flags (out of scope).
-
-### Key Constraints
-- Hard: use dl_techniques.utils.logger only (no print).
-- Hard: no parallel GPU; smoke-test only via --synthetic --max-train-samples 64.
-- Hard: do NOT run `make test`. No tests cover train_clip.py.
-- Soft: keep file name and Keras 3 conventions.
-- Follow-up (out of scope): src/train/cliffordnet/README.md references removed CLI flags.
-- Ghost constraint: curriculum was added for memory-constrained higher-res training; in practice users always run single-stage with `--stage2-epochs 0`. Removing matches actual usage.
-
-### Exploration Confidence
-- Scope: deep (file fully read; staging surface mapped).
-- Solution space: constrained (direct removal + flag rename).
-- Risk visibility: clear (no callers/tests depend on removed surface).

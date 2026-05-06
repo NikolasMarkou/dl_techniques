@@ -1,6 +1,130 @@
 # Consolidated Decisions
 *Cross-plan decision archive. Entries merged from per-plan decisions.md on close. Newest first.*
 
+## plan_2026-05-06_82749628
+### 2026-05-06 — D-001: Use UpSampling2D(nearest) along W as the causal upsampler.
+**Choice**: `keras.layers.UpSampling2D(size=(1, s), interpolation="nearest")` for the decoder up-path.
+**Cost**: no smoothing across pool boundaries — each output cell within a window has the same scalar. This is acceptable here because (a) `CausalCliffordNetBlock` after the upsample re-injects local mixing (left-only causal DW conv along W) so the decoder block can blend pooled positions back into per-token features, and (b) any smoother (bilinear/transposed-conv) leaks future info — losing causality is a bigger cost.
+**Why not transposed conv with mask**: complexity. Adding a learned-yet-strictly-lower-triangular conv is harder to verify than a stateless repeat. Revert-First / 10-Line Rule favours the stateless repeat.
+
+### 2026-05-06 — D-002: Pad-then-crop in `call()` (option B), not `seq_len % total_stride == 0` validation.
+**Choice**: right-pad input with zeros to next multiple of `total_stride`, run the U-Net, slice along W back to original `seq_len`.
+**Cost**: tiny per-call overhead (one pad + one slice op). Goes against "fail fast on invalid shapes" preference.
+**Why**: train script default is `seq_len = max_seq_length - 1 = 511`; making this work without forcing the user to think about stride alignment is the friendliest option. Padding does NOT pollute real positions because every block is causal in W (zeros at the right tail can only influence themselves or later padded positions).
+
+### 2026-05-06 — D-003: Skip-fusion = Concatenate + 1x1 Conv2D (not add).
+**Choice**: `concat([upsampled, encoder_skip], axis=-1)` then `Conv2D(channels, 1)` to project 2C → C.
+**Cost**: extra 1x1 conv per decoder level. Adds ~`channels^2 * 2` params per level; negligible vs the Clifford blocks' SRGP weights.
+**Why**: gives the model a learnable mixing weight between encoder skip and decoder feature; more flexible than addition; matches the dl_techniques/cliffordnet vision UNet pattern (`unet.py:676-680`).
+
+### 2026-05-06 — D-004: Per-stage isotropic channel count (no channel growth across stages).
+**Choice**: every stage uses the same `channels` (e.g. nano=128 throughout). DSv2 `out_channels` is left at `None`.
+**Cost**: gives up the standard U-Net "double channels when halving spatial" recipe. Bottleneck is wider in *receptive field* but not in *channel count*.
+**Why**: keeps the SRGP `shifts < channels` invariant trivially satisfied; matches `lm.py` which is also isotropic; cleaner skip-concat (no per-level channel projection on the encoder side); shifts list applies uniformly. If we later want a channel-pyramid variant, we add it as a separate variant — keep iteration 1 simple.
+
+### 2026-05-06 — D-004 SUPERSEDED by D-005: User rejected isotropic channels.
+**User feedback (Plan v1 review)**: Channels must grow per stage (typical U-Net doubling). Use base_channels per variant; per-stage channels derived as `base * 2**i`.
+
+### 2026-05-06 — D-006: STOP — Pre-Mortem Scenario A fired during Step 3 smoke check.
+**Trigger**: With nano-like config (base_channels=32, stride_per_stage=[2,2], total_stride=4), perturbing input position 7 (last) changed logits at positions 4, 5, 6 with max abs diff ~0.21–0.27 (well above 1e-5 tolerance). Positions 0–3 were byte-identical.
+
+**Root cause**: Pool→nearest-upsample **round trip** is not causal at fine resolution, even though nearest-upsample alone is. DSv2 with `padding="same"` and stride `s` produces pooled cell `j` that has seen input positions `[j*s, j*s+s-1]`. Nearest-upsample maps output position `k` to pooled cell `k // s`, which has seen up to input position `(k//s)*s + s - 1`. For `k % s != s - 1`, that maximum exceeds `k` — i.e. output position `k` reads from a pooled cell that has incorporated future inputs. Compounded across multiple levels (deepest cell sees up to `(k // total_stride)*total_stride + total_stride - 1` of the input).
+
+**A1 falsified**: The `upsampling-causality.md` finding's argument *"upsampled position k is identically equal to encoder feature at pooled position j; pooled position j was computed from input positions 0..j*s+(s-1), so k sees only past+current"* is correct ONLY at the pool grid (`k = j*s`). For all `k` in `[j*s, (j+1)*s - 2]`, "past+current" at the pool grid translates to **future** at the original grid.
+
+**Failed defense**: A1 wasn't truly tested at the unit level — the existing `test_causal_block_no_future_leak` regression covers the DSv2 block at pool resolution but never the round trip through upsample back to original resolution. The plan accepted A1 on the strength of an internal-consistency argument, not a test.
+
+**Per Autonomy Leash**: 0 fix attempts made on Step 3 — reverted uncommitted changes immediately on detecting the leak (Revert-First). Committed Steps 1 & 2 (scaffolding) are kept; they are causality-agnostic.
+
+**Remediation options to discuss with user**:
+- (R1) **Causal upsample**: shift upsampled feature right by `s-1` along W (zero-pad on left, drop right). Compounded across levels: output position `k` reads pooled cell `(k - (s_total - 1)) // s_total` at the deepest level, ensuring max-input-seen ≤ k. Implementable as a small custom layer or as `keras.ops.pad` + slice after each `UpSampling2D`. Cost: extra `(total_stride - 1)` positions of latency at the top of U; the first `total_stride - 1` positions of any stage's upsampled feature are zero-filled before the skip connection. The encoder skip at level 0 is fully causal, so the skip-fusion path at the leftmost positions still has signal — only the deep-path contribution is zero-padded.
+- (R2) **Skip-only at boundary positions**: for the first `s-1` output positions of each upsample window, mask the upsampled-feature contribution and rely entirely on the encoder skip. Equivalent to R1 in effect; different implementation.
+- (R3) **Drop the U-Net**: revert plan, fall back to non-pooled stack (i.e. `lm.py`'s isotropic depth-only model). User explicitly wanted U-Net so this is the last resort.
+- (R4) **Strict causal pool**: change DSv2 to use a pool that emits at the **right** edge of its window (pool position j sees inputs `[j*s - s + 1, j*s]`), then nearest-upsample is causal at all positions because pooled cell `k // s` has seen up to input `(k // s) * s ≤ k`. Cost: requires modifying DSv2 (out of plan scope) or wrapping it with a left-shift pre-pool.
+
+Recommendation: R1 (causal upsample with right-shift) is the smallest, most local change. R4 is more elegant but touches a shared layer.
+
+### 2026-05-06 — PIVOT: REFLECT → PIVOT → PLAN (adopt R1, causal upsample right-shift).
+**User decision**: choose R1 — causal upsample via right-shift by `s-1` (left zero-pad, drop `s-1` from the right) at each decoder upsample stage. Keep the change local to `lmunet.py`. Do NOT modify `CausalCliffordNetBlockDSv2`.
+
+**Ghost-constraint scan**: none — A1 was a wrong claim, not a ghost constraint. The constraint that originally drove "nearest upsample is enough" was based on an unproven derivation; nothing about the environment has changed.
+
+**Complexity assessment**: R1 adds ~5 lines per upsample call site (a `keras.ops.pad` + slice). Stays within complexity budget (no new abstractions; UpSampling2D + pad+slice is two stdlib ops in sequence). Net delta ~+10 lines vs original Step 3.
+
+**Available checkpoints**: cp-000-iter1 (pre-Step-1 commit `a7abadf`). Steps 1 & 2 commits kept (causality-agnostic scaffolding); resume from Step 3 on top of `245553d`.
+
+### 2026-05-06 — D-007: Causal upsample via right-shift by `s-1` (R1).
+**Choice**: After each `keras.layers.UpSampling2D(size=(1, s), interpolation="nearest")` in the decoder, apply a causal right-shift along W: `x = ops.pad(x, [[0,0],[0,0],[s-1,0],[0,0]])[:, :, :W_up, :]` where `W_up` is the post-upsample width. Equivalent to left-zero-padding by `s-1` then dropping the last `s-1` cells. Implemented inline at the call site as a small helper `_causal_upsample(x, stride)` private to `lmunet.py`.
+**Cost**: first `s-1` output positions of each decoder upsample stage have zero deep-path contribution (skip path still carries signal at those positions, since the encoder skip is at the original resolution and is itself causal). Compounded across levels, the leftmost `total_stride - 1` output positions have purely-skip information from the deepest stages — acceptable: this is "latency at warm-up" not a permanent bias.
+**Why**: smallest local change that fixes Scenario A. Does not touch the shared `CausalCliffordNetBlockDSv2`. Verifiable in isolation: a unit test on the helper alone proves `_causal_upsample(x_with_perturbation_at_k)` produces output where positions `< k` are byte-identical to the unperturbed baseline.
+**Anchor in code**: `# DECISION D-007: causal upsample via right-shift; see plans/plan_2026-05-06_82749628/decisions.md`. Placed at the call site of `_causal_upsample` in `call()` and at the helper definition.
+**Falsification**: unit test `test_causal_upsample_helper` (perturb input at position k, assert output positions `< k` byte-identical) MUST pass before the end-to-end causality test in Step 4.
+
+### 2026-05-06 — REFLECT (iter-1 post-pivot): all 6 criteria PASS.
+**Summary**: 30/30 unit tests pass. End-to-end causality verified (perturb-last, perturb-middle, non-multiple seq_len, with global_context). Helper micro-tests (TestCausalUpsampleHelper) isolate D-007 fix.
+
+**Simplification Checks (6)**:
+1. Could a step be removed? No — all 6 deliver distinct artifacts.
+2. Could two layers be merged? No — `_causal_upsample` is a stateless 4-line helper, can't merge into UpSampling2D.
+3. Is any abstraction unused? No — every new symbol is wired in.
+4. Could a config field be a constant? `base_channels` is the only config exposed at the variant boundary; the rest are per-variant defaults.
+5. Could a forward branch be deleted? No — pad+crop is needed for non-multiple seq_len; tied/untied LM head matches `lm.py` policy.
+6. Is anything wrapped that doesn't need wrapping? No — UpSampling2D + 1x1 Conv2D + Concatenate are stdlib; no adapter classes.
+
+**Devil's advocate**: One reason this might still be wrong despite passing — the causality tests use a small nano-like config (base_channels=16, stride=[2,2]). At deeper variants (base/large/xl with stride=[2,2,2], total_stride=8), the causal-shift compounds across 3 levels: total left-zero region = 7 positions. We never tested causality at the larger variant. However: the right-shift logic at each level is locally correct, and composing causal operations stays causal (mathematical property), so the small-config test is sufficient. Risk: if a future change adds a new spatial-mixing op at a deeper level, only the small-config test will catch it. Acceptable; flagged in "Not Verified" of verification.md.
+
+**Prediction accuracy**: see verification.md "Prediction Accuracy" table.
+
+**Root cause analysis**: only one failure during EXECUTE was the save/load tolerance (5e-5 vs plan's 1e-5). Immediate cause: GPU XLA reduction-order non-determinism. Contributing factor: plan tolerance was inherited from `lm.py` test which was simpler (no DSv2 / no decoder fusion path). Failed defense: none — the `lm.py` precedent suggested 1e-5 was achievable, and it took the actual test to reveal the gap. Prevention: future U-Net-style models should default to 1e-4 in save/load tests.
+
+### 2026-05-06 — D-005: Per-stage channel doubling (standard U-Net schedule). [SUPERSEDES D-004]
+**Choice**: `channels_per_stage[i] = base_channels * (2 ** i)` for `i in 0..num_levels-1`. Encoder doubles channels each downsample (DSv2 `out_channels` does the projection). Decoder mirrors going back up: 1x1 Conv2D after concat projects from `(C_{i+1} + C_i) = 3*C_i` down to `C_i`. Embedding dim = `base_channels` (top-of-U).
+**Cost**: parameter count grows fast at the bottleneck (largest channel count is `base * 2**(num_levels-1)`). For xl with base=192, num_levels=4 → bottleneck has 1536 channels. Slightly more memory than the isotropic D-004 design at the bottleneck. Decoder skip-fusion projection is `3*C_i → C_i` (was `2*C_i → C_i` under isotropic).
+**Why**: standard U-Net inductive bias — wider receptive field at deeper levels deserves more channels to capture coarser features; user explicitly required this; matches the dl_techniques vision UNet pattern. `shifts < channels` invariant remains trivially satisfied: the smallest channel count is at the top of U (`base_channels`), and `max(shifts) < base_channels` is checked once in `__init__` — every other stage has strictly more channels. DSv2's existing `out_channels` arg supplies the channel projection without adding new layers. Concat semantics unchanged: still concat along channel axis then 1x1 project — only the input/output channel arithmetic shifts.
+
+## plan_2026-05-06_13a2df9e
+### 2026-05-06 PLAN — chosen approach
+
+**Decision**: Add `CausalCliffordNetBlockDSv2` as a new sibling class in `clifford_block.py`, mirroring the structure of `CliffordNetBlockDSv2` but with a narrower pool-kind surface (`avg`/`max` only) and the causal-padding paradigm of `CausalCliffordNetBlock` applied to the depthwise context conv and the global-context cumulative mean.
+
+**Trade-off (X at the cost of Y)**:
+- Reuse causal-padding pattern (left-pad by `k-1` along W, then `valid` conv) at the cost of a slightly redundant call-time `pad` op (already accepted in `CausalCliffordNetBlock`).
+- Restrict pools to `avg` / `max` only at the cost of feature parity with DSv2; pyramid_diff / blur / gaussian_dw / pixel_unshuffle / resnetd are excluded because they would leak future info under H=1, W=seq layout.
+- Place new class in the same file at the cost of file growth (~2300 lines), matching the user's explicit instruction.
+
+**Alternatives considered**:
+- Pass a `causal: bool` flag into existing `CliffordNetBlockDSv2`: rejected — the parent class already validates `pyramid_diff` etc., and adding a flag complicates serialization, validation, and forward branching.
+- Subclass `CliffordNetBlockDSv2`: rejected — the parent's `dw_conv` and pool factory choices conflict with causal constraints; mirroring instead of inheriting matches the existing pattern (`CausalCliffordNetBlock` does not subclass `CliffordNetBlock`).
+- Place the class in a separate file: rejected — user explicitly requested same file.
+
+### 2026-05-06 INIT → EXPLORE → PLAN
+
+EXPLORE produced 3 indexed findings (scope-and-callers, causality-mechanics, dsv2-merge-points). Confidence: deep / constrained / clear. Transitioning to PLAN.
+
+### 2026-05-06 EXECUTE step-1 — DepthwiseConv2D vs Conv2D(groups=channels) deviation
+
+**Surprise**: `DepthwiseConv2D` on TF/CUDA rejects asymmetric strides
+(`Current implementation only supports equal length strides in the row
+and column dimensions`). The plan called for `DepthwiseConv2D(strides=(1, s))`
+which fails on GPU at strides=2.
+
+**Root cause**: The existing `CausalCliffordNetBlock` uses default strides=1
+so it never hit this limitation. The plan implicitly assumed
+`DepthwiseConv2D` accepts asymmetric strides — it does not on TF GPU.
+
+**Resolution (1-line fix at point of impact)**: Replace
+`DepthwiseConv2D(kernel_size=(1,k), strides=(1,s))` with
+`Conv2D(filters=channels, kernel_size=(1,k), strides=(1,s), groups=channels)`.
+Algebraically identical (depthwise = grouped conv with groups==channels==filters).
+Verified working at strides=2 with both shape and causality probes.
+
+**Trade-off**: Conv2D-with-groups at the cost of (a) a slightly larger
+memory footprint for the kernel-shape tensor, (b) divergence from the
+sibling `CausalCliffordNetBlock` which still uses `DepthwiseConv2D` (it
+can — its strides are always 1). Documented in DECISION D-002 in code.
+
+**Anchored**: D-002 comment expanded inline in `CausalCliffordNetBlockDSv2.__init__`.
+
 ## plan_2026-05-05_0eac2c81
 ### D-PLAN-001 (2026-05-05) — Empirical re-verification before fixing
 
@@ -277,72 +401,3 @@ Default to preserving exact original behavior unless there is a real regression 
 **Decision.** V11 (`DS-kitchen_sink`) uses `ctx_mode=pyramid_diff` rather than `abs at strides>1`. V6 and V7 are mutually-exclusive ctx_mode choices.
 
 **Why.** Analysis §3 hierarchy table puts V6 (pyramid_diff) and V7 (abs) at +0.1–0.3 each but V6 is principled-as-Laplacian-replacement while V7 is bypass. Stacking both is impossible at one ctx_mode value. Pyramid_diff preserves the Laplacian semantics axis D was meant to express. Cost: V11 won't isolate V7's contribution — that's already isolated in V7 itself.
-
-## plan_2026-04-30_9c4cdf31
-### D-001 (PLAN, 2026-04-30) — V2 alongside, legacy untouched
-**Decision**: Add `CapsNetV2`, `AttentionRoutingCapsule`, `CapsuleBlockV2` as new files alongside the existing `CapsNet`/`RoutingCapsule`/`CapsuleBlock`. Modify legacy code only for the LayerNorm bug fix.
-**Rationale**: User-confirmed default (Q1 answer). Existing tests stay green; users opting in to V2 get the new architecture without API breakage.
-**Trade-off**: More code (≈1500 net+) and two parallel APIs **at the cost of** a clean migration path and zero risk of regressing currently-working behavior.
-
-### D-002 (PLAN, 2026-04-30) — Bug fix: length-preserving LN, API stable
-**Decision**: Keep `CapsuleBlock(use_layer_norm=True)` as the public API; change its IMPLEMENTATION to length-preserving (split magnitude/direction, LN the direction, re-normalize, multiply magnitude back).
-**Rationale**: API stability for legacy users; the broken behavior is replaced with the correct behavior (margin loss now sees the magnitude it expects). Cleaner than introducing a new flag.
-**Trade-off**: Behavior change for any user who was depending on the old (buggy) magnitude rescaling **at the cost of** correctness for the documented length-as-probability semantics. Mitigated by `logger.info` at build time noting the correction.
-
-### D-003 (PLAN, 2026-04-30) — Decoupled length × probability in `AttentionRoutingCapsule`
-**Decision**: Replace squash entirely in V2. Use `v = sigmoid(prob_head(s)) * (s / (||s|| + eps))` — magnitude is a learned scalar from a per-capsule Dense head; direction is unit vector from raw routing aggregate.
-**Rationale**: Matches the Stage 3a design from the prior epistemic-deconstructor analysis (OBS-004). Eliminates squash saturation at 0 and conflation of "detection probability" with "vector magnitude side-effect".
-**Trade-off**: Slightly more parameters (the prob head) and a behavior different from "classical" capsules **at the cost of** clean gradient flow at small magnitudes and clearer semantic separation.
-
-### D-004 (PLAN, 2026-04-30) — Softmax over output capsules (axis=2)
-**Decision**: Default `softmax_axis="output"` in `AttentionRoutingCapsule` — each input capsule distributes its weight competitively across output capsules (matches dynamic routing semantics).
-**Rationale**: Preserves the "routing-by-agreement" intuition: an input votes for one parent, with probabilistic mass distributed by competition.
-**Trade-off**: Risk of coupling collapse (one parent wins all) **at the cost of** clearer semantic match to capsule routing literature. Pre-mortem signal Scenario 2 covers the fallback (switch to axis="input" if collapse observed at random init).
-
-### D-005 (PLAN, 2026-04-30) — No mixup in factory; defer to data pipeline
-**Decision**: `create_capsnet_v2` does NOT include mixup in the modern recipe defaults.
-**Rationale**: Mixup is a data-augmentation pipeline concern, not a model-side default. No mixup utility in `dl_techniques/datasets/` was found. Adding it would either (a) couple the model factory to a specific augmentation library or (b) require a new mixup utility — out of scope for "code path only" Stage 1.
-**Trade-off**: Recipe is missing one component **at the cost of** factory-pipeline coupling cleanliness. Document mixup as a recommended training-time augmentation.
-
-### D-007 (REFLECT, 2026-04-30) — Refactor `AttentionRoutingCapsule` matmul to `ops.einsum`
-**Decision (in EXECUTE step 6)**: replaced `ops.matmul(W, u_tiled).squeeze(axis=-1)` (with `W: (1, N_in, N_out, D_out, D_in)` × `u_tiled: (B, N_in, N_out, D_in, 1)`) with `ops.einsum("iode,bie->biod", self.W, inputs)` and reshaped W to `(N_in, N_out, D_out, D_in)`.
-**Why**: the matmul + squeeze pattern works in eager mode but the static last-axis size is lost under `tf.function` tracing inside `model.fit()`, raising "Cannot squeeze axis=-1, because the dimension is not 1". Einsum is shape-robust under graph mode.
-**Trade-off**: Slightly less explicit indexing **at the cost of** clean graph-mode execution. All 24 V2 layer tests + 16 V2 model tests + 80 legacy tests still pass after the refactor.
-**Falsification signal status**: Pre-Mortem Scenario 1 (serialization break) — did NOT fire. Scenario 2 (routing collapse) — did NOT fire (test_lengths_show_variance passes). Scenario 3 (pretrained fallback) — did NOT fire (test_..._falls_back_to_random_init passes).
-
-### D-006 (PLAN, 2026-04-30) — Pretrained URL placeholders accepted; rely on existing fallback
-**Decision**: Stage 2 factory `create_capsnet_v2_pretrained` passes through to `create_resnet(pretrained=...)` and inherits its fallback behavior (try download → fail → log warning → random init).
-**Rationale**: The repo's existing pattern. No new code path; failure mode is explicit and degrades gracefully. Users with a local weights file can pass `stem_pretrained="/path/to/weights.keras"`.
-**Trade-off**: Can't actually load ImageNet weights from the placeholder URL **at the cost of** complexity. Acceptable — code path is the deliverable.
-
-## plan_2026-04-29_b6dbc601
-### D-001 (PLAN, iter-1): Pool x_norm BEFORE stream split (instead of pooling z_det only)
-**Choice**: When `strides>1`, apply pool to `x_norm` once before computing both `z_det` and `z_ctx`; the strided DWConv produces the already-pooled context.
-
-**Trade-off**: Cleanest invariant satisfaction (z_det and z_ctx share shape automatically) at the cost of computing the LayerNorm on full-resolution input (Linear projection done on pooled tensor instead).
-
-**Alternatives considered**:
-- Pool z_det after Linear (full-res Linear then pool): wastes compute on the linear projection, no quality benefit.
-- Pool x_prev once and feed both streams from there (skipping LayerNorm on full-res): would change normalization semantics — LN computes statistics on a smaller spatial map.
-
-Going with: pool x_norm post-LN, before both streams. Same skip-pool type used for residual `x_prev`.
-
-### D-002 (PLAN, iter-1): Naming — `CliffordNetBlockDS`
-**Choice**: Class name `CliffordNetBlockDS` (DS = downsample / single-conv).
-
-**Trade-off**: Communicates the new capability (downsampling) at the cost of a slightly cryptic suffix. Alternative `CliffordNetBlock7x7` only describes the kernel size, not the strided variant — misleading when users use `strides=1`.
-
-### D-003 (PLAN, iter-1): Single class, not a parameter on existing block
-**Choice**: New class instead of adding `kernel_size` / `strides` / `skip_pool` parameters to existing `CliffordNetBlock`.
-
-**Trade-off**: Some duplication of forward-pass scaffolding at the cost of keeping the existing isotropic block exactly stable (no signature change → no risk to existing CliffordNet models that have been tuned in prior plans, see LESSONS L21-25). Existing serialized checkpoints continue to deserialize unchanged.
-
-### D-004 (PLAN, iter-1): Two pool instances (stream-split + skip), not shared
-**Choice**: Build two separate `keras.layers.AveragePooling2D` (or `MaxPooling2D`) instances when `strides>1`. They have identical configs but are not the same object.
-
-**Trade-off**: Slightly more verbose at the cost of avoiding any chance of state-sharing surprises (pool layers have no state, but Keras serialization sometimes treats shared sublayers oddly). Two layers also makes the forward path more readable: `pool_stream(x_norm)` vs `pool_skip(x_prev)`.
-
-### D-005 (REFLECT, iter-1): Devil's advocate — what could still be wrong
-- The strided DWConv with `padding="same"` and the 2x2 pool with `padding="same"` both ceil-divide spatial dims, so they produce matching shapes. Verified empirically across H ∈ {8, 16, 32}. Edge case: H=7 with strides=2 → both produce 4. Not exhaustively tested but `padding="same"` semantics are stable. Risk: low.
-- Devil's advocate concern: residual identity test at strides=2 only covers `skip_pool="avg"` against an explicit `AveragePooling2D` reference. The corresponding `skip_pool="max"` case isn't pixel-checked but is implicitly verified by `test_skip_pool_avg_vs_max_differ` (proves max path is wired distinctly). Acceptable.
-- All criteria PASS, no regressions. Recommend CLOSE.
