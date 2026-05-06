@@ -11,6 +11,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
     CausalCliffordNetBlock,
     CliffordNetBlockDS,
+    CausalCliffordNetBlockDSv2,
 )
 
 
@@ -1509,6 +1510,577 @@ class TestReviewRegressions:
             expected = -(-h // 2)
             assert out.shape[1] == expected
             assert out.shape[2] == expected
+
+
+# ===========================================================================
+# TestCausalCliffordNetBlockDSv2
+# ===========================================================================
+
+
+class TestCausalCliffordNetBlockDSv2:
+    """Test suite for CausalCliffordNetBlockDSv2 (causal sibling of DSv2)."""
+
+    @pytest.fixture
+    def channels(self) -> int:
+        return 16
+
+    @pytest.fixture
+    def shifts(self) -> list:
+        return [1, 2]
+
+    @pytest.fixture
+    def seq_tensor(self) -> tf.Tensor:
+        """4-D sequence tensor (B, 1, seq_len, D)."""
+        return tf.random.normal([2, 1, 16, 16])
+
+    @pytest.fixture
+    def layer_instance(
+        self, channels, shifts
+    ) -> CausalCliffordNetBlockDSv2:
+        return CausalCliffordNetBlockDSv2(channels=channels, shifts=shifts)
+
+    # ---- Initialization ---------------------------------------------------
+
+    def test_initialization_defaults(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(channels=channels, shifts=shifts)
+        assert layer.channels == channels
+        assert layer.shifts == shifts
+        assert layer.cli_mode == "full"
+        assert layer.ctx_mode == "diff"
+        assert layer.use_global_context is False
+        assert layer.kernel_size == 7
+        assert layer.strides == 1
+        assert layer.stream_pool_kind == "avg"
+        assert layer.skip_pool_kind == "avg"
+        assert layer.out_channels is None
+        assert layer.ctx_norm_type == "bn"
+        assert layer.ctx_activation == "silu"
+
+    def test_initialization_custom(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels,
+            shifts=shifts,
+            cli_mode="wedge",
+            ctx_mode="abs",
+            use_global_context=True,
+            kernel_size=5,
+            strides=2,
+            stream_pool="max",
+            skip_pool="max",
+            out_channels=32,
+            ctx_norm_type="ln",
+            ctx_activation=None,
+            layer_scale_init=1e-3,
+            drop_path_rate=0.1,
+            name="custom_causal_dsv2",
+        )
+        assert layer.cli_mode == "wedge"
+        assert layer.ctx_mode == "abs"
+        assert layer.use_global_context is True
+        assert layer.kernel_size == 5
+        assert layer.strides == 2
+        assert layer.stream_pool_kind == "max"
+        assert layer.skip_pool_kind == "max"
+        assert layer.out_channels == 32
+        assert layer.ctx_norm_type == "ln"
+        assert layer.ctx_activation is None
+        assert layer.name == "custom_causal_dsv2"
+
+    def test_invalid_channels(self, shifts):
+        with pytest.raises(ValueError, match="channels"):
+            CausalCliffordNetBlockDSv2(channels=0, shifts=shifts)
+
+    def test_invalid_ctx_mode_pyramid_diff(self, channels, shifts):
+        # pyramid_diff is the headline forbidden-for-causality mode.
+        with pytest.raises(ValueError, match="ctx_mode"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, ctx_mode="pyramid_diff",
+            )
+
+    def test_invalid_ctx_mode_unknown(self, channels, shifts):
+        with pytest.raises(ValueError, match="ctx_mode"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, ctx_mode="bad",
+            )
+
+    def test_invalid_kernel_size(self, channels, shifts):
+        with pytest.raises(ValueError, match="kernel_size"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, kernel_size=0,
+            )
+        with pytest.raises(ValueError, match="kernel_size"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, kernel_size=-3,
+            )
+
+    def test_invalid_strides(self, channels, shifts):
+        with pytest.raises(ValueError, match="strides"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, strides=0,
+            )
+
+    def test_invalid_stream_pool_blur(self, channels, shifts):
+        # 'blur' is forbidden in the causal variant (future leak on right edge).
+        with pytest.raises(ValueError, match="stream_pool"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, stream_pool="blur",
+            )
+
+    def test_invalid_skip_pool_pixel_unshuffle(self, channels, shifts):
+        with pytest.raises(ValueError, match="skip_pool"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, skip_pool="pixel_unshuffle",
+            )
+
+    def test_invalid_out_channels(self, channels, shifts):
+        with pytest.raises(ValueError, match="out_channels"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, out_channels=0,
+            )
+
+    def test_invalid_ctx_norm_type(self, channels, shifts):
+        with pytest.raises(ValueError, match="ctx_norm_type"):
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, ctx_norm_type="rms",
+            )
+
+    def test_global_context_requires_channels_ge_2(self, shifts):
+        with pytest.raises(ValueError, match="channels >= 2"):
+            CausalCliffordNetBlockDSv2(
+                channels=1, shifts=[1], use_global_context=True,
+            )
+
+    # ---- Build & shape ----------------------------------------------------
+
+    def test_build_strides1(self, layer_instance, seq_tensor):
+        layer_instance(seq_tensor)
+        assert layer_instance.built is True
+        assert layer_instance.input_norm.built is True
+        assert layer_instance.linear_det.built is True
+        assert layer_instance.dw_conv.built is True
+        assert layer_instance.local_geo_prod.built is True
+        assert layer_instance.ggr.built is True
+        # Pools are Identity at strides=1.
+        assert isinstance(
+            layer_instance.stream_pool, keras.layers.Identity
+        )
+        assert isinstance(
+            layer_instance.skip_pool, keras.layers.Identity
+        )
+
+    def test_build_strides2_creates_pools(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+            stream_pool="avg", skip_pool="avg",
+        )
+        x = tf.random.normal([2, 1, 16, channels])
+        layer(x)
+        assert isinstance(layer.stream_pool, keras.layers.AveragePooling2D)
+        assert isinstance(layer.skip_pool, keras.layers.AveragePooling2D)
+
+    def test_build_strides2_max_pool(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+            stream_pool="max", skip_pool="max",
+        )
+        x = tf.random.normal([2, 1, 16, channels])
+        layer(x)
+        assert isinstance(layer.stream_pool, keras.layers.MaxPooling2D)
+        assert isinstance(layer.skip_pool, keras.layers.MaxPooling2D)
+
+    def test_h_not_one_rejected(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(channels=channels, shifts=shifts)
+        x = tf.random.normal([2, 4, 16, channels])  # H=4 != 1
+        with pytest.raises(ValueError, match="H == 1"):
+            layer(x)
+
+    def test_channel_mismatch_rejected(self, shifts):
+        layer = CausalCliffordNetBlockDSv2(channels=16, shifts=shifts)
+        x = tf.random.normal([2, 1, 16, 8])  # last dim 8 != channels 16
+        with pytest.raises(ValueError, match="isotropic"):
+            layer(x)
+
+    def test_output_shape_strides1(self, layer_instance, seq_tensor):
+        out = layer_instance(seq_tensor)
+        assert out.shape == seq_tensor.shape
+
+    def test_output_shape_strides2(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        x = tf.random.normal([2, 1, 16, channels])
+        out = layer(x)
+        # H stays 1; W halves (ceil).
+        assert out.shape == (2, 1, 8, channels)
+
+    def test_output_shape_strides2_odd_seqlen(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        x = tf.random.normal([2, 1, 13, channels])
+        out = layer(x)
+        # ceil(13/2) = 7
+        assert out.shape == (2, 1, 7, channels)
+
+    def test_output_shape_out_channels(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2, out_channels=32,
+        )
+        x = tf.random.normal([2, 1, 16, channels])
+        out = layer(x)
+        assert out.shape == (2, 1, 8, 32)
+
+    def test_compute_output_shape_strides1(
+        self, layer_instance, seq_tensor
+    ):
+        layer_instance(seq_tensor)
+        computed = layer_instance.compute_output_shape(seq_tensor.shape)
+        assert computed == seq_tensor.shape
+
+    def test_compute_output_shape_strides2(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        result = layer.compute_output_shape((None, 1, 16, channels))
+        assert result == (None, 1, 8, channels)
+
+    def test_compute_output_shape_with_out_channels(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2, out_channels=32,
+        )
+        result = layer.compute_output_shape((None, 1, 16, channels))
+        assert result == (None, 1, 8, 32)
+
+    # ---- Causality (CRITICAL) --------------------------------------------
+
+    def test_causality_future_does_not_affect_past_strides1(
+        self, channels, shifts,
+    ):
+        """Strides=1: changing the last position must not alter earlier outputs."""
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = x1.numpy().copy()
+        x2[0, 0, -1, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False).numpy()
+        out2 = layer(x2, training=False).numpy()
+
+        # Earlier positions must be byte-identical.
+        np.testing.assert_allclose(
+            out1[0, 0, :-1], out2[0, 0, :-1],
+            atol=1e-6,
+            err_msg="Future leak: earlier positions affected by last-position change",
+        )
+        # Last position should differ (otherwise the block ignores its input).
+        assert not np.allclose(
+            out1[0, 0, -1], out2[0, 0, -1], atol=1e-3,
+        )
+
+    def test_causality_middle_change_no_backward_leak_strides1(
+        self, channels, shifts,
+    ):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = x1.numpy().copy()
+        change_pos = 8
+        x2[0, 0, change_pos, :] = tf.random.normal(
+            [channels], seed=99
+        ).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False).numpy()
+        out2 = layer(x2, training=False).numpy()
+
+        np.testing.assert_allclose(
+            out1[0, 0, :change_pos], out2[0, 0, :change_pos],
+            atol=1e-6,
+            err_msg="Backward leak detected (strides=1)",
+        )
+        assert not np.allclose(
+            out1[0, 0, change_pos], out2[0, 0, change_pos], atol=1e-3,
+        )
+
+    def test_causality_strides2_chunk_boundary(self, channels, shifts):
+        """Strides=2: perturbing input position k may only affect output
+        positions >= k // strides.
+        """
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        # Perturb input position 5 -> chunk index 5//2 = 2.
+        change_pos = 5
+        chunk = change_pos // 2
+        x2 = x1.numpy().copy()
+        x2[0, 0, change_pos, :] = tf.random.normal(
+            [channels], seed=99
+        ).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False).numpy()
+        out2 = layer(x2, training=False).numpy()
+
+        # Output positions [0..chunk-1] must be byte-identical.
+        np.testing.assert_allclose(
+            out1[0, 0, :chunk], out2[0, 0, :chunk],
+            atol=1e-6,
+            err_msg="Strides=2 backward leak: output before chunk affected",
+        )
+        # The output at the chunk boundary or later may differ.
+        assert not np.allclose(
+            out1[0, 0, chunk:], out2[0, 0, chunk:], atol=1e-3,
+        )
+
+    def test_causality_with_global_context(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts,
+            use_global_context=True,
+            layer_scale_init=1.0, drop_path_rate=0.0,
+        )
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = x1.numpy().copy()
+        x2[0, 0, -1, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        out1 = layer(x1, training=False).numpy()
+        out2 = layer(x2, training=False).numpy()
+
+        np.testing.assert_allclose(
+            out1[0, 0, :-1], out2[0, 0, :-1], atol=1e-5,
+            err_msg="Global context branch leaks future info",
+        )
+        assert not np.allclose(
+            out1[0, 0, -1], out2[0, 0, -1], atol=1e-3,
+        )
+
+    def test_causality_stacked_blocks(self, channels, shifts):
+        blocks = [
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts,
+                layer_scale_init=1.0, name=f"cdsv2_{i}",
+            )
+            for i in range(3)
+        ]
+        x1 = tf.random.normal([1, 1, 16, channels], seed=0)
+        x2 = x1.numpy().copy()
+        x2[0, 0, -1, :] = tf.random.normal([channels], seed=99).numpy()
+        x2 = tf.constant(x2)
+
+        o1, o2 = x1, x2
+        for block in blocks:
+            o1 = block(o1, training=False)
+            o2 = block(o2, training=False)
+        o1 = o1.numpy()
+        o2 = o2.numpy()
+        np.testing.assert_allclose(
+            o1[0, 0, :-1], o2[0, 0, :-1], atol=1e-5,
+            err_msg="Causality violation after stacking 3 blocks",
+        )
+
+    # ---- Functional ------------------------------------------------------
+
+    def test_ctx_mode_diff_vs_abs_differ(self, channels, shifts):
+        x = tf.random.normal([2, 1, 16, channels], seed=42)
+        layer_diff = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, ctx_mode="diff",
+            layer_scale_init=1.0,
+        )
+        layer_abs = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, ctx_mode="abs",
+            layer_scale_init=1.0,
+        )
+        out_diff = layer_diff(x, training=False).numpy()
+        out_abs = layer_abs(x, training=False).numpy()
+        assert not np.allclose(out_diff, out_abs, atol=1e-3)
+
+    def test_all_cli_modes(self, channels, shifts, seq_tensor):
+        for mode in ("inner", "wedge", "full"):
+            layer = CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, cli_mode=mode,
+            )
+            out = layer(seq_tensor)
+            assert out.shape == seq_tensor.shape
+            assert not np.any(np.isnan(out.numpy())), f"NaN cli_mode={mode}"
+
+    def test_residual_identity_at_init_strides1(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, layer_scale_init=1e-10,
+        )
+        x = tf.random.normal([2, 1, 8, channels])
+        out = layer(x)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_residual_identity_at_init_strides2_avg(
+        self, channels, shifts,
+    ):
+        """gamma~0 + strides=2 + avg skip pool -> output ≈ avg_pool(x)."""
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+            stream_pool="avg", skip_pool="avg",
+            layer_scale_init=1e-10,
+        )
+        x = tf.random.normal([2, 1, 16, channels])
+        out = layer(x)
+        ref = keras.layers.AveragePooling2D(
+            pool_size=(1, 2), strides=(1, 2), padding="same",
+        )(x)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(ref),
+            rtol=1e-4, atol=1e-4,
+        )
+
+    def test_numerical_stability(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        for scale in [1e-8, 1e8]:
+            x = tf.ones([2, 1, 8, channels]) * scale
+            out = layer(x)
+            assert not np.any(np.isnan(out.numpy())), f"NaN at scale {scale}"
+            assert not np.any(np.isinf(out.numpy())), f"Inf at scale {scale}"
+
+    def test_inference_deterministic(
+        self, channels, shifts, seq_tensor,
+    ):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+            drop_path_rate=0.0,
+        )
+        x = tf.random.normal([2, 1, 16, channels])
+        o1 = layer(x, training=False)
+        o2 = layer(x, training=False)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(o1),
+            keras.ops.convert_to_numpy(o2),
+            rtol=1e-6, atol=1e-6,
+        )
+
+    # ---- Gradient flow ---------------------------------------------------
+
+    def test_gradient_flow_strides1(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(channels=channels, shifts=shifts)
+        x = tf.Variable(tf.random.normal([2, 1, 8, channels]))
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out))
+        grads = tape.gradient(loss, x)
+        assert grads is not None
+        assert np.any(grads.numpy() != 0)
+
+    def test_gradient_flow_strides2(self, channels, shifts):
+        layer = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, strides=2,
+        )
+        x = tf.Variable(tf.random.normal([2, 1, 8, channels]))
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out))
+        grads = tape.gradient(loss, x)
+        assert grads is not None
+        assert np.any(grads.numpy() != 0)
+
+    # ---- Serialization ---------------------------------------------------
+
+    def test_serialization(self, channels, shifts):
+        original = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts,
+            cli_mode="wedge", ctx_mode="abs",
+            use_global_context=True,
+            kernel_size=5, strides=2,
+            stream_pool="max", skip_pool="max",
+            out_channels=32, ctx_norm_type="ln", ctx_activation=None,
+            layer_scale_init=1e-3, drop_path_rate=0.1,
+            name="causal_dsv2_s",
+        )
+        config = original.get_config()
+        restored = CausalCliffordNetBlockDSv2.from_config(config)
+
+        assert restored.channels == original.channels
+        assert restored.shifts == original.shifts
+        assert restored.cli_mode == original.cli_mode
+        assert restored.ctx_mode == original.ctx_mode
+        assert restored.use_global_context == original.use_global_context
+        assert restored.kernel_size == original.kernel_size
+        assert restored.strides == original.strides
+        assert restored.stream_pool_kind == original.stream_pool_kind
+        assert restored.skip_pool_kind == original.skip_pool_kind
+        assert restored.out_channels == original.out_channels
+        assert restored.ctx_norm_type == original.ctx_norm_type
+        assert restored.ctx_activation == original.ctx_activation
+        assert restored.layer_scale_init == original.layer_scale_init
+        assert restored.drop_path_rate == original.drop_path_rate
+
+    def test_model_save_load_strides1(self, channels, shifts):
+        x = tf.random.normal([2, 1, 16, channels])
+        inp = keras.Input(shape=(1, 16, channels))
+        out = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts, name="cdsv2",
+        )(inp)
+        model = keras.Model(inputs=inp, outputs=out)
+
+        original_pred = model.predict(x, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "model.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        loaded_pred = loaded.predict(x, verbose=0)
+        np.testing.assert_allclose(
+            original_pred, loaded_pred, rtol=1e-5, atol=1e-5,
+        )
+
+    def test_model_save_load_strides2(self, channels, shifts):
+        x = tf.random.normal([2, 1, 16, channels])
+        inp = keras.Input(shape=(1, 16, channels))
+        out = CausalCliffordNetBlockDSv2(
+            channels=channels, shifts=shifts,
+            strides=2, stream_pool="max", skip_pool="max",
+            name="cdsv2_strided",
+        )(inp)
+        model = keras.Model(inputs=inp, outputs=out)
+
+        original_pred = model.predict(x, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "model.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        loaded_pred = loaded.predict(x, verbose=0)
+        np.testing.assert_allclose(
+            original_pred, loaded_pred, rtol=1e-5, atol=1e-5,
+        )
+
+    # ---- Stacking --------------------------------------------------------
+
+    def test_stacking_strides2_halves_each(self, channels, shifts):
+        """Stack 3 blocks with strides=2: 32 -> 16 -> 8 -> 4 along W."""
+        x = tf.random.normal([2, 1, 32, channels])
+        blocks = [
+            CausalCliffordNetBlockDSv2(
+                channels=channels, shifts=shifts, strides=2,
+                name=f"cdsv2s_{i}",
+            )
+            for i in range(3)
+        ]
+        for block in blocks:
+            x = block(x)
+        assert x.shape == (2, 1, 4, channels)
+        assert not np.any(np.isnan(x.numpy()))
 
 
 if __name__ == "__main__":
