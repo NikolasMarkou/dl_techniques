@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import inspect
+import numpy as np
 import pytest
 
 
@@ -113,3 +114,129 @@ class TestPreprocessMlmDatasetNoCache:
             "preprocess_mlm_dataset must not call dataset.cache() — "
             "see D-005."
         )
+
+
+class TestDictKeyedCompile:
+    """Coverage for ``prepare_dict_keyed_compile`` (D-001).
+
+    The helper makes ``model.compile(metrics={"logits": [...]})`` actually
+    fire its metrics on subclassed Keras models that return a dict from
+    ``call()``. Without it, Keras silently no-ops the metric list — the
+    bug this plan fixes.
+
+    Tests c/d run a real ``model.fit`` on a tiny config to assert all 4
+    CLM metrics appear in ``history.history`` with clean (non-prefixed)
+    names. CPU only — no GPU required.
+    """
+
+    def test_helper_sets_output_names_on_subclassed_dict_model(self):
+        """SC-1 (a): empty -> ['logits']."""
+        import keras
+
+        from train.common.nlp import prepare_dict_keyed_compile
+
+        from dl_techniques.models.gpt2.gpt2 import GPT2
+
+        m = GPT2.from_variant("tiny", vocab_size=64, max_seq_len=8)
+        # Build the model so internal state is populated.
+        _ = m({"input_ids": np.zeros((1, 4), dtype=np.int32)}, training=False)
+        # Pre-condition: subclassed dict-output model has no output_names.
+        assert not getattr(m, "output_names", None)
+
+        prepare_dict_keyed_compile(m)
+        assert m.output_names == ["logits"]
+
+    def test_helper_is_idempotent(self):
+        """SC-1 (b): no-op when already populated."""
+        import keras
+
+        from train.common.nlp import prepare_dict_keyed_compile
+
+        m = keras.Sequential([keras.layers.Dense(2)])
+        m.build((None, 3))
+        prepare_dict_keyed_compile(m)  # may or may not set, depending on Keras
+        first = list(m.output_names) if m.output_names else None
+        # Pretend it was set explicitly with a different value -> stays put.
+        m.output_names = ["custom"]
+        prepare_dict_keyed_compile(m)
+        assert m.output_names == ["custom"]
+
+    def _assert_clm_metric_history(self, history):
+        keys = set(history.history.keys())
+        required = {"loss", "accuracy", "perplexity",
+                    "bits_per_token", "bits_per_character"}
+        missing = required - keys
+        assert not missing, (
+            f"missing metric keys in history: {missing}; got {sorted(keys)}"
+        )
+        # No `logits_` prefix on metrics — the whole point of the fix.
+        prefixed = [k for k in keys if k.startswith("logits_")]
+        assert not prefixed, (
+            f"unexpected logits_-prefixed keys in history: {prefixed}"
+        )
+        # SC-4: loss is finite.
+        loss_seq = history.history["loss"]
+        assert len(loss_seq) >= 1
+        assert np.isfinite(loss_seq[-1]), f"non-finite loss: {loss_seq}"
+
+    def test_fit_gpt2_emits_all_metrics(self):
+        """SC-2: real ``model.fit`` on tiny GPT2 emits all 4 metric keys."""
+        import keras
+
+        from train.common.nlp import (
+            prepare_dict_keyed_compile,
+            build_clm_metrics,
+        )
+        from dl_techniques.models.gpt2.gpt2 import GPT2
+        from dl_techniques.losses import MaskedCausalLMLoss
+
+        vocab_size = 64
+        seq_in = 7  # input length after the causal shift (chunk-1)
+        batch = 2
+        n_samples = 4
+
+        m = GPT2.from_variant(
+            "tiny", vocab_size=vocab_size, max_seq_len=seq_in,
+        )
+        prepare_dict_keyed_compile(m)
+        m.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+            loss={"logits": MaskedCausalLMLoss(ignore_index=-1)},
+            metrics={"logits": build_clm_metrics("gpt2")},
+        )
+        rng = np.random.default_rng(0)
+        x = rng.integers(0, vocab_size, size=(n_samples, seq_in), dtype=np.int32)
+        y = rng.integers(0, vocab_size, size=(n_samples, seq_in), dtype=np.int32)
+        history = m.fit(x, y, batch_size=batch, epochs=1, verbose=0)
+        self._assert_clm_metric_history(history)
+
+    def test_fit_cliffordnet_lm_emits_all_metrics(self):
+        """SC-3: real ``model.fit`` on tiny CliffordNetLM (single-key dict)."""
+        import keras
+
+        from train.common.nlp import (
+            prepare_dict_keyed_compile,
+            build_clm_metrics,
+        )
+        from dl_techniques.models.cliffordnet.lm import CliffordNetLM
+        from dl_techniques.losses import MaskedCausalLMLoss
+
+        vocab_size = 64
+        seq_in = 8
+        batch = 2
+        n_samples = 4
+
+        m = CliffordNetLM.from_variant(
+            "nano", vocab_size=vocab_size, max_seq_length=seq_in,
+        )
+        prepare_dict_keyed_compile(m)
+        m.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+            loss={"logits": MaskedCausalLMLoss(ignore_index=-1)},
+            metrics={"logits": build_clm_metrics("gpt2")},
+        )
+        rng = np.random.default_rng(0)
+        x = rng.integers(0, vocab_size, size=(n_samples, seq_in), dtype=np.int32)
+        y = rng.integers(0, vocab_size, size=(n_samples, seq_in), dtype=np.int32)
+        history = m.fit(x, y, batch_size=batch, epochs=1, verbose=0)
+        self._assert_clm_metric_history(history)
