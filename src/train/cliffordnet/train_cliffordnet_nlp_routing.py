@@ -125,6 +125,8 @@ from train.common.nlp import (
     create_warmup_lr_schedule,
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
+    build_clm_metrics,
+    augment_probe_results,
 )
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
@@ -579,6 +581,12 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             )
             logger.info("")
 
+        # Extension point for probe-time aggregate metrics (Self-BLEU,
+        # distinct-2, mean tok/s). Default is a no-op; trainers bind a
+        # concrete hook (e.g. ``augment_probe_results``) on the probe
+        # instance.
+        self._post_generate_hook(probe_results)
+
         if self._log_path:
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
@@ -587,6 +595,12 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         # the 300 autoregressive `model(...)` calls; without this, ~70 MB
         # per probe event leaked into RSS over the run.
         gc.collect()
+
+    def _post_generate_hook(self, results: dict) -> None:
+        """Override or rebind on the instance for custom probe-time
+        analysis. Default: no-op.
+        """
+        return None
 
     def _generate(self, prompt: str) -> Tuple[str, int]:
         """Autoregressive generation. Model outputs probabilities, so we
@@ -901,7 +915,7 @@ def compile_model(
             clipnorm=1.0,
         ),
         loss={"logits": create_loss_fn(config)},
-        metrics={"logits": ["accuracy"]},
+        metrics={"logits": build_clm_metrics(config.encoding_name)},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
@@ -1017,7 +1031,7 @@ def train_cliffordnet_nlp_routing(
         model_name=f"CliffordNetLMRouting-{variant_label}-{config.routing_mode}",
     ))
 
-    callbacks.append(GenerationProbeCallback(
+    probe_cb = GenerationProbeCallback(
         step_counter=step_counter,
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
@@ -1030,7 +1044,9 @@ def train_cliffordnet_nlp_routing(
         ctx_length=config.max_seq_length - 1,
         save_dir=results_dir,
         seed=config.probe_seed,
-    ))
+    )
+    probe_cb._post_generate_hook = augment_probe_results
+    callbacks.append(probe_cb)
 
     logger.info(
         f"Starting training: source={config.dataset_source}, "
