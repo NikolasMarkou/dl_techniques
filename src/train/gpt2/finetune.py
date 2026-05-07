@@ -43,6 +43,7 @@ from train.common.nlp import (
     preprocess_clm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
+    estimate_clm_steps_per_epoch,
 )
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
@@ -102,6 +103,13 @@ class FinetuneConfig:
 
     # Train/val split for local files
     val_fraction: float = 0.1
+
+    # DECISION D-001: optional override of LR-schedule horizon. None uses
+    # the chunk-aware estimator with measured train cardinality.
+    steps_per_epoch: Optional[int] = None
+
+    # DECISION D-006: end-to-end seed plumbing.
+    seed: int = 42
 
     # Analysis
     run_epoch_analysis: bool = True
@@ -306,8 +314,8 @@ def finetune_gpt2(
     logger.info("GPT-2 Domain Fine-tuning (CLM)")
     logger.info("=" * 60)
 
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
+    tf.random.set_seed(config.seed)
+    keras.utils.set_random_seed(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 
     # Tokenizer (must match pre-trained model)
@@ -323,8 +331,19 @@ def finetune_gpt2(
     # Data
     train_dataset, val_dataset = load_finetune_datasets(config, preprocessor)
 
-    # Estimate steps per epoch
-    steps_per_epoch = 1000  # default estimate
+    # DECISION D-001: estimate steps_per_epoch via the canonical helper.
+    # tf.data.Dataset.cardinality() returns UNKNOWN_CARDINALITY for the
+    # generator-backed packed CLM pipeline, so we cannot count chunks
+    # directly. Fall back to the helper's default Wikipedia-token estimate
+    # (or --steps-per-epoch override). Domain-specific finetune corpora
+    # should set --steps-per-epoch explicitly.
+    steps_per_epoch = estimate_clm_steps_per_epoch(
+        num_articles=None,
+        max_seq_length=config.max_seq_length,
+        batch_size=config.batch_size,
+        override=config.steps_per_epoch,
+    )
+    logger.info(f"steps_per_epoch={steps_per_epoch:,}")
 
     # Model
     model = load_pretrained_model(config)
@@ -439,6 +458,16 @@ def main() -> None:
         "--save-dir", type=str, default="results/gpt2_finetune",
         help="Output directory",
     )
+    parser.add_argument(
+        "--steps-per-epoch", type=int, default=None,
+        help="Override LR-schedule horizon (overrides chunk-aware estimate). "
+             "Recommended for small finetune corpora to avoid the helper's "
+             "Wikipedia-token fallback.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Global seed for tf/keras + dataset shuffle (D-006).",
+    )
 
     args = parser.parse_args()
 
@@ -453,6 +482,8 @@ def main() -> None:
     config.freeze_embeddings = args.freeze_embeddings
     config.freeze_n_layers = args.freeze_n_layers
     config.save_dir = args.save_dir
+    config.steps_per_epoch = args.steps_per_epoch
+    config.seed = args.seed
 
     if args.hf_dataset:
         config.data_source = "huggingface"
