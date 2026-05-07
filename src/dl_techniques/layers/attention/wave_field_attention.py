@@ -42,10 +42,13 @@ Complexity:
 """
 
 import math
-import numpy as np
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 
@@ -355,15 +358,15 @@ class WaveFieldAttention(keras.layers.Layer):
         w_lo = 1.0 - frac
         w_hi = frac
 
-        lo_oh = ops.one_hot(idx_lo, G, dtype="float32")
-        hi_oh = ops.one_hot(idx_hi, G, dtype="float32")
+        lo_oh = ops.one_hot(idx_lo, G, dtype="float32")  # (N, G)
+        hi_oh = ops.one_hot(idx_hi, G, dtype="float32")  # (N, G)
 
-        scatter_mat = (
-            ops.transpose(lo_oh) * ops.expand_dims(w_lo, 0)
-            + ops.transpose(hi_oh) * ops.expand_dims(w_hi, 0)
-        )  # (G, N)
-
-        gather_mat = ops.transpose(scatter_mat)  # (N, G)
+        # Build gather first (one transpose total instead of three).
+        gather_mat = (
+            lo_oh * ops.expand_dims(w_lo, -1)
+            + hi_oh * ops.expand_dims(w_hi, -1)
+        )  # (N, G)
+        scatter_mat = ops.transpose(gather_mat)  # (G, N)
         return scatter_mat, gather_mat
 
     def _build_wave_kernels_fft(self) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
@@ -379,9 +382,12 @@ class WaveFieldAttention(keras.layers.Layer):
         G = self.field_size
         t = ops.cast(ops.arange(G), "float32")
 
-        alpha = ops.log(1.0 + ops.exp(self.wave_damping))
-        omega = self.wave_frequency
-        phi = self.wave_phase
+        # Force fp32 for the kernel even under mixed-precision: wave params
+        # are autocast to compute_dtype (e.g. fp16) when read here, but the
+        # kernel feeds an FFT pipeline that runs in fp32.
+        alpha = ops.softplus(ops.cast(self.wave_damping, "float32"))
+        omega = ops.cast(self.wave_frequency, "float32")
+        phi = ops.cast(self.wave_phase, "float32")
 
         alpha = ops.expand_dims(alpha, 1)
         omega = ops.expand_dims(omega, 1)
@@ -412,11 +418,16 @@ class WaveFieldAttention(keras.layers.Layer):
         """
         G = self.field_size
 
-        field_t = ops.transpose(field, (0, 1, 3, 2))  # (B, H, D_h, G)
+        # Run FFT pipeline in float32 for stability under mixed-precision
+        # (fp16 / bf16) training. Cast back to the input dtype at the end.
+        in_dtype = field.dtype
+        field32 = ops.cast(field, "float32")
+        field_t = ops.transpose(field32, (0, 1, 3, 2))  # (B, H, D_h, G)
         field_padded = ops.pad(field_t, [[0, 0], [0, 0], [0, 0], [0, G]])
 
         field_re, field_im = keras.ops.rfft(field_padded)
 
+        # kernel_fft components are already float32 (built from float32 t).
         kern_re, kern_im = kernel_fft
         kern_re = ops.reshape(kern_re, (1, self.num_heads, 1, -1))
         kern_im = ops.reshape(kern_im, (1, self.num_heads, 1, -1))
@@ -426,8 +437,9 @@ class WaveFieldAttention(keras.layers.Layer):
 
         convolved = keras.ops.irfft((conv_re, conv_im))
         convolved = convolved[..., :G]
+        convolved = ops.transpose(convolved, (0, 1, 3, 2))
 
-        return ops.transpose(convolved, (0, 1, 3, 2))
+        return ops.cast(convolved, in_dtype)
 
     def _apply_field_coupling(self, field: keras.KerasTensor) -> keras.KerasTensor:
         """Apply row-softmax coupling across heads at each spatial position.
@@ -437,15 +449,12 @@ class WaveFieldAttention(keras.layers.Layer):
         :return: Coupled field of shape ``(B, H, G, D_h)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(field)[0]
-        H = self.num_heads
-        G = self.field_size
-        D_h = self.head_dim
-
         coupling = ops.softmax(self.field_coupling, axis=-1)
-        field_flat = ops.reshape(field, (batch_size, H, G * D_h))
-        coupled = ops.einsum("hk,bkf->bhf", coupling, field_flat)
-        return ops.reshape(coupled, (batch_size, H, G, D_h))
+        # Direct 4D einsum — avoids the flatten + 3D einsum + reshape cycle.
+        # Cast coupling to field.dtype so this works under mixed-precision
+        # (variables are stored as fp32 even under fp16 policy).
+        coupling = ops.cast(coupling, field.dtype)
+        return ops.einsum("hk,bkgd->bhgd", coupling, field)
 
     # -----------------------------------------------------------------
     # call
@@ -496,8 +505,12 @@ class WaveFieldAttention(keras.layers.Layer):
         v = ops.transpose(ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
 
         # 2. Field positions + scatter/gather matrices
+        # Built in float32 for index precision, then cast to compute_dtype
+        # so the einsum below works under mixed-precision policies.
         field_pos = self._compute_field_positions(seq_len)
         scatter_mat, gather_mat = self._build_scatter_gather_matrices(field_pos)
+        scatter_mat = ops.cast(scatter_mat, self.compute_dtype)
+        gather_mat = ops.cast(gather_mat, self.compute_dtype)
 
         # 3. Deposit = V * ||K||
         k_mag = ops.sqrt(ops.sum(ops.square(k), axis=-1, keepdims=True) + 1e-8)

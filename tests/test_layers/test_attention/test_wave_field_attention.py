@@ -692,6 +692,24 @@ class TestWaveFieldAttention:
         assert output.shape == (1, 20, 32)
         assert not tf.reduce_any(tf.math.is_nan(output))
 
+    @pytest.mark.parametrize("policy", ["mixed_float16", "mixed_bfloat16"])
+    def test_mixed_precision_end_to_end(self, policy):
+        # DECISION plan_2026-05-07_a73304d4/D-001 — locks in mixed-precision
+        # support added in V3.7. Regression guard against losing the casts
+        # of scatter/gather matrices, kernel build, and field coupling.
+        prev = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy(policy)
+            layer = WaveFieldAttention(dim=32, num_heads=4)
+            output = layer(tf.random.normal([2, 10, 32]))
+            assert output.shape == (2, 10, 32)
+            assert not tf.reduce_any(tf.math.is_nan(output))
+            assert not tf.reduce_any(tf.math.is_inf(output))
+            expected_dtype = "float16" if policy == "mixed_float16" else "bfloat16"
+            assert output.dtype.name == expected_dtype
+        finally:
+            keras.mixed_precision.set_global_policy(prev)
+
     def test_single_head(self):
         layer = WaveFieldAttention(dim=64, num_heads=1)
         output = layer(tf.random.normal([2, 10, 64]))
