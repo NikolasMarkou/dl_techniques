@@ -58,6 +58,7 @@ from train.common.nlp import (
     preprocess_clm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
+    estimate_clm_steps_per_epoch,
 )
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
@@ -127,18 +128,26 @@ class TrainingConfig:
     # HuggingFace / Wikipedia settings
     hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
     hf_wikipedia_config: str = "20231101.en"
-    min_article_length: int = 500
+    # DECISION D-003: 0 → packed CLM uses every token; pass 500+ only for
+    # per-doc consumers (MLM, classification).
+    min_article_length: int = 0
     val_fraction: float = 0.02
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
+    # DECISION D-002: parallel tokenization shards + per-epoch reshuffle.
+    shuffle_shards: int = 4
 
     # Checkpointing & analysis (step-based for large datasets)
     checkpoint_every_steps: int = 25000
     analyze_every_steps: int = 50000
     max_checkpoints: int = 3
+    # Optional override of LR-schedule horizon.
+    steps_per_epoch: Optional[int] = None
 
     # Resume from checkpoint
     resume_from: Optional[str] = None
+    # DECISION D-006: end-to-end seed plumbing.
+    seed: int = 42
 
     # Generation probes
     probe_prompts: List[str] = field(default_factory=lambda: [
@@ -593,12 +602,19 @@ def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
 def load_train_val_datasets(
     config: TrainingConfig,
     preprocessor,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
-    """Load, preprocess, and wrap train/val datasets for dict-output model."""
+    data_seed: int = 42,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
+    """Load, preprocess, and wrap train/val datasets for dict-output model.
+
+    :return: ``(train_ds, val_ds, n_train_articles)``.
+    """
+    n_train_articles: Optional[int] = None
     if config.dataset_source == "tfds":
         train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
     elif config.dataset_source == "huggingface":
-        train_ds, val_ds = _load_hf_datasets(config, preprocessor)
+        train_ds, val_ds, n_train_articles = _load_hf_datasets(
+            config, preprocessor, data_seed,
+        )
     else:
         raise ValueError(
             f"Unknown dataset_source: {config.dataset_source!r}. "
@@ -610,7 +626,7 @@ def load_train_val_datasets(
         lambda x, y: (x, {"logits": y}),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    return wrap(train_ds), wrap(val_ds)
+    return wrap(train_ds), wrap(val_ds), n_train_articles
 
 
 def _load_tfds_datasets(config, preprocessor):
@@ -625,29 +641,27 @@ def _load_tfds_datasets(config, preprocessor):
     return train, val
 
 
-def _load_hf_datasets(config, preprocessor):
-    train_raw, val_raw = load_wikipedia_train_val(
+def _load_hf_datasets(config, preprocessor, data_seed: int):
+    train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
         cache_dir=config.hf_cache_dir,
         config_name=config.hf_wikipedia_config,
         min_article_length=config.min_article_length,
         val_fraction=config.val_fraction,
         max_train_samples=config.max_train_samples,
         max_val_samples=config.max_val_samples,
+        seed=data_seed,
+        num_shards=config.shuffle_shards,
+        return_counts=True,
     )
-    # streaming=True is REQUIRED for Wikipedia: without it, preprocess_clm_dataset
-    # inserts a tf.data.cache() that accumulates ~20 GB of tokenized articles in RAM
-    # during the first epoch and triggers the OOM killer mid-training.
     train = preprocess_clm_dataset(
         train_raw, preprocessor,
         config.max_seq_length, config.batch_size,
-        streaming=True,
     )
     val = preprocess_clm_dataset(
         val_raw, preprocessor,
         config.max_seq_length, config.batch_size,
-        streaming=True,
     )
-    return train, val
+    return train, val, n_train
 
 
 # ---------------------------------------------------------------------------
@@ -682,12 +696,18 @@ def compile_model(
     )
 
 
-def _estimate_steps_per_epoch(config: TrainingConfig) -> int:
-    """Estimate steps per epoch for LR schedule."""
-    if config.max_train_samples:
-        return config.max_train_samples // config.batch_size
-    # Full Wikipedia (~4.85M articles after filtering) / batch_size
-    return 4_850_000 // config.batch_size
+def _make_steps_per_epoch(
+    config: TrainingConfig, n_train_articles: Optional[int],
+) -> int:
+    """Resolve steps_per_epoch via the canonical helper (D-001)."""
+    if config.dataset_source == "tfds" and config.max_samples and config.steps_per_epoch is None:
+        return max(1, config.max_samples // config.batch_size)
+    return estimate_clm_steps_per_epoch(
+        num_articles=n_train_articles or config.max_train_samples,
+        max_seq_length=config.max_seq_length,
+        batch_size=config.batch_size,
+        override=config.steps_per_epoch,
+    )
 
 
 def train_cliffordnet_nlp(
@@ -702,8 +722,8 @@ def train_cliffordnet_nlp(
     logger.info("CliffordNet NLP Causal LM Pre-training")
     logger.info("=" * 60)
 
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
+    tf.random.set_seed(config.seed)
+    keras.utils.set_random_seed(config.seed)
 
     # Tokenizer
     preprocessor = create_tokenizer(
@@ -715,14 +735,20 @@ def train_cliffordnet_nlp(
         config.mask_token_id,
     )
 
+    # DECISION D-006: derive data_seed before building the dataset.
+    initial_step = (
+        _extract_step_from_checkpoint(config.resume_from)
+        if config.resume_from else 0
+    )
+    data_seed = config.seed + initial_step
+
     # Data
-    train_dataset, val_dataset = load_train_val_datasets(
-        config, preprocessor,
+    train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
+        config, preprocessor, data_seed=data_seed,
     )
 
     # Model -- resume from checkpoint or create fresh
-    steps_per_epoch = _estimate_steps_per_epoch(config)
-    initial_step = 0
+    steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
 
     if config.resume_from:
         model, initial_step = load_model_from_checkpoint(config.resume_from)
@@ -875,12 +901,32 @@ def _build_parser() -> argparse.ArgumentParser:
                     default="/media/arxwn/data0_4tb/datasets/wikipedia")
     p.add_argument("--max-train-samples", type=int, default=None)
     p.add_argument("--val-fraction", type=float, default=0.02)
+    p.add_argument(
+        "--min-article-length", type=int, default=0,
+        help="HF Wikipedia char-length filter. 0 (default) = no filter "
+             "(recommended for packed CLM). 500+ for per-doc consumers.",
+    )
+    p.add_argument(
+        "--shuffle-shards", type=int, default=4,
+        help="HF Wikipedia parallel tokenization shards (D-002). 1 = "
+             "single-thread, deterministic; >1 reshuffles each epoch and "
+             "parallelises tokenization.",
+    )
+    p.add_argument(
+        "--seed", type=int, default=42,
+        help="Global seed for tf/keras + dataset shuffle. On --resume, data "
+             "seed is shifted by initial_step (D-006).",
+    )
 
     # Checkpointing
     p.add_argument("--checkpoint-every-steps", type=int, default=25000)
     p.add_argument("--analyze-every-steps", type=int, default=50000,
                     help="0 to disable")
     p.add_argument("--max-checkpoints", type=int, default=3)
+    p.add_argument(
+        "--steps-per-epoch", type=int, default=None,
+        help="Override LR-schedule horizon (overrides chunk-aware estimate).",
+    )
 
     # Resume
     p.add_argument(
@@ -920,6 +966,10 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         hf_cache_dir=args.hf_cache_dir,
         max_train_samples=args.max_train_samples,
         val_fraction=args.val_fraction,
+        min_article_length=args.min_article_length,
+        shuffle_shards=args.shuffle_shards,
+        seed=args.seed,
+        steps_per_epoch=args.steps_per_epoch,
         checkpoint_every_steps=args.checkpoint_every_steps,
         analyze_every_steps=args.analyze_every_steps,
         max_checkpoints=args.max_checkpoints,
