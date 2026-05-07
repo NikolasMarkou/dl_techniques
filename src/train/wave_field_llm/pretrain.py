@@ -44,6 +44,7 @@ from train.common.nlp import (
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
     build_clm_metrics,
+    prepare_dict_keyed_compile,
     augment_probe_results,
 )
 from dl_techniques.models.wave_field_llm.wave_field_llm import (
@@ -605,6 +606,7 @@ def compile_model(
         steps_per_epoch,
         config.warmup_ratio,
     )
+    prepare_dict_keyed_compile(model)
     model.compile(
         optimizer=keras.optimizers.AdamW(
             learning_rate=lr_schedule,
