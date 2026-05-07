@@ -101,8 +101,13 @@ import keras
 from keras import ops, initializers, regularizers
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class HierarchicalCodebookEmbedding(keras.layers.Layer):
@@ -291,3 +296,5 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
                 else:
                     config[key] = regularizers.deserialize(config[key])
         return cls(**config)
+
+# ---------------------------------------------------------------------

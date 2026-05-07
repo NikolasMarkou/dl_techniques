@@ -70,7 +70,7 @@ import keras
 from typing import Optional, Any, Tuple, Dict
 
 # ---------------------------------------------------------------------
-# Local imports
+# local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger

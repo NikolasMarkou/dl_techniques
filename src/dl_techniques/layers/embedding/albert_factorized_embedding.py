@@ -36,8 +36,13 @@ import keras
 from keras import initializers, regularizers
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class AlbertFactorizedEmbedding(keras.layers.Layer):
@@ -181,3 +186,5 @@ class AlbertFactorizedEmbedding(keras.layers.Layer):
             if config.get(key) and isinstance(config[key], dict):
                 config[key] = regularizers.deserialize(config[key])
         return cls(**config)
+
+# ---------------------------------------------------------------------

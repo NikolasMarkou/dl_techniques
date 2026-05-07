@@ -70,9 +70,9 @@ from typing import Optional, Any, Dict, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from ..norms.rms_norm import RMSNorm
 from ..norms.band_rms import BandRMS
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 

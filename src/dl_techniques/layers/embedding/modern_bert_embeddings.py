@@ -3,6 +3,12 @@ from keras import ops, initializers, layers
 from typing import Optional, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
