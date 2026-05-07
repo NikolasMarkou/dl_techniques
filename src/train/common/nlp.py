@@ -134,9 +134,12 @@ def preprocess_mlm_dataset(
         },
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    # DECISION D-005: do NOT call dataset.cache() here. Caching the tokenized
+    # MLM stream OOMs on Wikipedia-scale corpora (~20 GB tokenized in RAM
+    # during the first epoch). The trade-off is per-epoch re-tokenization on
+    # bounded TFDS sets, which costs <2 min/epoch on a 4090 host CPU.
     dataset = (
-        dataset.cache()
-        .shuffle(buffer_size=1000)
+        dataset.shuffle(buffer_size=1000)
         .batch(batch_size, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
     )
@@ -149,7 +152,6 @@ def preprocess_clm_dataset(
     preprocessor: TiktokenPreprocessor,
     max_seq_length: int,
     batch_size: int,
-    streaming: bool = False,
 ) -> tf.data.Dataset:
     """Tokenize, pack, and batch a text dataset for CLM pretraining.
 
@@ -183,15 +185,15 @@ def preprocess_clm_dataset(
         needed for the causal shift. After the shift, the model input
         and label tensors both have length ``max_seq_length - 1``.
     :param batch_size: Output batch size.
-    :param streaming: Retained for signature compatibility. The packed
-        generator never caches, so this flag has no effect — it is
-        accepted to avoid breaking callers that pass
-        ``streaming=True``. A future release may drop the parameter.
     :return: Batched ``tf.data.Dataset`` of ``(input_ids, labels)``
         tuples with shape ``(batch, max_seq_length - 1)``.
-    """
-    del streaming  # packed pipeline never caches, parameter kept for API stability.
 
+    .. note::
+        DECISION D-004: the legacy ``streaming`` parameter has been
+        removed. The packed pipeline never caches and the flag was a
+        no-op kept only for signature compatibility. Callers must drop
+        ``streaming=...``.
+    """
     encoder = preprocessor.tokenizer
     encoding_name = getattr(encoder, "name", None) or "gpt2"
     eot_token_id = int(encoder.eot_token)
@@ -341,6 +343,65 @@ def preprocess_classification_dataset(
     )
     logger.info(f"Classification dataset preprocessed: batch_size={batch_size}")
     return dataset
+
+
+# ---------------------------------------------------------------------
+# Step Estimation (packed CLM)
+# ---------------------------------------------------------------------
+
+
+# DECISION D-001: single canonical estimator for packed-CLM steps_per_epoch.
+# The packed CLM pipeline (preprocess_clm_packed_dataset) emits chunks, not
+# articles, so the historical formula ``num_articles // batch_size`` undercounts
+# total optimizer steps by ``avg_tokens_per_article / max_seq_length`` and
+# misaligns the warmup+cosine LR schedule. Every CLM training script must call
+# this helper instead of rolling its own _estimate_steps_per_epoch.
+#
+# Default avg_tokens_per_article reflects EN Wikipedia 20231101 with
+# ``min_article_length=0`` (~3B tokens / ~6.6M articles ≈ 440 tok/article).
+# Callers using ``min_article_length=500`` should pass ``avg_tokens_per_article=600``.
+
+# Total tokens in EN Wikipedia 20231101 with min_article_length=0.
+# Used as the fallback when neither override nor num_articles is provided.
+_DEFAULT_WIKIPEDIA_TOTAL_TOKENS = 2_900_000_000
+
+
+def estimate_clm_steps_per_epoch(
+    num_articles: Optional[int],
+    max_seq_length: int,
+    batch_size: int,
+    override: Optional[int] = None,
+    avg_tokens_per_article: int = 440,
+) -> int:
+    """Estimate ``steps_per_epoch`` for the packed-CLM pipeline.
+
+    The packed-CLM tokenizer (``preprocess_clm_packed_dataset``) emits
+    ``chunks`` of length ``max_seq_length``, not articles. The number of
+    optimizer steps per epoch is therefore
+    ``(num_articles * avg_tokens_per_article) // max_seq_length // batch_size``,
+    not ``num_articles // batch_size``. Getting this wrong miscalibrates the
+    warmup + cosine LR schedule; the schedule reaches ``alpha=0`` long before
+    training does, then training spends a large fraction of its steps at LR=0.
+
+    :param num_articles: Number of source articles (post-filter). ``None`` →
+        fall back to the EN-Wikipedia 20231101 token total
+        (``_DEFAULT_WIKIPEDIA_TOTAL_TOKENS``).
+    :param max_seq_length: Chunk length used by the packed pipeline.
+    :param batch_size: Mini-batch size.
+    :param override: If provided, return ``max(1, override)`` and ignore the
+        article-based estimate (used for ``--steps-per-epoch`` CLI override).
+    :param avg_tokens_per_article: Heuristic average tokens per article
+        post-tokenization. Default 440 corresponds to EN Wikipedia 20231101
+        with ``min_article_length=0``. Pass 600 for ``min_article_length=500``.
+    :return: Estimated steps per epoch (>= 1).
+    """
+    if override is not None:
+        return max(1, int(override))
+    if num_articles is None:
+        chunks = _DEFAULT_WIKIPEDIA_TOTAL_TOKENS // max(1, max_seq_length)
+    else:
+        chunks = (int(num_articles) * int(avg_tokens_per_article)) // max(1, max_seq_length)
+    return max(1, chunks // max(1, batch_size))
 
 
 # ---------------------------------------------------------------------
