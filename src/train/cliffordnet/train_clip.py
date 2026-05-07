@@ -1025,10 +1025,12 @@ def _run_pretrain_lm(
         )
     train_raw, _val_raw = load_wikipedia_train_val(
         cache_dir=args.pretrain_lm_hf_cache,
-        min_article_length=500,
+        min_article_length=args.pretrain_lm_min_article_length,
         val_fraction=0.02,
         max_val_samples=5000,
         max_train_samples=None,
+        seed=args.seed,
+        num_shards=args.pretrain_lm_shuffle_shards,
     )
 
     chunk_length = args.context_length + 1  # +1 for the causal shift.
@@ -1689,6 +1691,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="/media/arxwn/data0_4tb/datasets/wikipedia",
         help="HuggingFace cache dir for the Wikipedia dataset.",
     )
+    parser.add_argument(
+        "--pretrain-lm-min-article-length", type=int, default=0,
+        help="HF Wikipedia char-length filter for the LM pretrain stage. "
+             "0 (default) = no filter (recommended for packed CLM).",
+    )
+    parser.add_argument(
+        "--pretrain-lm-shuffle-shards", type=int, default=4,
+        help="Parallel tokenization shards for the LM pretrain Wikipedia "
+             "stream (D-002). 1 = single-thread; >1 reshuffles per epoch.",
+    )
 
     # Shared training
     parser.add_argument("--batch-size", type=int, default=128)
@@ -1782,6 +1794,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     # Infra
     parser.add_argument("--gpu", type=int, default=None)
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Global seed for tf/keras + dataset shuffle (D-006).",
+    )
 
     return parser
 
