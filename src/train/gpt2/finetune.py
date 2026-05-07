@@ -274,7 +274,7 @@ def load_pretrained_model(config: FinetuneConfig) -> GPT2:
                     logger.info(f"Froze layer: {layer.name}")
 
     trainable = sum(
-        keras.backend.count_params(w) for w in model.trainable_weights
+        int(np.prod(w.shape)) for w in model.trainable_weights
     )
     logger.info(f"Trainable parameters: {trainable:,} / {total_p:,}")
     return model
