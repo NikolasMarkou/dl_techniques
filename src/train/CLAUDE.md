@@ -207,10 +207,21 @@ def main():
 | `create_tokenizer(encoding, max_len, ...)` | TiktokenPreprocessor with cl100k_base defaults |
 | `decode_text(text)` | TF tensor → Python string |
 | `load_text_dataset(name, split, max_samples, as_supervised)` | TFDS text dataset loading |
-| `preprocess_mlm_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch for MLM |
+| `preprocess_mlm_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch for MLM (no `.cache()` — D-005) |
+| `preprocess_clm_dataset(ds, preprocessor, seq_len, batch)` | Concat-and-chunk packed CLM. Signature has **no** `streaming` parameter (D-004). |
+| `preprocess_clm_packed_dataset(ds, encoding_name, chunk_length, batch_size, eot_token_id, ...)` | Lower-level packed CLM with `repeat=True` for explicit step-budget loops |
 | `preprocess_classification_dataset(ds, preprocessor, seq_len, batch)` | Tokenize + batch with labels |
+| `estimate_clm_steps_per_epoch(num_articles, max_seq_length, batch_size, override=None, avg_tokens_per_article=440)` | **Canonical** chunk-aware steps-per-epoch helper (D-001). Use this everywhere — never roll a local `_estimate_steps_per_epoch`. |
 | `create_warmup_lr_schedule(lr, epochs, steps, warmup_ratio)` | Warmup + cosine decay |
 | `create_nlp_callbacks(name, prefix, ...)` | Common callbacks with TensorBoard enabled |
+
+**Wikipedia/HF data path conventions** (`dl_techniques.datasets.nlp.load_wikipedia_train_val`):
+
+- **Default `min_article_length=0`** (D-003). Packed CLM uses every token; pass 500+ only if a downstream consumer treats one document as one training example.
+- **`num_shards`** (D-002). Train pipeline supports parallel tokenization shards with per-epoch reshuffle. `num_shards=1` keeps today's deterministic single-thread behaviour. Default in CLM consumers is 4.
+- **`return_counts=True`** returns post-filter article counts; pass them to `estimate_clm_steps_per_epoch` for an accurate LR-schedule horizon.
+
+**CLM consumer CLI flag conventions** — every CLM training script must expose the same four flags so users can switch scripts without relearning: `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`. Resume seeding (D-006): when `--resume <ckpt>` is set, derive `data_seed = config.seed + initial_step` so resumed runs see new article ordering instead of replaying the first N chunks.
 
 ---
 
