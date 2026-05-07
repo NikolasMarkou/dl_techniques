@@ -379,6 +379,14 @@ class GenerationProbeCallback(keras.callbacks.Callback):
 
     def _generate(self, prompt: str) -> str:
         ids = self._enc.encode(prompt)
+        # Block special tokens from sampling: tiktoken's `decode` raises on
+        # any id at or above the encoder's `n_vocab` (the base vocab end)
+        # because the 4 reserved special-token ids in this codebase
+        # (50257..50260) live outside the BPE table. Suppress them at
+        # logits time so generation is restricted to decodable tokens.
+        special_ids = [
+            i for i in range(self._enc.n_vocab, max(self._enc.n_vocab + 1, 50261))
+        ]
 
         for _ in range(self.max_tokens):
             ctx = ids[-self._context_window:]
@@ -388,6 +396,9 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             logits = out["logits"][0, -1, :].numpy()
 
             logits[self._eot_id] = -1e9
+            for sid in special_ids:
+                if sid < logits.shape[0]:
+                    logits[sid] = -1e9
             for t in set(ids[-50:]):
                 if t == self._eot_id:
                     continue
@@ -407,7 +418,16 @@ class GenerationProbeCallback(keras.callbacks.Callback):
             next_token = top_idx[np.random.choice(len(top_idx), p=top_probs)]
             ids.append(int(next_token))
 
-        return self._enc.decode(ids)
+        # `errors="replace"` is a defensive backstop: if a tokenizer surprise
+        # (e.g. partial multi-byte BPE chunk at the tail) sneaks through,
+        # we want a string back, not a probe-side crash that kills training.
+        try:
+            return self._enc.decode(ids)
+        except (KeyError, UnicodeDecodeError) as e:
+            logger.warning(f"Probe decode fell back due to: {e}")
+            return self._enc.decode(
+                [t for t in ids if t < self._enc.n_vocab],
+            )
 
     def _post_generate_hook(self, results: dict) -> None:
         pass
