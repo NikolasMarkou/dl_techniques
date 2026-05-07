@@ -124,6 +124,7 @@ from train.common.nlp import (
     preprocess_clm_dataset,
     create_warmup_lr_schedule,
     create_nlp_callbacks,
+    estimate_clm_steps_per_epoch,
 )
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
@@ -213,10 +214,19 @@ class TrainingConfig:
     # HuggingFace / Wikipedia settings
     hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
     hf_wikipedia_config: str = "20231101.en"
-    min_article_length: int = 500
+    # DECISION D-003: 0 → packed CLM uses every token; stub filtering only
+    # loses tokens. Pass 500+ for per-doc consumers (MLM, classification).
+    min_article_length: int = 0
     val_fraction: float = 0.02
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
+    # DECISION D-002: parallel tokenization shards + per-epoch reshuffle.
+    shuffle_shards: int = 4
+
+    # DECISION D-006: end-to-end seed plumbing. On --resume the train loop
+    # derives data_seed = seed + initial_step so resumed runs see new
+    # article ordering instead of replaying the first N chunks.
+    seed: int = 42
 
     # Checkpointing & analysis (step-based for large datasets).
     # analyze_every_steps default 0 = OFF: spectral analysis blocks the
@@ -776,18 +786,26 @@ def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
 def load_train_val_datasets(
     config: TrainingConfig,
     preprocessor,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+    data_seed: int,
+) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
     """Load, preprocess, and wrap train/val datasets for dict-output model.
 
     The training dataset is `.repeat()`'d so multi-epoch runs and explicit
     ``steps_per_epoch`` arithmetic work — required for streaming HF data
     and consistent for TFDS. Validation dataset is NOT repeated; it must
     terminate so val metrics are computed once per epoch.
+
+    :return: ``(train_ds, val_ds, n_train_articles)``. ``n_train_articles``
+        is the post-filter article count for the HF Wikipedia path (used by
+        ``estimate_clm_steps_per_epoch``); ``None`` for the TFDS path.
     """
+    n_train_articles: Optional[int] = None
     if config.dataset_source == "tfds":
         train_ds, val_ds = _load_tfds_datasets(config, preprocessor)
     elif config.dataset_source == "huggingface":
-        train_ds, val_ds = _load_hf_datasets(config, preprocessor)
+        train_ds, val_ds, n_train_articles = _load_hf_datasets(
+            config, preprocessor, data_seed,
+        )
     else:
         raise ValueError(
             f"Unknown dataset_source: {config.dataset_source!r}. "
@@ -801,7 +819,7 @@ def load_train_val_datasets(
         )
     train_ds = _wrap_with_dict_label(train_ds).repeat()
     val_ds = _wrap_with_dict_label(val_ds)
-    return train_ds, val_ds
+    return train_ds, val_ds, n_train_articles
 
 
 def _load_tfds_datasets(config, preprocessor):
@@ -816,26 +834,27 @@ def _load_tfds_datasets(config, preprocessor):
     return train, val
 
 
-def _load_hf_datasets(config, preprocessor):
-    train_raw, val_raw = load_wikipedia_train_val(
+def _load_hf_datasets(config, preprocessor, data_seed: int):
+    train_raw, val_raw, n_train, _n_val = load_wikipedia_train_val(
         cache_dir=config.hf_cache_dir,
         config_name=config.hf_wikipedia_config,
         min_article_length=config.min_article_length,
         val_fraction=config.val_fraction,
         max_train_samples=config.max_train_samples,
         max_val_samples=config.max_val_samples,
+        seed=data_seed,
+        num_shards=config.shuffle_shards,
+        return_counts=True,
     )
     train = preprocess_clm_dataset(
         train_raw, preprocessor,
         config.max_seq_length, config.batch_size,
-        streaming=True,
     )
     val = preprocess_clm_dataset(
         val_raw, preprocessor,
         config.max_seq_length, config.batch_size,
-        streaming=True,
     )
-    return train, val
+    return train, val, n_train
 
 
 # ---------------------------------------------------------------------------
@@ -870,27 +889,24 @@ def compile_model(
     )
 
 
-def _estimate_steps_per_epoch(config: TrainingConfig) -> int:
-    """Estimate steps per epoch for LR schedule.
+def _make_steps_per_epoch(
+    config: TrainingConfig, n_train_articles: Optional[int],
+) -> int:
+    """Resolve steps_per_epoch using the canonical helper (D-001).
 
-    The HF Wikipedia path packs documents into chunks of ``max_seq_length``
-    tokens, so the number of training steps is ~(total_tokens //
-    max_seq_length // batch_size), not ``num_articles // batch_size``.
-    Average article length after the ``min_article_length=500`` filter is
-    ~600 tokens, so we use that as a back-of-envelope multiplier. Users
-    should pass ``--steps-per-epoch`` explicitly for production runs.
+    For TFDS this is one-doc-one-window so ``max_samples // batch_size`` is
+    the right estimate. For HF Wikipedia we pass the post-filter article
+    count from ``load_wikipedia_train_val`` to the chunk-aware helper.
+    Users may pass ``--steps-per-epoch`` to override either path.
     """
-    if config.steps_per_epoch is not None:
-        return max(1, int(config.steps_per_epoch))
-    if config.dataset_source == "tfds" and config.max_samples:
+    if config.dataset_source == "tfds" and config.max_samples and config.steps_per_epoch is None:
         return max(1, config.max_samples // config.batch_size)
-    if config.max_train_samples:
-        # Articles -> tokens (~600/article) -> chunks -> batches.
-        chunks = (config.max_train_samples * 600) // max(1, config.max_seq_length)
-        return max(1, chunks // config.batch_size)
-    # Full Wikipedia fallback: 4.85M articles * ~600 tokens.
-    chunks = (4_850_000 * 600) // max(1, config.max_seq_length)
-    return max(1, chunks // config.batch_size)
+    return estimate_clm_steps_per_epoch(
+        num_articles=n_train_articles or config.max_train_samples,
+        max_seq_length=config.max_seq_length,
+        batch_size=config.batch_size,
+        override=config.steps_per_epoch,
+    )
 
 
 def train_cliffordnet_nlp_routing(
@@ -901,8 +917,8 @@ def train_cliffordnet_nlp_routing(
     logger.info("CliffordNet NLP Routing-head Causal LM Pre-training")
     logger.info("=" * 60)
 
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
+    tf.random.set_seed(config.seed)
+    keras.utils.set_random_seed(config.seed)
 
     preprocessor = create_tokenizer(
         config.encoding_name,
@@ -913,12 +929,20 @@ def train_cliffordnet_nlp_routing(
         config.mask_token_id,
     )
 
-    train_dataset, val_dataset = load_train_val_datasets(
-        config, preprocessor,
+    # DECISION D-006: per-resume seed shift. We need initial_step BEFORE
+    # building the dataset to derive the data seed, but checkpoint loading
+    # also has to happen before fit. Pre-extract initial_step here.
+    initial_step = (
+        _extract_step_from_checkpoint(config.resume_from)
+        if config.resume_from else 0
+    )
+    data_seed = config.seed + initial_step
+
+    train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
+        config, preprocessor, data_seed=data_seed,
     )
 
-    steps_per_epoch = _estimate_steps_per_epoch(config)
-    initial_step = 0
+    steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
 
     if config.resume_from:
         model, initial_step = load_model_from_checkpoint(config.resume_from)
@@ -1109,6 +1133,22 @@ def _build_parser() -> argparse.ArgumentParser:
                     default="/media/arxwn/data0_4tb/datasets/wikipedia")
     p.add_argument("--max-train-samples", type=int, default=None)
     p.add_argument("--val-fraction", type=float, default=0.02)
+    p.add_argument(
+        "--min-article-length", type=int, default=0,
+        help="HF Wikipedia char-length filter. 0 (default) = no filter "
+             "(recommended for packed CLM). 500+ for per-doc consumers.",
+    )
+    p.add_argument(
+        "--shuffle-shards", type=int, default=4,
+        help="HF Wikipedia parallel tokenization shards (D-002). 1 = "
+             "single-thread, deterministic; >1 reshuffles each epoch and "
+             "parallelises tokenization.",
+    )
+    p.add_argument(
+        "--seed", type=int, default=42,
+        help="Global seed for tf/keras + dataset shuffle. On --resume, "
+             "data seed is shifted by initial_step (D-006).",
+    )
 
     p.add_argument("--checkpoint-every-steps", type=int, default=25000)
     p.add_argument("--analyze-every-steps", type=int, default=0,
@@ -1180,6 +1220,9 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         hf_cache_dir=args.hf_cache_dir,
         max_train_samples=args.max_train_samples,
         val_fraction=args.val_fraction,
+        min_article_length=args.min_article_length,
+        shuffle_shards=args.shuffle_shards,
+        seed=args.seed,
         checkpoint_every_steps=args.checkpoint_every_steps,
         analyze_every_steps=args.analyze_every_steps,
         max_checkpoints=args.max_checkpoints,
