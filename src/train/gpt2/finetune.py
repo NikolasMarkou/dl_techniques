@@ -44,6 +44,7 @@ from train.common.nlp import (
     create_warmup_lr_schedule,
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
+    build_clm_metrics,
 )
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
@@ -298,7 +299,7 @@ def compile_model(
     model.compile(
         optimizer=optimizer,
         loss={"logits": MaskedCausalLMLoss()},
-        metrics={"logits": ["accuracy"]},
+        metrics={"logits": build_clm_metrics(config.encoding_name)},
     )
     logger.info(
         f"Compiled for fine-tuning: AdamW, peak_lr={config.learning_rate}, "
