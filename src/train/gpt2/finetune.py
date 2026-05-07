@@ -45,6 +45,7 @@ from train.common.nlp import (
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
     build_clm_metrics,
+    prepare_dict_keyed_compile,
 )
 
 from dl_techniques.datasets.nlp import load_hf_text_dataset
@@ -296,6 +297,7 @@ def compile_model(
         weight_decay=config.weight_decay,
         clipnorm=1.0,
     )
+    prepare_dict_keyed_compile(model)
     model.compile(
         optimizer=optimizer,
         loss={"logits": MaskedCausalLMLoss()},
