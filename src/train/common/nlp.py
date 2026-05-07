@@ -17,6 +17,12 @@ from train.common import create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
+from dl_techniques.metrics.perplexity_metric import Perplexity
+from dl_techniques.metrics.llm_metrics import (
+    BitsPerToken,
+    BitsPerCharacter,
+    aggregate_probe_metrics as augment_probe_results,
+)
 
 
 # ---------------------------------------------------------------------
@@ -458,3 +464,91 @@ def create_nlp_callbacks(
         analyzer_start_epoch=analyzer_start_epoch,
     )
     return callbacks, results_dir
+
+
+# ---------------------------------------------------------------------
+# CLM compile-time metric builder
+# ---------------------------------------------------------------------
+
+# Per-encoding default chars-per-token approximations. These are display
+# constants used only by ``BitsPerCharacter``; the value is the empirical
+# mean characters per BPE token observed on standard English corpora
+# (Wikipedia / OpenWebText) for the corresponding tiktoken encoding.
+# Override via the ``chars_per_token`` argument of ``build_clm_metrics``
+# if your dataset materially deviates (e.g. code, non-English).
+_CHARS_PER_TOKEN_DEFAULTS = {
+    "gpt2": 4.0,
+    "r50k_base": 4.0,
+    "p50k_base": 4.0,
+    "cl100k_base": 4.0,
+    "o200k_base": 4.0,
+}
+
+
+def build_clm_metrics(
+        encoding_name: str = "gpt2",
+        ignore_index: int = -1,
+        chars_per_token: Optional[float] = None,
+) -> List[keras.metrics.Metric]:
+    """Build the canonical CLM evaluation-metric list.
+
+    Centralizes the metric set that every causal-language-modeling
+    trainer in ``src/train/`` uses, so each ``model.compile`` site is a
+    single-line call::
+
+        model.compile(
+            ...,
+            metrics={"logits": build_clm_metrics(config.encoding_name)},
+        )
+
+    The returned list is fresh on every call (Keras requires unique
+    metric instances per ``compile``).
+
+    Args:
+        encoding_name: tiktoken encoding name, used only to look up a
+            default ``chars_per_token`` constant. Defaults to ``"gpt2"``.
+        ignore_index: Class id to mask out from PPL/BPT/BPC accumulation
+            (e.g. ``-1`` for ``MaskedCausalLMLoss`` default, ``-100`` for
+            HuggingFace-style label padding). Defaults to ``-1``. Pass
+            ``None`` to disable masking. ``SparseCategoricalAccuracy``
+            does not support ``ignore_class`` and is therefore unmasked
+            -- this is the existing behaviour and matches all 6
+            in-scope trainers.
+        chars_per_token: Override for the ``BitsPerCharacter`` divisor.
+            When ``None``, looked up from ``_CHARS_PER_TOKEN_DEFAULTS``
+            using ``encoding_name``; falls back to ``4.0``.
+
+    Returns:
+        A list ``[SparseCategoricalAccuracy, Perplexity, BitsPerToken,
+        BitsPerCharacter]`` ready to drop into
+        ``metrics={"logits": [...]}``.
+    """
+    if chars_per_token is None:
+        chars_per_token = _CHARS_PER_TOKEN_DEFAULTS.get(encoding_name, 4.0)
+
+    return [
+        keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+        Perplexity(from_logits=True, ignore_class=ignore_index),
+        BitsPerToken(from_logits=True, ignore_class=ignore_index),
+        BitsPerCharacter(
+            chars_per_token=chars_per_token,
+            from_logits=True,
+            ignore_class=ignore_index,
+        ),
+    ]
+
+
+__all__ = [
+    "create_tokenizer",
+    "decode_text",
+    "load_text_dataset",
+    "preprocess_mlm_dataset",
+    "preprocess_clm_dataset",
+    "preprocess_clm_packed_dataset",
+    "preprocess_classification_dataset",
+    "estimate_clm_steps_per_epoch",
+    "create_warmup_lr_schedule",
+    "create_nlp_callbacks",
+    "build_clm_metrics",
+    "augment_probe_results",
+]
