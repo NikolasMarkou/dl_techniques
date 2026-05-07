@@ -22,12 +22,13 @@ DEFAULT_WIKIPEDIA_CONFIG = "20231101.en"
 def load_wikipedia_train_val(
     cache_dir: str = DEFAULT_WIKIPEDIA_CACHE_DIR,
     config_name: str = DEFAULT_WIKIPEDIA_CONFIG,
-    min_article_length: int = 500,
+    min_article_length: int = 0,
     val_fraction: float = 0.02,
     max_val_samples: int = 5000,
     max_train_samples: Optional[int] = None,
     seed: int = 42,
     return_counts: bool = False,
+    num_shards: int = 1,
 ):
     """Load Wikipedia with a proper random holdout train/val split.
 
@@ -38,21 +39,35 @@ def load_wikipedia_train_val(
     :param cache_dir: Local directory for Arrow cache files.
     :param config_name: Wikipedia config (e.g. ``'20231101.en'``).
     :param min_article_length: Skip articles whose raw text is shorter
-        than this many **characters** (not tokens). With the default
-        500-char threshold, articles of roughly 80-120 BPE tokens are
-        retained. Use a larger value to filter out stubs.
+        than this many **characters** (not tokens). DECISION D-003: the
+        default is **0** — for the packed CLM pipeline every token
+        contributes regardless of source-article length, so filtering
+        stubs only loses tokens. Set to 500+ only if a downstream
+        consumer treats one document as one training example
+        (per-doc MLM, classification).
     :param val_fraction: Fraction of articles reserved for validation.
     :param max_val_samples: Max validation articles.
     :param max_train_samples: Limit training articles. ``None`` for all.
     :param seed: Random seed for reproducible splits, shuffles, and
-        (when ``shuffle=True``) the per-shard order of articles emitted
-        by the tf.data generator.
+        the per-shard order of articles emitted by the tf.data
+        generator(s).
     :param return_counts: If ``True``, return the 4-tuple
         ``(train_ds, val_ds, n_train, n_val)`` where the counts are the
         exact post-filter article counts. Callers that need to compute
         ``steps_per_epoch`` from the real data volume should pass
         ``return_counts=True`` — the default ``False`` preserves the
         historical 2-tuple return.
+    :param num_shards: DECISION D-002. Number of parallel tokenization
+        shards for the train pipeline. ``num_shards=1`` (default)
+        preserves the historical single-thread, deterministic-order
+        behaviour. ``num_shards>1`` splits the train set into N HF
+        shards, builds N tf.data generators, applies a per-shard HF
+        ``.shuffle(seed=seed+i)``, and combines them via
+        ``tf.data.Dataset.sample_from_datasets``. This (a) reshuffles
+        articles every iterator restart (Keras epoch boundary) and
+        (b) parallelises tokenization (tiktoken releases the GIL).
+        The validation pipeline always uses ``num_shards=1`` so eval
+        ordering is deterministic.
     :return: ``(train_dataset, val_dataset)``, or
         ``(train_dataset, val_dataset, n_train, n_val)`` if
         ``return_counts=True``. Datasets yield raw text strings.
@@ -111,8 +126,12 @@ def load_wikipedia_train_val(
         f"(zero overlap guaranteed)"
     )
 
-    # Build tf.data.Datasets using generators (reads from Arrow on disk)
-    train_ds = _hf_to_tf_dataset(train_hf, shuffle=True, seed=seed)
+    # Build tf.data.Datasets using generators (reads from Arrow on disk).
+    # Train pipeline supports sharded interleave (D-002). Val is always
+    # single-shard so eval ordering is deterministic across runs.
+    train_ds = _hf_to_tf_dataset(
+        train_hf, shuffle=True, seed=seed, num_shards=num_shards,
+    )
     val_ds = _hf_to_tf_dataset(val_hf, shuffle=False)
 
     if return_counts:
@@ -124,32 +143,58 @@ def _hf_to_tf_dataset(
     hf_dataset: datasets.Dataset,
     shuffle: bool = False,
     seed: Optional[int] = None,
+    num_shards: int = 1,
 ) -> tf.data.Dataset:
-    """Convert HF Arrow dataset to tf.data.Dataset via generator.
+    """Convert HF Arrow dataset to tf.data.Dataset via generator(s).
 
     Reads text from memory-mapped Arrow files on demand — no need
     to load all articles into RAM.
 
     :param hf_dataset: HuggingFace arrow-backed dataset.
     :param shuffle: If True, apply a seeded row-level shuffle via
-        ``Dataset.shuffle(seed=seed)``. The shuffle is done once at
-        pipeline construction time — it is deterministic when ``seed``
-        is provided and non-deterministic otherwise.
+        ``Dataset.shuffle(seed=seed)`` on each shard.
     :param seed: Random seed for the shuffle. Only used when
         ``shuffle=True``.
+    :param num_shards: DECISION D-002. ``1`` (default) → single
+        generator, deterministic article order, single-thread
+        tokenization downstream. ``>1`` → split into N HF shards, build
+        N independently-shuffled tf.data generators, combine via
+        ``tf.data.Dataset.sample_from_datasets``. This reshuffles per
+        iterator restart (epoch) and unblocks parallel tokenization
+        because tiktoken releases the GIL during ``.encode``.
     """
-    if shuffle:
-        hf_dataset = hf_dataset.shuffle(seed=seed)
+    n_shards = max(1, int(num_shards))
 
-    def generator():
-        for item in hf_dataset:
-            yield item["text"]
+    def _build_single_shard(shard_hf: datasets.Dataset, shard_seed: Optional[int]):
+        if shuffle:
+            shard_hf = shard_hf.shuffle(seed=shard_seed)
 
-    ds = tf.data.Dataset.from_generator(
-        generator,
-        output_signature=tf.TensorSpec(shape=(), dtype=tf.string),
+        def generator():
+            for item in shard_hf:
+                yield item["text"]
+
+        return tf.data.Dataset.from_generator(
+            generator,
+            output_signature=tf.TensorSpec(shape=(), dtype=tf.string),
+        )
+
+    if n_shards == 1:
+        return _build_single_shard(hf_dataset, seed)
+
+    # Multi-shard: each shard gets its own shuffle seed so the global
+    # article order changes whenever ``seed`` changes (per-resume seed
+    # shifts in train scripts) without coupling all shards.
+    shards = []
+    for i in range(n_shards):
+        shard_hf = hf_dataset.shard(num_shards=n_shards, index=i)
+        shard_seed = None if seed is None else int(seed) + i
+        shards.append(_build_single_shard(shard_hf, shard_seed))
+
+    return tf.data.Dataset.sample_from_datasets(
+        shards,
+        seed=seed,
+        stop_on_empty_dataset=False,
     )
-    return ds
 
 
 def load_hf_text_dataset(
