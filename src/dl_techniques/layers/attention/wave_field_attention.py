@@ -42,9 +42,46 @@ Complexity:
 """
 
 import math
+import numpy as np
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class _IdentityPlusNoise(keras.initializers.Initializer):
+    """Initializer that returns ``eye(H) + RandomNormal(stddev, seed)``.
+
+    Reproducible under ``keras.utils.set_random_seed`` when ``seed`` is set,
+    or when ``seed=None`` and the global Keras seed is set. Preserves the
+    invariant that ``stddev=0`` ⇒ exact identity.
+    """
+
+    def __init__(self, stddev: float = 0.01, seed: Optional[int] = None) -> None:
+        self.stddev = float(stddev)
+        self.seed = seed
+
+    def __call__(self, shape, dtype=None):
+        if len(shape) != 2 or shape[0] != shape[1]:
+            raise ValueError(
+                f"_IdentityPlusNoise expects square 2-D shape, got {shape}"
+            )
+        dtype = dtype or "float32"
+        eye = ops.eye(shape[0], dtype=dtype)
+        if self.stddev == 0.0:
+            return eye
+        noise = keras.random.normal(
+            shape, mean=0.0, stddev=self.stddev, dtype=dtype, seed=self.seed
+        )
+        return eye + noise
+
+    def get_config(self) -> Dict[str, Any]:
+        return {"stddev": self.stddev, "seed": self.seed}
+
 
 # ---------------------------------------------------------------------
 
@@ -150,6 +187,7 @@ class WaveFieldAttention(keras.layers.Layer):
         use_bias: bool = True,
         gate_bias_init: float = 2.0,
         coupling_noise_stddev: float = 0.01,
+        coupling_seed: Optional[int] = None,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -180,6 +218,7 @@ class WaveFieldAttention(keras.layers.Layer):
         self.use_bias = use_bias
         self.gate_bias_init = gate_bias_init
         self.coupling_noise_stddev = coupling_noise_stddev
+        self.coupling_seed = coupling_seed
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -260,17 +299,18 @@ class WaveFieldAttention(keras.layers.Layer):
             trainable=True,
         )
 
-        # --- field coupling: identity + noise (matching PyTorch original) ---
-        import numpy as np
-
-        coupling_init = (
-            np.eye(H, dtype="float32")
-            + np.random.randn(H, H).astype("float32") * self.coupling_noise_stddev
-        )
+        # --- field coupling: identity + noise (Keras-seeded for reproducibility) ---
+        # DECISION plan_2026-05-07_47199c68/D-002 — replaces np.random.randn
+        # with a serializable Keras-seeded initializer so model rebuild from
+        # config alone is deterministic (under keras.utils.set_random_seed
+        # or an explicit coupling_seed).
         self.field_coupling = self.add_weight(
             name="field_coupling",
             shape=(H, H),
-            initializer=keras.initializers.Constant(coupling_init),
+            initializer=_IdentityPlusNoise(
+                stddev=self.coupling_noise_stddev,
+                seed=self.coupling_seed,
+            ),
             trainable=True,
         )
 
@@ -288,8 +328,12 @@ class WaveFieldAttention(keras.layers.Layer):
         :return: Float tensor of field positions with shape ``(seq_len,)``.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan_2026-05-07_47199c68/D-003 — clip to G-1 (not G-2) so the
+        # last field cell is reachable. _build_scatter_gather_matrices clips
+        # idx_lo to G-2, so idx_hi = idx_lo + 1 stays in-bounds; when
+        # field_pos == G-1 the bilinear weights collapse to (0, 1) on (G-2, G-1).
         seq_idx = ops.cast(ops.arange(seq_len), "float32")
-        return ops.clip(seq_idx * self._field_stride, 0.0, float(self.field_size - 2))
+        return ops.clip(seq_idx * self._field_stride, 0.0, float(self.field_size - 1))
 
     def _build_scatter_gather_matrices(
         self, field_pos: keras.KerasTensor
@@ -430,11 +474,26 @@ class WaveFieldAttention(keras.layers.Layer):
         H = self.num_heads
         D_h = self.head_dim
 
+        # Warn (Python-side, only when seq length is statically known) if
+        # the runtime sequence exceeds max_seq_len: tokens beyond max_seq_len
+        # alias to the boundary field cell, which is rarely intended.
+        static_seq_len = inputs.shape[1] if hasattr(inputs, "shape") else None
+        if isinstance(static_seq_len, int) and static_seq_len > self.max_seq_len:
+            logger.warning(
+                f"WaveFieldAttention: seq_len={static_seq_len} > max_seq_len="
+                f"{self.max_seq_len}; tokens beyond max_seq_len alias onto the "
+                f"last field cells. Increase max_seq_len for full resolution."
+            )
+
         # 1. QKV projection -> (B, H, N, D_h) each
         qkv = self.qkv_proj(inputs)
-        qkv = ops.reshape(qkv, (batch_size, seq_len, 3, H, D_h))
-        qkv = ops.transpose(qkv, (2, 0, 3, 1, 4))
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        # DECISION plan_2026-05-07_47199c68/D-001 — use ops.split rather than
+        # 5-D reshape + transpose + tensor[0]/[1]/[2] indexing for backend
+        # robustness across Keras 3 backends.
+        q, k, v = ops.split(qkv, 3, axis=-1)
+        q = ops.transpose(ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        k = ops.transpose(ops.reshape(k, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
+        v = ops.transpose(ops.reshape(v, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
 
         # 2. Field positions + scatter/gather matrices
         field_pos = self._compute_field_positions(seq_len)
@@ -446,6 +505,8 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # Apply padding mask to deposits
         if attention_mask is not None:
+            # Cast to float compute dtype so bool / int masks are accepted.
+            attention_mask = ops.cast(attention_mask, self.compute_dtype)
             # attention_mask: (B, N) -> (B, 1, N, 1)
             mask_4d = ops.expand_dims(ops.expand_dims(attention_mask, 1), -1)
             deposit = deposit * mask_4d
@@ -495,7 +556,8 @@ class WaveFieldAttention(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def compute_output_shape(self, input_shape):
-        return input_shape
+        # Output is always (B, N, dim) regardless of input last-dim resolution.
+        return (input_shape[0], input_shape[1], self.dim)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -508,6 +570,7 @@ class WaveFieldAttention(keras.layers.Layer):
             "use_bias": self.use_bias,
             "gate_bias_init": self.gate_bias_init,
             "coupling_noise_stddev": self.coupling_noise_stddev,
+            "coupling_seed": self.coupling_seed,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),

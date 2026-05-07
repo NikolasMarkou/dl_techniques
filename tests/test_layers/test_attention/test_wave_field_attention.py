@@ -371,12 +371,16 @@ class TestWaveFieldAttention:
         )
 
     def test_field_positions_clamped(self):
+        # DECISION plan_2026-05-07_47199c68/D-003 — field positions now clip
+        # to G-1 (was G-2). The previous bound wasted the last field cell;
+        # bilinear interpolation in _build_scatter_gather_matrices clamps
+        # idx_lo at G-2 so idx_hi = G-1 stays in-bounds.
         layer = WaveFieldAttention(dim=32, num_heads=4, field_size=64, max_seq_len=32)
         layer.build((None, 10, 32))
 
         pos = keras.ops.convert_to_numpy(layer._compute_field_positions(100))
         assert np.all(pos >= 0.0)
-        assert np.all(pos <= 62.0)
+        assert np.all(pos <= 63.0)
 
     def test_field_stride_computation(self):
         layer = WaveFieldAttention(dim=32, num_heads=4, field_size=512, max_seq_len=128)
