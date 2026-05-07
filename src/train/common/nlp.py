@@ -538,6 +538,52 @@ def build_clm_metrics(
     ]
 
 
+# ---------------------------------------------------------------------
+# Dict-keyed compile shim
+# ---------------------------------------------------------------------
+
+
+# DECISION plan_2026-05-07_824e5687/D-001: subclassed Keras 3 models that
+# return ``{"logits": ...}`` from ``call()`` have no ``output_names``
+# populated by the framework. Calling ``model.compile(metrics={"logits":
+# [...]})`` against such a model causes Keras's ``MetricsList`` to silently
+# drop every metric (only ``loss`` survives). Setting ``output_names``
+# explicitly on the instance before ``model.compile`` is the minimal,
+# library-untouching fix; it is a no-op when Keras already populated the
+# attribute (forwards-compat). Re-applied inside every trainer's
+# ``compile_model`` so the helper runs on both fresh and resumed
+# (``keras.models.load_model``) instances. Hard-codes the single-key case;
+# revisit if a CLM model ever needs metrics on multiple output heads.
+def prepare_dict_keyed_compile(
+    model: keras.Model,
+    output_key: str = "logits",
+) -> None:
+    """Ensure a dict-output subclassed model has ``output_names`` set.
+
+    Subclassed ``keras.Model`` instances whose ``call`` returns a dict do
+    not get ``output_names`` populated by Keras. As a result,
+    ``model.compile(metrics={"logits": [...]}, loss={"logits": fn})``
+    silently drops the metric list (the loss path uses a different code
+    path and works correctly). Setting
+    ``model.output_names = [output_key]`` before ``compile`` aligns
+    Keras's metric-flattening logic with the dict-keyed user spec.
+
+    Idempotent: if ``output_names`` is already a non-empty list, this is
+    a no-op (forwards-compat with future Keras releases that may
+    populate it automatically).
+
+    Args:
+        model: The subclassed model whose ``call`` returns
+            ``{output_key: tensor, ...}``.
+        output_key: The dict key the trainer keys metrics/loss against.
+            Defaults to ``"logits"``, which matches every CLM trainer in
+            ``src/train/`` today.
+    """
+    existing = getattr(model, "output_names", None)
+    if not existing:
+        model.output_names = [output_key]
+
+
 __all__ = [
     "create_tokenizer",
     "decode_text",
@@ -550,5 +596,6 @@ __all__ = [
     "create_warmup_lr_schedule",
     "create_nlp_callbacks",
     "build_clm_metrics",
+    "prepare_dict_keyed_compile",
     "augment_probe_results",
 ]

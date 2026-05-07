@@ -1,6 +1,237 @@
 # Consolidated Decisions
 *Cross-plan decision archive. Entries merged from per-plan decisions.md on close. Newest first.*
 
+## plan_2026-05-07_3f461682
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-07_3f461682/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-07
+**Context**: 5 in-scope Pattern-3 CLM trainers all share `metrics={"logits": ["accuracy"]}` and an empty `_post_generate_hook` extension. Existing `dl_techniques.metrics.perplexity_metric.Perplexity` is drop-in compatible. No BPC/BPW/BLEU exists. User instruction: "make good use of the common".
+**Decision**: Add ONE shared module `src/dl_techniques/metrics/llm_metrics.py` (`BitsPerToken`, `BitsPerCharacter`, plus pure-Python `self_bleu`/`distinct_n`/`aggregate_probe_metrics` helpers) + ONE builder helper `build_clm_metrics()` in `train.common.nlp`. Each trainer's `compile_model` becomes a single-line metrics swap; probe-bearing trainers add a single line binding `_post_generate_hook = augment_probe_results`.
+**Trade-off**: ~+220 LOC of shared code (excluding tests) **at the cost of** every per-trainer `compile_model` losing its inline `["accuracy"]` literal and gaining a dependency on the shared helper.
+**Reasoning**: User explicitly demands DRY; per-trainer copy of metric instantiation contradicts the request and matches an existing anti-pattern (5x duplicated probe class). Reusing existing `Perplexity` (already AMP-safe via fp32 accumulator) avoids re-implementing the gold-standard metric. Free-function `aggregate_probe_metrics` over a probe subclass is cleaner because (a) the probe class is already duplicated 5x — adding a 6th subclass per trainer compounds the duplication; (b) `_post_generate_hook` is a documented extension point. Probe-class extraction is deferred to a separate refactor plan.
+**Alternatives rejected**:
+- Per-trainer copy of metric list (violates DRY).
+- Subclass `GenerationProbeCallback` with `_post_generate_hook` override per trainer (5x copy of subclass; loses the DRY win).
+- Compute BPC by accumulating actual byte counts via decoded text (correct but requires decode in training loop — slow). Display constant `chars_per_token` is the standard simplification.
+- Include BPW (bits-per-word) — less commonly reported; adds a third constant; punted to keep metric set focused.
+- Include BLEU/ROUGE/Self-BLEU at compile time — impossible without generation; compile-time metrics see logits only.
+**Anchor-Refs**: (none — no `# DECISION` comment needed; the design is encoded in the new module's structure, not in a non-obvious code choice.)
+
+### D-002 | EXECUTE (Step 3 prep) | 2026-05-07
+**Context**: Surprise discovery during Step 3 prep — F-002 claimed all 5 GenerationProbeCallback classes implement `_post_generate_hook`, but `grep -rn _post_generate_hook src/train/` shows only `gpt2/pretrain.py` and `wave_field_llm/pretrain.py` have it. The 3 cliffordnet probes (nlp, nlp_unet, nlp_routing) lack the extension point. Plan SC-3 expects 5 hook binds.
+**Decision**: Add the `_post_generate_hook(self, results: dict) -> None` extension method (empty default) and a single-line `self._post_generate_hook(probe_results)` call inside `_run_probes` to all 3 cliffordnet probes, matching the gpt2/wave_field_llm pattern. Then bind `augment_probe_results` in all 5 trainers as planned.
+**Trade-off**: 3 extra small edits (add extension point) **at the cost of** preserving the DRY hook-binding contract across all 5 probe-bearing trainers and honoring SC-3 verbatim.
+**Reasoning**: The alternative (binding the hook in only 2 trainers and downgrading SC-3 to "exactly 2 hits") undercuts the user's "make good use of the common" intent and leaves 3 trainers without the diversity/throughput aggregates. Adding the extension point is a +2 LOC delta per file, fits within the 10-Line Rule, and is an internal protocol enhancement (private method, no API change).
+**Falsification signal**: none fired. This is a finding-correction, not a pivot.
+**Findings correction**: F-002 line 38 reads "All five `GenerationProbeCallback` classes implement an empty `_post_generate_hook`" — actually only 2 do. Will mark `[CORRECTED iter-1]` in findings.md.
+**Anchor-Refs**: (none — purely protocol-additive, no decision comment needed.)
+
+### D-003 | EXECUTE -> REFLECT | 2026-05-07
+**Context**: All 9 EXECUTE steps completed first try. No fix attempts. No leash hits. No falsification signals fired.
+**Decision**: Run REFLECT Phase-2 verification.
+**Verification outcome**: 7/7 SC PASS (see verification.md). 170/170 tests in tests/test_metrics/ pass. py_compile clean for all 8 affected modules. Convention scan clean. Scope drift zero (9 planned files, 9 changed). Changelog clean (all radius:LOW). validate-plan.mjs ERRORs are all pre-existing orphan anchors from legacy code, none introduced by iter-1.
+**Simplification Checks** (6):
+  1. **Single source of truth**: PASS — all metric math in one module; SC-1 grep confirms zero duplication.
+  2. **Forbidden patterns**: PASS — no wrapper cascades, no config toggles, no copy-paste, no exception swallowing (only the deliberate `try/except` in `aggregate_probe_metrics` that is documented as "probe must never kill train" and logs+skips).
+  3. **Complexity budget**: PASS for files/abstractions (2/3, 2/2). LOC overshoot was docstrings + 3 cliffordnet probe edits driven by D-002 finding correction; not budget-bloat.
+  4. **10-Line Rule**: N/A (no fix attempts).
+  5. **Revert-First**: N/A (no failures).
+  6. **3-Strike Rule**: N/A (no recurrence).
+**Recommendation**: CLOSE — present PC-REFLECT to user per protocol.
+**Anchor-Refs**: (none.)
+
+## plan_2026-05-07_08aaf818
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-07_08aaf818/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-07
+**Context**: Commit 1fe2088 hardened `wave_field_llm/pretrain.py` against tiktoken decode crashes when sampled ids include reserved specials (50257..50260). Four sibling training scripts have the same unguarded `self._enc.decode(ids)` pattern. Out-of-scope verification: NAM tokenizer is custom (not tiktoken); cliffordnet/power_sampling.py masks specials pre-sample so its decode is safe-by-construction.
+**Decision**: Mirror the exact 1fe2088 patch shape per-file (special-id range + in-loop mask + try/except backstop). Routing variant gets a small structural variation: mask insertion point is after `np.log(np.clip(...))` (no eot mask line in that variant), and the try/except keeps the `Tuple[str, int]` return signature in both branches.
+**Trade-off**: Behaviour parity with the proven 1fe2088 fix **at the cost of** ~60-80 net added lines across four files (no abstraction extraction).
+**Reasoning**: Extracting a shared helper (e.g. `_safe_decode(enc, ids)`) would cross the train/common boundary and pull in `tiktoken` as a hard dep on shared utilities — not worth it for 4 sites. The repeat-the-pattern approach also keeps each file self-contained for grepability and matches the codebase convention of per-file probe callbacks. Rejected alternative: widen the except clause to catch `Exception` — explicitly NOT done because matches reference exactly and an AttributeError on `n_vocab` should fail loud (real bug), not get swallowed.
+**Anchor-Refs**: none — the fix is mechanical pattern repetition; anchoring would clutter every probe callback. The trigger conditions in `references/decision-anchoring.md` are not met (no failed iteration baked in, no counterintuitive choice, no "looks redundant but isn't").
+
+## plan_2026-05-07_1519e34f
+### D-001 | EXPLORE → PLAN | 2026-05-07
+**Context**: GPT2 wraps `TextDecoder` → `TransformerLayer` → attention factory. WaveFieldAttention is not in the factory and uses a (B,N) padding mask, not a (B,N,N) attend mask. `TransformerLayer._get_attention_params` is a hardcoded switch that does not include wave_field. Reusing the factory path would require modifying shared infra (factory + transformer block) that 30+ unrelated models touch.
+**Decision**: Build a self-contained decoder stack inside the new model package. Skip `TextDecoder` / `TransformerLayer` / attention factory. Define a local `WaveFieldDecoderBlock` and assemble blocks directly in `WaveFieldLLM`.
+**Trade-off**: Code duplication (~150 LOC of pre-norm transformer block) **at the cost of** zero blast radius on the existing attention factory and transformer infra.
+**Reasoning**: LESSONS L11 — pure-additive sibling work fits a single iteration. Factory registration is a separate, optional improvement that can land later without blocking this plan.
+**Anchor-Refs**: `src/dl_techniques/models/wave_field_llm/wave_field_llm.py` (block class).
+
+### D-002 | PLAN | 2026-05-07
+**Context**: WaveFieldAttention introduces `field_size` as a new hyperparameter. Field stride = `(G-1)/(N-1)`. Larger `G` = sub-cell resolution + better gradient flow but `O(G log G)` FFT cost. Token positions beyond `max_seq_len` alias to the last cell.
+**Decision**: Default `field_size = 2 * max_seq_len` per variant. Expose `--field-size` CLI flag for override.
+**Trade-off**: ~2x FFT memory/FLOPs vs `field_size = max_seq_len` **at the cost of** sub-cell bilinear interpolation precision.
+**Reasoning**: 2x is empirically modest (FFT pipeline runs in fp32 with H=4..25 heads at most for XL — peak intermediate fits in 24GB at small variants). Sub-cell precision avoids the integer-aliasing risk that plagued early scatter-gather designs.
+**Anchor-Refs**: `src/dl_techniques/models/wave_field_llm/wave_field_llm.py` (`MODEL_VARIANTS`).
+
+### D-003 | PLAN | 2026-05-07
+**Context**: GPT-2 uses `tie_word_embeddings=True` by default. WaveFieldLLM is a research variant; users may want untied for ablation but the default should mirror GPT-2 for fair comparison.
+**Decision**: Default `tie_word_embeddings=True`, expose `--no-tie-word-embeddings` flag (mirror GPT-2 train script).
+**Trade-off**: vocab_size × embed_dim parameter savings + same default as GPT-2 **at the cost of** committing users to a single LM head policy unless they flip the CLI flag.
+**Reasoning**: Mirrors GPT-2 exactly so head-to-head benchmarks are apples-to-apples.
+
+### D-004 | PLAN | 2026-05-07
+**Context**: Variant table from GPT-2: tiny/small/medium/large/xl. WaveFieldLLM should use the same names for one-to-one A/B comparison.
+**Decision**: Clone `gpt2.py:MODEL_VARIANTS` verbatim, add `field_size = 2 * max_seq_len` per variant.
+**Trade-off**: Possible misnaming if variant capacity differs from GPT-2's at same name **at the cost of** trivial usability for swap-in benchmarking.
+**Reasoning**: Param counts will differ slightly (wave_field has ~10 params per attention layer + a tiny coupling matrix; replaces ~4*dim^2 of MHA's QKV+O Dense). Names track architecture role (small=124M-class), not absolute params.
+
+### D-005 | PLAN | 2026-05-07
+**Context**: GPT-2 model class default `vocab_size=100277` (cl100k_base) but train script default is `50261` (gpt2 encoding + 4 special). WaveFieldLLM train script will mirror the train default, but model-class default should align with what the train script uses to avoid silent vocab mismatch.
+**Decision**: Set `WaveFieldLLM.DEFAULT_VOCAB_SIZE = 50261`, matching the train script default and explicit special-token wiring.
+**Trade-off**: Diverges from GPT-2 model-class default **at the cost of** consistent train-script-class-default coupling.
+**Reasoning**: This codebase's CLM pipeline standardizes on tiktoken `gpt2` encoding (50257 base + 4 special). Using a different default at the class level invites silent vocab-size bugs.
+
+## plan_2026-05-07_a73304d4
+### D-001 | Mixed-precision regression contract | 2026-05-07
+**Context**: Reviewer flagged FFT under fp16 NaN risk (real). Investigation revealed the layer was crashing entirely under `mixed_float16`/`mixed_bfloat16` policies in three places independent of FFT (scatter/gather matrix dtype, kernel-build wave-parameter autocast, field_coupling weight dtype). User approved expanding scope to fix end-to-end mixed-precision support and lock it with a regression test.
+**Decision**: Add `test_mixed_precision_end_to_end[mixed_float16|mixed_bfloat16]` parametrised test. Anchor with `# DECISION plan_2026-05-07_a73304d4/D-001` because losing any of the three casts would silently break it.
+**Trade-off**: Two extra tests (~25 lines) **at the cost of** locking down a non-obvious cross-method invariant.
+**Reasoning**: Without the test, a future contributor refactoring any of the four cast sites could re-break mixed precision without the existing 62 tests catching it.
+**Anchor-Refs**: `tests/test_layers/test_attention/test_wave_field_attention.py:694-712`
+
+### D-002 | Reject rfft tuple-unpacking "fix" | 2026-05-07
+**Context**: This is the second review to claim `keras.ops.rfft` returns a complex tensor and tuple unpacking will crash. Empirically re-verified on Keras 3.8.0: returns `tuple` of length 2. `test_wave_kernel_fft_shape` (line 423-434) explicitly asserts the tuple shape.
+**Decision**: Do not adopt the V3.7 "fix". Keep current tuple unpacking.
+**Trade-off**: Going against reviewer's repeated insistence **at the cost of** verifying once more (3-line empirical test) and not breaking working code.
+**Reasoning**: The proposed V3.7 code at `kern_fft = ops.reshape(kernel_fft, ...)` would crash because `ops.reshape` does not accept a Python tuple. The current code works in production and is locked by tests.
+
+### D-003 | Force fp32 for wave-kernel build | 2026-05-07
+**Context**: Under AMP, `self.wave_damping`/`wave_frequency`/`wave_phase` are autocast to compute_dtype (fp16) when read inside `call()`, while `t = ops.cast(ops.arange(G), "float32")` is forced fp32. The mismatch crashed `_build_wave_kernels_fft`.
+**Decision**: Explicitly cast wave parameters to float32 inside `_build_wave_kernels_fft`. Build the entire kernel in fp32 (it feeds an fp32 FFT pipeline anyway).
+**Trade-off**: Three explicit fp32 casts **at the cost of** consistency under all precision policies. No accuracy loss because the kernel was already fp32-bound (`t` is cast).
+**Anchor-Refs**: `src/dl_techniques/layers/attention/wave_field_attention.py:393-397`
+
+### D-004 | Cast scatter/gather/coupling to compute_dtype | 2026-05-07
+**Context**: Same root cause as D-003 — fp32 indexing math vs fp16 activations. Rather than build matrices in compute_dtype (loses index precision), build in fp32 and cast at the einsum boundary.
+**Decision**: Cast scatter_mat/gather_mat to `self.compute_dtype` after building them in fp32. Cast `softmax(field_coupling)` to `field.dtype` inside `_apply_field_coupling`.
+**Trade-off**: Three small cast ops **at the cost of** preserving fp32 index/normalization precision while still allowing fp16 activations.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/wave_field_attention.py:507-509, 444-447`
+
+## plan_2026-05-07_47199c68
+### D-001 | EXPLORE → PLAN | 2026-05-07
+**Context**: Code review flagged 25 issues in `wave_field_attention.py`. Empirical verification showed `keras.ops.rfft` returns `(real, imag)` tuple in TF backend (review #2 false positive). Reviewer's own re-analysis withdrew #1. 62 baseline tests all pass.
+**Decision**: Apply 7 priority fixes (#3, #4, #5, #6, #8, #14, #15, #21); skip false positives and design-discussion items.
+**Trade-off**: Fix correctness/reproducibility/robustness issues **at the cost of** leaving design-discussion items (damping calibration, phase circle coverage, layer norm) untouched.
+**Reasoning**: Design-discussion items are locked by test contracts and lack a clear "right answer" — they belong in a future research/tuning iteration, not a bugfix pass.
+
+### D-002 | Coupling init scheme | 2026-05-07
+**Context**: Issue #3 — `np.random.randn` in `build()` is non-reproducible and breaks config-only reconstruction. The init must (a) preserve `stddev=0 ⇒ identity`, (b) preserve `stddev>0 ⇒ perturbed`, (c) be reproducible under `keras.utils.set_random_seed`.
+**Decision**: Define a private serializable `_IdentityPlusNoise(keras.initializers.Initializer)` that combines `keras.ops.eye` with `keras.random.normal(seed=...)`. Add `coupling_seed` arg to `__init__`/`get_config`.
+**Trade-off**: One new private class (1/2 abstraction budget) **at the cost of** ~25 LoC for the initializer + serialization.
+**Reasoning**: Alternative — using `keras.initializers.RandomNormal` directly — cannot add the identity matrix in a single `add_weight` call. Splitting into two weights would change the variable count and break `test_trainable_variable_count`. Custom initializer keeps the same weight-graph topology.
+
+### D-003 | Test assertion update for G-1 clip | 2026-05-07
+**Context**: Issue #5 — current code clips field positions to `G-2`, wasting the last field cell. Fix changes upper clip to `G-1`. Test `test_field_positions_clamped` asserts `pos <= 62.0` (G-2 for field_size=64), locking the bug as a contract.
+**Decision**: Update the test assertion to `<= 63.0` and anchor the change with `# DECISION plan_2026-05-07_47199c68/D-003` per LESSONS guidance.
+**Trade-off**: Break a single test assertion **at the cost of** documenting in the test why the change was made.
+**Reasoning**: The original assertion encoded the bug (field cell `G-1` was unreachable). Per LESSONS: "Pre-existing tests can encode bugs as contracts."
+
+### D-004 | Skip wave parameter constraint (issue #22) | 2026-05-07
+**Context**: Review #22 suggests `NonNeg` constraint on `wave_frequency`. Negative frequency is mathematically equivalent to positive frequency with phase shift in `cos(omega*t + phi)`.
+**Decision**: Do not add constraint.
+**Trade-off**: Slight interpretability ambiguity **at the cost of** unconstrained gradient flow.
+**Reasoning**: Constraints can slow convergence; the equivalence under sign flip means there's no functional bug.
+
+### D-005 | Skip damping range recalibration (issue #9) | 2026-05-07
+**Context**: Review #9 argues damping range `[-3.0, 0.5]` softplus'd ≈ `[0.049, 0.974]` causes some heads to decay too fast at field_size=512.
+**Decision**: Do not change the range.
+**Trade-off**: Possibly suboptimal head diversity at default field_size **at the cost of** stability of the trained-model contract.
+**Reasoning**: Test `test_wave_parameter_initial_values` locks `linspace(-3, 0.5, H)`. Changing it would invalidate prior trained checkpoints and the design intent (slow + fast heads). This is a design tuning question, not a bug.
+
+## plan_2026-05-07_c6dd7cc1
+### D-001 [iter-1, PLAN] — Centralize the chunk-aware step estimator in `train.common.nlp`
+
+**Decision**: Add `estimate_clm_steps_per_epoch(...)` to `src/train/common/nlp.py`. Every CLM training script with a Wikipedia (or HF text) source calls it. The function takes either an explicit override or `(num_articles, max_seq_length, batch_size, avg_tokens_per_article)` and returns chunks/batch.
+
+**X at the cost of Y**: One canonical helper at the cost of touching five callers. Trade-off accepted because the existing per-script `_estimate_steps_per_epoch` functions already drift (gpt2 + clifford-nlp use the wrong formula, routing uses the right one, train_clip avoids the problem entirely with a step budget). The drift is the bug; centralization eliminates it.
+
+**Anchor**: Comment `# DECISION D-001` at the helper definition explaining why a single function exists. Plus a one-liner at every call site.
+
+---
+
+### D-002 [iter-1, PLAN] — Per-epoch reshuffle via sharded `interleave`, not generator-internal counters
+
+**Decision**: Add a `num_shards` parameter to `_hf_to_tf_dataset` (default 1 = current behavior). When `num_shards > 1`: split the HF dataset into N shards via `hf_dataset.shard(num_shards=N, index=i)`, build N tf.data generators (one per shard), and combine via `tf.data.Dataset.sample_from_datasets` (or `interleave`) with `reshuffle_each_iteration=True` on a per-shard `.shuffle(buffer_size=…, seed=epoch_seed)`.
+
+**X at the cost of Y**: Per-epoch reshuffle + parallel tokenization at the cost of strict determinism (chunk order across resumes is non-deterministic; only the shard partition is deterministic). Trade-off accepted because (a) pretraining doesn't need step-level determinism and (b) determinism isn't currently preserved across resumes anyway (since `tf.random.set_seed(42)` doesn't restore tf.data state — current behavior is already non-deterministic on resume).
+
+**Alternative considered**: Generator-internal restart counter that re-seeds the HF shuffle on each call. Rejected: tightly couples shuffle policy to generator state, doesn't address Issue 5 (parallel tokenization), and complicates the `from_generator → tf.data` boundary.
+
+**Anchor**: `# DECISION D-002` on `_hf_to_tf_dataset` documenting the shard semantics.
+
+---
+
+### D-003 [iter-1, PLAN] — Default `min_article_length=0` in `load_wikipedia_train_val`
+
+**Decision**: Lower the default from 500 → 0. Update docstring to clarify: "0 for packed CLM (recommended); set 500+ only if a downstream consumer treats one document as one training example (per-doc MLM, classification)."
+
+**X at the cost of Y**: Better data utilization for packed CLM at the cost of including stub articles. Trade-off accepted: stub tokens contribute to packed token stream just like any other tokens; the only "loss" is that EOT separators between stubs become more frequent, which is harmless (and arguably useful as a diversity signal).
+
+**Compatibility risk**: Existing callers that pass `min_article_length=500` explicitly are unaffected. Callers that omit it (which is most of them) will see more articles after this plan. We update each call site explicitly to either keep the old value (with a `# DECISION` comment) or accept the new default. Default for ALL CLM consumers in this plan: 0.
+
+---
+
+### D-004 [iter-1, PLAN] — Remove dead `streaming` parameter from `preprocess_clm_dataset`
+
+**Decision**: Drop the `streaming` argument from `preprocess_clm_dataset(...)`. Remove all callsite usages. Remove the stale "OOM warning" comments from `train_cliffordnet_nlp.py` and `train_cliffordnet_nlp_routing.py`.
+
+**X at the cost of Y**: Cleaner API at the cost of a one-line breaking change in the function signature. Trade-off accepted because (a) the parameter is documented as a no-op, (b) only two known callers pass it, and (c) silent dead parameters become future foot-guns ("did setting streaming=False break my run?").
+
+**Anchor**: `# DECISION D-004` on the new signature, single line in commit message recording the removal.
+
+---
+
+### D-005 [iter-1, PLAN] — Drop `cache()` from `preprocess_mlm_dataset`
+
+**Decision**: Remove the `dataset.cache()` call inside `preprocess_mlm_dataset`. Tokenization runs every epoch.
+
+**X at the cost of Y**: ~10-30% MLM training slowdown (re-tokenize per epoch) at the cost of avoiding a future RAM-explosion trap when an MLM script gets pointed at Wikipedia. Trade-off accepted because (a) BERT/FNet pretrain currently caps via `--max-samples` so the cache fits, but the cap is a CLI flag that can be removed; (b) tiktoken throughput on a 4090 host CPU is ~1M tokens/sec/thread — re-tokenizing imdb-class corpora costs <2 min/epoch.
+
+**Mitigation**: Document the speed trade-off in the function docstring; suggest `--max-samples` users who want caching to call `.cache()` themselves at the call site.
+
+---
+
+### D-006 [iter-1, PLAN] — Plumb `--seed` end-to-end and derive resume seed from `initial_step`
+
+**Decision**: Add `--seed <int>` (default 42) to every in-scope CLM train script. Pass it to `tf.random.set_seed`, `keras.utils.set_random_seed`, AND `load_wikipedia_train_val(seed=...)`. When `--resume <ckpt>` is set, derive `data_seed = base_seed + initial_step` so resumed runs see a different shuffle.
+
+**X at the cost of Y**: One CLI flag and a deterministic shift at the cost of slight loss-of-reproducibility-on-resume (you can no longer reproduce a resumed run by replaying the same seed without the same `initial_step`). Acceptable: resume reproducibility was never guaranteed (tf.data state isn't checkpointed), and the shift makes the data-coverage benefit explicit.
+
+---
+
+### D-007 [iter-1, PLAN] — Keep `train_clip.py` `_run_pretrain_lm` largely as-is
+
+**Decision**: `train_clip.py:_run_pretrain_lm` already uses the right idiom (explicit `steps_budget`, `repeat=True`, `epochs=1`). The only change is to lower `min_article_length=500 → 0` (D-003) and pass through the seed (D-006). Do not refactor it to use the centralized helper — the step-budget pattern is correct here and the helper targets the epoch-budget pattern.
+
+**X at the cost of Y**: Two consistent patterns in the codebase (epoch-budget for pretrain scripts that use Keras `model.fit(epochs=...)`; step-budget for embedded sub-stages like CLIP pretrain) at the cost of "true uniformity." Trade-off accepted because forcing one pattern would either bloat the helper or kill an idiom that already works.
+
+---
+
+### D-008 [iter-1, PLAN] — Out-of-scope items (record explicitly to prevent scope creep)
+
+The following surfaced during EXPLORE but are explicitly **OUT OF SCOPE** for this plan:
+
+- `src/train/bert/wikipedia/pretrain.py` and `pretrain_english.py` — separate hand-rolled pipeline (HF streaming + bookcorpus interleave + custom WarmupSchedule). Their `total_steps` is hardcoded so they don't suffer from issue #1; their data path is independent. Touching them would double the blast radius.
+- Step-based validation cadence (Issue 6 in the catalog) — non-blocker, deferred.
+- `dl_techniques.utils.tokenizer.TiktokenPreprocessor` internals — out of scope.
+- Anything in `src/train/cliffordnet/` that is not a CLM training script (e.g. depth/CLIP/multitask paths that don't touch the NLP pipeline).
+
+Ghost-constraint check: the user originally typed "not in clifford unet" then re-issued the command with "not only in clifford unet" — this plan operates under the **second** (corrected) scope: ALL CLM consumers including UNet are fixed.
+
 ## plan_2026-05-06_82749628
 ### 2026-05-06 — D-001: Use UpSampling2D(nearest) along W as the causal upsampler.
 **Choice**: `keras.layers.UpSampling2D(size=(1, s), interpolation="nearest")` for the decoder up-path.
@@ -124,280 +355,3 @@ sibling `CausalCliffordNetBlock` which still uses `DepthwiseConv2D` (it
 can — its strides are always 1). Documented in DECISION D-002 in code.
 
 **Anchored**: D-002 comment expanded inline in `CausalCliffordNetBlockDSv2.__init__`.
-
-## plan_2026-05-05_0eac2c81
-### D-PLAN-001 (2026-05-05) — Empirical re-verification before fixing
-
-**Decision:** Verify each Phase-5 finding by running existing tests + targeted micro-experiments BEFORE writing any plan steps.
-
-**Rationale:** Phase-5 review claimed `B1/B5` (multi-input build crashes Functional API) but `test_model_save_load` in the existing suite already exercises that path and passes. Cost of writing a "fix" for a non-bug: real (touches public API). Cost of verifying first: 30 seconds of pytest.
-
-**Trade-off:** Spending one EXPLORE round on verification at the cost of slightly slower plan delivery — but avoiding fixing 6 phantom issues.
-
-**Outcome:**
-- Refuted: B1, B5, B9 (cosmetic only).
-- Confirmed: B16, B7, B17, B4, B8, B3, B13, P1, P2, L1.
-- Partially confirmed (works today, no test): B11.
-
-### D-PLAN-002 (2026-05-05) — pyramid_diff fix: slice-after-upsample over swap-to-resize
-
-**Decision:** Fix B16 by cropping `z_lo_up` to match `z_ctx.shape` after `UpSampling2D`, instead of replacing `UpSampling2D` with `keras.ops.image.resize`.
-
-**Rationale:**
-- `UpSampling2D` is a tracked Keras layer (clean serialisation, no `__init__` changes).
-- A static slice operation in `call` is graph-friendly (works under tf.function and Functional API).
-- The slice is a no-op when shapes already match (`H/s % s == 0`), so even-dim cases are byte-identical to current behavior.
-
-**Trade-off:** Sub-pixel positioning of the upsample is inherited from `UpSampling2D` (bilinear) rather than redone — at the cost of slightly less control over interpolation if a future reviewer wants nearest-neighbour. Acceptable because the original code already used bilinear.
-
-### D-PLAN-003 (2026-05-05) — Reject downsampling pool kinds at strides=1
-
-**Decision:** `_make_pool_v2` raises `ValueError` when `kind in {blur, gaussian_dw, pixel_unshuffle, resnetd}` and `strides == 1`.
-
-**Rationale:** These kinds *only* make sense as downsamplers. Silently returning Identity hides user errors. The legitimate strides=1 path is `kind in {avg, max}` which already returns `Identity` (and matches user mental model: "no downsampling, no pooling").
-
-**Trade-off:** Hard error at the cost of one possible legitimate use case (e.g. wanting blur at strides=1 for low-pass filtering without downsampling). That use case is not currently exercised anywhere in the codebase (grep confirmed) and is more naturally expressed by directly using `BlurPool2D(strides=1)`.
-
-### D-PLAN-004 (2026-05-05) — B11 source-level fix deferred; test only
-
-**Decision:** Add a regression test for CausalCliffordNetBlock causality, but do not change the source.
-
-**Rationale:** Empirical leak test shows current code is causally correct. The future risk is a refactor breaking causality silently. A test guards that without the cost of source changes (which would risk introducing a real bug while "fixing" a non-bug).
-
-**Trade-off:** Test guards present behavior without proving anything new. Cost is one short test (~15 LOC) for permanent regression coverage.
-
-### D-PLAN-005 (2026-05-05) — Defer B9, B12, X1, X2, X3 and remaining defensive items
-
-**Decision:** Do not fix B6, B9 (cosmetic), B12, B14, B15, B18, L2, L3, L4, L6, X1, X2, X3 in this plan.
-
-**Rationale:** Each is either a theoretical concern with no current evidence of breakage (B12 fp16 cumsum), a minor coupling smell (B14, B15), or a defensive assertion that adds lines without preventing a current failure mode (L2, X2). Per the LESSONS.md note "PLAN to PLAN cycles are normal" — keep this iteration tight; document for future plans.
-
-**Trade-off:** Smaller plan that lands cleanly at the cost of leaving improvements on the table. The findings.md "Out of scope" section preserves them for retrieval.
-
-### D-PIVOT-001 (2026-05-05) — B17 reverted mid-EXECUTE: not actually a bug
-
-**Decision:** Roll back the B17 change to `_make_pool_v2` (rejecting `pixel_unshuffle`/`resnetd`/`blur`/`gaussian_dw` at strides=1).
-
-**Trigger:** Step 5 caused `test_default_init_uses_v1_winner` to fail. DSv2's default `stream_pool="blur"` + `strides=1` constructed without error before; my "fix" raised.
-
-**Root cause analysis:**
-1. **Immediate cause:** New ValueError fired in default constructor.
-2. **Contributing factor:** I treated `Identity at strides=1 for non-{avg,max} kinds` as silent-degradation. It is actually a *deliberate uniform-construction contract* — a hierarchical model can declare `stream_pool="blur"` once and use it across all stages; only the strided stages activate the kind, the others pass through.
-3. **Failed defense:** No defense in plan. The Phase-5 review labelled this CONFIRMED based on empirical observation of the Identity-return, without checking if the behavior was *intended*. Empirical confirmation alone doesn't separate "bug" from "documented contract".
-4. **Prevention:** When a Phase-5 finding flags "silent degradation", grep the test suite for tests that *enforce* the silent behavior before assuming it's a bug. The test `test_default_init_uses_v1_winner` was one grep away.
-
-**Outcome:** Source reverted to original `if strides == 1: return Identity(...)` for all kinds. Comment expanded to document the contract. SC4 revoked from verification criteria.
-
-### D-PIVOT-002 (2026-05-05) — Source delta exceeded budget; accepted
-
-**Decision:** Accept +92 net source LOC vs target ≤ +60. Do not compress.
-
-**Rationale:** The overage is concentrated in (a) validation error messages — clarity wins over brevity for build-time errors that caller engineers will read; (b) the D-003 comment explaining the pyramid-diff slice — describes non-obvious math that future readers need.
-
-**Trade-off:** Slightly fatter source at the cost of better error messages and self-documenting math. Reverse if a future plan has a stronger LOC requirement.
-
-## plan_2026-05-05_60c5be7d
-### 2026-05-05 PLAN v1 — chosen approach
-
-**Decision**: 7-step incremental plan, ordered with the failing fp16 test FIRST (Step 1), then the fix (Step 2). Refactors (H-5) last with their own commit so they can be reverted independently.
-
-**At the cost of**: 7 small commits instead of one bundle — slightly more git overhead, but each commit is independently bisectable and the H-5 refactor can be reverted without losing the bug fixes.
-
-**Alternatives considered**:
-- "Single big commit covering all 8 fixes" — rejected. H-5 has nontrivial residual D-004 risk (LESSONS L31); coupling it to the fp16 fixes means a single failing save/load test forces reverting all bug fixes too.
-- "Apply M-1 to cosine basis as well" — DECLINED per user instruction ("if uncertain, leave it"). D-004 is recent and firsthand. Save the ~8KB per layer; not worth re-litigating.
-- "Conditional cast-back on input dtype (Step 2)" — rejected as default. The simpler "always fp32 output" is the deliberate override of compute_dtype for probability distributions; document with D-005. Keep the conditional version as fallback if Scenario B fires.
-
-**Anchor**: plan.md → Pre-Mortem (Scenario A is the H-5 escape hatch).
-
-### 2026-05-05 PLAN v1 refinement — Step 2 fp16-only conditional cast (user instruction)
-
-**Decision**: In Step 2, the cast-back at L717 becomes a conditional: keep fp32 ONLY when `inputs.dtype == "float16"`; otherwise cast back to input dtype as before.
-
-**At the cost of**: 3 extra lines (the if/else) instead of straight removal. Net step-2 line delta moves from -3 to ~0.
-
-**Rationale (user)**: bf16 has fp32-like range so the underflow doesn't apply; only fp16 is broken. Scoping the override to fp16 minimizes blast radius — fp32 callers see no behavior change at all, bf16 callers also unchanged. D-005 comment must reflect this scoped reasoning ("override compute_dtype for fp16 only").
-
-**Alternatives considered**:
-- "Always fp32 output" (original plan) — rejected per user; broader blast radius than necessary.
-- "Cast inside an `ops.cond`" — rejected; `inputs.dtype` is a static Python attribute, no runtime branch needed.
-
-**Anchor**: plan.md Step 2 (revised), D-005 comment in routing_probabilities.py at the L717 site.
-
-### 2026-05-05 PLAN v1 → EXECUTE — user approval
-
-**Decision**: User approved plan with Step 2 refinement above. M-1 stays declined. Step 7 keeps its independent checkpoint and revert-on-failure rule. Commit after each step. After Step 7 or any aborted step, run scoped pytest from Verification Strategy and route to REFLECT. Wait for user review before CLOSE.
-
-**Anchor**: state.md transition log (PLAN → EXECUTE).
-
-### 2026-05-05 EXECUTE Step 2 — surprise: Keras `compute_output_spec` overrides runtime dtype
-
-**Surprise**: under `mixed_float16` policy, `keras.Input(dtype="float16")(layer)` declared output dtype as fp16 even after `call()` returned fp32. Root cause: Keras Layer base class default `compute_output_spec` (layer.py:1096) returns `KerasTensor(dtype=self.compute_dtype)` whenever a custom `compute_output_shape` is implemented. The Functional graph then coerces the runtime tensor to that declared dtype.
-
-**Why not in Assumptions A1**: A1 covered input-side autocasting only. The output-side spec dtype was an unstated assumption — that runtime dtype propagates to the symbolic graph. It does NOT when a custom `compute_output_shape` is used.
-
-**Fix**: override `compute_output_spec` on the layer to return fp32 dtype under fp16 compute_dtype, matching the runtime cast logic at the D-005 site. +30 lines net for Step 2.
-
-**At the cost of**: more code than planned. Alternative considered and rejected — overriding the layer's `compute_dtype` to always be fp32, which would force kernel storage to fp32 and kill the mixed-precision benefit on the matmul.
-
-**Plan invalidation check**: Assumption A1 is still valid (input-side). No other assumption is invalidated. Steps 3-7 unaffected.
-
-**Anchor**: routing_probabilities.py — `compute_output_spec` override docstring + D-005 comment at the cast site.
-
-## plan_2026-05-04_1b2810b6
-### 2026-05-04 — Plan v1: routing-LM variant as parallel files (no edits to existing lm.py / train script)
-
-**Decision**: Implement the routing-LM variant as new sibling files (`lm_routing.py`, `train_cliffordnet_nlp_routing.py`, dedicated test file) rather than adding a flag to `CliffordNetLM` or `train_cliffordnet_nlp.py`.
-
-**Trade-off**: code duplication (~700 lines mirrored) at the cost of bisectability and zero risk to the existing baseline. Existing trained checkpoints and training pipelines remain bit-identical and untouchable.
-
-**Why not the alternative (flag-on-existing)**: a `use_routing_head: bool` flag on `CliffordNetLM` would require also threading a `from_logits` flag through the train script's loss creation, changing the model's serialization shape, and risk breaking existing depth-estimation / CLIP code paths that import `CliffordNetLM`. Cost (duplication) is bounded; cost of regression on shipped baselines is unbounded.
-
-**Anchored at**: `D-001` (in `lm_routing.py` near dict construction) — output dict key remains `"logits"` despite values being probabilities. `D-002` (in `lm_routing.py` near routing layer instantiation) — `from_logits=False` requirement and rationale for `routing_mode="trainable"` default. `D-003` (in `train_cliffordnet_nlp_routing.py` near `create_loss_fn`) — `from_logits=False` is required for routing output.
-
-**Default routing_mode**: `"trainable"`. Deterministic mode (16 fixed cosine projections to discriminate ~50K tokens) is information-theoretically too tight; exposed only as opt-in for ablation.
-
-**Loss reuse**: keep `MaskedCausalLMLoss` and `FocalCausalLMLoss` (existing classes). Both already support `from_logits=False` via `ops.log(y_pred + 1e-8)`. No new loss class needed.
-
-**Output key**: keep `"logits"` (not `"probs"`). The train data wrapper does `(x, y) -> (x, {"logits": y})` and compile uses `loss={"logits": ...}, metrics={"logits": ["accuracy"]}`. Renaming would force changes to the dataset wrapper and loss spec — out of scope.
-
-**Smoke verification only**: smoke runs check pipeline integrity (no crash, no NaN, gradient flow), not final perplexity. Convergence quality is out of scope; this is research scaffolding.
-
-### 2026-05-04 — Step 3: Surprise discovery — RoutingProbabilitiesLayer deterministic-mode FuncGraph capture bug
-
-**What happened**: Test 4-5 (`test_forward_shape[deterministic]`, `test_save_load_roundtrip[deterministic]`, etc.) failed with "tensor cannot be accessed from here, it was defined in FuncGraph(...) which is out of scope". The cosine basis was created in `build()` via `ops.stack(...)` returning a plain Tensor (not a tracked weight). When the layer is embedded inside a `keras.Model` subclass, Keras runs `compute_output_spec` in a transient scratch graph; `build()` runs there too and the cosine basis gets captured by that graph. Subsequent eager calls to `layer.kernel` then dereference a dead tensor.
-
-This bug surfaces only when `RoutingProbabilitiesLayer(deterministic)` is used as a sub-layer of a `keras.Model` subclass. Direct standalone use (the way the existing layer tests exercise it) works fine because there is no surrounding compute_output_spec scratch graph.
-
-**Falsification signal fired**: yes — Pre-Mortem Scenario 4 ("tests catch a contract violation that smoke run would have hidden"). Caught by tests rather than at runtime.
-
-**Root cause analysis**:
-1. Immediate cause: `ops.stack(...)` inside `build()` produces a graph-bound tensor.
-2. Contributing factor: the layer's previous design comment (D-003) explicitly chose "plain (non-tracked) tensor" over `add_weight` to "remain parameter-free and avoid get_build_config plumbing." This was an over-correction — `add_weight(trainable=False)` keeps the layer parameter-free in the trainable-parameter sense, while making the basis a tracked, graph-independent weight.
-3. Failed defense: the existing `test_no_trainable_parameters` and `test_build_process` asserted `len(non_trainable_weights) == 0`, encoding the buggy design as a contract. They would have flagged my fix as "regression" if I hadn't recognized them as the bug-encoding tests.
-4. Prevention: any layer that holds frozen state should store it via `add_weight(trainable=False)` so it's tracked and graph-independent. Plain tensors created inside `build()` are a foot-gun for Keras Model composition.
-
-**Fix (1 file in dl_techniques layer + 1 test file update)**:
-- `src/dl_techniques/layers/activations/routing_probabilities.py`: rename `_cosine_basis` to `_cosine_basis_numpy` (pure numpy), and in `build()` deterministic branch store the result via `add_weight(trainable=False, initializer=keras.initializers.Constant(...))`. Anchored as `# DECISION D-004` in the layer.
-- `tests/test_layers/test_activations/test_routing_probabilities.py`: update two tests (`test_build_process`, `test_no_trainable_parameters`) to expect `len(non_trainable_weights) == 1`, with comments pointing to D-004.
-
-**Fix attempts**: 1 (one). Within autonomy leash. Revert-first not used because the diagnosis was definitive (matches the FuncGraph error class) and the fix was minimal (no wrapper cascades, no new classes, just changing storage from plain-tensor to non-trainable-weight).
-
-**Verification**: full re-run of `tests/test_layers/test_activations/test_routing_probabilities*.py` (113 tests) + `tests/test_models/test_cliffordnet/test_cliffordnet_lm_routing.py` (21 tests) = **134 passed**. Both deterministic and trainable modes verified through Keras Model embedding (save/load roundtrip included).
-
-**Plan files touched (out-of-scope additions)**: Two unplanned edits beyond the original Files To Modify table:
-- `src/dl_techniques/layers/activations/routing_probabilities.py` (1 fix to library bug)
-- `tests/test_layers/test_activations/test_routing_probabilities.py` (2 test asserts updated)
-
-These are justified by the surprise discovery and noted here. The original plan's no-edit constraint applied to `lm.py` and `train_cliffordnet_nlp.py` — both untouched.
-
-## plan_2026-05-04_38e259bf
-### D-001 (PLAN, iter-1): unified `mode` parameter rather than two distinct classes or inheritance
-**Choice**: Single class with `mode: Literal["deterministic","trainable"]`. Default `"deterministic"` preserves existing call-site semantics.
-**Trade-off**: Single API surface and shared call/build math at the cost of a slightly larger constructor signature and dead kwargs (`kernel_initializer`, `bias_initializer`, etc.) when `mode="deterministic"`.
-**Alternatives rejected**:
-- Inheritance (`HierarchicalRoutingLayer(RoutingProbabilitiesLayer)`): keeps two classes, contradicts the "single layer" goal.
-- Class-method factory (`RoutingProbabilitiesLayer.trainable(...)`): non-idiomatic for Keras serialization; `from_config` would need extra plumbing.
-- Backward-compat alias `HierarchicalRoutingLayer = ...`: not requested; task says delete the file.
-
-### D-002 (PLAN, iter-1): renormalization uses `prob_sum + epsilon` in both modes
-**Choice**: Adopt the trainable variant's `unnormalized_probs / (prob_sum + self.epsilon)` for both modes.
-**Trade-off**: Tiny numerical bias in deterministic mode at the cost of guaranteed no-divide-by-zero. Magnitude < epsilon = 1e-7 — well below test tolerance (1e-6).
-**Why safe**: Decision probs are clipped to `[epsilon, 1-epsilon]`, so `prob_sum > 0` always, but the safer form costs nothing and unifies the code path.
-
-### D-002b (EXECUTE, iter-1): D-002 falsified — revert to mode-specific renormalization
-**Trigger**: `test_epsilon_parameter` in `test_routing_probabilities.py` regressed:
-asserts `sum == 1.0 atol=1e-6` for `epsilon=1e-5`. With `+ epsilon` denominator,
-sum is ~0.99998 — outside tolerance.
-**Reason**: Deterministic mode's original semantics guarantee exact sum=1.0; the
-"safety" of `+ epsilon` is unnecessary because clipping ensures `prob_sum > 0`.
-**Fix**: Branch on `self.mode`. Deterministic uses bare `prob_sum`; trainable
-keeps original `+ epsilon`. Both modes preserve their pre-merge semantics.
-**Lesson**: "Safer" numerical changes can violate API contracts asserted by tests.
-Default to preserving exact original behavior unless there is a real regression to fix.
-
-### D-003 (PLAN, iter-1): factory `'hierarchical_routing'` key and `probability_output` strings preserved
-**Choice**: Keep the public string keys; redirect them internally to `RoutingProbabilitiesLayer(mode="trainable", ...)`.
-**Trade-off**: API stability at the cost of a tiny indirection.
-
-## plan_2026-05-01_1c080382
-### D-001 — Choose STRETCH scope (A0 + B1 + B2 + C1 + C2) (2026-05-01, PLAN, iter-1)
-
-**Decision**: User explicitly chose STRETCH scope (13 runs, ~25h). Implement all four B/C cells, plus A0 anchor-seed panel via `--seed` reuse of existing V0/V1/V7.
-
-**Trade-off**: Maximum experimental coverage at cost of ~25h GPU time vs. ~21h MIN scope. Buys the pyrdiff-on-V1-substrate disambiguation (B2) and the LN late-stage control (C2). Worth it given user explicitly accepted the cost.
-
-### D-002 — Extend in-place, do not create sibling script (2026-05-01, PLAN, iter-1)
-
-**Decision**: Add the 4 new VARIANTS and the per-stage / seed plumbing to the existing `train_downsampling_experiments.py`. No `train_downsampling_followup.py` sibling.
-
-**Trade-off**: Single-script consistency and shared comparison.csv across both campaigns at cost of growing one file beyond 850 lines. User explicitly chose in-place. Deferring sibling-split until the file becomes unwieldy (≥1500 lines).
-
-### D-003 — Operate autonomously (no PLAN→EXECUTE approval gate) (2026-05-01, PLAN, iter-1)
-
-**Decision**: User said "WORK UNSUPERVISED". Skip the user-approval handoff after PLAN. Proceed directly into EXECUTE. Treat any further user-input gates as auto-approved unless hitting a genuine blocker (irreversible op, ambiguous failure, autonomy-leash exhaustion). Still STOP before launching the full 25h training run — only present the launch command.
-
-**Trade-off**: Faster iteration at cost of losing the early plan-review checkpoint. Mitigation: the plan is small (4 variants, 1 helper, 1 plumbing change), risk is low, and CLOSE still surfaces a final review.
-
-### D-004 — Per-stage `ctx_norm_type`: list-of-3 with scalar back-compat (2026-05-01, PLAN, iter-1)
-
-**Decision**: Encode the per-stage override as either a scalar str (existing behaviour, applies uniformly to stages 1/2/3 transitions) OR a length-3 list `[stage1, stage2, stage3]`. Pop the key out of `transition_kwargs` when it's a list and inject explicitly at each transition build site.
-
-**Trade-off**: Backwards-compatible at the cost of a single conditional in `build_variant`. Alternative (separate `ctx_norm_schedule` dict key) would have been cleaner but more invasive. Sticking with overload-the-existing-key per project preference for minimal surface-area churn.
-
-### D-005 — Use V1 substrate (no `internal_expansion`) for B1/B2/C1/C2 (2026-05-01, PLAN, iter-1)
-
-**Decision**: All four new variants use `internal_expansion=False` (matching V1's substrate exactly). They stack ONE axis at a time on V1.
-
-**Trade-off**: Tests the marginal contribution of each axis on the empirical winner at cost of NOT testing axis interactions with internal expansion. The prior V11 kitchen-sink stack on V4 substrate already failed (-0.51pp); we're avoiding that failure mode by keeping the substrate clean.
-
-## plan_2026-04-30_3a94be21
-### D-001 — 2026-04-30 — Implement V0–V7, V10–V12 (11 variants); defer V8 + V9
-
-**Decision.** Implement 11 of 12 variants from `analysis_2026-04-30_41b5e415/summary.md` §4. Defer V8 (full-res product, axis F) and V9 (grade-aware grouped pool).
-
-**Why.** V8 requires structural refactor of `CliffordNetBlockDS.call()` that reverses pool/product order — high blast radius, +30–50% FLOPs, marginal payoff per analysis §3 hierarchy table. V9 is an open research question (no grade metadata in repo, requires constructive design choice) — analysis §6.1 calls it out as needing separate research scope. Both are explicitly low priority in the analysis.
-
-**Cost.** The campaign cannot test the principled "interact-then-pool" hypothesis (V8) or the Clifford-correct grade-aware pool (V9). User loses the ability to validate H5 (bilinear bandwidth doubling) and H14 (grade-aware pool) in this iteration. Mitigation: leave hooks in `VARIANTS` dict commented out; structure the block refactor so V8/V9 can be added incrementally.
-
-### D-002 — 2026-04-30 — Stage layout `(96,2),(192,2),(384,4),(768,4)` with patch1 stem
-
-**Decision.** 4-stage backbone with channel schedule 96-192-384-768 (2-2-4-4 blocks). Patch1 stem (no spatial reduction at stem) so first strided transition is 32→16, then 16→8, 8→4. Total ~10M params at C=96 base — matches analysis "10M multi-stage" scale.
-
-**Why.** Analysis §6 H_SCOPE_MACRO assumes "4-stage backbone with channel ratios (96, 192, 384, 768) or similar". 96 is divisible by 4 and 16 (pixel-unshuffle skip needs `C·s²` integer; trivially satisfied). 12 total blocks ≈ existing `V4_4stage_aggressive` (12 blocks too) so wall-time per variant is comparable to E05 (~200 min at 10M).
-
-**Cost.** Different macro-arch may shift relative ranking (acknowledged as H_SCOPE_MACRO open in §6). Mitigation: layout is one constant in the script, easy to re-run with `(64,2),(128,2),(256,4),(512,4)` if needed.
-
-### D-003 — 2026-04-30 — Refactor `CliffordNetBlockDS` rather than subclass
-
-**Decision.** Extend `CliffordNetBlockDS` constructor with new params (`stream_pool`, `out_channels`, `ctx_norm_type`, additional `skip_pool` and `ctx_mode` enum values) rather than create a sibling class `CliffordNetBlockDSv2`.
-
-**Why.** The new knobs are orthogonal axes of the same architectural concept; a sibling class would duplicate ~70% of code. Strict additivity (defaults preserve current behavior) avoids breaking `train_compare_variants.py`, `train_downsampling_techniques.py`, and existing tests. `use_ctx_bn` kept as deprecated alias for `ctx_norm_type` to avoid call-site churn.
-
-**Cost.** Higher refactor risk on a layer used by other scripts. Mitigation: keep all new params optional with current-behavior defaults; verify with smoke-build of legacy training scripts before declaring step 3 done.
-
-### D-003-AMENDED — 2026-04-30 — Use sibling class `CliffordNetBlockDSv2` (user direction)
-
-**Decision (supersedes D-003).** Per user direction, create a NEW sibling class `CliffordNetBlockDSv2` in `src/dl_techniques/layers/geometric/clifford_block.py` that contains all axis A–H knobs natively. Leave `CliffordNetBlockDS` untouched.
-
-**Why.** User wants zero-risk back-compat. A sibling class:
-- Cannot accidentally break existing tests / training scripts (they keep using `CliffordNetBlockDS`).
-- Lets us add new parameters without deprecation aliases (`use_ctx_bn`).
-- Lets us refactor `call()` cleanly for `pyramid_diff` and the future V8 full-res-product variant without nesting flags.
-- Code duplication is acceptable (~70% overlap) since this is a research artifact.
-
-**Cost.** ~400 lines of duplicated code in `clifford_block.py`. Two classes to maintain. Mitigation: file already houses both `CliffordNetBlock` and `CliffordNetBlockDS` so a third class is consistent with the file's role.
-
-### D-005 — 2026-04-30 — Run smoke-test first, then full training only after user re-approval
-
-**Decision.** Step 5 = smoke-test (3 epochs × batch 32 × 11 variants, ~10–15 min total). Step 7 added: full 100-epoch training run (`--variant all --epochs 100 --batch-size 128 --gpu 0`) — ONLY after smoke passes AND user explicitly approves the full run.
-
-**Why.** Full run is ~40h serial on RTX 4090 (analysis §5 estimate ~75h for 21 cells = ~3.5h per 10M cell × 11 variants). User wants smoke validation as a checkpoint before committing GPU time.
-
-**Cost.** Adds a sync point. Trivial.
-
-### D-004 — 2026-04-30 — V11 picks `pyramid_diff` over `abs` (V6 dominates V7)
-
-**Decision.** V11 (`DS-kitchen_sink`) uses `ctx_mode=pyramid_diff` rather than `abs at strides>1`. V6 and V7 are mutually-exclusive ctx_mode choices.
-
-**Why.** Analysis §3 hierarchy table puts V6 (pyramid_diff) and V7 (abs) at +0.1–0.3 each but V6 is principled-as-Laplacian-replacement while V7 is bypass. Stacking both is impossible at one ctx_mode value. Pyramid_diff preserves the Laplacian semantics axis D was meant to express. Cost: V11 won't isolate V7's contribution — that's already isolated in V7 itself.

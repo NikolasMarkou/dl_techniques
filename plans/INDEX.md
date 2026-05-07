@@ -13,3 +13,9 @@
 | plan_2026-05-05_0eac2c81 | 2026-05-05 | Verify each issue raised in the Phase-5 review of `clifford_ | f-001, f-002, f-003 |
 | plan_2026-05-06_13a2df9e | 2026-05-06 | Add `CausalCliffordNetBlockDSv2` to `src/dl_techniques/layer | f-001 scope-and-callers.md, f-002 causality-mechanics.md, f-003 dsv2-merge-points.md |
 | plan_2026-05-06_82749628 | 2026-05-06 | Build `CliffordNetLMUNet` causal U-Net language model on top | causal-blocks-api.md, upsampling-causality.md, lm-and-train-mirror.md |
+| plan_2026-05-07_c6dd7cc1 | 2026-05-07 | Audit-confirmed fixes to the Wikipedia + HF NLP CLM dataset  | 01-pipeline-map.md, 02-issue-catalog.md, 03-design-precedents.md |
+| plan_2026-05-07_47199c68 | 2026-05-07 | Fix WaveFieldAttention V3.6 review issues — apply real fixes | f1: rfft return type empirically verified, f2: existing test suite all green (62/62), f3: test contracts locking in current behavior |
+| plan_2026-05-07_a73304d4 | 2026-05-07 | Apply 4 real V3.7 review optimizations; reject the false rff |  |
+| plan_2026-05-07_1519e34f | 2026-05-07 | Build a decoder-only language model using `WaveFieldAttentio | f-001 gpt2.py architecture & attention wiring, f-002 src/train/gpt2/pretrain.py conventions, f-003 wavefieldattention call signature & integration |
+| plan_2026-05-07_08aaf818 | 2026-05-07 | Apply the two-part tiktoken decode hardening fix from commit |  |
+| plan_2026-05-07_3f461682 | 2026-05-07 | Integrate richer LLM evaluation metrics (perplexity, bits-pe | f-001 llm trainer inventory & current metric setup, "accuracy", f-002 existing metrics infrastructure |
