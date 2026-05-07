@@ -43,6 +43,8 @@ from train.common.nlp import (
     create_warmup_lr_schedule,
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
+    build_clm_metrics,
+    augment_probe_results,
 )
 from dl_techniques.models.wave_field_llm.wave_field_llm import (
     WaveFieldLLM,
@@ -610,7 +612,7 @@ def compile_model(
             clipnorm=1.0,
         ),
         loss={"logits": create_loss_fn(config)},
-        metrics={"logits": ["accuracy"]},
+        metrics={"logits": build_clm_metrics(config.encoding_name)},
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
@@ -693,7 +695,7 @@ def train_wave_field_llm(
     # Generation probe context window: model's max - 1 keeps room for the
     # next token. For the smoke variant (max_seq_len=32) this means 31.
     probe_ctx = max(1, config.max_seq_length - 1)
-    callbacks.append(GenerationProbeCallback(
+    probe_cb = GenerationProbeCallback(
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
         encoding_name=config.encoding_name,
@@ -704,7 +706,9 @@ def train_wave_field_llm(
         save_dir=results_dir,
         initial_step=initial_step,
         context_window=probe_ctx,
-    ))
+    )
+    probe_cb._post_generate_hook = augment_probe_results
+    callbacks.append(probe_cb)
 
     logger.info(
         f"Starting training: source={config.dataset_source}, "
