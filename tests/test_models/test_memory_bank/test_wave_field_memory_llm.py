@@ -213,3 +213,50 @@ class TestSaveLoadRoundTrip:
         # Phase + global_step preserved.
         assert int(loaded.current_phase.numpy()) == 2
         assert int(loaded._global_step.numpy()) == 7
+
+    def test_save_load_after_two_train_steps(self, tmp_path):
+        """Step 8 — run 2 batches through the custom train_step, save,
+        reload, verify forward output identical and `current_phase` /
+        `_global_step` survive the round-trip."""
+        m = _build_tiny()
+        loss_fn = MaskedCausalLMLoss()
+        m.compile(
+            backbone_optimizer=keras.optimizers.AdamW(
+                learning_rate=1e-5, weight_decay=0.01, clipnorm=1.0,
+            ),
+            memory_optimizer=keras.optimizers.AdamW(
+                learning_rate=3e-4, weight_decay=0.01, clipnorm=1.0,
+            ),
+            loss={"logits": loss_fn},
+        )
+        m.output_names = ["logits"]
+        # Promote into Phase 2 so aux losses are exercised.
+        m.read_controller.enable_gate_entropy = True
+        m.read_controller.enable_load_balance = True
+        m.read_controller.enable_z_loss = True
+        m.current_phase.assign(2)
+
+        x = np.random.randint(0, 128, size=(4, 16)).astype(np.int32)
+        y = np.random.randint(0, 128, size=(4, 16)).astype(np.int32)
+        ds = tf.data.Dataset.from_tensor_slices((x, {"logits": y})).batch(2)
+
+        m.fit(ds, epochs=1, verbose=0)
+
+        # Snapshot the post-training forward output and counters.
+        probe = np.random.randint(0, 128, size=(2, 16)).astype(np.int32)
+        before = np.asarray(m(probe, training=False)["logits"])
+        gstep_before = int(m._global_step.numpy())
+        phase_before = int(m.current_phase.numpy())
+        assert gstep_before >= 2  # 2 batches = 2 train_step invocations
+        assert phase_before == 2
+
+        path = str(tmp_path / "m_post_train.keras")
+        m.save(path)
+        loaded = keras.models.load_model(
+            path, custom_objects=memory_llm_custom_objects(),
+        )
+        after = np.asarray(loaded(probe, training=False)["logits"])
+
+        np.testing.assert_allclose(before, after, atol=1e-5, rtol=1e-5)
+        assert int(loaded.current_phase.numpy()) == phase_before
+        assert int(loaded._global_step.numpy()) == gstep_before
