@@ -230,6 +230,78 @@ class TestCausalMaskWm:
 # ---------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------
+# SC5 — aux losses
+# ---------------------------------------------------------------------
+
+
+class TestAuxLosses:
+
+    def _enable_all(self, read):
+        read.enable_gate_entropy = True
+        read.enable_load_balance = True
+        read.enable_z_loss = True
+        read.enable_diversity = True
+        read.enable_infonce = True
+
+    def test_aux_losses_off_by_default_no_loss(self):
+        read, lt, write = _build_bundle(
+            embed_dim=16, num_heads=2, d_k=4, d_v=8,
+            s_lt=8, max_seq_len=4, top_k=2,
+        )
+        x = np.random.RandomState(0).randn(2, 3, 16).astype(np.float32)
+        # training=True with all flags off -> still no aux losses.
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        # `add_loss` populates self.losses on the layer. With no flags
+        # enabled, none should appear.
+        assert len(read.losses) == 0
+
+    def test_aux_losses_present_when_enabled_and_finite(self):
+        read, lt, write = _build_bundle(
+            embed_dim=16, num_heads=2, d_k=4, d_v=8,
+            s_lt=8, max_seq_len=4, top_k=2,
+        )
+        self._enable_all(read)
+        x = np.random.RandomState(1).randn(2, 3, 16).astype(np.float32)
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        # 5 aux losses (4 + z-loss).
+        assert len(read.losses) == 5
+        for l in read.losses:
+            assert np.isfinite(np.asarray(l)), f"non-finite aux loss: {l}"
+
+    def test_aux_losses_skipped_in_eval_mode(self):
+        read, lt, write = _build_bundle(
+            embed_dim=16, num_heads=2, d_k=4, d_v=8,
+            s_lt=8, max_seq_len=4, top_k=2,
+        )
+        self._enable_all(read)
+        x = np.random.RandomState(2).randn(2, 3, 16).astype(np.float32)
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=False)
+        assert len(read.losses) == 0
+
+    def test_diversity_subsample_finite_at_large_s_lt(self):
+        read = MemoryReadController(
+            embed_dim=16, num_heads=2, d_k=4, d_v=8,
+            s_lt=4096, max_seq_len=8, top_k=2,
+            enable_diversity=True, diversity_subsample=64,
+        )
+        lt = LongTermMemoryBank(s_lt=4096, d_k=4, d_v=8)
+        lt.build()
+        write = MemoryWriteController(d_k=4, d_v=8, embed_dim=16, max_seq_len=8)
+        x = np.random.RandomState(3).randn(1, 4, 16).astype(np.float32)
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        assert len(read.losses) == 1
+        assert np.isfinite(np.asarray(read.losses[0]))
+
+
 class TestConfig:
 
     def test_get_config_round_trip(self):

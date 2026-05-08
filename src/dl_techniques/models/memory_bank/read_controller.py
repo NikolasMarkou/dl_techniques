@@ -234,8 +234,6 @@ class MemoryReadController(keras.layers.Layer):
         :returns: Gated injection ``g * V_proj`` of shape ``(B, T, D)``.
             Caller is responsible for the residual add.
         """
-        del training  # unused at this step
-
         b = ops.shape(x_r)[0]
         t = ops.shape(x_r)[1]
 
@@ -311,10 +309,137 @@ class MemoryReadController(keras.layers.Layer):
         g = ops.sigmoid(self.W_g(x_r))  # (B, T, D)
         injection = g * v_proj
 
-        # Step-3 stops here. Step 4 will add aux losses based on
-        # routing / soft_w / sim_clipped / g / k_lt.
+        # 10. Anti-collapse aux losses (Step 4).
+        # All gated by enable flags so phase-1 disables them all. Each loss
+        # is computed only when training=True to avoid double-accumulation
+        # at eval time (LESSONS — `add_loss` semantics).
+        if training:
+            self._maybe_add_aux_losses(
+                routing=routing,
+                soft_w=soft_w,
+                sim_clipped=sim_clipped,
+                gate=g,
+                k_lt=k_lt,
+                v_lt=v_lt,
+                v_proj=v_proj,
+            )
 
         return injection
+
+    # ------------------------------------------------------------------
+    # Aux losses (Step 4)
+    # ------------------------------------------------------------------
+
+    def _maybe_add_aux_losses(
+        self,
+        routing: Any,
+        soft_w: Any,
+        sim_clipped: Any,
+        gate: Any,
+        k_lt: Any,
+        v_lt: Any,
+        v_proj: Any,
+    ) -> None:
+        """Compute and add the four (+ optional z-loss) anti-collapse aux
+        losses via :meth:`self.add_loss`. Each is gated by an enable flag
+        so phase-1 (or eager testing) can short-circuit all of them.
+        """
+        # 1. Gate entropy: maximize H(g) by adding `lambda * (-H_mean)`.
+        if self.enable_gate_entropy:
+            eps = 1e-7
+            g_clip = ops.clip(gate, eps, 1.0 - eps)
+            ent = -(g_clip * ops.log(g_clip)
+                     + (1.0 - g_clip) * ops.log(1.0 - g_clip))  # (B, T, D)
+            ent_mean = ops.mean(ent)
+            self.add_loss(self.lambda_gate_entropy * (-ent_mean))
+
+        # 2. Load balance: only over the M_LT slice (first S_lt columns).
+        # routing_lt: (B, T, H, S_lt). soft_lt: (B, T, H, S_lt).
+        routing_lt = routing[..., :self.s_lt]
+        soft_lt = soft_w[..., :self.s_lt]
+        if self.enable_load_balance:
+            f_i = ops.mean(routing_lt, axis=(0, 1, 2))  # (S_lt,)
+            p_i = ops.mean(soft_lt, axis=(0, 1, 2))     # (S_lt,)
+            lb = (
+                self.lambda_load_balance
+                * float(self.s_lt)
+                * ops.sum(ops.stop_gradient(f_i) * p_i)
+            )
+            self.add_loss(lb)
+
+        # 3. Z-loss on the M_LT slice (logsumexp(sim_lt))^2.
+        if self.enable_z_loss:
+            sim_lt = sim_clipped[..., :self.s_lt]  # (B, T, H, S_lt)
+            lse = ops.logsumexp(sim_lt, axis=-1)
+            zl = self.lambda_z_loss * ops.mean(lse * lse)
+            self.add_loss(zl)
+
+        # 4. Key diversity: subsample `diversity_subsample` keys from K_lt
+        # and add lambda * mean(off-diagonal cos-sim ** 2).
+        if self.enable_diversity:
+            n_sub = min(self.diversity_subsample, self.s_lt)
+            if n_sub == self.s_lt:
+                k_sub = k_lt
+            else:
+                # Random subsample via tf.random.shuffle on indices.
+                # Backend-agnostic: use keras.random for index sampling.
+                import tensorflow as _tf
+                idx = _tf.random.shuffle(_tf.range(self.s_lt))[:n_sub]
+                k_sub = ops.take(k_lt, idx, axis=0)
+            k_norm = k_sub / (ops.norm(k_sub, axis=-1, keepdims=True) + 1e-8)
+            cos = ops.matmul(k_norm, ops.transpose(k_norm))  # (n_sub, n_sub)
+            # Mask diagonal.
+            eye = ops.eye(n_sub, dtype=cos.dtype)
+            cos_off = cos * (1.0 - eye)
+            div = self.lambda_diversity * ops.mean(cos_off * cos_off)
+            self.add_loss(div)
+
+        # 5. InfoNCE: per-query positive vs `infonce_negatives` random
+        # K_lt rows. Implementation: take v_proj (already aggregated per
+        # query) as the query embedding, compare to mean-of-selected V_lt
+        # for the positive and to V_lt @ random rows for negatives. We
+        # project nothing additional — v_proj is the pooled-retrieved
+        # representation. The contrast is over key indices.
+        if self.enable_infonce:
+            import tensorflow as _tf
+            # Negatives: random index sample from K_lt's value bank V_lt.
+            n_neg = min(self.infonce_negatives, self.s_lt)
+            idx_neg = _tf.random.shuffle(_tf.range(self.s_lt))[:n_neg]
+            v_neg = ops.take(v_lt, idx_neg, axis=0)  # (n_neg, d_v)
+            # Positive: retrieved V_lt mean for top-1 routing row.
+            # Use the mean of V_lt under routing_lt restricted to the
+            # max position per (B, T, H).
+            # For simplicity here we contrast v_proj (pooled head-concat,
+            # shape (B, T, D)) vs lifted v_neg via a Dense W_out-like
+            # projection — but to avoid introducing extra weights we
+            # contrast in the d_v space using flattened means.
+            # v_proj_query = mean over D -> 1 scalar per (B, T) is too
+            # weak; instead we contrast the mean of routed V_total against
+            # v_neg in d_v space.
+            # routed_v_mean: (B, T, d_v) = mean over heads of retrieved_v
+            # We don't have retrieved_v here; reconstruct via routing @
+            # v_lt for the LT slice.
+            routed_v_lt = ops.einsum(
+                "bthm,mv->bthv", routing_lt, v_lt,
+            )  # (B, T, H, d_v)
+            q_emb = ops.mean(routed_v_lt, axis=2)  # (B, T, d_v)
+            # Positive: stop-grad anchor = same q_emb mean (sanity-only,
+            # collapse-resistant); per blueprint the positive is "mean of
+            # selected keys' values projection of that query" which IS
+            # q_emb. The contrastive signal pushes q_emb away from random
+            # K_lt rows.
+            tau = max(self.infonce_temperature, 1e-6)
+            pos_logit = ops.sum(q_emb * ops.stop_gradient(q_emb), axis=-1)  # (B, T)
+            neg_logits = ops.einsum(
+                "btv,nv->btn", q_emb, v_neg,
+            )  # (B, T, n_neg)
+            # Concatenate pos as logit-0 and apply log-softmax.
+            all_logits = ops.concatenate(
+                [ops.expand_dims(pos_logit, axis=-1), neg_logits], axis=-1,
+            )  # (B, T, 1 + n_neg)
+            log_probs = ops.log_softmax(all_logits / tau, axis=-1)
+            nce = -ops.mean(log_probs[..., 0])  # -log P(positive)
+            self.add_loss(self.lambda_infonce * nce)
 
     def _build_wm_mask(
         self, t: Any, wm_padding_mask: Any,
