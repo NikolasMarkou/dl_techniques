@@ -90,30 +90,21 @@ class MemoryWriteController(keras.layers.Layer):
         """
         k_wm, v_wm = self.wm_bank(x_w, training=training)
 
-        # Right-pad along axis=1 to max_seq_len.
+        # Right-pad along axis=1 to max_seq_len via concatenation with
+        # zeros — this avoids ops.pad's dynamic-paddings-tensor failure
+        # mode under tf.function tracing (some Keras 3 / TF 2.18 backends
+        # call `len(paddings)` which fails on symbolic tensors).
         b = ops.shape(k_wm)[0]
         t = ops.shape(k_wm)[1]
         pad_len = self.max_seq_len - t
 
-        # ops.pad with dynamic widths — supported in keras 3 / TF 2.18.
-        # Build paddings = [[0,0],[0,pad_len],[0,0]] symbolically.
-        zeros_b = ops.zeros((1,), dtype="int32")
-        zeros_d = ops.zeros((1,), dtype="int32")
-        pad_axis_t = ops.stack([
-            ops.zeros((), dtype="int32"),
-            ops.cast(pad_len, "int32"),
-        ])
-        paddings = ops.stack([
-            ops.stack([zeros_b[0], zeros_b[0]]),
-            pad_axis_t,
-            ops.stack([zeros_d[0], zeros_d[0]]),
-        ])
-        k_wm_padded = ops.pad(k_wm, paddings, mode="constant", constant_values=0.0)
-        v_wm_padded = ops.pad(v_wm, paddings, mode="constant", constant_values=0.0)
+        zeros_k = ops.zeros((b, pad_len, self.d_k), dtype=k_wm.dtype)
+        zeros_v = ops.zeros((b, pad_len, self.d_v), dtype=v_wm.dtype)
+        k_wm_padded = ops.concatenate([k_wm, zeros_k], axis=1)
+        v_wm_padded = ops.concatenate([v_wm, zeros_v], axis=1)
 
-        # Static-shape annotation: keras.ops.pad may produce a tensor with
-        # an unknown axis-1 dim for some backends. Reshape via
-        # ops.reshape with the known static dims.
+        # Reshape to pin the static axis-1 size so downstream ops.one_hot
+        # has a known M_static.
         k_wm_padded = ops.reshape(
             k_wm_padded, (b, self.max_seq_len, self.d_k),
         )
