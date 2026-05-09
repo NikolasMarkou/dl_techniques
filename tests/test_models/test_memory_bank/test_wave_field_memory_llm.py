@@ -305,3 +305,74 @@ class TestSaveLoadRoundTrip:
         np.testing.assert_allclose(before, after, atol=1e-5, rtol=1e-5)
         assert int(loaded.current_phase.numpy()) == phase_before
         assert int(loaded._global_step.numpy()) == gstep_before
+
+
+# ---------------------------------------------------------------------
+# B5: non-loss metric extraction works for dict-keyed forward
+# ---------------------------------------------------------------------
+
+
+class TestNonLossMetric:
+    """B5: SparseCategoricalAccuracy metric, compiled against
+    `metrics={"logits": [acc]}`, must successfully receive a tensor on
+    `update_state` rather than a dict (the dict caused TypeError before
+    the fix in train_step that extracts y_pred["logits"]/y["logits"]).
+    """
+
+    def test_non_loss_metric_works_with_dict_pred(self):
+        m = _build_tiny()
+        # output_names must be set BEFORE compile so CompileMetrics
+        # registers the per-output metric. This is the documented
+        # workaround for subclassed-model dict-keyed compile.
+        m.output_names = ["logits"]
+        loss_fn = MaskedCausalLMLoss()
+        acc = keras.metrics.SparseCategoricalAccuracy(name="acc")
+        m.compile(
+            backbone_optimizer=keras.optimizers.AdamW(
+                learning_rate=1e-5, weight_decay=0.01,
+            ),
+            memory_optimizer=keras.optimizers.AdamW(
+                learning_rate=3e-4, weight_decay=0.01,
+            ),
+            loss={"logits": loss_fn},
+            metrics={"logits": [acc]},
+        )
+
+        x = np.random.randint(0, 128, size=(4, 16)).astype(np.int32)
+        y = np.random.randint(0, 128, size=(4, 16)).astype(np.int32)
+        ds = tf.data.Dataset.from_tensor_slices(
+            (x, {"logits": y}),
+        ).batch(2)
+
+        history = m.fit(ds, epochs=1, verbose=0)
+        # Metric column appears in history.
+        keys = list(history.history.keys())
+        assert any("acc" in k for k in keys), (
+            f"expected an 'acc' metric in history, got {keys}"
+        )
+
+
+# ---------------------------------------------------------------------
+# R5: phase / step round-trip for non-default values
+# ---------------------------------------------------------------------
+
+
+class TestPhaseStepRoundTrip:
+    """R5: explicitly verify that current_phase=3 and _global_step=1234
+    survive save/load (without any train step in between)."""
+
+    def test_phase_3_step_1234_round_trip(self, tmp_path):
+        m = _build_tiny()
+        # Force a forward pass so all variables exist.
+        _ = m(np.zeros((1, 4), dtype=np.int32))
+        m.current_phase.assign(3)
+        m._global_step.assign(1234)
+
+        path = str(tmp_path / "m_phase3.keras")
+        m.save(path)
+
+        loaded = keras.models.load_model(
+            path, custom_objects=memory_llm_custom_objects(),
+        )
+        assert int(loaded.current_phase.numpy()) == 3
+        assert int(loaded._global_step.numpy()) == 1234

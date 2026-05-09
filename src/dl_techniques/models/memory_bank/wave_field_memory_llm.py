@@ -217,20 +217,26 @@ class WaveFieldMemoryLLM(keras.Model):
 
         self._build_architecture()
 
-        # Phase counter + global step (survive save/load).
+        # Phase counter + global step (survive save/load). Stored as
+        # float32 so they live on the same device (GPU) as the rest of
+        # the train_step graph — int32/int64 variables go to CPU by
+        # default since most int kernels are CPU-only, and Keras 3 / TF
+        # 2.18 errors on cross-device resource access from the compiled
+        # multi_step_on_iterator. Callers that need integer values cast
+        # via `int(self.current_phase.numpy())`.
         self.current_phase = self.add_weight(
             name="memory_current_phase",
             shape=(),
-            initializer=keras.initializers.Constant(1),
+            initializer=keras.initializers.Constant(1.0),
             trainable=False,
-            dtype="int32",
+            dtype="float32",
         )
         self._global_step = self.add_weight(
             name="memory_global_step",
             shape=(),
             initializer="zeros",
             trainable=False,
-            dtype="int64",
+            dtype="float32",
         )
 
         # Optimizers (set by compile()).
@@ -375,7 +381,10 @@ class WaveFieldMemoryLLM(keras.Model):
         x = self.embed_dropout(x, training=training)
 
         # Phase 1 (PHASE_WARMUP) disables memory entirely.
-        memory_active = ops.not_equal(self.current_phase, PHASE_WARMUP)
+        # current_phase is float32; cast PHASE_WARMUP to match.
+        memory_active = ops.not_equal(
+            self.current_phase, ops.cast(PHASE_WARMUP, "float32"),
+        )
 
         k_wm = None
         v_wm = None
@@ -467,15 +476,35 @@ class WaveFieldMemoryLLM(keras.Model):
         if memory_pairs:
             self.memory_optimizer.apply_gradients(memory_pairs)
 
-        self._global_step.assign_add(tf.constant(1, dtype="int64"))
+        self._global_step.assign_add(tf.constant(1.0, dtype="float32"))
 
+        # B5: dict-keyed forward + dict-keyed compile must work for
+        # non-loss metrics. The Keras `CompileMetrics` container expects
+        # update_state(y, y_pred) with the same dict structure compile()
+        # received. The "loss" tracker takes the scalar loss. After
+        # updating state, flatten CompileMetrics.result() (which returns
+        # a dict of inner-metric-name -> tensor) into the top-level
+        # output so e.g. 'acc' appears in `history.history`.
         for metric in self.metrics:
-            if metric.name == "loss":
+            mname = getattr(metric, "name", "")
+            if mname == "loss":
                 metric.update_state(loss)
             else:
+                # CompileMetrics handles dict-keyed routing internally;
+                # any other Metric instance gets the (y, y_pred) raw and
+                # is expected to handle dicts (most don't, so users
+                # should compile via metrics={"logits": [...]} which
+                # routes through CompileMetrics).
                 metric.update_state(y, y_pred)
 
-        return {m.name: m.result() for m in self.metrics}
+        out: Dict[str, Any] = {}
+        for m in self.metrics:
+            r = m.result()
+            if isinstance(r, dict):
+                out.update(r)
+            else:
+                out[m.name] = r
+        return out
 
     # ------------------------------------------------------------------
     # KMeans warmup
