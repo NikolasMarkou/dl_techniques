@@ -655,6 +655,41 @@ class WaveFieldMemoryLLM(keras.Model):
         return x
 
     # ------------------------------------------------------------------
+    # O3 — reset memory state
+    # ------------------------------------------------------------------
+
+    def reset_memory(self, seed: Optional[int] = None) -> None:
+        """Re-initialize ``K_lt`` and ``V_lt`` from
+        ``RandomNormal(stddev=initializer_range)``, set
+        ``current_phase`` to ``PHASE_WARMUP`` and ``_global_step`` to
+        zero. Useful for restarting curriculum or running ablations
+        without rebuilding the model.
+
+        :param seed: Optional seed for the random init. If ``None``,
+            the model's existing init RNG state is used (Keras
+            generates a fresh seed each call).
+        """
+        gen = keras.random.SeedGenerator(seed=seed) if seed is not None else None
+
+        def _normal(shape):
+            kwargs = {"stddev": self.initializer_range}
+            if gen is not None:
+                kwargs["seed"] = gen
+            return keras.random.normal(shape, **kwargs)
+
+        # K_lt and V_lt live on the LongTermMemoryBank.
+        self.lt_memory.K_lt.assign(_normal(self.lt_memory.K_lt.shape))
+        self.lt_memory.V_lt.assign(_normal(self.lt_memory.V_lt.shape))
+
+        self.current_phase.assign(float(PHASE_WARMUP))
+        self._global_step.assign(0.0)
+
+        logger.info(
+            f"reset_memory: K_lt/V_lt re-initialized; phase->{PHASE_WARMUP}, "
+            f"step->0"
+        )
+
+    # ------------------------------------------------------------------
     # Config + factory
     # ------------------------------------------------------------------
 

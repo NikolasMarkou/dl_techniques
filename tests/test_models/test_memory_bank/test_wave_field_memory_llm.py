@@ -423,3 +423,47 @@ class TestPhaseStepRoundTrip:
         )
         assert int(loaded.current_phase.numpy()) == 3
         assert int(loaded._global_step.numpy()) == 1234
+
+
+# ---------------------------------------------------------------------
+# O3: reset_memory
+# ---------------------------------------------------------------------
+
+
+class TestResetMemory:
+    """O3: `reset_memory()` re-randomizes K_lt / V_lt and zeros the
+    phase + step counters."""
+
+    def test_reset_memory_restarts_state(self):
+        m = _build_tiny()
+        # Trigger build.
+        _ = m(np.zeros((1, 4), dtype=np.int32))
+
+        klt_before = np.asarray(m.lt_memory.K_lt).copy()
+        vlt_before = np.asarray(m.lt_memory.V_lt).copy()
+        m.current_phase.assign(3.0)
+        m._global_step.assign(1234.0)
+
+        m.reset_memory(seed=42)
+
+        klt_after = np.asarray(m.lt_memory.K_lt)
+        vlt_after = np.asarray(m.lt_memory.V_lt)
+        # K_lt and V_lt changed.
+        assert not np.allclose(klt_before, klt_after)
+        assert not np.allclose(vlt_before, vlt_after)
+        # Counters reset.
+        assert int(m.current_phase.numpy()) == 1
+        assert int(m._global_step.numpy()) == 0
+
+    def test_reset_memory_seed_is_deterministic(self):
+        m1 = _build_tiny()
+        m2 = _build_tiny()
+        _ = m1(np.zeros((1, 4), dtype=np.int32))
+        _ = m2(np.zeros((1, 4), dtype=np.int32))
+        m1.reset_memory(seed=7)
+        m2.reset_memory(seed=7)
+        np.testing.assert_allclose(
+            np.asarray(m1.lt_memory.K_lt),
+            np.asarray(m2.lt_memory.K_lt),
+            atol=1e-7,
+        )
