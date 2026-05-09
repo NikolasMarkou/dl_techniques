@@ -50,6 +50,12 @@ from dl_techniques.models.memory_bank.write_controller import (
 from dl_techniques.models.memory_bank.read_controller import (
     MemoryReadController,
 )
+from dl_techniques.models.memory_bank.phase_scheduler import (
+    PHASE_WARMUP,
+    PHASE_FREEZE_BACKBONE,
+    PHASE_FULL,
+    PHASE_EXTEND,
+)
 
 
 # ---------------------------------------------------------------------
@@ -360,8 +366,8 @@ class WaveFieldMemoryLLM(keras.Model):
         x = self.embed_norm(x)
         x = self.embed_dropout(x, training=training)
 
-        # Phase 1 disables memory entirely.
-        memory_active = ops.not_equal(self.current_phase, 1)
+        # Phase 1 (PHASE_WARMUP) disables memory entirely.
+        memory_active = ops.not_equal(self.current_phase, PHASE_WARMUP)
 
         k_wm = None
         v_wm = None
@@ -482,11 +488,11 @@ class WaveFieldMemoryLLM(keras.Model):
             )
             return
 
-        # Run the warmup with current_phase forced to 1 so the read tap
-        # is bypassed (we still build all variables; we just skip the
-        # memory contribution).
+        # Run the warmup with current_phase forced to PHASE_WARMUP so the
+        # read tap is bypassed (we still build all variables; we just skip
+        # the memory contribution).
         prev_phase = int(self.current_phase.numpy())
-        self.current_phase.assign(1)
+        self.current_phase.assign(PHASE_WARMUP)
 
         try:
             hiddens: List[np.ndarray] = []

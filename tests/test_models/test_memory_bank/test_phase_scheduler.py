@@ -11,7 +11,13 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.memory_bank.phase_scheduler import PhaseScheduler
+from dl_techniques.models.memory_bank.phase_scheduler import (
+    PhaseScheduler,
+    PHASE_WARMUP,
+    PHASE_FREEZE_BACKBONE,
+    PHASE_FULL,
+    PHASE_EXTEND,
+)
 
 
 # ---------------------------------------------------------------------
@@ -152,3 +158,23 @@ class TestPhaseScheduler:
         assert cfg["phase2_steps"] == 7
         assert cfg["phase3_steps"] == 11
         assert cfg["warmup_num_batches"] == 4
+
+
+class TestPhaseConstants:
+    """D2: module-level phase constants are exported and used by the
+    scheduler's `_step_to_phase`."""
+
+    def test_constants_have_expected_int_values(self):
+        assert PHASE_WARMUP == 1
+        assert PHASE_FREEZE_BACKBONE == 2
+        assert PHASE_FULL == 3
+        assert PHASE_EXTEND == 4
+
+    def test_step_to_phase_uses_constants(self):
+        s = PhaseScheduler(
+            phase1_steps=10, phase2_steps=10, phase3_steps=10,
+        )
+        assert s._step_to_phase(0) == PHASE_WARMUP
+        assert s._step_to_phase(10) == PHASE_FREEZE_BACKBONE
+        assert s._step_to_phase(20) == PHASE_FULL
+        assert s._step_to_phase(30) == PHASE_EXTEND

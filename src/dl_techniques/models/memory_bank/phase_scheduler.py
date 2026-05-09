@@ -35,6 +35,17 @@ from dl_techniques.utils.logger import logger
 
 
 # ---------------------------------------------------------------------
+# D2: Module-level phase constants. These are the canonical names —
+# any code path that checks `current_phase == N` should import these.
+# ---------------------------------------------------------------------
+
+PHASE_WARMUP = 1            # P1 — backbone trainable, memory bypassed
+PHASE_FREEZE_BACKBONE = 2   # P2 — backbone frozen, memory + aux losses on
+PHASE_FULL = 3              # P3 — everything trainable, aux losses on
+PHASE_EXTEND = 4            # P4 — same trainable surface as P3
+
+
+# ---------------------------------------------------------------------
 
 
 class PhaseScheduler(keras.callbacks.Callback):
@@ -90,12 +101,12 @@ class PhaseScheduler(keras.callbacks.Callback):
 
     def _step_to_phase(self, step: int) -> int:
         if step < self._b1:
-            return 1
+            return PHASE_WARMUP
         if step < self._b2:
-            return 2
+            return PHASE_FREEZE_BACKBONE
         if step < self._b3:
-            return 3
-        return 4
+            return PHASE_FULL
+        return PHASE_EXTEND
 
     def _read_global_step(self) -> int:
         if not hasattr(self.model, "_global_step"):
@@ -108,11 +119,11 @@ class PhaseScheduler(keras.callbacks.Callback):
 
     def _apply_phase(self, phase: int) -> None:
         """Apply trainable flags + aux-loss flags + warmup for `phase`."""
-        if phase == 1:
+        if phase == PHASE_WARMUP:
             self._set_backbone_trainable(True)
             self._set_memory_trainable(True)
             self._set_aux_losses(False)
-        elif phase == 2:
+        elif phase == PHASE_FREEZE_BACKBONE:
             # Freeze backbone, unfreeze memory, enable aux losses.
             self._set_backbone_trainable(False)
             self._set_memory_trainable(True)
@@ -129,12 +140,12 @@ class PhaseScheduler(keras.callbacks.Callback):
                     logger.warning(
                         "PhaseScheduler: model has no warmup_memory_keys"
                     )
-        elif phase == 3:
+        elif phase == PHASE_FULL:
             # Unfreeze backbone; aux losses stay on.
             self._set_backbone_trainable(True)
             self._set_memory_trainable(True)
             self._set_aux_losses(True)
-        else:  # phase 4: same trainable surface as phase 3.
+        else:  # PHASE_EXTEND: same trainable surface as PHASE_FULL.
             self._set_backbone_trainable(True)
             self._set_memory_trainable(True)
             self._set_aux_losses(True)
