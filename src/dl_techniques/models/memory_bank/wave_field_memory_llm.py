@@ -382,6 +382,23 @@ class WaveFieldMemoryLLM(keras.Model):
 
         # Phase 1 (PHASE_WARMUP) disables memory entirely.
         # current_phase is float32; cast PHASE_WARMUP to match.
+        #
+        # R1 design note: the plan considered guarding the read pass
+        # under `not training` with `ops.cond(memory_active, ...)` to
+        # skip retrieval at eval time in P1. Two reasons we keep the
+        # multiply-by-zero pattern instead:
+        #   (1) `keras.ops.cond` inside a tf.function-compiled graph
+        #       traces BOTH branches in TF backend Keras 3. The
+        #       "skip retrieval" branch would still pay the trace cost
+        #       and would not actually skip the kernel launch.
+        #   (2) The retrieval kernels are small relative to backbone
+        #       attention; the savings are not worth the divergence
+        #       between training and eval graphs (which would also
+        #       complicate save/load by changing call-time behavior).
+        # Keep the gate-by-zero. P1 add_loss calls are gated by the
+        # `if training` block and the per-flag enables in
+        # `MemoryReadController._maybe_add_aux_losses`, so eval-time
+        # forward in P1 is correct even with retrieval running.
         memory_active = ops.not_equal(
             self.current_phase, ops.cast(PHASE_WARMUP, "float32"),
         )
