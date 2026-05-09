@@ -61,6 +61,25 @@ from dl_techniques.models.memory_bank.phase_scheduler import (
 # ---------------------------------------------------------------------
 
 
+def linear_top_k_anneal(
+    start: int, end: int, end_step: int,
+) -> Callable[[int], int]:
+    """O7 helper: linear anneal of `top_k` from `start` to `end` over the
+    first `end_step` training steps. After `end_step`, returns `end`.
+    Returns a callable suitable for `WaveFieldMemoryLLM(top_k_schedule=...)`.
+    """
+    if end_step <= 0:
+        raise ValueError(f"end_step must be positive, got {end_step}")
+
+    def schedule(step: int) -> int:
+        if step >= end_step:
+            return int(end)
+        frac = float(step) / float(end_step)
+        return int(round(start + (end - start) * frac))
+
+    return schedule
+
+
 def split_trainable_by_prefix(
     variables: List[Any],
     memory_prefixes: Tuple[str, ...] = ("memory_", "gate_"),
@@ -165,6 +184,12 @@ class WaveFieldMemoryLLM(keras.Model):
         # O6 — opt-in V_lt diversity aux loss. Default False so existing
         # variants and tests are unaffected.
         enable_v_diversity: bool = False,
+        # O7 — optional schedule for `read_controller.top_k`. A callable
+        # `step -> int` that returns the new top_k for a given training
+        # step. Applied by `PhaseScheduler.on_train_batch_begin` only on
+        # phase transitions (cheap retrace boundary). NOT serialized
+        # (callables can't round-trip via get_config).
+        top_k_schedule: Optional[Callable[[int], int]] = None,
         # Common transformer dropout / norm params.
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
@@ -212,6 +237,7 @@ class WaveFieldMemoryLLM(keras.Model):
         self.infonce_negatives = infonce_negatives
         self.infonce_temperature = infonce_temperature
         self.enable_v_diversity = enable_v_diversity
+        self.top_k_schedule = top_k_schedule
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range

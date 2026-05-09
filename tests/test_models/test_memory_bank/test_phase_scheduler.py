@@ -232,3 +232,94 @@ class TestEmbedDropoutWalked:
         assert m.lt_memory.trainable is True
         # aux losses off
         assert m.read_controller.enable_gate_entropy is False
+
+
+class TestTopKSchedule:
+    """O7: PhaseScheduler applies `model.top_k_schedule(step)` to
+    `read_controller.top_k` on phase transitions."""
+
+    def _make_model_with_schedule(self, schedule):
+        from unittest.mock import MagicMock
+
+        class _LayerStub:
+            def __init__(self):
+                self.trainable = True
+
+        m = _MockModel()
+        m.token_embeddings = _LayerStub()
+        m.position_embeddings = _LayerStub()
+        m.embed_norm = _LayerStub()
+        m.embed_dropout = _LayerStub()
+        m.final_norm = _LayerStub()
+        m.lm_head = _LayerStub()
+        m.lt_memory = _LayerStub()
+        m.write_controller = _LayerStub()
+        # read_controller needs `.top_k` attr (not a MagicMock so we can
+        # mutate it cleanly).
+        rc = _LayerStub()
+        rc.top_k = 32
+        rc.enable_gate_entropy = False
+        rc.enable_load_balance = False
+        rc.enable_z_loss = False
+        rc.enable_diversity = False
+        rc.enable_infonce = False
+        rc.enable_v_diversity = False
+        m.read_controller = rc
+        m.blocks = [_LayerStub() for _ in range(2)]
+        m.top_k_schedule = schedule
+        return m
+
+    def test_schedule_applied_on_phase_transition(self):
+        applied_steps = []
+        def schedule(step):
+            applied_steps.append(step)
+            return 16 if step < 10 else 8
+
+        m = self._make_model_with_schedule(schedule)
+        s = PhaseScheduler(phase1_steps=10, phase2_steps=10, phase3_steps=10)
+        s.set_model(m)
+
+        # Phase 1 transition (on_train_begin doesn't call schedule per
+        # current design; only batch-begin transitions do).
+        s.on_train_begin()
+        assert m.read_controller.top_k == 32  # unchanged at P1 start
+
+        # Cross into Phase 2.
+        m.set_step(10)
+        s.on_train_batch_begin(0)
+        assert 10 in applied_steps
+        assert m.read_controller.top_k == 8
+
+        # Same phase: schedule NOT re-applied.
+        applied_steps.clear()
+        m.set_step(11)
+        s.on_train_batch_begin(0)
+        assert applied_steps == []
+        assert m.read_controller.top_k == 8
+
+    def test_schedule_handles_invalid_returns(self):
+        def bad_schedule(step):
+            return -1
+
+        m = self._make_model_with_schedule(bad_schedule)
+        s = PhaseScheduler(phase1_steps=5, phase2_steps=5, phase3_steps=5)
+        s.set_model(m)
+        s.on_train_begin()
+        m.set_step(5)
+        # Should NOT raise; logs warning and keeps current top_k.
+        s.on_train_batch_begin(0)
+        assert m.read_controller.top_k == 32
+
+
+class TestLinearTopKAnneal:
+    """O7 helper: `linear_top_k_anneal` produces the expected schedule."""
+
+    def test_linear_schedule(self):
+        from dl_techniques.models.memory_bank.wave_field_memory_llm import (
+            linear_top_k_anneal,
+        )
+        sched = linear_top_k_anneal(start=64, end=8, end_step=100)
+        assert sched(0) == 64
+        assert sched(50) in (35, 36)  # 64 + (-56)*0.5 = 36
+        assert sched(100) == 8
+        assert sched(200) == 8  # past end_step => clamp

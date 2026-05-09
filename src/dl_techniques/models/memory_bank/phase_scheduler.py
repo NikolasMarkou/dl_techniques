@@ -246,6 +246,40 @@ class PhaseScheduler(keras.callbacks.Callback):
         if phase != self._last_phase:
             self._apply_phase(phase)
             self._last_phase = phase
+            # O7: apply optional top_k schedule on phase transitions.
+            self._apply_top_k_schedule(step)
+
+    def _apply_top_k_schedule(self, step: int) -> None:
+        """O7: if `model.top_k_schedule` is set, evaluate it at the
+        current step and assign the result to
+        `model.read_controller.top_k`. Done only on phase transitions
+        (cheap; phase-1 -> phase-2 is the only frequent case)."""
+        m = self.model
+        sched = getattr(m, "top_k_schedule", None)
+        if sched is None:
+            return
+        rc = getattr(m, "read_controller", None)
+        if rc is None:
+            return
+        try:
+            new_top_k = int(sched(step))
+        except Exception as exc:
+            logger.warning(
+                f"PhaseScheduler: top_k_schedule({step}) raised {exc}; "
+                f"keeping top_k={rc.top_k}"
+            )
+            return
+        if new_top_k <= 0:
+            logger.warning(
+                f"PhaseScheduler: top_k_schedule returned {new_top_k}; "
+                f"keeping top_k={rc.top_k}"
+            )
+            return
+        if new_top_k != rc.top_k:
+            logger.info(
+                f"PhaseScheduler: top_k {rc.top_k} -> {new_top_k} (step={step})"
+            )
+            rc.top_k = new_top_k
 
     # ------------------------------------------------------------------
     # Config (for callback save/restore via training logs)
