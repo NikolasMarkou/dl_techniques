@@ -44,22 +44,24 @@ Trainable variables route to the **memory** optimizer iff their `.name` contains
 
 - `memory_lt_bank`, `memory_wm_bank`, `memory_wm_W_K`, `memory_wm_W_V`
 - `memory_write_controller`, `memory_read_controller`
-- `memory_read_W_Q`, `memory_read_W_out`, `memory_read_out_norm`, `memory_read_log_temp`
+- `memory_read_W_Q`, `memory_read_W_out`, `memory_read_out_norm`, `memory_read_log_temp`, `memory_read_log_temp_nce`
 - `gate_W_g`
 - `memory_K_lt`, `memory_V_lt`, `memory_current_phase`, `memory_global_step`
 
-Renaming any of these silently misroutes gradients. Adding new memory weights requires a `memory_` prefix.
+Routing uses **leading-component prefix match** on `name.split('/')[0].startswith(...)` (R3+R4) — not substring — so a stray `memory_*` mid-path won't misroute gradients. Renaming any of the above silently misroutes gradients. Adding new memory weights requires a `memory_` prefix on the leading component.
 
 ## Curriculum
 
 ```
-Phase 1: [0, P1)              backbone trainable, memory trainable, aux losses OFF, memory bypassed
-                              (gate output zeroed via `current_phase == 1` check in forward)
-Phase 2: [P1, P1+P2)          backbone FROZEN, memory trainable, aux losses ON
-                              KMeans warmup runs once at boundary (seeds K_lt)
-Phase 3: [P1+P2, P1+P2+P3)    backbone unfrozen, memory trainable, aux losses ON
-Phase 4: ≥ sum                same trainable surface as Phase 3 (no-op extension)
+PHASE_WARMUP            = 1   [0, P1)              backbone trainable, memory trainable, aux losses OFF, memory bypassed
+                                                   (gate output zeroed via `current_phase == PHASE_WARMUP` check)
+PHASE_FREEZE_BACKBONE   = 2   [P1, P1+P2)          backbone FROZEN, memory trainable, aux losses ON
+                                                   KMeans warmup runs once at boundary (seeds K_lt — W_Q-projected)
+PHASE_FULL              = 3   [P1+P2, P1+P2+P3)    backbone unfrozen, memory trainable, aux losses ON
+PHASE_EXTEND            = 4   ≥ sum                same trainable surface as PHASE_FULL (no-op extension)
 ```
+
+The four phase constants are exported from `phase_scheduler.py` (D2). Use them instead of bare integer literals.
 
 Defaults: P1 = 50k, P2 = 25k, P3 = 100k. `--init-from` in the training script sets `phase1_steps=0` to skip Phase 1 when warm-starting from a `WaveFieldLLM` checkpoint.
 
@@ -75,7 +77,8 @@ All gated by per-flag enable booleans. Computed only when `training=True`.
 | `load_balance` | Switch-Transformer-style: `λ · S_lt · Σᵢ stop_grad(fᵢ) · pᵢ` over `M_LT` slice. | 1e-2 |
 | `z_loss` | `λ · mean(logsumexp(sim_lt)²)` (Mesh-TF style). | 1e-3 |
 | `diversity` | `λ · mean(off-diag (cos K_lt)²)` over a `diversity_subsample` random subsample. | 1e-3 |
-| `infonce` | Contrast routed-V mean against `infonce_negatives` random V_lt rows. **See bug audit.** | 5e-3 |
+| `infonce` | **B2 redesigned (D-001):** anchor = q_emb (router-mixed V_lt mean over heads); positive = top-1 hard-routed V_lt row mean over heads with stop_gradient; negs = `infonce_negatives` random V_lt rows. Cosine in d_v space, learnable τ = `softplus(memory_read_log_temp_nce) + 1e-3`. | 5e-3 |
+| `v_diversity` (O6, opt-in) | Mirrors `diversity` but over V_lt. Default off (`enable_v_diversity=False`). | 1e-3 |
 
 ## Usage
 
@@ -103,9 +106,23 @@ model.fit(train_ds, validation_data=val_ds, callbacks=[scheduler], epochs=N)
 To deserialize:
 
 ```python
-from dl_techniques.models.memory_bank.wave_field_memory_llm import memory_llm_custom_objects
+from dl_techniques.models.memory_bank import memory_llm_custom_objects  # O9: re-exported from package __init__
 m = keras.models.load_model("model.keras", custom_objects=memory_llm_custom_objects())
 ```
+
+### Opt-in features
+
+| Feature | Constructor flag | Default | Notes |
+|---|---|---|---|
+| Per-head K/V (full MHA over the bank) | `multi_head_keys=True` | `False` | O4. Allocates `(S_lt, num_heads, d_*)` for K_lt/V_lt and reshapes WM K/V. |
+| V_lt diversity aux loss | `enable_v_diversity=True` | `False` | O6. Mirrors K_lt diversity. |
+| top_k schedule | `top_k_schedule=callable` | `None` | O7. Applied by `PhaseScheduler` on phase transitions. NOT serialized. Use `linear_top_k_anneal(start, end, end_step)` helper. |
+| Reset memory | `model.reset_memory(seed=None)` | — | O3. Re-randomizes K_lt/V_lt, zeros phase + step. |
+| Periodic stats | Pass `MemoryStats(...)` callback to `fit` | — | O2. Logs top-K hits, gate percentiles, key utilization, V_lt effective rank every `log_every` batches. |
+
+### Serving / incremental decoding
+
+**Not supported.** The backbone is FFT-based and recomputes the full sequence per call (DECISION plan_2026-05-09_0f39a086/D-002). The memory-bank read/write controllers themselves are incremental-friendly, but a streaming variant of the wave-field attention (or a swap to MHA decoder for serving) is required first. See `WaveFieldMemoryLLM` class docstring for the two future paths.
 
 ## Variants
 
@@ -122,11 +139,13 @@ Constraints: `d_k ≠ d_v`, `d_v < embed_dim`, `embed_dim % num_heads == 0`, `to
 ## Files
 
 ```
-memory_banks.py          # LongTermMemoryBank, WorkingMemoryBank
-write_controller.py      # MemoryWriteController
-read_controller.py       # MemoryReadController + 5 aux losses
-phase_scheduler.py       # PhaseScheduler callback
-wave_field_memory_llm.py # WaveFieldMemoryLLM, split_trainable_by_prefix, memory_llm_custom_objects
+memory_banks.py          # LongTermMemoryBank, WorkingMemoryBank (multi_head_keys aware)
+write_controller.py      # MemoryWriteController (T<=max_seq_len assert)
+read_controller.py       # MemoryReadController + 6 aux losses (gate_entropy, load_balance, z_loss, K_lt diversity, V_lt diversity, redesigned InfoNCE)
+phase_scheduler.py       # PhaseScheduler callback + PHASE_* constants + top_k schedule
+memory_stats.py          # MemoryStats diagnostic callback (O2)
+wave_field_memory_llm.py # WaveFieldMemoryLLM, split_trainable_by_prefix, linear_top_k_anneal, memory_llm_custom_objects
+__init__.py              # Re-exports memory_llm_custom_objects, MemoryStats
 ```
 
 Trainer: `src/train/wave_field_llm/train_memory.py`. Tests: `tests/test_models/test_memory_bank/`.
