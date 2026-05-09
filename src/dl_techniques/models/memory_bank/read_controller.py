@@ -290,17 +290,17 @@ class MemoryReadController(keras.layers.Layer):
         # 5. Build the WM-portion masks:
         #   (a) causal — position t' in WM may only be read when t' <= t.
         #   (b) padding — already-zeroed positions get -inf.
-        # The combined mask is applied as additive -inf on disallowed
-        # positions of the WM slice (last `max_seq_len` columns of M).
+        # R6: split sim into LT/WM slices, add the mask only to the WM
+        # slice, then concatenate. This avoids materializing
+        # `lt_zeros = zeros((B, T, 1, S_lt))` (the LT slice is large —
+        # tens of thousands of slots — and zero-padding it just to add
+        # nothing is wasteful).
         causal_pad_mask_wm = self._build_wm_mask(t, wm_padding_mask)
         # causal_pad_mask_wm shape: (B, T, max_seq_len)
-        # Expand to (B, T, 1, max_seq_len) for broadcast over heads, then
-        # pad with zeros for the M_LT slice (no masking on M_LT).
         wm_mask = ops.expand_dims(causal_pad_mask_wm, axis=2)  # (B, T, 1, max_seq_len)
-        lt_zeros = ops.zeros((b, t, 1, self.s_lt), dtype=sim.dtype)
-        full_mask = ops.concatenate([lt_zeros, wm_mask], axis=-1)  # (B, T, 1, M_static)
-
-        sim = sim + full_mask
+        sim_lt = sim[..., :self.s_lt]                       # (B, T, H, S_lt)
+        sim_wm = sim[..., self.s_lt:] + wm_mask              # (B, T, H, max_seq_len)
+        sim = ops.concatenate([sim_lt, sim_wm], axis=-1)     # (B, T, H, M_static)
 
         # 6. Softmax + STE top-K.
         temp = ops.softplus(self.log_temp) + 0.1

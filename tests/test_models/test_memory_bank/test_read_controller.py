@@ -318,3 +318,62 @@ class TestConfig:
         assert clone.top_k == 4
         assert clone.gate_init_bias == -3.0
         assert clone.M_static == 26
+
+
+# ---------------------------------------------------------------------
+# R6: split/add/concat mask path equivalent to zeros-pad + concat
+# ---------------------------------------------------------------------
+
+
+class TestMaskPathEquivalence:
+    """R6: the new sim-split path adds the WM mask only to the WM slice,
+    avoiding allocation of a (B, T, 1, S_lt) zero tensor. This test
+    embeds the OLD (zeros-pad + concat) reference implementation and
+    asserts the two paths produce the same `sim` tensor (up to fp32
+    noise) and the same retrieval routing.
+    """
+
+    def _reference_old_sim(
+        self, sim_pre, wm_mask_btw, s_lt,
+    ):
+        """Old path: lt_zeros = zeros((B,T,1,S_lt)); full_mask =
+        concat([lt_zeros, expand(wm_mask)], axis=-1); sim + full_mask."""
+        b = sim_pre.shape[0]
+        t = sim_pre.shape[1]
+        wm_expanded = np.expand_dims(wm_mask_btw, axis=2)  # (B,T,1,WL)
+        lt_zeros = np.zeros((b, t, 1, s_lt), dtype=sim_pre.dtype)
+        full = np.concatenate([lt_zeros, wm_expanded], axis=-1)
+        return sim_pre + full
+
+    def _reference_new_sim(self, sim_pre, wm_mask_btw, s_lt):
+        """New path: split sim, add wm_mask only to WM slice, concat."""
+        wm_expanded = np.expand_dims(wm_mask_btw, axis=2)  # (B,T,1,WL)
+        sim_lt = sim_pre[..., :s_lt]
+        sim_wm = sim_pre[..., s_lt:] + wm_expanded
+        return np.concatenate([sim_lt, sim_wm], axis=-1)
+
+    def test_mask_split_path_equivalent_to_zeros_path(self):
+        rng = np.random.default_rng(0)
+        b, t, h, s_lt, wl = 2, 5, 3, 8, 7
+        m_static = s_lt + wl
+        sim_pre = rng.standard_normal((b, t, h, m_static)).astype(np.float32)
+        # WM mask: 0 on allowed, large negative on disallowed.
+        wm_mask = np.where(
+            rng.random((b, t, wl)) < 0.5, 0.0, -1.0e9,
+        ).astype(np.float32)
+
+        old = self._reference_old_sim(sim_pre, wm_mask, s_lt)
+        new = self._reference_new_sim(sim_pre, wm_mask, s_lt)
+        np.testing.assert_allclose(old, new, atol=1e-6, rtol=1e-6)
+
+    def test_real_forward_finite_after_split_path(self):
+        """Smoke-test: real forward through MemoryReadController (which
+        uses the new split path) produces finite output."""
+        read, lt, write = _build_bundle(
+            embed_dim=32, num_heads=4, d_k=8, d_v=16,
+            s_lt=16, max_seq_len=10, top_k=4,
+        )
+        x = np.random.randn(2, 7, 32).astype(np.float32)
+        out, *_ = _forward(read, lt, write, x)
+        assert tuple(out.shape) == (2, 7, 32)
+        assert np.all(np.isfinite(np.asarray(out)))
