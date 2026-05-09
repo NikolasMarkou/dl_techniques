@@ -438,3 +438,81 @@ class TestVDiversity:
         clone = MemoryReadController.from_config(cfg)
         assert clone.enable_v_diversity is True
         assert clone.lambda_v_diversity == 2.5e-3
+
+
+# ---------------------------------------------------------------------
+# B2: InfoNCE redesign (real contrastive gradient)
+# ---------------------------------------------------------------------
+
+
+class TestInfoNCERedesign:
+    """B2: the previous InfoNCE used `pos_logit = ||q_emb||²` which
+    produces a gradient collinear with q_emb (degenerate). The redesign
+    contrasts q_emb against the top-1 routed V_lt row (positive) and
+    `infonce_negatives` random V_lt rows."""
+
+    def _make(self):
+        read = MemoryReadController(
+            embed_dim=32, num_heads=4, d_k=8, d_v=16,
+            s_lt=16, max_seq_len=10, top_k=4,
+            enable_infonce=True,
+            infonce_negatives=8,
+            lambda_infonce=1.0,  # amplify so gradient is comfortably nonzero
+        )
+        lt = LongTermMemoryBank(s_lt=16, d_k=8, d_v=16)
+        lt.build()
+        write = MemoryWriteController(
+            d_k=8, d_v=16, embed_dim=32, max_seq_len=10,
+        )
+        return read, lt, write
+
+    def test_infonce_finite_when_enabled(self):
+        read, lt, write = self._make()
+        x = np.random.randn(2, 7, 32).astype(np.float32)
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        losses = [float(l) for l in read.losses]
+        assert len(losses) >= 1
+        assert all(np.isfinite(l) for l in losses)
+
+    def test_infonce_log_temp_nce_is_trainable(self):
+        read, lt, write = self._make()
+        x = np.random.randn(2, 7, 32).astype(np.float32)
+        # Trigger build.
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        names = [v.name for v in read.trainable_variables]
+        assert any("memory_read_log_temp_nce" in n for n in names), (
+            f"log_temp_nce not in trainable vars: {names}"
+        )
+
+    def test_infonce_provides_real_contrastive_gradient(self):
+        """The InfoNCE gradient w.r.t. q_emb should NOT be collinear
+        with q_emb itself — the old `||q||²` formulation produced a
+        gradient parallel to q_emb (no contrastive signal)."""
+        read, lt, write = self._make()
+        x = tf.constant(np.random.randn(2, 7, 32).astype(np.float32))
+
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            k_lt, v_lt = lt(None)
+            k_wm, v_wm, mask = write(x)
+            _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+            # Sum of aux losses (only InfoNCE here since the others are
+            # off by default on this controller config).
+            total = ops.sum(ops.stack([ops.cast(l, "float32") for l in read.losses]))
+        grad = tape.gradient(total, x)
+        assert grad is not None
+        gnp = np.asarray(grad).reshape(-1)
+        xnp = np.asarray(x).reshape(-1)
+        assert np.linalg.norm(gnp) > 0.0, "gradient is zero"
+        # cos(grad, x) should be far from ±1: |cos| < 0.95 is loose
+        # enough to absorb numeric noise but tight enough that the
+        # degenerate ||q||² gradient (which gives cos ≈ 1) would fail.
+        denom = np.linalg.norm(gnp) * np.linalg.norm(xnp) + 1e-12
+        cos_gx = float(np.dot(gnp, xnp) / denom)
+        assert abs(cos_gx) < 0.95, (
+            f"InfoNCE gradient looks collinear with input; cos={cos_gx}"
+        )

@@ -232,6 +232,17 @@ class MemoryReadController(keras.layers.Layer):
             initializer=self._log_temp_initializer,
             trainable=True,
         )
+        # B2: learnable InfoNCE temperature. tau = softplus(log_temp_nce)
+        # + 1e-3 to keep tau strictly positive.
+        # DECISION plan_2026-05-09_0f39a086/D-001 — added a separate
+        # learnable temperature so the InfoNCE redesign can adapt the
+        # contrastive sharpness independently of the routing softmax.
+        self.log_temp_nce = self.add_weight(
+            name="memory_read_log_temp_nce",
+            shape=(),
+            initializer=keras.initializers.Constant(0.0),
+            trainable=True,
+        )
         super().build(input_shape)
 
     def call(
@@ -463,47 +474,61 @@ class MemoryReadController(keras.layers.Layer):
             div_v = self.lambda_v_diversity * ops.mean(cos_v_off * cos_v_off)
             self.add_loss(div_v)
 
-        # 5. InfoNCE: per-query positive vs `infonce_negatives` random
-        # K_lt rows. Implementation: take v_proj (already aggregated per
-        # query) as the query embedding, compare to mean-of-selected V_lt
-        # for the positive and to V_lt @ random rows for negatives. We
-        # project nothing additional — v_proj is the pooled-retrieved
-        # representation. The contrast is over key indices.
+        # 5. B2 — proper InfoNCE contrastive loss.
+        # DECISION plan_2026-05-09_0f39a086/D-001 — the previous
+        # implementation used `pos_logit = ||q_emb||²` (cosine of q_emb
+        # with stop_gradient(q_emb)) which has a degenerate gradient
+        # collinear with q_emb itself: the loss only ever PUSHED q_emb
+        # away from random V_lt rows, never PULLED q_emb toward the
+        # actually-routed positive. The redesigned loss:
+        #   - anchor   = q_emb (router-mixed V_lt over heads)
+        #   - positive = top-1 hard-routed V_lt row mean over heads,
+        #                with stop_gradient (anchor not the positive)
+        #   - negs     = `infonce_negatives` random V_lt rows,
+        #                with stop_gradient
+        #   - similarity in d_v space, cosine, with learnable
+        #     temperature `tau = softplus(log_temp_nce) + 1e-3`.
         if self.enable_infonce:
-            # Negatives: random index sample from K_lt's value bank V_lt.
+            # Anchor — same router-mixed V_lt mean over heads as before.
+            routed_v_lt = ops.einsum(
+                "bthm,mv->bthv", routing_lt, v_lt,
+            )  # (B, T, H, d_v)
+            q_emb = ops.mean(routed_v_lt, axis=2)  # (B, T, d_v)
+
+            # Positive: hard top-1 V_lt row from the LT slice, mean over
+            # heads. We pick the argmax of routing_lt along the M_LT
+            # axis per (B, T, H), gather the corresponding V_lt rows,
+            # then mean over heads. stop_gradient so q_emb is the
+            # learning end of the contrast.
+            top1_idx = ops.argmax(routing_lt, axis=-1)  # (B, T, H)
+            pos_per_head = ops.take(v_lt, top1_idx, axis=0)  # (B, T, H, d_v)
+            pos_emb = ops.mean(pos_per_head, axis=2)  # (B, T, d_v)
+            pos_emb = ops.stop_gradient(pos_emb)
+
+            # Negatives: random V_lt rows.
             # B4: backend-agnostic random sampling via argsort(uniform).
             n_neg = min(self.infonce_negatives, self.s_lt)
             rand_scores_neg = keras.random.uniform((self.s_lt,))
             idx_neg = ops.argsort(rand_scores_neg)[:n_neg]
             v_neg = ops.take(v_lt, idx_neg, axis=0)  # (n_neg, d_v)
-            # Positive: retrieved V_lt mean for top-1 routing row.
-            # Use the mean of V_lt under routing_lt restricted to the
-            # max position per (B, T, H).
-            # For simplicity here we contrast v_proj (pooled head-concat,
-            # shape (B, T, D)) vs lifted v_neg via a Dense W_out-like
-            # projection — but to avoid introducing extra weights we
-            # contrast in the d_v space using flattened means.
-            # v_proj_query = mean over D -> 1 scalar per (B, T) is too
-            # weak; instead we contrast the mean of routed V_total against
-            # v_neg in d_v space.
-            # routed_v_mean: (B, T, d_v) = mean over heads of retrieved_v
-            # We don't have retrieved_v here; reconstruct via routing @
-            # v_lt for the LT slice.
-            routed_v_lt = ops.einsum(
-                "bthm,mv->bthv", routing_lt, v_lt,
-            )  # (B, T, H, d_v)
-            q_emb = ops.mean(routed_v_lt, axis=2)  # (B, T, d_v)
-            # Positive: stop-grad anchor = same q_emb mean (sanity-only,
-            # collapse-resistant); per blueprint the positive is "mean of
-            # selected keys' values projection of that query" which IS
-            # q_emb. The contrastive signal pushes q_emb away from random
-            # K_lt rows.
-            tau = max(self.infonce_temperature, 1e-6)
-            pos_logit = ops.sum(q_emb * ops.stop_gradient(q_emb), axis=-1)  # (B, T)
+            v_neg = ops.stop_gradient(v_neg)
+
+            # Cosine similarity in d_v space.
+            eps_n = 1e-8
+            q_norm = q_emb / (ops.norm(q_emb, axis=-1, keepdims=True) + eps_n)
+            pos_norm = pos_emb / (
+                ops.norm(pos_emb, axis=-1, keepdims=True) + eps_n
+            )
+            neg_norm = v_neg / (ops.norm(v_neg, axis=-1, keepdims=True) + eps_n)
+
+            pos_logit = ops.sum(q_norm * pos_norm, axis=-1)  # (B, T)
             neg_logits = ops.einsum(
-                "btv,nv->btn", q_emb, v_neg,
+                "btv,nv->btn", q_norm, neg_norm,
             )  # (B, T, n_neg)
-            # Concatenate pos as logit-0 and apply log-softmax.
+
+            # Learnable temperature; bounded below by 1e-3.
+            tau = ops.softplus(self.log_temp_nce) + 1e-3
+
             all_logits = ops.concatenate(
                 [ops.expand_dims(pos_logit, axis=-1), neg_logits], axis=-1,
             )  # (B, T, 1 + n_neg)
