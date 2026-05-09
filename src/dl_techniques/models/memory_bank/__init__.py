@@ -21,5 +21,6 @@ the canonical ``custom_objects`` source for save/load round-trip.
 from dl_techniques.models.memory_bank.wave_field_memory_llm import (
     memory_llm_custom_objects,
 )
+from dl_techniques.models.memory_bank.memory_stats import MemoryStats
 
-__all__ = ["memory_llm_custom_objects"]
+__all__ = ["memory_llm_custom_objects", "MemoryStats"]
