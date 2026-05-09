@@ -43,6 +43,25 @@ _NEG_INF = -1.0e9
 class MemoryReadController(keras.layers.Layer):
     """Multi-head top-K STE retrieval with gated residual injection.
 
+    .. note::
+
+       **Multi-Query Attention (MQA) over keys/values (D1).** By default
+       ``K_lt`` and ``V_lt`` (and the working-memory ``K_wm`` / ``V_wm``)
+       are **shared across heads** — only the query projection ``W_Q`` is
+       per-head. This is the MQA pattern (Shazeer 2019). The STE/top-K
+       retrieval therefore mixes per-head queries against a single set of
+       keys, which is cheaper and (empirically) close to standard MHA.
+       Setting ``multi_head_keys=True`` (see :class:`WaveFieldMemoryLLM`)
+       allocates per-head keys/values; that path is opt-in for ablations.
+
+    .. note::
+
+       **Per-channel gate (D5).** The gate ``g = sigmoid(X_R @ W_g + b_g)``
+       has output dimensionality ``D`` (matching ``embed_dim``), not
+       ``num_heads``. Each hidden channel gets its own gate value. The
+       initial bias is ``-3.0`` so sigmoid ≈ 0.04: at warmup the memory
+       contribution is ~96% bypassed and grows as the gate trains.
+
     :param embed_dim: Hidden-state dimensionality of ``X_R`` (= ``D``).
     :param num_heads: Number of attention heads.
     :param d_k: Per-head key dimensionality.
@@ -223,6 +242,17 @@ class MemoryReadController(keras.layers.Layer):
     ) -> Any:
         """Run retrieval and return ``g * V_proj`` (gated injection).
 
+        .. warning::
+
+           **Positional-7 signature (D3).** This ``call`` takes seven
+           positional tensor inputs (``x_r``, ``k_lt``, ``v_lt``, ``k_wm``,
+           ``v_wm``, ``wm_padding_mask``, ``training``). It is **not**
+           compatible with the Keras Functional API — Functional models
+           expect ``call(inputs, ...)`` with at most one tensor input. The
+           parent :class:`WaveFieldMemoryLLM` is a subclassed
+           :class:`keras.Model` for this reason; do not try to wire this
+           layer into a Functional graph.
+
         :param x_r: Hidden state at the read tap, shape ``(B, T, D)``.
         :param k_lt: Long-term keys, shape ``(S_lt, d_k)``.
         :param v_lt: Long-term values, shape ``(S_lt, d_v)``.
@@ -293,6 +323,11 @@ class MemoryReadController(keras.layers.Layer):
         )
 
         # STE: forward = hard_w, backward = soft_w.
+        # Straight-Through Estimator (Bengio, Léonard, Courville, 2013,
+        # "Estimating or Propagating Gradients Through Stochastic Neurons
+        # for Conditional Computation", arXiv:1308.3432). The forward pass
+        # uses the discrete top-K mask; the backward pass leaks gradients
+        # through the dense softmax so all S_lt+max_seq_len keys learn.
         routing = soft_w + ops.stop_gradient(hard_w - soft_w)
 
         # 7. Retrieve values: einsum('bthm,bmv->bthv').
@@ -381,10 +416,11 @@ class MemoryReadController(keras.layers.Layer):
             if n_sub == self.s_lt:
                 k_sub = k_lt
             else:
-                # Random subsample via tf.random.shuffle on indices.
-                # Backend-agnostic: use keras.random for index sampling.
-                import tensorflow as _tf
-                idx = _tf.random.shuffle(_tf.range(self.s_lt))[:n_sub]
+                # Random subsample via backend-agnostic argsort(uniform).
+                # B4: replaced tf.random.shuffle to keep this routine
+                # backend-agnostic (jax/torch backends have no `tf` module).
+                rand_scores = keras.random.uniform((self.s_lt,))
+                idx = ops.argsort(rand_scores)[:n_sub]
                 k_sub = ops.take(k_lt, idx, axis=0)
             k_norm = k_sub / (ops.norm(k_sub, axis=-1, keepdims=True) + 1e-8)
             cos = ops.matmul(k_norm, ops.transpose(k_norm))  # (n_sub, n_sub)
@@ -401,10 +437,11 @@ class MemoryReadController(keras.layers.Layer):
         # project nothing additional — v_proj is the pooled-retrieved
         # representation. The contrast is over key indices.
         if self.enable_infonce:
-            import tensorflow as _tf
             # Negatives: random index sample from K_lt's value bank V_lt.
+            # B4: backend-agnostic random sampling via argsort(uniform).
             n_neg = min(self.infonce_negatives, self.s_lt)
-            idx_neg = _tf.random.shuffle(_tf.range(self.s_lt))[:n_neg]
+            rand_scores_neg = keras.random.uniform((self.s_lt,))
+            idx_neg = ops.argsort(rand_scores_neg)[:n_neg]
             v_neg = ops.take(v_lt, idx_neg, axis=0)  # (n_neg, d_v)
             # Positive: retrieved V_lt mean for top-1 routing row.
             # Use the mean of V_lt under routing_lt restricted to the

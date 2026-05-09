@@ -16,6 +16,7 @@ be ``add_weight(trainable=False)`` not a plain attribute set in
 from typing import Any, Dict, Optional, Tuple
 
 import keras
+import tensorflow as tf
 from keras import ops
 
 from dl_techniques.models.memory_bank.memory_banks import WorkingMemoryBank
@@ -96,6 +97,18 @@ class MemoryWriteController(keras.layers.Layer):
         # call `len(paddings)` which fails on symbolic tensors).
         b = ops.shape(k_wm)[0]
         t = ops.shape(k_wm)[1]
+        # B6: guard T <= max_seq_len. If a caller passes a longer sequence,
+        # `pad_len` would be negative and `ops.zeros((b, pad_len, ...))`
+        # silently produces an empty / nonsense tensor. We assert in graph
+        # mode via tf.debugging (project convention; this is a model
+        # built only on the TF backend per dl_techniques policy).
+        tf.debugging.assert_less_equal(
+            t, self.max_seq_len,
+            message=(
+                "MemoryWriteController: input sequence length T exceeds "
+                "max_seq_len. T must be <= max_seq_len."
+            ),
+        )
         pad_len = self.max_seq_len - t
 
         zeros_k = ops.zeros((b, pad_len, self.d_k), dtype=k_wm.dtype)

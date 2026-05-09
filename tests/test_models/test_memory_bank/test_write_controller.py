@@ -1,7 +1,9 @@
 """Tests for MemoryWriteController."""
 
 import numpy as np
+import pytest
 import keras
+import tensorflow as tf
 from keras import ops
 
 from dl_techniques.models.memory_bank.write_controller import (
@@ -67,3 +69,12 @@ class TestMemoryWriteController:
         )
         out = ctrl.compute_output_shape((None, 5, 32))
         assert out == ((None, 20, 8), (None, 20, 16), (None, 20))
+
+    def test_assert_t_too_large_raises(self):
+        """B6: T > max_seq_len must raise (was: silent zero-shape pad)."""
+        ctrl = MemoryWriteController(
+            d_k=8, d_v=16, embed_dim=32, max_seq_len=10,
+        )
+        x = np.random.randn(1, 12, 32).astype(np.float32)
+        with pytest.raises((tf.errors.InvalidArgumentError, ValueError)):
+            ctrl(x)

@@ -207,7 +207,7 @@ class WaveFieldMemoryLLM(keras.Model):
         self.current_phase = self.add_weight(
             name="memory_current_phase",
             shape=(),
-            initializer=keras.initializers.Constant(1.0),
+            initializer=keras.initializers.Constant(1),
             trainable=False,
             dtype="int32",
         )
