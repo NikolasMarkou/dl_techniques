@@ -47,6 +47,8 @@ class MemoryWriteController(keras.layers.Layer):
         embed_dim: int,
         max_seq_len: int,
         initializer_range: float = 0.02,
+        num_heads: int = 1,
+        multi_head_keys: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -61,12 +63,16 @@ class MemoryWriteController(keras.layers.Layer):
         self.embed_dim = embed_dim
         self.max_seq_len = max_seq_len
         self.initializer_range = initializer_range
+        self.num_heads = num_heads
+        self.multi_head_keys = multi_head_keys
 
         self.wm_bank = WorkingMemoryBank(
             d_k=d_k,
             d_v=d_v,
             embed_dim=embed_dim,
             initializer_range=initializer_range,
+            num_heads=num_heads,
+            multi_head_keys=multi_head_keys,
             name="memory_wm_bank",
         )
 
@@ -111,19 +117,36 @@ class MemoryWriteController(keras.layers.Layer):
         )
         pad_len = self.max_seq_len - t
 
-        zeros_k = ops.zeros((b, pad_len, self.d_k), dtype=k_wm.dtype)
-        zeros_v = ops.zeros((b, pad_len, self.d_v), dtype=v_wm.dtype)
-        k_wm_padded = ops.concatenate([k_wm, zeros_k], axis=1)
-        v_wm_padded = ops.concatenate([v_wm, zeros_v], axis=1)
-
-        # Reshape to pin the static axis-1 size so downstream ops.one_hot
-        # has a known M_static.
-        k_wm_padded = ops.reshape(
-            k_wm_padded, (b, self.max_seq_len, self.d_k),
-        )
-        v_wm_padded = ops.reshape(
-            v_wm_padded, (b, self.max_seq_len, self.d_v),
-        )
+        if self.multi_head_keys:
+            # Per-head shape (B, T, H, d). Pad along T (axis=1) with H
+            # extra dim preserved.
+            zeros_k = ops.zeros(
+                (b, pad_len, self.num_heads, self.d_k), dtype=k_wm.dtype,
+            )
+            zeros_v = ops.zeros(
+                (b, pad_len, self.num_heads, self.d_v), dtype=v_wm.dtype,
+            )
+            k_wm_padded = ops.concatenate([k_wm, zeros_k], axis=1)
+            v_wm_padded = ops.concatenate([v_wm, zeros_v], axis=1)
+            k_wm_padded = ops.reshape(
+                k_wm_padded,
+                (b, self.max_seq_len, self.num_heads, self.d_k),
+            )
+            v_wm_padded = ops.reshape(
+                v_wm_padded,
+                (b, self.max_seq_len, self.num_heads, self.d_v),
+            )
+        else:
+            zeros_k = ops.zeros((b, pad_len, self.d_k), dtype=k_wm.dtype)
+            zeros_v = ops.zeros((b, pad_len, self.d_v), dtype=v_wm.dtype)
+            k_wm_padded = ops.concatenate([k_wm, zeros_k], axis=1)
+            v_wm_padded = ops.concatenate([v_wm, zeros_v], axis=1)
+            k_wm_padded = ops.reshape(
+                k_wm_padded, (b, self.max_seq_len, self.d_k),
+            )
+            v_wm_padded = ops.reshape(
+                v_wm_padded, (b, self.max_seq_len, self.d_v),
+            )
 
         # Padding mask: 1.0 on positions [0, T), 0.0 on [T, max_seq_len).
         positions = ops.arange(self.max_seq_len, dtype="int32")
@@ -141,6 +164,12 @@ class MemoryWriteController(keras.layers.Layer):
         self, input_shape: Tuple[Optional[int], ...],
     ) -> Tuple[Tuple[Optional[int], ...], ...]:
         b = input_shape[0]
+        if self.multi_head_keys:
+            return (
+                (b, self.max_seq_len, self.num_heads, self.d_k),
+                (b, self.max_seq_len, self.num_heads, self.d_v),
+                (b, self.max_seq_len),
+            )
         return (
             (b, self.max_seq_len, self.d_k),
             (b, self.max_seq_len, self.d_v),
@@ -155,5 +184,7 @@ class MemoryWriteController(keras.layers.Layer):
             "embed_dim": self.embed_dim,
             "max_seq_len": self.max_seq_len,
             "initializer_range": self.initializer_range,
+            "num_heads": self.num_heads,
+            "multi_head_keys": self.multi_head_keys,
         })
         return config

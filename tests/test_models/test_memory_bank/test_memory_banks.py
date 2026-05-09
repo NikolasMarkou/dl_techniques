@@ -118,3 +118,62 @@ class TestWorkingMemoryBank:
         wm = WorkingMemoryBank(d_k=8, d_v=16, embed_dim=32)
         out = wm.compute_output_shape((None, 7, 32))
         assert out == ((None, 7, 8), (None, 7, 16))
+
+
+# ---------------------------------------------------------------------
+# O4: multi_head_keys variant (per-head K/V)
+# ---------------------------------------------------------------------
+
+
+class TestMultiHeadKeysVariant:
+    def test_lt_bank_mha_shapes(self):
+        from dl_techniques.models.memory_bank.memory_banks import (
+            LongTermMemoryBank,
+        )
+        bank = LongTermMemoryBank(
+            s_lt=8, d_k=4, d_v=16, num_heads=4, multi_head_keys=True,
+        )
+        bank.build()
+        assert tuple(bank.K_lt.shape) == (8, 4, 4)
+        assert tuple(bank.V_lt.shape) == (8, 4, 16)
+
+    def test_lt_bank_assign_keys_from_kmeans_mha(self):
+        import numpy as np
+        from dl_techniques.models.memory_bank.memory_banks import (
+            LongTermMemoryBank,
+        )
+        bank = LongTermMemoryBank(
+            s_lt=8, d_k=4, d_v=16, num_heads=4, multi_head_keys=True,
+        )
+        bank.build()
+        # Pass MQA-shape centroids; bank should tile across heads.
+        centroids = np.random.randn(8, 4).astype(np.float32)
+        bank.assign_keys_from_kmeans(centroids)
+        klt = np.asarray(bank.K_lt)
+        for h in range(4):
+            np.testing.assert_allclose(klt[:, h, :], centroids)
+
+    def test_wm_bank_mha_shapes(self):
+        import numpy as np
+        from dl_techniques.models.memory_bank.memory_banks import (
+            WorkingMemoryBank,
+        )
+        bank = WorkingMemoryBank(
+            d_k=4, d_v=16, embed_dim=32, num_heads=4, multi_head_keys=True,
+        )
+        x = np.random.randn(2, 7, 32).astype(np.float32)
+        k, v = bank(x)
+        assert tuple(k.shape) == (2, 7, 4, 4)
+        assert tuple(v.shape) == (2, 7, 4, 16)
+
+    def test_lt_bank_round_trip_config_mha(self):
+        from dl_techniques.models.memory_bank.memory_banks import (
+            LongTermMemoryBank,
+        )
+        bank = LongTermMemoryBank(
+            s_lt=8, d_k=4, d_v=16, num_heads=3, multi_head_keys=True,
+        )
+        cfg = bank.get_config()
+        clone = LongTermMemoryBank.from_config(cfg)
+        assert clone.num_heads == 3
+        assert clone.multi_head_keys is True

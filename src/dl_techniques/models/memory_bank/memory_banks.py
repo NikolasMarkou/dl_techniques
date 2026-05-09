@@ -56,6 +56,8 @@ class LongTermMemoryBank(keras.layers.Layer):
         d_k: int,
         d_v: int,
         initializer_range: float = 0.02,
+        num_heads: int = 1,
+        multi_head_keys: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -71,11 +73,18 @@ class LongTermMemoryBank(keras.layers.Layer):
                 f"d_k must differ from d_v (blueprint constraint); "
                 f"got d_k=d_v={d_k}"
             )
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
 
         self.s_lt = s_lt
         self.d_k = d_k
         self.d_v = d_v
         self.initializer_range = initializer_range
+        # O4: per-head keys/values when `multi_head_keys=True`.
+        # `num_heads` is only used when the flag is True (otherwise the
+        # bank is single-head MQA-style).
+        self.num_heads = num_heads
+        self.multi_head_keys = multi_head_keys
 
         self._k_initializer = keras.initializers.RandomNormal(
             stddev=initializer_range,
@@ -87,15 +96,21 @@ class LongTermMemoryBank(keras.layers.Layer):
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         # Names carry the `memory_` prefix so the custom train_step can
         # route gradients to the memory optimizer.
+        if self.multi_head_keys:
+            k_shape = (self.s_lt, self.num_heads, self.d_k)
+            v_shape = (self.s_lt, self.num_heads, self.d_v)
+        else:
+            k_shape = (self.s_lt, self.d_k)
+            v_shape = (self.s_lt, self.d_v)
         self.K_lt = self.add_weight(
             name="memory_K_lt",
-            shape=(self.s_lt, self.d_k),
+            shape=k_shape,
             initializer=self._k_initializer,
             trainable=True,
         )
         self.V_lt = self.add_weight(
             name="memory_V_lt",
-            shape=(self.s_lt, self.d_v),
+            shape=v_shape,
             initializer=self._v_initializer,
             trainable=True,
         )
@@ -113,15 +128,35 @@ class LongTermMemoryBank(keras.layers.Layer):
     def assign_keys_from_kmeans(self, centroids: np.ndarray) -> None:
         """Replace ``K_lt`` with offline KMeans centroids.
 
-        :param centroids: Numpy array of shape ``(s_lt, d_k)``. Raises if
-            shape mismatch.
+        :param centroids: Numpy array of shape ``(s_lt, d_k)`` for MQA
+            mode, or ``(s_lt, num_heads, d_k)`` for ``multi_head_keys=
+            True``. In MQA mode the same centroids are used for every
+            head (broadcast on read). In MHA mode the caller is
+            responsible for producing per-head centroids — the simplest
+            policy is to pass the MQA centroids tiled across heads
+            (i.e. ``np.broadcast_to(c[:, None, :], (s_lt, H, d_k))``).
         """
         centroids = np.asarray(centroids, dtype=np.float32)
-        if centroids.shape != (self.s_lt, self.d_k):
-            raise ValueError(
-                f"centroids shape {centroids.shape} does not match "
-                f"(s_lt={self.s_lt}, d_k={self.d_k})"
-            )
+        if self.multi_head_keys:
+            expected = (self.s_lt, self.num_heads, self.d_k)
+            if centroids.shape == (self.s_lt, self.d_k):
+                # Convenience: caller passed MQA-shape centroids; tile
+                # across heads.
+                centroids = np.broadcast_to(
+                    centroids[:, None, :], expected,
+                ).copy()
+            if centroids.shape != expected:
+                raise ValueError(
+                    f"centroids shape {centroids.shape} does not match "
+                    f"(s_lt={self.s_lt}, num_heads={self.num_heads}, "
+                    f"d_k={self.d_k})"
+                )
+        else:
+            if centroids.shape != (self.s_lt, self.d_k):
+                raise ValueError(
+                    f"centroids shape {centroids.shape} does not match "
+                    f"(s_lt={self.s_lt}, d_k={self.d_k})"
+                )
         self.K_lt.assign(centroids)
         logger.info(
             f"LongTermMemoryBank: K_lt seeded from KMeans "
@@ -135,6 +170,8 @@ class LongTermMemoryBank(keras.layers.Layer):
             "d_k": self.d_k,
             "d_v": self.d_v,
             "initializer_range": self.initializer_range,
+            "num_heads": self.num_heads,
+            "multi_head_keys": self.multi_head_keys,
         })
         return config
 
@@ -165,6 +202,8 @@ class WorkingMemoryBank(keras.layers.Layer):
         d_v: int,
         embed_dim: int,
         initializer_range: float = 0.02,
+        num_heads: int = 1,
+        multi_head_keys: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -184,26 +223,36 @@ class WorkingMemoryBank(keras.layers.Layer):
                 f"d_v ({d_v}) must be < embed_dim ({embed_dim}) "
                 f"(bottleneck constraint)"
             )
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
 
         self.d_k = d_k
         self.d_v = d_v
         self.embed_dim = embed_dim
         self.initializer_range = initializer_range
+        self.num_heads = num_heads
+        self.multi_head_keys = multi_head_keys
 
         kernel_init = keras.initializers.TruncatedNormal(
             stddev=initializer_range,
         )
 
+        # O4: per-head Dense outputs when multi_head_keys=True. The
+        # output dim is `num_heads * d_k` (resp. `num_heads * d_v`); the
+        # call() reshapes to (B, T, num_heads, d_k/d_v).
+        wk_out = num_heads * d_k if multi_head_keys else d_k
+        wv_out = num_heads * d_v if multi_head_keys else d_v
+
         # Variable name prefixes carry `memory_` so the custom train_step
         # can route gradients to the memory optimizer.
         self.W_K = keras.layers.Dense(
-            d_k,
+            wk_out,
             use_bias=False,
             kernel_initializer=kernel_init,
             name="memory_wm_W_K",
         )
         self.W_V = keras.layers.Dense(
-            d_v,
+            wv_out,
             use_bias=True,
             kernel_initializer=kernel_init,
             name="memory_wm_W_V",
@@ -224,17 +273,29 @@ class WorkingMemoryBank(keras.layers.Layer):
 
         :param x_w: Hidden-state tensor of shape ``(B, T, D)``.
         :param training: Forwarded for parity (no dropout here).
-        :returns: ``(K_wm (B, T, d_k), V_wm (B, T, d_v))``.
+        :returns: For MQA mode: ``(K_wm (B, T, d_k), V_wm (B, T, d_v))``.
+            For ``multi_head_keys=True``:
+            ``(K_wm (B, T, num_heads, d_k), V_wm (B, T, num_heads, d_v))``.
         """
         del training  # unused
         k_wm = self.W_K(x_w)
         v_wm = self.W_V(x_w)
+        if self.multi_head_keys:
+            b = ops.shape(x_w)[0]
+            t = ops.shape(x_w)[1]
+            k_wm = ops.reshape(k_wm, (b, t, self.num_heads, self.d_k))
+            v_wm = ops.reshape(v_wm, (b, t, self.num_heads, self.d_v))
         return k_wm, v_wm
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...],
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         b, t = input_shape[0], input_shape[1]
+        if self.multi_head_keys:
+            return (
+                (b, t, self.num_heads, self.d_k),
+                (b, t, self.num_heads, self.d_v),
+            )
         return ((b, t, self.d_k), (b, t, self.d_v))
 
     def get_config(self) -> Dict[str, Any]:
@@ -244,5 +305,7 @@ class WorkingMemoryBank(keras.layers.Layer):
             "d_v": self.d_v,
             "embed_dim": self.embed_dim,
             "initializer_range": self.initializer_range,
+            "num_heads": self.num_heads,
+            "multi_head_keys": self.multi_head_keys,
         })
         return config

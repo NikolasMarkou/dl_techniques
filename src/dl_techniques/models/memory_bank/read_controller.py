@@ -108,6 +108,11 @@ class MemoryReadController(keras.layers.Layer):
         enable_diversity: bool = False,
         enable_infonce: bool = False,
         enable_v_diversity: bool = False,
+        # O4 — opt-in per-head keys/values. When True, K_lt/V_lt and the
+        # working-memory K/V are sized (..., num_heads, d_*) and the
+        # similarity / retrieval einsums use per-head signatures.
+        # Default False keeps MQA behavior bit-exact.
+        multi_head_keys: bool = False,
         # Aux loss coefficients.
         lambda_gate_entropy: float = 1e-3,
         lambda_load_balance: float = 1e-2,
@@ -162,6 +167,7 @@ class MemoryReadController(keras.layers.Layer):
         self.enable_diversity = enable_diversity
         self.enable_infonce = enable_infonce
         self.enable_v_diversity = enable_v_diversity
+        self.multi_head_keys = multi_head_keys
 
         self.lambda_gate_entropy = lambda_gate_entropy
         self.lambda_load_balance = lambda_load_balance
@@ -287,20 +293,33 @@ class MemoryReadController(keras.layers.Layer):
         q = ops.reshape(q_flat, (b, t, self.num_heads, self.d_k))  # (B, T, H, d_k)
 
         # 2. Tile K_lt / V_lt across batch.
-        # K_lt: (S_lt, d_k) -> (1, S_lt, d_k) -> (B, S_lt, d_k).
-        k_lt_b = ops.broadcast_to(
-            ops.expand_dims(k_lt, axis=0), (b, self.s_lt, self.d_k),
-        )
-        v_lt_b = ops.broadcast_to(
-            ops.expand_dims(v_lt, axis=0), (b, self.s_lt, self.d_v),
-        )
+        if self.multi_head_keys:
+            # K_lt: (S_lt, H, d_k) -> (B, S_lt, H, d_k).
+            k_lt_b = ops.broadcast_to(
+                ops.expand_dims(k_lt, axis=0),
+                (b, self.s_lt, self.num_heads, self.d_k),
+            )
+            v_lt_b = ops.broadcast_to(
+                ops.expand_dims(v_lt, axis=0),
+                (b, self.s_lt, self.num_heads, self.d_v),
+            )
+        else:
+            k_lt_b = ops.broadcast_to(
+                ops.expand_dims(k_lt, axis=0), (b, self.s_lt, self.d_k),
+            )
+            v_lt_b = ops.broadcast_to(
+                ops.expand_dims(v_lt, axis=0), (b, self.s_lt, self.d_v),
+            )
 
-        # 3. Concatenate to total keys/values along axis=1.
-        k_total = ops.concatenate([k_lt_b, k_wm], axis=1)  # (B, M_static, d_k)
-        v_total = ops.concatenate([v_lt_b, v_wm], axis=1)  # (B, M_static, d_v)
+        # 3. Concatenate to total keys/values along axis=1 (M axis).
+        k_total = ops.concatenate([k_lt_b, k_wm], axis=1)
+        v_total = ops.concatenate([v_lt_b, v_wm], axis=1)
 
-        # 4. Similarity: einsum('bthk,bmk->bthm').
-        sim = ops.einsum("bthk,bmk->bthm", q, k_total) / self._sqrt_dk
+        # 4. Similarity. MQA: 'bthk,bmk->bthm'. MHA: 'bthk,bmhk->bthm'.
+        if self.multi_head_keys:
+            sim = ops.einsum("bthk,bmhk->bthm", q, k_total) / self._sqrt_dk
+        else:
+            sim = ops.einsum("bthk,bmk->bthm", q, k_total) / self._sqrt_dk
 
         # 5. Build the WM-portion masks:
         #   (a) causal — position t' in WM may only be read when t' <= t.
@@ -345,8 +364,12 @@ class MemoryReadController(keras.layers.Layer):
         # through the dense softmax so all S_lt+max_seq_len keys learn.
         routing = soft_w + ops.stop_gradient(hard_w - soft_w)
 
-        # 7. Retrieve values: einsum('bthm,bmv->bthv').
-        retrieved_v = ops.einsum("bthm,bmv->bthv", routing, v_total)
+        # 7. Retrieve values. MQA: 'bthm,bmv->bthv'.
+        # MHA (multi_head_keys=True): 'bthm,bmhv->bthv'.
+        if self.multi_head_keys:
+            retrieved_v = ops.einsum("bthm,bmhv->bthv", routing, v_total)
+        else:
+            retrieved_v = ops.einsum("bthm,bmv->bthv", routing, v_total)
 
         # 8. Head-concat and output projection.
         retrieved_concat = ops.reshape(
@@ -447,6 +470,11 @@ class MemoryReadController(keras.layers.Layer):
                 rand_scores = keras.random.uniform((self.s_lt,))
                 idx = ops.argsort(rand_scores)[:n_sub]
                 k_sub = ops.take(k_lt, idx, axis=0)
+            # O4: in MHA mode k_sub has shape (n_sub, H, d_k); flatten the
+            # head axis into d_k for the cosine. Each "key vector" is the
+            # full per-head concatenation.
+            if self.multi_head_keys:
+                k_sub = ops.reshape(k_sub, (n_sub, self.num_heads * self.d_k))
             k_norm = k_sub / (ops.norm(k_sub, axis=-1, keepdims=True) + 1e-8)
             cos = ops.matmul(k_norm, ops.transpose(k_norm))  # (n_sub, n_sub)
             # Mask diagonal.
@@ -467,6 +495,8 @@ class MemoryReadController(keras.layers.Layer):
                 rand_v = keras.random.uniform((self.s_lt,))
                 idx_v = ops.argsort(rand_v)[:n_sub_v]
                 v_sub = ops.take(v_lt, idx_v, axis=0)
+            if self.multi_head_keys:
+                v_sub = ops.reshape(v_sub, (n_sub_v, self.num_heads * self.d_v))
             v_norm = v_sub / (ops.norm(v_sub, axis=-1, keepdims=True) + 1e-8)
             cos_v = ops.matmul(v_norm, ops.transpose(v_norm))
             eye_v = ops.eye(n_sub_v, dtype=cos_v.dtype)
@@ -489,19 +519,27 @@ class MemoryReadController(keras.layers.Layer):
         #   - similarity in d_v space, cosine, with learnable
         #     temperature `tau = softplus(log_temp_nce) + 1e-3`.
         if self.enable_infonce:
+            # O4: pre-collapse V_lt heads to a single representation for
+            # InfoNCE. In MQA mode v_lt is (S_lt, d_v); in MHA mode
+            # (S_lt, H, d_v) -> mean over heads -> (S_lt, d_v). InfoNCE
+            # operates in d_v space whichever mode we're in.
+            if self.multi_head_keys:
+                v_lt_flat = ops.mean(v_lt, axis=1)  # (S_lt, d_v)
+            else:
+                v_lt_flat = v_lt
+
             # Anchor — same router-mixed V_lt mean over heads as before.
+            # In MQA: einsum 'bthm,mv->bthv'. In MHA: routing already
+            # mixes per-head sims; route against v_lt_flat for q_emb.
             routed_v_lt = ops.einsum(
-                "bthm,mv->bthv", routing_lt, v_lt,
+                "bthm,mv->bthv", routing_lt, v_lt_flat,
             )  # (B, T, H, d_v)
             q_emb = ops.mean(routed_v_lt, axis=2)  # (B, T, d_v)
 
-            # Positive: hard top-1 V_lt row from the LT slice, mean over
-            # heads. We pick the argmax of routing_lt along the M_LT
-            # axis per (B, T, H), gather the corresponding V_lt rows,
-            # then mean over heads. stop_gradient so q_emb is the
-            # learning end of the contrast.
+            # Positive: hard top-1 V_lt row from the LT slice (head-mean
+            # in MHA mode) per (B, T, H), then mean over heads.
             top1_idx = ops.argmax(routing_lt, axis=-1)  # (B, T, H)
-            pos_per_head = ops.take(v_lt, top1_idx, axis=0)  # (B, T, H, d_v)
+            pos_per_head = ops.take(v_lt_flat, top1_idx, axis=0)  # (B, T, H, d_v)
             pos_emb = ops.mean(pos_per_head, axis=2)  # (B, T, d_v)
             pos_emb = ops.stop_gradient(pos_emb)
 
@@ -510,7 +548,7 @@ class MemoryReadController(keras.layers.Layer):
             n_neg = min(self.infonce_negatives, self.s_lt)
             rand_scores_neg = keras.random.uniform((self.s_lt,))
             idx_neg = ops.argsort(rand_scores_neg)[:n_neg]
-            v_neg = ops.take(v_lt, idx_neg, axis=0)  # (n_neg, d_v)
+            v_neg = ops.take(v_lt_flat, idx_neg, axis=0)  # (n_neg, d_v)
             v_neg = ops.stop_gradient(v_neg)
 
             # Cosine similarity in d_v space.
@@ -588,6 +626,7 @@ class MemoryReadController(keras.layers.Layer):
             "enable_diversity": self.enable_diversity,
             "enable_infonce": self.enable_infonce,
             "enable_v_diversity": self.enable_v_diversity,
+            "multi_head_keys": self.multi_head_keys,
             "lambda_gate_entropy": self.lambda_gate_entropy,
             "lambda_load_balance": self.lambda_load_balance,
             "lambda_z_loss": self.lambda_z_loss,

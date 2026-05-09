@@ -190,6 +190,9 @@ class WaveFieldMemoryLLM(keras.Model):
         # phase transitions (cheap retrace boundary). NOT serialized
         # (callables can't round-trip via get_config).
         top_k_schedule: Optional[Callable[[int], int]] = None,
+        # O4 — opt-in per-head keys/values. Default False keeps MQA
+        # behavior bit-exact.
+        multi_head_keys: bool = False,
         # Common transformer dropout / norm params.
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
@@ -238,6 +241,7 @@ class WaveFieldMemoryLLM(keras.Model):
         self.infonce_temperature = infonce_temperature
         self.enable_v_diversity = enable_v_diversity
         self.top_k_schedule = top_k_schedule
+        self.multi_head_keys = multi_head_keys
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range
@@ -332,16 +336,22 @@ class WaveFieldMemoryLLM(keras.Model):
         else:
             self.lm_head = None
 
-        # Memory components.
+        # Memory components. O4 plumbing: pass num_heads + multi_head_keys
+        # so the LT bank, write controller (and its inner WM bank), and
+        # read controller all agree on shape semantics.
         self.lt_memory = LongTermMemoryBank(
             s_lt=self.s_lt, d_k=self.d_k, d_v=self.d_v,
             initializer_range=self.initializer_range,
+            num_heads=self.num_heads,
+            multi_head_keys=self.multi_head_keys,
             name="memory_lt_bank",
         )
         self.write_controller = MemoryWriteController(
             d_k=self.d_k, d_v=self.d_v, embed_dim=self.embed_dim,
             max_seq_len=self.max_seq_len,
             initializer_range=self.initializer_range,
+            num_heads=self.num_heads,
+            multi_head_keys=self.multi_head_keys,
             name="memory_write_controller",
         )
         self.read_controller = MemoryReadController(
@@ -362,6 +372,7 @@ class WaveFieldMemoryLLM(keras.Model):
             infonce_negatives=self.infonce_negatives,
             infonce_temperature=self.infonce_temperature,
             enable_v_diversity=self.enable_v_diversity,
+            multi_head_keys=self.multi_head_keys,
             name="memory_read_controller",
         )
 
@@ -743,6 +754,7 @@ class WaveFieldMemoryLLM(keras.Model):
             "infonce_negatives": self.infonce_negatives,
             "infonce_temperature": self.infonce_temperature,
             "enable_v_diversity": self.enable_v_diversity,
+            "multi_head_keys": self.multi_head_keys,
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "initializer_range": self.initializer_range,

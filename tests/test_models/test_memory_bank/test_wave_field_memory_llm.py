@@ -467,3 +467,69 @@ class TestResetMemory:
             np.asarray(m2.lt_memory.K_lt),
             atol=1e-7,
         )
+
+
+# ---------------------------------------------------------------------
+# O4: multi_head_keys
+# ---------------------------------------------------------------------
+
+
+class TestMultiHeadKeys:
+    """O4: opt-in per-head K/V (full MHA over the bank). Default
+    `multi_head_keys=False` is bit-exact with the prior MQA implementation
+    (covered by all other tests in this file). These tests exercise the
+    True branch."""
+
+    def _build_mha(self, **overrides) -> WaveFieldMemoryLLM:
+        kw = _tiny_kwargs()
+        kw["multi_head_keys"] = True
+        kw.update(overrides)
+        m = WaveFieldMemoryLLM(**kw)
+        dummy = np.random.randint(0, 128, size=(1, 16)).astype(np.int32)
+        m(dummy, training=False)
+        return m
+
+    def test_default_is_mqa(self):
+        m = _build_tiny()
+        assert m.multi_head_keys is False
+        # K_lt has rank 2 in MQA mode.
+        assert m.lt_memory.K_lt.shape.rank == 2
+
+    def test_mha_forward_shape(self):
+        m = self._build_mha()
+        # K_lt rank 3 in MHA mode.
+        assert m.lt_memory.K_lt.shape.rank == 3
+        x = np.random.randint(0, 128, size=(2, 16)).astype(np.int32)
+        out = m(x, training=False)
+        assert tuple(out["logits"].shape) == (2, 16, 128)
+        assert np.all(np.isfinite(np.asarray(out["logits"])))
+
+    def test_mha_save_load_round_trip(self, tmp_path):
+        m = self._build_mha()
+        x = np.random.randint(0, 128, size=(2, 16)).astype(np.int32)
+        before = np.asarray(m(x, training=False)["logits"])
+        path = str(tmp_path / "mha.keras")
+        m.save(path)
+        loaded = keras.models.load_model(
+            path, custom_objects=memory_llm_custom_objects(),
+        )
+        after = np.asarray(loaded(x, training=False)["logits"])
+        np.testing.assert_allclose(before, after, atol=1e-5, rtol=1e-5)
+        assert loaded.multi_head_keys is True
+        assert loaded.lt_memory.K_lt.shape.rank == 3
+
+    def test_mha_one_train_step(self):
+        m = self._build_mha()
+        loss_fn = MaskedCausalLMLoss()
+        m.compile(
+            backbone_optimizer=keras.optimizers.AdamW(1e-5),
+            memory_optimizer=keras.optimizers.AdamW(3e-4),
+            loss={"logits": loss_fn},
+        )
+        m.output_names = ["logits"]
+        x = np.random.randint(0, 128, size=(2, 16)).astype(np.int32)
+        y = np.random.randint(0, 128, size=(2, 16)).astype(np.int32)
+        ds = tf.data.Dataset.from_tensor_slices((x, {"logits": y})).batch(2)
+        m.fit(ds, epochs=1, verbose=0)
+        # Step counter advanced.
+        assert int(m._global_step.numpy()) >= 1
