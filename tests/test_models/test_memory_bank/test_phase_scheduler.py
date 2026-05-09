@@ -178,3 +178,57 @@ class TestPhaseConstants:
         assert s._step_to_phase(10) == PHASE_FREEZE_BACKBONE
         assert s._step_to_phase(20) == PHASE_FULL
         assert s._step_to_phase(30) == PHASE_EXTEND
+
+
+class TestEmbedDropoutWalked:
+    """R2: embed_dropout was missing from the trainable walk in the
+    original parallel-list implementation. The new set-driven walk
+    includes it; verify by flipping phase and observing the flag."""
+
+    def _make_model_with_layers(self):
+        from unittest.mock import MagicMock
+
+        class _LayerStub:
+            def __init__(self):
+                self.trainable = True
+
+        m = _MockModel()
+        m.token_embeddings = _LayerStub()
+        m.position_embeddings = _LayerStub()
+        m.embed_norm = _LayerStub()
+        m.embed_dropout = _LayerStub()
+        m.final_norm = _LayerStub()
+        m.lm_head = _LayerStub()
+        m.lt_memory = _LayerStub()
+        m.write_controller = _LayerStub()
+        m.read_controller = _LayerStub()
+        # blocks (decoder list)
+        m.blocks = [_LayerStub() for _ in range(2)]
+        return m
+
+    def test_embed_dropout_is_walked_through_phase_changes(self):
+        m = self._make_model_with_layers()
+        s = PhaseScheduler(phase1_steps=10, phase2_steps=10, phase3_steps=10)
+        s.set_model(m)
+
+        # Phase 2: backbone frozen, memory trainable.
+        s._apply_phase(PHASE_FREEZE_BACKBONE)
+        assert m.embed_dropout.trainable is False
+        assert m.token_embeddings.trainable is False
+        assert m.lt_memory.trainable is True
+
+        # Phase 3: everything trainable.
+        s._apply_phase(PHASE_FULL)
+        assert m.embed_dropout.trainable is True
+        assert m.token_embeddings.trainable is True
+        assert m.lt_memory.trainable is True
+
+    def test_phase_1_all_trainable_no_aux(self):
+        m = self._make_model_with_layers()
+        s = PhaseScheduler(phase1_steps=10, phase2_steps=10, phase3_steps=10)
+        s.set_model(m)
+        s._apply_phase(PHASE_WARMUP)
+        assert m.embed_dropout.trainable is True
+        assert m.lt_memory.trainable is True
+        # aux losses off
+        assert m.read_controller.enable_gate_entropy is False

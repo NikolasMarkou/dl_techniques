@@ -156,33 +156,63 @@ class PhaseScheduler(keras.callbacks.Callback):
 
         logger.info(f"PhaseScheduler: entered phase {phase}")
 
-    def _set_backbone_trainable(self, flag: bool) -> None:
+    # R2: a single set-driven walk replaces the parallel attr lists in
+    # `_set_backbone_trainable` / `_set_memory_trainable`. The set
+    # `_MEMORY_LAYER_NAMES` is the source of truth for which attrs are
+    # memory; everything else listed in `_ALL_LAYER_NAMES` is backbone.
+    # `embed_dropout` is included (was missing — R2 audit smell).
+    _MEMORY_LAYER_NAMES = (
+        "lt_memory",
+        "wm_memory",
+        "read_controller",
+        "write_controller",
+    )
+    _ALL_LAYER_NAMES = (
+        "token_embeddings",
+        "position_embeddings",
+        "embed_norm",
+        "embed_dropout",
+        "final_norm",
+        "lm_head",
+        "lt_memory",
+        "wm_memory",
+        "read_controller",
+        "write_controller",
+    )
+
+    def _apply_trainable(self, mem_flag: bool, bb_flag: bool) -> None:
+        """Single-pass trainable walk over all known top-level attrs.
+        Memory layers get `mem_flag`; everything else gets `bb_flag`.
+        Also walks the decoder block list (variable count → not in the
+        named tuple)."""
         m = self.model
-        for attr in (
-            "token_embeddings",
-            "position_embeddings",
-            "embed_norm",
-            "final_norm",
-            "lm_head",
-        ):
+        memory_set = set(self._MEMORY_LAYER_NAMES)
+        for attr in self._ALL_LAYER_NAMES:
             obj = getattr(m, attr, None)
-            if obj is not None:
-                obj.trainable = flag
+            if obj is None:
+                continue
+            obj.trainable = mem_flag if attr in memory_set else bb_flag
         blocks = getattr(m, "blocks", None) or []
         for blk in blocks:
-            blk.trainable = flag
+            blk.trainable = bb_flag
+
+    def _set_backbone_trainable(self, flag: bool) -> None:
+        # Preserved for API compatibility — internally delegates to
+        # `_apply_trainable`. Memory flag preserved by reading current
+        # `read_controller.trainable`. _apply_phase always calls the
+        # two helpers in pairs so this state preservation is correct.
+        m = self.model
+        rc = getattr(m, "read_controller", None)
+        mem_flag = bool(getattr(rc, "trainable", True)) if rc else True
+        self._apply_trainable(mem_flag=mem_flag, bb_flag=flag)
 
     def _set_memory_trainable(self, flag: bool) -> None:
         m = self.model
-        for attr in (
-            "lt_memory",
-            "wm_memory",
-            "read_controller",
-            "write_controller",
-        ):
-            obj = getattr(m, attr, None)
-            if obj is not None:
-                obj.trainable = flag
+        # Recover current backbone flag from token_embeddings (a
+        # canonical backbone layer).
+        bb_layer = getattr(m, "token_embeddings", None)
+        bb_flag = bool(getattr(bb_layer, "trainable", True)) if bb_layer else True
+        self._apply_trainable(mem_flag=flag, bb_flag=bb_flag)
 
     def _set_aux_losses(self, flag: bool) -> None:
         rc = getattr(self.model, "read_controller", None)
