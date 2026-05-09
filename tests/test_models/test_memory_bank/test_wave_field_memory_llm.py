@@ -121,6 +121,51 @@ class TestVariableSplit:
         for v in memory_vars:
             assert "memory_" in v.name or "gate_" in v.name
 
+    def test_memory_vars_routed_by_leading_component(self):
+        """R3+R4: matching is on the leading component (Keras layer name),
+        not arbitrary substring inside the variable's full path."""
+        m = _build_tiny()
+        memory_vars, backbone_vars = split_trainable_by_prefix(
+            m.trainable_variables,
+        )
+        # Every memory variable's leading path component must start with
+        # `memory_` or `gate_` — the new strict rule.
+        for v in memory_vars:
+            head = v.name.split("/", 1)[0]
+            assert head.startswith("memory_") or head.startswith("gate_"), (
+                f"memory variable leading-component does not match: {v.name}"
+            )
+        # No backbone variable's leading component starts with the prefixes.
+        for v in backbone_vars:
+            head = v.name.split("/", 1)[0]
+            assert not (
+                head.startswith("memory_") or head.startswith("gate_")
+            ), f"backbone variable leading-component matched: {v.name}"
+
+    def test_split_handles_synthetic_substring_traps(self):
+        """A variable whose mid-path contains 'memory_' but whose head
+        does NOT must route to backbone under the new rule."""
+
+        class _Fake:
+            def __init__(self, name):
+                self.name = name
+
+        vars_ = [
+            _Fake("token_embeddings/embeddings"),       # backbone
+            _Fake("memory_K_lt"),                        # memory (leading)
+            _Fake("blocks/0/ffn/dense_kernel_memory_x"), # MUST be backbone
+            _Fake("gate_W_g/kernel"),                    # memory (leading)
+            _Fake(""),                                   # defensive backbone
+        ]
+        mem, bb = split_trainable_by_prefix(vars_)
+        mem_names = {v.name for v in mem}
+        bb_names = {v.name for v in bb}
+        assert "memory_K_lt" in mem_names
+        assert "gate_W_g/kernel" in mem_names
+        assert "blocks/0/ffn/dense_kernel_memory_x" in bb_names
+        assert "token_embeddings/embeddings" in bb_names
+        assert "" in bb_names
+
 
 # ---------------------------------------------------------------------
 # Custom train_step

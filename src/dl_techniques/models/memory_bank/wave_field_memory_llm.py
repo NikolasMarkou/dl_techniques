@@ -66,17 +66,25 @@ def split_trainable_by_prefix(
     memory_prefixes: Tuple[str, ...] = ("memory_", "gate_"),
 ) -> Tuple[List[Any], List[Any]]:
     """Partition ``variables`` into ``(memory_vars, backbone_vars)`` by
-    matching the leading path component of each variable's ``.name`` (or
-    its full name) against ``memory_prefixes``.
+    matching the **leading path component** of each variable's ``.name``
+    against ``memory_prefixes``.
 
-    Variables whose name contains any of the prefixes are routed to the
-    memory optimizer; everything else to the backbone optimizer.
+    Keras variable names compose as ``<layer_name>/<weight_name>`` (and
+    nested paths add further ``/`` components). R3+R4: we split on ``/``
+    and check whether the leading component **starts with** any prefix.
+    This is stricter than the previous substring match — a stray
+    ``"memory_"`` somewhere mid-path no longer leaks variables across
+    optimizers.
+
+    :returns: ``(memory_vars, backbone_vars)``. Variables with empty or
+        missing names are routed to backbone (defensive).
     """
     memory_vars: List[Any] = []
     backbone_vars: List[Any] = []
     for v in variables:
         name = getattr(v, "name", "") or ""
-        if any(p in name for p in memory_prefixes):
+        head = name.split("/", 1)[0]
+        if any(head.startswith(p) for p in memory_prefixes):
             memory_vars.append(v)
         else:
             backbone_vars.append(v)
@@ -434,16 +442,25 @@ class WaveFieldMemoryLLM(keras.Model):
         trainable_vars = self.trainable_variables
         grads = tape.gradient(loss, trainable_vars)
 
-        memory_pairs = []
-        backbone_pairs = []
-        for g, v in zip(grads, trainable_vars):
-            if g is None:
-                continue
-            name = getattr(v, "name", "") or ""
-            if "memory_" in name or "gate_" in name:
-                memory_pairs.append((g, v))
-            else:
-                backbone_pairs.append((g, v))
+        # R3+R4: drop None-gradient pairs first, then route via
+        # `split_trainable_by_prefix` (leading-component match). Keeps
+        # routing logic in one place; train_step no longer encodes the
+        # prefix policy inline.
+        live = [(g, v) for g, v in zip(grads, trainable_vars) if g is not None]
+        if live:
+            live_grads = [g for g, _ in live]
+            live_vars = [v for _, v in live]
+            mem_vars, bb_vars = split_trainable_by_prefix(live_vars)
+            mem_set = {id(v) for v in mem_vars}
+            memory_pairs = [
+                (g, v) for g, v in zip(live_grads, live_vars) if id(v) in mem_set
+            ]
+            backbone_pairs = [
+                (g, v) for g, v in zip(live_grads, live_vars)
+                if id(v) not in mem_set
+            ]
+        else:
+            memory_pairs, backbone_pairs = [], []
 
         if backbone_pairs:
             self.backbone_optimizer.apply_gradients(backbone_pairs)
