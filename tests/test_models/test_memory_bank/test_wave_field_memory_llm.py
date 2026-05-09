@@ -229,6 +229,53 @@ class TestWarmupMemoryKeys:
         # current_phase restored to its prior value (1 at init).
         assert int(m.current_phase.numpy()) == 1
 
+    def test_warmup_uses_W_Q_projection(self):
+        """B1: warmup must project hiddens through the head-averaged
+        W_Q kernel before clustering. Verify by replicating the
+        algorithm against the fitted K_lt and asserting they match
+        (up to KMeans randomness — we use random_state=0 in the model
+        to stabilize the comparison)."""
+        from sklearn.cluster import MiniBatchKMeans
+
+        m = _build_tiny()
+        # Capture W_Q kernel before warmup (it's frozen in the warmup
+        # — the read controller is non-trainable in P1 path-effect
+        # only after _set_memory_trainable, but we don't call the
+        # scheduler here so the kernel value is the init we'll inspect).
+        wq = np.asarray(m.read_controller.W_Q.kernel)
+        wq_avg = wq.reshape(m.embed_dim, m.num_heads, m.d_k).mean(axis=1)
+
+        x = np.random.randint(0, 128, size=(8, 16)).astype(np.int32)
+        ds = tf.data.Dataset.from_tensor_slices(x).batch(2)
+
+        # Run the model's warmup.
+        m.warmup_memory_keys(ds, num_batches=4)
+        klt_after = np.asarray(m.lt_memory.K_lt)
+
+        # Replicate the same procedure outside the model.
+        # Step 1: collect hidden states at the read tap.
+        hiddens = []
+        for batch in ds.take(4):
+            h = m._hidden_at_read_tap(batch)
+            hiddens.append(np.asarray(h).reshape(-1, m.embed_dim))
+        stacked = np.concatenate(hiddens, axis=0)
+        stacked_dk = stacked @ wq_avg
+
+        # Step 2: KMeans in d_k space.
+        kmeans = MiniBatchKMeans(
+            n_clusters=m.s_lt,
+            batch_size=min(4096, max(256, stacked_dk.shape[0] // 4)),
+            n_init=1, max_iter=20, random_state=0,
+        )
+        kmeans.fit(stacked_dk)
+        expected_centroids = kmeans.cluster_centers_.astype(np.float32)
+
+        # Centroid sets should match (the model's warmup uses the same
+        # random_state=0). Centroid order is stable for fixed seeds.
+        np.testing.assert_allclose(
+            klt_after, expected_centroids, atol=1e-4, rtol=1e-4,
+        )
+
 
 # ---------------------------------------------------------------------
 # Save/Load round-trip

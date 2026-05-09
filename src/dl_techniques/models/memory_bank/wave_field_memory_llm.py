@@ -595,22 +595,38 @@ class WaveFieldMemoryLLM(keras.Model):
                 reps = (n_clusters + stacked.shape[0] - 1) // stacked.shape[0]
                 stacked = np.tile(stacked, (reps, 1))[: n_clusters * 2]
 
+            # B1 — KMeans must condition K_lt against the actual query
+            # direction the read controller will project hiddens into,
+            # otherwise the centroids are essentially random in d_k space
+            # and the warmup adds no information. Project hiddens through
+            # the head-averaged W_Q kernel BEFORE clustering, then run
+            # KMeans in d_k space directly.
+            #
+            # W_Q.kernel shape: (embed_dim, num_heads * d_k).
+            # Reshape to (D, H, d_k) and mean over heads -> (D, d_k).
+            # This requires read_controller.W_Q.built (which holds since
+            # `_build_architecture` eagerly builds all sublayers).
+            wq_kernel = np.asarray(self.read_controller.W_Q.kernel)
+            assert wq_kernel.shape == (self.embed_dim, self.num_heads * self.d_k), (
+                f"unexpected W_Q kernel shape {wq_kernel.shape}"
+            )
+            wq_avg = (
+                wq_kernel
+                .reshape(self.embed_dim, self.num_heads, self.d_k)
+                .mean(axis=1)  # (D, d_k) — head-averaged Q projection
+                .astype(np.float32)
+            )
+            stacked_dk = stacked @ wq_avg  # (N, d_k)
+
             kmeans = MiniBatchKMeans(
                 n_clusters=n_clusters,
-                batch_size=min(4096, max(256, stacked.shape[0] // 4)),
+                batch_size=min(4096, max(256, stacked_dk.shape[0] // 4)),
                 n_init=1,
                 max_iter=20,
                 random_state=0,
             )
-            kmeans.fit(stacked)
-            centroids = kmeans.cluster_centers_.astype(np.float32)
-            # KMeans runs on hidden-state space (D); we need K_lt at d_k.
-            # Project via the read controller's W_Q-based key estimator:
-            # for warmup we project centroids through a freshly-initialized
-            # random Gaussian projection D -> d_k.
-            rng = np.random.RandomState(0)
-            proj = rng.randn(self.embed_dim, self.d_k).astype(np.float32) / np.sqrt(self.embed_dim)
-            centroids_dk = centroids @ proj
+            kmeans.fit(stacked_dk)
+            centroids_dk = kmeans.cluster_centers_.astype(np.float32)
             self.lt_memory.assign_keys_from_kmeans(centroids_dk)
             logger.info(
                 f"warmup_memory_keys: seeded K_lt with {n_clusters} centroids "
