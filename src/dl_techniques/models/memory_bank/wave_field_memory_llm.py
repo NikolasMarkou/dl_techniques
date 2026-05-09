@@ -118,6 +118,30 @@ class WaveFieldMemoryLLM(keras.Model):
     """Memory-augmented WaveFieldLLM with dual-tap topology.
 
     Memory hyperparameters scale per variant (see :data:`MODEL_VARIANTS`).
+
+    .. note::
+
+       **Incremental decoding (KV-cache) is not supported.**
+
+       DECISION plan_2026-05-09_0f39a086/D-002 — the audit's O1 ("add a
+       KV cache to support incremental decoding") was investigated and
+       deferred. The backbone uses :class:`WaveFieldAttention`, which is
+       FFT-based and recomputes the full sequence per call. Adding
+       single-token incremental decoding requires modifying
+       :class:`WaveFieldDecoderBlock` (or replacing the attention layer
+       with a streaming variant), which is outside the scope of the
+       memory-bank package. Two future paths:
+
+       (a) Add a streaming variant of WaveFieldAttention that maintains
+           a rolling spectral cache.
+
+       (b) Replace the backbone with a standard MHA decoder for serving
+           and keep the wave-field backbone for training only.
+
+       The memory-bank read/write controllers themselves are
+       incremental-friendly (single-token retrieval is O(top_k) against
+       a static M_static), but they cannot be exercised incrementally
+       without an incremental backbone.
     """
 
     DEFAULT_VOCAB_SIZE = 50261
