@@ -348,7 +348,17 @@ class MemoryReadController(keras.layers.Layer):
         # All gated by enable flags so phase-1 disables them all. Each loss
         # is computed only when training=True to avoid double-accumulation
         # at eval time (LESSONS — `add_loss` semantics).
-        if training:
+        # D4: also short-circuit when no aux loss is enabled — saves a few
+        # bool checks + the function call in Phase 1 / unscheduled use.
+        any_aux_enabled = (
+            self.enable_gate_entropy
+            or self.enable_load_balance
+            or self.enable_z_loss
+            or self.enable_diversity
+            or self.enable_infonce
+            or getattr(self, "enable_v_diversity", False)
+        )
+        if training and any_aux_enabled:
             self._maybe_add_aux_losses(
                 routing=routing,
                 soft_w=soft_w,
