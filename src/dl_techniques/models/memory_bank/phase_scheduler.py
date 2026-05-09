@@ -223,6 +223,10 @@ class PhaseScheduler(keras.callbacks.Callback):
         rc.enable_z_loss = flag
         rc.enable_diversity = flag
         rc.enable_infonce = flag
+        # O6: V_lt diversity loss (defaults False on the controller; only
+        # flipped here when this method is called by the curriculum).
+        if hasattr(rc, "enable_v_diversity"):
+            rc.enable_v_diversity = flag
 
     # ------------------------------------------------------------------
     # Callback hooks

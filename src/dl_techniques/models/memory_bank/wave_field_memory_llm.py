@@ -158,9 +158,13 @@ class WaveFieldMemoryLLM(keras.Model):
         lambda_z_loss: float = 1e-3,
         lambda_diversity: float = 1e-3,
         lambda_infonce: float = 5e-3,
+        lambda_v_diversity: float = 1e-3,
         diversity_subsample: int = 1024,
         infonce_negatives: int = 256,
         infonce_temperature: float = 0.1,
+        # O6 — opt-in V_lt diversity aux loss. Default False so existing
+        # variants and tests are unaffected.
+        enable_v_diversity: bool = False,
         # Common transformer dropout / norm params.
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
@@ -203,9 +207,11 @@ class WaveFieldMemoryLLM(keras.Model):
         self.lambda_z_loss = lambda_z_loss
         self.lambda_diversity = lambda_diversity
         self.lambda_infonce = lambda_infonce
+        self.lambda_v_diversity = lambda_v_diversity
         self.diversity_subsample = diversity_subsample
         self.infonce_negatives = infonce_negatives
         self.infonce_temperature = infonce_temperature
+        self.enable_v_diversity = enable_v_diversity
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.initializer_range = initializer_range
@@ -325,9 +331,11 @@ class WaveFieldMemoryLLM(keras.Model):
             lambda_z_loss=self.lambda_z_loss,
             lambda_diversity=self.lambda_diversity,
             lambda_infonce=self.lambda_infonce,
+            lambda_v_diversity=self.lambda_v_diversity,
             diversity_subsample=self.diversity_subsample,
             infonce_negatives=self.infonce_negatives,
             infonce_temperature=self.infonce_temperature,
+            enable_v_diversity=self.enable_v_diversity,
             name="memory_read_controller",
         )
 
@@ -653,9 +661,11 @@ class WaveFieldMemoryLLM(keras.Model):
             "lambda_z_loss": self.lambda_z_loss,
             "lambda_diversity": self.lambda_diversity,
             "lambda_infonce": self.lambda_infonce,
+            "lambda_v_diversity": self.lambda_v_diversity,
             "diversity_subsample": self.diversity_subsample,
             "infonce_negatives": self.infonce_negatives,
             "infonce_temperature": self.infonce_temperature,
+            "enable_v_diversity": self.enable_v_diversity,
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "initializer_range": self.initializer_range,

@@ -377,3 +377,64 @@ class TestMaskPathEquivalence:
         out, *_ = _forward(read, lt, write, x)
         assert tuple(out.shape) == (2, 7, 32)
         assert np.all(np.isfinite(np.asarray(out)))
+
+
+# ---------------------------------------------------------------------
+# O6: V_lt diversity loss
+# ---------------------------------------------------------------------
+
+
+class TestVDiversity:
+    """O6: enabling `enable_v_diversity` adds a finite, non-zero
+    diversity loss over V_lt (mirrors the K_lt diversity)."""
+
+    def test_v_diversity_finite_when_enabled(self):
+        read = MemoryReadController(
+            embed_dim=32, num_heads=4, d_k=8, d_v=16,
+            s_lt=16, max_seq_len=10, top_k=4,
+            enable_v_diversity=True,
+            diversity_subsample=8,
+            lambda_v_diversity=1e-2,
+        )
+        lt = LongTermMemoryBank(s_lt=16, d_k=8, d_v=16)
+        lt.build()
+        write = MemoryWriteController(
+            d_k=8, d_v=16, embed_dim=32, max_seq_len=10,
+        )
+        x = np.random.randn(2, 7, 32).astype(np.float32)
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        # At least one loss is registered (V_lt diversity).
+        losses = [float(l) for l in read.losses]
+        assert len(losses) >= 1
+        assert all(np.isfinite(l) for l in losses)
+        assert any(l > 0.0 for l in losses)
+
+    def test_v_diversity_off_by_default(self):
+        read = MemoryReadController(
+            embed_dim=32, num_heads=4, d_k=8, d_v=16,
+            s_lt=16, max_seq_len=10, top_k=4,
+        )
+        lt = LongTermMemoryBank(s_lt=16, d_k=8, d_v=16)
+        lt.build()
+        write = MemoryWriteController(
+            d_k=8, d_v=16, embed_dim=32, max_seq_len=10,
+        )
+        x = np.random.randn(2, 7, 32).astype(np.float32)
+        k_lt, v_lt = lt(None)
+        k_wm, v_wm, mask = write(x)
+        _ = read(x, k_lt, v_lt, k_wm, v_wm, mask, training=True)
+        # No aux losses by default (existing contract).
+        assert len(read.losses) == 0
+
+    def test_v_diversity_round_trip_in_config(self):
+        read = MemoryReadController(
+            embed_dim=32, num_heads=4, d_k=8, d_v=16,
+            s_lt=16, max_seq_len=10, top_k=4,
+            enable_v_diversity=True, lambda_v_diversity=2.5e-3,
+        )
+        cfg = read.get_config()
+        clone = MemoryReadController.from_config(cfg)
+        assert clone.enable_v_diversity is True
+        assert clone.lambda_v_diversity == 2.5e-3

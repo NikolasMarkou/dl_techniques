@@ -107,12 +107,14 @@ class MemoryReadController(keras.layers.Layer):
         enable_z_loss: bool = False,
         enable_diversity: bool = False,
         enable_infonce: bool = False,
+        enable_v_diversity: bool = False,
         # Aux loss coefficients.
         lambda_gate_entropy: float = 1e-3,
         lambda_load_balance: float = 1e-2,
         lambda_z_loss: float = 1e-3,
         lambda_diversity: float = 1e-3,
         lambda_infonce: float = 5e-3,
+        lambda_v_diversity: float = 1e-3,
         # Sub-sample sizes for cheap aux losses on large S_lt.
         diversity_subsample: int = 1024,
         infonce_negatives: int = 256,
@@ -159,12 +161,14 @@ class MemoryReadController(keras.layers.Layer):
         self.enable_z_loss = enable_z_loss
         self.enable_diversity = enable_diversity
         self.enable_infonce = enable_infonce
+        self.enable_v_diversity = enable_v_diversity
 
         self.lambda_gate_entropy = lambda_gate_entropy
         self.lambda_load_balance = lambda_load_balance
         self.lambda_z_loss = lambda_z_loss
         self.lambda_diversity = lambda_diversity
         self.lambda_infonce = lambda_infonce
+        self.lambda_v_diversity = lambda_v_diversity
 
         self.diversity_subsample = diversity_subsample
         self.infonce_negatives = infonce_negatives
@@ -440,6 +444,25 @@ class MemoryReadController(keras.layers.Layer):
             div = self.lambda_diversity * ops.mean(cos_off * cos_off)
             self.add_loss(div)
 
+        # 4b. O6 — V_lt diversity. Mirrors the K_lt diversity loss but
+        # over the value bank to keep retrieved values from collapsing
+        # into a single direction (cosine off-diagonal squared, on a
+        # `diversity_subsample` random subsample).
+        if self.enable_v_diversity:
+            n_sub_v = min(self.diversity_subsample, self.s_lt)
+            if n_sub_v == self.s_lt:
+                v_sub = v_lt
+            else:
+                rand_v = keras.random.uniform((self.s_lt,))
+                idx_v = ops.argsort(rand_v)[:n_sub_v]
+                v_sub = ops.take(v_lt, idx_v, axis=0)
+            v_norm = v_sub / (ops.norm(v_sub, axis=-1, keepdims=True) + 1e-8)
+            cos_v = ops.matmul(v_norm, ops.transpose(v_norm))
+            eye_v = ops.eye(n_sub_v, dtype=cos_v.dtype)
+            cos_v_off = cos_v * (1.0 - eye_v)
+            div_v = self.lambda_v_diversity * ops.mean(cos_v_off * cos_v_off)
+            self.add_loss(div_v)
+
         # 5. InfoNCE: per-query positive vs `infonce_negatives` random
         # K_lt rows. Implementation: take v_proj (already aggregated per
         # query) as the query embedding, compare to mean-of-selected V_lt
@@ -539,11 +562,13 @@ class MemoryReadController(keras.layers.Layer):
             "enable_z_loss": self.enable_z_loss,
             "enable_diversity": self.enable_diversity,
             "enable_infonce": self.enable_infonce,
+            "enable_v_diversity": self.enable_v_diversity,
             "lambda_gate_entropy": self.lambda_gate_entropy,
             "lambda_load_balance": self.lambda_load_balance,
             "lambda_z_loss": self.lambda_z_loss,
             "lambda_diversity": self.lambda_diversity,
             "lambda_infonce": self.lambda_infonce,
+            "lambda_v_diversity": self.lambda_v_diversity,
             "diversity_subsample": self.diversity_subsample,
             "infonce_negatives": self.infonce_negatives,
             "infonce_temperature": self.infonce_temperature,
