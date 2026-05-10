@@ -149,7 +149,7 @@ class StrongAugmentation(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Brightness adjustment
-        brightness_factor = ops.random.uniform(
+        brightness_factor = keras.random.uniform(
             shape=(),
             minval=1.0 - self.color_jitter_strength,
             maxval=1.0 + self.color_jitter_strength
@@ -157,7 +157,7 @@ class StrongAugmentation(keras.layers.Layer):
         x = ops.multiply(x, brightness_factor)
 
         # Contrast adjustment
-        contrast_factor = ops.random.uniform(
+        contrast_factor = keras.random.uniform(
             shape=(),
             minval=1.0 - self.color_jitter_strength,
             maxval=1.0 + self.color_jitter_strength
@@ -180,7 +180,7 @@ class StrongAugmentation(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Apply CutMix with probability
-        should_apply = ops.random.uniform(shape=()) < self.cutmix_prob
+        should_apply = keras.random.uniform(shape=()) < self.cutmix_prob
 
         if not should_apply:
             return x
@@ -189,11 +189,11 @@ class StrongAugmentation(keras.layers.Layer):
         height, width = ops.shape(x)[1], ops.shape(x)[2]
 
         # Generate random permutation
-        perm_indices = ops.random.shuffle(ops.arange(batch_size))
+        perm_indices = keras.random.shuffle(ops.arange(batch_size))
         x_perm = ops.take(x, perm_indices, axis=0)
 
         # Generate random cut ratio
-        cut_ratio = ops.random.uniform(
+        cut_ratio = keras.random.uniform(
             shape=(),
             minval=self.cutmix_ratio_range[0],
             maxval=self.cutmix_ratio_range[1]
@@ -203,19 +203,13 @@ class StrongAugmentation(keras.layers.Layer):
         cut_h = ops.cast(ops.cast(height, "float32") * cut_ratio, "int32")
         cut_w = ops.cast(ops.cast(width, "float32") * cut_ratio, "int32")
 
-        # Generate random cut position
-        cut_y = ops.random.uniform(
-            shape=(),
-            minval=0,
-            maxval=height - cut_h,
-            dtype="int32"
-        )
-        cut_x = ops.random.uniform(
-            shape=(),
-            minval=0,
-            maxval=width - cut_w,
-            dtype="int32"
-        )
+        # Generate random cut position. keras.random.uniform requires a
+        # floating dtype, so draw float in [0,1) and cast to int32 against
+        # the valid maxval. (D-005 follow-up.)
+        cut_y_f = keras.random.uniform(shape=(), minval=0.0, maxval=1.0)
+        cut_x_f = keras.random.uniform(shape=(), minval=0.0, maxval=1.0)
+        cut_y = ops.cast(cut_y_f * ops.cast(height - cut_h, "float32"), "int32")
+        cut_x = ops.cast(cut_x_f * ops.cast(width - cut_w, "float32"), "int32")
 
         # Create mask
         mask = ops.zeros((height, width, 1))
