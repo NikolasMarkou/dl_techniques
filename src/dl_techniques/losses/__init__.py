@@ -130,6 +130,12 @@ from .segmentation_loss import (
     create_loss_function as create_segmentation_loss_function, # Renamed
 )
 
+# from .segmentation_wrapper_loss
+from .segmentation_wrapper_loss import (
+    SegmentationWrapperLoss,
+    create_segmentation_wrapper_loss,
+)
+
 # from .siglip_contrastive_loss
 from .siglip_contrastive_loss import (
     SigLIPContrastiveLoss,
@@ -251,6 +257,9 @@ __all__ = [
     "SegmentationLossConfig",
     "SegmentationLosses",
     "create_segmentation_loss_function",
+    # segmentation_wrapper_loss
+    "SegmentationWrapperLoss",
+    "create_segmentation_wrapper_loss",
     # siglip_contrastive_loss
     "SigLIPContrastiveLoss",
     "AdaptiveSigLIPLoss",
