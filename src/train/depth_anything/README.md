@@ -3,12 +3,18 @@
 Pattern-5 (depth-estimation) training scaffold for
 `dl_techniques.models.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
 
-> **Read this first**: the model has known issues — see "Known Issues" in
-> `src/dl_techniques/models/depth_anything/README.md`. The `train_step`
-> Keras-3 API bug was fixed in plan `plan_2026-05-10_44694bc9`, but the
-> placeholder encoder, unimplemented semi-supervised pipeline, and
-> sigmoid-clamped output remain open. **The script will run, but it will not
-> match published Depth Anything numbers until those issues are addressed.**
+> **Status (post-`plan_2026-05-10_bd098beb`)**: the in-tree
+> `dl_techniques.models.vit.ViT` is now wired as the default encoder
+> (`--encoder-kind real`); the legacy Conv-BN-ReLU stack is preserved
+> behind `--encoder-kind placeholder`. The decoder default is `linear`
+> (no longer sigmoid-clamped to `[0,1]`). The `train_step` Keras-3 API
+> bug remains fixed. Save/load round-trip is verified on CPU
+> (max-abs-diff = 0.0).
+> **Open**: `--enable-semi-supervised` switches the model to the FAL
+> train_step path on `((x_lab, x_unlab), y_lab)` data, but the in-tree
+> `MegaDepthDataset` only yields labeled batches — feeding paired
+> unlabeled imagery requires extending the data pipeline. See
+> "Semi-supervised usage" below.
 
 ## Quick start
 
@@ -65,8 +71,10 @@ on this machine.
 | `--megadepth-root`            | `/media/arxwn/data0_4tb/datasets/Megadepth` | Path to MegaDepth root. |
 | `--max-train-files`           | `10000`                                   | Cap on training pairs. |
 | `--max-val-files`             | `1000`                                    | Cap on validation pairs. |
-| `--encoder-type`              | `vit_l`                                   | One of `{vit_s,vit_b,vit_l}`. Currently a placeholder — see model README #10. |
-| `--use-feature-alignment`     | off                                       | Enables `frozen_encoder` (random-weight teacher — see model README #2). Default off. |
+| `--encoder-type`              | `vit_l`                                   | One of `{vit_s,vit_b,vit_l}`. |
+| `--encoder-kind`              | `real`                                    | `real` (in-tree `ViT`) or `placeholder` (Conv-BN-ReLU compat). |
+| `--enable-semi-supervised`    | off                                       | Activates FAL train_step path on `((x_lab,x_unlab),y_lab)`. Requires extending `MegaDepthDataset` — see Semi-supervised usage below. |
+| `--use-feature-alignment`     | off                                       | Enables `frozen_encoder` (weight-shared teacher; EMA via `update_teacher_ema`). Default off. |
 | `--cutmix-prob`               | `0.5`                                     | Forwarded to `StrongAugmentation`. |
 | `--color-jitter-strength`     | `0.2`                                     | Forwarded to `StrongAugmentation`. |
 | `--epochs`                    | `100`                                     | |
@@ -102,23 +110,42 @@ results/
     └── (TensorBoard logs, CSV logs, model checkpoints)
 ```
 
+## Semi-supervised usage
+
+`--enable-semi-supervised` flips `DepthAnything.train_step` into a path that
+expects `((x_labeled, x_unlabeled), y_labeled)` per-batch. The model then
+runs:
+
+1. Supervised forward pass + `compute_loss` on the labeled batch.
+2. (When `--use-feature-alignment` is also set) `FeatureAlignmentLoss`
+   between `self.encoder(x_unlabeled)` and the weight-shared
+   `self.frozen_encoder(x_unlabeled)`. The teacher is initialized from a
+   `keras.models.clone_model` of the student at `build()` time and can be
+   advanced by calling `model.update_teacher_ema(decay=...)` from a custom
+   on-step callback.
+
+Caveat — the in-tree `train.common.megadepth.MegaDepthDataset` yields plain
+`(rgb, depth_with_mask)` tensors only. Wiring an unlabeled stream is
+**out of scope** for this plan; the model-side infrastructure is in place
+so a future plan can add a `_PairedUnlabeledDataset` wrapper that yields
+`((x_lab, x_unlab), y_lab)` and the script will pick it up unchanged.
+
 ## Known Issues — depth quality
 
 Even with this script working end-to-end, **do not expect publishable Depth
 Anything numbers**:
 
-1. **Encoder is a placeholder Conv-BN-ReLU stack**, not DINOv2. There is no
-   semantic prior. Use `--init-from <pretrained.keras>` if you have a
-   compatible backbone (otherwise initialization is random).
-2. **No semi-supervised pipeline** — only labeled MegaDepth depth supervision
-   is used. The "62M unlabeled images" claim from the original paper is not
-   implemented.
-3. **Decoder output is sigmoid-clamped** to `[0,1]`. The masked L1 + gradient
-   loss tolerates this, but `AffineInvariantLoss` does not — see model README #6.
-4. **MegaDepth ground truth is sparse** (Structure-from-Motion). Even a
-   correctly trained Depth Anything model will produce dense depth maps that
-   look *qualitatively* good but disagree with sparse SfM ground truth on
-   non-Lambertian / textureless regions.
+1. **Encoder is in-tree `ViT`, not DINOv2.** No external pretrained weights
+   are loaded by default. Use `--init-from <pretrained.keras>` if you have
+   a compatible backbone (otherwise initialization is random).
+2. **Semi-supervised data feed not wired** — only labeled MegaDepth depth
+   supervision is used unless you extend the dataset to yield
+   `((x_lab, x_unlab), y_lab)`. The "62M unlabeled images" claim from the
+   original paper is not implemented at the data level.
+3. **MegaDepth ground truth is sparse** (Structure-from-Motion). Even a
+   correctly trained Depth Anything model will produce dense depth maps
+   that look *qualitatively* good but disagree with sparse SfM ground
+   truth on non-Lambertian / textureless regions.
 
 The script is the right shape for when these issues are addressed — at that
 point `git pull` + re-run should be all that's needed. Until then, this is
