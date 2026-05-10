@@ -96,10 +96,12 @@ class DepthAnythingTrainingConfig:
     dataset_shuffle_buffer: int = 5000
 
     # Model — DepthAnything-specific
-    encoder_type: str = "vit_l"            # one of {'vit_s','vit_b','vit_l'} (placeholder; see README)
+    encoder_type: str = "vit_l"            # one of {'vit_s','vit_b','vit_l'}
+    encoder_kind: str = "real"             # 'real' (in-tree ViT) or 'placeholder' (Conv-BN-ReLU)
     decoder_dims: Tuple[int, ...] = (256, 128, 64, 32)
     output_channels: int = 1
     use_feature_alignment: bool = False    # see Known Issue #2 in model README
+    enable_semi_supervised: bool = False   # adds FAL term on unlabeled batches inside train_step
     cutmix_prob: float = 0.5
     color_jitter_strength: float = 0.2
 
@@ -356,12 +358,14 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
     """Create a DepthAnything model for monocular depth estimation."""
     return create_depth_anything(
         encoder_type=config.encoder_type,
-        input_shape=(config.patch_size, config.patch_size, 3),
+        image_shape=(config.patch_size, config.patch_size, 3),
         decoder_dims=list(config.decoder_dims),
         output_channels=config.output_channels,
         use_feature_alignment=config.use_feature_alignment,
         cutmix_prob=config.cutmix_prob,
         color_jitter_strength=config.color_jitter_strength,
+        encoder_kind=config.encoder_kind,
+        enable_semi_supervised=config.enable_semi_supervised,
     )
 
 
@@ -586,7 +590,22 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--encoder-type", choices=["vit_s", "vit_b", "vit_l"],
         default="vit_l",
-        help="DepthAnything encoder variant (placeholder; see model README)",
+        help="DepthAnything encoder variant",
+    )
+    parser.add_argument(
+        "--encoder-kind", choices=["real", "placeholder"], default="real",
+        help=(
+            "'real' uses an in-tree dl_techniques.models.vit.ViT backbone; "
+            "'placeholder' uses the legacy Conv-BN-ReLU stack (compat only)."
+        ),
+    )
+    parser.add_argument(
+        "--enable-semi-supervised", action="store_true",
+        help=(
+            "Activate the semi-supervised train_step path (FAL on unlabeled). "
+            "Note: requires data of shape ((x_lab, x_unlab), y_lab); the current "
+            "MegaDepthDataset only yields labeled batches — see train README."
+        ),
     )
     parser.add_argument(
         "--use-feature-alignment", action="store_true",
@@ -656,6 +675,8 @@ def main():
         max_train_files=args.max_train_files,
         max_val_files=args.max_val_files,
         encoder_type=args.encoder_type,
+        encoder_kind=args.encoder_kind,
+        enable_semi_supervised=args.enable_semi_supervised,
         use_feature_alignment=args.use_feature_alignment,
         cutmix_prob=args.cutmix_prob,
         color_jitter_strength=args.color_jitter_strength,
