@@ -1,6 +1,347 @@
 # Consolidated Findings
 *Cross-plan findings archive. Entries merged from per-plan findings.md on close. Newest first.*
 
+## plan_2026-05-10_bd098beb
+### Index
+
+| ID  | Topic | Detail |
+|-----|-------|--------|
+| F-001 | Inherited issue inventory (README #1-#14 + D-005) | inline below |
+| F-002 | Real encoder availability (ViT vs DINOv2) | inline below |
+| F-003 | Decoder upsampling design | inline below |
+| F-004 | Semi-supervised pipeline + feature-alignment wiring | inline below |
+| F-005 | Train-script + README sync impact | inline below |
+
+### Key Constraints
+
+### Hard
+- Keras 3 / TF 2.18 idioms, full `get_config()` round-trip, `@keras.saving.register_keras_serializable()`, `keras.ops`, `dl_techniques.utils.logger` (no `print`).
+- Single GPU, never parallel jobs. CPU smoke (`CUDA_VISIBLE_DEVICES=""`) preferred for verification.
+- Per-step commit `[iter-N/step-M] desc`; user pushes themselves.
+- Update both READMEs (model + train) when API changes.
+- Pattern `mlm.py:309-343` is canonical Keras-3 train_step. Already applied — preserve `# DECISION plan_2026-05-10_44694bc9/D-003` anchor unless we materially change semantics.
+- AdamW WD only — never combine with `kernel_regularizer=L2`.
+- 10-Line Rule + Autonomy Leash + 3-Strike Rule.
+
+### Soft
+- Real encoder: prefer `dl_techniques.models.vit.ViT(include_top=False, pooling=None)` — `DINOv2VisionTransformer` requires three Functional inputs (image+masks+is_training), much harder to compose.
+- DPTDecoder default activation: change `'sigmoid'` → `'linear'` so AffineInvariantLoss is usable.
+- Semi-supervised: gate behind `enable_semi_supervised` flag (default OFF) for backward compatibility.
+- Feature alignment: rewire `frozen_encoder` to be a `keras.models.clone_model(encoder)` weight-share teacher; expose `update_teacher_ema(decay)`. Default OFF.
+
+### Ghost / out-of-scope
+- True DINOv2 weight loading from HuggingFace — separate plan.
+- Pseudo-label depth-on-unlabeled training (needs a real pretrained teacher) — separate plan.
+- Multi-GPU / distributed.
+- `make test` (full 1.5h suite).
+
+### Exploration Confidence
+- **Problem scope: deep** — read entire `model.py`, `components.py`, `__init__.py`, `strong_augmentation.py`, `affine_invariant_loss.py`, `feature_alignment_loss.py`, current train script, ViT and DINOv2 model surface, prior plan summary + findings + decisions.
+- **Solution space: constrained** — fixes are mechanical for #5/#6/#7/#8/#10/#11/#13/#14 + D-005; substantive for #1 (real ViT encoder), #2/#3 (semi-sup + FAL wiring). Pattern: gate behind flags; default backward-compatible.
+- **Risk visibility: clear** — main risks: (a) real ViT encoder produces sequence `(B,N,D)` while decoder expects 4D — must reshape + upsample; (b) frozen_encoder clone ordering vs build; (c) save/load round-trip with new sub-model topology. Mitigated by step ordering + per-step CPU smoke.
+
+### F-001 — Inherited issue inventory
+
+From model README Known Issues + plan_2026-05-10_44694bc9 D-005:
+
+| # | Severity | Description | Fix shape |
+|---|----------|-------------|-----------|
+| 1 | HIGH | Placeholder Conv-BN-ReLU encoder, not real ViT/DINOv2 | Wire `dl_techniques.models.vit.ViT(include_top=False, pooling=None)`; reshape (B,N,D)→(B,h,w,D); placeholder kept behind `encoder_kind='conv'` |
+| 2 | HIGH | Frozen teacher has independent random weights | `keras.models.clone_model(encoder)` + copy weights post-build; expose `update_teacher_ema(decay)` |
+| 3 | HIGH | Semi-supervised pipeline unimplemented | `enable_semi_supervised` flag (default False). When True: `train_step` accepts `((x_lab, x_unlab), y_lab)`, computes labeled loss + FAL on unlabeled feats. Pseudo-label-depth deferred. |
+| 4 | FIXED | Keras-3 train_step (prior plan) | preserve `# DECISION plan_2026-05-10_44694bc9/D-003` |
+| 5 | LOW | tf.GradientTape | Acceptable; keep — Keras 3 supports TF backend tape. Note in README. |
+| 6 | HIGH | DPTDecoder default sigmoid incompatible with AIL | Change default to `'linear'`. Update train script + README. |
+| 7 | MEDIUM | Functional encoder built in `build()` is fragile under save/load | When encoder is ViT (declared in `__init__`), the issue disappears. |
+| 8 | LOW | Dead `if X is not None` checks + `_create_fallback_decoder` | Remove. |
+| 9 | LOW | StrongAugmentation cutmix per-batch + 3-channel hardcoded | Make channels dynamic; per-sample brightness/contrast factors. + D-005 fix. |
+| 10 | MEDIUM | `encoder_type` validated but unused | Map `vit_s/vit_b/vit_l` → ViT scales `small/base/large`; `conv` = placeholder. |
+| 11 | LOW | `input_shape` shadows Layer.input_shape | Rename to `image_shape` (back-compat alias retained). |
+| 12 | MEDIUM | No tests | Add `tests/test_models/test_depth_anything/test_depth_anything.py`. |
+| 13 | LOW | `frozen_encoder.trainable = trainable` after Functional construction | Replaced by clone_model approach. |
+| 14 | LOW | `compile()` mutates dead state | Remove `self.depth_loss`/`self.feature_loss`; just `super().compile()`. |
+| D-005 | HIGH | `keras.ops.random.uniform` doesn't exist in Keras 3.8 | Replace with `keras.random.uniform` in StrongAugmentation `_apply_color_jitter` and `_apply_cutmix`. |
+
+### F-002 — Real encoder availability
+
+`src/dl_techniques/models/vit/model.py` — `ViT(keras.Model)`:
+- `ViT(input_shape=(384,384,3), scale='small'/'base'/'large', patch_size=16, include_top=False, pooling=None)` returns `(B, num_patches+1, embed_dim)`.
+- Strip CLS: `x[:, 1:, :]` → `(B, num_patches, embed_dim)`.
+- Reshape to spatial: `(B, h, w, embed_dim)` where `h=H//patch_size`, `w=W//patch_size` (statically known from constructor).
+
+`DINOv2VisionTransformer` requires three Functional inputs (`[inputs, masks_input, is_training_input]`) — too invasive. Defer.
+
+### F-003 — Decoder upsampling design
+
+ViT encoder at patch_size=16 → encoder output is H/16 × W/16 (24×24 for 384×384). Need to upsample to full resolution.
+
+Add `upsample_factor: int = 1` to `DPTDecoder.__init__`. With 4-stage `dims=[256,128,64,32]`, distribute upsampling across stages: each non-final conv block followed by 2× bilinear upsample → cumulative 16× (one per stage; last stage no upsample, output_conv at full res).
+
+`compute_output_shape` updated to multiply h,w by upsample_factor.
+
+DepthAnything passes `upsample_factor = image_size // encoder_stride`. For placeholder Conv encoder (stride 32 actually — initial stride-2 conv + 4 maxpools = 32×), placeholder mode passes 32; for ViT (patch_size=16), passes 16.
+
+### F-004 — Semi-supervised + feature-alignment wiring
+
+`train_step(data)`: detect `x = data[0]; y = data[1]`. If `x` is a 2-tuple `(x_lab, x_unlab)`, run semi-sup path; else single-batch labeled-only path (current behavior).
+
+When `enable_semi_supervised` AND `use_feature_alignment`:
+1. Forward labeled: `y_pred_lab = self(x_lab, training=True)`. Capture student feat via `feat_student = self.encoder(x_unlab, training=True)`.
+2. Teacher: `feat_teacher = self.frozen_encoder(x_unlab, training=False)`. Stop-gradient on teacher path (frozen weights, no tape track).
+3. Loss: `loss = w_lab * compute_loss(x=x_lab, y=y, y_pred=y_pred_lab) + w_feat * FeatureAlignmentLoss()(feat_teacher, feat_student)`.
+
+`feature_alignment_loss` expects `(B, feature_dim)` shape. We pool `(B, h, w, D)` to `(B, D)` via global average pool BEFORE passing to FAL. (Per-token FAL would need broadcasting; pooled is the standard distillation form.)
+
+`frozen_encoder` build: in `DepthAnything.build()`, after `self.encoder = ...`, when `use_feature_alignment`: `self.frozen_encoder = keras.models.clone_model(self.encoder); self.frozen_encoder.set_weights(self.encoder.get_weights()); self.frozen_encoder.trainable = False`.
+
+`update_teacher_ema(decay=0.999)` method copies EMA weights from student → teacher. Future plan can wire a callback to invoke this each step.
+
+Pseudo-label-depth-on-unlabeled-data path: deferred. Documented in README as residual.
+
+### F-005 — Train script + README impact
+
+`src/train/depth_anything/train_depth_anything.py`:
+- `create_model()` adds `encoder_kind`, `output_activation='linear'` (now valid via DepthEstimationLoss + AIL both), `image_shape` (renamed), `enable_semi_supervised`.
+- Add `--encoder-kind {real,placeholder}` (default `real`) and `--enable-semi-supervised` flag (default off).
+- Loss: `DepthEstimationLoss` continues to work (linear output is fine; sigmoid was a constraint, removing it is a simplification).
+
+Model README rewrite Known Issues:
+- FIXED in this plan: #1, #2(weight-shared teacher), #3(infrastructure for semi-sup; FAL wired), #6, #7, #8, #10, #11, #13, #14, D-005, partial #9 (D-005 only — per-batch/3-channel cutmix is a separate refactor).
+- STILL OPEN: #5 (LOW; documented), #2-deeper (EMA decay default + callback to invoke it), #3-deeper (pseudo-label depth on unlabeled), #9-deeper (per-sample cutmix/color factors).
+- ADDED: #12 — tests added in this plan, so REMOVED from open list.
+
+### Corrections
+*None yet.*
+
+## plan_2026-05-10_44694bc9
+### Index
+
+| ID | Topic | Detail |
+|----|-------|--------|
+| F-001 | depth_anything code review (model.py / components.py / __init__.py) | inline below |
+| F-002 | Pattern-5 train reference (train_depth_estimation.py + helpers) | inline below |
+| F-003 | Deliverables scope and constraints | inline below |
+
+### Key Constraints
+
+### Hard
+- Goal = review + README + train PLAN scaffolding. Do NOT execute training; do NOT modify model.py/components.py source in this plan.
+- README at `src/dl_techniques/models/depth_anything/README.md`.
+- Train scaffolding at `src/train/depth_anything/` follows Pattern 5 (Depth Estimation) per `src/train/CLAUDE.md`.
+- Keras 3 / TF 2.18 idioms: `@keras.saving.register_keras_serializable()`, `keras.ops`, `dl_techniques.utils.logger`, no print, full `get_config()` round-trip.
+- `MPLBACKEND=Agg`, single GPU, `.venv/bin/python -m train.depth_anything.<script>`.
+- Use `train.common.megadepth` (`discover_megadepth_pairs`, `MegaDepthDataset`) for data — verified present.
+- Use `dl_techniques.metrics.depth_metrics` (`AbsRelMetric`, `DeltaThresholdMetric`, `SqRelMetric`, `RMSEMetric`, `RMSELogMetric`) — verified present.
+- Use `dl_techniques.callbacks.depth_visualization` (`DepthPredictionGridCallback`, `DepthMetricsCurveCallback`) — verified present.
+- `train.common.create_callbacks(monitor="val_loss", ...)` + append depth-specific.
+- AdamW WD only — never combine with `kernel_regularizer=L2`.
+- Commit prefix `[iter-N/step-M] description`. User pushes; commit locally only.
+
+### Soft
+- README must flag as known issues: placeholder encoder (not real DINOv2); semi-supervised pipeline described in module docstring is not implemented in `call()`/`train_step()`; sigmoid output activation is incompatible with affine-invariant loss; `compiled_loss`/`compiled_metrics` Keras-2 attributes will likely fail under Keras 3.8.
+- Train script overrides decoder `output_activation='linear'` (or `softplus`) instead of default `sigmoid`.
+- Expose `--init-from <pretrained.keras>` per Pattern 5 — pretrained encoder is necessary for usable depth quality (LESSONS / user memory). Without it, README must warn the run will not converge to publishable numbers.
+
+### Ghost / out-of-scope
+- Fixing the DepthAnything code (placeholder encoder, semi-supervised pipeline, sigmoid output, Keras-3 train_step API) — separate plan after this review.
+- Implementing real DINOv2 — separate effort.
+- Multi-GPU / distributed.
+- `make test` / full training execution.
+
+### Exploration Confidence
+- **Problem scope: deep** — all 3 depth_anything files read in full; every imported dep (`StrongAugmentation`, `AffineInvariantLoss`, `FeatureAlignmentLoss`) read; Pattern-5 reference (`train_depth_estimation.py` head) inspected; `train/CLAUDE.md`, `dl_techniques/CLAUDE.md`, `models/CLAUDE.md`, `losses/CLAUDE.md`, `layers/CLAUDE.md` re-read.
+- **Solution space: constrained** — README format conventional; train scaffolding mirrors Pattern 5 1:1.
+- **Risk visibility: clear** — main risk is overstating fixes (user wants review-only + plan); README must flag gaps without rewriting code. Second risk is sigmoid×affine-invariant mismatch; mitigated by overriding `output_activation='linear'` in trainer.
+
+### F-001 — Code review of depth_anything
+
+### Files
+- `__init__.py` — empty (1 line). Per `models/__init__.py` convention this is OK; but per-package `__init__.py` for a model usually re-exports the public API. Currently consumers must import from `.model` and `.components` directly. Minor gap.
+- `components.py` — `DPTDecoder` (keras.Layer). Self-contained, serializable. Implements only a final conv head — no multi-scale fusion or upsampling. Docstring is honest about this. NOT a true DPT decoder.
+- `model.py` — `DepthAnything` (keras.Model) + `create_depth_anything` factory.
+
+### Bugs / gaps (verified)
+1. **Placeholder encoder, not DINOv2.** `_create_encoder()` builds a small Conv-BN-ReLU stack. Module docstring "Inherits semantic priors from pre-trained encoders" is unfulfilled. (HIGH)
+2. **Frozen "teacher" encoder shares no weights with student.** `self.frozen_encoder = self._create_encoder(trainable=False)` builds an *independent* Functional model with fresh random weights. FeatureAlignmentLoss against random features is meaningless. (HIGH)
+3. **Semi-supervised pipeline implied by docstring is NOT implemented.** `call()` accepts `(x_labeled, x_unlabeled)` but uses only `x_labeled`. `train_step()` doesn't use the unlabeled half, the `feature` loss term, the `frozen_encoder`, or any consistency loss. The `loss_weights={'labeled','unlabeled','feature'}` dict is dead state. (HIGH)
+4. **`self.compiled_loss` / `self.compiled_metrics` are removed/deprecated in Keras 3.** Canonical Keras-3 pattern: `compute_loss(y, y_pred)` + iterate `self.metrics`. Calling `self.compiled_loss(y, y_pred)` and `self.compiled_metrics.update_state(...)` will raise `AttributeError` on Keras 3.8+. **`model.fit` will crash.** (HIGH — blocks any training)
+5. **`tf.GradientTape` instead of relying on Keras default `train_step` or `keras.ops`.** Couples to TF backend; minor convention violation. (LOW)
+6. **`DPTDecoder.output_activation='sigmoid'` is incompatible with `AffineInvariantLoss`.** Sigmoid clamps prediction to [0,1] making global scale ill-defined; AIL specifically expects unbounded scale to median-shift / MAD-normalize meaningfully. Standard depth output: `linear` or `softplus`/`exp`. (HIGH for training quality)
+7. **Functional encoder built inside `build()` is fragile under serialization.** Convention in dl_techniques: declare sub-layers in `__init__`. Save/load round-trip not tested. (MEDIUM)
+8. **Dead defensive checks**: `if DPTDecoder is not None`, `if StrongAugmentation is not None`, `if AffineInvariantLoss is not None`/`FeatureAlignmentLoss is not None` — all are class objects imported at top of file, never None. `_create_fallback_decoder` is dead code. (LOW)
+9. **`StrongAugmentation._apply_cutmix` hard-codes 3 channels** (`ops.tile(mask, [1, 1, 3])`); brightness/contrast factors are batch-scalar (single value applied to whole batch), not per-sample — much weaker than typical CutMix. (LOW; pre-existing layer)
+10. **`encoder_type` in {'vit_s','vit_b','vit_l'} validated but never used.** Placeholder encoder is identical for all three values. Misleading API. (MEDIUM)
+11. **`input_shape` parameter shadows Keras `Layer.input_shape`.** Mitigated as `self.input_shape_param`. `get_config` exports as `"input_shape"` so `from_config(**config)` round-trips. Error-prone naming. (LOW)
+12. **No tests** under `tests/test_models/test_depth_anything/` — verified absent.
+13. **`encoder.trainable = trainable`** set after Functional construction. Works, but combined with bug 2 above, the frozen "teacher" never gets a chance to be a real teacher.
+14. **`compile()` override silently mutates `self.loss_weights`** and stores `self.depth_loss` / `self.feature_loss` that are then never read by `train_step` — dead state. (LOW)
+
+### Things that ARE OK (no false positives)
+- `get_config` correctly serializes `kernel_initializer` / `kernel_regularizer` via `keras.initializers.serialize` / `keras.regularizers.serialize`; `__init__` accepts both string and dict (`keras.initializers.get(...)` handles both). Round-trip OK for these.
+- `@keras.saving.register_keras_serializable()` on `DepthAnything` and `DPTDecoder` — both decorated correctly.
+- `from_config(cls, config) -> cls(**config)` — fine because `keras.Model.__init__` accepts `**kwargs` (so `name`, `trainable`, `dtype` from base `get_config()` are absorbed).
+- `DPTDecoder` provides `get_build_config` / `build_from_config` — correct Keras 3 idiom for layers built from input shape.
+- `DPTDecoder.compute_output_shape` is correct.
+
+### F-002 — Pattern-5 train reference
+
+`src/train/cliffordnet/train_depth_estimation.py` is the canonical reference:
+- `DepthTrainingConfig` dataclass: `megadepth_root`, `train_split`, `patch_size`, `min_valid_ratio`, `max_train_files`, `max_val_files`, `dataset_shuffle_buffer`, `model_variant`, `batch_size`, `epochs`, `patches_per_image`, `augment_data`, `steps_per_epoch`, `learning_rate`, `optimizer_type`, `lr_schedule_type`, `warmup_epochs`, `weight_decay`, `gradient_clipping`, `enable_deep_supervision`, `monitor_every_n_epochs`, `early_stopping_patience`, `validation_steps`, `output_dir`, `experiment_name`, `init_from`, `seed`.
+- `DepthEstimationLoss(keras.losses.Loss)` — masked L1 + multi-scale gradient matching, **locally defined**.
+- Data: `discover_megadepth_pairs(megadepth_root)` → `(rgb_paths, depth_paths)` → `MegaDepthDataset(rgb, depth, batch_size, patch_size, ...)`. Yields `(rgb, y_true)` with `y_true = concat([depth, mask], axis=-1)`.
+- Optimizer/LR: `optimizer_builder` + `learning_rate_schedule_builder` from `dl_techniques.optimization`.
+- Callbacks: `create_common_callbacks(monitor="val_loss", patience, use_lr_schedule=True, include_terminate_on_nan=True, include_analyzer=False)` + append `DepthMetricsCurveCallback` + `DepthPredictionGridCallback`.
+- Pretrained init: `--init-from <ckpt.keras>` → `load_weights_from_checkpoint(model, ckpt, skip_prefixes=("head_",))`.
+- Reproducibility: `--seed` seeds Python/NumPy/TF/Keras at startup.
+
+### Verified present
+- `src/train/common/megadepth.py`
+- `src/dl_techniques/metrics/depth_metrics.py`
+- `src/dl_techniques/callbacks/depth_visualization.py`
+- `src/dl_techniques/utils/weight_transfer.py` (`load_weights_from_checkpoint`)
+
+### F-003 — Deliverables
+
+### Deliverable 1: README
+Path: `src/dl_techniques/models/depth_anything/README.md`
+
+Sections: Overview, Architecture (encoder placeholder, decoder, augmentation, frozen teacher), Components (`DepthAnything`, `DPTDecoder`, `StrongAugmentation`), Usage (forward pass, factory, compile), Configuration parameters, Example, **Known Issues / Caveats** (bullet list mapping to F-001 #1..#14), References.
+
+### Deliverable 2: Train scaffold
+Directory: `src/train/depth_anything/`
+
+Files:
+- `__init__.py` — empty (per train-package convention).
+- `train_depth_anything.py` — Pattern-5 trainer mirroring `cliffordnet/train_depth_estimation.py`, adapted to call `create_depth_anything(...)`. Override decoder `output_activation='linear'` at construction (constructor exposure or post-hoc `model.decoder.output_activation = 'linear'` reset would not propagate; recommended path: construct `DepthAnything` then replace `model.decoder.output_conv.activation = keras.activations.linear` BEFORE first forward pass — but this is fragile). Cleaner path: file local helper `build_depth_anything_for_training(args)` that constructs the model and a *new* `DPTDecoder(output_activation='linear', ...)` directly, swapping the decoder. Will document in plan.
+- README in `src/train/depth_anything/` — optional; add a short usage block + smoke recipe.
+
+### Compile path
+Two reasonable choices, both honest:
+1. Use `dl_techniques.losses.AffineInvariantLoss` — matches DepthAnything's docstring claim; requires linear output. NOTE: AIL ignores the validity mask channel — it processes the full 4D tensor as flat. We must either (a) slice off the mask before passing to AIL, or (b) use a wrapper that applies AIL only on `y_true[..., :1]` with `y_true[..., 1:]` as mask. (a) is simpler in trainer code.
+2. Use the proven `DepthEstimationLoss` from `cliffordnet/train_depth_estimation.py` (copy-paste local; mask-aware L1 + gradient matching). More predictable; less faithful to the paper recipe.
+
+Plan PROPOSAL: option (1) with a tiny `MaskedAffineInvariantLoss` wrapper inside the train script that splits `y_true` into `(depth, mask)`, masks invalid pixels in both `y_true` and `y_pred`, then calls AIL on the masked tensors. ~25 LOC.
+
+### CLI flags (mirror Pattern 5 + DepthAnything-specific)
+`--encoder-type {vit_s,vit_b,vit_l}`, `--input-size`, `--decoder-dims`, `--megadepth-root`, `--patch-size`, `--batch-size`, `--epochs`, `--learning-rate`, `--lr-schedule`, `--weight-decay`, `--gradient-clipping`, `--patience`, `--steps-per-epoch`, `--validation-steps`, `--max-train-files`, `--max-val-files`, `--init-from`, `--seed`, `--gpu`, `--output-dir`, `--experiment-name`, `--use-feature-alignment` (off by default until placeholder-vs-pretrained encoder is resolved), `--cutmix-prob`, `--color-jitter-strength`, `--show-plots`.
+
+### Corrections
+*None yet.*
+
+## plan_2026-05-09_0f39a086
+### Index
+
+| ID | Topic | File |
+|----|-------|------|
+| F-001 | Audit summary — 6 bugs / 6 robustness / 5 design / 9 opportunities; per-finding fix shape | findings/01-audit-summary.md |
+| F-002 | Importers of `memory_bank` — test scope | findings/02-importers.md |
+| F-003 | Design notes for non-trivial fixes (B1 W_Q-projected KMeans, B2 InfoNCE redesign, R1 cond, O4 plumbing, O7 schedule, D2 constants) | findings/03-design-notes.md |
+
+### Key Constraints
+
+### Hard
+- All 32 existing tests under `tests/test_models/test_memory_bank/` must pass.
+- Variable-name prefixes (`memory_*`, `gate_*`) are load-bearing for the dual-optimizer split — don't rename existing weights.
+- `keras.ops` / `keras.random` only (no `import tensorflow as _tf` for randomness — B4/O5).
+- `@keras.saving.register_keras_serializable()` + full `get_config()` round-trip on every Layer/Model.
+- `dl_techniques.utils.logger` (no `print`).
+- User pushes commits themselves; we commit locally only.
+- Single GPU; never run training in parallel (project memory).
+- Tests scoped to `tests/test_models/test_memory_bank/` — full suite is ~1.5h, do not run.
+
+### Soft
+- O1 (KV-cache for incremental decode) is a stretch goal — skip if it requires touching `WaveFieldDecoderBlock` (audit says so, mark scope-creep).
+- O4 (multi_head_keys) defaults to False everywhere to preserve current behavior.
+- B2 (InfoNCE) and O4 (multi_head_keys) are the largest fixes — own steps.
+
+### Ghost / out-of-scope
+- Modifying `WaveFieldDecoderBlock` or `WaveFieldAttention` (62 tests lock the latter).
+- Pushing to remote.
+- Running `make test` (full suite).
+
+### Exploration Confidence
+- **Problem scope: deep** — audit doc covers every finding with file:line references and prescribed fix shape; all source files read in full; existing tests catalogued.
+- **Solution space: constrained** — most fixes are one-shot; B2/R1/O4/O7 design choices resolved in F-003.
+- **Risk visibility: clear** — main risks identified (B2 InfoNCE redesign, R1 cond aux-loss interaction, R3 prefix-match reroute) and mitigations in F-003.
+
+Ready for PLAN.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-08_146ae899
+### Index
+
+| ID | Topic | File |
+|----|-------|------|
+| F-001 | `src/train/wave_field_llm/pretrain.py` Pattern-3 NLP CLM reference (skeleton, invariants, helpers) | findings/01-pretrain-py-reference.md |
+| F-002 | `WaveFieldLLM` model surface — extension shape for dual-tap memory | findings/02-wave-field-llm-model.md |
+| F-003 | Existing memory/routing layers in `dl_techniques` — none reusable as-is; reference patterns extracted | findings/03-existing-memory-and-routing-layers.md |
+| F-004 | Blueprint mapping to concrete code (top-K STE, gate init b=-3, 4 aux losses, 4-phase curriculum, custom train_step) | findings/04-blueprint-decomposition.md |
+| F-005 | Scope clarification + recommended file layout (training script + new wave_field_llm_memory model package) | findings/05-scope-and-file-layout.md |
+
+### Key Constraints
+
+### Hard
+- Output dict key MUST be `"logits"` (SYSTEM atlas invariant).
+- `prepare_dict_keyed_compile(model, output_key="logits")` must run BEFORE `model.compile`.
+- `metrics={"logits": build_clm_metrics(config.encoding_name)}` — Pattern-3 metric floor.
+- `@keras.saving.register_keras_serializable()` + full `get_config()` round-trip on every new Layer/Model.
+- Static `k` int for `ops.top_k`; static `num_classes` for `ops.one_hot` (set as `M_static = S_lt + max_seq_len`).
+- `d_v < embed_dim` (bottleneck enforced); `d_k != d_v` (blueprint).
+- No positional encodings on memory queries/keys.
+- `b_g` init = -3.0 (so sigmoid≈0.04, memory ~96% bypassed at init).
+- `K_lt` initialized via offline K-Means (`sklearn.cluster.MiniBatchKMeans`) on warmup hidden states, applied via `K_lt.assign(centroids)` at start of Phase 2.
+- Frozen state in layers via `add_weight(trainable=False, initializer=...)` (LESSONS — Keras FuncGraph dead-tensor bug).
+- STE: `routing = soft + ops.stop_gradient(hard - soft)` (canonical idiom from vector_quantizer.py).
+- Strict causal mask for M_WM retrieval (position t may only attend to WM tokens at positions <= t).
+- Sibling-stack pattern: NO modification of existing `WaveFieldLLM` / `WaveFieldAttention` / `WaveFieldDecoderBlock` (mirrors plan_2026-05-07_1519e34f D-001).
+- Custom `train_step` for differential LRs (backbone 1e-5, memory 3e-4) using two AdamW optimizers, gradient split by var name prefix.
+- `compiled_metrics.update_state(y, y_pred)` must be called inside the custom `train_step`.
+- `load_model` `custom_objects` must list both losses + every new custom Layer/Model class.
+- Single GPU only; `MPLBACKEND=Agg`; `dl_techniques.utils.logger` (no `print`).
+- Required CLM CLI flags: `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`, `--resume`.
+- AdamW WD only — no `kernel_regularizer=L2`.
+- Test scope: pytest only on touched modules.
+
+### Soft
+- Memory hyperparameters scale with variant: tiny=(d_k=64, d_v=128, S_lt=4096); small=(128, 256, 16384); medium=(128, 512, 32768); large/xl=(128, 512, 65536).
+- Default top-k retrieval = 32.
+- Default aux loss weights: λ_gate_entropy=1e-3, λ_load_balance=1e-2, λ_z_loss=1e-3, λ_diversity=1e-3, λ_infonce=5e-3.
+- Key diversity penalty subsamples 1024 keys per step (full S_lt×S_lt is too large at S_lt=65536).
+- InfoNCE uses 256 random negatives per step.
+- Default phase boundaries (steps): phase1=50000, phase2=25000, phase3=100000.
+- Variant ladder mirrors `WaveFieldLLM.MODEL_VARIANTS`: tiny/small/medium/large/xl.
+
+### Ghost / out-of-scope
+- "Reuse `KMeansLayer` for K_lt online updates" — false; offline `sklearn.MiniBatchKMeans` matches blueprint better.
+- "Reuse `KeyValueMemoryStore` from `experimental/contextual_memory.py`" — false; same K/V dim, no top-K, no aux losses.
+- "Modify `WaveFieldAttention` to accept memory queries" — false; locked by 62 tests.
+- "Single-file deliverable strict reading" — contradicts project convention; recommended scope is small new model package + training script (S2 in F-005).
+- Phase-4 long-context dataset construction — separate plan.
+- Distributed / multi-GPU — out of scope per project memory.
+
+### Exploration Confidence
+
+- **Problem scope: deep** — `pretrain.py` (887 LOC), `wave_field_llm.py` (582 LOC), `train.common.nlp` API, sibling memory layers, and 5 prior related plans all read in detail.
+- **Solution space: constrained** — Pattern-3 NLP CLM trainer template is locked by 6 existing trainers; the memory architecture is fully specified by the user-supplied blueprint. Open knobs: (a) scope S1 single-file vs S2 idiomatic split, (b) curriculum control via custom `train_step` vs callback-only.
+- **Risk visibility: clear** — primary risks identified: custom `train_step` interaction with `compiled_metrics` + `prepare_dict_keyed_compile`; save/load round-trip with phase counter; K-Means warmup cost at large S_lt (mitigated by MiniBatchKMeans + once-only at phase boundary); `ops.one_hot` static `num_classes` (mitigated by right-padding WM to `max_seq_len`).
+
+Ready for PLAN.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-07_824e5687
+### Index
+*To be populated during EXPLORE.*
+
+### Key Constraints
+*To be populated during EXPLORE.*
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
 ## plan_2026-05-07_3f461682
 ### Index
 - [F-001 LLM trainer inventory & current metric setup](plan_2026-05-07_3f461682/findings/01-llm-trainer-inventory.md) — 5 in-scope Pattern-3 CLM trainers (gpt2 pretrain/finetune, cliffordnet_nlp, _unet, _routing, wave_field_llm) all share `metrics={"logits": ["accuracy"]}`. qwen/nano_vlm/blt/bert/fnet are out of scope (custom trainers / different objectives).
@@ -108,144 +449,3 @@
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
-
-## plan_2026-05-07_a73304d4
-### Index
-- F1: rfft tuple return RE-VERIFIED on Keras 3.8.0. Reviewer's V3.7 "fix" would crash because `ops.reshape` cannot accept a tuple. Same false claim as previous review's #2.
-- F2: 62/62 tests pass on current commit `67745b5` (HEAD before this iteration).
-- F3: 4 real optimizations identified — mixed-precision cast, 4D coupling einsum, single-transpose scatter/gather, `ops.softplus`.
-- F4: Test contracts that gate the changes — `test_wave_kernel_fft_shape` (asserts tuple of len 2 — protects against accidentally adopting the false "fix"); `test_field_coupling_*` (output shape + near-identity correlation); `test_numerical_stability` (large/tiny inputs, no NaN/Inf).
-
-### Key Constraints
-- **Hard**: `keras.ops.rfft` returns 2-tuple `(real, imag)` on Keras 3.8.0 + TF 2.18 backend. Do not adopt the "complex tensor" fix.
-- **Hard**: All 62 existing tests must remain passing.
-- **Hard**: Weight topology must remain unchanged (`test_trainable_variable_count == 10`).
-- **Soft**: Project convention — `dl_techniques.utils.logger` is imported unconditionally everywhere; do NOT add try/except fallback (user-confirmed scope).
-
-### Corrections
-*None.*
-
-## plan_2026-05-07_47199c68
-### Index
-
-- [F1: rfft return type empirically verified](plan_2026-05-07_47199c68/findings/rfft-return-type.md) — Keras 3 TF backend returns `(real, imag)` tuple. Review issue #2 is a FALSE POSITIVE.
-- [F2: Existing test suite all green (62/62)](plan_2026-05-07_47199c68/findings/test-baseline.md) — `pytest test_wave_field_attention.py` passes; tests encode current behavior as contract.
-- [F3: Test contracts locking in current behavior](plan_2026-05-07_47199c68/findings/test-contracts.md) — Several tests will break if naive fixes are applied; identifies which assertions need updates.
-- [F4: Issue triage — real vs false positive](plan_2026-05-07_47199c68/findings/issue-triage.md) — Of 25 review issues: ~10 real fixes, ~5 false positives (incl. #1, #2, #12, #18, #20), rest are design choices/minor.
-
-### Key Constraints
-
-- **Hard**: All 62 existing tests must remain passing (or be updated with explicit anchor and justification).
-- **Hard**: Wave parameter init values are locked by `test_wave_parameter_initial_values` to `linspace(0, π, H)` for phase, `linspace(-3, 0.5, H)` for damping, `linspace(0.3, 4.0, H)` for frequency. Changes here require test update + decision anchor.
-- **Hard**: `coupling_noise_stddev=0.0` must give exact identity (`test_coupling_noise_zero_gives_identity`). Any new init scheme must preserve this.
-- **Hard**: `coupling_noise_stddev>0` must perturb away from identity (`test_coupling_noise_applied`).
-- **Soft**: Keras 3 idiom — prefer `keras.initializers` over numpy random for reproducibility.
-- **Soft**: `dl_techniques.utils.logger` for warnings, not `print`/`warnings`.
-
-### Corrections
-*None yet.*
-
-## plan_2026-05-07_c6dd7cc1
-### Index
-
-- [01-pipeline-map.md](plan_2026-05-07_c6dd7cc1/findings/01-pipeline-map.md) — Producer/consumer map across the codebase. Lists every train script that touches `load_wikipedia_train_val`, `preprocess_clm_dataset`, `preprocess_clm_packed_dataset`, `preprocess_mlm_dataset`, `load_hf_text_dataset`, `create_warmup_lr_schedule`. **Scope clarification (user re-issued command)**: "fix them everywhere **not only** in clifford unet" — UNet is INCLUDED.
-- [02-issue-catalog.md](plan_2026-05-07_c6dd7cc1/findings/02-issue-catalog.md) — Re-verified bug catalog with severity, exact LOC, recommended fix. 9 issues total: 7 confirmed from initial review, 1 downgraded (val cadence), 2 new (`MLM cache()` trap, `seed=42` magic).
-- [03-design-precedents.md](plan_2026-05-07_c6dd7cc1/findings/03-design-precedents.md) — Two existing in-repo precedents that already do "the right thing": `train_cliffordnet_nlp_routing.py` (chunk-aware estimator + `--steps-per-epoch` override) and `train_clip.py` `_run_pretrain_lm` (explicit `steps_budget` + `repeat=True`). Centralization should hoist their pattern into `train.common.nlp`.
-
-### Key Constraints
-
-### Hard
-- Existing `.keras` checkpoints must continue to load (resume must keep working). No changes to `MaskedCausalLMLoss` / `FocalCausalLMLoss` interfaces.
-- `model.fit(epochs=E, steps_per_epoch=S)` is required when the train dataset has `.repeat()` applied (otherwise infinite loop).
-- `tf.data.Dataset.from_generator` produces a non-cardinal dataset; `tf.data.experimental.cardinality()` returns `UNKNOWN_CARDINALITY`.
-- Tiktoken releases the GIL during `encode_ordinary_batch`, so multi-thread tokenization is feasible without process forks.
-- Single GPU jobs only (per LESSONS.md / project memory). No distributed-strategy work.
-- `MPLBACKEND=Agg` for any training script invocation in this codebase.
-
-### Soft
-- Heuristic ~600 tokens/article post 500-char filter (used by `train_cliffordnet_nlp_routing.py`). With `min_article_length=0` the avg drops; we'll re-derive the constant.
-- Shuffle buffer size (4096 today). Bigger is better but eats RAM (~3KB/chunk × 4096 ≈ 12 MB — trivial; could go 64k).
-- Number of tokenization shards (4-8 reasonable on the dev box).
-- Default `min_article_length` (currently 500 chars). For packed CLM, 0 is correct.
-
-### Ghost
-- The "streaming=True is REQUIRED ... otherwise OOM" comments in `train_cliffordnet_nlp.py:637-639` and `train_cliffordnet_nlp_routing.py` (and the `streaming` parameter on `preprocess_clm_dataset`) are vestiges of the pre-packed-pipeline era. They no longer apply since `preprocess_clm_packed_dataset` does not call `.cache()`.
-- The hardcoded `4_850_000` article count was empirically correct for `min_article_length=500`. Once we lower the default to 0, the article count rises and the 600-tokens/article heuristic falls — total tokens are roughly invariant (~3-4B for EN Wikipedia 20231101), so the chunk count is what we should be estimating, not articles × tokens.
-
-### Exploration Confidence
-- Problem scope: **deep** (every consumer mapped, library code traced, two existing in-repo precedents found and read).
-- Solution space: **constrained** (4 viable approaches per issue; recommended approaches map to existing code in this repo).
-- Risk visibility: **clear** (resume compatibility is the main risk; sharded interleave changes determinism — explicit user-facing trade-off).
-
-Ready for PLAN.
-
-## plan_2026-05-06_82749628
-### Index
-- [causal-blocks-api.md](plan_2026-05-06_82749628/findings/causal-blocks-api.md) — CausalCliffordNetBlock (dim-preserving) and CausalCliffordNetBlockDSv2 (causal stride downsampler). Shapes, allowed kwargs, ctx_mode/pool restrictions.
-- [upsampling-causality.md](plan_2026-05-06_82749628/findings/upsampling-causality.md) — keras.layers.UpSampling2D(size=(1, s), interpolation="nearest") is causal-safe. Bilinear / transposed-conv leak future. Tail right-pad + crop in call() solves the seq_len % total_stride != 0 case.
-- [lm-and-train-mirror.md](plan_2026-05-06_82749628/findings/lm-and-train-mirror.md) — lm.py contract (variants ladder, from_variant, get_config, tie_word_embeddings, {"logits": ...} dict). Train script callbacks are model-agnostic — only model class + custom_objects + dataset/results-dir prefix change.
-
-### Key Constraints
-
-### Hard
-- 4D layout (B, 1, seq_len, channels) end-to-end through encoder/decoder.
-- Strict causality: changing input position k must leave outputs at all positions < k byte-identical (within fp tolerance).
-- DSv2 ctx_mode restricted to {diff, abs} (no pyramid_diff); pool kinds restricted to {avg, max} (LESSONS L33).
-- Upsample must be nearest along W only — no bilinear, no transposed conv, no sub-pixel.
-- Output shape (B, seq_len, vocab_size) — must preserve full input length even when seq_len % total_stride != 0. Use right-pad + crop inside call().
-- Output dict key MUST remain "logits" — MaskedCausalLMLoss and the train script assume this.
-- Keras 3 conventions: @keras.saving.register_keras_serializable(), keras.ops, dl_techniques.utils.logger, full get_config() round-trip, no print.
-- tie_word_embeddings flag — same default as lm.py (True). Keep output_bias add_weight when tied.
-- Skip-connection fusion at SAME resolution as encoder skip — explicit Concatenate(axis=-1) followed by 1x1 Conv2D projection back to channels.
-- Test scope: pytest only on the new model file (LESSONS L20: never make test).
-- AdamW WD only — no kernel_regularizer=L2.
-- Use .venv/bin/python. Commit per step. User pushes themselves.
-
-### Soft
-- Mirror lm.py and train_cliffordnet_nlp.py line-by-line where it doesn't conflict with U-Net structure.
-- Variant ladder names: nano, mini, base, large, xl (1:1 with lm.py).
-- Class name: CliffordNetLMUNet. File path: src/dl_techniques/models/cliffordnet/lmunet.py. Train script: src/train/cliffordnet/train_cliffordnet_nlp_unet.py.
-- Default U-Net topology per variant: 3 stages (encoder + bottleneck + decoder), strides [2, 2], mirroring decoder. For deeper variants, allow 4 stages (strides [2, 2, 2]).
-- Default upsampler: keras.layers.UpSampling2D(size=(1, s), interpolation="nearest") + Concatenate(axis=-1) + 1x1 Conv2D.
-
-### Ghost constraints (none found)
-- "U-Net needs different output dict key" — false; loss + train wrapper + probe pivot on "logits".
-- "Need a custom causal upsampler layer" — false; UpSampling2D nearest is sufficient.
-- "Need to clone all callbacks" — false; they're model-agnostic.
-
-### Exploration Confidence
-- Problem scope: deep — exact line ranges of both causal blocks read; lm.py and train script read in full; vision unet skim confirms encoder/decoder fusion pattern; _make_causal_pool / padding="same" causal status grounded in LESSONS L33.
-- Solution space: constrained — block APIs and lm.py/train-script contracts pin the design. Only knobs are stages/strides/blocks-per-stage and skip-fusion (concat-1x1).
-- Risk visibility: clear — main risk is a subtle causality leak in upsample/concat/skip path; mitigated by the existing test_causality_* pattern from test_cliffordnet_lm.py (perturb position k, assert all positions < k byte-identical).
-
-Ready for PLAN.
-
-## plan_2026-05-06_13a2df9e
-### Index
-- [F-001 scope-and-callers.md](plan_2026-05-06_13a2df9e/findings/scope-and-callers.md) — pure-additive sibling class, no callers affected, layers `__init__.py` is empty so no export plumbing.
-- [F-002 causality-mechanics.md](plan_2026-05-06_13a2df9e/findings/causality-mechanics.md) — how `CausalCliffordNetBlock` enforces causality + which DSv2 ops are/are not causal under `(H=1, W=seq_len)` layout. Conclusion: avg/max with `padding="same"` are causal; `blur`, `gaussian_dw`, `pyramid_diff`, `pixel_unshuffle`, `resnetd` are not.
-- [F-003 dsv2-merge-points.md](plan_2026-05-06_13a2df9e/findings/dsv2-merge-points.md) — exact API delta, build-validation, and call-path changes vs DSv2; padding arithmetic for arbitrary `kernel_size`; tests to mirror.
-
-### Key Constraints
-
-### Hard
-- Same file: `src/dl_techniques/layers/geometric/clifford_block.py`. No new modules.
-- `H=1, W=seq_len` layout (matches `CausalCliffordNetBlock`).
-- Strict causality along W: future positions must not influence past outputs (must be regression-tested).
-- Existing 117+ tests in `test_clifford_block.py` must continue to pass — purely additive change.
-- Keras 3 / TF 2.18 idioms (`@keras.saving.register_keras_serializable()`, `keras.ops`, `dl_techniques.utils.logger`, no `print`).
-- No public-API breakage to existing classes.
-
-### Soft
-- Mirror existing class structure (init/build/call/get_config + the helper functions style).
-- Match test layout (per LESSONS.md) — class per layer, fixtures, save/load round-trip, gradient flow, causality regression.
-
-### Ghost constraints (not present)
-- Layers `__init__.py` is empty (per `layers/CLAUDE.md`) — no export plumbing needed.
-
-### Exploration Confidence
-- Problem scope: **deep** — exact line ranges and semantics of both parents read; constraints classified.
-- Solution space: **constrained** — combine two known patterns; only thing genuinely new is the narrower pool-kind surface and reasoning about which pools are causal.
-- Risk visibility: **clear** — main risk is a subtle pool-future-leak; mitigated by restricting to avg/max only and writing a perturb-future-position regression test.
-
-Ready for PLAN.
