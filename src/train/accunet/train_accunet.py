@@ -571,17 +571,18 @@ def run_training(config: AccUNetTrainingConfig) -> Tuple[keras.Model, str]:
     model.save(final_path)
     logger.info(f"Saved final model -> {final_path}")
 
-    # NB: ``compile=False`` because ``dl_techniques.losses.segmentation_loss``
-    # ``WrappedLoss`` (the loss returned by ``create_loss_function``) currently
-    # serializes a ``reduction`` kwarg that its ``__init__`` doesn't accept,
-    # so a full ``compile_from_config`` round-trip raises ``TypeError`` from
-    # inside Keras' deserializer. The trainer-side round-trip check only
-    # cares about the model topology + weights, so skip compile.
+    # Fixed in plan_2026-05-10_17633038 (D-002) — SegmentationWrapperLoss now
+    # lives in ``dl_techniques.losses.segmentation_wrapper_loss`` and is fully
+    # serializable, so the model round-trips with the loss attached (no
+    # ``compile=False``, no extra ``custom_objects`` for the loss).
     loaded = keras.models.load_model(
         final_path,
         custom_objects={"BinaryDiceMetric": BinaryDiceMetric},
-        compile=False,
     )
+    assert (
+        loaded.loss is not None
+        and type(loaded.loss).__name__ == "SegmentationWrapperLoss"
+    ), f"unexpected loss type: {type(loaded.loss).__name__}"
     sample = np.zeros(
         (1, config.image_size, config.image_size, config.input_channels),
         dtype="float32",
