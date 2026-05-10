@@ -524,50 +524,64 @@ class DepthAnything(keras.Model):
 
         logger.info(f"Compiled DepthAnything with loss weights: {self.loss_weights}")
 
-    def train_step(self, data: Any) -> Dict[str, keras.KerasTensor]:
-        """Execute one training step.
+    def _pseudo_label_depth(self, x_unlab: keras.KerasTensor) -> keras.KerasTensor:
+        """Generate stop-gradient pseudo-depth labels from the EMA teacher.
 
-        Two input shapes are accepted:
-
-        * ``(x, y)`` — labeled-only path (default).
-        * ``((x_lab, x_unlab), y_lab)`` — semi-supervised path. Active only
-          when ``self.enable_semi_supervised`` is True AND
-          ``self.use_feature_alignment`` is True. Adds a Feature-Alignment
-          Loss term computed on unlabeled features against the
-          weight-shared frozen teacher.
+        Runs the frozen teacher encoder + decoder in inference mode and
+        returns ``stop_gradient(depth)``. The student's gradient flows
+        through ``self(x_unlab, training=True)`` but never through this path
+        — exactly the Mean-Teacher / consistency-regularization recipe.
 
         Args:
-            data: Training data batch.
+            x_unlab: Unlabeled input batch ``(B, H, W, C)``.
 
         Returns:
-            Dictionary containing loss metrics.
+            Pseudo-depth tensor ``(B, H, W, output_channels)`` with no gradient.
         """
-        x, y = data
-        # Detect semi-supervised tuple-of-inputs.
-        if (
-            self.enable_semi_supervised
-            and isinstance(x, (tuple, list))
-            and len(x) == 2
-        ):
-            x_lab, x_unlab = x[0], x[1]
-        else:
-            x_lab, x_unlab = x, None
+        feat = self.frozen_encoder(x_unlab, training=False)
+        feat = self._features_to_spatial(feat)
+        pseudo = self.decoder(feat, training=False)
+        return ops.stop_gradient(pseudo)
 
+    def _train_step_labeled(
+        self,
+        x: keras.KerasTensor,
+        y: keras.KerasTensor,
+    ) -> Dict[str, keras.KerasTensor]:
+        """Labeled-only path: single forward + compute_loss + backprop."""
         with tf.GradientTape() as tape:
-            # Forward pass on labeled batch.
-            y_pred = self(x_lab, training=True)
+            y_pred = self(x, training=True)
             # DECISION plan_2026-05-10_44694bc9/D-003: Keras-3 canonical train_step
             # — replaces deprecated compiled-loss / compiled-metrics calls.
             # See dl_techniques/models/masked_language_model/mlm.py:309-343.
+            loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
+            loss = loss * self.loss_weights.get('labeled', 1.0)
+
+        trainable_vars = self.trainable_variables
+        gradients = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+
+        for m in self.metrics:
+            if m.name != "loss":
+                m.update_state(y, y_pred)
+        return {m.name: m.result() for m in self.metrics}
+
+    def _train_step_semi_supervised(
+        self,
+        x_lab: keras.KerasTensor,
+        x_unlab: keras.KerasTensor,
+        y: keras.KerasTensor,
+    ) -> Dict[str, keras.KerasTensor]:
+        """Semi-supervised path: labeled compute_loss + FAL + consistency."""
+        with tf.GradientTape() as tape:
+            # ---- labeled supervision ----
+            y_pred = self(x_lab, training=True)
             loss = self.compute_loss(x=x_lab, y=y, y_pred=y_pred)
             loss = loss * self.loss_weights.get('labeled', 1.0)
 
-            # Optional Feature-Alignment-Loss on unlabeled batch.
-            if (
-                x_unlab is not None
-                and self.use_feature_alignment
-                and self.frozen_encoder is not None
-            ):
+            # ---- semi-sup branch: FAL + consistency ----
+            if self.use_feature_alignment and self.frozen_encoder is not None:
+                # Feature-Alignment-Loss on unlabeled features.
                 feat_student = self.encoder(x_unlab, training=True)
                 feat_teacher = self.frozen_encoder(x_unlab, training=False)
                 # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
@@ -580,17 +594,49 @@ class DepthAnything(keras.Model):
                 fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
                 loss = loss + self.loss_weights.get('feature', 0.1) * fal
 
-        # Compute gradients and update weights
+                # Pseudo-label consistency: L1 between student depth on
+                # x_unlab and teacher's stop-gradient pseudo-depth.
+                y_pred_unlab = self(x_unlab, training=True)
+                pseudo = self._pseudo_label_depth(x_unlab)
+                consistency = ops.mean(ops.abs(y_pred_unlab - pseudo))
+                loss = loss + self.loss_weights.get('unlabeled', 0.5) * consistency
+
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        # Update user-defined metrics (Keras 3 auto-tracks the loss in self.metrics).
         for m in self.metrics:
             if m.name != "loss":
                 m.update_state(y, y_pred)
-
         return {m.name: m.result() for m in self.metrics}
+
+    def train_step(self, data: Any) -> Dict[str, keras.KerasTensor]:
+        """Execute one training step.
+
+        Two input shapes are accepted:
+
+        * ``(x, y)`` — labeled-only path (default). Routed to
+          :meth:`_train_step_labeled`.
+        * ``((x_lab, x_unlab), y_lab)`` — semi-supervised path. Active only
+          when ``self.enable_semi_supervised`` is True. Routed to
+          :meth:`_train_step_semi_supervised`. The semi-sup branch adds a
+          Feature-Alignment-Loss term and a stop-gradient pseudo-label
+          L1-consistency term over ``x_unlab``.
+
+        Args:
+            data: Training data batch.
+
+        Returns:
+            Dictionary containing loss metrics.
+        """
+        x, y = data
+        if (
+            self.enable_semi_supervised
+            and isinstance(x, (tuple, list))
+            and len(x) == 2
+        ):
+            return self._train_step_semi_supervised(x[0], x[1], y)
+        return self._train_step_labeled(x, y)
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
