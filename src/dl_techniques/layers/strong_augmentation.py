@@ -148,17 +148,23 @@ class StrongAugmentation(keras.layers.Layer):
         :return: Color-jittered images tensor.
         :rtype: keras.KerasTensor
         """
+        # Per-sample brightness factor with shape (B, 1, 1, 1) — broadcasts
+        # cleanly over (H, W, C) and varies the brightness *per image*. See
+        # README Known Issues #9.
+        batch_size = ops.shape(x)[0]
+        per_sample_shape = (batch_size, 1, 1, 1)
+
         # Brightness adjustment
         brightness_factor = keras.random.uniform(
-            shape=(),
+            shape=per_sample_shape,
             minval=1.0 - self.color_jitter_strength,
             maxval=1.0 + self.color_jitter_strength
         )
         x = ops.multiply(x, brightness_factor)
 
-        # Contrast adjustment
+        # Contrast adjustment (per-sample)
         contrast_factor = keras.random.uniform(
-            shape=(),
+            shape=per_sample_shape,
             minval=1.0 - self.color_jitter_strength,
             maxval=1.0 + self.color_jitter_strength
         )
@@ -231,9 +237,10 @@ class StrongAugmentation(keras.layers.Layer):
             mask
         )
 
-        # Apply mask to all channels (3 channels assumed; preserved from
-        # original behavior — see Known Issues #9 in the model README).
-        mask = ops.tile(mask, [1, 1, 3])
+        # Apply mask to all channels — dynamic last-dim multiple supports
+        # arbitrary channel counts (1, 3, 4, ...). Fixes Known Issues #9.
+        channels = ops.shape(x)[-1]
+        mask = ops.tile(mask, [1, 1, channels])
 
         # Multiply the mask by the symbolic apply-gate so mask=0 when not
         # applying; this is equivalent to the original `if not should_apply`.
