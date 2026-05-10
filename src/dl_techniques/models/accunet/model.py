@@ -365,6 +365,29 @@ class AccUNet(keras.Model):
             concat = keras.layers.Concatenate(axis=-1, name=f'concat_{level}')
             self.concat_layers.append(concat)
 
+    @staticmethod
+    def _validate_spatial_dims(shape: Tuple[Optional[int], ...]) -> None:
+        """Raise ``ValueError`` if H or W (positions 1, 2) are statically known
+        and not divisible by 16. ``None`` dims are accepted (dynamic shape).
+
+        DECISION plan_2026-05-10_bdb2c84d/D-001: AccUNet requires H, W divisible
+        by 16. ``padding='same'`` on MaxPooling2D was tried first but
+        ``Conv2DTranspose(strides=2, padding='same')`` always emits ``2 * H_in``
+        which cannot recover odd dims, so the decoder Concatenate still
+        mismatched. Failing loudly is the honest contract; the trainer must
+        resize inputs accordingly.
+        """
+        if len(shape) < 3:
+            return
+        h, w = shape[1], shape[2]
+        for name, dim in (("height", h), ("width", w)):
+            if dim is not None and dim % 16 != 0:
+                raise ValueError(
+                    f"AccUNet requires input {name} divisible by 16 "
+                    f"(4 stride-2 downsamples + matched stride-2 upsamples), "
+                    f"got {name}={dim}. Resize inputs to a multiple of 16."
+                )
+
     def call(
         self,
         inputs: keras.KerasTensor,
@@ -380,6 +403,9 @@ class AccUNet(keras.Model):
         Returns:
             Output tensor of shape (batch_size, height, width, num_classes).
         """
+        # Validate spatial dims at first call (skipped for dynamic shapes).
+        self._validate_spatial_dims(tuple(inputs.shape))
+
         # === ENCODER FORWARD PASS ===
         encoder_features: List[keras.KerasTensor] = []
         x = inputs
