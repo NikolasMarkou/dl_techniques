@@ -184,10 +184,10 @@ class DepthAnything(keras.Model):
         if self.encoder_kind == 'real':
             self.encoder_stride = _VIT_PATCH_SIZE  # 16
         else:
-            # Placeholder Conv encoder: initial stride-2 conv + initial stride-2
-            # maxpool => /4, then 3 stride-2 maxpools across stages 0..2
-            # (stage 3 has no pool) => /8 ⇒ total stride 32.
-            self.encoder_stride = 32
+            # Placeholder Conv encoder: initial stride-2 conv => /2, then 3
+            # stride-2 maxpools across stages 0..2 (stage 3 has no pool) => /8.
+            # Total stride 16 (matches the 4-stage DPT decoder's upsample).
+            self.encoder_stride = 16
         self.encoder_h = self.image_shape[0] // self.encoder_stride
         self.encoder_w = self.image_shape[1] // self.encoder_stride
 
@@ -344,12 +344,8 @@ class DepthAnything(keras.Model):
         )(inputs)
         x = keras.layers.BatchNormalization(name='initial_bn')(x)
         x = keras.layers.ReLU(name='initial_relu')(x)
-        x = keras.layers.MaxPooling2D(
-            pool_size=3,
-            strides=2,
-            padding='same',
-            name='initial_pool'
-        )(x)
+        # Note: removed legacy stride-2 'initial_pool' to keep placeholder
+        # encoder stride at 16 (matches 4-stage DPT decoder upsample).
 
         # Progressive feature extraction blocks
         dims = [64, 128, 256, 512]
