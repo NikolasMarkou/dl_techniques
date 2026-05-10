@@ -455,3 +455,148 @@ class MegaDepthDataset(keras.utils.PyDataset):
     def on_epoch_end(self):
         if self.is_training:
             np.random.shuffle(self.indices)
+
+
+# =====================================================================
+# Unlabeled image dataset + labeled/unlabeled pairing (semi-supervised)
+# =====================================================================
+
+
+def _discover_image_files(glob_pattern: str) -> List[str]:
+    """Resolve a glob pattern to a sorted list of image file paths."""
+    import glob as _glob
+    files = sorted(_glob.glob(glob_pattern, recursive=True))
+    return files
+
+
+class UnlabeledImageDataset(keras.utils.PyDataset):
+    """Minimal RGB-only PyDataset for unlabeled depth-anything pretraining.
+
+    Each ``__getitem__(idx)`` returns a numpy array
+    ``(batch_size, patch_size, patch_size, 3)`` of float32 RGB normalized to
+    ``[-1, +1]`` (matching :class:`MegaDepthDataset`'s RGB convention).
+
+    This dataset is intentionally simple: it does **not** load depth maps.
+    Use it as the unlabeled stream paired with a labeled
+    :class:`MegaDepthDataset` via :func:`pair_labeled_unlabeled`.
+
+    Args:
+        rgb_paths: List of RGB image file paths.
+        batch_size: Number of samples per batch.
+        patch_size: Spatial size of resized images.
+        is_training: If ``True``, shuffles indices each epoch.
+        workers: Number of multiprocessing workers (default 4).
+        **kwargs: Passed to :class:`keras.utils.PyDataset`.
+    """
+
+    def __init__(
+        self,
+        rgb_paths: List[str],
+        batch_size: int = 16,
+        patch_size: int = 256,
+        is_training: bool = True,
+        workers: int = 4,
+        **kwargs,
+    ):
+        super().__init__(workers=workers, use_multiprocessing=True, **kwargs)
+        if not rgb_paths:
+            raise ValueError("UnlabeledImageDataset: rgb_paths is empty.")
+        self.rgb_paths = list(rgb_paths)
+        self.batch_size = int(batch_size)
+        self.patch_size = int(patch_size)
+        self.is_training = bool(is_training)
+        self.n = len(self.rgb_paths)
+        self.indices = np.arange(self.n)
+        if self.is_training:
+            np.random.shuffle(self.indices)
+
+    def __len__(self) -> int:
+        return max(1, self.n // self.batch_size)
+
+    def _load_one(self, path: str) -> np.ndarray:
+        """Load + resize one image to (patch_size, patch_size, 3) in [-1, +1]."""
+        from PIL import Image
+        img = Image.open(path).convert("RGB").resize(
+            (self.patch_size, self.patch_size), Image.BILINEAR
+        )
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        arr = arr * 2.0 - 1.0  # → [-1, +1]
+        return arr
+
+    def __getitem__(self, idx: int) -> np.ndarray:
+        batch = []
+        for k in range(self.batch_size):
+            sample_idx = (idx * self.batch_size + k) % self.n
+            i = self.indices[sample_idx]
+            try:
+                batch.append(self._load_one(self.rgb_paths[i]))
+            except Exception:
+                # Pad with zeros on read failure rather than abort training.
+                batch.append(
+                    np.zeros((self.patch_size, self.patch_size, 3), dtype=np.float32)
+                )
+        return np.stack(batch).astype(np.float32)
+
+    def on_epoch_end(self) -> None:
+        if self.is_training:
+            np.random.shuffle(self.indices)
+
+
+def pair_labeled_unlabeled(
+    labeled_ds: "keras.utils.PyDataset",
+    unlabeled_ds: "keras.utils.PyDataset",
+    patch_size: int,
+    batch_size: int,
+):
+    """Yield ``((x_lab, x_unlab), y_lab)`` batches from two PyDatasets.
+
+    Wraps both PyDatasets via :func:`tf.data.Dataset.from_generator` and
+    zips them into the structure consumed by
+    :meth:`DepthAnything._train_step_semi_supervised`.
+
+    The unlabeled stream cycles independently of the labeled stream
+    (`.repeat()`) so the pairing length is bounded by the labeled dataset.
+
+    Args:
+        labeled_ds: A ``keras.utils.PyDataset`` yielding
+            ``(rgb_batch, y_true_batch)``.
+        unlabeled_ds: An :class:`UnlabeledImageDataset` (or any PyDataset
+            yielding ``rgb_batch`` of matching dtype/shape).
+        patch_size: Spatial patch size (must match both datasets).
+        batch_size: Per-batch size (must match both datasets).
+
+    Returns:
+        A ``tf.data.Dataset`` yielding ``((x_lab, x_unlab), y_lab)``.
+    """
+    import tensorflow as tf
+
+    rgb_spec = tf.TensorSpec(
+        shape=(batch_size, patch_size, patch_size, 3), dtype=tf.float32
+    )
+    y_spec = tf.TensorSpec(
+        shape=(batch_size, patch_size, patch_size, 2), dtype=tf.float32
+    )
+
+    def _lab_gen():
+        for i in range(len(labeled_ds)):
+            rgb, y = labeled_ds[i]
+            yield rgb.astype(np.float32), y.astype(np.float32)
+
+    def _unlab_gen():
+        # Loop forever — outer zip will stop at labeled length.
+        while True:
+            for i in range(len(unlabeled_ds)):
+                yield unlabeled_ds[i].astype(np.float32)
+
+    lab_tf = tf.data.Dataset.from_generator(
+        _lab_gen, output_signature=(rgb_spec, y_spec)
+    )
+    unlab_tf = tf.data.Dataset.from_generator(
+        _unlab_gen, output_signature=rgb_spec
+    )
+
+    paired = tf.data.Dataset.zip((lab_tf, unlab_tf)).map(
+        lambda lab, unlab: ((lab[0], unlab), lab[1]),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    return paired
