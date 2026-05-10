@@ -13,10 +13,11 @@ Key Features:
     - Memory-efficient tensor operations
 """
 
+import dataclasses
 import keras
 from keras import ops
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 
 # ---------------------------------------------------------------------
 # local imports
@@ -27,6 +28,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 
+@keras.saving.register_keras_serializable()
 @dataclass
 class LossConfig:
     """Configuration for loss function parameters.
@@ -53,6 +55,31 @@ class LossConfig:
     combo_alpha: float = 0.5
     combo_beta: float = 0.5
     boundary_theta: float = 1.5
+
+    # ---------------------------------------------------------------------
+    # Keras serialization hooks — keeps LossConfig usable as a serializable
+    # field of SegmentationWrapperLoss. See plan_2026-05-10_17633038 / D-002.
+    # ---------------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return a JSON-friendly dict of all dataclass fields.
+
+        Returns:
+            Configuration dictionary with all dataclass field values.
+        """
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "LossConfig":
+        """Reconstruct a LossConfig from its serialized dict.
+
+        Args:
+            config: Configuration dictionary produced by `get_config`.
+
+        Returns:
+            A new LossConfig instance equivalent to the original.
+        """
+        return cls(**config)
 
 
 class SegmentationLosses:
