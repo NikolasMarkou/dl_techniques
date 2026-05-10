@@ -39,6 +39,7 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.strong_augmentation import StrongAugmentation
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
@@ -303,6 +304,55 @@ class DepthAnything(keras.Model):
             return
         new_w = [decay * t + (1.0 - decay) * s for t, s in zip(teacher_w, student_w)]
         self.frozen_encoder.set_weights(new_w)
+
+    def from_pretrained_encoder(
+        self,
+        weights_path: str,
+        skip_prefixes: Tuple[str, ...] = (),
+    ) -> 'DepthAnything':
+        """Load encoder weights from a saved ``.keras`` checkpoint and re-sync teacher.
+
+        Wraps :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`
+        against ``self.encoder``. Force-builds the model first if needed. After
+        a successful load, re-copies student → teacher when feature alignment
+        is enabled, so the teacher starts from the pretrained snapshot.
+
+        Args:
+            weights_path: Path to a ``.keras`` checkpoint produced by
+                ``model.save(...)``. The checkpoint may itself be a
+                DepthAnything snapshot or a standalone encoder snapshot — the
+                weight-transfer helper matches by layer name.
+            skip_prefixes: Layer-name prefixes to ignore during transfer.
+                Defaults to ``()`` (transfer everything).
+
+        Returns:
+            ``self`` (so calls can chain).
+        """
+        if not self.built:
+            dummy = keras.ops.zeros((1,) + tuple(self.image_shape))
+            _ = self(dummy, training=False)
+
+        report = load_weights_from_checkpoint(
+            target=self.encoder,
+            ckpt_path=weights_path,
+            skip_prefixes=skip_prefixes,
+        )
+        logger.info(
+            f"from_pretrained_encoder: loaded={report.num_loaded} "
+            f"shape_mismatch={report.num_shape_mismatch} "
+            f"missing_in_source={len(report.missing_in_source)} "
+            f"unused_in_source={len(report.unused_in_source)}"
+        )
+        # Re-sync the frozen teacher so it starts from the pretrained snapshot.
+        if self.frozen_encoder is not None and self.use_feature_alignment:
+            try:
+                self.frozen_encoder.set_weights(self.encoder.get_weights())
+                logger.info("from_pretrained_encoder: teacher re-synced from student.")
+            except Exception as exc:  # pragma: no cover — diagnostic path
+                logger.warning(
+                    f"from_pretrained_encoder: teacher re-sync failed ({exc!r})."
+                )
+        return self
 
     def _features_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Convert a ViT-style ``(B, N+1, D)`` sequence into ``(B, h, w, D)``.
