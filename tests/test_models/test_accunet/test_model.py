@@ -653,5 +653,39 @@ class TestAccUNetErrorHandling:
             if "memory" not in str(e).lower() and "resource" not in str(e).lower():
                 raise  # Re-raise if it's not a memory issue
 
+class TestAccUNetPublicSurface:
+    """Lock the public package surface and the input-divisibility contract."""
+
+    def test_init_exports(self):
+        """All four public symbols must be importable from the package root."""
+        from dl_techniques.models.accunet import (
+            AccUNet as PkgAccUNet,
+            create_acc_unet,
+            create_acc_unet_binary,
+            create_acc_unet_multiclass,
+        )
+        # The class re-exported at the package root must be the same object as the
+        # one in the submodule (no shadowing / re-definition).
+        assert PkgAccUNet is AccUNet
+        assert callable(create_acc_unet)
+        assert callable(create_acc_unet_binary)
+        assert callable(create_acc_unet_multiclass)
+
+    def test_non_multiple_of_16_input(self):
+        """Inputs whose H or W are not divisible by 16 must raise ValueError; a
+        clean multiple-of-16 input must continue to produce the expected shape.
+        Locks in B1 fix path B (see plan decisions D-001, D-002)."""
+        # Non-divisible: must fail loudly with a clear message
+        for hw in [(120, 120), (100, 100), (33, 64), (128, 7)]:
+            model = AccUNet(input_channels=3, num_classes=1, base_filters=8)
+            x = keras.random.normal((1, hw[0], hw[1], 3))
+            with pytest.raises(ValueError, match="divisible by 16"):
+                model(x)
+        # Divisible: must work and round-trip the spatial dims
+        model_ok = AccUNet(input_channels=3, num_classes=1, base_filters=8)
+        y = model_ok(keras.random.normal((1, 128, 128, 3)))
+        assert tuple(y.shape) == (1, 128, 128, 1)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
