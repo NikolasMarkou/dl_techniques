@@ -574,69 +574,18 @@ def create_loss_function(
         >>> loss_fn = create_loss_function('focal', config)
         >>> model.compile(optimizer='adam', loss=loss_fn)
     """
+    # DECISION plan_2026-05-10_17633038/D-002 — this factory now delegates to
+    # `SegmentationWrapperLoss` (defined in `segmentation_wrapper_loss.py`).
+    # Validation + ValueError on unknown `loss_name` lives there as the single
+    # source of truth, so this function stays a thin backward-compat shim.
+    # Local import avoids any future top-level import cycle.
+    from dl_techniques.losses.segmentation_wrapper_loss import SegmentationWrapperLoss
+
     if config is None:
         config = LossConfig(num_classes=1)  # Default single-class config
         logger.info("Using default LossConfig with single class")
 
-    losses = SegmentationLosses(config)
-
-    @keras.saving.register_keras_serializable()
-    class WrappedLoss(keras.losses.Loss):
-        """Wrapper class to make segmentation losses compatible with Keras."""
-
-        def __init__(self, loss_fn: callable, name: str = loss_name):
-            """Initialize the wrapped loss function.
-
-            Args:
-                loss_fn: The actual loss function to wrap
-                name: Name of the loss function
-            """
-            super().__init__(name=name)
-            self.loss_fn = loss_fn
-
-        def call(self, y_true: Any, y_pred: Any) -> Any:
-            """Call the wrapped loss function.
-
-            Args:
-                y_true: Ground truth labels
-                y_pred: Predicted probabilities
-
-            Returns:
-                Loss value
-            """
-            return self.loss_fn(y_true, y_pred)
-
-        def get_config(self) -> dict:
-            """Get configuration for serialization.
-
-            Returns:
-                Configuration dictionary
-            """
-            config = super().get_config()
-            config.update({'name': self.name})
-            return config
-
-    loss_map = {
-        'cross_entropy': losses.cross_entropy_loss,
-        'dice': losses.dice_loss,
-        'focal': losses.focal_loss,
-        'tversky': losses.tversky_loss,
-        'focal_tversky': losses.focal_tversky_loss,
-        'lovasz': losses.lovasz_softmax_loss,
-        'combo': losses.combo_loss,
-        'boundary': losses.boundary_loss,
-        'hausdorff': losses.hausdorff_distance_loss
-    }
-
-    if loss_name not in loss_map:
-        available_losses = list(loss_map.keys())
-        logger.error(f"Unknown loss function: {loss_name}. Available: {available_losses}")
-        raise ValueError(
-            f"Unknown loss function: {loss_name}. "
-            f"Available losses: {available_losses}"
-        )
-
     logger.info(f"Created {loss_name} loss function")
-    return WrappedLoss(loss_map[loss_name])
+    return SegmentationWrapperLoss(loss_name, config)
 
 # ---------------------------------------------------------------------
