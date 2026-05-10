@@ -413,28 +413,22 @@ class DepthAnything(keras.Model):
         with tf.GradientTape() as tape:
             # Forward pass
             y_pred = self(x, training=True)
-
-            # Compute primary loss
-            loss = self.compiled_loss(y, y_pred)
-
-            # Add regularization losses
-            if self.losses:
-                regularization_loss = ops.sum(self.losses)
-                loss = loss + regularization_loss
+            # DECISION plan_2026-05-10_44694bc9/D-003: Keras-3 canonical train_step
+            # — replaces deprecated compiled-loss / compiled-metrics calls.
+            # See dl_techniques/models/masked_language_model/mlm.py:309-343.
+            loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
 
         # Compute gradients and update weights
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        # Update metrics
-        self.compiled_metrics.update_state(y, y_pred)
+        # Update user-defined metrics (Keras 3 auto-tracks the loss in self.metrics).
+        for m in self.metrics:
+            if m.name != "loss":
+                m.update_state(y, y_pred)
 
-        # Prepare return dictionary
-        result = {"loss": loss}
-        result.update({m.name: m.result() for m in self.metrics})
-
-        return result
+        return {m.name: m.result() for m in self.metrics}
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
