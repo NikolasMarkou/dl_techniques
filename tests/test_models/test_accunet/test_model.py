@@ -439,7 +439,6 @@ class TestAccUNetSerialization:
             input_channels=3,
             num_classes=1,
             kernel_regularizer=keras.regularizers.L2(1e-4),
-            bias_regularizer=keras.regularizers.L1(1e-5)
         )
         test_input = keras.random.normal((1, 128, 128, 3))
 

@@ -90,11 +90,7 @@ class AccUNet(keras.Model):
             Must be positive. Defaults to 3.
         kernel_initializer: String or Initializer instance for convolution kernels.
             Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer instance for bias vectors.
-            Defaults to 'zeros'.
         kernel_regularizer: Optional Regularizer instance for convolution kernels.
-            Defaults to None.
-        bias_regularizer: Optional Regularizer instance for bias vectors.
             Defaults to None.
         **kwargs: Additional arguments for the Model base class.
 
@@ -163,9 +159,7 @@ class AccUNet(keras.Model):
         base_filters: int = 32,
         mlfc_iterations: int = 3,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -186,9 +180,7 @@ class AccUNet(keras.Model):
         self.base_filters = base_filters
         self.mlfc_iterations = mlfc_iterations
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Calculate filter sizes for each level
         self.filter_sizes = [
@@ -469,9 +461,7 @@ class AccUNet(keras.Model):
             'base_filters': self.base_filters,
             'mlfc_iterations': self.mlfc_iterations,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
