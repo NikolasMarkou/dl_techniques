@@ -1,49 +1,63 @@
 # Depth Anything
 
-Keras 3 reference implementation of the *Depth Anything* monocular depth estimation
-architecture (`encoder + DPT-style decoder`). Source files:
+Keras 3 reference implementation of the *Depth Anything* monocular depth
+estimation architecture (`encoder + DPT-style decoder`). Source files:
 
 ```
 src/dl_techniques/models/depth_anything/
-├── __init__.py        # currently empty
-├── components.py      # DPTDecoder layer
+├── __init__.py        # public API: DepthAnything, create_depth_anything, DPTDecoder
+├── components.py      # DPTDecoder layer (linear default + upsample_factor)
 └── model.py           # DepthAnything keras.Model + create_depth_anything factory
 ```
 
-> **READ THIS BEFORE USING.** This module has known gaps between its name/docstring
-> and what it actually does. Most notably: **the encoder is a randomly-initialized
-> Conv-BN-ReLU stack**, *not* DINOv2; the semi-supervised pipeline implied by the
-> module docstring is **not implemented**. See "Known Issues" at the bottom.
+> **Status (post-`plan_2026-05-10_bd098beb`).** The model now uses the
+> in-tree `dl_techniques.models.vit.ViT` as its real encoder
+> (`encoder_kind='real'`, default), the DPT decoder defaults to `linear`
+> output (no longer sigmoid-clamped), and `train_step` supports both the
+> labeled-only path and a semi-supervised path keyed on
+> `enable_semi_supervised`. Save/load round-trip is verified end-to-end on
+> CPU (max-abs-diff = 0.0). The legacy Conv-BN-ReLU encoder is preserved
+> behind `encoder_kind='placeholder'` for back-compat.
+>
+> What is **still open** (deeper, separate-plan work): EMA-trained teacher
+> with on-step decay schedule, pseudo-label depth on the unlabeled stream,
+> per-sample CutMix factors, and external pretrained-encoder weight
+> loading (e.g. DINOv2). See "Known Issues" below.
 
 ---
 
 ## Overview
 
-`DepthAnything` is a `keras.Model` subclass that takes an RGB image batch and
-produces a single-channel depth map at the same spatial resolution:
+`DepthAnything` is a `keras.Model` subclass that takes an RGB image batch
+and produces a single-channel depth map at the same spatial resolution:
 
 ```
 input  : (B, H, W, 3)   float32 RGB
-output : (B, H, W, 1)   float32 depth
+output : (B, H, W, 1)   float32 depth (linear by default)
 ```
 
 It is composed of three sub-networks:
 
 | Sub-network        | Type                          | Where built       | Trainable |
 |--------------------|-------------------------------|-------------------|-----------|
-| `encoder`          | `keras.Model` (Functional)    | `build()`         | yes       |
-| `decoder`          | `DPTDecoder`                  | `build()`         | yes       |
-| `frozen_encoder`   | `keras.Model` (Functional)    | `build()` if `use_feature_alignment=True` | no |
-| `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a       |
+| `encoder`          | `keras.Model` (`ViT` or Conv) | `__init__`/`build()` | yes |
+| `decoder`          | `DPTDecoder`                  | `build()`         | yes |
+| `frozen_encoder`   | `keras.Model` (clone of encoder, weight-shared at build) | `build()` if `use_feature_alignment=True` | no |
+| `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a |
 
 Forward path (`call`):
 
 ```
-x → [augmentation if training] → encoder → decoder → depth
+x → [augmentation if training] → encoder → [_features_to_spatial if ViT] → decoder → depth
 ```
 
-If `inputs` is a `tuple(x_labeled, x_unlabeled)`, only the labeled half is used
-in the forward pass (see Known Issue #3 — semi-supervised pipeline unimplemented).
+`train_step` accepts two input shapes:
+
+* `(x, y)` — labeled-only path (default).
+* `((x_lab, x_unlab), y_lab)` — semi-supervised path. Active only when
+  `enable_semi_supervised=True` AND `use_feature_alignment=True`. Adds a
+  Feature-Alignment Loss term on unlabeled features against the
+  weight-shared frozen teacher.
 
 ---
 
@@ -51,57 +65,73 @@ in the forward pass (see Known Issue #3 — semi-supervised pipeline unimplement
 
 ### `DepthAnything` (in `model.py`)
 
-A `@keras.saving.register_keras_serializable()`-decorated `keras.Model` with full
-`get_config()` / `from_config()` round-trip support.
+A `@keras.saving.register_keras_serializable()`-decorated `keras.Model` with
+full `get_config()` / `from_config()` round-trip.
 
-**Constructor signature**:
+**Constructor (relevant args)**:
 
 ```python
 DepthAnything(
-    encoder_type:           str = 'vit_l',                     # one of {'vit_s','vit_b','vit_l'}
-    input_shape:            Tuple[int,int,int] = (384, 384, 3),
+    encoder_type:           str = 'vit_l',                # {'vit_s','vit_b','vit_l'}
+    image_shape:            Tuple[int,int,int] = (384, 384, 3),
     decoder_dims:           Optional[List[int]] = [256, 128, 64, 32],
     output_channels:        int  = 1,
     kernel_initializer:     Union[str, Initializer] = 'he_normal',
     kernel_regularizer:     Optional[Regularizer]   = None,
-    loss_weights:           Optional[Dict[str, float]] = {'labeled': 1.0,
-                                                          'unlabeled': 0.5,
-                                                          'feature': 0.1},
+    loss_weights:           Optional[Dict[str,float]] = {'labeled':1.0,
+                                                         'unlabeled':0.5,
+                                                         'feature':0.1},
     cutmix_prob:            float = 0.5,
     color_jitter_strength:  float = 0.2,
     use_feature_alignment:  bool  = True,
+    encoder_kind:           str   = 'real',           # 'real' | 'placeholder'
+    enable_semi_supervised: bool  = False,
+    encoder:                Optional[keras.Model] = None,   # for from_config
+    input_shape:            Optional[Tuple[int,int,int]] = None,  # legacy alias
     **kwargs,
 )
 ```
 
-> **Note on `input_shape`**. The constructor argument shadows
-> `keras.layers.Layer.input_shape`; the model stores it internally as
-> `self.input_shape_param`. `get_config()` exports it back under the key
-> `"input_shape"` so `from_config(**config)` round-trips cleanly.
+> **`input_shape` → `image_shape` rename.** `image_shape` is the canonical
+> kwarg. `input_shape` is accepted as a deprecated alias for one cycle so
+> previously-saved configs continue to load.
+
+**Save/load — D-004 override.** `DepthAnything` overrides Keras 3's
+`save_own_variables` / `load_own_variables` to persist `self.weights` as a
+flat numeric-keyed store at the model level. This bypasses the framework's
+path-walking, which (with a wrapped `ViT` sub-Model) was dropping 55/172
+kernel arrays during load. The override force-builds nested sub-Models on
+load when needed so `self.weights` matches the saved store. See
+`# DECISION plan_2026-05-10_bd098beb/D-004` in `model.py`.
+
+**EMA teacher.** `update_teacher_ema(decay=0.999)` advances the frozen
+teacher's weights toward the student via in-place EMA. Call this from a
+custom on-step callback when training semi-supervised. Default decay is
+0.999.
 
 ### `create_depth_anything(...)` (in `model.py`)
 
 Convenience factory that returns a *built* `DepthAnything`:
 
 ```python
-from dl_techniques.models.depth_anything.model import create_depth_anything
+from dl_techniques.models.depth_anything import create_depth_anything
 
 model = create_depth_anything(
+    encoder_kind='real',
     encoder_type='vit_l',
-    input_shape=(384, 384, 3),
+    image_shape=(384, 384, 3),
     decoder_dims=[256, 128, 64, 32],
-    use_feature_alignment=False,        # see Known Issue #2
+    use_feature_alignment=False,
 )
 ```
 
-The factory ends with a dummy forward pass (`model(keras.random.normal([1] + list(input_shape)))`)
-so the model is fully built when returned.
+The factory ends with a dummy forward pass so the model is fully built
+when returned.
 
 ### `DPTDecoder` (in `components.py`)
 
-A `@keras.saving.register_keras_serializable()`-decorated `keras.layers.Layer`.
-Implements a **simple convolutional decoder head**, *not* a full multi-scale DPT
-(Dense Prediction Transformer) decoder.
+`@keras.saving.register_keras_serializable()` `keras.layers.Layer`.
+Convolutional decoder head with optional bilinear upsampling.
 
 **Architecture**:
 
@@ -109,25 +139,26 @@ Implements a **simple convolutional decoder head**, *not* a full multi-scale DPT
 features (B, h, w, C_in)
    │
    ├── for dim in dims[:-1]:
-   │       Conv3x3(dim) → BN → ReLU
+   │       Conv3x3(dim) → BN → ReLU → [UpSample2D(2x bilinear) if upsample_factor>1]
    │
-   ├── Conv3x3(output_channels) with output_activation        # default 'sigmoid'
+   ├── Conv3x3(output_channels) with output_activation        # default 'linear'
    │
-   └── depth (B, h, w, output_channels)
+   └── depth (B, h*upsample_factor, w*upsample_factor, output_channels)
 ```
 
-**Important**: `output_activation` defaults to `'sigmoid'`, which clamps the
-output to `[0, 1]`. This is **incompatible with `AffineInvariantLoss`**, which
-expects unbounded scale (see Known Issue #6).
+`output_activation` defaults to `'linear'`. `upsample_factor` defaults to
+`1`; `DepthAnything` passes `upsample_factor=encoder_stride` so the decoder
+lifts features back to input resolution.
 
-`DPTDecoder` provides full Keras 3 idioms: `build()`, `call()`, `get_config()`,
-`get_build_config()`, `build_from_config()`, `compute_output_shape()`.
+### `StrongAugmentation` (in `dl_techniques.layers.strong_augmentation`)
 
-### `StrongAugmentation` (external — `dl_techniques.layers.strong_augmentation`)
+CutMix + color jitter. Used by `DepthAnything` during `training=True` forward
+passes. Two recent fixes (D-005 + follow-up):
 
-A separate layer that combines CutMix + color jitter. Used by `DepthAnything`
-during training-mode forward passes. Its `__init__.py` accepts `cutmix_prob`
-and `color_jitter_strength`. See Known Issue #9 below for caveats.
+* `keras.random.uniform/shuffle` now used in place of nonexistent
+  `keras.ops.random.*`.
+* Cutmix gating uses a symbolic mask multiplier (no Python `if`), so the
+  layer is fully graph-traceable inside `model.fit`.
 
 ---
 
@@ -137,34 +168,45 @@ and `color_jitter_strength`. See Known Issue #9 below for caveats.
 
 ```python
 import keras
-from dl_techniques.models.depth_anything.model import create_depth_anything
+from dl_techniques.models.depth_anything import create_depth_anything
 
-model = create_depth_anything(
-    encoder_type='vit_l',
-    input_shape=(384, 384, 3),
-    use_feature_alignment=False,
-)
+model = create_depth_anything(encoder_kind='real', encoder_type='vit_l',
+                              image_shape=(384, 384, 3),
+                              use_feature_alignment=False)
 x = keras.random.normal([2, 384, 384, 3])
 depth = model(x, training=False)
 print(depth.shape)  # (2, 384, 384, 1)
 ```
 
-### Compile / train
-
-> **The model's `train_step` was rewritten in this plan to use the canonical
-> Keras-3 pattern** (`self.compute_loss(...)` + iterate `self.metrics`). See
-> Known Issue #4 — fixed in this plan.
+### Compile / train (labeled-only)
 
 ```python
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=5e-6, weight_decay=1e-5),
-    loss=keras.losses.MeanSquaredError(),    # see Known Issue #6 if you want AffineInvariantLoss
+    loss=keras.losses.MeanSquaredError(),
 )
 # model.fit(x_train, y_train, epochs=...)
 ```
 
-For a complete training script wired to MegaDepth + depth metrics + visualization
-callbacks, see `src/train/depth_anything/`.
+### Semi-supervised usage
+
+```python
+model = create_depth_anything(
+    encoder_kind='real', encoder_type='vit_l', image_shape=(384, 384, 3),
+    use_feature_alignment=True, enable_semi_supervised=True,
+)
+model.compile(optimizer=keras.optimizers.AdamW(1e-4))
+# data shape per batch: ((x_lab, x_unlab), y_lab)
+# model.fit(ds, epochs=...)
+# Optionally advance the EMA teacher on each step:
+# class TeacherEMACallback(keras.callbacks.Callback):
+#     def on_train_batch_end(self, *_):
+#         self.model.update_teacher_ema(decay=0.999)
+```
+
+The infrastructure is wired (frozen weight-shared teacher, FAL term inside
+`train_step`); the open work is feeding `((x_lab, x_unlab), y_lab)` from a
+real dataset (the in-tree `MegaDepthDataset` only yields labeled batches).
 
 ### Serialization
 
@@ -173,141 +215,97 @@ model.save('depth_anything.keras')
 loaded = keras.models.load_model('depth_anything.keras')
 ```
 
-`get_config()` exports every constructor argument; `from_config(cls, config)`
-calls `cls(**config)` so any extra base-class keys (`name`, `trainable`,
-`dtype`) are absorbed by `keras.Model.__init__(**kwargs)`.
+Verified end-to-end on CPU (max-abs-diff = 0.0; SC-6 in
+`plan_2026-05-10_bd098beb`).
 
 ---
 
 ## Configuration
 
-| Argument                | Type                       | Default                          | Notes |
-|-------------------------|----------------------------|----------------------------------|-------|
-| `encoder_type`          | `str`                      | `'vit_l'`                        | Validated against `{'vit_s','vit_b','vit_l'}` but the placeholder encoder is identical for all three (see Known Issue #10). |
-| `input_shape`           | `Tuple[int,int,int]`       | `(384, 384, 3)`                  | Shadows `Layer.input_shape`; stored as `self.input_shape_param`. |
-| `decoder_dims`          | `List[int]`                | `[256, 128, 64, 32]`             | First entry sets the encoder feature-projection dim; last entry is the penultimate decoder width. |
-| `output_channels`       | `int`                      | `1`                              | Final depth-map channel count. |
-| `kernel_initializer`    | `str` \| `Initializer`     | `'he_normal'`                    | Accepts string names or initializer instances. |
-| `kernel_regularizer`    | `Regularizer` \| `None`    | `None`                           | Do **not** combine with `AdamW(weight_decay=...)` (double weight decay). |
-| `loss_weights`          | `Dict[str,float]`          | `{labeled:1.0,unlabeled:0.5,feature:0.1}` | Currently dead state — `train_step` does not consume these (Known Issue #14). |
-| `cutmix_prob`           | `float`                    | `0.5`                            | Forwarded to `StrongAugmentation`. |
-| `color_jitter_strength` | `float`                    | `0.2`                            | Forwarded to `StrongAugmentation`. |
-| `use_feature_alignment` | `bool`                     | `True`                           | Builds `frozen_encoder` (which has random weights — Known Issue #2). Set `False` for honest baselines. |
+| Argument                 | Type                       | Default                                | Notes |
+|--------------------------|----------------------------|----------------------------------------|-------|
+| `encoder_type`           | `str`                      | `'vit_l'`                              | One of `{vit_s, vit_b, vit_l}`. Picks ViT scale. |
+| `encoder_kind`           | `str`                      | `'real'`                               | `'real'` builds in-tree `ViT`; `'placeholder'` builds the legacy Conv-BN-ReLU. |
+| `image_shape`            | `Tuple[int,int,int]`       | `(384, 384, 3)`                        | Canonical kwarg. `input_shape` accepted as deprecated alias. |
+| `decoder_dims`           | `List[int]`                | `[256, 128, 64, 32]`                   | Stage widths; last entry is the penultimate decoder width. |
+| `output_channels`        | `int`                      | `1`                                    | Final depth-map channel count. |
+| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | |
+| `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Do **not** combine with `AdamW(weight_decay=...)`. |
+| `loss_weights`           | `Dict[str,float]`          | `{labeled:1.0, unlabeled:0.5, feature:0.1}` | Consumed by the semi-sup `train_step` path. |
+| `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`. |
+| `color_jitter_strength`  | `float`                    | `0.2`                                  | Forwarded to `StrongAugmentation`. |
+| `use_feature_alignment`  | `bool`                     | `True`                                 | Builds `frozen_encoder` (weight-shared at build). |
+| `enable_semi_supervised` | `bool`                     | `False`                                | Switches `train_step` to `((x_lab, x_unlab), y_lab)` mode. |
 
-`DPTDecoder` constructor (used internally by `DepthAnything.build()`):
+`DPTDecoder` (used internally):
 
-| Argument             | Default       | Notes |
-|----------------------|---------------|-------|
-| `dims`               | required      | Forwarded from `DepthAnything.decoder_dims`. |
-| `output_channels`    | `1`           | Forwarded. |
-| `output_activation`  | `'sigmoid'`   | **Not exposed via `DepthAnything`'s constructor.** Override path requires editing the model. |
-| `kernel_initializer` | `'he_normal'` | Forwarded. |
-| `kernel_regularizer` | `None`        | Forwarded. |
-
----
-
-## Example — full pipeline
-
-```python
-import keras, numpy as np
-from dl_techniques.models.depth_anything.model import create_depth_anything
-
-model = create_depth_anything(
-    encoder_type='vit_l',
-    input_shape=(384, 384, 3),
-    decoder_dims=[256, 128, 64, 32],
-    use_feature_alignment=False,
-)
-model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=5e-6, weight_decay=1e-5),
-    loss=keras.losses.MeanSquaredError(),
-)
-
-x = np.random.randn(4, 384, 384, 3).astype('float32')
-y = np.random.rand (4, 384, 384, 1).astype('float32')   # in [0,1] because output is sigmoid
-hist = model.fit(x, y, epochs=1, batch_size=2, verbose=0)
-```
+| Argument            | Default       | Notes |
+|---------------------|---------------|-------|
+| `dims`              | required      | Forwarded from `DepthAnything.decoder_dims`. |
+| `output_channels`   | `1`           | Forwarded. |
+| `output_activation` | `'linear'`    | Linear is the canonical depth-estimation output. |
+| `upsample_factor`   | `1`           | Forwarded as `encoder_stride` (16 for both real and placeholder). Power of 2 only. |
+| `kernel_initializer`| `'he_normal'` | |
+| `kernel_regularizer`| `None`        | |
 
 ---
 
-## Known Issues / Caveats
+## Known Issues
 
-The following gaps were surfaced by a code review during plan
-`plan_2026-05-10_44694bc9`. They are listed honestly; the README is **not** a
-patch — it is a contract with the reader. Items #4 was fixed in this plan;
-items #1, #2, #3, #5–#14 are *not* fixed and remain open work.
+The 14-item review from `plan_2026-05-10_44694bc9` plus D-005 has been
+folded into the work below. Item numbers are kept stable for traceability.
 
-1. **Placeholder encoder, not DINOv2.** `_create_encoder()` builds a small
-   Conv-BN-ReLU stack with a `feature_projection` 1×1 head. The module
-   docstring's claim "Inherits semantic priors from pre-trained encoders" is
-   **unfulfilled**. Without a real DINOv2 (or other pretrained vision encoder)
-   the model has no semantic prior and cannot match published Depth Anything
-   numbers. Pass `--init-from <pretrained.keras>` in the train script to
-   transfer at least *some* useful initialization. *(HIGH)*
-2. **Frozen "teacher" encoder shares no weights with student.** When
-   `use_feature_alignment=True`, `self.frozen_encoder = self._create_encoder(trainable=False)`
-   builds an *independent* Functional model with **freshly randomly-initialized
-   weights**. `FeatureAlignmentLoss` against random features is meaningless.
-   Use `use_feature_alignment=False` until this is rewired (e.g., after
-   pretraining + EMA copy of the student into the teacher). *(HIGH)*
-3. **Semi-supervised pipeline implied by docstring is NOT implemented.**
-   `call()` accepts `(x_labeled, x_unlabeled)` but processes only `x_labeled`.
-   `train_step()` does not use the unlabeled half, the `feature` loss term, the
-   `frozen_encoder`, or any consistency loss. The
-   `loss_weights={'labeled','unlabeled','feature'}` dict is dead state.
-   The "62M unlabeled images" claim in the module docstring is aspirational. *(HIGH)*
-4. **[FIXED in this plan]** *(was: `self.compiled_loss` / `self.compiled_metrics`
-   are removed/deprecated in Keras 3.)* The `train_step` previously called
-   `self.compiled_loss(y, y_pred)` and `self.compiled_metrics.update_state(...)`,
-   both of which raise `AttributeError` on Keras 3.8+. **Status: fixed.**
-   `train_step` now uses `self.compute_loss(x=x, y=y, y_pred=y_pred)` and
-   iterates `self.metrics` for user-defined metric updates, mirroring
-   `dl_techniques/models/masked_language_model/mlm.py`. The semi-supervised
-   pipeline (#3) and feature-alignment loss (#2) are still **not** wired in
-   `train_step` — only the deprecated-API crash is fixed. *(HIGH — was blocking
-   any training; now cleared.)*
-5. **`tf.GradientTape` instead of `keras.ops` / default `train_step`.** The
-   custom `train_step` couples the model to the TensorFlow backend even though
-   the rest of the library is backend-agnostic via `keras.ops`. Minor
-   convention violation; consider letting Keras provide the default `train_step`
-   once the semi-supervised pipeline is properly designed. *(LOW)*
-6. **`DPTDecoder.output_activation='sigmoid'` is incompatible with
-   `AffineInvariantLoss`.** Sigmoid clamps prediction to `[0,1]`, making global
-   scale ill-defined; AIL specifically expects unbounded scale to median-shift /
-   MAD-normalize meaningfully. The standard depth output is `linear` (or
-   `softplus`/`exp`). The training script in `src/train/depth_anything/` works
-   around this by using a masked L1 + gradient-matching loss (compatible with
-   any output range) rather than AIL. To use AIL, the decoder must be patched
-   to remove sigmoid. *(HIGH for training quality)*
-7. **Functional encoder built inside `build()` is fragile under serialization.**
-   `dl_techniques` convention is to declare sub-layers in `__init__`. The
-   current pattern (Functional model constructed in `build()`) has not been
-   tested under save/load round-trip. *(MEDIUM)*
-8. **Dead defensive checks.** `if DPTDecoder is not None`,
-   `if StrongAugmentation is not None`, `if AffineInvariantLoss is not None`,
-   `if FeatureAlignmentLoss is not None` — all are class objects imported at
-   the top of the file and can never be `None`. `_create_fallback_decoder()` is
-   dead code. *(LOW)*
-9. **`StrongAugmentation._apply_cutmix` hard-codes 3 channels** (`ops.tile(mask, [1, 1, 3])`)
-   and applies *batch-scalar* (single value applied to whole batch) brightness
-   and contrast factors rather than per-sample. Much weaker than typical CutMix.
-   *(LOW; pre-existing layer in `dl_techniques.layers.strong_augmentation`.)*
-10. **`encoder_type` validated but unused.** `'vit_s'`, `'vit_b'`, `'vit_l'` all
-    produce the same placeholder Conv-BN-ReLU encoder. Misleading API. *(MEDIUM)*
-11. **`input_shape` parameter shadows `Layer.input_shape`.** Stored as
-    `self.input_shape_param`. `get_config()` exports it as `"input_shape"` so
-    `from_config(**config)` round-trips, but the naming is error-prone for
-    contributors used to standard Keras attributes. *(LOW)*
-12. **No tests.** There is no `tests/test_models/test_depth_anything/` — the
-    model has zero pytest coverage. Save/load, gradient flow, and shape
-    invariants are unverified. *(MEDIUM)*
-13. **`frozen_encoder.trainable = trainable` set after Functional construction.**
-    Works in isolation, but combined with #2 above the frozen "teacher" never
-    becomes a real teacher. *(LOW)*
-14. **`compile()` override silently mutates `self.loss_weights`** and stores
-    `self.depth_loss` / `self.feature_loss` that are then never read by
-    `train_step`. The override is partially dead state — only `super().compile(...)`
-    is doing useful work. *(LOW)*
+**FIXED in `plan_2026-05-10_bd098beb`** (this plan):
+
+* **#1** — Encoder is now a real `ViT` backbone (`encoder_kind='real'`,
+  default). Placeholder Conv-BN-ReLU preserved behind `'placeholder'`.
+* **#2** — Frozen teacher is now weight-shared at build via
+  `keras.models.clone_model(student) + set_weights(student.get_weights())`.
+  EMA advance via `update_teacher_ema(decay=...)`. *Open at deeper layer*:
+  on-step EMA decay schedule + integration with a real pretrained student.
+* **#3** — Semi-supervised infrastructure wired: `enable_semi_supervised`
+  flag, `train_step` accepts `((x_lab, x_unlab), y_lab)`,
+  `FeatureAlignmentLoss` term on unlabeled features. *Open at deeper layer*:
+  pseudo-label depth on unlabeled stream + dataset-side
+  `((x_lab, x_unlab), y_lab)` pairing.
+* **#4** — `train_step` Keras-3 API (was fixed in `plan_44694bc9`); the
+  `# DECISION plan_2026-05-10_44694bc9/D-003` anchor is preserved.
+* **#6** — `DPTDecoder.output_activation` defaults to `'linear'`. Compatible
+  with `AffineInvariantLoss` and the masked-L1 + gradient loss.
+* **#7** — Real ViT encoder is constructed in `__init__`, not `build()`,
+  for the real path; serialization is verified by SC-6 (max-abs-diff = 0.0)
+  via the D-004 `save_own_variables` / `load_own_variables` override.
+* **#8** — Dead `if X is not None` guards and `_create_fallback_decoder`
+  removed.
+* **#10** — `encoder_type` now actually selects ViT scale
+  (`small`/`base`/`large`) — no longer cosmetic.
+* **#11** — `input_shape` renamed to `image_shape` (legacy kwarg accepted
+  for one cycle).
+* **#12** — Test module added at `tests/test_models/test_depth_anything/`
+  covering build, forward, save/load, train_step (labeled and semi-sup),
+  decoder default, StrongAugmentation forward.
+* **#13** — `frozen_encoder` weight-share issue subsumed by #2.
+* **#14** — `compile()` override no longer stashes dead `self.depth_loss` /
+  `self.feature_loss`.
+* **D-005** — `StrongAugmentation` uses `keras.random.uniform/shuffle`
+  (and a graph-mode cutmix gate; see #9 below for what's still pending).
+
+**STILL OPEN**:
+
+* **#5** — Custom `train_step` uses `tf.GradientTape` rather than
+  default Keras `train_step`. Acceptable for now (semi-sup path needs the
+  custom tape). *(LOW.)*
+* **#2-deeper** — On-step EMA decay schedule + integration with a real
+  pretrained student.
+* **#3-deeper** — Pseudo-label depth on unlabeled stream + dataset-side
+  `((x_lab, x_unlab), y_lab)` pairing.
+* **#9** — `StrongAugmentation._apply_cutmix` still hard-codes 3 channels
+  and uses batch-scalar (not per-sample) brightness/contrast factors.
+  Cutmix gating is now graph-mode safe (D-005 follow-up). *(LOW.)*
+
+**REMOVED** (issue no longer applicable):
+
+* **#12** — there are now tests.
 
 ---
 
@@ -321,6 +319,9 @@ items #1, #2, #3, #5–#14 are *not* fixed and remain open work.
   Supervision."** 2023.
 - In-tree canonical Keras-3 `train_step` pattern:
   `src/dl_techniques/models/masked_language_model/mlm.py:309-343`.
+- D-004 save/load override:
+  `src/dl_techniques/models/depth_anything/model.py` (search for
+  `# DECISION plan_2026-05-10_bd098beb/D-004`).
 
 ---
 
@@ -332,3 +333,4 @@ items #1, #2, #3, #5–#14 are *not* fixed and remain open work.
   trainer that the depth_anything trainer mirrors.
 - `src/dl_techniques/models/depth_anything/components.py` — `DPTDecoder` source.
 - `src/dl_techniques/models/depth_anything/model.py` — `DepthAnything` source.
+- `tests/test_models/test_depth_anything/` — pytest coverage.
