@@ -384,7 +384,7 @@ import matplotlib.pyplot as plt
 
 # Local imports from your project structure
 # (Assuming the files are in the specified dl_techniques structure)
-from dl_techniques.models.segmentation.acc_unet.model import create_acc_unet_binary
+from dl_techniques.models.accunet import create_acc_unet_binary
 
 # 1. Generate dummy segmentation data
 def create_dummy_data(num_samples, height, width):
@@ -444,13 +444,13 @@ plt.show()
 
 **Purpose**: The main Keras `Model` subclass that assembles the entire ACC-UNet architecture. Usually instantiated via the factory functions below.
 
-**Location**: `dl_techniques.models.segmentation.acc_unet.model.AccUNet`
+**Location**: `dl_techniques.models.accunet.AccUNet`
 
 ### 6.2 Factory Functions
 
 These are the recommended way to create ACC-UNet models.
 
-**Location**: `dl_techniques.models.segmentation.acc_unet.model`
+**Location**: `dl_techniques.models.accunet`
 
 #### `create_acc_unet(...)`
 The general-purpose factory function.
@@ -503,6 +503,20 @@ These are the custom `Layer` subclasses that form the building blocks of ACC-UNe
 
 ## 7. Configuration & Model Variants
 
+### Input Size Contract
+
+ACC-UNet performs **4 stride-2 downsampling stages** in the encoder followed by
+**4 stride-2 transposed-convolution upsampling stages** in the decoder. Because
+`Conv2DTranspose(strides=2, padding='same')` always emits exactly `2 * H_in`,
+the model can only round-trip spatial dimensions when **`H` and `W` are
+divisible by 16**. Any other input shape is rejected with a clear `ValueError`
+at the start of the forward pass — **resize your inputs to a multiple of 16
+before feeding the model** (the trainer in `src/train/accunet/` does this for
+you).
+
+Verified parameter counts (`base_filters=32, num_classes=1, input=224x224`):
+~16.8 M trainable parameters (call `model.count_params()` to check).
+
 ### Choosing `base_filters`
 
 This parameter controls the overall capacity of the model. The number of filters at each encoder level will be `[base_filters, base_filters*2, ..., base_filters*16]`.
@@ -534,7 +548,7 @@ This controls how many times the cross-level feature fusion is applied.
 # train_dataset: yields (image, mask) tuples of shape (256, 256, 1)
 # val_dataset: yields (image, mask) tuples of shape (256, 256, 1)
 
-from dl_techniques.models.segmentation.acc_unet.model import create_acc_unet_binary
+from dl_techniques.models.accunet import create_acc_unet_binary
 # A common loss for segmentation is a combination of BCE and Dice
 import tensorflow as tf
 
@@ -570,7 +584,7 @@ model.compile(
 ACC-UNet can handle variable input sizes if `input_shape` is set to `None`.
 
 ```python
-from dl_techniques.models.segmentation.acc_unet.model import create_acc_unet_multiclass
+from dl_techniques.models.accunet import create_acc_unet_multiclass
 
 # 1. Create model for 5 classes, dynamic HxW
 model = create_acc_unet_multiclass(
@@ -664,28 +678,20 @@ model.compile(optimizer='adam', loss='binary_crossentropy')
 # - ~50% reduction in memory usage, allowing larger batch sizes.
 ```
 
-### TensorFlow XLA Compilation
+### XLA / `jit_compile`
 
-Use XLA (Accelerated Linear Algebra) for an additional 10-30% speedup by compiling the computation graph.
+Use XLA (Accelerated Linear Algebra) for an additional 10-30% speedup. With Keras 3
+this is a single `compile()` flag — no custom training loop or `tf.GradientTape` is
+needed, and the model still trains via `model.fit()`.
 
 ```python
-import tensorflow as tf
-
-# Create and compile the model as usual
 model = create_acc_unet_binary(input_channels=1, input_shape=(256, 256))
-model.compile(optimizer='adam', loss='binary_crossentropy')
-
-# Create a compiled training step
-@tf.function(jit_compile=True)
-def train_step(x, y):
-    with tf.GradientTape() as tape:
-        y_pred = model(x, training=True)
-        loss = model.compute_loss(y=y, y_pred=y_pred)
-    gradients = tape.gradient(loss, model.trainable_variables)
-    model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    return loss
-
-# In your training loop, call `train_step(images, masks)` instead of model.fit()
+model.compile(
+    optimizer='adam',
+    loss='binary_crossentropy',
+    jit_compile=True,  # XLA-compile the train/eval step
+)
+# model.fit(...) as usual
 ```
 
 ---
@@ -750,7 +756,7 @@ import keras
 import numpy as np
 
 # Assuming imports for create_acc_unet_binary are set up
-from dl_techniques.models.segmentation.acc_unet.model import create_acc_unet_binary
+from dl_techniques.models.accunet import create_acc_unet_binary
 
 def test_model_creation():
     """Test that the model can be created."""
