@@ -179,11 +179,10 @@ class StrongAugmentation(keras.layers.Layer):
         :return: CutMix-augmented images tensor.
         :rtype: keras.KerasTensor
         """
-        # Apply CutMix with probability
+        # Apply CutMix with probability. Use a symbolic gate (no Python `if`)
+        # so the layer is graph-traceable inside `model.fit`.
         should_apply = keras.random.uniform(shape=()) < self.cutmix_prob
-
-        if not should_apply:
-            return x
+        gate = ops.cast(should_apply, "float32")  # 0.0 or 1.0
 
         batch_size = ops.shape(x)[0]
         height, width = ops.shape(x)[1], ops.shape(x)[2]
@@ -232,8 +231,13 @@ class StrongAugmentation(keras.layers.Layer):
             mask
         )
 
-        # Apply mask to all channels
+        # Apply mask to all channels (3 channels assumed; preserved from
+        # original behavior — see Known Issues #9 in the model README).
         mask = ops.tile(mask, [1, 1, 3])
+
+        # Multiply the mask by the symbolic apply-gate so mask=0 when not
+        # applying; this is equivalent to the original `if not should_apply`.
+        mask = mask * gate
 
         # Mix images
         x = ops.multiply(x, ops.subtract(1.0, mask)) + ops.multiply(x_perm, mask)
