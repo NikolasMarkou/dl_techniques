@@ -464,67 +464,62 @@ def test_loss_function_creation() -> None:
 
 
 def test_loss_serialization_and_deserialization() -> None:
-    """Test that segmentation losses can be properly serialized and deserialized."""
-    logger.info("Testing loss serialization and deserialization")
+    """Strengthened: full save/load round-trip MUST succeed unconditionally.
 
-    # Create a model with segmentation loss
+    No try/except (no longer encoding the bug as a contract). No
+    `custom_objects` (the registered `SegmentationWrapperLoss` is auto-
+    discoverable). No `compile=False` (the loss survives the round-trip).
+    Asserts class identity, config preservation, and functional
+    equivalence to atol 1e-6.
+
+    See plan_2026-05-10_17633038 / D-002.
+    """
+    logger.info("Testing loss serialization and deserialization (strengthened)")
+
+    # Build a tiny model.
     inputs = keras.Input(shape=(16, 16, 3))
     x = keras.layers.Conv2D(8, 3, activation='relu', padding='same')(inputs)
     outputs = keras.layers.Conv2D(3, 1, activation='softmax')(x)
     model = keras.Model(inputs=inputs, outputs=outputs)
 
-    # Create the loss with custom parameters
     config = LossConfig(
         num_classes=3,
         focal_gamma=1.5,
         focal_alpha=0.3,
         tversky_alpha=0.2,
-        tversky_beta=0.8
+        tversky_beta=0.8,
     )
-
     original_loss = create_loss_function('focal_tversky', config)
 
-    logger.info(f"Created original loss: {original_loss.name}")
+    model.compile(optimizer='adam', loss=original_loss)
 
-    # Compile the model
-    model.compile(
-        optimizer='adam',
-        loss=original_loss
-    )
-
-    # Save the model to a temporary file
     with tempfile.TemporaryDirectory() as tmp_dir:
         model_path = os.path.join(tmp_dir, 'segmentation_model.keras')
         model.save(model_path)
-        logger.info(f"Model saved to {model_path}")
 
-        # Custom objects dictionary for loading
-        custom_objects = {
-            'WrappedLoss': type(original_loss),
-            'SegmentationLosses': SegmentationLosses,
-            'LossConfig': LossConfig
-        }
+        # NO custom_objects, NO compile=False — must work as-is.
+        loaded_model = keras.models.load_model(model_path)
 
-        # Load the model back
-        try:
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects=custom_objects
-            )
-            logger.info("Model loaded successfully")
+        loaded_loss = loaded_model.loss
+        assert type(loaded_loss).__name__ == 'SegmentationWrapperLoss', \
+            f"unexpected loss type: {type(loaded_loss).__name__}"
+        assert loaded_loss.loss_name == 'focal_tversky', loaded_loss.loss_name
+        assert loaded_loss.config.focal_gamma == 1.5
+        assert loaded_loss.config.tversky_alpha == 0.2
 
-            # Get the loss configuration
-            loaded_loss = loaded_model.loss
+        # Functional equivalence on a small batch.
+        rng = np.random.default_rng(seed=0)
+        labels = rng.integers(low=0, high=3, size=(2, 16, 16))
+        y_true = np.eye(3, dtype=np.float32)[labels]  # one-hot
+        logits = rng.standard_normal(size=(2, 16, 16, 3)).astype(np.float32)
+        e = np.exp(logits - logits.max(axis=-1, keepdims=True))
+        y_pred = (e / e.sum(axis=-1, keepdims=True)).astype(np.float32)
 
-            # Check that the loss type matches
-            assert type(loaded_loss).__name__ == type(original_loss).__name__, \
-                f"Expected same loss type, got {type(loaded_loss)} vs {type(original_loss)}"
+        orig_val = float(original_loss(y_true, y_pred))
+        loaded_val = float(loaded_loss(y_true, y_pred))
+        assert abs(orig_val - loaded_val) < 1e-6, (orig_val, loaded_val)
 
-            logger.info("Serialization test passed successfully")
-
-        except Exception as e:
-            logger.warning(f"Serialization test failed (expected for complex losses): {e}")
-            # This is acceptable for complex custom losses
+        logger.info("Serialization round-trip + functional equivalence: PASS")
 
 
 def test_boundary_and_hausdorff_losses(segmentation_data: Tuple[np.ndarray, np.ndarray],
