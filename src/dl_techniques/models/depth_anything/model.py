@@ -481,21 +481,58 @@ class DepthAnything(keras.Model):
     def train_step(self, data: Any) -> Dict[str, keras.KerasTensor]:
         """Execute one training step.
 
+        Two input shapes are accepted:
+
+        * ``(x, y)`` — labeled-only path (default).
+        * ``((x_lab, x_unlab), y_lab)`` — semi-supervised path. Active only
+          when ``self.enable_semi_supervised`` is True AND
+          ``self.use_feature_alignment`` is True. Adds a Feature-Alignment
+          Loss term computed on unlabeled features against the
+          weight-shared frozen teacher.
+
         Args:
-            data: Training data batch in format (inputs, targets).
+            data: Training data batch.
 
         Returns:
             Dictionary containing loss metrics.
         """
         x, y = data
+        # Detect semi-supervised tuple-of-inputs.
+        if (
+            self.enable_semi_supervised
+            and isinstance(x, (tuple, list))
+            and len(x) == 2
+        ):
+            x_lab, x_unlab = x[0], x[1]
+        else:
+            x_lab, x_unlab = x, None
 
         with tf.GradientTape() as tape:
-            # Forward pass
-            y_pred = self(x, training=True)
+            # Forward pass on labeled batch.
+            y_pred = self(x_lab, training=True)
             # DECISION plan_2026-05-10_44694bc9/D-003: Keras-3 canonical train_step
             # — replaces deprecated compiled-loss / compiled-metrics calls.
             # See dl_techniques/models/masked_language_model/mlm.py:309-343.
-            loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
+            loss = self.compute_loss(x=x_lab, y=y, y_pred=y_pred)
+            loss = loss * self.loss_weights.get('labeled', 1.0)
+
+            # Optional Feature-Alignment-Loss on unlabeled batch.
+            if (
+                x_unlab is not None
+                and self.use_feature_alignment
+                and self.frozen_encoder is not None
+            ):
+                feat_student = self.encoder(x_unlab, training=True)
+                feat_teacher = self.frozen_encoder(x_unlab, training=False)
+                # Pool to (B, D). ViT seq output is (B, N+1, D); drop CLS.
+                if len(feat_student.shape) == 4:
+                    feat_student = ops.mean(feat_student, axis=[1, 2])
+                    feat_teacher = ops.mean(feat_teacher, axis=[1, 2])
+                elif len(feat_student.shape) == 3:
+                    feat_student = ops.mean(feat_student[:, 1:, :], axis=1)
+                    feat_teacher = ops.mean(feat_teacher[:, 1:, :], axis=1)
+                fal = FeatureAlignmentLoss()(feat_teacher, feat_student)
+                loss = loss + self.loss_weights.get('feature', 0.1) * fal
 
         # Compute gradients and update weights
         trainable_vars = self.trainable_variables
