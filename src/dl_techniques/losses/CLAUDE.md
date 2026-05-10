@@ -19,7 +19,7 @@ from dl_techniques.losses import (
     # Generative
     WassersteinLoss,
     # Specialized
-    CapsuleMarginLoss, SegmentationLoss, ImageRestorationLoss,
+    CapsuleMarginLoss, SegmentationLoss, SegmentationWrapperLoss, ImageRestorationLoss,
     # Information-theoretic
     GoodhartLoss, DecoupledInformationLoss,
 )
@@ -47,6 +47,7 @@ from dl_techniques.losses import (
 - `nano_vlm_loss.py` — NanoVLM vision-language loss
 - `quantile_loss.py` — Quantile regression loss
 - `segmentation_loss.py` — Segmentation loss (Dice, Tversky, focal)
+- `segmentation_wrapper_loss.py` — Serializable name-dispatched wrapper around `SegmentationLosses` for use as a compile/save/load-friendly Keras `Loss`
 - `smape_loss.py` — Symmetric MAPE
 - `sparsemax_loss.py` — Sparsemax loss
 - `tabm_loss.py` — TabM model loss
