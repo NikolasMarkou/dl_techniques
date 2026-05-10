@@ -23,7 +23,7 @@ The following loss functions are available in this module:
 | **Information-Theoretic** | `DecoupledInformationLoss`, `FocalUncertaintyLoss`, `GoodhartAwareLoss` | Advanced losses that combine a task objective (e.g., cross-entropy) with regularizers for uncertainty, diversity, and information compression. | Improving model robustness, calibration, and generalization by preventing overconfidence and reliance on spurious correlations. |
 | **Language Modeling** | `NanoVLMLoss`, `HRMLoss` | Autoregressive cross-entropy losses for next-token prediction, with support for masking and multi-task Q-learning (HRM). | Training generative language models or the language component of VLMs. |
 | **Robust Regression** | `HuberLoss` | A hybrid loss that behaves like MSE for small errors and MAE for large errors, making it robust to outliers. | Regression tasks with noisy data or significant outliers. |
-| **Segmentation** | `SegmentationLosses`, `create_segmentation_loss_function` | A factory for various segmentation losses, including Dice, Focal, Tversky, Lovász, and combined losses. | Semantic segmentation tasks, especially with class imbalance. |
+| **Segmentation** | `SegmentationWrapperLoss`, `SegmentationLosses`, `create_segmentation_loss_function` | Serializable Keras `Loss` dispatching by name over Dice, Focal, Tversky, Lovász, and combined losses. Save/load round-trips without `custom_objects`. | Semantic segmentation tasks, especially with class imbalance. |
 | **Time Series Forecasting** | `MASELoss`, `SMAPELoss`, `MQLoss` | Scale-free error metrics (MASE, SMAPE) and quantile loss (MQL) for probabilistic forecasting. | Evaluating and training forecasting models across series with different scales and for generating prediction intervals. |
 | **Wasserstein GANs** | `WassersteinLoss`, `WassersteinGradientPenaltyLoss`, `create_wgan_gp_losses` | Losses based on the Wasserstein distance for stable training of Generative Adversarial Networks. | Training WGANs and WGAN-GP for high-quality generative modeling. |
 | **YOLOv12 Multi-Task** | `YOLOv12MultiTaskLoss`, `create_yolov12_multitask_loss` | An advanced multi-task loss orchestrator for object detection, segmentation, and classification, with optional uncertainty weighting. | Training complex, multi-headed computer vision models like YOLOv12. |
@@ -113,22 +113,32 @@ class DINOModel(keras.Model):
 ```
 
 ### Segmentation Losses
-Use the factory `create_segmentation_loss_function` for convenience.
+Recommended path: construct `SegmentationWrapperLoss` directly. The legacy
+factory `create_segmentation_loss_function` still works and now delegates
+to the same class.
 
-**Key Params:** `loss_name` (str), `config` (`LossConfig` object).
+**Key Params:** `loss_name` (str), `config` (`SegmentationLossConfig` / `LossConfig`).
 
 ```python
-from dl_techniques.losses import create_segmentation_loss_function, SegmentationLossConfig
+import keras
+from dl_techniques.losses import SegmentationWrapperLoss, SegmentationLossConfig
 
 # Configure parameters for segmentation
 seg_config = SegmentationLossConfig(num_classes=19, focal_gamma=2.5)
 
-# Create a combined Focal + Tversky loss
-focal_tversky_loss = create_segmentation_loss_function(
-    'focal_tversky',
-    config=seg_config
-)
+# Recommended: construct the loss directly.
+focal_tversky_loss = SegmentationWrapperLoss('focal_tversky', seg_config)
+
 model.compile(optimizer='adam', loss=focal_tversky_loss)
+
+# Save and reload — no custom_objects, no compile=False.
+model.save('seg.keras')
+reloaded = keras.models.load_model('seg.keras')
+assert type(reloaded.loss).__name__ == 'SegmentationWrapperLoss'
+
+# Legacy factory still works (delegates to SegmentationWrapperLoss):
+# from dl_techniques.losses import create_segmentation_loss_function
+# focal_tversky_loss = create_segmentation_loss_function('focal_tversky', seg_config)
 ```
 
 ### Wasserstein GAN Losses
