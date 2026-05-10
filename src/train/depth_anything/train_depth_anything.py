@@ -51,6 +51,9 @@ from train.common.megadepth import (
     discover_megadepth_pairs,
     load_and_process_pair as _load_and_process_pair,
     MegaDepthDataset,
+    UnlabeledImageDataset,
+    pair_labeled_unlabeled,
+    _discover_image_files,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -60,6 +63,11 @@ from dl_techniques.optimization import (
 from dl_techniques.models.depth_anything.model import (
     DepthAnything,
     create_depth_anything,
+)
+from dl_techniques.models.depth_anything.teacher_ema import (
+    TeacherEMACallback,
+    cosine_ema_schedule,
+    linear_ema_schedule,
 )
 from dl_techniques.metrics.depth_metrics import (
     AbsRelMetric,
@@ -130,6 +138,15 @@ class DepthAnythingTrainingConfig:
 
     # Pretrained init (e.g. backbone from a prior depth_anything run, or any compatible .keras checkpoint)
     init_from: Optional[str] = None
+    # Pretrained encoder weights — applied via DepthAnything.from_pretrained_encoder.
+    pretrained_encoder_weights: Optional[str] = None
+    # Semi-supervised: glob for unlabeled RGB images
+    unlabeled_image_glob: Optional[str] = None
+    # EMA schedule for teacher updates (used when use_feature_alignment=True)
+    ema_schedule: str = "none"          # one of {'cosine', 'linear', 'none'}
+    ema_decay_start: float = 0.5
+    ema_decay_end: float = 0.999
+    ema_warmup_steps: int = 0
     seed: int = 42
 
     def __post_init__(self):
@@ -467,6 +484,15 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
                 f"likely a checkpoint / architecture mismatch."
             )
 
+    # Pretrained encoder-only weights: loaded into model.encoder via the
+    # DepthAnything hook, which also re-syncs the EMA teacher.
+    if config.pretrained_encoder_weights is not None:
+        logger.info(
+            f"Loading pretrained encoder weights: "
+            f"{config.pretrained_encoder_weights}"
+        )
+        model.from_pretrained_encoder(config.pretrained_encoder_weights)
+
     lr_schedule = learning_rate_schedule_builder({
         "type": config.lr_schedule_type,
         "learning_rate": config.learning_rate,
@@ -504,13 +530,65 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
     callbacks, results_dir = create_callbacks(config, val_rgb, val_depth)
     output_dir = Path(results_dir)
 
+    # Optional EMA teacher callback (engages on-step decay schedule).
+    if config.ema_schedule != "none" and config.use_feature_alignment:
+        total_ema_steps = max(1, steps_per_epoch * config.epochs - config.ema_warmup_steps)
+        if config.ema_schedule == "cosine":
+            schedule_fn = cosine_ema_schedule(
+                config.ema_decay_start, config.ema_decay_end, total_ema_steps,
+            )
+        else:
+            schedule_fn = linear_ema_schedule(
+                config.ema_decay_start, config.ema_decay_end, total_ema_steps,
+            )
+        callbacks.append(
+            TeacherEMACallback(
+                schedule=schedule_fn,
+                warmup_steps=config.ema_warmup_steps,
+                log_every=max(1, steps_per_epoch),
+            )
+        )
+        logger.info(
+            f"TeacherEMACallback: schedule={config.ema_schedule} "
+            f"start={config.ema_decay_start} end={config.ema_decay_end} "
+            f"warmup={config.ema_warmup_steps} total_steps={total_ema_steps}"
+        )
+
+    # Optional semi-sup paired dataset: ((x_lab, x_unlab), y_lab).
+    fit_train_data = train_ds
+    if (
+        config.enable_semi_supervised
+        and config.unlabeled_image_glob is not None
+    ):
+        unlabeled_paths = _discover_image_files(config.unlabeled_image_glob)
+        if not unlabeled_paths:
+            raise RuntimeError(
+                f"No unlabeled images matched: {config.unlabeled_image_glob}"
+            )
+        logger.info(
+            f"Semi-supervised: {len(unlabeled_paths)} unlabeled images "
+            f"(glob: {config.unlabeled_image_glob})"
+        )
+        unlabeled_ds = UnlabeledImageDataset(
+            unlabeled_paths,
+            batch_size=config.batch_size,
+            patch_size=config.patch_size,
+            is_training=True,
+            workers=max(1, num_workers // 2),
+        )
+        fit_train_data = pair_labeled_unlabeled(
+            train_ds, unlabeled_ds,
+            patch_size=config.patch_size,
+            batch_size=config.batch_size,
+        )
+
     with open(output_dir / "config.json", "w") as f:
         json.dump(config.__dict__, f, indent=2, default=str)
 
     start_time = time.time()
 
     history = model.fit(
-        train_ds,
+        fit_train_data,
         epochs=config.epochs,
         validation_data=val_ds,
         steps_per_epoch=steps_per_epoch,
@@ -650,6 +728,45 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pretrained-encoder-weights", type=str, default=None,
+        help=(
+            "Path to a .keras checkpoint of a *standalone encoder* (e.g. a "
+            "saved ViT). Loaded via DepthAnything.from_pretrained_encoder, "
+            "then re-synced into the EMA teacher when feature alignment is "
+            "enabled. Distinct from --init-from (which loads into the full "
+            "depth model)."
+        ),
+    )
+    parser.add_argument(
+        "--unlabeled-image-glob", type=str, default=None,
+        help=(
+            "Glob pattern resolving to unlabeled RGB images (e.g. "
+            "'/data/unlabeled/**/*.jpg'). When set together with "
+            "--enable-semi-supervised, the train pipeline yields "
+            "((x_lab, x_unlab), y_lab) batches and engages the semi-sup "
+            "train_step path."
+        ),
+    )
+    parser.add_argument(
+        "--ema-schedule", choices=["cosine", "linear", "none"], default="none",
+        help=(
+            "Teacher EMA decay schedule. 'none' disables on-step EMA "
+            "updates (teacher remains the snapshot taken at build time)."
+        ),
+    )
+    parser.add_argument(
+        "--ema-decay-start", type=float, default=0.5,
+        help="EMA decay at step 0 (cosine/linear).",
+    )
+    parser.add_argument(
+        "--ema-decay-end", type=float, default=0.999,
+        help="EMA decay asymptote (cosine/linear).",
+    )
+    parser.add_argument(
+        "--ema-warmup-steps", type=int, default=0,
+        help="Number of training steps to skip before EMA updates begin.",
+    )
+    parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for Python/NumPy/TF/Keras init.",
     )
@@ -694,6 +811,12 @@ def main():
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
         init_from=args.init_from,
+        pretrained_encoder_weights=args.pretrained_encoder_weights,
+        unlabeled_image_glob=args.unlabeled_image_glob,
+        ema_schedule=args.ema_schedule,
+        ema_decay_start=args.ema_decay_start,
+        ema_decay_end=args.ema_decay_end,
+        ema_warmup_steps=args.ema_warmup_steps,
         seed=args.seed,
     )
 
