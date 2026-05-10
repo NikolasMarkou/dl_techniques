@@ -69,7 +69,15 @@ class DPTDecoder(keras.layers.Layer):
         activation: String or callable, activation function to use.
             Defaults to "relu".
         output_activation: String or callable, activation function for output layer.
-            Defaults to "sigmoid".
+            Defaults to "linear" (no activation). For depth estimation pipelines that
+            use AffineInvariantLoss or DepthEstimationLoss, the network output should
+            be unconstrained; clamp to ``[0,1]`` only when explicitly required.
+        upsample_factor: Integer, total bilinear upsampling factor applied across the
+            decoder stages. Must be a power of 2 and ``<= 2 ** len(dims)``. When
+            greater than 1, ``2x`` ``UpSampling2D`` blocks are placed after the first
+            ``log2(upsample_factor)`` non-final conv stages so the cumulative upscale
+            equals ``upsample_factor``. The remaining stages keep the resolution.
+            Defaults to 1 (no upsampling — original behavior).
         **kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
@@ -97,7 +105,8 @@ class DPTDecoder(keras.layers.Layer):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             use_bias: bool = False,
             activation: Union[str, callable] = "relu",
-            output_activation: Union[str, callable] = "sigmoid",
+            output_activation: Union[str, callable] = "linear",
+            upsample_factor: int = 1,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -110,11 +119,30 @@ class DPTDecoder(keras.layers.Layer):
         self.use_bias = use_bias
         self.activation = activation
         self.output_activation = output_activation
+        self.upsample_factor = int(upsample_factor)
+
+        # Validate upsample_factor: must be a power of 2 and <= 2**len(dims).
+        if self.upsample_factor < 1 or (self.upsample_factor & (self.upsample_factor - 1)) != 0:
+            raise ValueError(
+                f"upsample_factor must be a positive power of 2, got {upsample_factor}"
+            )
+        # Number of 2x upsamples to insert.
+        self._num_upsamples = 0
+        uf = self.upsample_factor
+        while uf > 1:
+            uf //= 2
+            self._num_upsamples += 1
+        if self._num_upsamples > len(self.dims):
+            raise ValueError(
+                f"upsample_factor=2**{self._num_upsamples} requires at least "
+                f"{self._num_upsamples} decoder stages, but len(dims)={len(self.dims)}"
+            )
 
         # Will be initialized in build()
         self.conv_layers: List[keras.layers.Conv2D] = []
         self.batch_norm_layers: List[keras.layers.BatchNormalization] = []
         self.activation_layers: List[keras.layers.Layer] = []
+        self.upsample_layers: List[Optional[keras.layers.Layer]] = []
         self.output_conv: Optional[keras.layers.Conv2D] = None
         self._build_input_shape: Optional[Tuple[int, ...]] = None
 
@@ -131,6 +159,7 @@ class DPTDecoder(keras.layers.Layer):
         self.conv_layers = []
         self.batch_norm_layers = []
         self.activation_layers = []
+        self.upsample_layers = []
 
         # Create convolutional layers for each dimension
         for i, dim in enumerate(self.dims):
@@ -156,6 +185,15 @@ class DPTDecoder(keras.layers.Layer):
                 name=f'activation_{i}'
             )
             self.activation_layers.append(activation_layer)
+
+            # Upsample after the first _num_upsamples stages (one 2x per stage).
+            if i < self._num_upsamples:
+                up = keras.layers.UpSampling2D(
+                    size=(2, 2), interpolation='bilinear', name=f'upsample_{i}'
+                )
+            else:
+                up = None
+            self.upsample_layers.append(up)
 
         # Final output layer
         self.output_conv = keras.layers.Conv2D(
@@ -189,14 +227,17 @@ class DPTDecoder(keras.layers.Layer):
         x = inputs
 
         # Apply decoder layers sequentially
-        for conv, bn, activation in zip(
+        for conv, bn, activation, up in zip(
                 self.conv_layers,
                 self.batch_norm_layers,
-                self.activation_layers
+                self.activation_layers,
+                self.upsample_layers,
         ):
             x = conv(x)
             x = bn(x, training=training)
             x = activation(x)
+            if up is not None:
+                x = up(x)
 
         # Apply final output layer
         x = self.output_conv(x)
@@ -215,8 +256,14 @@ class DPTDecoder(keras.layers.Layer):
         # Convert to list for consistent manipulation
         input_shape_list = list(input_shape)
 
-        # Output has same spatial dimensions but different channel count
-        output_shape_list = input_shape_list[:-1] + [self.output_channels]
+        # Spatial dims are scaled by upsample_factor; channels become output_channels.
+        h = input_shape_list[1]
+        w = input_shape_list[2]
+        if h is not None:
+            h = h * self.upsample_factor
+        if w is not None:
+            w = w * self.upsample_factor
+        output_shape_list = [input_shape_list[0], h, w, self.output_channels]
 
         # Return as tuple for consistency
         return tuple(output_shape_list)
@@ -236,6 +283,7 @@ class DPTDecoder(keras.layers.Layer):
             "use_bias": self.use_bias,
             "activation": self.activation,
             "output_activation": self.output_activation,
+            "upsample_factor": self.upsample_factor,
         })
         return config
 
