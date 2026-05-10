@@ -10,19 +10,22 @@ src/dl_techniques/models/depth_anything/
 └── model.py           # DepthAnything keras.Model + create_depth_anything factory
 ```
 
-> **Status (post-`plan_2026-05-10_bd098beb`).** The model now uses the
-> in-tree `dl_techniques.models.vit.ViT` as its real encoder
-> (`encoder_kind='real'`, default), the DPT decoder defaults to `linear`
-> output (no longer sigmoid-clamped), and `train_step` supports both the
-> labeled-only path and a semi-supervised path keyed on
-> `enable_semi_supervised`. Save/load round-trip is verified end-to-end on
-> CPU (max-abs-diff = 0.0). The legacy Conv-BN-ReLU encoder is preserved
-> behind `encoder_kind='placeholder'` for back-compat.
+> **Status (post-`plan_2026-05-10_54e6e303`).** The model uses the in-tree
+> `dl_techniques.models.vit.ViT` as its real encoder (`encoder_kind='real'`,
+> default); the DPT decoder defaults to `linear` output;  `train_step`
+> dispatches to a clean labeled-only path or a clearly-delimited
+> semi-supervised path that adds FAL on pooled features **and** an L1
+> pseudo-label consistency term on student-vs-teacher depth on `x_unlab`.
+> On-step EMA decay is provided by `TeacherEMACallback` with cosine/linear
+> schedules, and `DepthAnything.from_pretrained_encoder(path)` loads encoder
+> weights from a saved `.keras` checkpoint and re-syncs the teacher.
+> `StrongAugmentation` now supports any number of channels and applies
+> per-sample brightness/contrast factors. Save/load round-trip is verified
+> end-to-end on CPU (max-abs-diff = 0.0). The legacy Conv-BN-ReLU encoder
+> is preserved behind `encoder_kind='placeholder'` for back-compat.
 >
-> What is **still open** (deeper, separate-plan work): EMA-trained teacher
-> with on-step decay schedule, pseudo-label depth on the unlabeled stream,
-> per-sample CutMix factors, and external pretrained-encoder weight
-> loading (e.g. DINOv2). See "Known Issues" below.
+> Only one residual note remains (`tf.GradientTape` in the custom
+> `train_step` — required by the semi-sup path). See "Known Issues" below.
 
 ---
 
@@ -191,22 +194,45 @@ model.compile(
 ### Semi-supervised usage
 
 ```python
+import keras
+from dl_techniques.models.depth_anything import (
+    create_depth_anything, TeacherEMACallback, cosine_ema_schedule,
+)
+from train.common.megadepth import (
+    MegaDepthDataset, UnlabeledImageDataset, pair_labeled_unlabeled,
+)
+
 model = create_depth_anything(
     encoder_kind='real', encoder_type='vit_l', image_shape=(384, 384, 3),
     use_feature_alignment=True, enable_semi_supervised=True,
 )
+
+# Optional: load encoder weights from a saved .keras checkpoint
+# (re-syncs the EMA teacher automatically).
+# model.from_pretrained_encoder('/path/to/encoder.keras')
+
 model.compile(optimizer=keras.optimizers.AdamW(1e-4))
-# data shape per batch: ((x_lab, x_unlab), y_lab)
-# model.fit(ds, epochs=...)
-# Optionally advance the EMA teacher on each step:
-# class TeacherEMACallback(keras.callbacks.Callback):
-#     def on_train_batch_end(self, *_):
-#         self.model.update_teacher_ema(decay=0.999)
+
+# Build a paired ((x_lab, x_unlab), y_lab) tf.data.Dataset.
+labeled_ds   = MegaDepthDataset(rgb_paths, depth_paths, batch_size=8, patch_size=384)
+unlabeled_ds = UnlabeledImageDataset(unlab_paths, batch_size=8, patch_size=384)
+paired_ds    = pair_labeled_unlabeled(labeled_ds, unlabeled_ds, patch_size=384, batch_size=8)
+
+# On-step EMA decay (cosine 0.5 → 0.999 over the run).
+total_steps = len(labeled_ds) * 100
+ema_cb = TeacherEMACallback(
+    schedule=cosine_ema_schedule(0.5, 0.999, total_steps),
+    warmup_steps=0,
+)
+
+model.fit(paired_ds, epochs=100, steps_per_epoch=len(labeled_ds),
+          callbacks=[ema_cb])
 ```
 
-The infrastructure is wired (frozen weight-shared teacher, FAL term inside
-`train_step`); the open work is feeding `((x_lab, x_unlab), y_lab)` from a
-real dataset (the in-tree `MegaDepthDataset` only yields labeled batches).
+The semi-supervised `train_step` adds two losses on top of the labeled loss:
+**FAL** between pooled student/teacher features on `x_unlab`, and **L1
+pseudo-label consistency** between the student's depth on `x_unlab` and the
+teacher's stop-gradient depth pseudo-labels.
 
 ### Serialization
 
@@ -255,19 +281,16 @@ Verified end-to-end on CPU (max-abs-diff = 0.0; SC-6 in
 The 14-item review from `plan_2026-05-10_44694bc9` plus D-005 has been
 folded into the work below. Item numbers are kept stable for traceability.
 
-**FIXED in `plan_2026-05-10_bd098beb`** (this plan):
+**FIXED in `plan_2026-05-10_bd098beb`**:
 
 * **#1** — Encoder is now a real `ViT` backbone (`encoder_kind='real'`,
   default). Placeholder Conv-BN-ReLU preserved behind `'placeholder'`.
 * **#2** — Frozen teacher is now weight-shared at build via
   `keras.models.clone_model(student) + set_weights(student.get_weights())`.
-  EMA advance via `update_teacher_ema(decay=...)`. *Open at deeper layer*:
-  on-step EMA decay schedule + integration with a real pretrained student.
+  EMA advance via `update_teacher_ema(decay=...)`.
 * **#3** — Semi-supervised infrastructure wired: `enable_semi_supervised`
   flag, `train_step` accepts `((x_lab, x_unlab), y_lab)`,
-  `FeatureAlignmentLoss` term on unlabeled features. *Open at deeper layer*:
-  pseudo-label depth on unlabeled stream + dataset-side
-  `((x_lab, x_unlab), y_lab)` pairing.
+  `FeatureAlignmentLoss` term on unlabeled features.
 * **#4** — `train_step` Keras-3 API (was fixed in `plan_44694bc9`); the
   `# DECISION plan_2026-05-10_44694bc9/D-003` anchor is preserved.
 * **#6** — `DPTDecoder.output_activation` defaults to `'linear'`. Compatible
@@ -281,27 +304,45 @@ folded into the work below. Item numbers are kept stable for traceability.
   (`small`/`base`/`large`) — no longer cosmetic.
 * **#11** — `input_shape` renamed to `image_shape` (legacy kwarg accepted
   for one cycle).
-* **#12** — Test module added at `tests/test_models/test_depth_anything/`
-  covering build, forward, save/load, train_step (labeled and semi-sup),
-  decoder default, StrongAugmentation forward.
 * **#13** — `frozen_encoder` weight-share issue subsumed by #2.
 * **#14** — `compile()` override no longer stashes dead `self.depth_loss` /
   `self.feature_loss`.
 * **D-005** — `StrongAugmentation` uses `keras.random.uniform/shuffle`
-  (and a graph-mode cutmix gate; see #9 below for what's still pending).
+  (and a graph-mode cutmix gate).
+
+**FIXED in `plan_2026-05-10_54e6e303`** (this plan):
+
+* **#2-deeper** — On-step EMA decay schedule + integration. New module
+  `dl_techniques/models/depth_anything/teacher_ema.py` provides
+  `cosine_ema_schedule(start, end, total_steps)`,
+  `linear_ema_schedule(...)`, and `TeacherEMACallback(schedule, warmup_steps)`.
+  `DepthAnything.from_pretrained_encoder(weights_path)` loads encoder
+  weights from a `.keras` checkpoint and re-syncs the teacher.
+* **#3-deeper** — Pseudo-label depth on the unlabeled stream
+  (`DepthAnything._pseudo_label_depth`, stop-gradient L1 consistency in
+  the semi-sup path) + dataset-side pairing utilities
+  `train.common.megadepth.UnlabeledImageDataset` and
+  `pair_labeled_unlabeled` yielding `((x_lab, x_unlab), y_lab)` via
+  `tf.data.Dataset.from_generator` + zip.
+* **#5** — `train_step` refactored into a clean labeled-only path
+  (`_train_step_labeled`: forward + `compute_loss` + apply grads) and a
+  clearly delimited semi-supervised branch
+  (`_train_step_semi_supervised`: labeled + FAL + pseudo-label
+  consistency). The D-003 anchor is preserved at the labeled
+  `compute_loss` call.
+* **#9** — `_apply_cutmix` mask now tiles to `ops.shape(x)[-1]`
+  (channels dynamic, supports 1/3/4); brightness/contrast factors are
+  per-sample with shape `(B, 1, 1, 1)` so each image gets distinct jitter.
+* **Multi-epoch FAL stability test** — added at
+  `tests/test_models/test_depth_anything/test_depth_anything.py`
+  (`TestMultiEpochFALStability`): 3 epochs * 2 steps semi-sup synthetic;
+  asserts losses finite, last <= 1.5 * first, and teacher weights moved.
 
 **STILL OPEN**:
 
-* **#5** — Custom `train_step` uses `tf.GradientTape` rather than
-  default Keras `train_step`. Acceptable for now (semi-sup path needs the
-  custom tape). *(LOW.)*
-* **#2-deeper** — On-step EMA decay schedule + integration with a real
-  pretrained student.
-* **#3-deeper** — Pseudo-label depth on unlabeled stream + dataset-side
-  `((x_lab, x_unlab), y_lab)` pairing.
-* **#9** — `StrongAugmentation._apply_cutmix` still hard-codes 3 channels
-  and uses batch-scalar (not per-sample) brightness/contrast factors.
-  Cutmix gating is now graph-mode safe (D-005 follow-up). *(LOW.)*
+* **#5 (base note)** — Custom `train_step` uses `tf.GradientTape` rather
+  than default Keras `train_step`. Acceptable for now (semi-sup path needs
+  the custom tape). *(LOW.)*
 
 **REMOVED** (issue no longer applicable):
 

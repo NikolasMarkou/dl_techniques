@@ -3,18 +3,17 @@
 Pattern-5 (depth-estimation) training scaffold for
 `dl_techniques.models.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
 
-> **Status (post-`plan_2026-05-10_bd098beb`)**: the in-tree
-> `dl_techniques.models.vit.ViT` is now wired as the default encoder
-> (`--encoder-kind real`); the legacy Conv-BN-ReLU stack is preserved
-> behind `--encoder-kind placeholder`. The decoder default is `linear`
-> (no longer sigmoid-clamped to `[0,1]`). The `train_step` Keras-3 API
-> bug remains fixed. Save/load round-trip is verified on CPU
-> (max-abs-diff = 0.0).
-> **Open**: `--enable-semi-supervised` switches the model to the FAL
-> train_step path on `((x_lab, x_unlab), y_lab)` data, but the in-tree
-> `MegaDepthDataset` only yields labeled batches — feeding paired
-> unlabeled imagery requires extending the data pipeline. See
-> "Semi-supervised usage" below.
+> **Status (post-`plan_2026-05-10_54e6e303`)**: in-tree
+> `dl_techniques.models.vit.ViT` as the default encoder
+> (`--encoder-kind real`). DPT decoder default is `linear`. `train_step`
+> dispatches to a clean labeled path or a semi-sup path that adds FAL +
+> stop-gradient pseudo-label L1 consistency. Semi-supervised data feed
+> is now wired end-to-end via `--unlabeled-image-glob`, which builds an
+> `UnlabeledImageDataset` paired with `MegaDepthDataset` into
+> `((x_lab, x_unlab), y_lab)` batches. On-step EMA decay is driven by
+> `TeacherEMACallback` (`--ema-schedule {cosine,linear,none}`). External
+> encoder weights can be loaded via `--pretrained-encoder-weights`
+> (`from_pretrained_encoder` re-syncs the teacher).
 
 ## Quick start
 
@@ -37,6 +36,16 @@ MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
 MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
     --encoder-type vit_l --epochs 100 --batch-size 16 \
     --init-from results/depth_anything_pretrain_*/model_inference.keras \
+    --gpu 0
+
+# Semi-supervised run with EMA teacher + paired unlabeled images
+MPLBACKEND=Agg .venv/bin/python -m train.depth_anything.train_depth_anything \
+    --encoder-type vit_l --epochs 100 --batch-size 8 --patch-size 384 \
+    --use-feature-alignment --enable-semi-supervised \
+    --unlabeled-image-glob '/data/unlabeled/**/*.jpg' \
+    --ema-schedule cosine --ema-decay-start 0.5 --ema-decay-end 0.999 \
+    --ema-warmup-steps 0 \
+    --pretrained-encoder-weights /path/to/vit_encoder.keras \
     --gpu 0
 ```
 
@@ -73,7 +82,13 @@ on this machine.
 | `--max-val-files`             | `1000`                                    | Cap on validation pairs. |
 | `--encoder-type`              | `vit_l`                                   | One of `{vit_s,vit_b,vit_l}`. |
 | `--encoder-kind`              | `real`                                    | `real` (in-tree `ViT`) or `placeholder` (Conv-BN-ReLU compat). |
-| `--enable-semi-supervised`    | off                                       | Activates FAL train_step path on `((x_lab,x_unlab),y_lab)`. Requires extending `MegaDepthDataset` — see Semi-supervised usage below. |
+| `--enable-semi-supervised`    | off                                       | Activates FAL + pseudo-label consistency train_step path on `((x_lab,x_unlab),y_lab)`. Combine with `--unlabeled-image-glob`. |
+| `--unlabeled-image-glob`      | `None`                                    | Glob to unlabeled RGB images (e.g. `'/data/unlab/**/*.jpg'`); paired with `MegaDepthDataset` via `pair_labeled_unlabeled`. |
+| `--pretrained-encoder-weights`| `None`                                    | Path to a saved encoder `.keras` file. Loaded via `DepthAnything.from_pretrained_encoder`; re-syncs the EMA teacher. |
+| `--ema-schedule`              | `none`                                    | `{cosine,linear,none}`. Drives `TeacherEMACallback` when `--use-feature-alignment` is on. |
+| `--ema-decay-start`           | `0.5`                                     | EMA decay at step 0. |
+| `--ema-decay-end`             | `0.999`                                   | EMA decay asymptote at the end of the run. |
+| `--ema-warmup-steps`          | `0`                                       | Number of training steps before EMA updates begin. |
 | `--use-feature-alignment`     | off                                       | Enables `frozen_encoder` (weight-shared teacher; EMA via `update_teacher_ema`). Default off. |
 | `--cutmix-prob`               | `0.5`                                     | Forwarded to `StrongAugmentation`. |
 | `--color-jitter-strength`     | `0.2`                                     | Forwarded to `StrongAugmentation`. |
@@ -112,23 +127,23 @@ results/
 
 ## Semi-supervised usage
 
-`--enable-semi-supervised` flips `DepthAnything.train_step` into a path that
-expects `((x_labeled, x_unlabeled), y_labeled)` per-batch. The model then
-runs:
+Combine `--enable-semi-supervised` with `--unlabeled-image-glob` and (for
+EMA) `--use-feature-alignment` + `--ema-schedule`. The script then:
 
-1. Supervised forward pass + `compute_loss` on the labeled batch.
-2. (When `--use-feature-alignment` is also set) `FeatureAlignmentLoss`
-   between `self.encoder(x_unlabeled)` and the weight-shared
-   `self.frozen_encoder(x_unlabeled)`. The teacher is initialized from a
-   `keras.models.clone_model` of the student at `build()` time and can be
-   advanced by calling `model.update_teacher_ema(decay=...)` from a custom
-   on-step callback.
+1. Builds a labeled `MegaDepthDataset` and an `UnlabeledImageDataset` from
+   the glob.
+2. Pairs them via `pair_labeled_unlabeled` into a `tf.data.Dataset`
+   yielding `((x_lab, x_unlab), y_lab)`.
+3. Routes batches into `DepthAnything._train_step_semi_supervised`, which
+   adds two loss terms on top of the labeled `compute_loss`:
+   * **FAL** between pooled student/teacher features on `x_unlab`.
+   * **L1 pseudo-label consistency** between the student's depth on
+     `x_unlab` and the EMA teacher's stop-gradient pseudo-depth.
+4. Drives the EMA teacher per training batch via `TeacherEMACallback`
+   using the chosen schedule.
 
-Caveat — the in-tree `train.common.megadepth.MegaDepthDataset` yields plain
-`(rgb, depth_with_mask)` tensors only. Wiring an unlabeled stream is
-**out of scope** for this plan; the model-side infrastructure is in place
-so a future plan can add a `_PairedUnlabeledDataset` wrapper that yields
-`((x_lab, x_unlab), y_lab)` and the script will pick it up unchanged.
+The labeled component is unchanged: depth supervision still uses MegaDepth
+RGB+depth pairs (sparse SfM ground truth caveats below).
 
 ## Known Issues — depth quality
 
@@ -136,13 +151,10 @@ Even with this script working end-to-end, **do not expect publishable Depth
 Anything numbers**:
 
 1. **Encoder is in-tree `ViT`, not DINOv2.** No external pretrained weights
-   are loaded by default. Use `--init-from <pretrained.keras>` if you have
-   a compatible backbone (otherwise initialization is random).
-2. **Semi-supervised data feed not wired** — only labeled MegaDepth depth
-   supervision is used unless you extend the dataset to yield
-   `((x_lab, x_unlab), y_lab)`. The "62M unlabeled images" claim from the
-   original paper is not implemented at the data level.
-3. **MegaDepth ground truth is sparse** (Structure-from-Motion). Even a
+   are loaded by default. Use `--pretrained-encoder-weights <ckpt.keras>`
+   (encoder-only) or `--init-from <ckpt.keras>` (full model) if you have a
+   compatible checkpoint; otherwise initialization is random.
+2. **MegaDepth ground truth is sparse** (Structure-from-Motion). Even a
    correctly trained Depth Anything model will produce dense depth maps
    that look *qualitatively* good but disagree with sparse SfM ground
    truth on non-Lambertian / textureless regions.
