@@ -315,7 +315,11 @@ class GroupAttention(keras.layers.Layer):
         query = self.linear_query(context_norm)
         scores = ops.matmul(query, ops.transpose(key, axes=(0, 2, 1)))
         scores = scores / math.sqrt(self.hidden_size)
-        scores = ops.where(final_adj_mask, scores, -1e9)
+        # DECISION plan_2026-05-11_3c3ed037/D-001
+        # dtype-aware mask sentinel: -1e9 overflows fp16 (min ~ -6.5e4),
+        # producing NaN after softmax. Use -1e4 under float16 compute_dtype.
+        neg_inf = -1e4 if self.compute_dtype == "float16" else -1e9
+        scores = ops.where(final_adj_mask, scores, neg_inf)
         neibor_attn = ops.softmax(scores, axis=-1)
 
         # Symmetrize and stabilize.
@@ -495,7 +499,9 @@ class TreeMHA(keras.layers.Layer):
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
         if mask is not None:
-            attention_mask = (1.0 - ops.cast(mask, self.compute_dtype)) * -1e9
+            # dtype-aware mask sentinel (see GroupAttention D-001).
+            neg_inf = -1e4 if self.compute_dtype == "float16" else -1e9
+            attention_mask = (1.0 - ops.cast(mask, self.compute_dtype)) * neg_inf
             broadcast_mask = ops.expand_dims(attention_mask, axis=1)
             scaled_attention_logits += broadcast_mask
 
