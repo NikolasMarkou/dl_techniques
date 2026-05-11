@@ -815,14 +815,11 @@ class TreeTransformer(keras.Model):
         },
     }
 
-    PRETRAINED_WEIGHTS = {
-        "base": {
-            "uncased": "https://example.com/tree_transformer_base_uncased.keras"
-        },
-        "large": {
-            "uncased": "https://example.com/tree_transformer_large_uncased.keras"
-        },
-    }
+    # B-5 fix: no public pretrained weights are distributed for TreeTransformer.
+    # The previous `https://example.com/...` placeholder URLs guaranteed a 404
+    # at download time. Pass `pretrained=<local-path.keras>` to load local
+    # weights, or omit `pretrained` for random init.
+    PRETRAINED_WEIGHTS: Dict[str, Dict[str, str]] = {}
 
     DEFAULT_VOCAB_SIZE = 30000
     DEFAULT_MAX_LEN = 256
@@ -1063,27 +1060,17 @@ class TreeTransformer(keras.Model):
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
     ) -> str:
-        """Downloads pretrained weights from URL."""
-        if (
-            variant not in TreeTransformer.PRETRAINED_WEIGHTS
-            or dataset not in TreeTransformer.PRETRAINED_WEIGHTS[variant]
-        ):
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}' "
-                f"with dataset '{dataset}'."
-            )
-        url = TreeTransformer.PRETRAINED_WEIGHTS[variant][dataset]
-        logger.info(
-            f"Downloading TreeTransformer-{variant} ({dataset}) weights..."
+        """B-5 fix: no public pretrained weights exist for TreeTransformer.
+
+        Raises ``NotImplementedError`` with a clear remediation message. Pass
+        ``pretrained=<path/to/checkpoint.keras>`` to ``from_variant`` to load
+        local weights, or omit ``pretrained`` to initialize randomly.
+        """
+        raise NotImplementedError(
+            "No public pretrained weights are distributed for TreeTransformer. "
+            "Pass `pretrained=path/to/checkpoint.keras` to load local weights, "
+            "or omit `pretrained` for random init."
         )
-        weights_path = keras.utils.get_file(
-            fname=f"tree_transformer_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/tree_transformer",
-        )
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
