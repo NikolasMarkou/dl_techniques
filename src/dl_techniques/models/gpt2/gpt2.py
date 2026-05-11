@@ -396,8 +396,10 @@ class GPT2(keras.Model):
         :param variant: Variant name: ``'tiny'``, ``'small'``, ``'medium'``,
             ``'large'``, ``'xl'``.
         :type variant: str
-        :param pretrained: If True, loads pretrained weights from default URL.
-            If string, treats it as a path to local weights file.
+        :param pretrained: If ``True``, raises ``NotImplementedError`` (no
+            public GPT-2 weights are distributed by this library). If a string
+            path, loads weights from that local ``.keras`` file. If ``False``
+            (default), returns a random-initialized model.
         :type pretrained: Union[bool, str]
         :param kwargs: Override any variant parameter.
         :return: Configured GPT-2 model instance.
