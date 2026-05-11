@@ -743,3 +743,60 @@ class CliffordNet(keras.Model):
         :return: Configured :class:`CliffordNet` instance.
         """
         return cls.from_variant("lite_g", num_classes=num_classes, **kwargs)
+
+
+def create_cliffordnet(
+        variant: str = "lite",
+        num_classes: int = 100,
+        pretrained: Union[bool, str] = False,
+        weights_dataset: str = "cifar100",
+        cache_dir: Optional[str] = None,
+        **kwargs: Any,
+) -> "CliffordNet":
+    """Convenience function to create CliffordNet models.
+
+    Mirrors :func:`dl_techniques.models.resnet.model.create_resnet` and
+    :func:`dl_techniques.models.tree_transformer.model.create_tree_transformer`
+    for consistency across the model zoo: a thin module-level factory that
+    delegates to :meth:`CliffordNet.from_variant`.
+
+    Args:
+        variant: String, model variant ("nano", "lite", "lite_g").
+        num_classes: Integer, number of output classes.
+        pretrained: Boolean or string. If ``True``, attempts to load pretrained
+            weights for the chosen ``weights_dataset`` (currently raises
+            :class:`NotImplementedError` — no public CliffordNet weights are
+            hosted). If a string, treated as a path to a local ``.keras``
+            weights file.
+        weights_dataset: String, dataset key for pretrained weights (kept for
+            API parity with other foundation models).
+        cache_dir: Optional string, directory to cache downloaded weights.
+        **kwargs: Additional arguments forwarded to
+            :meth:`CliffordNet.from_variant` (e.g. ``stochastic_depth_rate``,
+            ``dropout_rate``).
+
+    Returns:
+        CliffordNet model instance.
+
+    Example:
+        >>> # Create CliffordNet-Lite with random init for CIFAR-100
+        >>> model = create_cliffordnet("lite", num_classes=100)
+        >>>
+        >>> # Smaller variant for CIFAR-10 with override
+        >>> model = create_cliffordnet(
+        ...     "nano", num_classes=10, stochastic_depth_rate=0.1
+        ... )
+        >>>
+        >>> # Load from local weights file
+        >>> model = create_cliffordnet(
+        ...     "lite", num_classes=100, pretrained="path/to/weights.keras"
+        ... )
+    """
+    return CliffordNet.from_variant(
+        variant,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        weights_dataset=weights_dataset,
+        cache_dir=cache_dir,
+        **kwargs,
+    )
