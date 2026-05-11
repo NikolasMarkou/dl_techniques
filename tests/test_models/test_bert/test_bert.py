@@ -420,5 +420,58 @@ class TestBERTAdvancedFeatures:
             pytest.fail(f"Model summary raised an exception: {e}")
 
 
+class TestBERTIter1Refactor:
+    """Lock-in tests for the iter-1 bert refactor (plan_2026-05-11_9357982a).
+
+    Mirrors the ``TestTreeTransformerIter1Refactor`` pattern from
+    ``tests/test_models/test_tree_transformer/test_model.py``.
+    """
+
+    def test_create_bert_factory(self):
+        """``create_bert`` returns a configured ``BERT`` and runs a forward pass."""
+        from dl_techniques.models.bert.bert import create_bert
+
+        model = create_bert("tiny", vocab_size=200)
+        assert isinstance(model, BERT)
+        assert model.vocab_size == 200
+
+        batch_size, seq_len = 2, 8
+        input_ids = keras.ops.cast(
+            keras.random.uniform((batch_size, seq_len), maxval=200), "int32"
+        )
+        outputs = model(input_ids, training=False)
+        assert "last_hidden_state" in outputs
+        assert outputs["last_hidden_state"].shape == (
+            batch_size, seq_len, model.hidden_size,
+        )
+
+    def test_from_variant_pretrained_true_raises(self):
+        """``BERT.from_variant(..., pretrained=True)`` must raise ``NotImplementedError``.
+
+        No public BERT weights are distributed by this library; the
+        placeholder URL flow was silently random-initialising before the
+        iter-1 refactor (see plan_2026-05-11_9357982a D-001).
+        """
+        with pytest.raises(NotImplementedError):
+            BERT.from_variant("tiny", pretrained=True)
+
+    def test_public_api_surface(self):
+        """The bert package public API is exactly ``{BERT, create_bert, create_bert_with_head}``."""
+        import dl_techniques.models.bert as pkg
+
+        assert set(pkg.__all__) == {
+            "BERT", "create_bert", "create_bert_with_head",
+        }
+        assert not hasattr(pkg, "create_nlp_head"), (
+            "create_nlp_head must no longer be re-exported from the bert "
+            "package; import it from dl_techniques.layers.nlp_heads instead."
+        )
+
+        # BERT must remain importable from the .bert submodule path
+        # (existing tests rely on this — see line 23 of this file).
+        from dl_techniques.models.bert.bert import BERT as BERTViaSubmodule
+        assert BERTViaSubmodule is pkg.BERT
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
