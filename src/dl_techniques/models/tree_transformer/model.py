@@ -1190,6 +1190,61 @@ class TreeTransformer(keras.Model):
         )
 
 
+def create_tree_transformer(
+        variant: str = "base",
+        vocab_size: Optional[int] = None,
+        pretrained: Union[bool, str] = False,
+        weights_dataset: str = "uncased",
+        cache_dir: Optional[str] = None,
+        **kwargs: Any,
+) -> "TreeTransformer":
+    """Convenience function to create Tree Transformer encoder models.
+
+    Mirrors :func:`dl_techniques.models.resnet.model.create_resnet` for consistency
+    across the model zoo: a thin module-level factory that delegates to
+    :meth:`TreeTransformer.from_variant`.
+
+    Args:
+        variant: String, model variant ("tiny", "small", "base", "large").
+        vocab_size: Optional integer; override the variant default vocabulary
+            size. Passing a value different from
+            :attr:`TreeTransformer.DEFAULT_VOCAB_SIZE` while ``pretrained=True``
+            will skip loading vocab-dependent layers (embeddings, LM head).
+        pretrained: Boolean or string. If ``True``, attempts to load pretrained
+            weights for the chosen ``weights_dataset`` (currently raises
+            :class:`NotImplementedError` — no public Tree Transformer weights
+            are hosted). If a string, treated as a path to a local
+            ``.keras`` / ``.weights.h5`` file.
+        weights_dataset: String, dataset key for pretrained weights (kept for
+            API parity with other foundation models).
+        cache_dir: Optional string, directory to cache downloaded weights.
+        **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__``
+            (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``).
+
+    Returns:
+        TreeTransformer encoder instance.
+
+    Example:
+        >>> # Create a Tree Transformer base encoder with random init
+        >>> model = create_tree_transformer("base")
+        >>>
+        >>> # Smaller variant with a custom vocabulary
+        >>> model = create_tree_transformer("tiny", vocab_size=8000)
+        >>>
+        >>> # Load from local weights file
+        >>> model = create_tree_transformer("base", pretrained="path/to/weights.keras")
+    """
+    if vocab_size is not None:
+        kwargs["vocab_size"] = vocab_size
+    return TreeTransformer.from_variant(
+        variant,
+        pretrained=pretrained,
+        weights_dataset=weights_dataset,
+        cache_dir=cache_dir,
+        **kwargs,
+    )
+
+
 # ---------------------------------------------------------------------
 # Integration with NLP Task Heads
 # ---------------------------------------------------------------------
