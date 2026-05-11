@@ -645,7 +645,8 @@ class CliffordNet(keras.Model):
                         dataset=weights_dataset,
                         cache_dir=cache_dir,
                     )
-                except Exception as exc:
+                # DECISION plan_2026-05-11_0090b0b8/D-001
+                except (IOError, OSError, ValueError) as exc:
                     logger.warning(
                         f"Failed to download pretrained weights: {exc}. "
                         "Continuing with random initialisation."
