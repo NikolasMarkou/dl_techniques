@@ -339,11 +339,18 @@ class GroupAttention(keras.layers.Layer):
         b = ops.cast(ops.eye(current_seq_len, dtype="int32"), "bool")
 
         # Use log-space for numerical stability to avoid underflow.
-        t = ops.log(neibor_attn + 1e-9)
-        t = ops.where(adj_mask_upper, t, 0.0) # Consider only super-diagonal.
-
-        t = ops.matmul(t, tri_matrix)
-        g_attn = ops.exp(ops.matmul(tri_matrix, t))
+        # B-1 fp16 fix: the additive eps must be representable in compute_dtype
+        # (fp16 min positive ≈ 6e-5 — `1e-9` collapses to 0 and log(0) → -inf,
+        # which then propagates NaN through exp(matmul(...))). Cast the DP
+        # block to float32 explicitly so log/exp are always stable, then cast
+        # back to compute_dtype.
+        neibor_attn_f32 = ops.cast(neibor_attn, "float32")
+        tri_matrix_f32 = ops.cast(tri_matrix, "float32")
+        t = ops.log(neibor_attn_f32 + 1e-9)
+        t = ops.where(adj_mask_upper, t, 0.0)  # Consider only super-diagonal.
+        t = ops.matmul(t, tri_matrix_f32)
+        g_attn = ops.exp(ops.matmul(tri_matrix_f32, t))
+        g_attn = ops.cast(g_attn, self.compute_dtype)
 
         # Finalize group attention scores.
         g_attn = ops.where(
@@ -1041,9 +1048,13 @@ class TreeTransformer(keras.Model):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
         from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
         if not self.built:
+            seq_len = min(64, self.max_len)
             dummy_input = {
-                "input_ids": keras.random.uniform(
-                    (1, 64), 0, self.vocab_size, dtype="int32"
+                "input_ids": ops.cast(
+                    keras.random.uniform(
+                        (1, seq_len), 0, self.vocab_size
+                    ),
+                    "int32",
                 )
             }
             self(dummy_input, training=False)

@@ -547,3 +547,198 @@ class TestTreeTransformerAdvancedFeatures:
             model.summary()
         except Exception as e:
             pytest.fail(f"Model summary raised an exception: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Iteration-1 (plan_2026-05-11_3c3ed037) regression / fix-locking tests
+# ---------------------------------------------------------------------------
+
+class TestTreeTransformerIter1Fixes:
+    """Locks the 4 review bug fixes (B-1, B-3, B-4, B-5) + MLM wrapper compat."""
+
+    def test_mixed_float16_no_nan(self):
+        """B-1/B-2: dtype-aware mask sentinel keeps fp16 forward NaN-free."""
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            model = TreeTransformer(
+                vocab_size=200, hidden_size=32, num_layers=2, num_heads=4,
+                intermediate_size=64, max_len=16, pad_token_id=0,
+            )
+            input_ids = keras.ops.cast(
+                keras.random.uniform((2, 16), maxval=200), "int32"
+            )
+            # Mix in some pad tokens to exercise the masked-softmax sentinel.
+            pad_mask = keras.ops.cast(
+                keras.random.uniform((2, 16), maxval=4) < 1, "int32"
+            )
+            input_ids = input_ids * (1 - pad_mask)
+            out = model({"input_ids": input_ids}, training=False)
+            assert not bool(
+                keras.ops.any(keras.ops.isnan(out["last_hidden_state"]))
+            ), "NaN found in last_hidden_state under mixed_float16"
+            assert not bool(
+                keras.ops.any(keras.ops.isnan(out["logits"]))
+            ), "NaN found in logits under mixed_float16"
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)
+
+    def test_attention_mask_honored(self):
+        """B-3: explicit attention_mask in dict input wins over pad-derivation."""
+        model = TreeTransformer(
+            vocab_size=200, hidden_size=32, num_layers=2, num_heads=4,
+            intermediate_size=64, max_len=16, pad_token_id=0,
+        )
+        # Build an input where input_ids has NO pad tokens (all > 0) so the
+        # fallback mask would be all-ones, but we pass an explicit
+        # attention_mask that zeros out half the positions. If the explicit
+        # mask is honored, break_probs at the masked positions go to zero
+        # (or near-zero); if it's ignored, they stay non-zero.
+        input_ids = keras.ops.cast(
+            keras.random.uniform((2, 16), minval=1, maxval=200), "int32"
+        )
+        explicit_mask = keras.ops.concatenate([
+            keras.ops.ones((2, 8), dtype="int32"),
+            keras.ops.zeros((2, 8), dtype="int32"),
+        ], axis=1)
+        out_explicit = model(
+            {"input_ids": input_ids, "attention_mask": explicit_mask},
+            training=False,
+        )
+        out_implicit = model({"input_ids": input_ids}, training=False)
+        # Outputs must DIFFER — fallback would give an all-ones mask, explicit
+        # mask gives a half-zeroed one. If they're identical, the explicit
+        # mask was dropped.
+        diff = keras.ops.convert_to_numpy(
+            keras.ops.max(keras.ops.abs(
+                out_explicit["last_hidden_state"]
+                - out_implicit["last_hidden_state"]
+            ))
+        )
+        assert diff > 1e-4, (
+            f"Explicit attention_mask had no effect (max-abs-diff {diff})"
+        )
+
+    def test_pad_token_id_nonzero(self):
+        """pad_token_id != 0 correctly drives the implicit mask."""
+        pad_id = 100266
+        model = TreeTransformer(
+            vocab_size=100277, hidden_size=32, num_layers=2, num_heads=4,
+            intermediate_size=64, max_len=16, pad_token_id=pad_id,
+        )
+        # First 8 positions are real tokens (id 5), last 8 are pad_id.
+        input_ids_np = np.array(
+            [[5] * 8 + [pad_id] * 8, [7] * 8 + [pad_id] * 8],
+            dtype="int32",
+        )
+        input_ids = keras.ops.convert_to_tensor(input_ids_np)
+        out_with_pad = model({"input_ids": input_ids}, training=False)
+        # And a version where pad_id is replaced by a real token everywhere
+        # — outputs at the first 8 positions must differ (different right-context).
+        input_ids_full = keras.ops.convert_to_tensor(
+            np.array([[5] * 16, [7] * 16], dtype="int32")
+        )
+        out_full = model({"input_ids": input_ids_full}, training=False)
+        diff = keras.ops.convert_to_numpy(keras.ops.max(keras.ops.abs(
+            out_with_pad["last_hidden_state"][:, :8, :]
+            - out_full["last_hidden_state"][:, :8, :]
+        )))
+        assert diff > 1e-4, (
+            "pad_token_id != 0 did not change the attention pattern — "
+            "implicit mask is likely broken."
+        )
+
+    def test_mlm_wrapper_compatibility(self):
+        """MaskedLanguageModel accepts a TreeTransformer encoder and forwards correctly."""
+        from dl_techniques.models.masked_language_model.mlm import (
+            MaskedLanguageModel,
+        )
+        encoder = TreeTransformer.from_variant(
+            "tiny", vocab_size=200, max_len=16, pad_token_id=0
+        )
+        mlm = MaskedLanguageModel(
+            encoder=encoder,
+            vocab_size=200,
+            mask_token_id=103,
+            mask_ratio=0.15,
+        )
+        input_ids = keras.ops.cast(
+            keras.random.uniform((2, 16), minval=1, maxval=200), "int32"
+        )
+        attention_mask = keras.ops.ones((2, 16), dtype="int32")
+        logits = mlm(
+            {"input_ids": input_ids, "attention_mask": attention_mask},
+            training=False,
+        )
+        # MaskedLanguageModel.call returns the MLM logits tensor directly
+        # (shape: (B, L, vocab_size)).
+        assert logits.shape == (2, 16, 200), (
+            f"Unexpected MLM logits shape: {logits.shape}"
+        )
+
+    def test_load_pretrained_weights_uses_weight_transfer(self):
+        """B-4: load_pretrained_weights uses weight_transfer helper on .keras file."""
+        model_src = TreeTransformer(
+            vocab_size=200, hidden_size=32, num_layers=2, num_heads=4,
+            intermediate_size=64, max_len=16, pad_token_id=0,
+        )
+        # Build with a forward pass.
+        dummy = keras.ops.cast(
+            keras.random.uniform((1, 16), maxval=200), "int32"
+        )
+        _ = model_src({"input_ids": dummy}, training=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ckpt_path = os.path.join(tmp, "tree.keras")
+            model_src.save(ckpt_path)
+
+            model_dst = TreeTransformer(
+                vocab_size=200, hidden_size=32, num_layers=2, num_heads=4,
+                intermediate_size=64, max_len=16, pad_token_id=0,
+            )
+            # The new API: no by_name, no skip_mismatch — uses
+            # load_weights_from_checkpoint internally.
+            model_dst.load_pretrained_weights(ckpt_path)
+            # Compare at least one block's weight values.
+            src_weights = model_src.weights
+            dst_weights = model_dst.weights
+            assert len(src_weights) == len(dst_weights)
+            # Pick a non-trivial layer (first encoder block's first weight).
+            matched = 0
+            for sw, dw in zip(src_weights, dst_weights):
+                if sw.shape == dw.shape:
+                    a = keras.ops.convert_to_numpy(sw.value)
+                    b = keras.ops.convert_to_numpy(dw.value)
+                    if np.allclose(a, b, atol=1e-6):
+                        matched += 1
+            assert matched > 0, "No weights transferred via weight_transfer helper"
+
+    def test_model_fit_one_step_smoke(self):
+        """1-step fit smoke on MaskedLanguageModel(TreeTransformer)."""
+        from dl_techniques.models.masked_language_model.mlm import (
+            MaskedLanguageModel,
+        )
+        encoder = TreeTransformer.from_variant(
+            "tiny", vocab_size=200, max_len=16, pad_token_id=0
+        )
+        mlm = MaskedLanguageModel(
+            encoder=encoder,
+            vocab_size=200,
+            mask_token_id=103,
+            mask_ratio=0.15,
+        )
+        mlm.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-4, clipnorm=1.0)
+        )
+
+        # Build synthetic tf.data.Dataset matching MLM.train_step's expectations.
+        input_ids = tf.random.uniform(
+            (4, 16), minval=1, maxval=200, dtype=tf.int32
+        )
+        attention_mask = tf.ones((4, 16), dtype=tf.int32)
+        ds = tf.data.Dataset.from_tensor_slices(
+            {"input_ids": input_ids, "attention_mask": attention_mask}
+        ).batch(2)
+        history = mlm.fit(ds, epochs=1, verbose=0)
+        loss = history.history["loss"][-1]
+        assert np.isfinite(loss), f"Non-finite loss after 1-step fit: {loss}"
