@@ -61,7 +61,7 @@ import math
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Union, Tuple, Dict, Any, List
+from typing import Optional, Union, Tuple, Dict, Any, List, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -1025,35 +1025,39 @@ class TreeTransformer(keras.Model):
     def load_pretrained_weights(
         self,
         weights_path: str,
-        skip_mismatch: bool = True,
-        by_name: bool = True,
+        skip_prefixes: Sequence[str] = (),
+        strict: bool = False,
     ) -> None:
-        """Loads pretrained weights into the model."""
+        """Loads pretrained weights into the model from a ``.keras`` checkpoint.
+
+        Uses :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`
+        which walks layers by name and calls ``set_weights`` when shapes match.
+
+        B-4 fix: replaces the previous ``self.load_weights(..., by_name=True)``
+        path which is broken on Keras 3.8 ``.keras`` files.
+
+        :param weights_path: Path to a ``.keras`` checkpoint.
+        :param skip_prefixes: Layer-name prefixes to skip during transfer.
+        :param strict: If True, raise on any shape mismatch.
+        """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
-        try:
-            if not self.built:
-                dummy_input = {
-                    "input_ids": keras.random.uniform(
-                        (1, 64), 0, self.vocab_size, dtype="int32"
-                    )
-                }
-                self(dummy_input, training=False)
-            logger.info(f"Loading pretrained weights from {weights_path}")
-            self.load_weights(
-                weights_path, skip_mismatch=skip_mismatch, by_name=by_name
-            )
-            if skip_mismatch:
-                logger.info(
-                    "Weights loaded with skip_mismatch=True. "
-                    "Layers with shape mismatches were skipped."
+        from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+        if not self.built:
+            dummy_input = {
+                "input_ids": keras.random.uniform(
+                    (1, 64), 0, self.vocab_size, dtype="int32"
                 )
-            else:
-                logger.info("All weights loaded successfully.")
-        except Exception as e:
-            raise ValueError(
-                f"Failed to load weights from {weights_path}: {str(e)}"
-            )
+            }
+            self(dummy_input, training=False)
+        logger.info(f"Loading pretrained weights from {weights_path}")
+        report = load_weights_from_checkpoint(
+            target=self,
+            ckpt_path=weights_path,
+            skip_prefixes=skip_prefixes,
+            strict=strict,
+        )
+        logger.info(report.summary_string())
 
     @staticmethod
     def _download_weights(
@@ -1127,10 +1131,16 @@ class TreeTransformer(keras.Model):
         model = cls(**config)
         if load_weights_path:
             try:
+                # skip_mismatch (legacy local flag) controls whether vocab-dependent
+                # layers are excluded from transfer. Map to skip_prefixes for the
+                # new weight_transfer-based loader.
+                skip_prefixes = (
+                    ("embedding", "lm_head") if skip_mismatch else ()
+                )
                 model.load_pretrained_weights(
                     load_weights_path,
-                    skip_mismatch=skip_mismatch,
-                    by_name=True,
+                    skip_prefixes=skip_prefixes,
+                    strict=False,
                 )
             except Exception as e:
                 logger.error(f"Failed to load pretrained weights: {e}")
