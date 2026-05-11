@@ -30,9 +30,10 @@ The architecture's key innovation is its **Hierarchical Group Attention** mechan
 9.  [Performance Optimization](#9-performance-optimization)
 10. [Serialization & Deployment](#10-serialization--deployment)
 11. [Testing & Validation](#11-testing--validation)
-12. [Troubleshooting & FAQs](#12-troubleshooting--faqs)
-13. [Technical Details](#13-technical-details)
-14. [Citation](#14-citation)
+12. [Known Limitations](#12-known-limitations)
+13. [Troubleshooting & FAQs](#13-troubleshooting--faqs)
+14. [Technical Details](#14-technical-details)
+15. [Citation](#15-citation)
 
 ---
 
@@ -138,7 +139,7 @@ This example builds a `tiny` model and inspects its outputs for a dummy sequence
 ```python
 import keras
 import numpy as np
-from model import TreeTransformer
+from dl_techniques.models.tree_transformer import TreeTransformer
 
 # 1. Create a "tiny" Tree Transformer from a pre-defined variant
 # This model is a pure encoder, ready to be used as a foundation.
@@ -175,6 +176,7 @@ print(f"Break probabilities shape: {outputs['break_probs'].shape}")
 | `TreeTransformerBlock` | `keras.layers.Layer` | A single layer of the encoder, containing `GroupAttention`, `TreeMHA`, and an `FFN`. |
 | `GroupAttention` | `keras.layers.Layer` | The core layer that computes unsupervised constituency probabilities. |
 | `TreeMHA` | `keras.layers.Layer` | A multi-head attention layer whose scores are modulated by the output of `GroupAttention`. |
+| `PositionalEncoding` | `keras.layers.Layer` | Sinusoidal positional encoding applied to the token embeddings before the encoder stack. |
 | `create_tree_transformer_with_head()` | Function | A factory to build a complete end-to-end model by combining a `TreeTransformer` with a task-specific head (e.g., for NER). |
 
 ---
@@ -205,30 +207,42 @@ model = TreeTransformer.from_variant(
 
 ### Example 1: Setting up for Masked Language Modeling (MLM)
 
-The primary training objective for Tree Transformer is MLM, identical to BERT.
+The primary training objective for Tree Transformer is MLM, identical to BERT. Use the
+`MaskedLanguageModel` wrapper from `dl_techniques.models.masked_language_model` which
+handles the masking, label generation, and loss internally (it is encoder-agnostic and
+accepts any encoder exposing `.hidden_size` and a `{"last_hidden_state": ...}` output).
 
 ```python
 import keras
-from model import TreeTransformer
+from dl_techniques.models.tree_transformer import TreeTransformer
+from dl_techniques.models.masked_language_model import MaskedLanguageModel
 
-# 1. Create the model
-model = TreeTransformer.from_variant("base", vocab_size=30000)
+# 1. Create the foundation encoder. The trainer MUST set pad_token_id to match
+#    the tokenizer's pad id (e.g. 100266 for tiktoken cl100k_base) — leaving the
+#    default 0 silently mis-masks every input when the tokenizer's pad id is not 0.
+encoder = TreeTransformer.from_variant(
+    "base", vocab_size=100277, pad_token_id=100266
+)
 
-# 2. Define optimizer and loss
-# Keras's standard cross-entropy loss handles masked labels automatically
-# if the ignored positions are set to a negative value (e.g., -100).
-optimizer = keras.optimizers.Adam(learning_rate=5e-5)
-loss_fn = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+# 2. Wrap in the MLM trainer. It handles random 15% masking with the
+#    80/10/10 convention and produces a categorical cross-entropy loss
+#    over masked positions only.
+mlm = MaskedLanguageModel(
+    encoder=encoder,
+    vocab_size=100277,
+    mask_token_id=100264,
+    pad_token_id=100266,
+    mask_ratio=0.15,
+)
 
-# 3. Compile the model
-# We only care about the 'logits' output for the MLM loss.
-model.compile(optimizer=optimizer, loss=loss_fn, weighted_metrics=["accuracy"])
+# 3. Compile with AdamW + warmup. clipnorm=1.0 keeps log/exp in
+#    GroupAttention stable (see §12 FAQ).
+mlm.compile(optimizer=keras.optimizers.AdamW(learning_rate=5e-5, clipnorm=1.0))
 
-# 4. Train the model (assuming a data generator `mlm_dataset`)
-# The dataset should yield dictionaries:
-# inputs = {"input_ids": masked_tokens}
-# targets = original_tokens_with_-100_for_non_masked
-# model.fit(mlm_dataset, epochs=3)
+# 4. Train on a tokenized dataset yielding dicts of input_ids /
+#    attention_mask / token_type_ids — see `src/train/tree_transformer/pretrain.py`
+#    for a complete end-to-end script (`python -m train.tree_transformer.pretrain --help`).
+# mlm.fit(mlm_dataset, epochs=3)
 ```
 
 ### Example 2: Fine-tuning for a Downstream Task (NER)
@@ -237,7 +251,7 @@ Use the `create_tree_transformer_with_head` factory to easily build a model for 
 
 ```python
 import keras
-from model import create_tree_transformer_with_head
+from dl_techniques.models.tree_transformer import create_tree_transformer_with_head
 from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration
@@ -297,6 +311,9 @@ plt.show()
     ```python
     keras.mixed_precision.set_global_policy('mixed_float16')
     ```
+    Note: `GroupAttention` and `TreeMHA` use a dtype-aware mask sentinel (`-1e4`
+    under `float16`, `-1e9` otherwise) so masked positions do not overflow fp16
+    and produce NaN after softmax. This is automatic — no user action needed.
 -   **XLA Compilation**: Use `jit_compile=True` during `model.compile()` for graph compilation, which can provide a speed boost for the matrix-heavy operations in `GroupAttention`.
     ```python
     model.compile(..., jit_compile=True)
@@ -327,16 +344,33 @@ loaded_model.summary()
 
 ## 11. Testing & Validation
 
-This implementation includes a comprehensive `pytest` suite in `test_model.py`, covering:
+This implementation includes a `pytest` suite at `tests/test_models/test_tree_transformer/test_model.py` covering:
 -   Model initialization and parameter validation.
 -   Correctness of output shapes for all model variants.
--   Serialization and deserialization consistency.
+-   Serialization / deserialization round-trip (max-abs-diff 0.0 on logits).
 -   End-to-end integration with task heads, including gradient flow checks.
--   Edge cases like padding and minimum sequence length.
+-   Edge cases: padding behavior, `seq_len == 1`, `seq_len == max_len`.
+-   Mixed-precision (`mixed_float16`) NaN regression test.
+-   Explicit `attention_mask` honoring in dict input.
+-   `pad_token_id != 0` masking.
+-   `load_pretrained_weights` via `weight_transfer` helper.
+-   `MaskedLanguageModel` wrapper compatibility + 1-step `fit` smoke.
+
+## 12. Known Limitations
+
+-   **No public pretrained weights**: `PRETRAINED_WEIGHTS` is empty. Calling
+    `TreeTransformer.from_variant(..., pretrained=True)` raises a clear
+    `NotImplementedError`. Pass `pretrained=path/to/checkpoint.keras` to load
+    locally-trained weights, or omit the argument for random init.
+-   **`lm_head` is part of the foundation model**: The output `logits` head is
+    always built. For pure-encoder use (downstream fine-tuning) this is wasted
+    weight. Strip it by saving only the encoder via the training script
+    (`src/train/tree_transformer/pretrain.py` saves a separate
+    `pretrained_tree_transformer_encoder_*.keras` artifact).
 
 ---
 
-## 12. Troubleshooting & FAQs
+## 13. Troubleshooting & FAQs
 
 **Issue 1: Training is unstable, loss becomes `NaN`.**
 -   **Cause**: The `log` and `exp` operations in `GroupAttention` can be sensitive.
@@ -351,13 +385,13 @@ A: **No.** This is the main advantage. It learns syntax in a fully unsupervised 
 
 ---
 
-## 13. Technical Details
+## 14. Technical Details
 
 The core of `GroupAttention` is an efficient algorithm resembling CKY parsing, but implemented with matrix operations for GPU execution. It uses clever multiplications with upper-triangular matrices to simulate the recursive combination of smaller spans into larger ones. This allows it to compute scores for all spans in a fixed number of matrix multiplications, maintaining a time complexity of `O(L² * D)`, the same as standard self-attention.
 
 ---
 
-## 14. Citation
+## 15. Citation
 
 This implementation is based on the original Tree Transformer paper. If you use this model in your research, please cite their work:
 
