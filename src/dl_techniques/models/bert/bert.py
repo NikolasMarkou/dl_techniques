@@ -593,52 +593,29 @@ class BERT(keras.Model):
         dataset: str = "uncased",
         cache_dir: Optional[str] = None
     ) -> str:
-        """Download pretrained weights from URL.
+        """Pretrained-weights download stub. Always raises ``NotImplementedError``.
 
-        :param variant: Model variant name.
+        No public pretrained BERT weights are distributed by ``dl_techniques``.
+        The previous implementation pointed at placeholder ``example.com`` URLs
+        whose download failures were silently swallowed by ``from_variant``,
+        producing a random-initialized model that masqueraded as pretrained.
+
+        To load weights, pass ``pretrained="/path/to/checkpoint.keras"`` to
+        :meth:`from_variant`. To get a random-init model, omit ``pretrained``.
+
+        :param variant: Model variant name (unused).
         :type variant: str
-        :param dataset: Dataset/version the weights were trained on.
-            Options: "uncased", "cased", "multilingual".
+        :param dataset: Dataset/version identifier (unused).
         :type dataset: str
-        :param cache_dir: Directory to cache downloaded weights.
-            If None, uses default Keras cache directory.
+        :param cache_dir: Cache directory (unused).
         :type cache_dir: Optional[str]
-        :return: Path to the downloaded weights file.
-        :rtype: str
-        :raises ValueError: If variant or dataset is not available.
-
-        Example:
-            .. code-block:: python
-
-                weights_path = BERT._download_weights("base", "uncased")
+        :raises NotImplementedError: Always.
         """
-        if variant not in BERT.PRETRAINED_WEIGHTS:
-            raise ValueError(
-                f"No pretrained weights available for variant '{variant}'. "
-                f"Available variants: {list(BERT.PRETRAINED_WEIGHTS.keys())}"
-            )
-
-        if dataset not in BERT.PRETRAINED_WEIGHTS[variant]:
-            raise ValueError(
-                f"No pretrained weights available for dataset '{dataset}'. "
-                f"Available datasets for {variant}: "
-                f"{list(BERT.PRETRAINED_WEIGHTS[variant].keys())}"
-            )
-
-        url = BERT.PRETRAINED_WEIGHTS[variant][dataset]
-
-        logger.info(f"Downloading BERT-{variant} ({dataset}) weights...")
-
-        # Download weights using Keras utility
-        weights_path = keras.utils.get_file(
-            fname=f"bert_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/bert"
+        raise NotImplementedError(
+            "No public pretrained weights are distributed for BERT. "
+            "Pass `pretrained='/path/to/checkpoint.keras'` to load local "
+            "weights, or omit `pretrained` for random init."
         )
-
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     @classmethod
     def from_variant(
@@ -706,14 +683,19 @@ class BERT(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # Download from URL
+                # DECISION plan_2026-05-11_9357982a/D-001
+                # Do NOT broaden this except clause. Catching `Exception` here
+                # was an I-01 bug: it silently swallowed `NotImplementedError`
+                # from `_download_weights` and returned a random-init model
+                # masquerading as pretrained. Only catch concrete I/O errors
+                # that legitimately indicate a missing/corrupt local mirror.
                 try:
                     load_weights_path = cls._download_weights(
                         variant=variant,
                         dataset=weights_dataset,
                         cache_dir=cache_dir
                     )
-                except Exception as e:
+                except (IOError, OSError, ValueError) as e:
                     logger.warning(
                         f"Failed to download pretrained weights: {str(e)}. "
                         f"Continuing with random initialization."
