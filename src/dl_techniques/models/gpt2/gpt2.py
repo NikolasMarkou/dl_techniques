@@ -353,6 +353,37 @@ class GPT2(keras.Model):
         })
         return config
 
+    # DECISION plan_2026-05-11_a9e8e6f6/D-001
+    # _download_weights raises NotImplementedError instead of falling back to
+    # random-init. The prior silent random-init (logger.warning + return model)
+    # misled callers into thinking they had pretrained weights. No public GPT-2
+    # weights are distributed with dl_techniques; users must pass a local path
+    # via pretrained="/path/to/file.keras" or pretrained=False (default).
+    @staticmethod
+    def _download_weights(
+        variant: str,
+        cache_dir: Optional[str] = None,
+    ) -> str:
+        """Resolve a local path for pretrained weights of ``variant``.
+
+        Not implemented: no public GPT-2 weights are distributed with
+        ``dl_techniques``. Always raises ``NotImplementedError``. This method
+        exists to mirror the BERT / tree_transformer / ResNet factory recipe
+        and to provide an explicit failure mode in place of a silent
+        random-init fallback.
+
+        :param variant: Variant name (unused).
+        :type variant: str
+        :param cache_dir: Cache directory (unused).
+        :type cache_dir: Optional[str]
+        :raises NotImplementedError: Always.
+        """
+        raise NotImplementedError(
+            "Pretrained GPT-2 weights are not distributed with dl_techniques. "
+            "Pass pretrained=<local_path> to load a local checkpoint, or "
+            "pretrained=False to random-init."
+        )
+
     @classmethod
     def from_variant(
         cls,
