@@ -362,3 +362,38 @@ class TestGPT2GradientFlow:
         updated_weights = [w.numpy() for w in model.trainable_weights[:2]]
         for w_init, w_updated in zip(initial_weights, updated_weights):
             assert not np.allclose(w_init, w_updated), "Weights did not update"
+
+
+# ---------------------------------------------------------------------
+# Iter-1 Refactor Lock-In Tests (plan_2026-05-11_a9e8e6f6)
+# ---------------------------------------------------------------------
+
+
+class TestGPT2Iter1Refactor:
+    """Lock-in tests for the iter-1 refactor: factory, NotImplementedError, API surface."""
+
+    def test_create_gpt2_factory_returns_gpt2_instance(self):
+        """`create_gpt2` is importable from the package root and returns a
+        ``GPT2`` instance with variant params matching ``MODEL_VARIANTS``."""
+        from dl_techniques.models.gpt2 import GPT2 as PkgGPT2, create_gpt2
+
+        model = create_gpt2("tiny")
+        assert isinstance(model, PkgGPT2)
+        tiny_spec = PkgGPT2.MODEL_VARIANTS["tiny"]
+        assert model.embed_dim == tiny_spec["embed_dim"]
+        assert model.depth == tiny_spec["depth"]
+        assert model.num_heads == tiny_spec["num_heads"]
+
+    def test_from_variant_pretrained_true_raises_not_implemented(self):
+        """`GPT2.from_variant(..., pretrained=True)` must raise
+        ``NotImplementedError`` (no silent random-init fallback). Locks in the
+        I-01 fix."""
+        with pytest.raises(NotImplementedError):
+            GPT2.from_variant("tiny", pretrained=True)
+
+    def test_public_api_surface(self):
+        """The package's declared public API (`__all__`) is exactly
+        ``{GPT2, create_gpt2}``. Locks in the 2-name surface."""
+        import dl_techniques.models.gpt2 as pkg
+
+        assert sorted(pkg.__all__) == ["GPT2", "create_gpt2"]
