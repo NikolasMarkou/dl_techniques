@@ -440,50 +440,24 @@ class CliffordNet(keras.Model):
         dataset: str = "cifar100",
         cache_dir: Optional[str] = None,
     ) -> str:
-        """Download pretrained weights from a registered URL.
+        """Stub: no public CliffordNet checkpoints are distributed.
 
         :param variant: Model variant name (e.g. ``"nano"``, ``"lite"``).
         :param dataset: Dataset the weights were trained on.
-        :param cache_dir: Directory to cache downloaded weights. If
-            ``None``, uses the default Keras cache directory.
-        :return: Local path to the downloaded weights file.
-        :raises ValueError: If no URL is registered for the combination.
+        :param cache_dir: Directory to cache downloaded weights (unused).
+        :return: Never returns — always raises.
+        :raises NotImplementedError: Always. No public CliffordNet
+            checkpoints exist. To load local weights, pass
+            ``pretrained='/path/to/weights.keras'`` to
+            :meth:`CliffordNet.from_variant`.
         """
-        pretrained_weights: Dict[str, Dict[str, str]] = {
-            "nano": {
-                "cifar100": "https://example.com/cliffordnet_nano_cifar100.keras",
-            },
-            "lite": {
-                "cifar100": "https://example.com/cliffordnet_lite_cifar100.keras",
-            },
-            "lite_g": {
-                "cifar100": "https://example.com/cliffordnet_lite_g_cifar100.keras",
-            },
-        }
-
-        if variant not in pretrained_weights:
-            raise ValueError(
-                f"No pretrained weights for variant '{variant}'. "
-                f"Available: {list(pretrained_weights.keys())}"
-            )
-        if dataset not in pretrained_weights[variant]:
-            raise ValueError(
-                f"No pretrained weights for dataset '{dataset}' under "
-                f"variant '{variant}'. "
-                f"Available: {list(pretrained_weights[variant].keys())}"
-            )
-
-        url = pretrained_weights[variant][dataset]
-        logger.info(f"Downloading CliffordNet-{variant} weights ({dataset})...")
-
-        weights_path = keras.utils.get_file(
-            fname=f"cliffordnet_{variant}_{dataset}.keras",
-            origin=url,
-            cache_dir=cache_dir,
-            cache_subdir="models/clifford_net",
+        # DECISION plan_2026-05-11_0090b0b8/D-001
+        raise NotImplementedError(
+            "No public CliffordNet checkpoints are distributed. "
+            "To load local weights, pass "
+            "`pretrained='/path/to/weights.keras'` instead of "
+            "`pretrained=True`."
         )
-        logger.info(f"Weights downloaded to: {weights_path}")
-        return weights_path
 
     # ------------------------------------------------------------------
     # Serialization
