@@ -17,8 +17,9 @@ Usage Examples:
 .. code-block:: python
 
     import keras
-    from dl_techniques.nlp.heads.factory import create_nlp_head
-    from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
+    from dl_techniques.layers.nlp_heads import (
+        create_nlp_head, NLPTaskConfig, NLPTaskType,
+    )
 
     # 1. Load pretrained BERT model
     bert_encoder = BERT.from_variant("base", pretrained=True)
@@ -903,7 +904,7 @@ def create_bert_with_head(
 
     This function demonstrates the intended integration pattern:
     1. Instantiate a foundational `BERT` model (optionally pretrained).
-    2. Instantiate a task-specific head from the `dl_techniques.nlp.heads`
+    2. Instantiate a task-specific head from the `dl_techniques.layers.nlp_heads`
        factory.
     3. Combine them into a single, end-to-end `keras.Model`.
 

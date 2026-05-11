@@ -8,6 +8,14 @@ A production-ready, fully-featured implementation of the **BERT (Bidirectional E
 
 The architecture's key feature is its stack of **Transformer Encoder Layers**, designed to produce rich, contextualized token embeddings. It includes built-in support for loading standard model variants (`base`, `large`, etc.) with or without pretrained weights.
 
+> ⚠️ **No public pretrained weights are distributed by this library.** Calls
+> like `BERT.from_variant("base", pretrained=True)` shown throughout this
+> README will raise `NotImplementedError`. To use pretrained weights, pass a
+> local file path (`pretrained="path/to/checkpoint.keras"`). To get a
+> random-initialized model, omit `pretrained` (or set `pretrained=False`).
+> The `pretrained=True` examples below remain in the docs to illustrate the
+> intended API once weights become available.
+
 ---
 
 ## Table of Contents
@@ -235,7 +243,7 @@ The core building block of the BERT encoder, repeated multiple times.
 
 ### 4.3 Task-Specific Heads
 
-This implementation deliberately separates the core BERT model from task heads. The `dl_techniques.nlp.heads` module and the `create_bert_with_head` factory function are the intended integration points.
+This implementation deliberately separates the core BERT model from task heads. The `dl_techniques.layers.nlp_heads` module and the `create_bert_with_head` factory function are the intended integration points.
 -   The heads are simple Keras layers that take the output from `BERT` (`last_hidden_state`) and project it to the desired output for a specific task.
 -   Examples: A `Dense` layer for classification, a `TokenClassificationHead` for NER, etc.
 
