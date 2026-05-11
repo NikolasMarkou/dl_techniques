@@ -22,6 +22,7 @@ from typing import Dict, Any
 
 from dl_techniques.models.tree_transformer.model import (
     TreeTransformer,
+    create_tree_transformer,
     create_tree_transformer_with_head,
 )
 from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
@@ -742,3 +743,82 @@ class TestTreeTransformerIter1Fixes:
         history = mlm.fit(ds, epochs=1, verbose=0)
         loss = history.history["loss"][-1]
         assert np.isfinite(loss), f"Non-finite loss after 1-step fit: {loss}"
+
+
+class TestTreeTransformerIter1Refactor:
+    """Lock-in tests for the iter-1 refactor (plan_2026-05-11_0a5779e8):
+
+    - ``create_tree_transformer`` module-level factory exists and works.
+    - ``from_variant(pretrained=True)`` raises ``NotImplementedError``
+      instead of silently falling back to random init.
+    - Package-level public API is exactly the trimmed 3-name surface.
+    """
+
+    def test_create_tree_transformer_factory(self):
+        """`create_tree_transformer` returns a configured TreeTransformer
+        with the variant defaults and runs a forward pass."""
+        model = create_tree_transformer("tiny", vocab_size=200)
+
+        assert isinstance(model, TreeTransformer)
+        # tiny variant: hidden_size=128, num_layers=4, num_heads=4
+        assert model.hidden_size == 128
+        assert model.num_layers == 4
+        assert model.num_heads == 4
+        assert model.vocab_size == 200
+
+        input_ids = np.random.randint(0, 200, size=(2, 16), dtype=np.int32)
+        attention_mask = np.ones((2, 16), dtype=np.int32)
+        outputs = model(
+            {"input_ids": input_ids, "attention_mask": attention_mask}
+        )
+        assert "last_hidden_state" in outputs
+        assert outputs["last_hidden_state"].shape == (2, 16, 128)
+
+    def test_from_variant_pretrained_true_raises(self):
+        """`from_variant(pretrained=True)` must raise NotImplementedError
+        rather than silently random-initializing.
+
+        Previously the body wrapped `_download_weights` in `except Exception`,
+        so the NotImplementedError raised by `_download_weights` was caught
+        and the model returned with random weights, misleading users.
+        """
+        with pytest.raises(NotImplementedError):
+            TreeTransformer.from_variant("tiny", pretrained=True)
+
+    def test_public_api_surface(self):
+        """Package `__init__` exposes only the 3 public symbols."""
+        import dl_techniques.models.tree_transformer as pkg
+
+        expected = {
+            "TreeTransformer",
+            "create_tree_transformer",
+            "create_tree_transformer_with_head",
+        }
+        assert set(pkg.__all__) == expected
+        for name in expected:
+            assert hasattr(pkg, name), f"missing public symbol: {name}"
+
+        # Layer classes intentionally NOT re-exported from the package
+        # (callers like nam/ import them directly from .model).
+        for name in (
+            "GroupAttention",
+            "TreeMHA",
+            "PositionalEncoding",
+            "TreeTransformerBlock",
+        ):
+            assert not hasattr(pkg, name), (
+                f"internal layer {name} should not be re-exported from "
+                "the tree_transformer package __init__"
+            )
+
+        # But they must still be importable from .model (nam consumer contract).
+        from dl_techniques.models.tree_transformer.model import (
+            GroupAttention,
+            TreeMHA,
+            PositionalEncoding,
+            TreeTransformerBlock,
+        )
+        assert GroupAttention is not None
+        assert TreeMHA is not None
+        assert PositionalEncoding is not None
+        assert TreeTransformerBlock is not None
