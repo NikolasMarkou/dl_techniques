@@ -24,3 +24,10 @@
 | plan_2026-05-09_0f39a086 | 2026-05-09 | Fix every finding from the deep code review of `src/dl_techn |  |
 | plan_2026-05-10_44694bc9 | 2026-05-10 | Deep review of `src/dl_techniques/models/depth_anything/`, t |  |
 | plan_2026-05-10_bd098beb | 2026-05-10 | Fix every remaining issue documented in `src/dl_techniques/m |  |
+| plan_2026-05-10_54e6e303 | 2026-05-10 | Close every remaining OPEN item in `src/dl_techniques/models |  |
+| plan_2026-05-10_bdb2c84d | 2026-05-10 | Two coupled deliverables: |  |
+| plan_2026-05-10_17633038 | 2026-05-10 | Fix the `WrappedLoss` save/load round-trip bug **AND** promo |  |
+| plan_2026-05-10_e6309bd5 | 2026-05-10 | Fix the two correctness bugs in `src/dl_techniques/models/ti |  |
+| plan_2026-05-11_3c3ed037 | 2026-05-11 | Two coupled deliverables in one iteration: |  |
+| plan_2026-05-11_0a5779e8 | 2026-05-11 | Refactor `src/dl_techniques/models/tree_transformer/` to mir |  |
+| plan_2026-05-11_9357982a | 2026-05-11 | Refactor `src/dl_techniques/models/bert/` to mirror the stru | iter-n/step-m |

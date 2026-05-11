@@ -1,6 +1,210 @@
 # Consolidated Decisions
 *Cross-plan decision archive. Entries merged from per-plan decisions.md on close. Newest first.*
 
+## plan_2026-05-11_9357982a
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-11_9357982a/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-11
+**Context**: Bert's `BERT.from_variant(pretrained=True)` follows the same pattern that was identified as a "silent random-init footgun" in `plans/LESSONS.md` line 53 and fixed for tree_transformer under plan_2026-05-11_0a5779e8 D-001: `_download_weights` issues `keras.utils.get_file` against a placeholder `example.com` URL; the caller in `from_variant` wraps the call in `except Exception` (bert.py:716), so any network/DNS error returns a random-init model with only a `logger.warning`.
+
+**Decision**: Apply the same fix recipe as tree_transformer D-001: (a) make `_download_weights` raise `NotImplementedError` with a remediation message instead of attempting the placeholder URL fetch; (b) narrow the `from_variant` except clause from `except Exception` to `except (IOError, OSError, ValueError)` so `NotImplementedError` propagates. Add `# DECISION plan_2026-05-11_9357982a/D-001` anchor above the narrowed except block. Lock in with `test_from_variant_pretrained_true_raises`.
+
+**Trade-off**: A loud failure mode for `pretrained=True` **at the cost of** breaking the documented but unusable API path (no caller in the repo actually uses `pretrained=True` against this package — verified by grep).
+
+**Reasoning**: The placeholder URLs are not real public weights; silently random-initialising while logging a warning is worse than raising — users believe they got a pretrained model. The narrowed except clause still catches the legitimate failures (network glitch, disk full, parse errors) that would occur once real weights are eventually published. Anchor lives in source so the next maintainer who is tempted to broaden the except again sees the prior reasoning.
+
+**Anchor-Refs**: `src/dl_techniques/models/bert/bert.py:686` (try/except block in `from_variant` after step-2 narrowing).
+
+### D-002 | PLAN | 2026-05-11
+**Context**: bert/__init__.py today re-exports `create_nlp_head` (a passthrough from `dl_techniques.layers.nlp_heads`). Grep across `src/` and `tests/` finds zero external imports of this name from the bert package.
+
+**Decision**: Drop `create_nlp_head` from `bert/__init__.py.__all__`. New public surface is exactly `{BERT, create_bert, create_bert_with_head}` — 3 names, mirroring resnet (`{ResNet, create_resnet, create_inference_model_from_training_model}`) and post-refactor tree_transformer.
+
+**Trade-off**: A cleaner, bert-specific public surface **at the cost of** any (unknown, external-to-the-repo) caller that imports `create_nlp_head` from `dl_techniques.models.bert` — they would need to rewrite the import to `from dl_techniques.layers.nlp_heads import create_nlp_head`.
+
+**Reasoning**: The re-export was incidental (top-of-file import to support `create_bert_with_head`'s body, leaked into `__all__`). The real home is `dl_techniques.layers.nlp_heads`; that path is already what the README's other code blocks use. No in-repo consumer depends on the bert re-export.
+
+### D-003 | REFLECT | 2026-05-11
+**Context**: All 5 EXECUTE steps completed without fix attempts (autonomy leash never invoked). Scoped pytest 28/28 PASS. All 10 success criteria PASS.
+
+**Decision**: Recommend → CLOSE. No PIVOT signal, no EXPLORE gap.
+
+**Trade-off**: Closing this plan as-is **at the cost of** leaving 7 README `pretrained=True` example blocks untouched (Scenario C partial fire) — mitigated by a top-of-README `⚠️` admonition. The alternative (rewriting every example) would have inflated scope without changing the contract.
+
+**Reasoning**:
+- 10/10 SCs PASS with direct evidence per row in verification.md.
+- No regressions: pre-existing 25 tests + 3 new = 28/28.
+- Scope drift: zero. Exactly the 4 planned files were modified.
+- Diff review clean: no debug artifacts; one anchored `# DECISION` comment at bert.py:686.
+- Validate-plan ERRORs are all pre-existing orphan anchors from past plans (cliffordnet, gpt2, nam, common/nlp) — none introduced here. Out of scope for this plan.
+- Simplification checks pass: no wrappers added, no config toggles, 1 abstraction added (create_bert) which is a deliberate mirror of resnet/tree_transformer, not novel complexity.
+
+**Devil's advocate (EXTENDED — skipped, iteration 1).**
+
+**Anchor-Refs**: n/a (REFLECT decision).
+
+## plan_2026-05-11_0a5779e8
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-11_0a5779e8/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-11
+**Context**: tree_transformer/model.py:1110-1118 catches `Exception` from `_download_weights`, which (B-5) deliberately raises `NotImplementedError`. Result: `from_variant(pretrained=True)` silently logs a warning and random-inits — violates the docstring contract "If True, loads pretrained weights". No internal caller in src/ uses `pretrained=True` (grep clean), so re-raising is safe.
+**Decision**: Narrow the `except Exception` block to catch only `(IOError, OSError, ValueError)` (network/disk errors). `NotImplementedError` propagates with its clear remediation message.
+**Trade-off**: Loud failure on `pretrained=True` **at the cost of** removing the silent random-init fallback.
+**Reasoning**: A configuration error (no public weights distributed) should surface immediately, not produce a misleadingly "successful" random-init model. Tests will lock this contract.
+**Anchor-Refs**: `src/dl_techniques/models/tree_transformer/model.py:1112-1119` — `# DECISION plan_2026-05-11_0a5779e8/D-001` placed at the narrowed try/except in `from_variant`.
+
+### D-002 | EXECUTE → REFLECT | 2026-05-11
+**Context**: All 6 plan steps executed without failure, no fix attempts triggered, no autonomy-leash hits. Scoped pytest reports 33 passed (30 prior + 3 new — plan's "31 prior" estimate was off by 1). nam smoke imports green. Scope drift: zero. Diff: only the 3 planned files.
+**Decision**: Recommend CLOSE.
+**Trade-off**: Accept slight LOC overshoot (+163 net vs predicted +57, driven entirely by the 80-line lock-in test class) **at the cost of** strong regression protection for the refactor.
+**Reasoning**: All 8 success criteria PASS, no regressions, decision anchor resolvable, no simplification blockers, no surprises. Devil's-advocate: one reason this might still be wrong — the lock-in tests don't exercise `create_tree_transformer(pretrained="path")`, only the bare-encoder path; the loader codepath is however independently covered by `test_load_pretrained_weights_uses_weight_transfer`. Acceptable.
+
+### Simplification Checks
+1. Can it be simpler? — No; factory body is 5 lines, minimum viable parity with `create_resnet`.
+2. Did we add abstractions? — One factory function, mirroring zoo convention. Not a new abstraction in spirit.
+3. Papering over a deeper bug? — No; the narrowed except surfaces a real contract violation rather than hiding it.
+4. Could a deletion solve it? — `__init__.py` net `-6` LOC. Used.
+5. Duplication? — No; factory delegates to `from_variant`.
+6. Config that doesn't earn its weight? — No new config.
+
+## plan_2026-05-11_3c3ed037
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-11_3c3ed037/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-11
+**Context**: Deep review of `src/dl_techniques/models/tree_transformer/` surfaced 4 real bugs (B-1 mixed_float16 NaN due to `-1e9` fp16 sentinel, B-3 explicit `attention_mask` dict input dropped, B-4 `load_weights(..., by_name=True)` broken on Keras 3.8 `.keras`, B-5 placeholder `example.com` URLs in `PRETRAINED_WEIGHTS`) plus minor surface/doc gaps. The training pipeline does not exist; sibling `src/train/bert/{pretrain.py, finetune.py}` is the canonical Pattern-3 NLP template and `MaskedLanguageModel` wrapper is encoder-agnostic — empirically verified to accept TreeTransformer (it exposes `.hidden_size` and `{"last_hidden_state": ...}`). Save/load round-trip, gradient flow, basic forward all verified correct.
+**Decision**: Bundle into one iteration-1 plan: (a) 4 bug fixes (B-1, B-3, B-4, B-5), (b) `__init__.py` re-exports + README reconciliation, (c) 6 new tests locking the fixes, (d) `pretrain.py` + `finetune.py` + per-trainer `README.md` mirroring the BERT sibling 1:1.
+**Trade-off**: 5 new files / +950 LOC across 8 files **at the cost of** going 2 over the 3-file complexity-budget ceiling and a wider review surface than a fix-only plan.
+**Reasoning**: The trainer rides on Step 5 (`__init__.py` re-export) and Step 2 (attention_mask honoring) — splitting fix-only and trainer-only plans would force the trainer to either pin to broken imports or wait, neither acceptable. The 5-new-files bound is set by the trainer's mandatory `pretrain.py`+`finetune.py`+`__init__.py` plus optional README; no new abstractions are introduced (0/2 budget honored). Same overage precedent as plan_bdb2c84d (accunet trainer + model fixes). Alternatives rejected: (1) "fix-only this plan, trainer next plan" — leaves the package undocumented for training; (2) "trainer-only this plan, fix bugs later" — trainer would hit B-3 (attention_mask) inside MaskedLanguageModel since the wrapper passes attention_mask explicitly.
+**Anchor-Refs**: will be created in EXECUTE — `# DECISION plan_2026-05-11_3c3ed037/D-001` at the dtype-aware sentinel in `GroupAttention.call` (Step 1).
+
+## plan_2026-05-10_e6309bd5
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-10_e6309bd5/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-10
+**Context**: Deep review of the TRM package surfaced 2 real bugs in `model.py` (B-3 Q-learn lookahead runs with `training=True`; B-5 inference never halts on `q_halt > 0`, contradicting both the paper and the README). One originally-flagged CRITICAL bug (B-1: `ops.expand_dims(axis=tuple)`) was empirically falsified — works on both eager and `@tf.function` graph on Keras 3.8 / TF 2.18. `components.py` is clean. `__init__.py` + README have small drift. No training script exists for TRM, and `dl_techniques.losses.hrm_loss.HRMLoss` + `dl_techniques.metrics.hrm_metrics.HRMMetrics` are API-compatible with TRM's output schema.
+**Decision**: Bundle (a) the 2 bug fixes + minor validation + `create_trm(...)` factory, (b) a 10-test test module locking the fixes, (c) README reconciliation, and (d) a new HRM-style training script mirroring `src/train/hrm/train_hrm.py` into a single iteration-1 plan.
+**Trade-off**: One larger plan (8 steps, ~+900 LOC, 4 new files) **at the cost of** longer review surface and a wider blast radius if any step blocks the rest.
+**Reasoning**: The fixes are interlocking — B-5 (inference halt) is testable only with the same test infrastructure that proves the trainer's eval path. Splitting into "bug-fix plan" + "trainer plan" would force two REFLECT cycles and re-execute the same smoke runs. The new abstraction count (1: `TRMTrainer`) is within budget. The puzzle-embedding paper-fidelity gap (B-11) is explicitly out of scope and documented as a residual — a larger plan to wire `HRMSparsePuzzleEmbedding` is appropriate later. Alternatives rejected: (1) "patch B-5 only, defer factory + trainer" — leaves the package un-trainable; (2) "ship trainer first, fix bugs in iter-2" — trainer correctness depends on inference halt semantics, so this just defers the same test work.
+**Anchor-Refs**: will be created in EXECUTE — `# DECISION plan_2026-05-10_e6309bd5/D-001` to be placed at the B-5 inference-halt patch in `model.py`.
+
+## plan_2026-05-10_17633038
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-10_17633038/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-10
+**Context**: User reported a `reduction` round-trip mismatch in `WrappedLoss`. EXPLORE found a deeper structural defect: `WrappedLoss` is defined INSIDE `create_loss_function` (closure), captures `loss_fn` as a bound method on a local `SegmentationLosses` instance, and emits a `get_config` that is missing both `loss_fn` and `loss_name`. Even fixing the `reduction` mismatch (any of the three user-suggested fixes a/b/c) would still leave `WrappedLoss(**config)` crashing because `loss_fn` cannot be reconstructed from the saved config. The bug is structural, not a kwarg-mismatch.
+**Decision**: Hoist `WrappedLoss` to module scope; reparameterize its constructor as `(loss_name, config, name=None, reduction=...)`; reconstruct `loss_fn` from a module-level `_LOSS_METHOD_MAP` lookup against `SegmentationLosses(config)`; add `LossConfig.get_config`/`from_config`; rewrite `create_loss_function` as a thin one-line wrapper for backward compatibility; strengthen the test contract to assert the round-trip succeeds (currently swallowed in `try/except`); remove the `compile=False` workaround in the accunet trainer.
+**Trade-off**: A net +50 LOC in `segmentation_loss.py` (vs. user's expected ≤5-LOC kwarg patch) **at the cost of** a fix that actually works under `keras.models.load_model(...)` without `custom_objects`/`compile=False`, and that closes the latent blast-radius for every future segmentation trainer.
+**Reasoning**: User's three candidate fixes (a) accept-and-ignore reduction, (b) drop reduction from get_config, (c) forward reduction to super — were each falsified during EXPLORE because they only address the `reduction` symptom; the closure-capture problem makes `loss_fn` unrecoverable regardless. The chosen design is the minimum change that makes round-trip actually work and is consistent with how every other Keras 3 custom loss in the library is built (e.g. `DiceFocalSegmentationLoss` in `yolo12_multitask_loss.py`). Alternative rejected: serialize `loss_fn` directly via `keras.saving.serialize_keras_object` on the bound method — Keras can't serialize bound methods of locally-constructed instances, only registered classes/functions.
+**Anchor-Refs**: (none yet — anchor will be added at `src/dl_techniques/losses/segmentation_loss.py:<L>` during step 2 if a `# DECISION plan_2026-05-10_17633038/D-001` comment is needed at the WrappedLoss class to explain the closure→module-level hoist.)
+
+### D-002 | PLAN (revision) → PLAN | 2026-05-11
+**Context**: User rejected v1 plan and requested re-PLAN with a different target structure: instead of hoisting `WrappedLoss` *inside* `segmentation_loss.py`, extract it as a first-class loss in its own module under `src/dl_techniques/losses/`, with its own tests, following sibling-loss conventions. EXPLORE additions surveyed `huber_loss.py`, `goodhart_loss.py`, `any_loss.py`, `focal_uncertainty_loss.py`, `clifford_detection_loss.py`, `__init__.py`, `CLAUDE.md`, `README.md`, plus the existing test file. Findings consolidated in F-004.
+**Decision**: Create new module `src/dl_techniques/losses/segmentation_wrapper_loss.py` with class `SegmentationWrapperLoss` decorated by bare `@keras.saving.register_keras_serializable()` (no package= argument — sibling convention). Keep `LossConfig`, `SegmentationLosses`, and `create_loss_function` in `segmentation_loss.py` for backward compatibility; `create_loss_function` becomes a 1-line delegator that returns `SegmentationWrapperLoss(loss_name, config)`. Add `LossConfig.get_config`/`from_config` in its current location (it's still a dataclass config and is referenced by the new module). Add new test file `tests/test_losses/test_segmentation_wrapper_loss.py` for class-direct tests; strengthen the existing `test_loss_serialization_and_deserialization` in `test_segmentation_loss.py` (no try/except). Update `losses/__init__.py`, `losses/CLAUDE.md`, `losses/README.md`.
+**Trade-off**: One additional file (new module + new test file = +2 files) and a tiny re-export indirection in `segmentation_loss.py` **at the cost of** zero caller changes (full backward compat) AND a first-class library asset that follows sibling conventions, lives in the conventional location, and has its own focused test surface.
+**Reasoning**: User correctly identified that the v1 in-file hoist made the wrapper a hidden helper of `segmentation_loss.py` rather than a reusable library primitive. Sibling conventions (F-004) clearly favor one-loss-per-module. Backward compat is preserved by keeping `LossConfig`, `SegmentationLosses`, and `create_loss_function` symbols at their current import paths and turning `create_loss_function` into a delegator. The previously-planned `package='dl_techniques.losses'` argument on the decorator is removed because no sibling uses it — bare decorator is the convention. `LossConfig` stays in `segmentation_loss.py` to avoid a circular import (new module imports `LossConfig` and `SegmentationLosses` from old module).
+**Anchor-Refs**: `src/dl_techniques/losses/segmentation_wrapper_loss.py:88`, `src/dl_techniques/losses/segmentation_loss.py:559`, `src/train/accunet/train_accunet.py:574`, `tests/test_losses/test_segmentation_loss.py:474`
+
+### D-003 | EXECUTE → REFLECT | 2026-05-11
+**Context**: All 11 plan steps executed in iteration 1. No falsification trigger fired; no autonomy-leash hit; complexity budget honored (2 new files / 0 new abstractions / net +212/-127 LOC).
+**Decision**: Route REFLECT → CLOSE pending user confirmation. All 14 success criteria verified PASS. Verification evidence captured in verification.md.
+**Trade-off**: Closing iteration 1 now **at the cost of** not validating cross-process pickling or multi-epoch training convergence with the new loss — both deemed out of scope (the bug was about save/load round-trip, which is now exhaustively tested across all 9 loss names).
+**Reasoning**: Devil's-advocate consideration: the only plausible remaining failure mode is a Keras-version drift (e.g. Keras 3.9 changes `serialize_keras_object` semantics for dataclasses); however that would surface as a downstream regression, not as a defect in this fix. The current implementation matches sibling conventions exactly, so any future Keras change would also affect `HuberLoss`/`GoodhartLoss`/etc. — and the test surface added here would catch it.
+**Anchor-Refs**: (none — REFLECT-stage decision, no in-code anchor needed.)
+
+## plan_2026-05-10_bdb2c84d
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-10_bdb2c84d/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-10
+**Context**: EXPLORE confirmed three real issues in `src/dl_techniques/models/accunet/` (B1 input divisibility crash, B2 broken public surface + wrong README import path, B3 dead bias args) and several README/docs hygiene items. The training script does not exist yet and the user explicitly asked for a "plan for training". Reference trainers `train_convunext.py` (segmentation U-Net) and `train_depth_anything.py` (modern dataclass config) provide a clean template. `dl_techniques.losses.segmentation_loss` already provides the loss families needed.
+**Decision**: Bundle (a) targeted accunet model fixes + README cleanup and (b) a fresh Pattern-4 trainer at `src/train/accunet/train_accunet.py` into one plan, executed in two groups (A: model/docs, B: trainer) with explicit STOP-IF triggers around the `padding='same'` change.
+**Trade-off**: Slightly over the file-add budget (4 new files vs 3 max) **at the cost of** delivering both deliverables coherently in one iteration instead of fragmenting into two plans.
+**Reasoning**: The trainer needs the model fixes (B2 import surface) to land before it can `from dl_techniques.models.accunet import ...` cleanly. Splitting into two plans would force the trainer to either pin to the broken import path or wait — neither is good. The over-budget file count is justified because a trainer + its `__init__.py` + a brief README + a new test file can't be compressed further without crossing project conventions. Alternative rejected: skip trainer README — but the project consistently ships per-model READMEs in `src/train/<model>/`.
+**Anchor-Refs**: (no in-source DECISION anchors required — all changes are at the boundary, not deep inside the call graph)
+
+### D-002 | EXECUTE step 2 falsification | 2026-05-10
+**Context**: Plan step 2 first attempted fix path A (`padding='same'` on the four `MaxPooling2D` layers) so non-multiple-of-16 inputs would still concat cleanly. Empirical check on `(1,120,120,3)`: encoder ceil-divides 120→60→30→15→8 but `Conv2DTranspose(strides=2,padding='same')` always emits exactly `2*H_in`, so the decoder upsample of `8→16` cannot match the skip path's `15`. Falsification trigger 1 fired (different mechanism than the test-bit-equality scenario predicted in plan §7).
+**Decision**: Revert path A; adopt fix path B as planned — explicit `ValueError` on non-divisible inputs, validated in `call()` rather than `build()` (because overriding `keras.Model.build()` on a model with sublayers built lazily during `call` breaks save/load — the load path expects the model's `build()` to NOT have been short-circuited via `super().build()` flagging the model `built=True` while leaving children unbuilt; this surfaced as the 3 failing serialization tests on attempt 1).
+**Trade-off**: API contract becomes restrictive (callers must resize to multiples of 16) **at the cost of** a permissive but broken silent-crash today.
+**Reasoning**: Fix path A was infeasible regardless of MaxPooling padding because `Conv2DTranspose` is the dominant constraint. Fix path B is what the EXPLORE finding F-005 actually recommended on architectural grounds; we just had to validate the hypothesis empirically first. Validation-in-`call()` is preferred over a full `build()` override because (1) it avoids the lazy-build vs save/load conflict, (2) it still fires before any heavy work, (3) `keras.Input(shape=(None,None,3))` symbolic build paths that pass `None` dims correctly skip the check.
+**Anchor-Refs**: D-002's substantive choice is anchored via the `# DECISION plan_2026-05-10_bdb2c84d/D-001` comment at `src/dl_techniques/models/accunet/model.py:365` (the path-A→path-B reasoning is consolidated under D-001 in source — D-002 is the meta-decision about *how* to perform the validation, recorded only in this log because it's a methodology note, not a code constraint).
+
+## plan_2026-05-10_54e6e303
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-10_54e6e303/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-10
+**Context**: Two prior plans landed almost-everything in the depth_anything README review. Remaining OPEN items are #2-deeper (EMA schedule + pretrained-encoder hook), #3-deeper (pseudo-label generation + dataset pairing), #5 (train_step refactor), #9 (StrongAugmentation channels + per-sample factors), and a multi-epoch FAL stability test. User explicitly requested "MAXIMUM EFFORT — fix everything, no deferred to follow-up".
+**Decision**: Single iteration, 10 steps, additive-leaning surface. New `teacher_ema.py` module (schedules + callback), `from_pretrained_encoder` instance method, refactored `train_step` into clean labeled / semi-sup helpers, new `UnlabeledImageDataset` + pairing helper in `train.common.megadepth`, new CLI flags. Defaults preserve plan_bd098beb backward compatibility.
+**Trade-off**: Larger one-shot surface (~+500 LOC across 9 files) **at the cost of** delivering the full residual scope in a single PLAN cycle, avoiding a multi-plan tail.
+**Reasoning**: Each OPEN item has a known fix shape (F-002..F-007). The 10-Line Rule is respected per-step (no individual step exceeds the 10-line guidance for fix attempts; feature additions are scoped to ≤80 LOC each). Risk concentrated in Step 4 (train_step refactor) — pre-mortem Scenario A captures the regression signal.
+**Anchor-Refs**: D-003 anchor preserved at the `compute_loss` call inside `_train_step_labeled` (`model.py`); D-004 anchor preserved at the existing `save_own_variables` block.
+
+### D-002 | PLAN | 2026-05-10
+**Context**: Pseudo-label depth from the EMA teacher could be implemented as either (a) a stop-gradient consistency term (student-on-unlabeled vs teacher-on-unlabeled, plain L1) or (b) using the labeled `compute_loss` against the teacher's prediction as if a synthetic ground truth (would require fabricating a mask channel).
+**Decision**: Approach (a) — plain L1 between `self(x_unlab, training=True)` and `stop_gradient(teacher(x_unlab))`. Add consistency to total loss weighted by `loss_weights['unlabeled']` (already exposed; previously dead).
+**Trade-off**: Simpler, mask-free, smaller surface **at the cost of** not exercising `compute_loss`'s mask-aware path on unlabeled data. The EMA teacher's predictions are dense (no SfM mask), so a fake-mask of all-ones would be a no-op anyway.
+**Reasoning**: Mean-Teacher / DepthAnything paper recipe is exactly L1 student-vs-teacher with stop-gradient. Approach (b) would require a 2-channel synthetic target which adds zero information.
+**Anchor-Refs**: none in code (semantic decision).
+
+### D-003 | EXECUTE → REFLECT | 2026-05-10
+**Context**: Step 3 verification revealed that the natural call shape of `from_pretrained_encoder` is to load against an *encoder-only* `.keras` checkpoint (e.g. `model.encoder.save(path)`), not against a wrapping DepthAnything checkpoint. Saving the whole DepthAnything has only 3 top-level layers (encoder, frozen_encoder, decoder), and the layer-by-layer transfer doesn't recurse into sub-Models — so loading from a DepthAnything snapshot results in `num_loaded == 0`.
+**Decision**: Document the call shape (encoder-only checkpoint) in the round-trip pytest and in the train README. The train script already takes `--pretrained-encoder-weights` for an *encoder* checkpoint and `--init-from` for a *full DepthAnything* checkpoint — these stay distinct.
+**Trade-off**: Two flags instead of one **at the cost of** clear semantics — `--pretrained-encoder-weights` is for ViT-style external snapshots; `--init-from` is for full-model warm-start.
+**Reasoning**: Hiding this behind a single flag would require auto-detecting the checkpoint type at load time, adding fragility for no real benefit (the user picks one path or the other anyway).
+
+### D-004 | REFLECT | 2026-05-10
+**Context**: Several LOC predictions in plan.md were exceeded (teacher_ema.py 155 vs ≤80; from_pretrained_encoder +51 vs ≤+25; megadepth additions +145 vs ≤+60; train script +124 vs ≤+70). Reviewed each commit's diff for unnecessary content.
+**Decision**: Accept the overshoot. None of the additions add new abstractions beyond the planned two (`TeacherEMACallback`, `UnlabeledImageDataset`); overshoot is from full Google-style docstrings (per `dl_techniques` convention), per-flag argparse `help=` strings, and one extra wiring block (TeacherEMACallback construction inside the train script).
+**Trade-off**: Larger raw line count **at the cost of** maintainability — every public method has a docstring, every flag has user-visible help text. Removing them would pass the LOC budget at the cost of a less self-documenting codebase.
+**Reasoning**: All overshoots are LOW blast-radius (per `blast-radius.mjs`). No simplification blockers, no wrapper cascades, no exception swallowing. The complexity budget's intent (no wrapper cascades, no new abstractions beyond planned) is honoured.
+
+### D-005 | REFLECT (devil's advocate) | 2026-05-10
+**Context**: Could the multi-epoch FAL stability test be passing for the wrong reason — e.g. losses staying finite simply because the gradient-tape never executes the new branches?
+**Concern**: If `use_feature_alignment=True` and `enable_semi_supervised=True` but `frozen_encoder is None` (clone failed), the FAL+consistency block is silently skipped.
+**Verification**: The pseudo-label gradient-leak test (`TestPseudoLabelDepth::test_pseudo_label_shape_and_no_grad`) fully exercises `_pseudo_label_depth` end-to-end including `frozen_encoder(x_unlab)`. The semi-sup smoke test (`TestDepthAnything::test_train_step_semi_supervised_smoke`) reaches `_train_step_semi_supervised` and gradient-applies. The multi-epoch test additionally asserts teacher weights moved (sum-abs > 0), which requires `update_teacher_ema` running, which requires an alive `frozen_encoder`. No silent-skip path.
+**Outcome**: No additional changes needed.
+
 ## plan_2026-05-10_bd098beb
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -58,224 +262,3 @@
 - LOC bound on Step 3 widened by ≤+30 for the override pair; final diff +268/-95 stays within widened bound (+180+30=+210 originally targeted; over by +58 due to additional refactor of dead-branch removal that was already in plan).
 - Net complexity: one new persistence surface (a flat numeric-keyed weight store at the DepthAnything level). Documented inline + anchored + covered by SC-6 round-trip test.
 - Forbidden patterns avoided: no wrappers, no config toggles, no copy-paste, no exception swallow, no type escapes. The override is the canonical Keras-3 mechanism for this class of problem (per Keras 3 docs).
-
-## plan_2026-05-10_44694bc9
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-10_44694bc9/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-10
-**Context**: depth_anything review surfaced 14 issues — most importantly: placeholder encoder (not DINOv2), unimplemented semi-supervised pipeline, Keras-2 `compiled_loss`/`compiled_metrics` calls that will crash on Keras 3.8, sigmoid output incompatible with AffineInvariantLoss. User wants review + README + train scaffolding, NOT code fixes.
-**Decision**: Pure-additive plan — write a frank README that documents all 14 issues as "Known Issues / Caveats" and a Pattern-5 train scaffold that mirrors `cliffordnet/train_depth_estimation.py`, swaps in `create_depth_anything`, uses a locally-copied `DepthEstimationLoss` (mask-aware L1 + grad-match), and exposes `--init-from`. Do NOT call `model.fit()` during EXECUTE — verification is py_compile + import smoke + grep for required surface. The script's runtime correctness depends on the model's pre-existing bugs being fixed in a future plan; the train README warns the user.
-**Trade-off**: Scaffolding that cannot actually train today **at the cost of** an honest, complete deliverable that documents the gap rather than silently extending it. The alternative (fixing the model) violates the user's explicit "review only + plan" instruction and would balloon scope.
-**Reasoning**: User explicitly said "Do NOT execute training; just plan it (write the plan + scaffolding files as appropriate during EXECUTE phase if user approves)". A fixed-but-untrained model and a broken-but-documented model are equally not-trained today; the latter respects scope and surfaces the bugs to the next plan.
-**Anchor-Refs**: none (additive scaffolding; no in-code DECISION anchors needed because the file-level docstring of the train script will explain the relationship to the upstream model bugs).
-
-### D-002 | PLAN | 2026-05-10
-**Context**: DPTDecoder defaults `output_activation='sigmoid'` which clamps depth to [0,1] and is incompatible with AffineInvariantLoss (which expects unbounded scale). DepthAnything does NOT expose `output_activation` to its constructor.
-**Decision**: Use `DepthEstimationLoss` (masked L1 + multi-scale gradient matching, copy-pasted from `train_depth_estimation.py`) which works in any output range. Document the sigmoid+AIL mismatch in README. Do NOT attempt to swap the decoder (would require either editing the model or using fragile post-construction monkey-patching).
-**Trade-off**: The "training the model as advertised" claim of the README is honest about the AIL incompatibility **at the cost of** the train script departing from the depth_anything module docstring's loss recipe. The depth_anything docstring is misleading anyway (per F-001 #6).
-**Reasoning**: DepthEstimationLoss is the proven recipe used in CliffordNet depth training and matches the `MegaDepthDataset` `y_true=concat([depth,mask],-1)` contract. AIL would require a wrapper to handle the mask channel AND a decoder swap to remove sigmoid — both add fragility. The README explicitly says "the train script uses DepthEstimationLoss because the model's default sigmoid output is incompatible with AffineInvariantLoss; switching to AIL requires patching the model's decoder."
-**Anchor-Refs**: none.
-
-### D-003 | PLAN-REV-1 | 2026-05-10
-**Context**: User expanded scope (post-PC-PLAN approval): also fix the Keras-2 `compiled_loss` / `compiled_metrics` bug in `model.py`'s `train_step` (F-001 #4). User explicitly invoked Revert-First / 10-Line Rule and requested verification by `py_compile` + a smoke `model.fit` for 1 step on a tiny synthetic batch (or `tf.function`-trace if smoke is too risky/slow). No `test_step` is defined in `model.py` — it inherits Keras 3 default, so no test_step changes are needed.
-**Decision**: Add steps 5 (in-place patch of `train_step`) and 6 (CPU smoke `model.fit` 1-step on 1×32×32×3 synthetic batch). Replace `self.compiled_loss(y, y_pred)` → `self.compute_loss(x=x, y=y, y_pred=y_pred)`; replace `self.compiled_metrics.update_state(y, y_pred)` → `for m in self.metrics: m.update_state(y, y_pred) if m.name != "loss" else m.update_state(loss)` (or simply iterate excluding the loss tracker which Keras 3's default `compile()` manages internally — the canonical pattern in `mlm.py:309-343` simply iterates `self.metrics` and returns `{m.name: m.result() for m in self.metrics}`). Anchor `# DECISION plan_2026-05-10_44694bc9/D-003` at the patched lines. Bound: ≤ +12 / -8 LOC delta on `model.py`.
-**Trade-off**: A real `model.fit` smoke (CPU, < 30s) **at the cost of** ~30s of EXECUTE time and minor risk that the tiny shape (32×32) hits an architectural lower bound (mitigated in Failure Modes — fall back to 64×64 if needed). Chosen over `tf.function`-trace because: (a) `fit` exercises the full Keras-3 train_step dispatch including metric infrastructure, which is exactly what bug #4 broke; (b) a trace-only call could miss errors that surface in the metric update path; (c) 30s on CPU is cheap.
-**Reasoning**: The bug is API-level — first batch raises `AttributeError`. A 1-step fit is the minimum surface that proves the patch. Keeping the patch to ≤10 LOC enforces Revert-First — if the simple replacement isn't enough, that signals the model needs deeper rework (semi-supervised pipeline, frozen-encoder weight sharing) which is OUT of scope. README's Known Issues continues to flag bugs #1, #2, #3, #5–#14 as unfixed.
-**Pattern source**: `src/dl_techniques/models/masked_language_model/mlm.py:309-343` (canonical Keras-3 `compute_loss` + `for m in self.metrics` pattern, in-tree, current).
-**Anchor-Refs**: `src/dl_techniques/models/depth_anything/model.py:416` (DECISION anchor at the `compute_loss` call site, post-patch).
-
-### D-004 | REFLECT | 2026-05-10
-**Context**: SC-10 set a deletion bound of -8 LOC on `model.py`. Actual deletion was -15 LOC (overshoot of 7). The 7 extra deletions came from removing the now-redundant `if self.losses: regularization_loss = ops.sum(self.losses); loss = loss + regularization_loss` block, plus comment whitespace.
-**Decision**: Mark SC-10 as PARTIAL but recommend CLOSE. Keras 3's `compute_loss(x, y, y_pred)` automatically includes `self.losses` (regularization terms) in the returned loss. Keeping the manual `loss + regularization_loss` block in addition would double-count regularization on every training step.
-**Trade-off**: Documenting an SC-10 PARTIAL **at the cost of** retaining a strict-but-incorrect deletion bound. The alternative — preserving the redundant block to satisfy the bound — would introduce a numerical bug (2× regularization).
-**Reasoning**: The bound was set during PLAN before fully resolving the Keras-3 `compute_loss` semantics. Pre-Mortem Scenario E ("step 5 ends up needing > 10 LOC") was framed around *adding* lines because the simple replacement isn't sufficient — the spirit of that signal does not apply to *removing* now-redundant lines that the framework handles internally. Net delta is -6 LOC (simplification), well within the spirit of the 10-Line Rule. No `# DECISION` anchor on the deletion itself — D-003 already covers the rewrite intent.
-**Anchor-Refs**: none beyond D-003.
-
-### D-005 | REFLECT | 2026-05-10
-**Context**: During SC-14 CPU smoke, surfaced an orthogonal pre-existing bug in `dl_techniques.layers.strong_augmentation.StrongAugmentation._apply_color_jitter` — calls `ops.random.uniform(...)` but `keras.ops` has no `random` submodule in Keras 3.8 (random ops live in `keras.random`). This is unrelated to the train_step Keras-3 fix; it's a *separate* Keras-2 → Keras-3 API drift in the augmentation layer.
-**Decision**: Out of scope for this plan. Smoke worked around it by setting `model.augmentation = None` before `fit`. Logging the bug as a finding for the next plan.
-**Trade-off**: Surfacing the bug honestly **at the cost of** a marginally less complete smoke (augmentation path not exercised). The train_step patch — which IS this plan's deliverable — is fully verified.
-**Reasoning**: Plan REV-1 scope was strictly "fix the Keras-2 train_step API"; expanding to also fix StrongAugmentation would violate the 10-Line Rule and the user's explicit Revert-First constraint. The model README already lists augmentation in Known Issue #9 (re cutmix channel hard-coding); this new finding extends #9 with the `ops.random.uniform` Keras-3 break.
-**Anchor-Refs**: none — bug is in a separate package.
-
-## plan_2026-05-09_0f39a086
-### D-001 | PLAN (iter-1) | 2026-05-09
-**Context**: B2 audit finding — InfoNCE positive logit is `||q_emb||²` (degenerate self-dot). Audit suggests two design options. F-003 §B2 picks option (b): contrast `q_emb` (router-mixed `V_lt`, anchor) vs top-1 hard-routed `V_lt` mean (positive, stop_gradient) vs random `V_lt` rows (negatives, stop_gradient). Cosine in `d_v` with learnable temperature.
-**Decision**: Replace pos_logit with proper contrastive design. Add new trainable weight `memory_read_log_temp_nce` (init `Constant(0.0)`). Anchor with `# DECISION plan_2026-05-09_0f39a086/D-001`.
-**Trade-off**: Real contrastive gradient signal **at the cost of** one extra trainable scalar weight + ~40 LOC of replaced math. The number of aux losses stays at 5 (unchanged from existing test contract).
-**Reasoning**: Audit option (a) — EMA copy of q_emb — requires a state-tracking buffer (extra `add_weight(trainable=False)` and update logic in `call`). Option (b) is stateless and cheaper. Random-V_lt negatives are already cheap (sampled once per call). Stop_gradient on positive prevents the NCE term from forcing q_emb into a small anchor (which option (a) would also need to guard against).
-**Anchor-Refs**: `src/dl_techniques/models/memory_bank/read_controller.py` (InfoNCE block, set during EXECUTE step 10)
-
-### D-002 | PLAN (iter-1) | 2026-05-09
-**Context**: O1 audit finding asks for incremental decode KV-cache. Audit explicitly states "stretch goal — if it requires touching WaveFieldDecoderBlock, mark scope-creep and skip with note." WaveFieldAttention is FFT-based, recomputes full sequence per call; incremental decode requires modifying attention.
-**Decision**: SKIP O1. Document in `WaveFieldMemoryLLM` docstring: incremental decode not supported because WaveFieldAttention is FFT-based; future plan can add a streaming variant or swap to MHA backbone. Anchor with `# DECISION plan_2026-05-09_0f39a086/D-002`.
-**Trade-off**: No serving-side incremental decode **at the cost of** zero blast radius on `WaveFieldAttention` (62-test contract) and `WaveFieldDecoderBlock`.
-**Reasoning**: SYSTEM atlas invariant — `WaveFieldAttention` is locked. Adopting cache requires either (a) adding a streaming variant (~300 LOC + new tests) or (b) replacing the backbone (separate model). Either is its own plan.
-**Anchor-Refs**: `src/dl_techniques/models/memory_bank/wave_field_memory_llm.py` (set during EXECUTE step 16)
-
-### D-003 | PLAN (iter-1) | 2026-05-09
-**Context**: R1 audit finding — pay full retrieval cost in Phase 1. Audit notes: "if cond breaks shape inference, document why and keep current behavior with a clear comment." Aux losses inside cond branches register only if branch is taken — under graph trace, behavior is backend-dependent.
-**Decision**: Apply `keras.ops.cond`-based skip ONLY in eval mode (`training=False`); keep multiply-by-zero in training mode for predictable aux-loss accounting.
-**Trade-off**: Eval-time speedup in Phase 1 **at the cost of** asymmetric training/eval code paths and a comment explaining why. Training-mode P1 cost remains unchanged (mitigated by `--init-from` + `phase1_steps=0`).
-**Reasoning**: Aux losses are gated by `enable_*` flags during P1 anyway, but `add_loss` registration semantics inside a `keras.ops.cond` branch are unreliable on TF backend (per LESSONS — frozen state and side effects in branched graphs). Asymmetric path keeps training behavior identical to current and unlocks eval-time speedup.
-**Anchor-Refs**: `src/dl_techniques/models/memory_bank/wave_field_memory_llm.py` (set during EXECUTE step 6)
-
-### D-004 | PLAN (iter-1) | 2026-05-09
-**Context**: R3 prefix-match — current `if "memory_" in name` substring match accepts `memory_efficient_attention` etc. Two fix options per audit: leading-component match (cheap, refactor-safe) vs membership-set walk (bulletproof, more expensive).
-**Decision**: Leading-component match: `name.split('/')[0].startswith(p) for p in memory_prefixes`. Apply in `split_trainable_by_prefix` AND call it from `train_step` (R4).
-**Trade-off**: Slight increase in matching strictness **at the cost of** rejecting variables whose intended-memory layers are nested inside non-memory parents. Verified: all existing memory weights live under top-level layers whose names already start with `memory_` or `gate_`, so no existing variables are misrouted.
-**Reasoning**: Membership-set walk requires resolving Variable→Layer ownership (Keras 3 doesn't expose this directly without walking `model.layers` recursively); slow at construction but safe. Leading-component match is the audit's recommended fix and is sufficient for the current naming convention.
-**Anchor-Refs**: `src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:58-77` (split_trainable_by_prefix definition)
-
-## plan_2026-05-08_146ae899
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-08_146ae899/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-08
-**Context**: User-supplied blueprint requires memory banks (M_LT/M_WM), differentiable top-K read controller, gated injection, 4 anti-collapse aux losses, phase scheduler, and a memory-augmented model class. F-005 surfaced a scope question (S1 single-file vs S2 idiomatic split). User chose S2 with a placement revision: the new package goes under `src/dl_techniques/models/memory_bank/` (not `wave_field_llm_memory/`), tests under `tests/test_models/test_memory_bank/`. Existing `WaveFieldLLM` / `WaveFieldAttention` / `WaveFieldDecoderBlock` are untouched (sibling-stack pattern).
-**Decision**: Package = `src/dl_techniques/models/memory_bank/`; trainer = `src/train/wave_field_llm/train_memory.py`; tests = `tests/test_models/test_memory_bank/`. 6 new classes (`LongTermMemoryBank`, `WorkingMemoryBank`, `MemoryReadController`, `MemoryWriteController`, `PhaseScheduler`, `WaveFieldMemoryLLM`). Custom `train_step` for differential LRs (backbone 1e-5 / memory 3e-4); `PhaseScheduler` callback flips trainable flags + triggers KMeans warmup at phase 1→2. Defaults: top_k=32, phase boundaries 50K/25K/100K, aux weights λ_gate_entropy=1e-3, λ_load_balance=1e-2, λ_z_loss=1e-3, λ_diversity=1e-3, λ_infonce=5e-3. Offline `sklearn.MiniBatchKMeans` for K_lt warmup.
-**Trade-off**: 13 new files and ~2750 LOC of greenfield code **at the cost of** project-idiomatic separation (model code under `dl_techniques/models/`, trainer under `src/train/`, mirror tests). The denser single-file alternative (S1) was rejected because it would inline ~600 LOC of registered Layer/Model classes into a training script — breaks `register_keras_serializable` import paths and prevents per-module testing.
-**Reasoning**: Sibling-stack pattern has precedent (plan_2026-05-07_1519e34f D-001) and zero blast radius on the existing 62-test `WaveFieldAttention` API lock. Custom `train_step` is the blueprint-mandated path for differential LRs; `PhaseScheduler`-only would require recompiles at phase boundaries. Package name `memory_bank/` (over `wave_field_llm_memory/`) keeps the package backbone-agnostic — future architectures can compose the same memory primitives.
-**Anchor-Refs**: (will be set during EXECUTE on memory_bank/wave_field_memory_llm.py for the dual-tap topology choice and on read_controller.py for the STE idiom)
-
-## plan_2026-05-07_824e5687
-### D-001 (PLAN, iter-1) - Recommended fix: Option B-minimal via shared helper
-
-**Choice**: Add `prepare_dict_keyed_compile(model, output_key="logits") -> None` to `train.common.nlp`. Each of the 6 trainers calls it inside `compile_model(...)` before `model.compile(...)`.
-
-**Trade-off**: Buy clean metric names (no `logits_` prefix) and zero changes to model classes / probe / save-load contracts AT THE COST OF a tiny mutation of the user's model object (sets `model.output_names`). Helper is idempotent and self-documenting; the alternative is per-trainer 1-liner duplication or invasive model-side changes that couple the library to training compile shape.
-
-**Why not Option A (flat metrics list with dict-unpack wrapper)**: Keras 3 rejects flat lists for multi-output models (`ValueError: list length 4 != model has 2 outputs`). Verified empirically.
-
-**Why not Option C (positional `[ms, []]`)**: relies on alphabetical output ordering; metrics attach to `last_hidden_state` instead of `logits`. Verified empirically. Brittle.
-
-**Why not Option D (`LogitsOnlyWrapper` keras.Model subclass)**: works but breaks the probe contract (`out["logits"]` becomes a tensor, not a dict access), changes saved-checkpoint type, requires custom_objects expansion on resume. Substantially more invasive.
-
-**Anchored**: yes - `# DECISION plan_2026-05-07_824e5687/D-001` next to the helper definition (and on each trainer's call site).
-
-### D-002 (PLAN, iter-1) - Verification gate: real `model.fit` is mandatory
-
-**Choice**: SC-2 / SC-3 unit tests construct tiny instances of two model classes (GPT2 + CliffordNetLM, covering both 2-key and 1-key dict returns), call the helper, compile with the same dict-keyed pattern as the trainers, run `model.fit(x, y, epochs=1, verbose=0)`, and assert that all 4 metric keys exist in `history.history` AND that no `logits_` prefix leaked. Plus a GPU smoke (SC-7 / SC-8) that asserts the same on `training_log.csv`.
-
-**Trade-off**: Buy real-runtime coverage of the dict-keyed metric resolution path AT THE COST OF a ~30s addition to the unit test runtime + a GPU smoke step that takes 1-2 minutes. Plan_3f461682's iter-1 verification (grep + py_compile + builder-shape unit tests) was insufficient and let the bug ship.
-
-**Anchored**: yes - `# DECISION plan_2026-05-07_824e5687/D-002` in the test file's class docstring.
-
-### D-003 (REFLECT, iter-1) - All 8 success criteria PASS; recommend CLOSE
-
-**Outcome**: 8/8 success criteria PASS on iteration 1. 37/37 pytest (test_common_nlp + test_llm_metrics) green in 50.88s CPU. Two GPU smokes (gpt2 tiny, cliffordnet nano) emitted all 4 metric columns in `training_log.csv` with finite perplexity well above 1.0 (46479.25 and 52552.90 respectively, expected for 1 epoch on 64 IMDB samples without any pretraining).
-
-**Trade-off**: Buy a working, single-helper fix anchored at the shared boundary (`train.common.nlp`) AT THE COST OF mutating `model.output_names` per-instance from training-side code. The mutation is idempotent and only touches a Keras attribute the framework leaves unset on subclassed dict-output models; the fix is reversible (delete the helper + 6 import/call lines).
-
-**Diff**: 8 files / +186 / -0. Matches plan exactly (helper +47, tests +127, 6 trainers +12). Within complexity budget (files 0/3, abstractions 1/2, net LOC <= soft cap 200).
-
-**Devil's advocate (real-fit-coverage-confirmed)**: 4 of 6 wired trainers (`finetune.py`, `cliffordnet_nlp_unet.py`, `cliffordnet_nlp_routing.py`, `wave_field_llm/pretrain.py`) are not GPU-smoked. Their compile_model bodies are textually identical to the smoked two; the unit tests cover the two output-shape variants (multi-key and single-key dict) that span the model surface. Acceptable risk; can be follow-up smoked without blocking close.
-
-**Anchored**: this REFLECT entry is informational; no in-code anchor required.
-
-**Recommendation**: CLOSE. Awaiting user confirmation per protocol.
-
-## plan_2026-05-07_3f461682
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-07_3f461682/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-07
-**Context**: 5 in-scope Pattern-3 CLM trainers all share `metrics={"logits": ["accuracy"]}` and an empty `_post_generate_hook` extension. Existing `dl_techniques.metrics.perplexity_metric.Perplexity` is drop-in compatible. No BPC/BPW/BLEU exists. User instruction: "make good use of the common".
-**Decision**: Add ONE shared module `src/dl_techniques/metrics/llm_metrics.py` (`BitsPerToken`, `BitsPerCharacter`, plus pure-Python `self_bleu`/`distinct_n`/`aggregate_probe_metrics` helpers) + ONE builder helper `build_clm_metrics()` in `train.common.nlp`. Each trainer's `compile_model` becomes a single-line metrics swap; probe-bearing trainers add a single line binding `_post_generate_hook = augment_probe_results`.
-**Trade-off**: ~+220 LOC of shared code (excluding tests) **at the cost of** every per-trainer `compile_model` losing its inline `["accuracy"]` literal and gaining a dependency on the shared helper.
-**Reasoning**: User explicitly demands DRY; per-trainer copy of metric instantiation contradicts the request and matches an existing anti-pattern (5x duplicated probe class). Reusing existing `Perplexity` (already AMP-safe via fp32 accumulator) avoids re-implementing the gold-standard metric. Free-function `aggregate_probe_metrics` over a probe subclass is cleaner because (a) the probe class is already duplicated 5x — adding a 6th subclass per trainer compounds the duplication; (b) `_post_generate_hook` is a documented extension point. Probe-class extraction is deferred to a separate refactor plan.
-**Alternatives rejected**:
-- Per-trainer copy of metric list (violates DRY).
-- Subclass `GenerationProbeCallback` with `_post_generate_hook` override per trainer (5x copy of subclass; loses the DRY win).
-- Compute BPC by accumulating actual byte counts via decoded text (correct but requires decode in training loop — slow). Display constant `chars_per_token` is the standard simplification.
-- Include BPW (bits-per-word) — less commonly reported; adds a third constant; punted to keep metric set focused.
-- Include BLEU/ROUGE/Self-BLEU at compile time — impossible without generation; compile-time metrics see logits only.
-**Anchor-Refs**: (none — no `# DECISION` comment needed; the design is encoded in the new module's structure, not in a non-obvious code choice.)
-
-### D-002 | EXECUTE (Step 3 prep) | 2026-05-07
-**Context**: Surprise discovery during Step 3 prep — F-002 claimed all 5 GenerationProbeCallback classes implement `_post_generate_hook`, but `grep -rn _post_generate_hook src/train/` shows only `gpt2/pretrain.py` and `wave_field_llm/pretrain.py` have it. The 3 cliffordnet probes (nlp, nlp_unet, nlp_routing) lack the extension point. Plan SC-3 expects 5 hook binds.
-**Decision**: Add the `_post_generate_hook(self, results: dict) -> None` extension method (empty default) and a single-line `self._post_generate_hook(probe_results)` call inside `_run_probes` to all 3 cliffordnet probes, matching the gpt2/wave_field_llm pattern. Then bind `augment_probe_results` in all 5 trainers as planned.
-**Trade-off**: 3 extra small edits (add extension point) **at the cost of** preserving the DRY hook-binding contract across all 5 probe-bearing trainers and honoring SC-3 verbatim.
-**Reasoning**: The alternative (binding the hook in only 2 trainers and downgrading SC-3 to "exactly 2 hits") undercuts the user's "make good use of the common" intent and leaves 3 trainers without the diversity/throughput aggregates. Adding the extension point is a +2 LOC delta per file, fits within the 10-Line Rule, and is an internal protocol enhancement (private method, no API change).
-**Falsification signal**: none fired. This is a finding-correction, not a pivot.
-**Findings correction**: F-002 line 38 reads "All five `GenerationProbeCallback` classes implement an empty `_post_generate_hook`" — actually only 2 do. Will mark `[CORRECTED iter-1]` in findings.md.
-**Anchor-Refs**: (none — purely protocol-additive, no decision comment needed.)
-
-### D-003 | EXECUTE -> REFLECT | 2026-05-07
-**Context**: All 9 EXECUTE steps completed first try. No fix attempts. No leash hits. No falsification signals fired.
-**Decision**: Run REFLECT Phase-2 verification.
-**Verification outcome**: 7/7 SC PASS (see verification.md). 170/170 tests in tests/test_metrics/ pass. py_compile clean for all 8 affected modules. Convention scan clean. Scope drift zero (9 planned files, 9 changed). Changelog clean (all radius:LOW). validate-plan.mjs ERRORs are all pre-existing orphan anchors from legacy code, none introduced by iter-1.
-**Simplification Checks** (6):
-  1. **Single source of truth**: PASS — all metric math in one module; SC-1 grep confirms zero duplication.
-  2. **Forbidden patterns**: PASS — no wrapper cascades, no config toggles, no copy-paste, no exception swallowing (only the deliberate `try/except` in `aggregate_probe_metrics` that is documented as "probe must never kill train" and logs+skips).
-  3. **Complexity budget**: PASS for files/abstractions (2/3, 2/2). LOC overshoot was docstrings + 3 cliffordnet probe edits driven by D-002 finding correction; not budget-bloat.
-  4. **10-Line Rule**: N/A (no fix attempts).
-  5. **Revert-First**: N/A (no failures).
-  6. **3-Strike Rule**: N/A (no recurrence).
-**Recommendation**: CLOSE — present PC-REFLECT to user per protocol.
-**Anchor-Refs**: (none.)
-
-## plan_2026-05-07_08aaf818
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-07_08aaf818/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-07
-**Context**: Commit 1fe2088 hardened `wave_field_llm/pretrain.py` against tiktoken decode crashes when sampled ids include reserved specials (50257..50260). Four sibling training scripts have the same unguarded `self._enc.decode(ids)` pattern. Out-of-scope verification: NAM tokenizer is custom (not tiktoken); cliffordnet/power_sampling.py masks specials pre-sample so its decode is safe-by-construction.
-**Decision**: Mirror the exact 1fe2088 patch shape per-file (special-id range + in-loop mask + try/except backstop). Routing variant gets a small structural variation: mask insertion point is after `np.log(np.clip(...))` (no eot mask line in that variant), and the try/except keeps the `Tuple[str, int]` return signature in both branches.
-**Trade-off**: Behaviour parity with the proven 1fe2088 fix **at the cost of** ~60-80 net added lines across four files (no abstraction extraction).
-**Reasoning**: Extracting a shared helper (e.g. `_safe_decode(enc, ids)`) would cross the train/common boundary and pull in `tiktoken` as a hard dep on shared utilities — not worth it for 4 sites. The repeat-the-pattern approach also keeps each file self-contained for grepability and matches the codebase convention of per-file probe callbacks. Rejected alternative: widen the except clause to catch `Exception` — explicitly NOT done because matches reference exactly and an AttributeError on `n_vocab` should fail loud (real bug), not get swallowed.
-**Anchor-Refs**: none — the fix is mechanical pattern repetition; anchoring would clutter every probe callback. The trigger conditions in `references/decision-anchoring.md` are not met (no failed iteration baked in, no counterintuitive choice, no "looks redundant but isn't").
-
-## plan_2026-05-07_1519e34f
-### D-001 | EXPLORE → PLAN | 2026-05-07
-**Context**: GPT2 wraps `TextDecoder` → `TransformerLayer` → attention factory. WaveFieldAttention is not in the factory and uses a (B,N) padding mask, not a (B,N,N) attend mask. `TransformerLayer._get_attention_params` is a hardcoded switch that does not include wave_field. Reusing the factory path would require modifying shared infra (factory + transformer block) that 30+ unrelated models touch.
-**Decision**: Build a self-contained decoder stack inside the new model package. Skip `TextDecoder` / `TransformerLayer` / attention factory. Define a local `WaveFieldDecoderBlock` and assemble blocks directly in `WaveFieldLLM`.
-**Trade-off**: Code duplication (~150 LOC of pre-norm transformer block) **at the cost of** zero blast radius on the existing attention factory and transformer infra.
-**Reasoning**: LESSONS L11 — pure-additive sibling work fits a single iteration. Factory registration is a separate, optional improvement that can land later without blocking this plan.
-**Anchor-Refs**: `src/dl_techniques/models/wave_field_llm/wave_field_llm.py` (block class).
-
-### D-002 | PLAN | 2026-05-07
-**Context**: WaveFieldAttention introduces `field_size` as a new hyperparameter. Field stride = `(G-1)/(N-1)`. Larger `G` = sub-cell resolution + better gradient flow but `O(G log G)` FFT cost. Token positions beyond `max_seq_len` alias to the last cell.
-**Decision**: Default `field_size = 2 * max_seq_len` per variant. Expose `--field-size` CLI flag for override.
-**Trade-off**: ~2x FFT memory/FLOPs vs `field_size = max_seq_len` **at the cost of** sub-cell bilinear interpolation precision.
-**Reasoning**: 2x is empirically modest (FFT pipeline runs in fp32 with H=4..25 heads at most for XL — peak intermediate fits in 24GB at small variants). Sub-cell precision avoids the integer-aliasing risk that plagued early scatter-gather designs.
-**Anchor-Refs**: `src/dl_techniques/models/wave_field_llm/wave_field_llm.py` (`MODEL_VARIANTS`).
-
-### D-003 | PLAN | 2026-05-07
-**Context**: GPT-2 uses `tie_word_embeddings=True` by default. WaveFieldLLM is a research variant; users may want untied for ablation but the default should mirror GPT-2 for fair comparison.
-**Decision**: Default `tie_word_embeddings=True`, expose `--no-tie-word-embeddings` flag (mirror GPT-2 train script).
-**Trade-off**: vocab_size × embed_dim parameter savings + same default as GPT-2 **at the cost of** committing users to a single LM head policy unless they flip the CLI flag.
-**Reasoning**: Mirrors GPT-2 exactly so head-to-head benchmarks are apples-to-apples.
-
-### D-004 | PLAN | 2026-05-07
-**Context**: Variant table from GPT-2: tiny/small/medium/large/xl. WaveFieldLLM should use the same names for one-to-one A/B comparison.
-**Decision**: Clone `gpt2.py:MODEL_VARIANTS` verbatim, add `field_size = 2 * max_seq_len` per variant.
-**Trade-off**: Possible misnaming if variant capacity differs from GPT-2's at same name **at the cost of** trivial usability for swap-in benchmarking.
-**Reasoning**: Param counts will differ slightly (wave_field has ~10 params per attention layer + a tiny coupling matrix; replaces ~4*dim^2 of MHA's QKV+O Dense). Names track architecture role (small=124M-class), not absolute params.
-
-### D-005 | PLAN | 2026-05-07
-**Context**: GPT-2 model class default `vocab_size=100277` (cl100k_base) but train script default is `50261` (gpt2 encoding + 4 special). WaveFieldLLM train script will mirror the train default, but model-class default should align with what the train script uses to avoid silent vocab mismatch.
-**Decision**: Set `WaveFieldLLM.DEFAULT_VOCAB_SIZE = 50261`, matching the train script default and explicit special-token wiring.
-**Trade-off**: Diverges from GPT-2 model-class default **at the cost of** consistent train-script-class-default coupling.
-**Reasoning**: This codebase's CLM pipeline standardizes on tiktoken `gpt2` encoding (50257 base + 4 special). Using a different default at the class level invites silent vocab-size bugs.
