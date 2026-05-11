@@ -363,8 +363,23 @@ class TRM(keras.Model):
                 outputs["target_q_continue"] = ops.sigmoid(target_q)
 
         if not training:
-            # Inference mode: only halt at the maximum step limit
-            new_halted = is_last_step
+            # Inference mode: halt on learned signal OR max-steps reached.
+            # Mirrors training-mode halting minus the exploration branch
+            # (B-5 fix — previously inference never halted early, contradicting
+            # both the TRM paper and the package README).
+            # DECISION plan_2026-05-10_e6309bd5/D-001: inference uses the
+            # learned halt signal so that ACT halts on q_halt > 0 (or
+            # q_halt > q_continue under Q-learning mode). No exploration at
+            # inference. halt_max_steps==1 keeps the original is_last_step
+            # short-circuit.
+            if self.halt_max_steps > 1:
+                if self.no_act_continue:
+                    halt_signal = q_halt > 0
+                else:
+                    halt_signal = q_halt > q_continue
+                new_halted = is_last_step | halt_signal
+            else:
+                new_halted = is_last_step
 
         # Construct new carry state
         new_carry = {
