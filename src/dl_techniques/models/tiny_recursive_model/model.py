@@ -344,10 +344,14 @@ class TRM(keras.Model):
             new_halted = new_halted & (steps >= min_halt_steps)
 
             if not self.no_act_continue:
-                # Q-learning: compute target Q-value for Bellman update
-                # Lookahead one step to get target Q-value
+                # Q-learning: compute target Q-value for Bellman update.
+                # Lookahead one step in eval-mode (deterministic, no dropout)
+                # so the bootstrap target is not corrupted by training-time
+                # stochasticity. The target is also detached from the graph
+                # via stop_gradient — HRMLoss consumes it as a Bellman TD
+                # target (B-3 fix).
                 _, _, (next_q_halt, next_q_continue) = self.inner(
-                    new_inner_carry, current_data, training=training
+                    new_inner_carry, current_data, training=False
                 )
                 # Target is the maximum Q-value at the next state
                 target_q = ops.where(
@@ -355,6 +359,7 @@ class TRM(keras.Model):
                     next_q_halt,
                     ops.maximum(next_q_halt, next_q_continue)
                 )
+                target_q = ops.stop_gradient(target_q)
                 outputs["target_q_continue"] = ops.sigmoid(target_q)
 
         if not training:
