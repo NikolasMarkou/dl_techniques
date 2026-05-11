@@ -20,15 +20,19 @@ Usage Examples:
 .. code-block:: python
 
     import keras
-    from dl_techniques.nlp.heads.factory import create_nlp_head
-    from dl_techniques.nlp.heads.task_types import NLPTaskConfig, NLPTaskType
+    from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
+    from dl_techniques.layers.nlp_heads import NLPTaskType
 
-    # 1. Load (hypothetically) pretrained Tree Transformer
-    tree_transformer = TreeTransformer.from_variant("base", pretrained=True)
-
-    # 2. Load from local weights file
+    # 1. Load Tree Transformer from a local weights file
+    #    (no public Tree Transformer weights are hosted — `pretrained=True`
+    #    raises NotImplementedError; supply a path to your own weights.)
     tree_transformer = TreeTransformer.from_variant(
-        "large", pretrained="path/to/weights.keras"
+        "base", pretrained="path/to/weights.keras"
+    )
+
+    # 2. Load a larger variant from a different local checkpoint
+    tree_transformer = TreeTransformer.from_variant(
+        "large", pretrained="path/to/large.keras"
     )
 
     # 3. Create Tree Transformer with custom configuration
@@ -1092,7 +1096,26 @@ class TreeTransformer(keras.Model):
         cache_dir: Optional[str] = None,
         **kwargs: Any,
     ) -> "TreeTransformer":
-        """Creates a TreeTransformer model from a predefined variant."""
+        """Creates a TreeTransformer model from a predefined variant.
+
+        Args:
+            variant: One of ``cls.MODEL_VARIANTS`` (e.g. ``"tiny"``, ``"small"``,
+                ``"base"``, ``"large"``).
+            pretrained: ``False`` (default) for random init. ``True`` to attempt
+                downloading hosted weights — this currently raises
+                :class:`NotImplementedError` because no public Tree Transformer
+                weights are hosted. A string path is treated as a local
+                ``.keras`` / ``.weights.h5`` file to load.
+            weights_dataset: Dataset key for hosted weights (kept for API
+                parity with BERT / DistilBERT / ResNet — currently unused since
+                no public weights are hosted).
+            cache_dir: Optional cache directory for downloaded weights.
+            **kwargs: Forwarded to ``TreeTransformer.__init__``.
+
+        Raises:
+            NotImplementedError: If ``pretrained=True``. Use
+                ``pretrained="path/to/weights.keras"`` to load local weights.
+        """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
@@ -1272,9 +1295,13 @@ def create_tree_transformer_with_head(
     :type tree_transformer_variant: str
     :param task_config: An `NLPTaskConfig` object defining the task.
     :type task_config: NLPTaskConfig
-    :param pretrained: If True, loads pretrained weights. If str, path to local weights.
+    :param pretrained: If ``True``, attempts to load hosted weights — this
+        currently raises ``NotImplementedError`` (no public Tree Transformer
+        weights are hosted). Pass a string path to a local
+        ``.keras`` / ``.weights.h5`` file to load weights instead.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: Dataset for pretrained weights ("uncased").
+    :param weights_dataset: Dataset key for hosted weights ("uncased"). Kept
+        for API parity; currently unused since no public weights are hosted.
     :type weights_dataset: str
     :param cache_dir: Directory to cache downloaded weights.
     :type cache_dir: Optional[str]
