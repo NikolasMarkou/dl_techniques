@@ -439,10 +439,12 @@ class GPT2(keras.Model):
                 model.load_weights(weights_path, skip_mismatch=True)
                 logger.info(f"Loaded weights from {weights_path}")
             else:
-                logger.warning(
-                    "pretrained=True but no weights URL configured. "
-                    "Model initialized with random weights."
-                )
+                # DECISION plan_2026-05-11_a9e8e6f6/D-001
+                # pretrained=True (boolean) routes through _download_weights,
+                # which raises NotImplementedError. Replaces the prior silent
+                # random-init fallback (logger.warning + return model) that
+                # misled callers (I-01).
+                cls._download_weights(variant)
 
         return model
 
