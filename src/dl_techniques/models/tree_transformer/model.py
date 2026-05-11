@@ -1107,11 +1107,18 @@ class TreeTransformer(keras.Model):
             if isinstance(pretrained, str):
                 load_weights_path = pretrained
             else:
+                # DECISION plan_2026-05-11_0a5779e8/D-001
+                # Narrow the except clause so NotImplementedError raised by
+                # _download_weights (no public Tree Transformer weights are
+                # hosted) propagates to the caller. Previously this was caught
+                # by `except Exception`, silently random-initializing the
+                # model and misleading users into believing they got
+                # pretrained weights. Only catch genuine network/disk errors.
                 try:
                     load_weights_path = cls._download_weights(
                         variant, weights_dataset, cache_dir
                     )
-                except Exception as e:
+                except (IOError, OSError, ValueError) as e:
                     logger.warning(
                         f"Failed to download pretrained weights: {e}. "
                         "Continuing with random initialization."
