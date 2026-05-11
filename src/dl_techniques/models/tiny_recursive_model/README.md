@@ -133,7 +133,7 @@ This principled approach results in a simple, scalable, and powerful architectur
 
 TRM's operation is best understood as two nested loops.
 
-1.  **Outer Loop (ACT Loop)**: This is the adaptive part, managed by the training script. It calls the model repeatedly, passing the state (`carry`) from one step to the next. It checks the model's halting signal to decide whether to continue the loop.
+1.  **Outer Loop (ACT Loop)**: This is the adaptive part, managed by the training script (or inference driver). It calls the model repeatedly, passing the state (`carry`) from one step to the next. It checks the model's halting signal — at both **training** and **inference** the same learned halt signal is consulted (`q_halt > 0`, or `q_halt > q_continue` under Q-learning mode). Training additionally applies an exploration branch that can force continuation for a random subset of sequences; inference does not.
 2.  **Inner Loop (Reasoning Cycle)**: This is a fixed, two-stage process inside the `TRMInner` layer that runs *once* per outer loop step. It updates the hierarchical latent states (`z_L` and `z_H`).
 
 ```
@@ -196,7 +196,7 @@ STEP 4: HALTING LOGIC & STATE UPDATE
 ────────────────────────────────────
 - Increment `steps` counter.
 - Update `carry["halted"]` mask based on `q_halt`, `q_continue`, and `max_steps`.
-- Detach gradients from `z_H_new` and `z_L_new` using `tf.stop_gradient` before
+- Detach gradients from `z_H_new` and `z_L_new` using `keras.ops.stop_gradient` before
   placing them in the `new_carry` to prevent backpropagation through time.
 
 OUTPUTS:
@@ -301,7 +301,22 @@ print(f"Halted mask: {new_carry['halted'].numpy().any()}")  # Some might halt
 | **`TRMInner`** | `...trm.components` | A Keras `Layer` that performs the core two-level reasoning (`z_L`, `z_H`) for one step. |
 | **`TRMReasoningModule`** | `...trm.components` | A Keras `Layer` composed of a stack of `TransformerLayer` instances. Used for both H- and L-level processing. |
 
-### 6.2 Core Building Block
+### 6.2 Output Schema by Mode
+
+`model(carry, batch, training=...)` always returns `(new_carry, outputs)`. The
+`outputs` dictionary keys depend on mode and configuration:
+
+| Mode | `no_act_continue` | Keys present in `outputs` |
+|------|-------------------|---------------------------|
+| training | True (default) | `logits`, `q_halt_logits`, `q_continue_logits` |
+| training | False (Q-learning) | `logits`, `q_halt_logits`, `q_continue_logits`, `target_q_continue` (sigmoided, stop-gradient'd Bellman target) |
+| inference | True or False | `logits`, `q_halt_logits`, `q_continue_logits` |
+
+`HRMLoss` (in `dl_techniques.losses.hrm_loss`) consumes this schema unchanged
+and silently tolerates the absence of `target_q_continue` under
+`no_act_continue=True`.
+
+### 6.3 Core Building Block
 
 | Layer | Location | Purpose |
 | :--- | :--- | :--- |
@@ -547,8 +562,8 @@ def test_single_step_execution():
 
     # First step
     new_carry, outputs = model(carry, batch, training=False)
-    # In inference, halts only at max steps. In training, it can halt early.
-    assert not tf.reduce_all(new_carry["halted"])
+    # ACT halts on q_halt > 0 (or q_halt > q_continue if no_act_continue=False)
+    # OR at halt_max_steps. With halt_max_steps=1 the model halts immediately.
     assert tf.reduce_all(new_carry["steps"] == 1)
     assert outputs["logits"].shape == (4, 50, 12)
     print("✓ Single step execution and state update are correct")
@@ -580,9 +595,9 @@ A: `model.fit()` assumes a static computational graph where one input batch prod
 
 A: The `carry` is a Python dictionary that holds the model's state between recursive steps. It contains the latent states (`z_H`, `z_L`), the step counters, the halting masks, and the current input data for each item in the batch. It's the "memory" of the reasoning process.
 
-**Q: Why are gradients stopped between steps with `tf.stop_gradient`?**
+**Q: Why are gradients stopped between steps with `keras.ops.stop_gradient`?**
 
-A: This is a crucial design choice to make training stable. It prevents backpropagation through the entire unrolled sequence of steps (which can be very long). Instead, the model is trained to improve its *next* step based on the *current* state, treating each reasoning step as a distinct unit. This implementation uses the native `tf.stop_gradient` for robustness with the TensorFlow backend.
+A: This is a crucial design choice to make training stable. It prevents backpropagation through the entire unrolled sequence of steps (which can be very long). Instead, the model is trained to improve its *next* step based on the *current* state, treating each reasoning step as a distinct unit. This implementation uses `keras.ops.stop_gradient` (backend-agnostic).
 
 **Q: What are the `H_init` and `L_init` weights for?**
 
@@ -590,11 +605,29 @@ A: They are learnable tensors that represent the model's optimal "blank slate" o
 
 ---
 
+## 14.1 Known Limitations
+
+- **Puzzle embeddings are zero-padded** — the `puzzle_emb_len` prefix of the
+  sequence is currently filled with zeros rather than driven by a sparse,
+  learnable puzzle-embedding table (as in the HRM and original TRM
+  PyTorch implementations). This is a paper-fidelity residual; wiring
+  `HRMSparsePuzzleEmbedding` into `TRMInner` is planned in a follow-up.
+- **`current_data` first-step zero-fill** — `initial_carry` sets
+  `current_data` to all-zeros and `halted=True`, so the first call to the
+  model replaces these zeros with the real batch contents via the
+  reset-on-halt branch. Token id 0 may transiently appear in `current_data`
+  before that reset; this is documented behavior and not a bug.
+- **Mixed precision is untested** — the code is mixed-precision compatible
+  by construction (uses `self.compute_dtype` for the initial carry) but
+  the `mixed_float16` path has not been smoke-tested in this iteration.
+
+---
+
 ## 15. Technical Details
 
 ### Gradient Control and State Management
 
-The separation of the `carry` state between steps is critical. Inside the `TRMInner.call` method, the updated `z_H` and `z_L` states are wrapped in `tf.stop_gradient` before being placed in the `new_carry`. This means that when the optimizer computes gradients, it only looks at the computation within the *current* step. The model learns to produce a good output and a good *next state*, but the gradient path does not flow back through all previous states. This avoids the vanishing/exploding gradient problems common in traditional RNNs and makes training deep recursive models feasible.
+The separation of the `carry` state between steps is critical. Inside the `TRMInner.call` method, the updated `z_H` and `z_L` states are wrapped in `keras.ops.stop_gradient` before being placed in the `new_carry`. This means that when the optimizer computes gradients, it only looks at the computation within the *current* step. The model learns to produce a good output and a good *next state*, but the gradient path does not flow back through all previous states. This avoids the vanishing/exploding gradient problems common in traditional RNNs and makes training deep recursive models feasible.
 
 ### Q-Learning Halting Mechanism
 
