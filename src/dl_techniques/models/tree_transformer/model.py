@@ -972,18 +972,27 @@ class TreeTransformer(keras.Model):
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
         """Forward pass of the TreeTransformer model."""
+        explicit_attention_mask = None
         if isinstance(inputs, dict):
             input_ids = inputs.get("input_ids")
             if input_ids is None:
                 raise ValueError(
                     "Dictionary input must contain 'input_ids' key"
                 )
+            # B-3 fix: honor an explicitly-provided attention_mask when the
+            # caller passes a dict (BERT-style API). When absent, fall back to
+            # deriving the mask from `input_ids != pad_token_id` so callers
+            # that only pass `input_ids` keep working unchanged.
+            explicit_attention_mask = inputs.get("attention_mask")
         else:
             input_ids = inputs
 
-        mask = ops.cast(
-            ops.not_equal(input_ids, self.pad_token_id), "int32"
-        )
+        if explicit_attention_mask is not None:
+            mask = ops.cast(explicit_attention_mask, "int32")
+        else:
+            mask = ops.cast(
+                ops.not_equal(input_ids, self.pad_token_id), "int32"
+            )
         mask = ops.expand_dims(mask, axis=1)
 
         x = self.embedding(input_ids)
