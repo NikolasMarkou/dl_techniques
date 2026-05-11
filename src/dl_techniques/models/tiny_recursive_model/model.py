@@ -136,6 +136,22 @@ class TRM(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
+        # --- Input validation ---
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by "
+                f"num_heads ({num_heads})."
+            )
+        if halt_max_steps < 1:
+            raise ValueError(
+                f"halt_max_steps must be >= 1, got {halt_max_steps}."
+            )
+        if not (0.0 <= halt_exploration_prob <= 1.0):
+            raise ValueError(
+                f"halt_exploration_prob must be in [0, 1], got "
+                f"{halt_exploration_prob}."
+            )
+
         # Store all configuration parameters as instance attributes
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -386,5 +402,86 @@ class TRM(keras.Model):
         })
         return config
 
+
+# ---------------------------------------------------------------------
+
+
+def create_trm(
+    vocab_size: int,
+    hidden_size: int,
+    num_heads: int,
+    expansion: float,
+    seq_len: int,
+    puzzle_emb_len: int = 16,
+    h_layers: int = 2,
+    l_layers: int = 2,
+    halt_max_steps: int = 10,
+    halt_exploration_prob: float = 0.1,
+    no_act_continue: bool = True,
+    rope_theta: float = 10000.0,
+    attention_type: AttentionType = 'multi_head',
+    ffn_type: FFNType = 'swiglu',
+    normalization_type: NormalizationType = 'rms_norm',
+    normalization_position: NormalizationPositionType = 'post',
+    dropout_rate: float = 0.0,
+    attention_dropout_rate: float = 0.0,
+    name: Optional[str] = None,
+) -> TRM:
+    """Factory for constructing a built TRM model.
+
+    Returns a TRM instance with its inner layer built so that ``H_init`` /
+    ``L_init`` weights exist before the first ``call``. This mirrors the
+    factory convention used elsewhere in ``dl_techniques.models``.
+
+    Args:
+        vocab_size: Size of the vocabulary for token embeddings.
+        hidden_size: Dimensionality of hidden states. Must be divisible by
+            ``num_heads``.
+        num_heads: Number of attention heads in transformer layers.
+        expansion: Factor to determine FFN intermediate size.
+        seq_len: Length of the input sequence (excluding puzzle embedding).
+        puzzle_emb_len: Length of the puzzle embedding prefix. Default 16.
+        h_layers: Number of layers in the H-level module. Default 2.
+        l_layers: Number of layers in the L-level module. Default 2.
+        halt_max_steps: Maximum ACT steps. Must be >= 1. Default 10.
+        halt_exploration_prob: Probability of exploration during halting.
+            Must be in [0, 1]. Default 0.1.
+        no_act_continue: Use simple halting (True) vs Q-learning (False).
+            Default True.
+        rope_theta: Theta for Rotary Position Embedding. Default 10000.0.
+        attention_type: Type of attention mechanism.
+        ffn_type: Type of feed-forward network.
+        normalization_type: Type of normalization layer.
+        normalization_position: ``pre`` or ``post`` normalization.
+        dropout_rate: Dropout rate for transformer layers.
+        attention_dropout_rate: Dropout rate for attention.
+        name: Optional Keras model name.
+
+    Returns:
+        A built ``TRM`` instance.
+    """
+    model = TRM(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        expansion=expansion,
+        seq_len=seq_len,
+        puzzle_emb_len=puzzle_emb_len,
+        h_layers=h_layers,
+        l_layers=l_layers,
+        halt_max_steps=halt_max_steps,
+        halt_exploration_prob=halt_exploration_prob,
+        no_act_continue=no_act_continue,
+        rope_theta=rope_theta,
+        attention_type=attention_type,
+        ffn_type=ffn_type,
+        normalization_type=normalization_type,
+        normalization_position=normalization_position,
+        dropout_rate=dropout_rate,
+        attention_dropout_rate=attention_dropout_rate,
+        name=name,
+    )
+    model.build()
+    return model
 
 # ---------------------------------------------------------------------

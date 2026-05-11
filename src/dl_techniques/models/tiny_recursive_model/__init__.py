@@ -1,6 +1,6 @@
 from .components import TRMReasoningModule, TRMInner
-from .model import TRM
+from .model import TRM, create_trm
 
 __all__ = [
-    'TRM', 'TRMInner', 'TRMReasoningModule'
+    'TRM', 'TRMInner', 'TRMReasoningModule', 'create_trm'
 ]
