@@ -839,6 +839,71 @@ class BERT(keras.Model):
 
 
 # ---------------------------------------------------------------------
+# Module-level Factory
+# ---------------------------------------------------------------------
+
+
+def create_bert(
+    variant: str = "base",
+    vocab_size: Optional[int] = None,
+    pretrained: Union[bool, str] = False,
+    weights_dataset: str = "uncased",
+    cache_dir: Optional[str] = None,
+    **kwargs: Any,
+) -> "BERT":
+    """Convenience factory that mirrors ``create_resnet`` / ``create_tree_transformer``.
+
+    Thin wrapper around :meth:`BERT.from_variant` exposing the most common
+    construction arguments at module level. Behaves identically to calling
+    ``BERT.from_variant(...)`` directly.
+
+    :param variant: BERT variant name (``"tiny"``, ``"small"``, ``"base"``,
+        ``"large"``). Defaults to ``"base"``.
+    :type variant: str
+    :param vocab_size: Optional vocabulary size override. If ``None`` (default),
+        the variant's default vocab size is used. If provided, forwarded as
+        ``vocab_size=...`` in ``kwargs``.
+    :type vocab_size: Optional[int]
+    :param pretrained: If ``True``, attempts to load pretrained weights — note
+        that no public BERT weights are distributed by this library, so
+        ``True`` will raise ``NotImplementedError``. If a string path, loads
+        local weights from that path. If ``False`` (default), random init.
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset identifier for pretrained weights
+        (``"uncased"``, ``"cased"``, ...). Only meaningful when ``pretrained``
+        is True (currently raises). Defaults to ``"uncased"``.
+    :type weights_dataset: str
+    :param cache_dir: Directory for cached weights downloads. Currently unused
+        because no public weights are distributed.
+    :type cache_dir: Optional[str]
+    :param kwargs: Additional keyword arguments forwarded to
+        :meth:`BERT.from_variant` (e.g. ``dropout_rate``, ``max_position_embeddings``).
+    :type kwargs: Any
+
+    :returns: Configured ``BERT`` instance.
+    :rtype: BERT
+
+    :raises NotImplementedError: If ``pretrained=True`` (no public weights).
+    :raises FileNotFoundError: If ``pretrained`` is a string path that does
+        not exist.
+    :raises ValueError: If ``variant`` is not a recognized BERT variant.
+
+    Example:
+        >>> bert = create_bert("base")
+        >>> bert = create_bert("tiny", vocab_size=200)
+    """
+    if vocab_size is not None:
+        kwargs["vocab_size"] = vocab_size
+    return BERT.from_variant(
+        variant,
+        pretrained=pretrained,
+        weights_dataset=weights_dataset,
+        cache_dir=cache_dir,
+        **kwargs,
+    )
+
+
+# ---------------------------------------------------------------------
 # Integration with NLP Task Heads
 # ---------------------------------------------------------------------
 
