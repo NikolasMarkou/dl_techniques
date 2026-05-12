@@ -16,6 +16,7 @@ Usage:
 """
 
 import os
+import sys
 import gc
 import json
 import time
@@ -108,6 +109,10 @@ class TrainingConfig:
     experiment_name: Optional[str] = None
     save_training_samples: bool = True
     save_model_checkpoints: bool = True
+
+    # Convergence guard (DECISION plan_2026-05-12_f2d29729/D-007)
+    # If None, threshold auto-derives to min(max(2/num_classes, 0.05), 0.95).
+    success_threshold: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -499,8 +504,20 @@ def convert_keras_history_to_training_history(
 # MAIN TRAINING
 # =============================================================================
 
-def train_vit(config: TrainingConfig, gpu_id: Optional[int] = None) -> keras.Model:
-    """Orchestrate the ViT classification training pipeline."""
+def train_vit(
+        config: TrainingConfig, gpu_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """Orchestrate the ViT classification training pipeline.
+
+    Returns:
+        Dict with keys:
+          - ``model``: the trained ``keras.Model``.
+          - ``best_val_acc``: ``float`` peak ``val_accuracy`` observed.
+          - ``early_stop_epoch``: ``int`` number of epochs actually run
+            (``len(history.history['loss'])``).
+          - ``total_epochs``: ``int`` configured ``config.epochs``.
+          - ``history``: raw ``keras.callbacks.History`` object.
+    """
     setup_gpu(gpu_id)
 
     logger.info(f"Experiment: {config.experiment_name}, Variant: {config.model_variant}")
@@ -629,8 +646,19 @@ def train_vit(config: TrainingConfig, gpu_id: Optional[int] = None) -> keras.Mod
     except Exception as e:
         logger.warning(f"Failed to save training history: {e}")
 
+    # Convergence accounting (DECISION plan_2026-05-12_f2d29729/D-007)
+    val_acc_curve = history.history.get("val_accuracy", [0.0]) or [0.0]
+    best_val_acc = float(max(val_acc_curve))
+    early_stop_epoch = int(len(history.history.get("loss", [])))
+
     gc.collect()
-    return model
+    return {
+        "model": model,
+        "best_val_acc": best_val_acc,
+        "early_stop_epoch": early_stop_epoch,
+        "total_epochs": int(config.epochs),
+        "history": history,
+    }
 
 
 # =============================================================================
@@ -687,6 +715,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--monitor-every", type=int, default=5)
     parser.add_argument("--early-stopping-patience", type=int, default=15)
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
+    parser.add_argument(
+        "--success-threshold", type=float, default=None,
+        help="Override the auto-derived val_accuracy convergence threshold "
+             "for the SUCCESS log guard. Default: auto = "
+             "min(max(2/num_classes, 0.05), 0.95).",
+    )
 
     return parser.parse_args()
 
@@ -736,6 +770,7 @@ def main() -> None:
         early_stopping_patience=args.early_stopping_patience,
         output_dir=args.output_dir,
         experiment_name=args.experiment_name,
+        success_threshold=args.success_threshold,
     )
 
     logger.info(
@@ -745,11 +780,40 @@ def main() -> None:
     )
 
     try:
-        train_vit(config, gpu_id=args.gpu)
-        logger.info("=== TRAINING COMPLETED SUCCESSFULLY ===")
+        result = train_vit(config, gpu_id=args.gpu)
     except Exception as e:
         logger.error(f"Training failed: {e}")
         raise
+
+    # DECISION plan_2026-05-12_f2d29729/D-007: guard the SUCCESS log on
+    # actual convergence + non-trivially-early stop. Iter-1 emitted SUCCESS
+    # at best_val_acc=0.23 (random-class chance ~0.10) which masked the
+    # data-pipeline bug. Threshold derives from `config.success_threshold`
+    # if set, else clamped auto = min(max(2/num_classes, 0.05), 0.95).
+    if config.success_threshold is not None:
+        threshold = float(config.success_threshold)
+    else:
+        threshold = min(max(2.0 / config.num_classes, 0.05), 0.95)
+    converged = result["best_val_acc"] >= threshold
+    stopped_early = result["early_stop_epoch"] < 0.5 * result["total_epochs"]
+    if converged and not stopped_early:
+        logger.info(
+            f"=== TRAINING COMPLETED SUCCESSFULLY "
+            f"(best_val_acc={result['best_val_acc']:.4f} >= {threshold:.4f}) ==="
+        )
+    elif converged and stopped_early:
+        logger.warning(
+            f"Training converged (best_val_acc={result['best_val_acc']:.4f} >= "
+            f"{threshold:.4f}) but early-stopped at epoch "
+            f"{result['early_stop_epoch']}/{result['total_epochs']} (<50%). "
+            "Inspect curves."
+        )
+    else:
+        logger.error(
+            f"=== TRAINING DID NOT CONVERGE "
+            f"(best_val_acc={result['best_val_acc']:.4f} < {threshold:.4f}) ==="
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
