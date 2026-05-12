@@ -86,6 +86,19 @@ def parse_args():
         "--phase1-steps", type=int, default=5000,
         help="Steps for phase 1 (op_classifier only). 0 to skip.",
     )
+    parser.add_argument(
+        "--alpha-max", type=float, default=0.1,
+        help="Hard cap on the residual-scorer mixing weight (alpha).",
+    )
+    parser.add_argument(
+        "--alpha-warmup-steps", type=int, default=5000,
+        help="Linear ramp length: alpha goes 0 -> alpha_max over this many "
+             "post-phase-1 steps.",
+    )
+    parser.add_argument(
+        "--w-consistency", type=float, default=0.5,
+        help="Weight of the residual<->PEMDAS KL consistency loss.",
+    )
     parser.add_argument("--log-interval", type=int, default=200)
     parser.add_argument("--eval-interval", type=int, default=2000)
     parser.add_argument("--save-interval", type=int, default=5000)
@@ -95,7 +108,7 @@ def parse_args():
 
 
 def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
-                       max_act_steps, freeze_mask=None):
+                       max_act_steps, freeze_mask=None, w_consistency=0.0):
     """Compiled training function with STE gradient flow.
 
     The result loss gradient flows through the STE on op_classifier
@@ -128,6 +141,13 @@ def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
             # the hard operator. This is important — the soft path
             # quality determines the gradient quality for the host loss.
             L_operator = tf.constant(0.0)
+            # Consistency loss: KL(softmax(pemdas) || softmax(residual)) over
+            # operator positions per step, averaged over batch and steps.
+            # Provides dense gradient signal to reduction_scorer regardless
+            # of alpha (KL is computed on residual_logits directly, not on
+            # the alpha-scaled scores). DECISION D-003.
+            L_consistency = tf.constant(0.0)
+            consistency_step_count = tf.constant(0.0)
             for step_idx in range(max_act_steps):
                 out = step_outputs[step_idx]
                 step_valid = per_step_valid_mask[:, step_idx]
@@ -141,7 +161,49 @@ def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
                     step_op_onehot, clamped_logits, from_logits=True
                 )
                 L_operator += tf.reduce_mean(per_sample_op * step_valid)
+
+                # --- Consistency: KL(P_pemdas || P_residual) over op-positions.
+                # pemdas_logits is already operator-masked to -1e9 at non-op
+                # positions. residual_logits is the raw tanh-bounded residual.
+                # We renormalize residual over operator positions by adding
+                # the same -1e9 mask, so both softmaxes are over the same
+                # support (operator-only positions per row).
+                pemdas_logits = out["pemdas_logits"]
+                residual_raw = out["residual_logits"]
+                op_mask = out["op_mask"]
+                neg_inf_mask = (1.0 - op_mask) * (-1e9)
+                residual_logits = residual_raw + neg_inf_mask
+
+                # Per-row "has any operator?" (B,) — skip otherwise to avoid
+                # softmax(all -inf) -> NaN.
+                any_op_row = tf.cast(
+                    tf.greater(tf.reduce_sum(op_mask, axis=-1), 0.5),
+                    tf.float32,
+                )
+
+                log_p = tf.nn.log_softmax(pemdas_logits, axis=-1)
+                log_q = tf.nn.log_softmax(residual_logits, axis=-1)
+                p = tf.exp(log_p)
+                # KL = sum P * (log P - log Q). NaNs at fully-masked rows are
+                # killed by any_op_row * step_valid.
+                kl_per_row = tf.reduce_sum(
+                    p * (log_p - log_q), axis=-1
+                )  # (B,)
+                kl_per_row = tf.where(
+                    tf.math.is_finite(kl_per_row),
+                    kl_per_row,
+                    tf.zeros_like(kl_per_row),
+                )
+                row_weight = any_op_row * step_valid
+                L_consistency += tf.reduce_sum(
+                    kl_per_row * row_weight
+                ) / (tf.reduce_sum(row_weight) + 1e-8)
+                consistency_step_count += 1.0
+
             L_operator = L_operator / tf.cast(max_act_steps, tf.float32)
+            L_consistency = L_consistency / tf.maximum(
+                consistency_step_count, 1.0
+            )
 
             # Result loss: Huber in log-space. Gradient flows through
             # STE → op_classifier → tree encoder when use_ste=True.
@@ -155,6 +217,7 @@ def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
             total_loss = (
                 w_operator * L_operator
                 + result_loss_weight * L_result
+                + w_consistency * L_consistency
             )
 
         grads = tape.gradient(total_loss, train_vars)
@@ -174,6 +237,13 @@ def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
             [tf.norm(g) for g in grads if g is not None]
         )
 
+        # Per-variable probe: reduction_scorer kernel grad norm. Used to
+        # confirm Step 1's "dead Dense(1) is now wired" claim.
+        scorer_grad_norm = tf.constant(0.0)
+        for i, v in enumerate(train_vars):
+            if "reduction_scorer" in v.name and "kernel" in v.name:
+                scorer_grad_norm = tf.norm(grads[i])
+
         first_out = step_outputs[0]
         pred_op = tf.argmax(first_out["op_logits"], axis=-1)
 
@@ -181,10 +251,12 @@ def _make_ste_train_fn(model, optimizer, result_loss_weight, w_operator,
             "total_loss": total_loss,
             "L_operator": L_operator,
             "L_result": L_result,
+            "L_consistency": L_consistency,
             "result": last_result,
             "pred_op": pred_op,
             "grad_mean": tf.reduce_mean(grad_norms),
             "grad_max": tf.reduce_max(grad_norms),
+            "scorer_grad_norm": scorer_grad_norm,
         }
 
     return _step
@@ -249,13 +321,16 @@ def main():
     output_dir = Path(args.save_dir) / f"dfsa_ste_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build model with STE enabled
+    # Build model with STE + learned residual enabled.
+    # alpha starts at 0.0 (set by DifferentiableFSA ctor) → forward is
+    # bit-identical to iter-5 until the post-phase-1 ramp starts.
     model = DifferentiableFSA(
         hidden_size=args.hidden_size,
         max_expression_len=args.max_len,
         num_tree_layers=args.num_tree_layers,
         num_heads=args.num_heads,
         use_ste=True,
+        use_learned_residual=True,
     )
     tokenizer = ArithmeticTokenizer(max_len=args.max_len)
 
@@ -273,19 +348,44 @@ def main():
     ok, total, _ = _eval_quick(model, tokenizer)
     logger.info(f"Pre-training accuracy: {ok}/{total} ({ok/total*100:.1f}%)")
 
-    # Count gradient-receiving variables
+    # Count gradient-receiving variables. Probe twice: once at alpha=0
+    # (residual must contribute zero gradient to reduction_scorer via the
+    # alpha * residual term — but consistency loss in train fn will still
+    # provide grad; here we only probe the result-loss path) and once at
+    # alpha=alpha_max (must show non-zero scorer kernel grad).
     ids_t = tf.constant(tokenizer.encode_batch(["(3 + 5) * 2"]))
-    with tf.GradientTape() as tape:
-        out = model.multi_reduce(ids_t, max_steps=4, training=True)
-        loss = tf.reduce_sum(out[-1]["result"])
-    grads = tape.gradient(loss, model.trainable_variables)
-    n_grad = sum(
-        1 for g in grads
-        if g is not None and tf.reduce_any(tf.not_equal(g, 0)).numpy()
+
+    def _probe(alpha_val):
+        model.alpha.assign(alpha_val)
+        with tf.GradientTape() as tape:
+            out = model.multi_reduce(ids_t, max_steps=4, training=True)
+            loss = tf.reduce_sum(out[-1]["result"])
+        grads = tape.gradient(loss, model.trainable_variables)
+        n_grad = sum(
+            1 for g in grads
+            if g is not None and tf.reduce_any(tf.not_equal(g, 0)).numpy()
+        )
+        scorer_norm = 0.0
+        for v, g in zip(model.trainable_variables, grads):
+            if g is None:
+                continue
+            if "reduction_scorer" in v.name and "kernel" in v.name:
+                scorer_norm = float(tf.norm(g).numpy())
+        return n_grad, scorer_norm
+
+    n_grad_a0, sn_a0 = _probe(0.0)
+    n_grad_am, sn_am = _probe(args.alpha_max)
+    model.alpha.assign(0.0)  # reset for training; ramp will drive it later
+
+    logger.info(
+        f"Gradient flow @ alpha=0.0: {n_grad_a0}/"
+        f"{len(model.trainable_variables)} vars, scorer-kernel grad norm="
+        f"{sn_a0:.3e} (must be ~0 — residual is alpha-gated)"
     )
     logger.info(
-        f"Gradient flow: {n_grad}/{len(model.trainable_variables)} "
-        f"variables receive nonzero gradients"
+        f"Gradient flow @ alpha={args.alpha_max}: {n_grad_am}/"
+        f"{len(model.trainable_variables)} vars, scorer-kernel grad norm="
+        f"{sn_am:.3e} (must be > 1e-6 — residual channel live)"
     )
 
     # Optimizer
@@ -324,9 +424,13 @@ def main():
             f"freezing {len(freeze_mask) - n_train}"
         )
 
+        # Phase 1: only op_classifier trains. reduction_scorer is frozen via
+        # freeze_mask, but we still pass w_consistency so the loss tensor has
+        # the same shape across phases (alpha is 0 anyway).
         compiled_fn = _make_ste_train_fn(
             model, optimizer, args.result_loss_weight, args.w_operator,
             args.act_steps, freeze_mask=freeze_mask,
+            w_consistency=args.w_consistency,
         )
 
         # Warmup trace
@@ -356,6 +460,7 @@ def main():
                     f"  P1 step {step:>5d} | "
                     f"L_op={float(raw['L_operator'].numpy()):.4f} | "
                     f"L_res={float(raw['L_result'].numpy()):.4f} | "
+                    f"L_cons={float(raw['L_consistency'].numpy()):.4f} | "
                     f"grad={float(raw['grad_mean'].numpy()):.2f}"
                 )
 
@@ -369,7 +474,7 @@ def main():
 
     compiled_fn = _make_ste_train_fn(
         model, optimizer, args.result_loss_weight, args.w_operator,
-        args.act_steps,
+        args.act_steps, w_consistency=args.w_consistency,
     )
 
     # Warmup trace for phase 2 (new graph with all vars trainable)
@@ -385,6 +490,15 @@ def main():
 
     start_time = time.time()
     for step in range(args.phase1_steps + 1, args.steps + 1):
+        # --- Alpha schedule (linear ramp 0 -> alpha_max over alpha_warmup_steps
+        # post-phase-1 steps). Assigned eagerly between graph calls — the
+        # graph reads alpha as a Variable, so no retracing is needed.
+        ramp_progress = min(
+            1.0,
+            (step - args.phase1_steps) / max(1, args.alpha_warmup_steps),
+        )
+        model.alpha.assign(args.alpha_max * ramp_progress)
+
         progress = min(args.curriculum_cap, step / args.steps)
         input_ids, targets, _, expressions, _ = \
             generate_curriculum_batch(args.batch_size, progress, tokenizer)
@@ -404,11 +518,14 @@ def main():
             sps = (step - args.phase1_steps) / elapsed if elapsed > 0 else 0
             logger.info(
                 f"  P2 step {step:>5d} | "
+                f"alpha={float(model.alpha.numpy()):.4f} | "
                 f"loss={float(raw['total_loss'].numpy()):.4f} | "
                 f"L_op={float(raw['L_operator'].numpy()):.4f} | "
                 f"L_res={float(raw['L_result'].numpy()):.4f} | "
+                f"L_cons={float(raw['L_consistency'].numpy()):.4f} | "
                 f"step_1%={float(np.mean(per_sample_rel < 0.01)):.3f} | "
                 f"grad={float(raw['grad_mean'].numpy()):.2f} | "
+                f"scorer_g={float(raw['scorer_grad_norm'].numpy()):.3e} | "
                 f"{sps:.1f} steps/s"
             )
 
