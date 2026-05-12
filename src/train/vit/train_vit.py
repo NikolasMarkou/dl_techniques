@@ -182,6 +182,77 @@ def _cifar_normalize(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.
     return image, label
 
 
+def _assert_train_val_distribution_match(
+        train_ds: tf.data.Dataset,
+        val_ds: tf.data.Dataset,
+        *,
+        mean_tol: float = 0.5,
+        std_ratio_tol: float = 0.5,
+) -> None:
+    """Pre-fit guard: train and val batches must agree on per-channel mean/std.
+
+    DECISION plan_2026-05-12_f2d29729/D-007: lock-in for the iter-1 cliff bug
+    (D-006). Pulls ONE batch from each dataset, computes per-channel mean/std,
+    logs both, and raises ``RuntimeError`` if either the mean offset or the std
+    ratio exceeds tolerance on any channel. Tolerances are loose by design --
+    the iter-1 bug produced ``|Δmean| ~ 2.0`` per channel; this catches
+    structural divergence, not numerical drift.
+
+    Args:
+        train_ds: training dataset (repeating; one batch consumed here is safe
+            since Keras builds its own iterator at fit time).
+        val_ds: validation dataset.
+        mean_tol: maximum allowed ``|mean_train_c - mean_val_c|`` per channel.
+        std_ratio_tol: maximum allowed ``|std_train_c / std_val_c - 1|`` per
+            channel.
+
+    Raises:
+        RuntimeError: when either tolerance is exceeded on any channel.
+    """
+    x_train_batch, _ = next(iter(train_ds))
+    x_val_batch, _ = next(iter(val_ds))
+
+    mean_train = tf.reduce_mean(x_train_batch, axis=[0, 1, 2])
+    mean_val = tf.reduce_mean(x_val_batch, axis=[0, 1, 2])
+    std_train = tf.math.reduce_std(x_train_batch, axis=[0, 1, 2])
+    std_val = tf.math.reduce_std(x_val_batch, axis=[0, 1, 2])
+
+    mean_train_np = mean_train.numpy()
+    mean_val_np = mean_val.numpy()
+    std_train_np = std_train.numpy()
+    std_val_np = std_val.numpy()
+
+    for c, (mt, mv) in enumerate(zip(mean_train_np, mean_val_np)):
+        logger.info(
+            f"distribution check: channel {c} train mean={float(mt):+.4f} "
+            f"val mean={float(mv):+.4f} |Δ|={abs(float(mt) - float(mv)):.4f}"
+        )
+    for c, (st, sv) in enumerate(zip(std_train_np, std_val_np)):
+        ratio = float(st) / float(sv) if float(sv) > 0.0 else float("inf")
+        logger.info(
+            f"distribution check: channel {c} train std={float(st):.4f} "
+            f"val std={float(sv):.4f} ratio={ratio:.4f}"
+        )
+
+    mean_diff = tf.reduce_max(tf.abs(mean_train - mean_val))
+    std_ratio_dev = tf.reduce_max(tf.abs(std_train / std_val - 1.0))
+    mean_diff_f = float(mean_diff.numpy())
+    std_ratio_dev_f = float(std_ratio_dev.numpy())
+
+    if mean_diff_f >= mean_tol or std_ratio_dev_f >= std_ratio_tol:
+        raise RuntimeError(
+            "Train/val distribution mismatch detected before fit. "
+            f"max|Δmean|={mean_diff_f:.4f} (tol={mean_tol}); "
+            f"max|std_ratio-1|={std_ratio_dev_f:.4f} (tol={std_ratio_tol}). "
+            f"Per-channel train mean={mean_train_np.tolist()} "
+            f"val mean={mean_val_np.tolist()} "
+            f"train std={std_train_np.tolist()} "
+            f"val std={std_val_np.tolist()}. "
+            "This is the fingerprint of D-006 (augment-then-normalize bug). "
+            "Inspect create_cifar_dataset pipeline ordering."
+        )
+
+
 def create_cifar_dataset(
         config: TrainingConfig,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, int, int]:
@@ -445,6 +516,11 @@ def train_vit(config: TrainingConfig, gpu_id: Optional[int] = None) -> keras.Mod
     if config.dataset in ("cifar10", "cifar100"):
         train_ds, val_ds, steps_per_epoch, val_steps = create_cifar_dataset(config)
         input_shape = (config.image_size, config.image_size, 3)
+        # DECISION plan_2026-05-12_f2d29729/D-007: distribution invariant guard.
+        # Catches the D-006 fingerprint (train/val pipeline divergence) BEFORE
+        # any compute is spent on fit. ImageNet path skipped — different
+        # invariants (file-based, no in-memory pre-normalization).
+        _assert_train_val_distribution_match(train_ds, val_ds)
     elif config.dataset == "imagenet":
         train_ds = create_imagenet_dataset(config.train_data_dir, config, is_training=True)
         val_ds = create_imagenet_dataset(config.val_data_dir, config, is_training=False)
