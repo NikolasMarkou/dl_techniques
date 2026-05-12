@@ -556,6 +556,7 @@ def build_clm_metrics(
 # revisit if a CLM model ever needs metrics on multiple output heads.
 def prepare_dict_keyed_compile(
     model: keras.Model,
+    output_keys: Optional[List[str]] = None,
     output_key: str = "logits",
 ) -> None:
     """Ensure a dict-output subclassed model has ``output_names`` set.
@@ -565,23 +566,31 @@ def prepare_dict_keyed_compile(
     ``model.compile(metrics={"logits": [...]}, loss={"logits": fn})``
     silently drops the metric list (the loss path uses a different code
     path and works correctly). Setting
-    ``model.output_names = [output_key]`` before ``compile`` aligns
-    Keras's metric-flattening logic with the dict-keyed user spec.
+    ``model.output_names = [...keys]`` before ``compile`` aligns
+    Keras's metric / loss / loss_weights flattening logic with the
+    dict-keyed user spec.
 
     Idempotent: if ``output_names`` is already a non-empty list, this is
     a no-op (forwards-compat with future Keras releases that may
     populate it automatically).
 
     Args:
-        model: The subclassed model whose ``call`` returns
-            ``{output_key: tensor, ...}``.
-        output_key: The dict key the trainer keys metrics/loss against.
-            Defaults to ``"logits"``, which matches every CLM trainer in
-            ``src/train/`` today.
+        model: The subclassed model whose ``call`` returns a dict.
+        output_keys: Ordered list of dict keys produced by ``model.call``
+            that the trainer will key losses / metrics / loss_weights
+            against. When ``None`` (default), falls back to the single
+            key ``[output_key]`` — preserving the legacy single-head
+            CLM trainer behaviour. Use this for matryoshka / multi-head
+            trainers that emit multiple loss-bearing logits keys (e.g.
+            ``["logits", "logits_w64", "logits_w32"]``).
+        output_key: Legacy single-key shortcut. Used only when
+            ``output_keys`` is ``None``. Defaults to ``"logits"``, which
+            matches every single-head CLM trainer in ``src/train/`` today.
     """
+    keys: List[str] = list(output_keys) if output_keys else [output_key]
     existing = getattr(model, "output_names", None)
     if not existing:
-        model.output_names = [output_key]
+        model.output_names = keys
 
 
 __all__ = [
